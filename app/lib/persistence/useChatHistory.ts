@@ -19,7 +19,6 @@ import {
 } from './db';
 import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
-import { webcontainer } from '~/lib/webcontainer';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 
@@ -103,7 +102,8 @@ export function useChatHistory() {
             if (startingIdx > 0) {
               const files = Object.entries(validSnapshot?.files || {})
                 .map(([key, value]) => {
-                  if (value?.type !== 'file') {
+                  // Binaries carry no text content and no project commands (package.json etc.).
+                  if (value?.type !== 'file' || value.isBinary) {
                     return null;
                   }
 
@@ -134,7 +134,13 @@ export function useChatHistory() {
                   <boltArtifact id="restored-project-setup" title="Restored Project & Setup" type="bundled">
                   ${Object.entries(snapshot?.files || {})
                     .map(([key, value]) => {
-                      if (value?.type === 'file') {
+                      /**
+                       * Binary files are deliberately omitted: their bytes are already on
+                       * disk via restoreSnapshot. Emitting them here would inline base64
+                       * into LLM context (SPEC §1.3 principle 10) and have the action
+                       * runner rewrite them as UTF-8 text, corrupting them.
+                       */
+                      if (value?.type === 'file' && !value.isBinary) {
                         return `
                       <boltAction type="file" filePath="${key}">
 ${value.content}
@@ -198,16 +204,21 @@ ${value.content}
   }, [mixedId, db, navigate, searchParams]); // Added db, navigate, searchParams dependencies
 
   const takeSnapshot = useCallback(
-    async (chatIdx: string, files: FileMap, _chatId?: string | undefined, chatSummary?: string) => {
+    async (chatIdx: string, _files: FileMap, _chatId?: string | undefined, chatSummary?: string) => {
       const id = chatId.get();
 
       if (!id || !db) {
         return;
       }
 
+      /**
+       * Serialize from the WebContainer rather than snapshotting the in-memory FileMap:
+       * binary files hold no content in the map, so persisting it directly wrote empty
+       * PNGs/GLBs into the snapshot (SPEC §1.3 principle 10).
+       */
       const snapshot: Snapshot = {
         chatIndex: chatIdx,
-        files,
+        files: await workbenchStore.serializeFiles(),
         summary: chatSummary,
       };
 
@@ -222,37 +233,19 @@ ${value.content}
     [db],
   );
 
-  const restoreSnapshot = useCallback(async (id: string, snapshot?: Snapshot) => {
-    // const snapshotStr = localStorage.getItem(`snapshot:${id}`); // Remove localStorage usage
-    const container = await webcontainer;
-
+  const restoreSnapshot = useCallback(async (_id: string, snapshot?: Snapshot) => {
     const validSnapshot = snapshot || { chatIndex: '', files: {} };
 
     if (!validSnapshot?.files) {
       return;
     }
 
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (key.startsWith(container.workdir)) {
-        key = key.replace(container.workdir, '');
-      }
-
-      if (value?.type === 'folder') {
-        await container.fs.mkdir(key, { recursive: true });
-      }
-    });
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (value?.type === 'file') {
-        if (key.startsWith(container.workdir)) {
-          key = key.replace(container.workdir, '');
-        }
-
-        await container.fs.writeFile(key, value.content, { encoding: value.isBinary ? undefined : 'utf8' });
-      } else {
-      }
-    });
-
-    // workbenchStore.files.setKey(snapshot?.files)
+    /**
+     * Binary entries are base64-decoded and written as bytes. Upstream passed the raw
+     * `content` string to `fs.writeFile` for every file, which UTF-8 encoded it — so a
+     * binary was written either as a 0-byte file or as literal base64 text.
+     */
+    await workbenchStore.restoreFiles(validSnapshot.files);
   }, []);
 
   return {

@@ -1,7 +1,11 @@
 import type { PathWatcherEvent, WebContainer } from '@webcontainer/api';
-import { getEncoding } from 'istextorbinary';
 import { map, type MapStore } from 'nanostores';
-import { Buffer } from 'node:buffer';
+import {
+  fileEntryFromBuffer,
+  serializeFileMap,
+  writeSerializedFileMap,
+  type SerializedFileMap,
+} from '~/lib/binary/binary-files';
 import { path } from '~/utils/path';
 import { bufferWatchEvents } from '~/utils/buffer';
 import { WORK_DIR } from '~/utils/constants';
@@ -24,12 +28,19 @@ import { getCurrentChatId } from '~/utils/fileLocks';
 
 const logger = createScopedLogger('FilesStore');
 
-const utf8TextDecoder = new TextDecoder('utf8', { fatal: true });
-
 export interface File {
   type: 'file';
   content: string;
+
+  /**
+   * When true, `content` is ALWAYS empty: binary bytes live in the WebContainer FS,
+   * not in this map (SPEC §1.3 principle 10 — binary content never enters the editor's
+   * text map or LLM context). Read the bytes with `FilesStore.readBinaryFile()`.
+   */
   isBinary: boolean;
+
+  /** Byte length on disk. The only thing we know about a binary file's contents. */
+  size?: number;
   isLocked?: boolean;
   lockedByFolder?: string; // Path of the folder that locked this file
 }
@@ -723,21 +734,19 @@ export class FilesStore {
             this.#size++;
           }
 
-          let content = '';
-
           /**
-           * @note This check is purely for the editor. The way we detect this is not
-           * bullet-proof and it's a best guess so there might be false-positives.
-           * The reason we do this is because we don't want to display binary files
-           * in the editor nor allow to edit them.
+           * Binary files keep `content: ''` here — their bytes stay on disk in the
+           * WebContainer and are read back on demand (`readBinaryFile`). We record
+           * `isBinary` + `size` so the editor can refuse to render them and egress
+           * paths know to fetch real bytes instead of trusting `content`.
            */
-          const isBinary = isBinaryFile(buffer);
+          const entry = fileEntryFromBuffer(buffer);
 
-          if (!isBinary) {
-            content = this.#decodeFileContent(buffer);
-          }
+          // Preserve lock state — the watcher must not silently unlock a file.
+          const existing = this.files.get()[sanitizedPath];
+          const isLocked = existing?.type === 'file' ? existing.isLocked : undefined;
 
-          this.files.setKey(sanitizedPath, { type: 'file', content, isBinary });
+          this.files.setKey(sanitizedPath, { ...entry, isLocked });
 
           break;
         }
@@ -754,17 +763,44 @@ export class FilesStore {
     }
   }
 
-  #decodeFileContent(buffer?: Uint8Array) {
-    if (!buffer || buffer.byteLength === 0) {
-      return '';
-    }
+  /**
+   * Read a binary file's real bytes from the WebContainer — the source of truth for
+   * binary content. Every egress path (snapshot, ZIP, GitHub push, deploy, share build)
+   * goes through here rather than reading `File.content`, which is empty for binaries.
+   */
+  async readBinaryFile(filePath: string): Promise<Uint8Array> {
+    const webcontainer = await this.#webcontainer;
+    const relativePath = path.relative(webcontainer.workdir, filePath);
 
-    try {
-      return utf8TextDecoder.decode(buffer);
-    } catch (error) {
-      console.log(error);
-      return '';
-    }
+    return webcontainer.fs.readFile(relativePath);
+  }
+
+  /**
+   * Serialize the whole project for transport (snapshot / share build / GitHub sync),
+   * reading real bytes for every binary file. Binaries arrive base64-encoded; text is
+   * carried verbatim. A snapshot→restore round-trip is byte-exact.
+   */
+  async serializeFiles(): Promise<SerializedFileMap> {
+    const webcontainer = await this.#webcontainer;
+
+    return serializeFileMap(
+      this.files.get(),
+      webcontainer.fs,
+      (filePath) => path.relative(webcontainer.workdir, filePath),
+      (filePath, error) => logger.error(`Failed to read binary file for serialization: ${filePath}`, error),
+    );
+  }
+
+  /**
+   * Materialize a serialized project back into the WebContainer, byte-faithfully.
+   * Used by snapshot restore and checkpoint restore (SPEC §4.12).
+   */
+  async restoreFiles(files: SerializedFileMap): Promise<void> {
+    const webcontainer = await this.#webcontainer;
+
+    await writeSerializedFileMap(files, webcontainer.fs, (filePath) =>
+      filePath.startsWith(webcontainer.workdir) ? path.relative(webcontainer.workdir, filePath) : filePath,
+    );
   }
 
   async createFile(filePath: string, content: string | Uint8Array = '') {
@@ -786,17 +822,21 @@ export class FilesStore {
       const isBinary = content instanceof Uint8Array;
 
       if (isBinary) {
-        await webcontainer.fs.writeFile(relativePath, Buffer.from(content));
+        await webcontainer.fs.writeFile(relativePath, content);
 
-        const base64Content = Buffer.from(content).toString('base64');
+        /**
+         * Bytes now live on disk; the map records metadata only, matching what the
+         * watcher will report for this same file a moment later. Storing base64 here
+         * (as upstream did) both leaked binary content into the editor's text map and
+         * was immediately clobbered by the watcher anyway.
+         */
         this.files.setKey(filePath, {
           type: 'file',
-          content: base64Content,
+          content: '',
           isBinary: true,
+          size: content.byteLength,
           isLocked: false,
         });
-
-        this.#modifiedFiles.set(filePath, base64Content);
       } else {
         const contentToWrite = (content as string).length === 0 ? ' ' : content;
         await webcontainer.fs.writeFile(relativePath, contentToWrite);
@@ -930,22 +970,4 @@ export class FilesStore {
       logger.error('Failed to persist deleted paths to localStorage', error);
     }
   }
-}
-
-function isBinaryFile(buffer: Uint8Array | undefined) {
-  if (buffer === undefined) {
-    return false;
-  }
-
-  return getEncoding(convertToBuffer(buffer), { chunkLength: 100 }) === 'binary';
-}
-
-/**
- * Converts a `Uint8Array` into a Node.js `Buffer` by copying the prototype.
- * The goal is to  avoid expensive copies. It does create a new typed array
- * but that's generally cheap as long as it uses the same underlying
- * array buffer.
- */
-function convertToBuffer(view: Uint8Array): Buffer {
-  return Buffer.from(view.buffer, view.byteOffset, view.byteLength);
 }

@@ -1,10 +1,13 @@
 import { type ActionFunctionArgs, json } from '@remix-run/cloudflare';
 import crypto from 'crypto';
 import type { NetlifySiteInfo } from '~/types/netlify';
+import { deployFileToBytes, type DeployFile } from '~/lib/binary/binary-files';
 
 interface DeployRequestBody {
   siteId?: string;
-  files: Record<string, string>;
+
+  /** `string` is the legacy text-only shape; DeployFile carries binaries as base64. */
+  files: Record<string, DeployFile | string>;
   chatId: string;
 }
 
@@ -123,14 +126,23 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
-    // Create file digests
+    /**
+     * Decode every file to its real bytes ONCE, and hash/upload those bytes.
+     *
+     * Netlify's digest must be the sha1 of the exact bytes we later PUT. Hashing a
+     * lossily-decoded string (and then uploading that string as `octet-stream`) shipped
+     * corrupted images, fonts, and wasm to every published game.
+     */
+    const fileBytes: Record<string, Buffer> = {};
     const fileDigests: Record<string, string> = {};
 
-    for (const [filePath, content] of Object.entries(files)) {
+    for (const [filePath, file] of Object.entries(files)) {
       // Ensure file path starts with a forward slash
       const normalizedPath = filePath.startsWith('/') ? filePath : '/' + filePath;
-      const hash = crypto.createHash('sha1').update(content).digest('hex');
-      fileDigests[normalizedPath] = hash;
+      const bytes = Buffer.from(deployFileToBytes(file as DeployFile | string));
+
+      fileBytes[normalizedPath] = bytes;
+      fileDigests[normalizedPath] = crypto.createHash('sha1').update(bytes).digest('hex');
     }
 
     // Create a new deploy with digests
@@ -183,12 +195,15 @@ export async function action({ request }: ActionFunctionArgs) {
 
       if (!filesUploaded && (status.state === 'prepared' || status.state === 'uploaded')) {
         // Upload all files regardless of required array
-        for (const [filePath, content] of Object.entries(files)) {
+        for (const filePath of Object.keys(files)) {
           const normalizedPath = filePath.startsWith('/') ? filePath : '/' + filePath;
           const encodedPath = normalizedPath
             .split('/')
             .map((segment) => encodeURIComponent(segment))
             .join('/');
+
+          // The exact bytes we hashed above — matching the digest Netlify is expecting.
+          const content = fileBytes[normalizedPath];
 
           let uploadSuccess = false;
           let uploadRetries = 0;

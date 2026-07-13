@@ -2,6 +2,11 @@ import ignore from 'ignore';
 import type { ProviderInfo } from '~/types/model';
 import type { Template } from '~/types/template';
 import { STARTER_TEMPLATES } from './constants';
+import { base64ToBytes } from '~/lib/binary/binary-files';
+import { webcontainer } from '~/lib/webcontainer';
+import { createScopedLogger } from './logger';
+
+const logger = createScopedLogger('StarterTemplate');
 
 const starterTemplateSelectionPrompt = (templates: Template[]) => `
 You are an experienced developer who helps people choose the best starter template for their projects.
@@ -112,7 +117,16 @@ export const selectStarterTemplate = async (options: { message: string; model: s
   }
 };
 
-const getGitHubRepoContent = async (repoName: string): Promise<{ name: string; path: string; content: string }[]> => {
+interface TemplateFile {
+  name: string;
+  path: string;
+
+  /** base64 when `isBinary`, UTF-8 text otherwise. */
+  content: string;
+  isBinary?: boolean;
+}
+
+const getGitHubRepoContent = async (repoName: string): Promise<TemplateFile[]> => {
   try {
     // Instead of directly fetching from GitHub, use our own API endpoint as a proxy
     const response = await fetch(`/api/github-template?repo=${encodeURIComponent(repoName)}`);
@@ -130,6 +144,77 @@ const getGitHubRepoContent = async (repoName: string): Promise<{ name: string; p
     throw error;
   }
 };
+
+/**
+ * Write template binaries into the WebContainer as real bytes.
+ *
+ * Missing assets are reported loudly rather than swallowed: a template that mounts without
+ * its images produces an unresolvable Vite import and a blank preview, which is exactly the
+ * failure this whole path exists to prevent.
+ */
+async function writeBinaryTemplateFiles(files: TemplateFile[]) {
+  const container = await webcontainer;
+
+  for (const file of files) {
+    try {
+      const dir = file.path.split('/').slice(0, -1).join('/');
+
+      if (dir) {
+        await container.fs.mkdir(dir, { recursive: true });
+      }
+
+      await container.fs.writeFile(file.path, base64ToBytes(file.content));
+    } catch (error) {
+      logger.error(`Failed to write binary template file: ${file.path}`, error);
+      throw new Error(`Failed to mount template asset "${file.path}" — the project would be missing assets.`);
+    }
+  }
+
+  logger.info(`Mounted ${files.length} binary template asset(s)`);
+
+  await ensureFrameworkPublicAssets(files);
+}
+
+/**
+ * Project-setup hygiene mandated by `project-installer.md` / `react-framework.md`
+ * (SPEC §4.4): the framework preloader expects `babylon.png` and `spinner.png` to exist in
+ * `public/`. They ship in the framework's own assets folder, so copy them across if the
+ * template did not already provide them.
+ *
+ * Best-effort by design: a template that carries neither is not broken by this step.
+ */
+async function ensureFrameworkPublicAssets(files: TemplateFile[]) {
+  const container = await webcontainer;
+
+  for (const name of ['babylon.png', 'spinner.png']) {
+    const target = `public/${name}`;
+
+    if (files.some((f) => f.path === target)) {
+      continue;
+    }
+
+    /*
+     * `src/babylon/assets/` is the framework's own copy and the source SPEC §4.4 names.
+     * Fall back to any other assets folder so non-standard templates still work.
+     */
+    const source =
+      files.find((f) => f.isBinary && f.path === `src/babylon/assets/${name}`) ??
+      files.find((f) => f.isBinary && f.path.endsWith(`/assets/${name}`));
+
+    if (!source) {
+      logger.warn(`Framework asset ${name} not found in template — skipping public/ copy`);
+      continue;
+    }
+
+    try {
+      await container.fs.mkdir('public', { recursive: true });
+      await container.fs.writeFile(target, base64ToBytes(source.content));
+      logger.info(`Copied ${source.path} -> ${target}`);
+    } catch (error) {
+      logger.error(`Failed to copy framework asset to ${target}`, error);
+    }
+  }
+}
 
 export async function getTemplates(templateName: string, title?: string) {
   const template = STARTER_TEMPLATES.find((t) => t.name == templateName);
@@ -183,10 +268,27 @@ export async function getTemplates(templateName: string, title?: string) {
     filesToImport.ignoreFile = ignoredFiles;
   }
 
+  /**
+   * Binary template assets (textures, models, audio, fonts, wasm) are written straight into
+   * the WebContainer as bytes and are NEVER routed through the boltArtifact.
+   *
+   * The artifact is a TEXT protocol: the action runner UTF-8 encodes whatever it is given,
+   * so a PNG round-tripped through it arrives corrupted — and its base64 would also land in
+   * LLM context, which SPEC §1.3 principle 10 forbids. The framework requires
+   * `public/babylon.png` and `public/spinner.png` to exist on disk; this is what puts them
+   * there (SPEC §4.4).
+   */
+  const binaryFiles = filesToImport.files.filter((file) => file.isBinary);
+  const textFiles = filesToImport.files.filter((file) => !file.isBinary);
+
+  if (binaryFiles.length > 0) {
+    await writeBinaryTemplateFiles(binaryFiles);
+  }
+
   const assistantMessage = `
 Bolt is initializing your project with the required files using the ${template.name} template.
 <boltArtifact id="imported-files" title="${title || 'Create initial files'}" type="bundled">
-${filesToImport.files
+${textFiles
   .map(
     (file) =>
       `<boltAction type="file" filePath="${file.path}">

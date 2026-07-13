@@ -15,6 +15,7 @@ import { useGitHubDeploy } from '~/components/deploy/GitHubDeploy.client';
 import { useGitLabDeploy } from '~/components/deploy/GitLabDeploy.client';
 import { GitHubDeploymentDialog } from '~/components/deploy/GitHubDeploymentDialog';
 import { GitLabDeploymentDialog } from '~/components/deploy/GitLabDeploymentDialog';
+import type { DeployFile } from '~/lib/binary/binary-files';
 
 interface DeployButtonProps {
   onVercelDeploy?: () => Promise<void>;
@@ -44,7 +45,7 @@ export const DeployButton = ({
   const { handleGitLabDeploy } = useGitLabDeploy();
   const [showGitHubDeploymentDialog, setShowGitHubDeploymentDialog] = useState(false);
   const [showGitLabDeploymentDialog, setShowGitLabDeploymentDialog] = useState(false);
-  const [githubDeploymentFiles, setGithubDeploymentFiles] = useState<Record<string, string> | null>(null);
+  const [githubDeploymentFiles, setGithubDeploymentFiles] = useState<Record<string, DeployFile> | null>(null);
   const [gitlabDeploymentFiles, setGitlabDeploymentFiles] = useState<Record<string, string> | null>(null);
   const [githubProjectName, setGithubProjectName] = useState('');
   const [gitlabProjectName, setGitlabProjectName] = useState('');

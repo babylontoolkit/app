@@ -60,9 +60,9 @@ export const ImportFolderButton: React.FC<ImportFolderButtonProps> = ({ classNam
       );
 
       const textFiles = fileChecks.filter((f) => !f.isBinary).map((f) => f.file);
-      const binaryFilePaths = fileChecks
-        .filter((f) => f.isBinary)
-        .map((f) => f.file.webkitRelativePath.split('/').slice(1).join('/'));
+
+      // Binaries are imported as bytes, not skipped — a game is mostly binary assets.
+      const binaryFiles = fileChecks.filter((f) => f.isBinary).map((f) => f.file);
 
       if (textFiles.length === 0) {
         const error = new Error('No text files found');
@@ -72,15 +72,11 @@ export const ImportFolderButton: React.FC<ImportFolderButtonProps> = ({ classNam
         return;
       }
 
-      if (binaryFilePaths.length > 0) {
-        logStore.logWarning(`Skipping binary files during import`, {
-          folderName,
-          binaryCount: binaryFilePaths.length,
-        });
-        toast.info(`Skipping ${binaryFilePaths.length} binary files`);
+      if (binaryFiles.length > 0) {
+        toast.info(`Importing ${binaryFiles.length} binary asset(s)`);
       }
 
-      const messages = await createChatFromFolder(textFiles, binaryFilePaths, folderName);
+      const messages = await createChatFromFolder(textFiles, binaryFiles, folderName);
 
       if (importChat) {
         await importChat(folderName, [...messages]);
@@ -89,7 +85,7 @@ export const ImportFolderButton: React.FC<ImportFolderButtonProps> = ({ classNam
       logStore.logSystem('Folder imported successfully', {
         folderName,
         textFileCount: textFiles.length,
-        binaryFileCount: binaryFilePaths.length,
+        binaryFileCount: binaryFiles.length,
       });
       toast.success('Folder imported successfully');
     } catch (error) {

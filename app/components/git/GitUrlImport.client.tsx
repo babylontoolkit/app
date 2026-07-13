@@ -8,6 +8,7 @@ import { Chat } from '~/components/chat/Chat.client';
 import { useGit } from '~/lib/hooks/useGit';
 import { useChatHistory } from '~/lib/persistence';
 import { createCommandsMessage, detectProjectCommands, escapeBoltTags } from '~/utils/projectCommands';
+import { isBinaryPath } from '~/lib/binary/binary-files';
 import { LoadingOverlay } from '~/components/ui/LoadingOverlay';
 import { toast } from 'react-toastify';
 
@@ -56,18 +57,39 @@ export function GitUrlImport() {
 
         if (importChat) {
           const filePaths = Object.keys(data).filter((filePath) => !ig.ignores(filePath));
-          const textDecoder = new TextDecoder('utf-8');
 
+          /**
+           * `gitClone` has already written every file — binaries included — to the
+           * WebContainer as real bytes. Binaries are therefore EXCLUDED from the artifact
+           * below rather than decoded into it: upstream ran them through a non-fatal
+           * TextDecoder, replacing every invalid byte with U+FFFD, and the action runner
+           * then wrote that garbage back over the correct bytes on disk. Skipping them
+           * keeps the clone's bytes intact and keeps binary content out of LLM context.
+           */
           const fileContents = filePaths
             .map((filePath) => {
               const { data: content, encoding } = data[filePath];
-              return {
-                path: filePath,
-                content:
-                  encoding === 'utf8' ? content : content instanceof Uint8Array ? textDecoder.decode(content) : '',
-              };
+
+              if (isBinaryPath(filePath)) {
+                return null;
+              }
+
+              if (encoding === 'utf8') {
+                return { path: filePath, content: content as string };
+              }
+
+              if (!(content instanceof Uint8Array)) {
+                return null;
+              }
+
+              // A strict decode: anything that is not valid UTF-8 is binary, and stays on disk only.
+              try {
+                return { path: filePath, content: new TextDecoder('utf-8', { fatal: true }).decode(content) };
+              } catch {
+                return null;
+              }
             })
-            .filter((f) => f.content);
+            .filter((f): f is { path: string; content: string } => !!f?.content);
 
           const commands = await detectProjectCommands(fileContents);
           const commandsMessage = createCommandsMessage(commands);

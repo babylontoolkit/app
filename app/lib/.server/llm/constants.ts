@@ -49,7 +49,12 @@ export const MAX_RESPONSE_SEGMENTS = 2;
 export interface File {
   type: 'file';
   content: string;
+
+  /** When true, `content` is empty — binary bytes never reach the server or the model. */
   isBinary: boolean;
+
+  /** Byte length on disk; the only thing the model learns about a binary file. */
+  size?: number;
   isLocked?: boolean;
   lockedByFolder?: string;
 }

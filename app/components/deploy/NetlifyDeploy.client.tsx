@@ -8,6 +8,7 @@ import { useState } from 'react';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import { formatBuildFailureOutput } from './deployUtils';
+import { bytesToBase64, isBinaryPath, type DeployFile } from '~/lib/binary/binary-files';
 
 export function useNetlifyDeploy() {
   const [isDeploying, setIsDeploying] = useState(false);
@@ -115,19 +116,30 @@ export function useNetlifyDeploy() {
         throw new Error('Could not find build output directory. Please check your build configuration.');
       }
 
-      async function getAllFiles(dirPath: string): Promise<Record<string, string>> {
-        const files: Record<string, string> = {};
+      /**
+       * Read the build output as BYTES.
+       *
+       * Reading with 'utf-8' lossily decoded every image, font, and .wasm in `dist/` —
+       * each invalid byte became U+FFFD — and the deployed game shipped corrupted assets.
+       * Binaries travel to the server base64-encoded and are decoded there (SPEC §4.8:
+       * a published build must be byte-identical to what the user played).
+       */
+      async function getAllFiles(dirPath: string): Promise<Record<string, DeployFile>> {
+        const files: Record<string, DeployFile> = {};
         const entries = await container.fs.readdir(dirPath, { withFileTypes: true });
 
         for (const entry of entries) {
           const fullPath = path.join(dirPath, entry.name);
 
           if (entry.isFile()) {
-            const content = await container.fs.readFile(fullPath, 'utf-8');
+            const bytes = await container.fs.readFile(fullPath);
 
             // Remove build path prefix from the path
             const deployPath = fullPath.replace(finalBuildPath, '');
-            files[deployPath] = content;
+
+            files[deployPath] = isBinaryPath(fullPath)
+              ? { content: bytesToBase64(bytes), encoding: 'base64' }
+              : { content: new TextDecoder().decode(bytes), encoding: 'utf8' };
           } else if (entry.isDirectory()) {
             const subFiles = await getAllFiles(fullPath);
             Object.assign(files, subFiles);

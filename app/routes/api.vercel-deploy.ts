@@ -1,5 +1,6 @@
 import { type ActionFunctionArgs, type LoaderFunctionArgs, json } from '@remix-run/cloudflare';
 import type { VercelProjectInfo } from '~/types/vercel';
+import type { DeployFile } from '~/lib/binary/binary-files';
 
 // Function to detect framework from project files
 const detectFramework = (files: Record<string, string>): string => {
@@ -233,7 +234,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 interface DeployRequestBody {
   projectId?: string;
-  files: Record<string, string>;
+
+  /** Build output. `string` is the legacy text-only shape; DeployFile carries binaries as base64. */
+  files: Record<string, DeployFile | string>;
+
+  /** Source files, used for framework detection and framework builds — always text. */
   sourceFiles?: Record<string, string>;
   chatId: string;
   framework?: string;
@@ -343,7 +348,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Prepare files for deployment
-    const deploymentFiles = [];
+    const deploymentFiles: { file: string; data: string; encoding?: 'base64' }[] = [];
 
     /*
      * For frameworks that need to build on Vercel, include source files
@@ -365,13 +370,20 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     } else {
       // For static sites, only include build output
-      for (const [filePath, content] of Object.entries(files)) {
+      for (const [filePath, file] of Object.entries(files)) {
         // Ensure file path doesn't start with a slash for Vercel
         const normalizedPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
-        deploymentFiles.push({
-          file: normalizedPath,
-          data: content,
-        });
+
+        /**
+         * Binaries are handed to Vercel base64-encoded with an explicit `encoding` — its
+         * file API supports this and upstream never used it, so every deployed image, font,
+         * and .wasm was uploaded as UTF-8 text and arrived corrupted.
+         */
+        if (typeof file !== 'string' && file.encoding === 'base64') {
+          deploymentFiles.push({ file: normalizedPath, data: file.content, encoding: 'base64' });
+        } else {
+          deploymentFiles.push({ file: normalizedPath, data: typeof file === 'string' ? file : file.content });
+        }
       }
     }
 

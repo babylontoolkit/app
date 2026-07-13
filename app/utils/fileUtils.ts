@@ -104,10 +104,15 @@ export const detectProjectType = async (
   return { type: '', setupCommand: '', followupMessage: '' };
 };
 
-export const filesToArtifacts = (files: { [path: string]: { content: string } }, id: string): string => {
+export const filesToArtifacts = (
+  files: { [path: string]: { content: string; isBinary?: boolean } },
+  id: string,
+): string => {
   return `
 <boltArtifact id="${id}" title="User Updated Files">
 ${Object.keys(files)
+  // Binary content never enters LLM context (SPEC §1.3 principle 10).
+  .filter((filePath) => !files[filePath].isBinary)
   .map(
     (filePath) => `
 <boltAction type="file" filePath="${filePath}">

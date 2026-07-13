@@ -8,6 +8,7 @@ import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import { getLocalStorage } from '~/lib/persistence/localStorage';
 import { formatBuildFailureOutput } from './deployUtils';
+import { bytesToBase64, isBinaryPath, type DeployFile } from '~/lib/binary/binary-files';
 
 export function useGitHubDeploy() {
   const [isDeploying, setIsDeploying] = useState(false);
@@ -86,8 +87,8 @@ export function useGitHubDeploy() {
       const container = await webcontainer;
 
       // Get all files recursively - we'll deploy the entire project, not just the build directory
-      async function getAllFiles(dirPath: string, basePath: string = ''): Promise<Record<string, string>> {
-        const files: Record<string, string> = {};
+      async function getAllFiles(dirPath: string, basePath: string = ''): Promise<Record<string, DeployFile>> {
+        const files: Record<string, DeployFile> = {};
         const entries = await container.fs.readdir(dirPath, { withFileTypes: true });
 
         for (const entry of entries) {
@@ -110,16 +111,23 @@ export function useGitHubDeploy() {
           }
 
           if (entry.isFile()) {
-            // Skip binary files, large files and other common excludes
+            // Never publish local noise or secrets.
             if (entry.name.endsWith('.DS_Store') || entry.name.endsWith('.log') || entry.name.startsWith('.env')) {
               continue;
             }
 
             try {
-              const content = await container.fs.readFile(fullPath, 'utf-8');
+              /**
+               * Read bytes, and base64 binaries. Reading with 'utf-8' replaced every invalid
+               * byte with U+FFFD, so images/models/fonts were pushed to the user's repo as
+               * corrupted text (the comment above used to claim binaries were "skipped" —
+               * they never were).
+               */
+              const bytes = await container.fs.readFile(fullPath);
 
-              // Store the file with its relative path, not the full system path
-              files[relativePath] = content;
+              files[relativePath] = isBinaryPath(fullPath)
+                ? { content: bytesToBase64(bytes), encoding: 'base64' }
+                : { content: new TextDecoder().decode(bytes), encoding: 'utf8' };
             } catch (error) {
               console.warn(`Could not read file ${fullPath}:`, error);
               continue;

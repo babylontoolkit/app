@@ -11,12 +11,13 @@ import { chatId } from '~/lib/persistence/useChatHistory';
 import { useStore } from '@nanostores/react';
 import { GitHubAuthDialog } from '~/components/@settings/tabs/github/components/GitHubAuthDialog';
 import { SearchInput, EmptyState, StatusIndicator, Badge } from '~/components/ui';
+import { deployFileToBytes, type DeployFile } from '~/lib/binary/binary-files';
 
 interface GitHubDeploymentDialogProps {
   isOpen: boolean;
   onClose: () => void;
   projectName: string;
-  files: Record<string, string>;
+  files: Record<string, DeployFile | string>;
 }
 
 export function GitHubDeploymentDialog({ isOpen, onClose, projectName, files }: GitHubDeploymentDialogProps) {
@@ -302,11 +303,11 @@ export function GitHubDeploymentDialog({ isOpen, onClose, projectName, files }: 
       const fileEntries = Object.entries(files);
 
       // Filter out files and format them for display
-      const fileList = fileEntries.map(([filePath, content]) => {
+      const fileList = fileEntries.map(([filePath, file]) => {
         // The paths are already properly formatted in the GitHubDeploy component
         return {
           path: filePath,
-          size: new TextEncoder().encode(content).length,
+          size: deployFileToBytes(file).length,
         };
       });
 
@@ -363,18 +364,44 @@ export function GitHubDeploymentDialog({ isOpen, onClose, projectName, files }: 
       try {
         console.log('Creating tree for repository');
 
-        // Create a tree with all files
-        const tree = fileEntries.map(([filePath, content]) => ({
-          path: filePath, // We've already formatted the paths correctly
-          mode: '100644' as const, // Regular file
-          type: 'blob' as const,
-          content,
-        }));
+        const sanitizedRepoName = sanitizeRepoName(repoName);
+
+        /**
+         * A tree entry's inline `content` is ALWAYS interpreted as UTF-8 by the GitHub API —
+         * there is no base64 option on createTree. So binaries are uploaded as real blobs
+         * first (createBlob accepts base64) and the tree references them by sha. Upstream
+         * inlined them as text, pushing corrupted images/models/fonts to the user's repo.
+         */
+        const tree = await Promise.all(
+          fileEntries.map(async ([filePath, file]) => {
+            if (typeof file !== 'string' && file.encoding === 'base64') {
+              const { data: blob } = await octokit.git.createBlob({
+                owner: connection.user.login,
+                repo: sanitizedRepoName,
+                content: file.content,
+                encoding: 'base64',
+              });
+
+              return {
+                path: filePath,
+                mode: '100644' as const,
+                type: 'blob' as const,
+                sha: blob.sha,
+              };
+            }
+
+            return {
+              path: filePath, // We've already formatted the paths correctly
+              mode: '100644' as const, // Regular file
+              type: 'blob' as const,
+              content: typeof file === 'string' ? file : file.content,
+            };
+          }),
+        );
 
         console.log(`Creating tree with ${tree.length} files using base: ${baseSha || 'none'}`);
 
         // Create a tree with all the files, using the base tree if available
-        const sanitizedRepoName = sanitizeRepoName(repoName);
         const { data: treeData } = await octokit.git.createTree({
           owner: connection.user.login,
           repo: sanitizedRepoName,

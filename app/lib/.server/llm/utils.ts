@@ -71,6 +71,16 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
         return '';
       }
 
+      /**
+       * Binary content never enters LLM context (SPEC §1.3 principle 10). Emitting a
+       * binary here would ship an EMPTY <boltAction type="file"> for it — inviting the
+       * model to "helpfully" rewrite a texture or model as an empty text file. The agent
+       * is told the file exists and how big it is, and nothing more.
+       */
+      if (dirent.isBinary) {
+        return `<boltFile filePath="${useRelativePath ? path.replace('/home/project/', '') : path}" binary="true" size="${dirent.size ?? 0}" />`;
+      }
+
       const codeWithLinesNumbers = dirent.content
         .split('\n')
         // .map((v, i) => `${i + 1}|${v}`)

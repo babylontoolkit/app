@@ -18,6 +18,11 @@ import { description } from '~/lib/persistence';
 import Cookies from 'js-cookie';
 import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
+import type { GitLabCommitAction } from '~/types/GitLab';
+import { bytesToBase64, type SerializedFileMap } from '~/lib/binary/binary-files';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('WorkbenchStore');
 
 const { saveAs } = fileSaver;
 
@@ -89,6 +94,24 @@ export class WorkbenchStore {
 
   get files() {
     return this.#filesStore.files;
+  }
+
+  /**
+   * Serialize the project for transport (snapshots, share builds, GitHub sync), reading
+   * real bytes for binaries from the WebContainer (SPEC §1.3 principle 10).
+   */
+  serializeFiles(): Promise<SerializedFileMap> {
+    return this.#filesStore.serializeFiles();
+  }
+
+  /** Materialize a serialized project back into the WebContainer, byte-faithfully. */
+  restoreFiles(files: SerializedFileMap): Promise<void> {
+    return this.#filesStore.restoreFiles(files);
+  }
+
+  /** Read a binary file's real bytes. `File.content` is always empty for binaries. */
+  readBinaryFile(filePath: string): Promise<Uint8Array> {
+    return this.#filesStore.readBinaryFile(filePath);
   }
 
   get currentDocument(): ReadableAtom<EditorDocument | undefined> {
@@ -621,24 +644,44 @@ export class WorkbenchStore {
     const uniqueProjectName = `${projectName}_${timestampHash}`;
 
     for (const [filePath, dirent] of Object.entries(files)) {
-      if (dirent?.type === 'file' && !dirent.isBinary) {
-        const relativePath = extractRelativePath(filePath);
+      if (dirent?.type !== 'file') {
+        continue;
+      }
 
-        // split the path into segments
-        const pathSegments = relativePath.split('/');
+      const relativePath = extractRelativePath(filePath);
 
-        // if there's more than one segment, we need to create folders
-        if (pathSegments.length > 1) {
-          let currentFolder = zip;
+      /**
+       * Binary files carry no content in the store — read their real bytes back from the
+       * WebContainer. Exporting a game without its textures, models, and audio would ship
+       * a broken project (SPEC §4.8: export is never a lossy path).
+       */
+      let content: string | Uint8Array;
 
-          for (let i = 0; i < pathSegments.length - 1; i++) {
-            currentFolder = currentFolder.folder(pathSegments[i])!;
-          }
-          currentFolder.file(pathSegments[pathSegments.length - 1], dirent.content);
-        } else {
-          // if there's only one segment, it's a file in the root
-          zip.file(relativePath, dirent.content);
+      if (dirent.isBinary) {
+        try {
+          content = await this.#filesStore.readBinaryFile(filePath);
+        } catch (error) {
+          logger.error(`Failed to read binary file for export: ${filePath}`, error);
+          continue;
         }
+      } else {
+        content = dirent.content;
+      }
+
+      // split the path into segments
+      const pathSegments = relativePath.split('/');
+
+      // if there's more than one segment, we need to create folders
+      if (pathSegments.length > 1) {
+        let currentFolder = zip;
+
+        for (let i = 0; i < pathSegments.length - 1; i++) {
+          currentFolder = currentFolder.folder(pathSegments[i])!;
+        }
+        currentFolder.file(pathSegments[pathSegments.length - 1], content);
+      } else {
+        // if there's only one segment, it's a file in the root
+        zip.file(relativePath, content);
       }
     }
 
@@ -652,27 +695,43 @@ export class WorkbenchStore {
     const syncedFiles = [];
 
     for (const [filePath, dirent] of Object.entries(files)) {
-      if (dirent?.type === 'file' && !dirent.isBinary) {
-        const relativePath = extractRelativePath(filePath);
-        const pathSegments = relativePath.split('/');
-        let currentHandle = targetHandle;
-
-        for (let i = 0; i < pathSegments.length - 1; i++) {
-          currentHandle = await currentHandle.getDirectoryHandle(pathSegments[i], { create: true });
-        }
-
-        // create or get the file
-        const fileHandle = await currentHandle.getFileHandle(pathSegments[pathSegments.length - 1], {
-          create: true,
-        });
-
-        // write the file content
-        const writable = await fileHandle.createWritable();
-        await writable.write(dirent.content);
-        await writable.close();
-
-        syncedFiles.push(relativePath);
+      if (dirent?.type !== 'file') {
+        continue;
       }
+
+      // Binaries sync as bytes, not as an empty string (see downloadZip).
+      let content: string | Uint8Array;
+
+      if (dirent.isBinary) {
+        try {
+          content = await this.#filesStore.readBinaryFile(filePath);
+        } catch (error) {
+          logger.error(`Failed to read binary file for sync: ${filePath}`, error);
+          continue;
+        }
+      } else {
+        content = dirent.content;
+      }
+
+      const relativePath = extractRelativePath(filePath);
+      const pathSegments = relativePath.split('/');
+      let currentHandle = targetHandle;
+
+      for (let i = 0; i < pathSegments.length - 1; i++) {
+        currentHandle = await currentHandle.getDirectoryHandle(pathSegments[i], { create: true });
+      }
+
+      // create or get the file
+      const fileHandle = await currentHandle.getFileHandle(pathSegments[pathSegments.length - 1], {
+        create: true,
+      });
+
+      // write the file content
+      const writable = await fileHandle.createWritable();
+      await writable.write(content);
+      await writable.close();
+
+      syncedFiles.push(relativePath);
     }
 
     return syncedFiles;
@@ -789,17 +848,39 @@ export class WorkbenchStore {
             // Create blobs for each file
             const blobs = await Promise.all(
               Object.entries(files).map(async ([filePath, dirent]) => {
-                if (dirent?.type === 'file' && dirent.content) {
-                  const { data: blob } = await octokit.git.createBlob({
-                    owner: repo.owner.login,
-                    repo: repo.name,
-                    content: Buffer.from(dirent.content).toString('base64'),
-                    encoding: 'base64',
-                  });
-                  return { path: extractRelativePath(filePath), sha: blob.sha };
+                if (dirent?.type !== 'file') {
+                  return null;
                 }
 
-                return null;
+                /**
+                 * Binaries have no content in the store — read their bytes and base64 them
+                 * for the Git Data API. Upstream's `dirent.content` truthiness check silently
+                 * dropped every texture/model/audio file from the pushed repo (SPEC §4.13:
+                 * a user's repo must be a complete, buildable project).
+                 */
+                let base64Content: string;
+
+                if (dirent.isBinary) {
+                  try {
+                    base64Content = bytesToBase64(await this.#filesStore.readBinaryFile(filePath));
+                  } catch (error) {
+                    logger.error(`Failed to read binary file for push: ${filePath}`, error);
+                    return null;
+                  }
+                } else if (dirent.content) {
+                  base64Content = Buffer.from(dirent.content, 'utf8').toString('base64');
+                } else {
+                  return null;
+                }
+
+                const { data: blob } = await octokit.git.createBlob({
+                  owner: repo.owner.login,
+                  repo: repo.name,
+                  content: base64Content,
+                  encoding: 'base64',
+                });
+
+                return { path: extractRelativePath(filePath), sha: blob.sha };
               }),
             );
 
@@ -898,20 +979,34 @@ export class WorkbenchStore {
           await new Promise((r) => setTimeout(r, 1000));
         }
 
-        const actions = Object.entries(files).reduce(
-          (acc, [filePath, dirent]) => {
-            if (dirent?.type === 'file' && dirent.content) {
-              acc.push({
+        const actions: GitLabCommitAction[] = [];
+
+        for (const [filePath, dirent] of Object.entries(files)) {
+          if (dirent?.type !== 'file') {
+            continue;
+          }
+
+          // Binaries commit base64-encoded; GitLab's commit API takes an explicit encoding.
+          if (dirent.isBinary) {
+            try {
+              actions.push({
                 action: 'create',
                 file_path: extractRelativePath(filePath),
-                content: dirent.content,
+                content: bytesToBase64(await this.#filesStore.readBinaryFile(filePath)),
+                encoding: 'base64',
               });
+            } catch (error) {
+              logger.error(`Failed to read binary file for push: ${filePath}`, error);
             }
-
-            return acc;
-          },
-          [] as { action: 'create' | 'update'; file_path: string; content: string }[],
-        );
+          } else if (dirent.content) {
+            actions.push({
+              action: 'create',
+              file_path: extractRelativePath(filePath),
+              content: dirent.content,
+              encoding: 'text',
+            });
+          }
+        }
 
         // Check which files exist and update action accordingly
         for (const action of actions) {
