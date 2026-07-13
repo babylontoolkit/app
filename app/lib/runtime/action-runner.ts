@@ -6,6 +6,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
 import type { BoltShell } from '~/utils/shell';
+import { isAllowedShellCommand } from './shell-allowlist';
 
 const logger = createScopedLogger('ActionRunner');
 
@@ -250,6 +251,22 @@ export class ActionRunner {
   async #runShellAction(action: ActionState) {
     if (action.type !== 'shell') {
       unreachable('Expected shell action');
+    }
+
+    /*
+     * Allow-list gate (SPEC §4.2.5, §5). The WebContainer shell is where a command actually runs, so
+     * this is the enforcement point — the system prompt's instruction to stay inside the allow-list
+     * is guidance, and guidance is not a control. Refused commands surface as a normal action error,
+     * which the model sees and can correct.
+     */
+    const allowed = isAllowedShellCommand(action.content);
+
+    if (!allowed.allowed) {
+      logger.warn(`Blocked shell command: ${action.content} — ${allowed.reason}`);
+      throw new ActionCommandError(
+        'Shell command not permitted',
+        `${allowed.reason}\n\nOnly \`npm install <package>\` and \`npm run <script>\` may be run.`,
+      );
     }
 
     const shell = this.#shellTerminal();

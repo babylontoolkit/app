@@ -12,7 +12,13 @@ export const MAX_TOKENS = 128000;
 export const PROVIDER_COMPLETION_LIMITS: Record<string, number> = {
   OpenAI: 4096, // Standard GPT models (o1 models have much higher limits)
   Github: 4096, // GitHub Models use OpenAI-compatible limits
-  Anthropic: 64000, // Conservative limit for Claude 4 models (Opus: 32k, Sonnet: 64k)
+  /*
+   * A FLOOR, not a ceiling (SPEC §4.2a). Only consulted when a model's real output cap is
+   * unknown — exactly when we want to be pessimistic, because undershooting output truncates
+   * while overshooting is a hard 400. 64000 is the smallest cap across the current lineup
+   * (Haiku 4.5). Do NOT "helpfully" raise this to 128k.
+   */
+  Anthropic: 64000,
   Google: 8192, // Gemini 1.5 Pro/Flash standard limit
   Cohere: 4000,
   DeepSeek: 8192,

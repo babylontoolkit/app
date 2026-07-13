@@ -1,4 +1,9 @@
 import { BaseProvider } from '~/lib/modules/llm/base-provider';
+import {
+  dropOrphanReasoningSignatures,
+  stripSamplingParams,
+  supportsSamplingParams,
+} from '~/lib/modules/llm/capabilities';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
@@ -12,35 +17,42 @@ export default class AnthropicProvider extends BaseProvider {
     apiTokenKey: 'ANTHROPIC_API_KEY',
   };
 
+  /*
+   * Model IDs are COMPLETE as written — never append a date (`-20251114`) or `-latest`.
+   * Those belong to the retired dated-snapshot scheme and now 404.
+   *
+   * `maxTokenAllowed` = context window. `maxCompletionTokens` = OUTPUT cap. They are different
+   * numbers and must not be copied between rows: Haiku 4.5 is the exception at 200k/64k, and
+   * asking for more output than a model allows is a hard 400.
+   */
   staticModels: ModelInfo[] = [
-    /*
-     * Essential fallback models - only the most stable/reliable ones
-     * Claude 3.5 Sonnet: 200k context, excellent for complex reasoning and coding
-     */
     {
-      name: 'claude-3-5-sonnet-20241022',
-      label: 'Claude 3.5 Sonnet',
+      name: 'claude-sonnet-5',
+      label: 'Claude Sonnet 5',
       provider: 'Anthropic',
-      maxTokenAllowed: 200000,
-      maxCompletionTokens: 128000,
+      maxTokenAllowed: 1_000_000,
+      maxCompletionTokens: 128_000,
     },
-
-    // Claude 3 Haiku: 200k context, fastest and most cost-effective
     {
-      name: 'claude-3-haiku-20240307',
-      label: 'Claude 3 Haiku',
+      name: 'claude-haiku-4-5',
+      label: 'Claude Haiku 4.5',
       provider: 'Anthropic',
-      maxTokenAllowed: 200000,
-      maxCompletionTokens: 128000,
+      maxTokenAllowed: 200_000,
+      maxCompletionTokens: 64_000, // NOT 128k — see above
     },
-
-    // Claude Opus 4: 200k context, 32k output limit (latest flagship model)
     {
-      name: 'claude-opus-4-20250514',
-      label: 'Claude 4 Opus',
+      name: 'claude-opus-4-8',
+      label: 'Claude Opus 4.8',
       provider: 'Anthropic',
-      maxTokenAllowed: 200000,
-      maxCompletionTokens: 32000,
+      maxTokenAllowed: 1_000_000,
+      maxCompletionTokens: 128_000,
+    },
+    {
+      name: 'claude-fable-5',
+      label: 'Claude Fable 5',
+      provider: 'Anthropic',
+      maxTokenAllowed: 1_000_000,
+      maxCompletionTokens: 128_000,
     },
   ];
 
@@ -74,32 +86,13 @@ export default class AnthropicProvider extends BaseProvider {
     const data = res.data.filter((model: any) => model.type === 'model' && !staticModelIds.includes(model.id));
 
     return data.map((m: any) => {
-      // Get accurate context window from Anthropic API
-      let contextWindow = 32000; // default fallback
-
-      // Anthropic provides max_tokens in their API response
-      if (m.max_tokens) {
-        contextWindow = m.max_tokens;
-      } else if (m.id?.includes('claude-3-5-sonnet')) {
-        contextWindow = 200000; // Claude 3.5 Sonnet has 200k context
-      } else if (m.id?.includes('claude-3-haiku')) {
-        contextWindow = 200000; // Claude 3 Haiku has 200k context
-      } else if (m.id?.includes('claude-3-opus')) {
-        contextWindow = 200000; // Claude 3 Opus has 200k context
-      } else if (m.id?.includes('claude-3-sonnet')) {
-        contextWindow = 200000; // Claude 3 Sonnet has 200k context
-      }
-
-      // Determine completion token limits based on specific model
-      let maxCompletionTokens = 128000; // default for older Claude 3 models
-
-      if (m.id?.includes('claude-opus-4')) {
-        maxCompletionTokens = 32000; // Claude 4 Opus: 32K output limit
-      } else if (m.id?.includes('claude-sonnet-4')) {
-        maxCompletionTokens = 64000; // Claude 4 Sonnet: 64K output limit
-      } else if (m.id?.includes('claude-4')) {
-        maxCompletionTokens = 32000; // Other Claude 4 models: conservative 32K limit
-      }
+      /*
+       * The Models API is self-describing and returns BOTH numbers — do not guess, and do not
+       * swap them. Fallbacks are deliberately asymmetric: undershooting output truncates,
+       * overshooting is a 400. So the output fallback is pessimistic.
+       */
+      const contextWindow: number = m.max_input_tokens ?? 200_000;
+      const maxCompletionTokens: number = m.max_tokens ?? 8192;
 
       return {
         name: m.id,
@@ -125,11 +118,13 @@ export default class AnthropicProvider extends BaseProvider {
       defaultBaseUrlKey: '',
       defaultApiTokenKey: 'ANTHROPIC_API_KEY',
     });
-    const anthropic = createAnthropic({
-      apiKey,
-      headers: { 'anthropic-beta': 'output-128k-2025-02-19' },
-    });
 
-    return anthropic(model);
+    // No `output-128k-2025-02-19` beta header — that capability is GA on Claude 4+.
+    const anthropic = createAnthropic({ apiKey });
+
+    const instance = supportsSamplingParams(model) ? anthropic(model) : stripSamplingParams(anthropic(model));
+
+    // Applied to EVERY Claude model: any thinking-capable model can emit an empty thinking block.
+    return dropOrphanReasoningSignatures(instance);
   };
 }

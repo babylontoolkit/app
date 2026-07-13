@@ -58,6 +58,41 @@ carry them base64-encoded as a wire format only.
 | `app/components/git/GitUrlImport.client.tsx` | binaries excluded from the artifact so the clone's correct bytes are not overwritten by a mangled UTF-8 copy |
 | `app/components/deploy/*`, `app/routes/api.{netlify,vercel}-deploy.ts` | build output read as bytes; binaries uploaded base64 (were: `readFile(…, 'utf-8')` → U+FFFD corruption) |
 
+## Divergence map — the brain: doc-sync, agent proxy, skills (SPEC §4.2, §4.2a, §4.3, §4.11)
+
+Built additively: the entire subsystem is new files under `app/lib/.server/{prompt,skills,agent}` plus
+three new routes. Upstream's `/api/chat` and its whole provider/LLM layer are left **intact and
+working** — we add a parallel generation path rather than rewriting theirs, so upstream's coming
+agent/subagent rework can still land beneath us.
+
+**New (net-new files — zero merge surface):**
+- `app/lib/.server/prompt/**` — doc-sync: `sources.ts`, `github.ts`, `build.ts`, `store.ts`, `active.ts`, `sections/*.md` (platform prompt sections, versioned with the code), `doc-sync.spec.ts`
+- `app/lib/.server/skills/**` — skills sync/store/validation: `frontmatter.ts`, `store.ts`, `sync.ts`, `skills.spec.ts`
+- `app/lib/.server/agent/**` — the proxy: `config.ts`, `proxy.ts`, `tools.ts`, `usage.ts`
+- `app/lib/skills/slash.ts` (+ spec) — shared slash parsing (client + server)
+- `app/lib/modules/llm/capabilities.ts` (+ `providers/anthropic.spec.ts`) — §4.2a wire-level shims
+- `app/lib/runtime/shell-allowlist.ts` (+ spec) — §4.2.5 allow-list
+- `app/components/chat/SkillAutocomplete.tsx` — `/` skill menu
+- `app/routes/api.agent.ts`, `api.admin.prompt.ts`, `api.skills.ts`
+
+**Storage seam:** `prompt_versions` / `skills` / `skill_versions` / `generations` are specified as
+Supabase tables (§4.5.5) that do not exist until Stage 2. Each store is defined as an INTERFACE with a
+filesystem adapter (`.data/`, gitignored) behind `getPromptStore()` / `getSkillStore()` /
+`getGenerationLog()`. Versioning, atomic activation, and rollback are fully implemented today; Stage 2
+adds a Supabase adapter and switches the factory. No caller changes.
+
+**Upstream files touched (each small and localized — keep them small on merge):**
+
+| File | Change |
+|---|---|
+| `package.json` | `@ai-sdk/anthropic` `0.0.39` → `^1.2.12`. 0.0.x predates thinking entirely and cannot parse the content blocks current Claude models emit. **Never downgrade** (2.x needs `ai@5`). |
+| `app/lib/modules/llm/providers/anthropic.ts` | Current model table (§4.2a); `getDynamicModels` reads `max_input_tokens` (context) and `max_tokens` (output) instead of conflating them; `getModelInstance` composes `stripSamplingParams` + `dropOrphanReasoningSignatures`; dropped the obsolete `output-128k-2025-02-19` beta header. |
+| `app/utils/constants.ts` | `DEFAULT_MODEL` → `claude-sonnet-5` (upstream's `claude-3-5-sonnet-latest` is retired AND matched no `staticModels` entry). |
+| `app/lib/.server/llm/constants.ts` | Comments only — `PROVIDER_COMPLETION_LIMITS.Anthropic` stays `64000`, now documented as a FLOOR so nobody raises it to 128k. |
+| `app/components/chat/Chat.client.tsx` | One line: `useChat({ api: '/api/chat' })` → `'/api/agent'`. The single switch that routes generation through the platform proxy. |
+| `app/components/chat/ChatBox.tsx` | Slash autocomplete: mount `<SkillAutocompleteMenu>` and give it first refusal on `onKeyDown` (so Enter completes a `/skill` instead of sending it). |
+| `app/lib/runtime/action-runner.ts` | `#runShellAction` gates on `isAllowedShellCommand()` (§4.2.5). The WebContainer shell is where commands actually run, so it is the enforcement point. |
+
 ## Other upstream files touched
 
 | File | Change |

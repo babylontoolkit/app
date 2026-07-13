@@ -6,7 +6,14 @@ export const WORK_DIR = `/home/${WORK_DIR_NAME}`;
 export const MODIFICATIONS_TAG_NAME = 'bolt_file_modifications';
 export const MODEL_REGEX = /^\[Model: (.*?)\]\n\n/;
 export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
-export const DEFAULT_MODEL = 'claude-3-5-sonnet-latest';
+
+/*
+ * The platform model (SPEC §4.2a). Credits-mode generations always use this — swapping the
+ * platform model means editing this one constant. Deliberately NOT an env var: the value must
+ * always match a `staticModels` entry, and a typo'd env value would 404 at the first generation.
+ * (Upstream's `claude-3-5-sonnet-latest` was retired AND matched no `staticModels` entry.)
+ */
+export const DEFAULT_MODEL = 'claude-sonnet-5';
 export const PROMPT_COOKIE_KEY = 'cachedPrompt';
 export const TOOL_EXECUTION_APPROVAL = {
   APPROVE: 'Yes, approved.',

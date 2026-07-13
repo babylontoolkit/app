@@ -1,0 +1,201 @@
+/**
+ * Regression tests for the three wire-level Anthropic failures (SPEC §4.2a, spec/anthropic-models.md §3).
+ *
+ * These bugs are invisible to typecheck and to any test that asserts on our own intermediate
+ * objects — they live between our code and the wire. So these tests assert on the ACTUAL
+ * serialized request body, and drive the REAL `ai.streamText` pipeline against a replayed SSE
+ * stream in the exact shape production sends.
+ *
+ * NOTE: this imports `capabilities` + the ai-sdk directly rather than `AnthropicProvider`, because
+ * `base-provider → manager → registry → providers → base-provider` is an import cycle that the
+ * bundler tolerates and vitest does not. Pre-existing; don't restructure it for a test.
+ */
+import { createAnthropic } from '@ai-sdk/anthropic';
+import { streamText } from 'ai';
+import { describe, expect, it } from 'vitest';
+import {
+  dropOrphanReasoningSignatures,
+  stripSamplingParams,
+  supportsSamplingParams,
+} from '~/lib/modules/llm/capabilities';
+
+/** Builds an Anthropic SSE response body from raw event objects. */
+function sseResponse(events: object[]): Response {
+  const body = events.map((e) => `event: ${(e as any).type}\ndata: ${JSON.stringify(e)}\n\n`).join('');
+
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
+/**
+ * The production stream shape for a model with adaptive thinking and `display: "omitted"`:
+ * a thinking block whose text is EMPTY, a `signature_delta`, and NO `thinking_delta`.
+ *
+ * Getting this shape right is the whole test. An invented `thinking_delta` carrying text would
+ * pass against a stream that does not exist in production, and the bug would ship.
+ */
+const EMPTY_THINKING_THEN_TEXT = [
+  {
+    type: 'message_start',
+    message: {
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-sonnet-5',
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 1 },
+    },
+  },
+  { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-with-no-reasoning' } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+  { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Hello' } },
+  { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: ' world' } },
+  { type: 'content_block_stop', index: 1 },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: { output_tokens: 5 },
+  },
+  { type: 'message_stop' },
+];
+
+/** A stream where thinking DOES carry text — the legitimate reasoning + signature pair. */
+const REAL_THINKING_THEN_TEXT = [
+  EMPTY_THINKING_THEN_TEXT[0],
+  { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Let me think.' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'legit-signature' } },
+  { type: 'content_block_stop', index: 0 },
+  ...EMPTY_THINKING_THEN_TEXT.slice(4),
+];
+
+/** Captures the serialized request body the provider puts on the wire. */
+function capturingFetch(events: object[]) {
+  const captured: { body?: any; headers?: Record<string, string> } = {};
+
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    captured.body = JSON.parse(String(init?.body));
+    captured.headers = init?.headers as Record<string, string>;
+
+    return sseResponse(events);
+  }) as unknown as typeof fetch;
+
+  return { captured, fetchImpl };
+}
+
+/** Drains a streamText result to completion, returning the concatenated text. */
+async function drain(result: ReturnType<typeof streamText>): Promise<string> {
+  let text = '';
+
+  for await (const chunk of result.textStream) {
+    text += chunk;
+  }
+
+  return text;
+}
+
+describe('supportsSamplingParams', () => {
+  it('reports the current flagships as having removed sampling params', () => {
+    expect(supportsSamplingParams('claude-sonnet-5')).toBe(false);
+    expect(supportsSamplingParams('claude-opus-4-8')).toBe(false);
+    expect(supportsSamplingParams('claude-opus-4-7')).toBe(false);
+    expect(supportsSamplingParams('claude-fable-5')).toBe(false);
+  });
+
+  it('reports older models as still accepting them', () => {
+    expect(supportsSamplingParams('claude-haiku-4-5')).toBe(true);
+    expect(supportsSamplingParams('claude-opus-4-6')).toBe(true);
+    expect(supportsSamplingParams('claude-sonnet-4-6')).toBe(true);
+  });
+
+  it('resolves Bedrock-prefixed ids', () => {
+    expect(supportsSamplingParams('anthropic.claude-sonnet-5')).toBe(false);
+    expect(supportsSamplingParams('anthropic.claude-haiku-4-5')).toBe(true);
+  });
+});
+
+describe('stripSamplingParams (§3.1 — `temperature is deprecated for this model`)', () => {
+  /*
+   * `ai@4` injects `temperature: 0` when the caller supplies none, so the unwrapped model puts a
+   * sampling param on the wire even though nothing in our code ever set one. This test asserts on
+   * the serialized body precisely because the call site looks innocent.
+   */
+  it('leaves NO sampling params in the serialized request body', async () => {
+    const { captured, fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+    const anthropic = createAnthropic({ apiKey: 'test-key', fetch: fetchImpl });
+
+    const model = dropOrphanReasoningSignatures(stripSamplingParams(anthropic('claude-sonnet-5')));
+
+    await drain(streamText({ model, prompt: 'hi' }));
+
+    expect(captured.body).toBeDefined();
+    expect(captured.body).not.toHaveProperty('temperature');
+    expect(captured.body).not.toHaveProperty('top_p');
+    expect(captured.body).not.toHaveProperty('top_k');
+  });
+
+  it('proves the bug exists without the wrapper: ai@4 injects temperature: 0 unasked', async () => {
+    const { captured, fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+    const anthropic = createAnthropic({ apiKey: 'test-key', fetch: fetchImpl });
+
+    // Same call, but only the reasoning wrapper — no sampling strip.
+    const model = dropOrphanReasoningSignatures(anthropic('claude-sonnet-5'));
+
+    await drain(streamText({ model, prompt: 'hi' }));
+
+    // This `0` is what the API 400s on. Nobody in our code asked for it.
+    expect(captured.body.temperature).toBe(0);
+  });
+
+  it('does not touch models that still accept sampling params', async () => {
+    const { captured, fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+    const anthropic = createAnthropic({ apiKey: 'test-key', fetch: fetchImpl });
+
+    const raw = anthropic('claude-haiku-4-5');
+    const model = dropOrphanReasoningSignatures(
+      supportsSamplingParams('claude-haiku-4-5') ? raw : stripSamplingParams(raw),
+    );
+
+    await drain(streamText({ model, prompt: 'hi', temperature: 0.7 }));
+
+    expect(captured.body.temperature).toBe(0.7);
+  });
+});
+
+describe('dropOrphanReasoningSignatures (§3.3 — `reasoning-signature without reasoning`)', () => {
+  it('streams text through an empty thinking block + signature_delta', async () => {
+    const { fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+    const anthropic = createAnthropic({ apiKey: 'test-key', fetch: fetchImpl });
+
+    const model = dropOrphanReasoningSignatures(stripSamplingParams(anthropic('claude-sonnet-5')));
+
+    await expect(drain(streamText({ model, prompt: 'hi' }))).resolves.toBe('Hello world');
+  });
+
+  it('proves the bug exists without the wrapper: the orphan signature blows up ai@4', async () => {
+    const { fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+    const anthropic = createAnthropic({ apiKey: 'test-key', fetch: fetchImpl });
+
+    // Bypass the wrapper — the exact production failure.
+    const model = stripSamplingParams(anthropic('claude-sonnet-5'));
+
+    await expect(drain(streamText({ model, prompt: 'hi' }))).rejects.toThrow(/reasoning-signature|InvalidStreamPart/i);
+  });
+
+  it('passes REAL reasoning and its legitimate signature through untouched', async () => {
+    const { fetchImpl } = capturingFetch(REAL_THINKING_THEN_TEXT);
+    const anthropic = createAnthropic({ apiKey: 'test-key', fetch: fetchImpl });
+
+    const model = dropOrphanReasoningSignatures(stripSamplingParams(anthropic('claude-sonnet-5')));
+    const result = streamText({ model, prompt: 'hi' });
+
+    await expect(drain(result)).resolves.toBe('Hello world');
+    await expect(result.reasoning).resolves.toBe('Let me think.');
+  });
+});

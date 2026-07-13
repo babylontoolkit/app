@@ -132,7 +132,12 @@ export const ChatImpl = memo(
       setData,
       addToolResult,
     } = useChat({
-      api: '/api/chat',
+      /*
+       * The platform agent proxy (SPEC §3, §4.2) — NOT upstream's /api/chat. LLM calls never leave
+       * the browser directly: the platform key, the synced prompt version, the credit gate, the
+       * server-side skill tool loop, and usage recording all live behind this route.
+       */
+      api: '/api/agent',
       body: {
         apiKeys,
         files,

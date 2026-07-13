@@ -20,6 +20,7 @@ import type { DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import { McpTools } from './MCPTools';
 import { WebSearch } from './WebSearch.client';
+import { SkillAutocompleteMenu, useSkillAutocomplete } from './SkillAutocomplete';
 
 interface ChatBoxProps {
   isModelSettingsCollapsed: boolean;
@@ -66,6 +67,17 @@ interface ChatBoxProps {
 }
 
 export const ChatBox: React.FC<ChatBoxProps> = (props) => {
+  /*
+   * Setting the input through a synthetic change event is the existing convention in this codebase
+   * (BaseChat does the same) — `setInput` is not threaded down this far, and inventing a second prop
+   * chain for it would widen the diff against upstream for no behavioral gain.
+   */
+  const skillAutocomplete = useSkillAutocomplete(props.input, (value) => {
+    props.handleInputChange?.({
+      target: { value },
+    } as React.ChangeEvent<HTMLTextAreaElement>);
+  });
+
   return (
     <div
       className={classNames(
@@ -171,6 +183,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
       <div
         className={classNames('relative shadow-xs border border-bolt-elements-borderColor backdrop-blur rounded-lg')}
       >
+        <SkillAutocompleteMenu autocomplete={skillAutocomplete} />
         <textarea
           ref={props.textareaRef}
           className={classNames(
@@ -209,6 +222,16 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             });
           }}
           onKeyDown={(event) => {
+            /*
+             * The skill menu gets first refusal on the key. While it is open, Enter/Tab/arrows
+             * belong to it — otherwise Enter would send a half-typed `/bt-sp` as a chat message.
+             */
+            skillAutocomplete.handleKeyDown(event);
+
+            if (event.defaultPrevented) {
+              return;
+            }
+
             if (event.key === 'Enter') {
               if (event.shiftKey) {
                 return;

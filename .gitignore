@@ -45,3 +45,7 @@ changelogUI.md
 docs/instructions/Roadmap.md
 .cursorrules
 .qodo
+
+# Platform data store (prompt versions, skills, generations) — local dev backend for the
+# Supabase/S3 layer that lands in Stage 2. Never commit.
+.data/

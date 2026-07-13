@@ -89,9 +89,22 @@ No bolt.diy marks in any user-facing surface. ALL brand output (product name, lo
 
 We build in **STAGES** (GETTING_STARTED.md Step 4) — dependency-first construction order. SPEC §9's *phases* are LAUNCH/GATING order and never bound what may be built (see the BUILD-FIRST standing rule). Nothing here is "out of scope because it's a later phase."
 
-> **Active stage: 1 — The brain (agent + knowledge).** Build §4.3 doc-sync → §4.2 server agent proxy (tool loop, self-healing repair turns, usage recording) → §4.11 skills sync + `/slash` invocation, plus §4.2a Anthropic provider hardening. Credentials optional: absent keys degrade gracefully.
+> **Active stage: 2 — Project creation (the Toolkit core).** Build §4.4 game_registry (`source_class`, `scene_url`, `match_keywords`) + template snapshot pipeline → §4.4a new-project routing (a typed prompt SEEDS a registry entry and RUNS IMMEDIATELY — the wizard NEVER interrupts it) → §4.4b copy-from-source scaffolding → §4.4c landing-page TOTAL rewrite + play contract + bundle integrity. Verify: "make me a kart racer" → seeded from Racing → themed landing page → Play launches the project's own GameMode.
 >
-> **Stage 0 — binary-assets blocker: DONE** (commit `110d3ff`). Verified 2026-07-12: live `babylontoolkit/StarterAssets` mount carries 12/12 binaries byte-identical to GitHub raw; snapshot→restore preserves PNG bytes hash-identically (`app/lib/binary/binary-files.spec.ts`); typecheck, lint, and all 4 test files green.
+> (Stage 3 is the hosted layer — §4.5 Supabase, §4.6 credits/Stripe. The Stage 1 stores are already behind interfaces — `getPromptStore()` / `getSkillStore()` / `getGenerationLog()` — with filesystem adapters writing to `.data/`; Stage 3 adds Supabase adapters and switches the factories, with no caller changes.)
+>
+> **Stage 1 — the brain: DONE.** Verified 2026-07-13 against the live repos and the live Anthropic API:
+> - **§4.2a Anthropic hardening** — `@ai-sdk/anthropic ^1.2.12`; current model table; `stripSamplingParams` + `dropOrphanReasoningSignatures` in `capabilities.ts` (outside `.server/`); `DEFAULT_MODEL = claude-sonnet-5`. `anthropic.spec.ts` asserts on the serialized wire body and a replayed SSE stream, and INCLUDES the two "prove the bug exists" tests. Live calls green on sonnet-5 / haiku-4-5 / opus-4-8.
+> - **§4.3 doc-sync** — 26 docs fetched from `babylontoolkit/agent`, 143KB base prompt, 15 on-demand blocks (keyword-routed), 2 declaration files; versioned + content-addressed store; hash no-op; atomic activation + rollback; `POST /api/admin/prompt` (ADMIN_TOKEN-guarded; unset = closed). The Agent Reference is a ROUTER INDEX that tells the reader to fetch sub-docs at runtime — `sections/00-platform-identity.md` overrides that, since generation has zero network access by rule (§1.3 principle 3).
+> - **§4.11 skills** — all 9 skills synced from `babylontoolkit/skills`; frontmatter validation (invalid bundle → skip, never fatal); manifest-only resource resolution (traversal is unreachable, not "blocked"); `/` autocomplete in chat; slash force-load; auto description-triggered `load_skill` confirmed firing.
+> - **§4.2 agent proxy** — `/api/agent` (upstream `/api/chat` left intact); server-side tool loop invisible to the client; prompt-cache breakpoints (measured 114k tokens written → 84k read back); usage + cache tokens recorded per generation.
+>
+> **Known Stage 1 follow-ups (behavioral, not structural):**
+> - **Skill over-loading.** On a request that merely *resembles* a skill's domain, the model can burn all 6 tool rounds loading skills and reading their resources (measured: 180k in / 75k out / >10 min for one small feature). The cap-continuation ("on cap, proceed with what's loaded") prevents the silent truncation this used to cause, but the index directive in `sections/40-skill-usage.md` still needs tuning. Simple requests that match no skill are unaffected (39s, clean artifact).
+> - **No text streams during tool rounds** — the user can watch a blank pane for minutes. Wants a progress annotation ("loading skill…"), as upstream does for context/summary.
+> - **Self-healing (§4.2.7) is server-ready but client-unwired.** The proxy accepts `errors` / `repairOf` / `repairAttempt` and caps repairs at 2; nothing on the client posts Vite compile errors to it yet.
+>
+> **Stage 0 — binary-assets blocker: DONE** (commit `110d3ff`). Verified 2026-07-12: live `babylontoolkit/StarterAssets` mount carries 12/12 binaries byte-identical to GitHub raw; snapshot→restore preserves PNG bytes hash-identically (`app/lib/binary/binary-files.spec.ts`).
 >
 > SPEC §9's "Phase 0 — prompt proof" (`tools/phase0` throwaway script) was **skipped deliberately**: it was a pre-fork de-risking exercise, and the fork now proves the same thing end-to-end in the real UI.
 
