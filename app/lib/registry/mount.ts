@@ -45,6 +45,43 @@ export async function writeBinaryFiles(files: TemplateFile[]): Promise<void> {
 }
 
 /**
+ * Write the project's TEXT files into the container (SPEC §4.2.8).
+ *
+ * The artifact is a channel to the MODEL that happens to also write files; this is the plain
+ * filesystem. Since the agent proxy already shows the model the whole project every turn — built
+ * from the file map, which the watcher populates from exactly these writes — inlining the files into
+ * the creation artifact as well sent every one of them TWICE, forever, in an assistant message that
+ * never leaves the history. So nothing is inlined: the starter lands here, and the artifact carries
+ * only `npm install` and `npm run dev`.
+ *
+ * Awaited BEFORE the artifact is returned, so every file is on disk by the time `npm install` runs.
+ */
+export async function writeTextFiles(files: TemplateFile[]): Promise<void> {
+  if (files.length === 0) {
+    return;
+  }
+
+  const container = await webcontainer;
+
+  for (const file of files) {
+    const dir = file.path.split('/').slice(0, -1).join('/');
+
+    try {
+      if (dir) {
+        await container.fs.mkdir(dir, { recursive: true });
+      }
+
+      await container.fs.writeFile(file.path, file.content);
+    } catch (error) {
+      logger.error(`Failed to write file: ${file.path}`, error);
+      throw new Error(`Failed to mount "${file.path}" — the project would be incomplete.`);
+    }
+  }
+
+  logger.info(`Mounted ${files.length} text file(s)`);
+}
+
+/**
  * Copy `src/babylon/assets/{babylon,spinner}.png` → `public/`, then VERIFY both landed.
  *
  * Verification is the point: a silent failure here produces a project whose preloader 404s, which is

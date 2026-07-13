@@ -41,10 +41,20 @@ export interface GenerationRecord {
   completionTokens: number;
   totalTokens: number;
 
-  /** Input served from the prompt cache — billed at the reduced rate (§4.3.5, a primary margin lever). */
+  /** Input served from the prompt cache — billed at 0.1x (§4.3.5, a primary margin lever). */
   cacheReadTokens: number;
 
-  /** Input written INTO the cache — billed at a premium, paid once per prefix change. */
+  /**
+   * Input written INTO the cache — paid once per prefix change.
+   *
+   * **Billed at 2x, NOT 1.25x.** We use the 1-hour cache tier (`ttl: '1h'`, see `proxy.ts`), because
+   * the 5-minute default expires while the user is playing the game we just built — turning the cache
+   * into a thing we re-create on every turn rather than read. The 1h tier's write premium is the price
+   * of that, and it repays itself on the second cached turn.
+   *
+   * Stage 3's ledger math MUST use 2x here. Assuming the 1.25x default would systematically
+   * under-charge every generation (SPEC §4.2.8, §4.6).
+   */
   cacheCreationTokens: number;
 
   /** Tool rounds the server ran inside this generation. */

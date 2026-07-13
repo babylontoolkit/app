@@ -34,8 +34,26 @@ const logger = createScopedLogger('agent-proxy');
 /** Self-healing cap per generation (§4.2.7). Beyond this the agent is thrashing, not fixing. */
 export const MAX_REPAIR_TURNS = 2;
 
-/** Anthropic permits a small number of cache breakpoints; we spend at most three. */
-const CACHE_CONTROL = { anthropic: { cacheControl: { type: 'ephemeral' as const } } };
+/**
+ * Prompt-cache breakpoints (SPEC §4.2.8). Anthropic permits four; we spend all four — the base
+ * prompt, the routed doc blocks, an invoked skill, and the project files. There are none spare.
+ *
+ * **The TTL is the whole point.** The default `ephemeral` tier expires after 5 MINUTES, and an app
+ * builder is exactly the workload that defeats it: the user generates a game, then spends several
+ * minutes actually PLAYING it before asking for a change. By then the prefix is cold, and the next
+ * turn re-writes all ~111k tokens at full price. That is not paying for a cache — it is paying to
+ * keep creating one, on every turn, forever.
+ *
+ * The 1h tier costs 2x to write instead of 1.25x, and reads stay at 0.1x. It therefore breaks even
+ * on the SECOND cached turn and wins on every turn after — which, for a session where a human stops
+ * to look at what we built, is every session. Measured over ten turns: ~$4.16 of cache writes at 5m
+ * vs ~$0.97 at 1h.
+ *
+ * Verified against the live API (2026-07): `ttl` needs no beta header (the extended TTL is GA), the
+ * SDK passes `cacheControl` through verbatim, and an entry written this way is still a cache READ
+ * seven minutes later — i.e. it is genuinely 1h and not a silent fall back to the 5m tier.
+ */
+const CACHE_CONTROL = { anthropic: { cacheControl: { type: 'ephemeral' as const, ttl: '1h' as const } } };
 
 export interface AgentRequest {
   messages: Message[];
@@ -264,10 +282,21 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   if (request.files && Object.keys(request.files).length > 0) {
-    // Binaries arrive here as `<boltFile binary size>` markers with empty content — never bytes.
+    /*
+     * Binaries and opaque files arrive here as `<boltFile>` markers — never bodies (§4.2.8).
+     *
+     * This block IS cached, and that is not a contradiction of the ordering above. A breakpoint
+     * caches the prefix UP TO itself, so the base prompt and the routed blocks keep their own cache
+     * entries regardless: if a file changes next turn, only THIS entry misses and the expensive
+     * prefix still hits. What the breakpoint buys is the multiplier — `maxSteps` re-sends the entire
+     * prefix on every step of the tool loop, so an uncached file context is paid up to seven times
+     * per generation at full price. Cached, steps 2..n read it at a tenth. It was the single largest
+     * line item in the 997k-token creation we measured (§4.2.8).
+     */
     system.push({
       role: 'system',
       content: `# Current Project Files\n\n${createFilesContext(request.files, true)}`,
+      providerOptions: CACHE_CONTROL,
     });
   }
 

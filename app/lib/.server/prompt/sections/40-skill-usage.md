@@ -19,7 +19,7 @@ Rules:
   inside one skill's domain AND you would otherwise be guessing at a workflow.
 - **A description that merely SOUNDS related is not a match.** Most requests touch design, planning and
   code in some sense; that does not mean the design, planning and code skills all apply. Ask whether
-  the skill's *workflow* is the one the user is asking you to perform. If not, skip it.
+  the skill's _workflow_ is the one the user is asking you to perform. If not, skip it.
 - **At most ONE skill per generation.** Loading is not free: it costs a tool round and a large amount
   of context, and you have a limited number of rounds. Every round spent loading a skill you didn't
   need is a round you no longer have to write the code — which is what the user actually asked for.

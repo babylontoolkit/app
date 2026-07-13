@@ -606,11 +606,23 @@ export class FilesStore {
     // Clean up any files that were previously deleted
     this.#cleanupDeletedFiles();
 
-    // Set up file watcher
+    /*
+     * File watcher.
+     *
+     * Upstream also excluded `**\/package-lock.json` here, on the assumption that the file map is a
+     * view for the model. It is not — it is the SOURCE for every egress path (ZIP export, GitHub
+     * sync, snapshot, share build all iterate `this.files`). A lockfile absent from the map is a
+     * lockfile absent from the user's exported project, so a restored snapshot re-resolves its
+     * dependencies and can install a different tree than the one that was tested (SPEC §4.4, §4.2.8).
+     *
+     * Keeping it OUT of the model's context is a separate concern, handled where it belongs — at the
+     * context boundary (`~/lib/context/opaque-files`): the model gets a `<boltFile>` marker, and the
+     * client strips the body before posting the map to the agent route.
+     */
     webcontainer.internal.watchPaths(
       {
         include: [`${WORK_DIR}/**`],
-        exclude: ['**/node_modules', '.git', '**/package-lock.json'],
+        exclude: ['**/node_modules', '.git'],
         includeContent: true,
       },
       bufferWatchEvents(100, this.#processEventBuffer.bind(this)),

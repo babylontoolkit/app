@@ -328,10 +328,15 @@ describe('project hygiene (§4.4)', () => {
   );
 
   /*
-   * The starter ships carets and NO lockfile, so `npm install` floats every Babylon package while the
-   * toolkit pins its peers exactly. `@babylonjs/serializers@9.16.1` then imports `__esDecorate` from
-   * `@babylonjs/core@9.15.0`'s tslib, which does not export it → MISSING_EXPORT → `npm run build`
-   * fails. Dev still boots, so this stays hidden until the user clicks Share (SPEC §4.4, §4.8).
+   * The starter ships carets, so `npm install` floats every Babylon package while the toolkit pins
+   * its peers exactly. `@babylonjs/serializers` is NOT one of those peers, so it floats to 9.16.1 and
+   * imports `__esDecorate` from `@babylonjs/core@9.15.0`'s tslib, which does not export it →
+   * MISSING_EXPORT → `npm run build` fails. Dev still boots, so this stays hidden until the user
+   * clicks Share (SPEC §4.4, §4.8).
+   *
+   * The starter's committed lockfile does NOT fix this — it was taken after the caret had already
+   * floated, so it pins the broken pair deterministically (verified: `npm ci && npm run build` on a
+   * clean clone fails; pinning + dropping the lockfile builds clean). Hence both halves below.
    */
   it('pins every Babylon package to an exact version', () => {
     const pinned = JSON.parse(pinBabylonDependencies(PACKAGE_JSON));
@@ -382,6 +387,35 @@ createRoot(document.getElementById("root")!).render(
       expect(isTemplateJunk(path)).toBe(true);
     },
   );
+
+  /*
+   * The lockfile is the project's exact, tested dependency resolution — SPEC §4.4 requires it to ship,
+   * and it makes the container's `npm install` deterministic and fast. But at ~218KB (~55k tokens) it
+   * must never be inlined into the artifact, which reaches the MODEL. It goes to disk out-of-band,
+   * exactly as binaries do. These two assertions are the whole contract, and they pull in opposite
+   * directions — hence both.
+   */
+  it('keeps the lockfile in the project (it is not junk)', () => {
+    expect(isTemplateJunk('package-lock.json')).toBe(false);
+  });
+
+  /*
+   * Upstream now pins the Babylon set exactly (9.16.0 + an `overrides` block for the transitive
+   * gui-editor), so pinning is a NO-OP on the current starter and must stay that way — a pin that
+   * REWROTE a correct version would fight the committed lockfile.
+   */
+  it('leaves an already-pinned dependency set untouched', () => {
+    const pinned = JSON.stringify(
+      { name: 'my-starter-app', dependencies: { '@babylonjs/core': '9.16.0', '@babylonjs/serializers': '9.16.0' } },
+      null,
+      2,
+    );
+
+    const out = JSON.parse(pinBabylonDependencies(pinned));
+
+    expect(out.dependencies['@babylonjs/core']).toBe('9.16.0');
+    expect(out.dependencies['@babylonjs/serializers']).toBe('9.16.0');
+  });
 
   it.each(['src/main.tsx', 'package.json', 'public/babylon.png', 'src/babylon/globals.ts'])('mounts %s', (path) => {
     expect(isTemplateJunk(path)).toBe(false);

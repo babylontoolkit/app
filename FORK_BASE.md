@@ -58,6 +58,27 @@ carry them base64-encoded as a wire format only.
 | `app/components/git/GitUrlImport.client.tsx` | binaries excluded from the artifact so the clone's correct bytes are not overwritten by a mangled UTF-8 copy |
 | `app/components/deploy/*`, `app/routes/api.{netlify,vercel}-deploy.ts` | build output read as bytes; binaries uploaded base64 (were: `readFile(…, 'utf-8')` → U+FFFD corruption) |
 
+## Divergence map — context budget (merge hotspot: LLM context assembly)
+
+Upstream inlines every text file into the model's context and inlines the template into the creation
+artifact as well. Per SPEC §4.2.8 / `spec/context-budget.md` we send each file AT MOST ONCE, and never
+send files no correct edit exists for. Implemented additively: a net-new classifier + two small hooks.
+
+**New (net-new files — zero merge surface):**
+- `app/lib/context/opaque-files.ts` — the classifier: generated / vendored / image-ish text
+- `app/lib/context/opaque-files.spec.ts` — guards BOTH directions (hidden stays hidden; readable stays readable)
+
+**Contract:** a file is in the project OR in the conversation, never in the conversation twice. The
+WebContainer FS is how files reach the project; the artifact is a message to the model. Opaque and
+binary files are declared as `<boltFile>` markers (path + size), never as bodies.
+
+| File | Change |
+|---|---|
+| `app/lib/.server/llm/utils.ts` | `createFilesContext` emits a `<boltFile opaque>` marker for opaque files (was: full body). One `if`, mirroring the existing `isBinary` branch. |
+| `app/lib/.server/agent/proxy.ts` | file-context system block carries a cache breakpoint; cache TTL is `1h` (was: the 5-minute default, which expires while the user plays the game we just built — so every turn re-wrote the whole prefix at full price) |
+| `app/lib/stores/files.ts` | watcher no longer excludes `**/package-lock.json`. Upstream treated the file map as a view for the model; it is the SOURCE for every egress path (ZIP, GitHub sync, snapshot, share build), so the exclusion silently shipped user projects with no lockfile. Keeping it from the model is done at the context boundary instead. |
+| `app/components/chat/Chat.client.tsx` | posts `stripOpaqueContent(files)` rather than the raw map — opaque bodies (218KB lockfile, vendor shims) are freight on every turn, since the model only ever receives a marker for them |
+
 ## Upstream files touched — Stage 2 (project creation, SPEC §4.4)
 
 | File | Change |

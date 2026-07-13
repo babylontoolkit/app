@@ -6,13 +6,24 @@
  * SPEC calls out as a launch blocker, so the pipeline BAKES them in rather than trusting the starter
  * repo to stay correct:
  *
- *  - **Exact `@babylonjs/*` pins.** The starter declares `^9.15.0` and ships NO lockfile, so a fresh
- *    `npm install` floats every Babylon package to the newest minor. `@babylonjs-toolkit/next` pins
- *    its peers EXACTLY, so the moment one floats (e.g. `@babylonjs/serializers@9.16.1` importing
- *    `__esDecorate` from `@babylonjs/core@9.15.0`'s tslib, which does not export it) `npm run build`
- *    dies with MISSING_EXPORT. `npm run dev` still boots — so this hides until Share (§4.8), where a
- *    user's published game silently fails to build. Pinning is our compensation for the absent
- *    lockfile; when the starter commits one, this becomes belt-and-braces.
+ *  - **Exact `@babylonjs/*` pins (defence in depth).** A floated caret on the Babylon set breaks
+ *    `npm run build` with MISSING_EXPORT while `npm run dev` still boots — so it stays invisible
+ *    until Share (§4.8), where a user's published game silently fails to build. This is not
+ *    hypothetical: the starter once declared `^9.15.0` and `@babylonjs/serializers` — which is NOT
+ *    among the toolkit's exactly-pinned peers, so nothing constrained it — floated to 9.16.1 and
+ *    imported `__esDecorate` from `@babylonjs/core@9.15.0`'s tslib, which did not export it.
+ *
+ *    UPSTREAM FIXED (2026-07): the starter now declares the whole Babylon set exactly at 9.16.0 and
+ *    carries an `overrides` block pinning the transitive `@babylonjs/gui-editor` too, plus a lockfile
+ *    that agrees. Verified on a clean clone: `npm ci && npm run build` succeeds, one copy of `core`.
+ *    So `pinBabylonDependencies` is now a NO-OP on the current starter — it is kept as a tripwire for
+ *    the folder/git import paths and for any future template that reintroduces a caret. Removing it
+ *    would silently re-arm a failure that only shows up at Share.
+ *
+ *  - **The lockfile ships with the project.** It is the exact, tested dependency resolution, and it
+ *    makes `npm install` deterministic and materially faster. It reaches the container the same way
+ *    every other file now does — written straight to disk, never inlined into the artifact, and shown
+ *    to the model only as a `<boltFile opaque>` marker (`~/lib/context/opaque-files`, SPEC §4.2.8).
  *  - **No `.git`, no `node_modules`.** A project must never be wired to our starter's remote origin.
  *    A zipball carries no `.git` at all, which satisfies "remove the remote origin" structurally —
  *    the filter keeps it that way for any future ingest path that does carry one.

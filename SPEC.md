@@ -216,6 +216,35 @@ Key property of this architecture: **compute for running user projects costs us 
 
 **Model policy (see §4.2a):** credits mode uses a single config-defined model — no Standard/Max toggle, no model names in the UI. Model selection UI exists only under `PRO_FEATURES_ENABLED=true` (Pro/BYOK).
 
+### 4.2.8 Context Budget — what the model is allowed to see (money path)
+
+**Principle: the artifact is a channel to the MODEL that happens to write files. The WebContainer filesystem is how files get to the project. Never confuse the two.** Every byte routed through a `boltArtifact` is a byte the model pays to read — on this turn, and on every subsequent turn, because the artifact lives in the assistant message and rides the history forever.
+
+This is a **money path**, in the same sense the ledger is. A regression here throws no error and fails no build; it silently multiplies the input bill of every generation. It is treated with the same rigor: tests in `app/lib/context/opaque-files.spec.ts`, and a measured before/after on any change.
+
+**The measurement that produced this section (2026-07, "make me a kart racer"):** 997,775 *uncached* prompt tokens for one project creation, ~$4.25 all-in. Two independent causes, both structural:
+
+1. **Double representation.** The creation artifact inlined all 51 starter files (258KB, ~70k tokens), AND the agent proxy sent the same files again as `# Current Project Files`, built from the file map. Every file, twice, on every step.
+2. **Multiplied by the tool loop.** `maxSteps` re-sends the entire prefix on each step (up to `MAX_TOOL_ROUNDS + 1` = 7). An *uncached* file context is therefore paid up to seven times per generation at full price.
+
+**The three rules that follow, all now enforced in code:**
+
+- **The creation artifact carries NO file bodies.** The whole starter — binary and text — is written straight to the WebContainer (`writeBinaryFiles` / `writeTextFiles` in `app/lib/registry/mount.ts`), and the artifact carries only `npm install` + `npm run dev`. The file map (which the watcher populates from exactly those writes) is the **single representation** the model ever sees. Safe because restore is snapshot-driven (`useChatHistory` → `restoreFiles`), never artifact-replay.
+- **Opaque files are never shown, only declared** (`app/lib/context/opaque-files.ts`). A file can be in the project but not in the conversation for three reasons, and all three now get identical treatment — a `<boltFile>` marker with path + size, and no body:
+  - *binary* — bytes cannot survive UTF-8 encoding (`spec/binary-files.md`);
+  - *generated* — the lockfile: correct text, 218KB, no correct edit exists;
+  - *opaque* — vendor runtime shims (`public/scripts/twgsl.js` 73KB, `pep.js` 41KB, `glslang.js` 16KB — **half the starter's entire text payload**) and image assets that happen to be text (`.svg`).
+
+  The inverse rule matters just as much: everything the agent must READ to work — `globals.ts`, `system/platform.tsx`, the `classes/` library, `vite.config.ts` — stays fully visible. Hiding those would leave the model guessing at the play contract, which is the exact failure §4.4c exists to prevent.
+- **Opaque means "not in the conversation", NOT "not in the project".** Upstream's watcher excluded `**/package-lock.json` from the FilesStore, treating the file map as a view for the model. It is not — it is the SOURCE every egress path builds from (ZIP export, GitHub sync, snapshot, share build all iterate `workbenchStore.files`), so that exclusion silently shipped user projects with **no lockfile**, and a restored snapshot would re-resolve dependencies and could install a different tree than the one that was tested. The three concerns are separated: the **watcher** keeps the file in the project, the **context boundary** keeps it away from the model (a marker), and the **client** strips its body before POSTing the map (`stripOpaqueContent`, a copy — never a mutation, or egress loses the file again). Verified: the lockfile now survives snapshot→restore and lands in the exported ZIP as valid JSON, while never reaching the model.
+- **The file context is CACHED.** It carries a cache breakpoint (`app/lib/.server/agent/proxy.ts`). This does not contradict the "volatile context last, uncached" ordering of §4.3.5: a breakpoint caches the prefix *up to itself*, so the base prompt and routed blocks keep their own entries and a file edit invalidates only the file entry. What the breakpoint buys is the **multiplier** — steps 2..n of the tool loop read the project at a tenth of the price instead of full freight.
+
+- **The cache TTL is 1 hour, not the default 5 minutes.** An app builder is the workload that defeats a 5-minute cache: the user generates a game, then spends minutes *playing it* before asking for a change, by which point the prefix is cold and the next turn re-writes ~111k tokens at full price. That is paying to *keep creating* a cache rather than read one, and it is invisible in a single-creation measurement. The 1h tier writes at **2×** (vs 1.25×) and reads at 0.1×, so it breaks even on the second cached turn: over ten turns, ~$4.16 of cache writes becomes ~$0.97. Verified live — `ttl` needs no beta header, `@ai-sdk/anthropic` passes `cacheControl` through verbatim, and the entry is still a cache read seven minutes later (so it is not silently falling back to 5m). **Billing consequence: cache creation is billed at 2× — §4.6's ledger math must not assume 1.25×.**
+
+**Result, same prompt, measured end to end:** request body 553,660 → 181,569 bytes; total input tokens **1,100,188 → 111,659 (−90%)**; cost ≈ **$4.25 → $1.35**. Output is now the dominant cost (~69%), which is the correct shape — we pay for what the model *writes*, not for what it *re-reads*. The next levers, in order, are a **patch/diff action type** (`ActionType` is currently `file | shell | supabase` — every edit rewrites a whole file, so "make the button blue" re-emits all of `Home.tsx`) and **model routing** (Haiku for trivial turns, 3× cheaper).
+
+**Standing rule for every future ingest path** (folder import, git import, remix, asset add, restore): new files must be classified before they can reach the model. If a path adds files to a project, it is responsible for deciding whether they are opaque — the default for anything generated, vendored, or minified is **opaque**.
+
 ### 4.2a Anthropic Model Configuration & Provider Hardening
 
 **Model is a single constant, never UI.** Credits-mode generations always use upstream's **`DEFAULT_MODEL`** in `app/utils/constants.ts` — currently **`claude-sonnet-5`** (upstream's original value, `claude-3-5-sonnet-latest`, was retired AND matched no `staticModels` entry). Swapping the platform model = editing that one constant. Deliberately NOT an env var: the model must always be a valid `staticModels` entry, and a typo'd env value would 404 at first generation.

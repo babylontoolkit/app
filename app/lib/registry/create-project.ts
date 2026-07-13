@@ -17,7 +17,7 @@ import type { GameRegistryEntry } from '~/types/game-registry';
 import type { TemplateFile } from '~/types/template';
 import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
-import { ensureFrameworkPublicAssets, writeBinaryFiles } from './mount';
+import { ensureFrameworkPublicAssets, writeBinaryFiles, writeTextFiles } from './mount';
 import {
   CLASS_LIBRARY_DIR,
   GLOBALS_PATH,
@@ -116,8 +116,21 @@ export async function createProjectFromRegistry(options: {
    */
   const projectFiles = [...files, { name: `${className}.ts`, path: gameMode.path, content: gameMode.content }];
 
-  // ---- binaries out of band, then the text files via the artifact ----
-
+  /*
+   * ---- the artifact carries NO file bodies (SPEC §4.2.8) ----
+   *
+   * The artifact is a channel to the MODEL that happens to write files. Inlining the starter into it
+   * sent every file to the model TWICE — once here, in an assistant message that then rides in the
+   * history FOREVER, and again in the `# Current Project Files` context the agent proxy builds from
+   * the file map on every turn. The starter is 258KB of text (~70k tokens), and the tool loop re-sends
+   * the prefix on each of its steps: the measured cost of one "make me a kart racer" was 997,775
+   * uncached prompt tokens.
+   *
+   * So the whole project — binary AND text — is written straight to the WebContainer, and the
+   * artifact carries only the two shell actions. The filesystem is the filesystem; the file map (which
+   * the watcher populates from these very writes) is the single representation the model ever sees.
+   * Awaited here, so every file is on disk before `npm install` runs.
+   */
   const binaries = projectFiles.filter((file) => file.isBinary);
   const textFiles = projectFiles.filter((file) => !file.isBinary);
 
@@ -125,22 +138,16 @@ export async function createProjectFromRegistry(options: {
     await writeBinaryFiles(binaries);
   }
 
+  await writeTextFiles(textFiles);
   await ensureFrameworkPublicAssets(binaries);
 
   logger.info(
-    `Seeded "${title}" from ${entry.id} → ${className} (${textFiles.length} text, ${binaries.length} binary)`,
+    `Seeded "${title}" from ${entry.id} → ${className} (${textFiles.length} text, ${binaries.length} binary, 0 inlined)`,
   );
 
   const assistantMessage = `Setting up your project from the ${entry.title} starter.
 
 <boltArtifact id="project-setup" title="${title}" type="bundled">
-${textFiles
-  .map(
-    (file) => `<boltAction type="file" filePath="${file.path}">
-${file.content}
-</boltAction>`,
-  )
-  .join('\n')}
 <boltAction type="shell">npm install</boltAction>
 <boltAction type="start">npm run dev</boltAction>
 </boltArtifact>`;

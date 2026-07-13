@@ -2,12 +2,13 @@ import { useStore } from '@nanostores/react';
 import type { Message } from 'ai';
 import { useChat } from '@ai-sdk/react';
 import { useAnimate } from 'framer-motion';
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { stripOpaqueContent } from '~/lib/context/opaque-files';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
@@ -97,6 +98,15 @@ export const ChatImpl = memo(
     const [searchParams, setSearchParams] = useSearchParams();
     const [fakeLoading, setFakeLoading] = useState(false);
     const files = useStore(workbenchStore.files);
+
+    /*
+     * The map the SERVER sees. Opaque bodies (the 218KB lockfile, the vendor shims) are stripped:
+     * they belong in `files` — every egress path builds from it — but the model only ever gets a
+     * `<boltFile>` marker for them, so posting their contents on every turn is pure freight
+     * (SPEC §4.2.8). `files` itself is untouched, so the workbench and exports still see everything.
+     */
+    const agentFiles = useMemo(() => stripOpaqueContent(files), [files]);
+
     const [designScheme, setDesignScheme] = useState<DesignScheme>(defaultDesignScheme);
     const actionAlert = useStore(workbenchStore.alert);
     const deployAlert = useStore(workbenchStore.deployAlert);
@@ -149,7 +159,7 @@ export const ChatImpl = memo(
       api: '/api/agent',
       body: {
         apiKeys,
-        files,
+        files: agentFiles,
         promptId,
         contextOptimization: contextOptimizationEnabled,
         chatMode,

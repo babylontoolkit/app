@@ -3,6 +3,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, MODEL_REGEX, PROVIDER_REGEX } from '~/
 import { IGNORE_PATTERNS, type FileMap } from './constants';
 import ignore from 'ignore';
 import type { ContextAnnotation } from '~/types/context';
+import { isOpaqueToModel } from '~/lib/context/opaque-files';
 
 export function extractPropertiesFromMessage(message: Omit<Message, 'id'>): {
   model: string;
@@ -79,6 +80,18 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
        */
       if (dirent.isBinary) {
         return `<boltFile filePath="${useRelativePath ? path.replace('/home/project/', '') : path}" binary="true" size="${dirent.size ?? 0}" />`;
+      }
+
+      /**
+       * Opaque files are text, but no correct edit to them exists: vendor runtime shims, image
+       * assets, the lockfile (SPEC §4.2.8). They get the same treatment as binaries — the model is
+       * told they exist and how big they are, and nothing more. `public/scripts/` alone is HALF the
+       * starter's text payload, and it was being re-sent, at full price, on every step.
+       */
+      const relativePath = path.replace('/home/project/', '');
+
+      if (isOpaqueToModel(relativePath)) {
+        return `<boltFile filePath="${useRelativePath ? relativePath : path}" opaque="true" size="${dirent.content.length}" />`;
       }
 
       const codeWithLinesNumbers = dirent.content

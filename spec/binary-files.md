@@ -3,6 +3,13 @@
 Sub-spec for **SPEC §1.3 principle 10** and **§4.4**. Governs every path that moves project
 files. Implemented; this documents the contract so it is not re-broken.
 
+> **See also `spec/context-budget.md` (SPEC §4.2.8), which generalizes this one.** "Binary" turned out
+> to be one of *three* reasons a file belongs in the project but not in the model's context — the
+> others being *generated* (the lockfile) and *opaque* (vendored/minified code, `.svg`). All three are
+> now declared to the model as `<boltFile>` markers and written to the sandbox out-of-band, by the same
+> mechanism this spec introduced. The rule below — never route these through a `boltArtifact` — is
+> unchanged; it simply applies to a wider set of files than "binary".
+
 ---
 
 ## 1. The bug this exists to prevent

@@ -73,7 +73,7 @@ all binaries byte-identical to a fresh clone; `vite build` → ZERO unresolved i
 public/babylon.png + public/spinner.png present (copied from src/babylon/assets/ at creation).
 ```
 
-### Stage 1 — The brain (agent + knowledge)
+### Stage 1 — The brain (agent + knowledge) - DONE
 ```
 Continue per CLAUDE.md/SPEC.md (build-first; no credentials needed).
 Build: §4.3 doc-sync (fetch Agent Reference + sub-docs + Component Reference on-demand
@@ -90,7 +90,7 @@ Dev path: PRO_FEATURES_ENABLED=true + my own key in .env.local. Verify: /bt-spec
 the skill and produces its workflow output.
 ```
 
-### Stage 2 — Project creation (the Toolkit core)
+### Stage 2 — Project creation (the Toolkit core) - DONE
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §4.4 game_registry (source_class, scene_url, match_keywords) + template snapshot
