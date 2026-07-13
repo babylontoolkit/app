@@ -32,6 +32,7 @@ import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDE
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
+import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
 
 const logger = createScopedLogger('agent-proxy');
@@ -285,6 +286,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * only appears in the task.
    */
   const routingText = `${lastUserText(messages)}\n${slash?.skillBlock ?? ''}`;
+
+  /*
+   * Is this the turn that BUILDS the project? (§4.4b)
+   *
+   * On a creation turn the brief is the whole workflow — there is nothing to look up — and letting the
+   * model try is what made creation slow: it drafted the game, abandoned the draft to call `load_skill`,
+   * and redrafted, six times, for 350s and 29,173 wasted output tokens. The system prompt forbids this
+   * in words and the model did it anyway. So the tools are taken away rather than argued about.
+   */
+  const isCreationTurn = lastUserText(messages).includes(CREATION_BRIEF_MARKER);
   const store = getPromptStore();
   const blocks: Array<{ id: string; title: string; body: string }> = [];
 
@@ -331,7 +342,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    *
    * `load_skill` remains for anything the router does not anticipate.
    */
-  const preloaded = await preloadSkills(routingText, slash?.skillName);
+  const preloaded = await preloadSkills(routingText, slash?.skillName, isCreationTurn);
 
   if (preloaded.length > 0) {
     system.push({ role: 'system', content: buildPreloadedSkillBlock(preloaded), providerOptions: CACHE_CONTROL });
@@ -378,7 +389,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   logger.info(
     `Generation: model=${model} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
-      `mode=${useByok ? 'byok' : 'platform'}`,
+      `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION (no tools)' : ''}`,
   );
 
   const coreMessages = convertToCoreMessages(messages as any);
@@ -508,7 +519,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   async function* run(): AsyncGenerator<string> {
     try {
-      const first = startStream([...system, ...coreMessages], true);
+      /*
+       * A creation turn runs with NO tools: one call, one answer, no round trips (§4.4b).
+       *
+       * `toolChoice: 'none'` is not enough on its own to save the time — the model still gets the tool
+       * definitions and still drafts around them. Passing `allowTools: false` sets `maxSteps: 1`, so
+       * there is exactly one LLM call and the model has no way to abandon its draft and start over.
+       */
+      const first = startStream([...system, ...coreMessages], !isCreationTurn);
       yield* drain(first);
 
       /*

@@ -18,6 +18,7 @@ import type { TemplateFile } from '~/types/template';
 import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
 import { ensureFrameworkPublicAssets, writeBinaryFiles, writeTextFiles } from './mount';
+import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import {
   CLASS_LIBRARY_DIR,
   GLOBALS_PATH,
@@ -180,7 +181,12 @@ function buildCreationBrief(options: {
     ? `navigate('/play', { gameMode: '${className}', sceneUrl: '${entry.scene_url}' })`
     : `navigate('/play', { gameMode: '${className}' })`;
 
-  return `The project has been created and is installing. Do not re-create it.
+  /*
+   * The opening sentence is a CONTRACT, not prose: the agent proxy matches `CREATION_BRIEF_MARKER` to
+   * recognise a creation turn and run it without tools (§4.2). Change the wording here and you must
+   * change the constant — otherwise creation silently regresses to the slow, six-tool-round path.
+   */
+  return `${CREATION_BRIEF_MARKER} Do not re-create it.
 
 **This project**
 - Title: ${title}

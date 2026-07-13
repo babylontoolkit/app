@@ -80,14 +80,30 @@ export interface PreloadedSkill {
  * `slashSkill` is the skill the user explicitly invoked (`/bt-design`). It is already injected by the
  * proxy, so it must not be pre-loaded twice.
  */
-export async function preloadSkills(routingText: string, slashSkill?: string): Promise<PreloadedSkill[]> {
+export async function preloadSkills(
+  routingText: string,
+  slashSkill?: string,
+  isCreation = false,
+): Promise<PreloadedSkill[]> {
   const haystack = routingText.toLowerCase();
 
-  const wanted = Object.entries(SKILL_KEYWORDS)
-    .filter(([name]) => name !== slashSkill)
-    .filter(([, keywords]) => keywords.some((keyword) => haystack.includes(keyword)))
-    .map(([name]) => name)
-    .slice(0, MAX_PRELOADED);
+  /*
+   * A creation turn gets exactly ONE skill: the design skill.
+   *
+   * Two reasons. The routing text on a creation turn is the BRIEF, not the user's words — it is full of
+   * incidental vocabulary ("created", "starter", "scaffold") that keyword-matches skills the model has
+   * no use for; we watched it drag in `bt-prototype` for a project that was already scaffolded. And a
+   * creation turn writes a landing page from scratch (§4.4c), which is the one part of the job where
+   * the design skill genuinely changes the output. Everything else it needs is in the brief.
+   */
+  const candidates = isCreation
+    ? ['bt-design'].filter((name) => name !== slashSkill)
+    : Object.entries(SKILL_KEYWORDS)
+        .filter(([name]) => name !== slashSkill)
+        .filter(([, keywords]) => keywords.some((keyword) => haystack.includes(keyword)))
+        .map(([name]) => name);
+
+  const wanted = candidates.slice(0, MAX_PRELOADED);
 
   if (wanted.length === 0) {
     return [];

@@ -1,4 +1,49 @@
-# spec/context-budget.md — what the model is allowed to see
+# spec/context-budget.md
+
+> ## OUTPUT tokens are a budget too — and on creation they were the bigger one
+>
+> This document is about what the model READS. The other half of the bill is what it WRITES, and a
+> creation turn was spending most of its output on work nobody ever saw.
+>
+> **Progressive disclosure (`load_skill` on demand) was catastrophic here.** Per-step timings from a
+> real "make me a kart racer":
+>
+> ```
+> step 1:  28s |  2,570 out | load_skill          step 5:  51s |  4,221 out | read_skill_resource
+> step 2:  27s |  2,015 out | read_skill_resource step 6:  53s |  4,250 out | load_skill
+> step 3:  52s |  4,074 out | load_skill          step 7:  86s |  7,768 out | load_skill
+> step 4:  51s |  4,275 out | load_skill          step 8: 118s | 13,813 out | ANSWER
+> ```
+>
+> A tool CALL is a JSON argument worth ~50 tokens. Those 29,173 tokens across the tool steps are the
+> model **drafting the game, abandoning the draft to fetch a skill, and redrafting** — six times, to
+> load exactly ONE distinct skill. That was **75% of the wall clock and 68% of the bill, spent writing
+> code the user never saw.**
+>
+> Two fixes, both measured:
+> 1. **Pre-load the skills a request obviously needs** into the CACHED prefix (`preload-skills.ts`).
+>    Cache reads bill at 0.1x, so the context is nearly free — and there are no round trips to redraft
+>    around.
+> 2. **A creation turn runs with NO tools at all** (`CREATION_BRIEF_MARKER` → `allowTools: false`). The
+>    brief IS the workflow; there is nothing to look up. The system prompt already said "never load a
+>    skill on a project-creation turn" **and the model ignored it four times** — so the capability is
+>    removed rather than discouraged. Instructions are not a control.
+>
+> | "make me a kart racer" | Before | After |
+> |---|---|---|
+> | Wall clock | 468s | **114s** |
+> | Output tokens | 42,986 | **12,862** |
+> | Tool rounds | 6 (hit the cap) | **0** |
+> | Raw cost | $1.41 | **$0.32** |
+> | Credits | 470 | **106** |
+>
+> Quality was verified unchanged: landing page rewritten from scratch, play contract intact, binaries
+> byte-faithful. The signup grant went from ~5 creations to ~21.
+>
+> **The trap to not re-introduce:** a tool round is not "one extra API call". It re-prefills the whole
+> prompt AND invites the model to throw away everything it has written so far. Before adding a tool to
+> the loop, ask whether the thing it fetches could simply be in the cached prefix instead.
+ — what the model is allowed to see
 
 > Sub-spec of SPEC §4.2.8. Sibling of `spec/binary-files.md`, and the generalization of it.
 >
