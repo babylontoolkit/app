@@ -4,9 +4,22 @@ import type { ChatHistoryItem } from './useChatHistory';
 import type { Snapshot } from './types'; // Import Snapshot type
 
 export interface IChatMetadata {
-  gitUrl: string;
+  /*
+   * Optional now. It was required because the only chats carrying metadata were git imports; a chat
+   * bound to a server-side PROJECT carries metadata too, and has no repo (§4.5).
+   */
+  gitUrl?: string;
   gitBranch?: string;
   netlifySiteId?: string;
+
+  /**
+   * The server-side project this chat belongs to (§4.5.5).
+   *
+   * This is the ONLY link between the browser's chat and the project that lives on the platform. It
+   * is what makes a build resumable on another machine, shareable, and remixable — without it the
+   * project exists solely in this IndexedDB and dies with the profile.
+   */
+  projectId?: string;
 }
 
 const logger = createScopedLogger('ChatHistory');

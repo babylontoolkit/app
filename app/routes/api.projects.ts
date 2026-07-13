@@ -21,6 +21,18 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
 export async function action({ request, context }: ActionFunctionArgs) {
   try {
+    /*
+     * Remix sends every non-GET method here, so an unguarded `DELETE /api/projects` would fall into
+     * the CREATE branch, fail on the missing body, and surface as a 500 — an alarming way to say
+     * "that endpoint doesn't exist". Deleting a project is done through `/api/projects/:id`.
+     */
+    if (request.method !== 'POST') {
+      return json(
+        { error: true, message: `Cannot ${request.method} /api/projects.`, statusCode: 405, isRetryable: false },
+        { status: 405, headers: { Allow: 'GET, POST' } },
+      );
+    }
+
     const user = await requireUser(request, context);
     const body = await request.json<{ name?: string; templateId?: string }>();
 

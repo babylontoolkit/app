@@ -24,6 +24,12 @@ interface AssistantMessageProps {
   messageId?: string;
   onRewind?: (messageId: string) => void;
   onFork?: (messageId: string) => void;
+
+  /** Restore the project FILES to the checkpoint taken at this message (§4.12). */
+  onRestore?: (messageId: string) => void;
+
+  /** Re-run this turn from the checkpoint that preceded it (§4.12). */
+  onRetry?: (messageId: string) => void;
   append?: (message: Message) => void;
   chatMode?: 'discuss' | 'build';
   setChatMode?: (mode: 'discuss' | 'build') => void;
@@ -66,6 +72,8 @@ export const AssistantMessage = memo(
     messageId,
     onRewind,
     onFork,
+    onRestore,
+    onRetry,
     append,
     chatMode,
     setChatMode,
@@ -151,8 +159,33 @@ export const AssistantMessage = memo(
                   Tokens: {usage.totalTokens} (prompt: {usage.promptTokens}, completion: {usage.completionTokens})
                 </div>
               )}
-              {(onRewind || onFork) && messageId && (
+              {(onRewind || onFork || onRestore || onRetry) && messageId && (
                 <div className="flex gap-2 flex-col lg:flex-row ml-auto">
+                  {/*
+                   * Restore the FILES to this checkpoint (§4.12) — distinct from Revert, which only
+                   * rewinds the conversation. For a non-developer who cannot read a diff to see what
+                   * the last generation broke, this is the safety net: it puts the game back.
+                   * Restoring never destroys history — the checkpoints after this one survive, so the
+                   * undo can itself be undone.
+                   */}
+                  {onRestore && (
+                    <WithTooltip tooltip="Restore the project files to this point">
+                      <button
+                        onClick={() => onRestore(messageId)}
+                        key="i-ph:clock-counter-clockwise"
+                        className="i-ph:clock-counter-clockwise text-xl text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary transition-colors"
+                      />
+                    </WithTooltip>
+                  )}
+                  {onRetry && (
+                    <WithTooltip tooltip="Try this again">
+                      <button
+                        onClick={() => onRetry(messageId)}
+                        key="i-ph:arrows-clockwise"
+                        className="i-ph:arrows-clockwise text-xl text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary transition-colors"
+                      />
+                    </WithTooltip>
+                  )}
                   {onRewind && (
                     <WithTooltip tooltip="Revert to this message">
                       <button

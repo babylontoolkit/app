@@ -51,6 +51,24 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
  */
 export async function action({ request, params, context }: ActionFunctionArgs) {
   try {
+    /*
+     * Remix routes EVERY non-GET method to `action`, so without this guard `DELETE` on a checkpoint
+     * URL would silently MARK IT CURRENT — the exact opposite of what the caller asked for, with no
+     * error to tell them. There is deliberately no delete endpoint (history is append-only), and
+     * "silently did something else" is a far worse answer than "that isn't a thing you can do".
+     */
+    if (request.method !== 'POST' && request.method !== 'PUT') {
+      return json(
+        {
+          error: true,
+          message: `Cannot ${request.method} a checkpoint. Checkpoints are never deleted — history is append-only. POST here to restore this one.`,
+          statusCode: 405,
+          isRetryable: false,
+        },
+        { status: 405, headers: { Allow: 'GET, POST, PUT' } },
+      );
+    }
+
     const user = await requireUser(request, context);
     const project = await requireOwnedProject(user, params.projectId!, context);
 

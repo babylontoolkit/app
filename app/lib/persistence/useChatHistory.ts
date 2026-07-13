@@ -1,5 +1,5 @@
 import { useLoaderData, useNavigate, useSearchParams } from '@remix-run/react';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { atom } from 'nanostores';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
@@ -21,6 +21,10 @@ import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
+import { createSnapshot, restoreLatestServerCheckpoint, saveMessages } from './projects';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('ChatHistory');
 
 export interface ChatHistoryItem {
   id: string;
@@ -38,6 +42,16 @@ export const db = persistenceEnabled ? await openDatabase() : undefined;
 export const chatId = atom<string | undefined>(undefined);
 export const description = atom<string | undefined>(undefined);
 export const chatMetadata = atom<IChatMetadata | undefined>(undefined);
+
+/**
+ * The server-side project this chat is building (§4.5.5).
+ *
+ * `undefined` for a chat that has no project yet (a fresh page, or an upstream blank/import flow that
+ * has not created one). Everything that talks to the server keys off this: the agent route's ownership
+ * check, checkpoints, and the message history. It is persisted in the chat's IndexedDB metadata, which
+ * is what lets a reload find its way back to the project.
+ */
+export const projectId = atom<string | undefined>(undefined);
 export function useChatHistory() {
   const navigate = useNavigate();
   const { id: mixedId } = useLoaderData<{ id?: string }>();
@@ -47,6 +61,12 @@ export function useChatHistory() {
   const [initialMessages, setInitialMessages] = useState<Message[]>([]);
   const [ready, setReady] = useState<boolean>(false);
   const [urlId, setUrlId] = useState<string | undefined>();
+
+  /** Guards against re-checkpointing the same message — see `checkpointProject`. */
+  const lastCheckpointedMessage = useRef<string | undefined>(undefined);
+
+  /** The conversation as last stored locally — uploaded to the server once a generation finishes. */
+  const latestMessages = useRef<Message[]>([]);
 
   useEffect(() => {
     if (!db) {
@@ -176,7 +196,15 @@ ${value.content}
                  */
                 ...filteredMessages,
               ];
-              restoreSnapshot(mixedId);
+
+              /*
+               * Upstream called `restoreSnapshot(mixedId)` with NO snapshot, so it restored `{}` and
+               * wrote nothing. The files came back only by replaying the `<boltAction>` artifact
+               * above — which is TEXT ONLY, so every binary (textures, models, audio, the framework's
+               * own PNGs) was silently missing after a reload. Passing the snapshot restores the
+               * bytes; the artifact still replays the text.
+               */
+              await restoreSnapshot(mixedId, validSnapshot);
             }
 
             setInitialMessages(filteredMessages);
@@ -185,6 +213,29 @@ ${value.content}
             description.set(storedMessages.description);
             chatId.set(storedMessages.id);
             chatMetadata.set(storedMessages.metadata);
+            projectId.set(storedMessages.metadata?.projectId);
+
+            /*
+             * The SERVER holds the authoritative files (§4.5.5). IndexedDB is a same-browser cache;
+             * the project itself lives on the platform, so on resume we mount what the platform has —
+             * that is what makes a build openable on another machine at all.
+             *
+             * Best-effort by design: if the network is down, the local snapshot above already put a
+             * working project on screen, and refusing to open it would be a worse answer.
+             */
+            const pid = storedMessages.metadata?.projectId;
+
+            if (pid) {
+              try {
+                const { files } = await restoreLatestServerCheckpoint(pid);
+
+                if (files) {
+                  await workbenchStore.restoreFiles(files);
+                }
+              } catch (error) {
+                logger.warn(`Could not restore project ${pid} from the server: ${(error as Error).message}`);
+              }
+            }
           } else {
             navigate('/', { replace: true });
           }
@@ -216,9 +267,11 @@ ${value.content}
        * binary files hold no content in the map, so persisting it directly wrote empty
        * PNGs/GLBs into the snapshot (SPEC §1.3 principle 10).
        */
+      const files = await workbenchStore.serializeFiles();
+
       const snapshot: Snapshot = {
         chatIndex: chatIdx,
-        files: await workbenchStore.serializeFiles(),
+        files,
         summary: chatSummary,
       };
 
@@ -232,6 +285,51 @@ ${value.content}
     },
     [db],
   );
+
+  /**
+   * Push a checkpoint to the server (§4.5.5, §4.12).
+   *
+   * DELIBERATELY NOT called from `takeSnapshot`. Upstream fires that on every mutation of the message
+   * array — which, while a generation streams, is every few hundred milliseconds. Hooking a server
+   * upload to it produced 160+ checkpoints for ONE message, each a 5.9MB copy of the whole project:
+   * about a gigabyte of uploads competing with the stream the user is waiting on. It made the build
+   * visibly crawl.
+   *
+   * SPEC §4.5.5 says it plainly — snapshot "after each APPLIED generation", not per token. So this is
+   * called once, from `onFinish`, when the files have stopped moving.
+   *
+   * Idempotent on `messageId`: a re-render, a retry, or a double `onFinish` cannot mint a duplicate.
+   */
+  const checkpointProject = useCallback(async (messageId: string) => {
+    const pid = projectId.get();
+
+    if (!pid || lastCheckpointedMessage.current === messageId) {
+      return;
+    }
+
+    lastCheckpointedMessage.current = messageId;
+
+    try {
+      const files = await workbenchStore.serializeFiles();
+
+      /*
+       * Files and conversation together, once, at the end of a generation. The conversation belongs to
+       * the PROJECT, not to this browser — without it a build cannot be resumed on another machine and
+       * a shared or remixed project arrives with no history of how it was made (§4.5).
+       */
+      await Promise.all([createSnapshot(pid, { files, messageId }), saveMessages(pid, latestMessages.current)]);
+
+      logger.info(`Checkpointed project ${pid} at message ${messageId}`);
+    } catch (error) {
+      /*
+       * Never surfaced to the user: their game is on disk and in IndexedDB, the build worked, and a
+       * failed checkpoint upload is our problem, not something for them to act on. Reset the guard so
+       * the next turn retries.
+       */
+      lastCheckpointedMessage.current = undefined;
+      logger.error(`Failed to checkpoint project ${pid}: ${(error as Error).message}`);
+    }
+  }, []);
 
   const restoreSnapshot = useCallback(async (_id: string, snapshot?: Snapshot) => {
     const validSnapshot = snapshot || { chatIndex: '', files: {} };
@@ -266,6 +364,9 @@ ${value.content}
         console.error(error);
       }
     },
+
+    /** Call once a generation has finished and the files have stopped moving (§4.5.5). */
+    checkpointProject,
     storeMessageHistory: async (messages: Message[]) => {
       if (!db || messages.length === 0) {
         return;
@@ -325,15 +426,25 @@ ${value.content}
         return;
       }
 
+      const allMessages = [...archivedMessages, ...messages];
+
       await setMessages(
         db,
         finalChatId, // Use the potentially updated chatId
-        [...archivedMessages, ...messages],
+        allMessages,
         urlId,
         description.get(),
         undefined,
         chatMetadata.get(),
       );
+
+      /*
+       * The server copy of the conversation is written by `checkpointProject` at the END of a
+       * generation, NOT here. This function runs on every mutation of the message array — many times
+       * a second while streaming — and uploading the whole conversation on each of those ticks is the
+       * same mistake that made checkpoints storm the server.
+       */
+      latestMessages.current = allMessages;
     },
     duplicateCurrentChat: async (listItemId: string) => {
       if (!db || (!mixedId && !listItemId)) {

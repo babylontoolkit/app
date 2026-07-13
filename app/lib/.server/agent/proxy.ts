@@ -31,6 +31,7 @@ import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.serv
 import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDER, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
 import { getGenerationLog, type GenerationRecord } from './usage';
+import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
 
 const logger = createScopedLogger('agent-proxy');
@@ -319,6 +320,23 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     system.push({ role: 'system', content: slash.skillBlock, providerOptions: CACHE_CONTROL });
   }
 
+  /*
+   * Hand the model the skills it is obviously going to want, instead of making it fetch them.
+   *
+   * Progressive disclosure loses badly here, and we have the numbers: a real kart-racer build spent
+   * 350s and 29,173 output tokens on SIX tool rounds — 75% of the wall clock and 68% of the bill — to
+   * load exactly ONE distinct skill. A tool call is ~50 tokens; those tens of thousands are the model
+   * drafting the game, deciding it wants a skill, and throwing the draft away to redraft. Pre-loading
+   * into the CACHED prefix (reads bill at 0.1x) deletes the round trips AND the redrafts.
+   *
+   * `load_skill` remains for anything the router does not anticipate.
+   */
+  const preloaded = await preloadSkills(routingText, slash?.skillName);
+
+  if (preloaded.length > 0) {
+    system.push({ role: 'system', content: buildPreloadedSkillBlock(preloaded), providerOptions: CACHE_CONTROL });
+  }
+
   if (request.files && Object.keys(request.files).length > 0) {
     /*
      * Binaries and opaque files arrive here as `<boltFile>` markers — never bodies (§4.2.8).
@@ -338,8 +356,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     });
   }
 
-  // 9. The tool loop runs entirely server-side; the client stream stays pure text + actions.
-  const toolContext: SkillToolContext = { loaded: new Set(slash ? [slash.skillName] : []) };
+  /*
+   * 9. The tool loop runs entirely server-side; the client stream stays pure text + actions.
+   *
+   * Pre-loaded skills are seeded as ALREADY LOADED, so if the model calls `load_skill` for one anyway
+   * (it does — we watched it call for `bt-design` four times in a single generation) the tool returns a
+   * cheap acknowledgement instead of re-injecting 19KB and burning a round from the cap.
+   */
+  const toolContext: SkillToolContext = {
+    loaded: new Set([...(slash ? [slash.skillName] : []), ...preloaded.map((s) => s.name)]),
+  };
   const tools = createSkillTools(toolContext);
 
   const modelInstance = provider.getModelInstance({

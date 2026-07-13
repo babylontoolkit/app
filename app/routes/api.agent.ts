@@ -7,12 +7,14 @@
  * (§4.2 step 3).
  */
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
-import { createDataStream, formatDataStreamPart, type Message } from 'ai';
+import { createDataStream, formatDataStreamPart, type DataStreamWriter, type Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import { runAgentGeneration } from '~/lib/.server/agent/proxy';
 import { NotConfiguredError } from '~/lib/.server/agent/config';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
+import { validateAttachments } from '~/lib/.server/agent/attachments';
+import { claimProject } from '~/lib/.server/agent/inflight';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
 
@@ -57,6 +59,13 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
   const apiKeys: Record<string, string> = JSON.parse(cookies.apiKeys || '{}');
   const providerSettings: Record<string, IProviderSetting> = JSON.parse(cookies.providers || '{}');
 
+  /*
+   * Held across the whole STREAM, not just this function — the response returns while generation is
+   * still running, so releasing on return would free the project while its files are still being
+   * written. Released in the stream's `finally`, or in the catch below if we never got that far.
+   */
+  let releaseProject: (() => void) | undefined;
+
   try {
     /*
      * THE TWO WALLS (§4.5.3), in order, before a single token is spent.
@@ -72,6 +81,23 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     if (body.projectId) {
       await requireOwnedProject(user, body.projectId, context);
     }
+
+    /*
+     * Attachments (§4.12), BEFORE the credit gate — a rejected upload must never cost the user
+     * credits and must never reach the model. The client already limits size and type, but that limit
+     * lives in a browser the user controls; this is a plain HTTP endpoint and `curl` does not run our
+     * React code. Vision tokens bill through the normal formula, so an unbounded attachment is an
+     * unbounded bill on OUR platform key.
+     */
+    validateAttachments(body.messages, context);
+
+    /*
+     * One in-flight generation per project (§4.12). Two generations against one project interleave
+     * their file actions and leave a working tree that is a mix of two different ideas — a corruption
+     * the user cannot see and cannot undo. Claimed here, released in `finally` so a Stop, a crash, or
+     * a closed tab all free it.
+     */
+    releaseProject = body.projectId ? claimProject(body.projectId, user.id) : undefined;
 
     const generation = await runAgentGeneration({
       messages: body.messages,
@@ -98,53 +124,11 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
 
     const dataStream = createDataStream({
       async execute(stream) {
-        /*
-         * TEXT ONLY. The proxy's generator has already resolved the whole server-side tool loop —
-         * including the forced continuation when the tool-round cap is hit — so what arrives here is
-         * exactly what the user should see: prose + boltArtifact markup, and nothing else.
-         */
-        for await (const delta of generation.textStream) {
-          stream.write(formatDataStreamPart('text', delta));
+        try {
+          await streamGeneration(stream, generation);
+        } finally {
+          releaseProject?.();
         }
-
-        const usage = await generation.usage;
-
-        stream.writeMessageAnnotation({
-          type: 'usage',
-          value: {
-            completionTokens: usage.completionTokens,
-            promptTokens: usage.promptTokens,
-            totalTokens: usage.totalTokens,
-            cacheReadTokens: usage.cacheReadTokens,
-            cacheCreationTokens: usage.cacheCreationTokens,
-          },
-        });
-
-        // Traceability for the client (cost badge, and which doc snapshot produced this answer).
-        stream.writeMessageAnnotation({
-          type: 'agentMeta',
-          value: {
-            promptVersionId: generation.promptVersionId,
-            model: generation.model,
-            skillsLoaded: [...generation.toolContext.loaded],
-            blocksLoaded: generation.blocksLoaded,
-          },
-        });
-
-        /*
-         * What this generation actually cost the user, and their new balance (§4.6). Sent AFTER the
-         * text so the credit badge updates from a settled number, never an estimate.
-         */
-        const settlement = await generation.settlement;
-
-        stream.writeMessageAnnotation({
-          type: 'credits',
-          value: {
-            creditsCharged: settlement?.creditsCharged ?? 0,
-            balanceAfter: settlement?.balanceAfter ?? null,
-            notice: generation.notice ?? null,
-          },
-        });
       },
       onError: (error: any) => `Custom error: ${error?.message || 'Unknown error'}`,
     });
@@ -159,6 +143,9 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       },
     });
   } catch (error: any) {
+    // Never hold a project because the request failed before the stream started.
+    releaseProject?.();
+
     logger.error(error);
 
     // "Not configured" is a first-class, describable state — never a crash, never a silent fallback.
@@ -179,4 +166,55 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       { status: error?.statusCode || 500, headers: { 'Content-Type': 'application/json' } },
     );
   }
+}
+
+/** The visible stream: prose + actions, then the annotations the client's badges are built from. */
+async function streamGeneration(stream: DataStreamWriter, generation: Awaited<ReturnType<typeof runAgentGeneration>>) {
+  /*
+   * TEXT ONLY. The proxy's generator has already resolved the whole server-side tool loop —
+   * including the forced continuation when the tool-round cap is hit — so what arrives here is
+   * exactly what the user should see: prose + boltArtifact markup, and nothing else.
+   */
+  for await (const delta of generation.textStream) {
+    stream.write(formatDataStreamPart('text', delta));
+  }
+
+  const usage = await generation.usage;
+
+  stream.writeMessageAnnotation({
+    type: 'usage',
+    value: {
+      completionTokens: usage.completionTokens,
+      promptTokens: usage.promptTokens,
+      totalTokens: usage.totalTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheCreationTokens: usage.cacheCreationTokens,
+    },
+  });
+
+  // Traceability for the client (cost badge, and which doc snapshot produced this answer).
+  stream.writeMessageAnnotation({
+    type: 'agentMeta',
+    value: {
+      promptVersionId: generation.promptVersionId,
+      model: generation.model,
+      skillsLoaded: [...generation.toolContext.loaded],
+      blocksLoaded: generation.blocksLoaded,
+    },
+  });
+
+  /*
+   * What this generation actually cost the user, and their new balance (§4.6). Sent AFTER the text so
+   * the credit badge updates from a settled number, never an estimate.
+   */
+  const settlement = await generation.settlement;
+
+  stream.writeMessageAnnotation({
+    type: 'credits',
+    value: {
+      creditsCharged: settlement?.creditsCharged ?? 0,
+      balanceAfter: settlement?.balanceAfter ?? null,
+      notice: generation.notice ?? null,
+    },
+  });
 }

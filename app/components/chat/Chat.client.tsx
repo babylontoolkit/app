@@ -5,7 +5,8 @@ import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
-import { description, useChatHistory } from '~/lib/persistence';
+import { chatMetadata, description, projectId, useChatHistory } from '~/lib/persistence';
+import { createProject } from '~/lib/persistence/projects';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
@@ -41,7 +42,7 @@ const logger = createScopedLogger('Chat');
 export function Chat() {
   renderLogger.trace('Chat');
 
-  const { ready, initialMessages, storeMessageHistory, importChat, exportChat } = useChatHistory();
+  const { ready, initialMessages, storeMessageHistory, checkpointProject, importChat, exportChat } = useChatHistory();
   const title = useStore(description);
   useEffect(() => {
     workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
@@ -55,6 +56,7 @@ export function Chat() {
           initialMessages={initialMessages}
           exportChat={exportChat}
           storeMessageHistory={storeMessageHistory}
+          checkpointProject={checkpointProject}
           importChat={importChat}
         />
       )}
@@ -83,13 +85,16 @@ const processSampledMessages = createSampler(
 interface ChatProps {
   initialMessages: Message[];
   storeMessageHistory: (messages: Message[]) => Promise<void>;
+
+  /** Snapshot the project to the server once a generation has finished (§4.5.5). */
+  checkpointProject: (messageId: string) => Promise<void>;
   importChat: (description: string, messages: Message[]) => Promise<void>;
   exportChat: () => void;
   description?: string;
 }
 
 export const ChatImpl = memo(
-  ({ description, initialMessages, storeMessageHistory, importChat, exportChat }: ChatProps) => {
+  ({ description, initialMessages, storeMessageHistory, checkpointProject, importChat, exportChat }: ChatProps) => {
     useShortcuts();
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -131,6 +136,7 @@ export const ChatImpl = memo(
       return (PROVIDER_LIST.find((p) => p.name === savedProvider) || DEFAULT_PROVIDER) as ProviderInfo;
     });
     const { showChat } = useStore(chatStore);
+    const activeProjectId = useStore(projectId);
     const [animationScope, animate] = useAnimate();
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [chatMode, setChatMode] = useState<'discuss' | 'build'>('build');
@@ -161,6 +167,16 @@ export const ChatImpl = memo(
       body: {
         apiKeys,
         files: agentFiles,
+
+        /*
+         * Which project this generation is building (§4.5.3, §4.12).
+         *
+         * The server checks ownership on it before spending a token, and uses it to enforce one
+         * in-flight generation per project. Read from the store rather than captured, so it is
+         * present on the very first turn after `startProject` creates the project.
+         */
+        projectId: activeProjectId,
+
         promptId,
         contextOptimization: contextOptimizationEnabled,
         chatMode,
@@ -183,6 +199,19 @@ export const ChatImpl = memo(
       onFinish: (message, response) => {
         const usage = response.usage;
         setData(undefined);
+
+        /*
+         * Checkpoint the project HERE — once, now that the generation is done and the files have
+         * stopped moving (SPEC §4.5.5: "auto-snapshot after each applied generation").
+         *
+         * Not inside `storeMessageHistory`: that runs on every mutation of the message array, which
+         * while streaming is several times a second. Uploading a 5.9MB project on each of those ticks
+         * produced 160 checkpoints for a single message and visibly starved the stream the user was
+         * waiting on.
+         */
+        checkpointProject(message.id).catch(() => {
+          // Already logged. A failed checkpoint is our problem, not something the user can act on.
+        });
 
         /*
          * The settled cost of this generation (§4.6). The server charged against REAL token usage —
@@ -460,6 +489,25 @@ export const ChatImpl = memo(
         });
 
         setProjectSeed({ entry, className, title, prompt, matched });
+
+        /*
+         * Register the project with the PLATFORM (§4.5.5) — before the first generation, because the
+         * agent route checks ownership of `projectId` and enforces one in-flight build per project.
+         *
+         * If this fails the build still runs: the game is already written into the WebContainer and
+         * refusing to continue because our bookkeeping call timed out would be an absurd way to lose
+         * someone's work. It simply stays a local-only project (no checkpoints, no resume elsewhere),
+         * and says so rather than pretending.
+         */
+        try {
+          const project = await createProject({ name: title, templateId: entry.id });
+          projectId.set(project.id);
+          chatMetadata.set({ ...chatMetadata.get(), projectId: project.id });
+        } catch (error) {
+          projectId.set(undefined);
+          logger.error(`Could not register the project with the server: ${(error as Error).message}`);
+          toast.warn('This project is saved on this device only — we could not reach the server.');
+        }
 
         const shown = visiblePrompt ?? prompt;
         const stamp = new Date().getTime();
