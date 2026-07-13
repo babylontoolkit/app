@@ -85,10 +85,14 @@ No bolt.diy marks in any user-facing surface. ALL brand output (product name, lo
 - Generated projects: Babylon Toolkit + BabylonJS only; three.js only on explicit user request as a utility; never restructure the starter's Vite/React scaffold unasked; keep the project runnable.
 - The Agent Reference docs and skills repos are authored externally (`babylontoolkit/agent`, `babylontoolkit/skills`) — this codebase consumes them; never edit their content from here.
 
-## Current phase
+## Current stage
 
-Track the active phase (SPEC §9) here so sessions know what's in scope:
+We build in **STAGES** (GETTING_STARTED.md Step 4) — dependency-first construction order. SPEC §9's *phases* are LAUNCH/GATING order and never bound what may be built (see the BUILD-FIRST standing rule). Nothing here is "out of scope because it's a later phase."
 
-> **Active phase: 0 — Prompt proof.** In scope: `tools/phase0` script only. Out of scope: fork surgery, Supabase, billing.
+> **Active stage: 1 — The brain (agent + knowledge).** Build §4.3 doc-sync → §4.2 server agent proxy (tool loop, self-healing repair turns, usage recording) → §4.11 skills sync + `/slash` invocation, plus §4.2a Anthropic provider hardening. Credentials optional: absent keys degrade gracefully.
+>
+> **Stage 0 — binary-assets blocker: DONE** (commit `110d3ff`). Verified 2026-07-12: live `babylontoolkit/StarterAssets` mount carries 12/12 binaries byte-identical to GitHub raw; snapshot→restore preserves PNG bytes hash-identically (`app/lib/binary/binary-files.spec.ts`); typecheck, lint, and all 4 test files green.
+>
+> SPEC §9's "Phase 0 — prompt proof" (`tools/phase0` throwaway script) was **skipped deliberately**: it was a pre-fork de-risking exercise, and the fork now proves the same thing end-to-end in the real UI.
 
-(Update this block as phases complete.)
+(Update this block as stages complete.)

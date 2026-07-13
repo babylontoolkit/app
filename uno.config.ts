@@ -1,11 +1,21 @@
 import { globSync } from 'fast-glob';
 import fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { basename } from 'node:path';
 import { defineConfig, presetIcons, presetUno, transformerDirectives } from 'unocss';
 
 const iconPaths = globSync('./icons/*.svg');
 
 const collectionName = 'bolt';
+
+/*
+ * presetIcons only installs its filesystem loader when `!process.env.VSCODE_CWD` — it assumes any
+ * VS Code environment is the UnoCSS extension hosting it. A dev server started from VS Code's
+ * integrated terminal inherits VSCODE_CWD, so every @iconify-json icon silently resolves to nothing.
+ * Loading the collections ourselves keeps icons working regardless of where the process was launched.
+ */
+const requireJson = createRequire(`${process.cwd()}/`);
+const iconifyCollection = (name: string) => () => requireJson(`@iconify-json/${name}/icons.json`);
 
 const customIconCollection = iconPaths.reduce(
   (acc, iconPath) => {
@@ -241,6 +251,8 @@ export default defineConfig({
       warn: true,
       collections: {
         ...customIconCollection,
+        ph: iconifyCollection('ph'),
+        'svg-spinners': iconifyCollection('svg-spinners'),
       },
       unit: 'em',
     }),

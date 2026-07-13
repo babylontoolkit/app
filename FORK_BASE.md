@@ -57,3 +57,9 @@ carry them base64-encoded as a wire format only.
 | `app/utils/{folderImport,fileUtils}.ts` | folder import writes binaries as bytes (was: dropped, "Skipping N binary files") |
 | `app/components/git/GitUrlImport.client.tsx` | binaries excluded from the artifact so the clone's correct bytes are not overwritten by a mangled UTF-8 copy |
 | `app/components/deploy/*`, `app/routes/api.{netlify,vercel}-deploy.ts` | build output read as bytes; binaries uploaded base64 (were: `readFile(…, 'utf-8')` → U+FFFD corruption) |
+
+## Other upstream files touched
+
+| File | Change |
+|---|---|
+| `uno.config.ts` | `presetIcons` collections: register `ph` + `svg-spinners` explicitly. Upstream relies on presetIcons' filesystem loader, which it installs only when `!process.env.VSCODE_CWD` (it assumes VS Code means the UnoCSS extension is the host). A dev server started from VS Code's integrated terminal inherits that var, so every `i-ph:*` / `i-svg-spinners:*` icon silently rendered blank. Loading the collections ourselves is launch-environment independent. Upstream-mergeable (additive keys). |
