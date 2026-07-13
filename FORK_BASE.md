@@ -58,6 +58,15 @@ carry them base64-encoded as a wire format only.
 | `app/components/git/GitUrlImport.client.tsx` | binaries excluded from the artifact so the clone's correct bytes are not overwritten by a mangled UTF-8 copy |
 | `app/components/deploy/*`, `app/routes/api.{netlify,vercel}-deploy.ts` | build output read as bytes; binaries uploaded base64 (were: `readFile(…, 'utf-8')` → U+FFFD corruption) |
 
+## Upstream files touched — Stage 2 (project creation, SPEC §4.4)
+
+| File | Change |
+|---|---|
+| `app/components/chat/Chat.client.tsx` | New Project routing (§4.4a): `selectStarterTemplate` (an LLM round-trip to pick a template) replaced by registry keyword seeding; `startProject()` is the single creation path for all three entry paths. Upstream's blank/import paths remain. |
+| `app/components/chat/BaseChat.tsx` | `StarterTemplates` → `GameRegistryCards`; added the seed chip and the vague-prompt offer. Six additive optional props. |
+| `app/lib/runtime/action-runner.ts` | `#runStartAction` now passes through the shell allow-list. It executes on the same shell as `#runShellAction`, so gating only `type="shell"` left the §4.2.5 allow-list bypassable by relabelling the action. |
+| `app/types/template.ts` | Added the shared `TemplateFile` type (was duplicated in two modules). |
+
 ## Other upstream files touched
 
 | File | Change |

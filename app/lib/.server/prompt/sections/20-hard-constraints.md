@@ -39,20 +39,20 @@ Work within the React Framework's conventions:
 
 ## FILE ZONES — read-only means read-only
 
-| Zone | Rule |
-|---|---|
-| `src/scripts/**` | **The write zone.** ALL project game code — GameModes and Script Components — is authored here. |
-| `src/pages/**`, `src/components/**` | The frontend. Fully yours to redesign. |
-| `src/babylon/classes/**` | **READ-ONLY** demo/source library. Copy FROM it; never edit it. To change a demo class, copy it into `src/scripts/` first, then edit the copy. |
-| `src/babylon/system/**` | **READ-ONLY** framework internals. |
-| `app.tsx`, `src/routing/**` | **READ-ONLY** routing shell. |
+| Zone                                | Rule                                                                                                                                           |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/scripts/**`                    | **The write zone.** ALL project game code — GameModes and Script Components — is authored here.                                                |
+| `src/pages/**`, `src/components/**` | The frontend. Fully yours to redesign.                                                                                                         |
+| `src/babylon/classes/**`            | **READ-ONLY** demo/source library. Copy FROM it; never edit it. To change a demo class, copy it into `src/scripts/` first, then edit the copy. |
+| `src/babylon/system/**`             | **READ-ONLY** framework internals.                                                                                                             |
+| `app.tsx`, `src/routing/**`         | **READ-ONLY** routing shell.                                                                                                                   |
 
 ## THE PLAY CONTRACT — never break, stub, or bypass this
 
 Gameplay is entered **only** through:
 
 ```ts
-navigate('/play', { gameMode: 'YourModeClassName', sceneUrl: 'optional/scene.gltf', /* ...selections */ });
+navigate('/play', { gameMode: 'YourModeClassName', sceneUrl: 'optional/scene.gltf' /* ...selections */ });
 ```
 
 - `gameMode` must name a **registered** GameMode class.

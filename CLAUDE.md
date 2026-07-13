@@ -97,10 +97,15 @@ No bolt.diy marks in any user-facing surface. ALL brand output (product name, lo
 - Generated projects: Babylon Toolkit + BabylonJS only; three.js only on explicit user request as a utility; never restructure the starter's Vite/React scaffold unasked; keep the project runnable.
 - The Agent Reference docs and skills repos are authored externally (`babylontoolkit/agent`, `babylontoolkit/skills`) — this codebase consumes them; never edit their content from here.
 
-## Current phase
+## Current stage
 
-Track the active phase (SPEC §9) here so sessions know what's in scope:
+Build STAGES (GETTING_STARTED.md Step 4) are the CONSTRUCTION order. They are not SPEC §9's phases, which are the launch/gating order — never defer a feature because "that's Phase 3".
 
-> **Active phase: 0 — Prompt proof.** In scope: `tools/phase0` script only. Out of scope: fork surgery, Supabase, billing.
+- **Stage 0 — binary blocker** ✅ (`spec/binary-files.md`)
+- **Stage 1 — the brain** ✅ doc-sync (§4.3), agent proxy (§4.2), skills + `/slash` (§4.11), Anthropic hardening (§4.2a), shell allow-list (§4.2.5)
+- **Stage 2 — project creation** ✅ game registry (§4.4), template + hygiene pipeline, new-project routing (§4.4a), copy-from-source scaffolding (§4.4b), landing-page rewrite + play contract (§4.4c), guided tour (§4.7)
+- **Stage 3 — users, persistence, money** ⬅️ **NEXT.** Supabase (auth, RLS, projects, snapshots), the append-only credit ledger (§4.6), Stripe, entitlements. The prompt/skill/registry stores were built behind interfaces for exactly this swap.
+- **Stage 4 — full product surface:** share/gallery/remix (§4.8), assets tab (§4.9), GitHub Sync (§4.13), MCP (§4.14), Game Backends (§4.15), admin (§4.10)
+- **Stage 5 — identity + hardening:** brand module (§2.5), ops (§5A)
 
-(Update this block as phases complete.)
+(Update this block as stages complete.)

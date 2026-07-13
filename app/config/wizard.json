@@ -1,0 +1,251 @@
+{
+  "$comment": "Guided Tour Wizard content (SPEC §4.7, spec/wizard-config.md) — DATA, not code. Every mechanic must be anchored to a built-in Toolkit system (`backing`): a checkbox is a reliability promise, and one that generates broken code is worse than no checkbox. `registryId` must exist in game-registry.json.",
+  "version": 1,
+  "preamble": "Build the first playable version of this game. Keep it simple, keep it running, and make each item below actually work before moving to the next.",
+  "vibes": [
+    {
+      "id": "sunset-arcade",
+      "label": "Sunset Arcade",
+      "description": "Warm, golden, high-contrast — bright and friendly.",
+      "fragment": "Art direction: warm sunset lighting with a golden-hour skybox, saturated arcade colors, and soft bloom. The landing page should feel bright, energetic and inviting."
+    },
+    {
+      "id": "neon-night",
+      "label": "Neon Night",
+      "description": "Dark streets, neon glow, reflections.",
+      "fragment": "Art direction: night-time scene lit by saturated neon, a dark skybox, strong bloom and glow on emissive surfaces, and wet-looking reflective ground. The landing page should be dark with neon accents."
+    },
+    {
+      "id": "low-poly-day",
+      "label": "Low-Poly Daylight",
+      "description": "Clean, flat, cheerful.",
+      "fragment": "Art direction: clean low-poly look, flat unlit-style colors, a bright daylight skybox and simple directional lighting with no heavy post-processing. The landing page should be clean, flat and cheerful."
+    },
+    {
+      "id": "moody-fog",
+      "label": "Moody Fog",
+      "description": "Desaturated, foggy, atmospheric.",
+      "fragment": "Art direction: heavy atmospheric fog, desaturated palette, overcast lighting and subtle vignette. The landing page should be muted, moody and cinematic."
+    }
+  ],
+  "crossGenre": [
+    {
+      "id": "mobile-controls",
+      "label": "Play on phones (touch controls)",
+      "fragment": "Add on-screen touch controls so the game is playable on a phone, using the Toolkit's MobileInputController.",
+      "backing": "MobileInputController"
+    },
+    {
+      "id": "splitscreen",
+      "label": "Split-screen local co-op (2-4 players)",
+      "fragment": "Add split-screen local multiplayer using DefaultCameraSystem.SetMultiPlayerViewLayout.",
+      "backing": "DefaultCameraSystem"
+    },
+    {
+      "id": "score-hud",
+      "label": "Score & timer on screen",
+      "fragment": "Add an on-screen HUD showing the score and a timer.",
+      "backing": "UserInterface / GamePatterns HUD"
+    },
+    {
+      "id": "audio",
+      "label": "Music & sound effects",
+      "fragment": "Add background music and sound effects using TOOLKIT.AudioSource.",
+      "backing": "TOOLKIT.AudioSource"
+    },
+    {
+      "id": "menus",
+      "label": "Pause menu & game-over screen",
+      "fragment": "Add a pause menu and a game-over screen, following the Toolkit's UserInterface patterns.",
+      "backing": "UserInterface patterns"
+    },
+    {
+      "id": "polish",
+      "label": "Visual polish (glow, particles)",
+      "fragment": "Add visual polish: a DefaultRenderingPipeline with glow, and ShurikenParticles effects at the moments that matter.",
+      "backing": "DefaultRenderingPipeline + ShurikenParticles"
+    },
+    {
+      "id": "gamepad",
+      "label": "Gamepad support",
+      "fragment": "Add gamepad support through TOOLKIT.InputController.",
+      "backing": "TOOLKIT.InputController"
+    },
+    {
+      "id": "leaderboard",
+      "label": "Online leaderboard",
+      "fragment": "Add an online leaderboard backed by the connected Game Backend.",
+      "backing": "Game Backend (§4.15)",
+      "requires": "gameBackend"
+    }
+  ],
+  "genres": [
+    {
+      "registryId": "gm_racing_v1",
+      "card": "Arcade racing",
+      "mechanics": [
+        {
+          "id": "laps",
+          "label": "Lap counter & race timer",
+          "fragment": "Add a lap counter and a race timer using the Toolkit RacingSystem.",
+          "backing": "RacingSystem"
+        },
+        {
+          "id": "boost",
+          "label": "Boost pads",
+          "fragment": "Add boost pads on the track that accelerate the car when driven over, using the RacingSystem.",
+          "backing": "RacingSystem"
+        },
+        {
+          "id": "drift",
+          "label": "Drift handling",
+          "fragment": "Tune the car for arcade drift handling using the RacingSystem's drift support.",
+          "backing": "RacingSystem"
+        },
+        {
+          "id": "ai-racers",
+          "label": "AI opponents",
+          "fragment": "Add AI opponent cars that race the track, using the RacingSystem with NavigationAgent pathing.",
+          "backing": "RacingSystem + NavigationAgent"
+        },
+        {
+          "id": "minimap",
+          "label": "Minimap",
+          "fragment": "Add a minimap showing the track and the cars on it.",
+          "backing": "RacingSystem pattern"
+        },
+        {
+          "id": "race-menus",
+          "label": "Countdown & results screen",
+          "fragment": "Add a race countdown at the start and a results screen at the finish.",
+          "backing": "UserInterface patterns"
+        }
+      ]
+    },
+    {
+      "registryId": "gm_adventure_v1",
+      "card": "Explore a 3D world",
+      "mechanics": [
+        {
+          "id": "double-jump",
+          "label": "Double jump",
+          "fragment": "Give the player a double jump, via the player controller's jump properties.",
+          "backing": "StandardPlayerController"
+        },
+        {
+          "id": "sprint",
+          "label": "Sprint",
+          "fragment": "Add a sprint, using the controller's run/walk speeds and a sprint input binding.",
+          "backing": "StandardPlayerController"
+        },
+        {
+          "id": "climb-vault",
+          "label": "Climb & vault over ledges",
+          "fragment": "Enable the built-in climb system so the player can climb and vault over ledges.",
+          "backing": "CharacterController climb system"
+        },
+        {
+          "id": "pickups",
+          "label": "Collectible pickups with counter",
+          "fragment": "Scatter collectible pickups through the level and show a counter of how many have been collected.",
+          "backing": "GamePatterns pickups"
+        },
+        {
+          "id": "enemies",
+          "label": "Patrolling enemies",
+          "fragment": "Add patrolling enemies that chase the player when spotted, using NavigationAgent pathfinding.",
+          "backing": "NavigationAgent"
+        },
+        {
+          "id": "health",
+          "label": "Health & damage",
+          "fragment": "Add player health, damage on contact with enemies, and a health display.",
+          "backing": "GamePatterns PlayerHealth"
+        },
+        {
+          "id": "checkpoints",
+          "label": "Checkpoints & respawn",
+          "fragment": "Add checkpoints that the player respawns at after falling or dying.",
+          "backing": "GamePatterns"
+        }
+      ]
+    },
+    {
+      "registryId": "gm_fps_explorer_v1",
+      "card": "See through your character's eyes",
+      "mechanics": [
+        {
+          "id": "sprint-jump",
+          "label": "Sprint & jump",
+          "fragment": "Add sprinting and jumping to the first-person controller.",
+          "backing": "StandardPlayerController"
+        },
+        {
+          "id": "interact",
+          "label": "Look-at interaction prompts",
+          "fragment": "Add a look-at raycast that shows an interaction prompt when the player is looking at something usable.",
+          "backing": "raycast + UI pattern"
+        },
+        {
+          "id": "pickups",
+          "label": "Collectibles",
+          "fragment": "Add collectible objects the player can pick up, with a counter.",
+          "backing": "GamePatterns pickups"
+        },
+        {
+          "id": "doors",
+          "label": "Doors & switches",
+          "fragment": "Add doors that open and switches that trigger them, using hinge joints and trigger volumes.",
+          "backing": "FixedHingeJoint + trigger volumes"
+        },
+        {
+          "id": "footsteps",
+          "label": "Footstep & ambient audio",
+          "fragment": "Add footstep sounds and an ambient audio bed using TOOLKIT.AudioSource.",
+          "backing": "TOOLKIT.AudioSource"
+        }
+      ]
+    },
+    {
+      "registryId": "gm_physics_v1",
+      "card": "Stack it, smash it, swing it",
+      "mechanics": [
+        {
+          "id": "stacks",
+          "label": "Destructible stacks",
+          "fragment": "Add stacks of physics blocks that topple and scatter when hit.",
+          "backing": "RigidbodyPhysics (Havok)"
+        },
+        {
+          "id": "ragdoll",
+          "label": "Ragdoll characters",
+          "fragment": "Add ragdoll characters built from the Toolkit's joint suite.",
+          "backing": "BallSocket/Hinge/Sixdof joints"
+        },
+        {
+          "id": "swings",
+          "label": "Swinging & hanging objects",
+          "fragment": "Add swinging and hanging objects using hinge and distance joints.",
+          "backing": "Hinge/Distance joints"
+        },
+        {
+          "id": "levers",
+          "label": "Levers & sliding platforms",
+          "fragment": "Add levers and sliding platforms using slider/prismatic joints.",
+          "backing": "Slider/Prismatic joints"
+        },
+        {
+          "id": "grab",
+          "label": "Click-and-throw objects",
+          "fragment": "Let the player click to grab an object and throw it, using a raycast and a physics impulse.",
+          "backing": "raycast + impulse"
+        }
+      ]
+    },
+    {
+      "registryId": "gm_blank_v1",
+      "card": "Start from an empty scene",
+      "mechanics": []
+    }
+  ]
+}

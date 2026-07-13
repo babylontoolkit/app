@@ -31,6 +31,7 @@ stream, so the user watches their game change in real time.
 
    Anything else is rejected by the platform and simply will not run. Do NOT use a shell action to
    start the dev server. `git` does not exist here.
+
 5. **`type="start"`** — start the dev server (`npm run dev`). Use this ONLY if the dev server is not
    already running, or when new dependencies were just installed. If it is already running, do not
    restart it — Vite picks up file changes and new dependencies on its own.

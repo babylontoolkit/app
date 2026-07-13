@@ -18,7 +18,12 @@ import { useSettings } from '~/lib/hooks/useSettings';
 import type { ProviderInfo } from '~/types/model';
 import { useSearchParams } from '@remix-run/react';
 import { createSampler } from '~/utils/sampler';
-import { getTemplates, selectStarterTemplate } from '~/utils/selectStarterTemplate';
+import { createProjectFromRegistry } from '~/lib/registry/create-project';
+import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registry/match';
+import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
+import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
+import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
+import type { GameRegistryEntry } from '~/types/game-registry';
 import { logStore } from '~/lib/stores/logs';
 import { streamingState } from '~/lib/stores/streaming';
 import { filesToArtifacts } from '~/utils/fileUtils';
@@ -100,8 +105,12 @@ export const ChatImpl = memo(
       (project) => project.id === supabaseConn.selectedProjectId,
     );
     const supabaseAlert = useStore(workbenchStore.supabaseAlert);
-    const { activeProviders, promptId, autoSelectTemplate, contextOptimizationEnabled } = useSettings();
+    const { activeProviders, promptId, contextOptimizationEnabled } = useSettings();
     const [llmErrorAlert, setLlmErrorAlert] = useState<LlmErrorAlertType | undefined>(undefined);
+
+    // New Project routing (§4.4a). `vaguePrompt` is set ONLY when there is genuinely nothing to act on.
+    const { entries: registryEntries } = useGameRegistry();
+    const [vaguePrompt, setVaguePrompt] = useState<string | null>(null);
     const [model, setModel] = useState(() => {
       const savedModel = Cookies.get('selectedModel');
       return savedModel || DEFAULT_MODEL;
@@ -391,6 +400,133 @@ export const ChatImpl = memo(
       return attachments;
     };
 
+    /**
+     * Create the project and start the first generation (SPEC §4.4 / §4.4b / §4.4c).
+     *
+     * Every New Project path lands here — typed prompt (A), card (B), wizard (C). The deterministic
+     * work (mount, hygiene, copy-rename-register the GameMode) happens in `createProjectFromRegistry`;
+     * what reaches the model is a mounted, registered, running project plus a brief.
+     *
+     * When there is no prompt (a card click), the chat is empty: the model builds the landing page and
+     * stops. `visiblePrompt` is what the user actually typed — the wizard's compiled text is hidden
+     * behind its summary card, per §4.7.
+     */
+    const startProject = async (options: {
+      entry: GameRegistryEntry;
+      prompt?: string;
+      visiblePrompt?: string;
+      matched?: string[];
+    }): Promise<boolean> => {
+      const { entry, prompt, visiblePrompt, matched } = options;
+      const title = prompt ? deriveProjectTitle(prompt, entry.title) : entry.title;
+
+      try {
+        const { assistantMessage, userMessage, className } = await createProjectFromRegistry({
+          entry,
+          title,
+          prompt,
+        });
+
+        setProjectSeed({ entry, className, title, prompt, matched });
+
+        const shown = visiblePrompt ?? prompt;
+        const stamp = new Date().getTime();
+
+        const messages: Message[] = [];
+
+        if (shown) {
+          const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${shown}`;
+          messages.push({
+            id: `1-${stamp}`,
+            role: 'user',
+            content: userMessageText,
+            parts: createMessageParts(userMessageText, imageDataList),
+          });
+        }
+
+        messages.push(
+          { id: `2-${stamp}`, role: 'assistant', content: assistantMessage },
+          {
+            id: `3-${stamp}`,
+            role: 'user',
+            content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userMessage}`,
+            annotations: ['hidden'],
+          },
+        );
+
+        setMessages(messages);
+
+        const reloadOptions =
+          uploadedFiles.length > 0 ? { experimental_attachments: await filesToAttachments(uploadedFiles) } : undefined;
+
+        reload(reloadOptions);
+
+        setInput('');
+        Cookies.remove(PROMPT_COOKIE_KEY);
+        setUploadedFiles([]);
+        setImageDataList([]);
+        setVaguePrompt(null);
+        resetEnhancer();
+        textareaRef.current?.blur();
+        setFakeLoading(false);
+
+        return true;
+      } catch (error) {
+        logger.error('Project creation failed', error);
+        toast.error(error instanceof Error ? error.message : 'Could not create the project from the starter template.');
+        setFakeLoading(false);
+
+        return false;
+      }
+    };
+
+    /** §4.4a Path B — a picked card is explicit input: create it and go. No wizard. */
+    const handleSelectEntry = async (entry: GameRegistryEntry) => {
+      runAnimation();
+      setFakeLoading(true);
+      await startProject({ entry });
+    };
+
+    /** §4.4a Path C — the wizard's four steps compile to the first message (§4.7). */
+    const handleCompleteTour = async (selection: WizardSelection) => {
+      runAnimation();
+      setFakeLoading(true);
+      await startProject({
+        entry: selection.entry,
+        prompt: compileWizardPrompt(selection),
+        visiblePrompt: summarizeSelection(selection),
+      });
+    };
+
+    /**
+     * The vague-prompt offer (§4.4a): "Want a guided setup, or just start from a blank scene?"
+     * Choosing the blank scene still runs the user's words — they are not thrown away.
+     */
+    const handleVagueChoice = async (choice: 'tour' | 'blank') => {
+      if (choice === 'tour') {
+        return;
+      }
+
+      const fallback = findFallbackEntry(registryEntries);
+
+      if (!fallback) {
+        return;
+      }
+
+      const prompt = vaguePrompt ?? undefined;
+      setVaguePrompt(null);
+      runAnimation();
+      setFakeLoading(true);
+      await startProject({ entry: fallback, prompt });
+    };
+
+    /** The seed chip's "change" (§4.4a step 3) — re-seed from another entry and re-run the prompt. */
+    const handleReseed = async (entry: GameRegistryEntry) => {
+      const seed = projectSeedStore.get();
+      setFakeLoading(true);
+      await startProject({ entry, prompt: seed?.prompt });
+    };
+
     const sendMessage = async (_event: React.UIEvent, messageInput?: string) => {
       const messageContent = messageInput || input;
 
@@ -417,71 +553,32 @@ export const ChatImpl = memo(
       if (!chatStarted) {
         setFakeLoading(true);
 
-        if (autoSelectTemplate) {
-          const { template, title } = await selectStarterTemplate({
-            message: finalMessageContent,
-            model,
-            provider,
-          });
+        /*
+         * §4.4a Path A: seed from the registry and RUN. No LLM round-trip, no wizard, no "now pick a
+         * template" after the user has already said what they want. The ONLY prompt that does not go
+         * straight to a generation is one with nothing in it to act on — and that one is offered the
+         * wizard, never forced into it.
+         */
+        const decision = decideSeed(finalMessageContent, registryEntries);
 
-          if (template !== 'blank') {
-            const temResp = await getTemplates(template, title).catch((e) => {
-              if (e.message.includes('rate limit')) {
-                toast.warning('Rate limit exceeded. Skipping starter template\n Continuing with blank template');
-              } else {
-                toast.warning('Failed to import starter template\n Continuing with blank template');
-              }
+        if (decision.kind === 'vague') {
+          setVaguePrompt(finalMessageContent);
+          setFakeLoading(false);
 
-              return null;
-            });
-
-            if (temResp) {
-              const { assistantMessage, userMessage } = temResp;
-              const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
-
-              setMessages([
-                {
-                  id: `1-${new Date().getTime()}`,
-                  role: 'user',
-                  content: userMessageText,
-                  parts: createMessageParts(userMessageText, imageDataList),
-                },
-                {
-                  id: `2-${new Date().getTime()}`,
-                  role: 'assistant',
-                  content: assistantMessage,
-                },
-                {
-                  id: `3-${new Date().getTime()}`,
-                  role: 'user',
-                  content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userMessage}`,
-                  annotations: ['hidden'],
-                },
-              ]);
-
-              const reloadOptions =
-                uploadedFiles.length > 0
-                  ? { experimental_attachments: await filesToAttachments(uploadedFiles) }
-                  : undefined;
-
-              reload(reloadOptions);
-              setInput('');
-              Cookies.remove(PROMPT_COOKIE_KEY);
-
-              setUploadedFiles([]);
-              setImageDataList([]);
-
-              resetEnhancer();
-
-              textareaRef.current?.blur();
-              setFakeLoading(false);
-
-              return;
-            }
-          }
+          return;
         }
 
-        // If autoSelectTemplate is disabled or template selection failed, proceed with normal message
+        const seeded = await startProject({
+          entry: decision.entry,
+          prompt: finalMessageContent,
+          matched: decision.kind === 'matched' ? decision.matched : undefined,
+        });
+
+        if (seeded) {
+          return;
+        }
+
+        // Creation failed — fall through and let the user's message run against an empty workspace.
         const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
         const attachments = uploadedFiles.length > 0 ? await filesToAttachments(uploadedFiles) : undefined;
 
@@ -627,6 +724,12 @@ export const ChatImpl = memo(
         enhancingPrompt={enhancingPrompt}
         promptEnhanced={promptEnhanced}
         sendMessage={sendMessage}
+        onSelectEntry={handleSelectEntry}
+        onCompleteTour={handleCompleteTour}
+        vaguePrompt={vaguePrompt}
+        onVagueChoice={handleVagueChoice}
+        onReseed={handleReseed}
+        canReseed={!isLoading && !fakeLoading && messages.length <= 3}
         model={model}
         setModel={handleModelChange}
         provider={provider}

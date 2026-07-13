@@ -18,7 +18,11 @@ import { ImportButtons } from '~/components/chat/chatExportAndImport/ImportButto
 import { ExamplePrompts } from '~/components/chat/ExamplePrompts';
 import GitCloneButton from './GitCloneButton';
 import type { ProviderInfo } from '~/types/model';
-import StarterTemplates from './StarterTemplates';
+import { GameRegistryCards } from './GameRegistryCards';
+import { StartedFromChip } from './StartedFromChip';
+import { VaguePromptOffer } from './VaguePromptOffer';
+import type { GameRegistryEntry } from '~/types/game-registry';
+import type { WizardSelection } from '~/lib/registry/wizard';
 import type { ActionAlert, SupabaseAlert, DeployAlert, LlmErrorAlertType } from '~/types/actions';
 import DeployChatAlert from '~/components/deploy/DeployAlert';
 import ChatAlert from './ChatAlert';
@@ -82,6 +86,14 @@ interface BaseChatProps {
   setSelectedElement?: (element: ElementInfo | null) => void;
   addToolResult?: ({ toolCallId, result }: { toolCallId: string; result: any }) => void;
   onWebSearchResult?: (result: string) => void;
+
+  // New Project routing (SPEC §4.4a) — paths B and C, the vague-prompt offer, and the seed chip.
+  onSelectEntry?: (entry: GameRegistryEntry) => void;
+  onCompleteTour?: (selection: WizardSelection) => void;
+  vaguePrompt?: string | null;
+  onVagueChoice?: (choice: 'tour' | 'blank') => void;
+  onReseed?: (entry: GameRegistryEntry) => void;
+  canReseed?: boolean;
 }
 
 export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
@@ -132,6 +144,12 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
         throw new Error('addToolResult not implemented');
       },
       onWebSearchResult,
+      onSelectEntry,
+      onCompleteTour,
+      vaguePrompt,
+      onVagueChoice,
+      onReseed,
+      canReseed = false,
     },
     ref,
   ) => {
@@ -146,6 +164,9 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     const [progressAnnotations, setProgressAnnotations] = useState<ProgressAnnotation[]>([]);
     const expoUrl = useStore(expoUrlAtom);
     const [qrModalOpen, setQrModalOpen] = useState(false);
+
+    // Lifted so the vague-prompt offer and the "guided tour" link open the same wizard (§4.4a Path C).
+    const [tourOpen, setTourOpen] = useState(false);
 
     useEffect(() => {
       if (expoUrl) {
@@ -368,6 +389,11 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
               initial="smooth"
             >
               <StickToBottom.Content className="flex flex-col gap-4 relative ">
+                {chatStarted && (
+                  <div className="max-w-chat mx-auto w-full">
+                    <StartedFromChip onReseed={onReseed} canChange={canReseed} />
+                  </div>
+                )}
                 <ClientOnly>
                   {() => {
                     return chatStarted ? (
@@ -479,6 +505,9 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                 </div>
               )}
               <div className="flex flex-col gap-5">
+                {!chatStarted && vaguePrompt && onVagueChoice && (
+                  <VaguePromptOffer onChoose={onVagueChoice} onTour={() => setTourOpen(true)} />
+                )}
                 {!chatStarted &&
                   ExamplePrompts((event, messageInput) => {
                     if (isStreaming) {
@@ -488,7 +517,14 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
 
                     handleSendMessage?.(event, messageInput);
                   })}
-                {!chatStarted && <StarterTemplates />}
+                {!chatStarted && onSelectEntry && onCompleteTour && (
+                  <GameRegistryCards
+                    onSelectEntry={onSelectEntry}
+                    onCompleteTour={onCompleteTour}
+                    tourOpen={tourOpen}
+                    setTourOpen={setTourOpen}
+                  />
+                )}
               </div>
             </div>
           </div>

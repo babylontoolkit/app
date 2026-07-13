@@ -305,6 +305,21 @@ export class ActionRunner {
       unreachable('Shell terminal not found');
     }
 
+    /*
+     * A `start` action is a shell command by another name — it runs on the same shell, with the same
+     * reach. Gating only `type="shell"` would leave the allow-list (SPEC §4.2.5, §5) trivially
+     * bypassable by relabelling the action, so the same gate applies here.
+     */
+    const allowed = isAllowedShellCommand(action.content);
+
+    if (!allowed.allowed) {
+      logger.warn(`Blocked start command: ${action.content} — ${allowed.reason}`);
+      throw new ActionCommandError(
+        'Start command not permitted',
+        `${allowed.reason}\n\nOnly \`npm install <package>\` and \`npm run <script>\` may be run.`,
+      );
+    }
+
     const shell = this.#shellTerminal();
     await shell.ready();
 

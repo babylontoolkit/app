@@ -1,0 +1,196 @@
+/**
+ * New Project creation (SPEC §4.4 / §4.4b / §4.4c) — every entry path ends here.
+ *
+ * The division of labour is deliberate:
+ *
+ *   **This code** does everything that must be RIGHT: mounting the starter, project hygiene, copying
+ *   the registry entry's `source_class` into `src/scripts/`, renaming the class and its registration
+ *   string, re-basing its imports, and adding it to `globals.ts` so it actually registers. None of it
+ *   is left to the model, because every one of these failures is silent — the project compiles and
+ *   then dead-ends.
+ *
+ *   **The model** does everything that must be GOOD: the landing page designed for this game, and the
+ *   user's actual request. It gets a mounted, registered, running project to start from.
+ */
+import registryData from '~/config/game-registry.json';
+import type { GameRegistryEntry } from '~/types/game-registry';
+import type { TemplateFile } from '~/types/template';
+import { createScopedLogger } from '~/utils/logger';
+import { applyProjectHygiene } from './hygiene';
+import { ensureFrameworkPublicAssets, writeBinaryFiles } from './mount';
+import {
+  CLASS_LIBRARY_DIR,
+  GLOBALS_PATH,
+  RESERVED_CLASS_NAMES,
+  deriveClassName,
+  registerGameModeInGlobals,
+  scaffoldGameMode,
+} from './scaffold';
+
+const logger = createScopedLogger('CreateProject');
+
+/** The ONE universal starter (SPEC §4.4) — there are no per-genre repos. */
+export const STARTER_REPO = registryData.starter_repo;
+
+export interface CreatedProject {
+  /** The assistant turn that mounts the files — replayed into the chat as a completed artifact. */
+  assistantMessage: string;
+
+  /** The hidden user turn that briefs the model on what it must now build. */
+  userMessage: string;
+
+  /** The project's own GameMode class (§4.4b) — the only name the play contract may reference. */
+  className: string;
+}
+
+async function fetchStarterFiles(): Promise<TemplateFile[]> {
+  const response = await fetch(`/api/github-template?repo=${encodeURIComponent(STARTER_REPO)}`);
+
+  if (!response.ok) {
+    throw new Error(`Could not fetch the starter template (${response.status}).`);
+  }
+
+  return (await response.json()) as TemplateFile[];
+}
+
+/**
+ * The images the project actually has on disk.
+ *
+ * Handed to the model explicitly because the alternative is it GUESSING an asset path — the exact
+ * cause of the "Failed to resolve import" blank preview in Phase 1 (§4.4c). It may import any of
+ * these or none of them; it may never import anything else.
+ */
+function listAvailableImages(files: TemplateFile[]): string[] {
+  return files
+    .filter(
+      (file) =>
+        file.isBinary && /^(src\/assets|public)\//.test(file.path) && /\.(png|jpe?g|svg|webp)$/i.test(file.path),
+    )
+    .map((file) => file.path)
+    .sort();
+}
+
+/**
+ * Create a project from a registry entry.
+ *
+ * `prompt` is the user's own words (Path A) or the wizard's compiled brief (Path C); on the card path
+ * (Path B) there is none, and the model is told to build the landing page and stop.
+ */
+export async function createProjectFromRegistry(options: {
+  entry: GameRegistryEntry;
+  title: string;
+  prompt?: string;
+}): Promise<CreatedProject> {
+  const { entry, title, prompt } = options;
+
+  const files = applyProjectHygiene(await fetchStarterFiles(), { projectTitle: title });
+
+  const className = deriveClassName(title, RESERVED_CLASS_NAMES);
+
+  // ---- §4.4b: copy the demo out of the read-only library, rename it, register it ----
+
+  const sourcePath = `${CLASS_LIBRARY_DIR}/${entry.source_class}`;
+  const source = files.find((file) => file.path === sourcePath);
+
+  if (!source) {
+    throw new Error(`Registry entry "${entry.id}" names ${sourcePath}, which is not in the starter template.`);
+  }
+
+  const gameMode = scaffoldGameMode({
+    sourceClassFile: entry.source_class,
+    sourceContent: source.content,
+    className,
+  });
+
+  const globals = files.find((file) => file.path === GLOBALS_PATH);
+
+  if (!globals) {
+    throw new Error(`The starter template is missing ${GLOBALS_PATH} — the GameMode could never register.`);
+  }
+
+  globals.content = registerGameModeInGlobals(globals.content, className);
+
+  /*
+   * The library file itself is NEVER touched — it stays pristine as a clean source for every future
+   * copy, and as read-only reference material for the model (§4.4b step 5).
+   */
+  const projectFiles = [...files, { name: `${className}.ts`, path: gameMode.path, content: gameMode.content }];
+
+  // ---- binaries out of band, then the text files via the artifact ----
+
+  const binaries = projectFiles.filter((file) => file.isBinary);
+  const textFiles = projectFiles.filter((file) => !file.isBinary);
+
+  if (binaries.length > 0) {
+    await writeBinaryFiles(binaries);
+  }
+
+  await ensureFrameworkPublicAssets(binaries);
+
+  logger.info(
+    `Seeded "${title}" from ${entry.id} → ${className} (${textFiles.length} text, ${binaries.length} binary)`,
+  );
+
+  const assistantMessage = `Setting up your project from the ${entry.title} starter.
+
+<boltArtifact id="project-setup" title="${title}" type="bundled">
+${textFiles
+  .map(
+    (file) => `<boltAction type="file" filePath="${file.path}">
+${file.content}
+</boltAction>`,
+  )
+  .join('\n')}
+<boltAction type="shell">npm install</boltAction>
+<boltAction type="start">npm run dev</boltAction>
+</boltArtifact>`;
+
+  return {
+    assistantMessage,
+    userMessage: buildCreationBrief({ entry, title, className, prompt, images: listAvailableImages(binaries) }),
+    className,
+  };
+}
+
+/**
+ * The hidden first user message: what the model must know that it cannot see from the files alone.
+ *
+ * Kept short on purpose. The Hard Constraints (file zones, play contract, bundle integrity, the
+ * landing-page rewrite rule) already live in the CACHED system prompt (§4.2) — repeating them here
+ * would pay full input rates on every project creation to say what the model has already been told.
+ * This message carries only the per-project FACTS: the class, the scene, the images, the request.
+ */
+function buildCreationBrief(options: {
+  entry: GameRegistryEntry;
+  title: string;
+  className: string;
+  prompt?: string;
+  images: string[];
+}): string {
+  const { entry, title, className, prompt, images } = options;
+
+  const play = entry.scene_url
+    ? `navigate('/play', { gameMode: '${className}', sceneUrl: '${entry.scene_url}' })`
+    : `navigate('/play', { gameMode: '${className}' })`;
+
+  return `The project has been created and is installing. Do not re-create it.
+
+**This project**
+- Title: ${title}
+- Seeded from: ${entry.title} (${entry.genre})
+- Its GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. It is the ONLY mode this project may launch.
+- Launch it with: \`${play}\`
+${entry.scene_url ? '' : '- This genre has no preload scene; the GameMode builds its own content.\n'}
+**Images on disk** (import from these or none — never invent an asset path):
+${images.map((path) => `- ${path}`).join('\n')}
+
+**Your task now**
+1. Rewrite \`src/pages/Home.tsx\` and \`src/pages/Home.css\` COMPLETELY, as a landing page designed from scratch for *${title}*. Nothing from the starter page survives — no hero montage, no demo buttons, no Vite/React/Babylon links, no footer, no attribution of any kind. Reach gameplay through the play contract above.
+2. ${
+    prompt
+      ? `Then build what the user asked for:\n\n> ${prompt}`
+      : `That is all for now — the user has not asked for anything else yet.`
+  }
+
+When you are done, suggest two or three concrete next steps (a new game mode, a menu, a mechanic).`;
+}
