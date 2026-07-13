@@ -11,6 +11,8 @@ import { createDataStream, formatDataStreamPart, type Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import { runAgentGeneration } from '~/lib/.server/agent/proxy';
 import { NotConfiguredError } from '~/lib/.server/agent/config';
+import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
+import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
 
@@ -39,6 +41,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     messages: Message[];
     files?: FileMap;
     chatId?: string;
+    projectId?: string;
     errors?: string[];
     repairOf?: string;
     repairAttempt?: number;
@@ -55,10 +58,35 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
   const providerSettings: Record<string, IProviderSetting> = JSON.parse(cookies.providers || '{}');
 
   try {
+    /*
+     * THE TWO WALLS (§4.5.3), in order, before a single token is spent.
+     *
+     * 1. Session — and VERIFIED, because generation is what costs us money. An unverified account may
+     *    open the builder and look around; it may not burn credits (§4.5.1).
+     * 2. Ownership — if this generation names a project, the caller must own it. `projectId` arrives
+     *    from the client, so without this check it is just a number someone can change in DevTools to
+     *    write files into a stranger's game.
+     */
+    const user = await requireVerifiedUser(request, context);
+
+    if (body.projectId) {
+      await requireOwnedProject(user, body.projectId, context);
+    }
+
     const generation = await runAgentGeneration({
       messages: body.messages,
       files: body.files,
       chatId: body.chatId,
+      user,
+      projectId: body.projectId,
+
+      /*
+       * Stop (§4.12). Remix hands us the client's disconnect signal, so closing the stream (the Stop
+       * button, or a closed tab) aborts the provider call instead of leaving it running and billing
+       * us for output nobody will ever read.
+       */
+      abortSignal: request.signal,
+
       errors: body.errors,
       repairOf: body.repairOf,
       repairAttempt: body.repairAttempt,
@@ -100,6 +128,21 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
             model: generation.model,
             skillsLoaded: [...generation.toolContext.loaded],
             blocksLoaded: generation.blocksLoaded,
+          },
+        });
+
+        /*
+         * What this generation actually cost the user, and their new balance (§4.6). Sent AFTER the
+         * text so the credit badge updates from a settled number, never an estimate.
+         */
+        const settlement = await generation.settlement;
+
+        stream.writeMessageAnnotation({
+          type: 'credits',
+          value: {
+            creditsCharged: settlement?.creditsCharged ?? 0,
+            balanceAfter: settlement?.balanceAfter ?? null,
+            notice: generation.notice ?? null,
           },
         });
       },

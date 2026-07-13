@@ -1,5 +1,9 @@
 # spec/billing.md — Credits, Stripe & Entitlements (governs SPEC §4.6, §4.6.1, §4.5.4)
 
+> **Status: IMPLEMENTED and verified end-to-end (Stage 3, 2026-07).** The design below is what we
+> built, with four deliberate divergences recorded in *Divergences from the original design* at the
+> bottom. Read that section before assuming a line here describes the code.
+
 ## Invariants (unit-test all of these)
 
 1. Ledger is append-only. Balance derived: latest `balance_after` per user. Single bucket; credits never expire.
@@ -14,9 +18,20 @@
 ## Charge computation (post-generation)
 
 ```
-raw_cost   = in*IN_RATE + cached_in*CACHED_RATE + out*OUT_RATE      // per-model config
+raw_cost   = in*IN_RATE + cached_in*CACHED_READ_RATE                 // per-model config
+           + cache_write*CACHE_WRITE_RATE + out*OUT_RATE
 credits    = ceil(raw_cost / CREDIT_UNIT_COST * MARGIN)              // MARGIN ≥ target gross margin
 ```
+
+⚠️ **FOUR token classes, not three.** The original formula omitted cache WRITES. They are not free,
+and they are not billed at the 1.25× headline number either: `proxy.ts` uses the **1-hour** cache tier
+(§4.2.8), which writes at **2× base input**. Billing must agree with that choice — assuming 1.25×
+under-charges *every* generation, and nothing in the system would notice. `billing.spec.ts` asserts
+the 2× relationship across the whole rate table.
+
+⚠️ **Sonnet 5 carries introductory pricing ($2/$10 per MTok) until 2026-08-31; the rate table
+deliberately uses the standard $3/$15.** Seeding the intro rate would compress the margin below target
+the day it lapses — silently. Under-charging ourselves for a few weeks is the right direction to err.
 - Self-healing repair turns: tokens accumulate onto the parent generation at `REPAIR_WEIGHT` (config, e.g. 0.5).
 - Aborted (Stop): charge tokens actually consumed to abort.
 - Hard failure (API error, zero actions parsed + error status): auto-refund row (`reason='refund'`).
@@ -47,3 +62,94 @@ Balance chip, per-message cost badge (shows 'BYOK' for Pro-key generations), bil
 ## Flags & caps
 
 `BILLING_ENFORCED` (gate on/off; recording always on), `SIGNUP_GRANT_CREDITS`, `DAILY_TOKEN_BUDGET` (platform breaker), per-user rate limits. Anthropic Console spend caps are the backstop of last resort.
+
+---
+
+## Divergences from the original design (recorded per SPEC §11)
+
+Four things the implementation does differently. Each was a deliberate choice, not an oversight.
+
+**1. The charge formula has four token classes, not three.** Cache writes were missing and they bill
+at 2× (see above). This is the single most expensive line in the file to get wrong.
+
+**2. The pre-flight gate is `balance > 0`, not `balance ≥ p90-estimate`.** The original wanted a
+conservative cost estimate before starting. We do not have one and cannot cheaply get one: a
+generation's cost is dominated by the tool loop, whose length is not knowable in advance. So the gate
+asks only "do you have anything left", and a generation that overshoots is allowed to drive the
+balance **negative** — §4.2.1 forbids killing an in-flight generation for balance, so reality is
+allowed to overshoot and the gate on the *next* generation catches it. **Exposure is bounded by one
+generation**, which is the price of never yanking a game out from under someone mid-build. Only
+`generation` (and admin `adjustment`) rows may go negative; a purchase or refund that computes
+negative is a bug and is refused.
+
+**3. "One DB transaction per logical event" is implemented as `append_ledger_entry`** — a Postgres
+`security definer` function that takes a per-user advisory lock, reads the latest `balance_after`, and
+inserts, atomically. This is *stronger* than the original wording, and it is the point: deriving
+`balance_after` in TypeScript is a read-modify-write, i.e. exactly the lost update the append-only
+design exists to prevent. There is no INSERT policy on `credit_ledger` at all — a user cannot append
+their own credits — and a trigger refuses `UPDATE`/`DELETE` outright, so append-only is enforced by
+the database rather than by convention.
+
+**4. `REPAIR_WEIGHT` is not implemented.** Self-healing repair turns settle as their own generation at
+full cost rather than accumulating onto the parent at a discount. Repair turns are cheap (they run
+against a cached prefix) and a weighting factor is a pricing decision we have no data to make yet. The
+`generations` row carries `repairOf`, so the data to make it later is being recorded.
+
+## Also true, and easy to get wrong
+
+- **Bill from `result.steps`, never from `result.usage` + `result.providerMetadata`.** Those two have
+  different SCOPES, and ai@4 documents it in passing: `usage` is combined across every step, while
+  `providerMetadata` is *"from the LAST step"*. Anthropic reports cache reads/writes **only** in
+  provider metadata — so the obvious pairing bills six rounds of input against one round of cache, and
+  nothing throws. We shipped that bug and caught it because a real generation logged 133,565
+  cache-read tokens: suspiciously close to exactly ONE read of a 133K prefix. `steps` is the only
+  surface where both numbers are per-step. Guarded by `step-usage.spec.ts`.
+
+- **The cached prefix includes the TOOL DEFINITIONS, not just the system blocks.** Change a tool's
+  schema (or the base prompt) and every user's cache entry is invalidated: the next generation pays a
+  full cache WRITE at 2×. Measured: an otherwise-trivial generation cost $0.51, of which **$0.36 (71%)
+  was the cache write** — then $0.22 on the very next identical run, with writes at zero. This is
+  correct behaviour, but it means a deploy has a real, one-off cost, and it is easy to misread a
+  post-deploy cost spike as a regression.
+
+- **Tool rounds are SEQUENTIAL LLM round trips, and they are a latency line item.** Each one
+  re-prefills the whole prompt before the model can even say what it wants next. A tool that takes one
+  item per call turns N items into N round trips: `read_skill_resource` did exactly that and we
+  measured a generation burning all six tool rounds to page in a single skill, leaving none to answer
+  with. It takes a `paths` ARRAY now, and the same probe drops to two rounds. Any future tool that
+  fetches "a thing" should fetch "things".
+
+- **Auto-refund on hard failure is implemented** (§4.6). The provider still bills *us* for the tokens a
+  failed generation burned — we do not get those back. But the user asked for a game and got an error,
+  so we eat it: the debit stays (it happened) and a compensating `refund` row sits beside it, pointing
+  at the same `generation_id`. Append-only means the history stays honest *and* the balance comes out
+  right. A **Stop** is not a failure — a stopped generation burned real tokens by the user's own
+  decision, and is charged for what it consumed to the abort point (§4.12).
+
+- **The grace window is the subtlest rule in the file.** "The license service said nothing" and "the
+  license service said no" are different facts. Conflating them means every blip in *our*
+  infrastructure silently revokes BYOK from every paying Pro subscriber — and it looks exactly like a
+  normal lapse, so nobody would know to investigate. An unreachable service produces **no entitlement
+  change** for 72h.
+
+- **Pro gates exactly one thing.** The collapsed Model Settings toggle *renders the model name*, so it
+  is gated alongside the panel; so are the Settings → Cloud/Local Providers tabs, which are the same
+  machinery behind a different door. In the shipping default all of it is **absent from the DOM** — not
+  disabled, not collapsed.
+
+## Degrade gracefully — local mode is real, not a mock
+
+With no vendor accounts at all, the platform runs as a single verified local developer with filesystem
+persistence, a real append-only ledger, real ownership checks, and byte-faithful snapshots. That is
+what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the license service existed
+(§1.3 principle 0). `assertNotLocalInProduction` **refuses to boot** into that mode when
+`NODE_ENV=production`, because it treats every caller as a verified admin.
+
+## Verified end-to-end (2026-07, local mode)
+
+- Signup grant fired **exactly once**: `grant +2250 → 2250`.
+- A live generation settled against real usage: `generation −7 → 2243` (raw cost $0.0184,
+  `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
+- The `generations` record attributes the charge to a user, a model, and its four token classes.
+- `PRO_FEATURES_ENABLED=false`: **zero** model names, provider names, `<select>`s, or API-key inputs in
+  the DOM. `=true`: BYOK unlocked, Model Settings appears, Pro badge renders.

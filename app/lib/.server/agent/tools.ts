@@ -82,46 +82,76 @@ export function createSkillTools(context: SkillToolContext) {
        * ever reads files SHIPPED INSIDE a skill bundle.
        */
       description:
-        'Read a supporting file bundled inside a skill (e.g. references/foo.md), for a skill you have loaded. ' +
+        'Read supporting files bundled inside a skill (e.g. references/foo.md), for a skill you have loaded. ' +
         "Paths come from that skill's own instructions — do not guess at them. " +
+        'ALWAYS request every resource you need in ONE call by passing them all in `paths` — each call is a ' +
+        'slow round trip, and there is a hard cap on how many you get. ' +
         "This is NOT a filesystem: it cannot read the user's project files. The project's files are already " +
         'in your context under "Current Project Files"; there is no tool to read more of them.',
       parameters: z.object({
-        skill: z.string().describe('The skill that bundles the file.'),
-        path: z.string().describe("The resource path exactly as listed in that skill's instructions."),
-      }),
-      execute: async ({ skill, path }) => {
+        skill: z.string().describe('The skill that bundles the files.'),
+
         /*
-         * Resolves strictly through the version's manifest by exact match — no path semantics at all,
-         * which is what removes the entire traversal class of bugs rather than trying to filter for it.
+         * A LIST, not a path. One-path-per-call made N resources cost N sequential LLM round trips —
+         * and a round trip is not cheap: it re-prefills the entire (133K-token) prompt before the
+         * model can so much as name the next file. We measured a generation that spent all six of its
+         * tool rounds paging in a single skill's resources and had none left to answer with. Batching
+         * collapses that to one round.
          */
-        const contents = await store.readResource(skill, path);
+        paths: z
+          .array(z.string())
+          .min(1)
+          .describe(
+            'Every resource path you need from this skill, exactly as listed in its instructions. ' +
+              'Pass them ALL at once rather than calling this tool repeatedly.',
+          ),
+      }),
+      execute: async ({ skill, paths }) => {
+        const version = await store.getActive(skill);
 
-        if (contents === null) {
-          const version = await store.getActive(skill);
+        if (!version) {
+          return `No skill named "${skill}" exists.`;
+        }
 
-          if (!version) {
-            return `No skill named "${skill}" exists.`;
+        const sections: string[] = [];
+        const missing: string[] = [];
+
+        for (const path of paths) {
+          /*
+           * Resolves strictly through the version's manifest by exact match — no path semantics at
+           * all, which removes the entire traversal class of bugs rather than trying to filter for it.
+           */
+          const contents = await store.readResource(skill, path);
+
+          if (contents === null) {
+            missing.push(path);
+            continue;
           }
 
-          logger.warn(`read_skill_resource: "${path}" not in ${skill}'s manifest`);
+          sections.push(`## ${path}\n\n${contents}`);
+        }
+
+        if (missing.length > 0) {
+          logger.warn(`read_skill_resource: [${missing.join(', ')}] not in ${skill}'s manifest`);
 
           /*
-           * Tell it to STOP, not just that it failed. A bare "not found" invites the model to try
-           * the next plausible path, and a handful of those retries exhausts the tool-round cap.
+           * Tell it to STOP, not just that it failed. A bare "not found" invites the model to try the
+           * next plausible path, and a handful of those retries exhausts the tool-round cap. Report
+           * misses ALONGSIDE the hits so a single bad path does not cost a whole extra round.
            */
-          return (
-            `"${path}" is not a resource of skill "${skill}". ` +
-            `Its bundled resources are: ${version.resourcePaths.join(', ') || '(none — this skill bundles no files)'}.\n\n` +
-            "Do not retry with a different path. If you were looking for a file in the user's PROJECT " +
-            '(SPEC.md, source files, …), this tool cannot read it: the project files available to you are ' +
-            'already in your context. Proceed with what you have.'
+          sections.push(
+            `## Not found: ${missing.join(', ')}\n\n` +
+              `These are not resources of skill "${skill}". Its bundled resources are: ` +
+              `${version.resourcePaths.join(', ') || '(none — this skill bundles no files)'}.\n\n` +
+              "Do not retry with a different path. If you were looking for a file in the user's PROJECT " +
+              '(SPEC.md, source files, …), this tool cannot read it: the project files available to you ' +
+              'are already in your context. Proceed with what you have.',
           );
         }
 
-        logger.info(`read_skill_resource: ${skill}/${path}`);
+        logger.info(`read_skill_resource: ${skill} [${paths.join(', ')}] (${missing.length} missing)`);
 
-        return contents;
+        return sections.join('\n\n---\n\n');
       },
     }),
   };

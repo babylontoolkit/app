@@ -1,0 +1,97 @@
+/**
+ * Session, balance, and capabilities (SPEC §4.5, §4.6, §4.6.1).
+ *
+ * The one endpoint the client asks: *who am I, what may I do, and what do I have left?* Everything
+ * the UI needs to decide what to render — and, critically, **nothing the UI could use to grant itself
+ * something.** `proFeaturesEnabled` and `byokUnlocked` are reported here, but the server re-derives
+ * both on every generation (`resolveByok`). This response is a hint for rendering, never an authority.
+ *
+ * It is also where the **signup grant** is issued (§4.5.4): the first time we see a VERIFIED session.
+ * Not at signup — an unconfirmed address must never be able to mint credits — and not in the auth
+ * route, because OAuth users never pass through it. Every authenticated path lands here, and the
+ * grant is idempotent, so "call it every time" is both correct and safe.
+ */
+import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { getUser } from '~/lib/.server/supabase/auth';
+import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
+import { getPlatformConfig } from '~/lib/.server/agent/config';
+import { getBillingConfig } from '~/lib/.server/billing/rates';
+import { ensureSignupGrant, getLedger } from '~/lib/.server/billing/ledger';
+import { getEntitlement } from '~/lib/.server/licensing/entitlements';
+import { isStripeConfigured, CREDIT_PACKS } from '~/lib/.server/billing/stripe';
+import { errorResponse } from '~/lib/.server/http';
+
+export async function loader({ request, context }: LoaderFunctionArgs) {
+  try {
+    const user = await getUser(request, context);
+    const platform = getPlatformConfig(context);
+    const billing = getBillingConfig(context);
+
+    if (!user) {
+      return json({
+        authenticated: false,
+        accountsEnabled: isSupabaseConfigured(context),
+
+        /*
+         * Even signed out, the client needs to know whether Pro machinery exists at all — because in
+         * the shipping default (`false`) the provider picker, model selector and key fields must not
+         * render for ANYONE, signed in or not (§4.6.1).
+         */
+        proFeaturesEnabled: platform.proFeaturesEnabled,
+      });
+    }
+
+    // The grant. Idempotent — a partial unique index means exactly one lands, however many race.
+    if (user.emailVerified && billing.grantsEnabled) {
+      await ensureSignupGrant(user.id, billing.signupGrantCredits, context);
+    }
+
+    const [balance, entitlement] = await Promise.all([
+      getLedger(context).balance(user.id),
+      platform.proFeaturesEnabled ? getEntitlement(user.id, user.email, context) : Promise.resolve(null),
+    ]);
+
+    /*
+     * BYOK is unlocked by an ACTIVE entitlement — or by local dev, which has no license service to
+     * ask (§4.6.1). Note this is only ever `true` when `proFeaturesEnabled` is on, so the credits-only
+     * default can never accidentally reveal a key field.
+     */
+    const byokUnlocked = platform.proFeaturesEnabled && (user.isLocal || entitlement?.status === 'active');
+
+    return json({
+      authenticated: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName,
+        emailVerified: user.emailVerified,
+        isAdmin: user.isAdmin,
+        isLocal: user.isLocal,
+      },
+
+      credits: {
+        balance,
+
+        /*
+         * Off = beta mode: usage is recorded in full, but a zero balance blocks nobody (§4.6). The UI
+         * uses this to decide whether to show an "out of credits" wall or just a usage read-out.
+         */
+        enforced: billing.enforced,
+        purchasable: isStripeConfigured(context),
+        packs: CREDIT_PACKS.filter((p) => p.isActive),
+      },
+
+      pro: {
+        proFeaturesEnabled: platform.proFeaturesEnabled,
+        byokUnlocked,
+        tier: entitlement?.tier ?? null,
+        status: entitlement?.status ?? null,
+        subscriberEmail: entitlement?.subscriberEmail ?? null,
+      },
+
+      accountsEnabled: isSupabaseConfigured(context),
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}

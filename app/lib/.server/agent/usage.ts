@@ -20,8 +20,19 @@ export interface GenerationRecord {
   id: string;
   createdAt: string;
   chatId?: string;
+
+  /** Every generation is attributable to a user — the ledger debit points back at this row (§4.5.4). */
+  userId?: string;
+  projectId?: string;
+
   model: string;
   provider: string;
+
+  /** What we actually charged. Zero for BYOK and for unmetered beta mode — but always recorded. */
+  creditsCharged?: number;
+
+  /** Raw model spend in USD, before margin. The honest number for the admin cost dashboards (§4.10). */
+  rawCostUsd?: number;
 
   /** Traceability: which synced doc snapshot produced this generation (§4.3.7). */
   promptVersionId: string | null;
@@ -60,26 +71,44 @@ export interface GenerationRecord {
   /** Tool rounds the server ran inside this generation. */
   toolRounds: number;
 
+  /**
+   * Wall-clock for the whole generation.
+   *
+   * Recorded because "it feels slow" is not actionable and the two causes have opposite fixes:
+   * sequential tool rounds (fix: batch the tool calls) vs. decode of a large answer (fix: emit fewer
+   * output tokens — caching cannot help, decode is serial at ~60-90 tok/s). With this alongside
+   * `completionTokens` and `toolRounds`, the two are told apart by arithmetic instead of by guessing.
+   */
+  durationMs?: number;
+
+  /**
+   * Per-step breakdown of the tool loop — the only way to tell the two latency causes apart.
+   *
+   * Aggregate numbers hide the thing you need: a generation billed for 44,308 output tokens whose
+   * final visible answer was ~9k tokens means ~35k output tokens were spent on steps that produced
+   * nothing the user ever saw (re-generated answers after a tool-round cap, abandoned attempts,
+   * verbose tool preambles). You cannot see that in a total, and you cannot fix what you cannot see.
+   */
+  steps?: Array<{
+    ms: number;
+    outTokens: number;
+    inTokens: number;
+    cacheRead: number;
+    cacheWrite: number;
+    tools: string[];
+  }>;
+
   /** Set when this is a self-healing repair turn; points at the generation it repairs (§4.2.7). */
   repairOf?: string;
   finishReason?: string;
 }
 
-export type CreditGateResult =
-  | { allowed: true; mode: 'unmetered' }
-  | { allowed: true; mode: 'credits'; balance: number }
-  | { allowed: false; mode: 'credits'; balance: number; message: string };
-
 /**
- * Check that a user can afford a generation BEFORE it starts.
- *
- * In-flight generations are never killed for balance (§4.2.1) — this gate runs once, up front.
- * Until the ledger exists there is nothing to debit, so every request is `unmetered`.
+ * The credit gate now lives with the ledger it reads (`~/lib/.server/billing/gate`). It is
+ * re-exported here because the agent proxy has always reached for it through this module, and
+ * `checkCreditGate` + `getGenerationLog` are two halves of the same story: gate before, record after.
  */
-export async function checkCreditGate(_userId?: string): Promise<CreditGateResult> {
-  // Stage 2 (§4.6): resolve balance from the append-only ledger and block at <= 0 with an upsell.
-  return { allowed: true, mode: 'unmetered' };
-}
+export { checkCreditGate, settleGeneration, refundGeneration, type CreditGateResult } from '~/lib/.server/billing/gate';
 
 export class GenerationLog {
   private readonly _dir: string;
@@ -88,12 +117,17 @@ export class GenerationLog {
     this._dir = dir ?? path.join(platformDataDir(), 'generations');
   }
 
-  async record(entry: Omit<GenerationRecord, 'id' | 'createdAt'>): Promise<GenerationRecord> {
+  /**
+   * `id` is optional but usually SUPPLIED by the caller, because the ledger debit references it — the
+   * generation id has to exist before we can charge for the generation (§4.5.4: every debit is
+   * attributable). We mint one only when nobody cared enough to.
+   */
+  async record(entry: Omit<GenerationRecord, 'id' | 'createdAt'> & { id?: string }): Promise<GenerationRecord> {
     const createdAt = new Date().toISOString();
     const record: GenerationRecord = {
-      id: `gen_${createdAt.replace(/[-:.TZ]/g, '').slice(0, 14)}_${Math.random().toString(36).slice(2, 8)}`,
-      createdAt,
       ...entry,
+      id: entry.id ?? `gen_${createdAt.replace(/[-:.TZ]/g, '').slice(0, 14)}_${Math.random().toString(36).slice(2, 8)}`,
+      createdAt,
     };
 
     try {
@@ -104,8 +138,18 @@ export class GenerationLog {
       logger.error(`Failed to record generation: ${(error as Error).message}`);
     }
 
+    /*
+     * The decode rate is the punchline. Output tokens leave the model serially, so a generation that
+     * writes 44k tokens simply CANNOT finish in under several minutes — and seeing tok/s next to the
+     * wall-clock is what stops us from trying to cache our way out of a decode problem.
+     */
+    const seconds = (record.durationMs ?? 0) / 1000;
+    const timing = record.durationMs
+      ? `${seconds.toFixed(1)}s (${(record.completionTokens / Math.max(seconds, 0.001)).toFixed(0)} out tok/s), `
+      : '';
+
     logger.info(
-      `Generation ${record.id}: ${record.promptTokens} in (+${record.cacheReadTokens} cached, ` +
+      `Generation ${record.id}: ${timing}${record.promptTokens} in (+${record.cacheReadTokens} cached, ` +
         `${record.cacheCreationTokens} written) / ${record.completionTokens} out, ` +
         `${record.toolRounds} tool rounds, finish=${record.finishReason}, ` +
         `skills=[${record.skillsLoaded.join(',')}]`,

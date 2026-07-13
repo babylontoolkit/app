@@ -107,7 +107,7 @@ Verify: type "make me a kart racer" → project seeded from Racing → landing p
 Play launches the project's own GameMode.
 ```
 
-### Stage 3 — Users, persistence, money
+### Stage 3 — Users, persistence, money - DONE
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §4.5 auth/profiles/projects/snapshots (Supabase config-driven; storage layer with

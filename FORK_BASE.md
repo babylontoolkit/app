@@ -79,6 +79,38 @@ binary files are declared as `<boltFile>` markers (path + size), never as bodies
 | `app/lib/stores/files.ts` | watcher no longer excludes `**/package-lock.json`. Upstream treated the file map as a view for the model; it is the SOURCE for every egress path (ZIP, GitHub sync, snapshot, share build), so the exclusion silently shipped user projects with no lockfile. Keeping it from the model is done at the context boundary instead. |
 | `app/components/chat/Chat.client.tsx` | posts `stripOpaqueContent(files)` rather than the raw map — opaque bodies (218KB lockfile, vendor shims) are freight on every turn, since the model only ever receives a marker for them |
 
+## Divergence map — Stage 3: identity, persistence, money (merge hotspot: none — almost entirely additive)
+
+bolt.diy ships **no** user system (local, single-user, browser-persisted). This whole layer is net-new,
+so the merge surface is close to zero: eight new server modules and a handful of new routes. Only three
+upstream files were touched, each with a small localized hook.
+
+**New (net-new — zero merge surface):**
+- `app/lib/.server/env.ts` — the single door to server config. ⚠️ Platform secrets are NEVER `VITE_`-prefixed (Vite inlines those into the client bundle; the Supabase service-role key bypasses RLS).
+- `app/lib/.server/supabase/` — request client (RLS in force) + admin client (bypasses RLS; three privileged jobs only), auth, the two-wall rule
+- `app/lib/.server/projects/` — projects, snapshots (byte-faithful via `SerializedFileMap`), `requireOwnedProject`
+- `app/lib/.server/billing/` — rate table, append-only ledger, gate + settlement + auto-refund, Stripe
+- `app/lib/.server/licensing/` — ASMX `ValidateSubscription` client, entitlements, the 72h grace window, `resolveByok`
+- `app/lib/.server/storage/` — `ObjectStore` interface, S3 adapter, local-FS fallback
+- `app/lib/.server/http.ts` — uniform error responses (404-not-403 for ownership)
+- `app/lib/stores/session.ts`, `app/lib/hooks/useSession.ts` — the client's view of who it is
+- `app/components/auth/`, `app/components/chat/CreditsIndicator.client.tsx`
+- `supabase/migrations/0001_stage3_*.sql` — schema, RLS, and `append_ledger_entry` (the atomic writer)
+- Routes: `api.auth`, `api.me`, `api.credits`, `api.checkout`, `api.stripe-webhook`, `api.entitlement`, `api.projects*`, `auth.callback`
+
+**Contract:** the platform Supabase (accounts, projects, ledger) is a DIFFERENT Supabase from upstream's
+Game Backends connector (§4.15), which is the USER's own project and whose `VITE_SUPABASE_*` values are
+public by design. Do not merge the two.
+
+| File | Change |
+|---|---|
+| `app/lib/.server/agent/proxy.ts` | Takes an `AuthUser` (never a client-supplied id — the ledger is keyed on it); resolves BYOK server-side from a verified entitlement; runs the credit gate before the first token; settles against REAL usage in `finally` (so Stop and crashes settle too); auto-refunds hard failures; threads an `AbortSignal` for Stop (§4.12). |
+| `app/routes/api.agent.ts` | The two walls before any token is spent: `requireVerifiedUser` + `requireOwnedProject`. Passes `request.signal` so a closed stream aborts the provider call. Emits a `credits` annotation carrying the settled charge. |
+| `app/components/chat/ChatBox.tsx` | Provider picker / model selector / API-key field are **Pro-gated** (§4.6.1) — and so is the collapsed Model Settings toggle, which *renders the model name*. In the shipping default all of it is absent from the DOM. |
+| `app/components/@settings/core/ControlPanel.tsx` | The `cloud-providers` / `local-providers` tabs are the same machinery behind a different door — filtered out unless BYOK is unlocked. |
+| `app/components/header/Header.tsx` | Credits indicator + account menu. |
+| `app/components/chat/Chat.client.tsx` | Applies the settled balance from the `credits` annotation (server's number, not a local subtraction — which would drift on the first stop or repair). |
+
 ## Upstream files touched — Stage 2 (project creation, SPEC §4.4)
 
 | File | Change |

@@ -23,6 +23,7 @@ import { DataTab } from '~/components/@settings/tabs/data/DataTab';
 import { EventLogsTab } from '~/components/@settings/tabs/event-logs/EventLogsTab';
 import GitHubTab from '~/components/@settings/tabs/github/GitHubTab';
 import GitLabTab from '~/components/@settings/tabs/gitlab/GitLabTab';
+import { useByokUnlocked } from '~/lib/hooks/useSession';
 import SupabaseTab from '~/components/@settings/tabs/supabase/SupabaseTab';
 import VercelTab from '~/components/@settings/tabs/vercel/VercelTab';
 import NetlifyTab from '~/components/@settings/tabs/netlify/NetlifyTab';
@@ -59,6 +60,9 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
   const { hasUnreadNotifications, unreadNotifications, markAllAsRead } = useNotifications();
   const { hasConnectionIssues, currentIssue, acknowledgeIssue } = useConnectionStatus();
 
+  /** Pro gates exactly one thing: BYOK + model selection (§4.6.1). Server-derived, never a client flag. */
+  const byokUnlocked = useByokUnlocked();
+
   // Memoize the base tab configurations to avoid recalculation
   const baseTabConfig = useMemo(() => {
     return new Map(DEFAULT_TAB_CONFIG.map((tab) => [tab.id, tab]));
@@ -86,10 +90,23 @@ export const ControlPanel = ({ open, onClose }: ControlPanelProps) => {
           return false;
         }
 
+        /*
+         * PRO-GATED (SPEC §4.6.1, §2.3). The provider tabs are the OTHER door into the same machinery
+         * the chat box hides: they configure providers, models and API keys. Gating the chat box but
+         * leaving these two tabs in Settings would put a full provider/key surface one click away in
+         * the credits-only product — and let a non-entitled user paste a key we would then refuse to
+         * honor, which is worse than not offering at all.
+         *
+         * `byokUnlocked` is false for everyone in the shipping default, so both tabs are ABSENT.
+         */
+        if ((tab.id === 'cloud-providers' || tab.id === 'local-providers') && !byokUnlocked) {
+          return false;
+        }
+
         return tab.visible && tab.window === 'user';
       })
       .sort((a, b) => a.order - b.order);
-  }, [tabConfiguration, profile?.preferences?.notifications, baseTabConfig]);
+  }, [tabConfiguration, profile?.preferences?.notifications, baseTabConfig, byokUnlocked]);
 
   // Reset to default view when modal opens/closes
   useEffect(() => {

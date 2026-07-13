@@ -398,7 +398,13 @@ Landing page → full game frontend is expected and supported. The launch MECHAN
 
 ### 4.5 Identity, Accounts & Persistence (Supabase)
 
+> **Status: IMPLEMENTED (Stage 3, 2026-07).** Sub-spec: `spec/billing.md` (which also records four deliberate divergences from the original billing design — read it before assuming §4.6 describes the code).
+
 bolt.diy ships **no** user system (local, single-user, browser-persisted). This entire layer is net-new; Supabase Auth is the identity provider so we never store passwords or build token handling ourselves.
+
+**Local mode (Supabase unconfigured) is a REAL, supported mode — not a stub.** The platform resolves to a single verified local developer with filesystem persistence, a working append-only ledger, real ownership checks, and byte-faithful snapshots. This is what made Stage 3 buildable and testable before a Supabase project, an S3 bucket, a Stripe account, or the license service existed (§1.3 principle 0) — and it is the single-user posture bolt.diy shipped with, so local dev behaves as it always did. It can never reach production by accident: `assertNotLocalInProduction` **refuses to boot** into the anonymous local user when `NODE_ENV=production`, because that fallback treats every caller as a verified admin.
+
+⚠️ **The platform Supabase is NOT the one in §4.15 (Game Backends).** That one is the *user's own* project, reached through upstream's connector with `VITE_SUPABASE_*` — values that are public by design. Ours holds accounts, projects and the credit ledger, and its service-role key **bypasses RLS**. Platform secrets are therefore never `VITE_`-prefixed: Vite inlines every `VITE_*` variable into the client bundle, so doing so would hand every visitor every row in the database.
 
 #### 4.5.1 Authentication
 
@@ -471,6 +477,8 @@ entitlements     -- id, user_id, source ('protools_subscription'), tier
 - Balance = latest `balance_after`; ledger append-only, never a mutable counter.
 
 ### 4.6 Credits & Billing
+
+> **Status: IMPLEMENTED (Stage 3, 2026-07) — see `spec/billing.md` for the four divergences from this design.** In short: the charge formula has **four** token classes, not three (cache WRITES bill at **2×** base input, because we use the 1-hour cache tier per §4.2.8 — assuming the 1.25× headline number under-charges every generation and nothing throws); the pre-flight gate is `balance > 0` rather than a p90 cost estimate (a generation's cost is dominated by the tool loop and is not knowable in advance), so a `generation` debit is allowed to drive the balance negative and the *next* gate catches it — exposure bounded by one generation, which is the price of never yanking a game out from under someone mid-build; `balance_after` is derived by an atomic Postgres writer (`append_ledger_entry`) rather than in application code; and `REPAIR_WEIGHT` is not implemented (repair turns settle at full cost; `generations.repairOf` records the data to price them later).
 
 - **Payments: Stripe only.** Stripe Checkout (cards + Apple/Google Pay + Link) is the platform's sole payment processor — for credit packs and premium assets. **No PayPal integration exists anywhere in the platform**: Pro Tools subscriptions are validated exclusively through the Babylon Toolkit license service (§4.6.1); how that service verifies subscriptions internally is outside this system's boundary. The ledger keeps provider-agnostic fields (`payment_provider` + `payment_ref`) purely as cheap insurance (e.g., a future Merchant-of-Record move for tax compliance — see open questions); no second integration is planned.
 - **Single credit balance:** one bucket, filled by Stripe pack purchases, the signup grant, promos, refunds; never expires. Append-only ledger; balance = latest `balance_after`. Pro Tools subscribers don't receive credit grants — their perk is BYOK (§4.6.1), which bypasses credit charges entirely.
@@ -548,6 +556,8 @@ The point of this subsystem: **the skills in `github.com/babylontoolkit/skills` 
 **Trust model:** platform skills (our repo) are trusted prompt content. Community/user-installed skills remain OUT OF SCOPE until a review/moderation model exists (marketplace expansion intent, §1.4).
 
 ### 4.12 Generation Controls & Project History (Bolt/Lovable parity)
+
+> **Status: server side IMPLEMENTED (Stage 3, 2026-07).** Stop aborts the provider call through an `AbortSignal` threaded from the request; checkpoints are the `snapshots` table + object storage, addressed **through** their project so ownership is checked (`/api/projects/:id/snapshots/:snapshotId`). Billing on a stopped generation charges tokens actually consumed to the abort point — never the full estimate. A **Stop is not a failure**: a hard failure (provider error, broken stream) auto-refunds, a stop does not, because the tokens it burned were burned by the user's own decision.
 
 Users of Bolt/Lovable expect to control and undo the AI. Without these, one bad generation strands a non-developer.
 

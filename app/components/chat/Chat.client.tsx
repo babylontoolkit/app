@@ -9,6 +9,7 @@ import { description, useChatHistory } from '~/lib/persistence';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
+import { applySettlement } from '~/lib/stores/session';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
@@ -182,6 +183,27 @@ export const ChatImpl = memo(
       onFinish: (message, response) => {
         const usage = response.usage;
         setData(undefined);
+
+        /*
+         * The settled cost of this generation (§4.6). The server charged against REAL token usage —
+         * including for a generation the user stopped — so we take its balance verbatim rather than
+         * subtracting locally, which would drift from the ledger on the first stop or repair turn.
+         *
+         * `notice` carries the friendly "your Pro subscription lapsed, so this used credits" fallback
+         * (§4.6.1). It is never an error; the build succeeded.
+         */
+        const credits = message.annotations?.find(
+          (a): a is { type: 'credits'; value: { balanceAfter: number | null; notice: string | null } } =>
+            typeof a === 'object' && a !== null && (a as { type?: string }).type === 'credits',
+        );
+
+        if (credits) {
+          applySettlement(credits.value.balanceAfter);
+
+          if (credits.value.notice) {
+            toast.info(credits.value.notice);
+          }
+        }
 
         if (usage) {
           console.log('Token usage:', usage);

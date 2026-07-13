@@ -6,6 +6,10 @@
  * provider (§1.3 principle 0).
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
+import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
+
+/** Re-exported: this was the original home of the error, and several routes import it from here. */
+export { NotConfiguredError };
 
 export interface PlatformConfig {
   /** The platform Anthropic key. Server-only, always. */
@@ -32,29 +36,13 @@ export interface PlatformConfig {
 export const PLATFORM_MODEL = DEFAULT_MODEL;
 export const PLATFORM_PROVIDER = 'Anthropic';
 
-function env(context: unknown, key: string): string | undefined {
-  const fromCloudflare = (context as { cloudflare?: { env?: Record<string, string> } })?.cloudflare?.env?.[key];
-
-  return fromCloudflare || process.env[key] || undefined;
-}
-
 export function getPlatformConfig(context?: unknown): PlatformConfig {
   return {
     anthropicApiKey: env(context, 'ANTHROPIC_API_KEY'),
-    proFeaturesEnabled: env(context, 'PRO_FEATURES_ENABLED') === 'true',
+    proFeaturesEnabled: envFlag(context, 'PRO_FEATURES_ENABLED'),
     githubToken: env(context, 'GITHUB_API_KEY') || env(context, 'VITE_GITHUB_ACCESS_TOKEN'),
     adminToken: env(context, 'ADMIN_TOKEN'),
   };
-}
-
-export class NotConfiguredError extends Error {
-  readonly statusCode = 503;
-  readonly isRetryable = false;
-
-  constructor(what: string, how: string) {
-    super(`${what} is not configured. ${how}`);
-    this.name = 'NotConfiguredError';
-  }
 }
 
 /**

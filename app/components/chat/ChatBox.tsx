@@ -21,6 +21,7 @@ import type { ElementInfo } from '~/components/workbench/Inspector';
 import { McpTools } from './MCPTools';
 import { WebSearch } from './WebSearch.client';
 import { SkillAutocompleteMenu, useSkillAutocomplete } from './SkillAutocomplete';
+import { useByokUnlocked } from '~/lib/hooks/useSession';
 
 interface ChatBoxProps {
   isModelSettingsCollapsed: boolean;
@@ -67,6 +68,12 @@ interface ChatBoxProps {
 }
 
 export const ChatBox: React.FC<ChatBoxProps> = (props) => {
+  /*
+   * The ONE gate on all provider/model/key UI (§4.6.1). Read from the SERVER's session, never from a
+   * client env var — a `VITE_`-prefixed flag would be a value the user can edit.
+   */
+  const byokUnlocked = useByokUnlocked();
+
   /*
    * Setting the input through a synthetic change event is the existing convention in this codebase
    * (BaseChat does the same) — `setInput` is not threaded down this far, and inventing a second prop
@@ -116,36 +123,49 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
         <rect className={classNames(styles.PromptEffectLine)} pathLength="100" strokeLinecap="round"></rect>
         <rect className={classNames(styles.PromptShine)} x="48" y="24" width="70" height="1"></rect>
       </svg>
-      <div>
-        <ClientOnly>
-          {() => (
-            <div className={props.isModelSettingsCollapsed ? 'hidden' : ''}>
-              <ModelSelector
-                key={props.provider?.name + ':' + props.modelList.length}
-                model={props.model}
-                setModel={props.setModel}
-                modelList={props.modelList}
-                provider={props.provider}
-                setProvider={props.setProvider}
-                providerList={props.providerList || (PROVIDER_LIST as ProviderInfo[])}
-                apiKeys={props.apiKeys}
-                modelLoading={props.isModelLoading}
-              />
-              {(props.providerList || []).length > 0 &&
-                props.provider &&
-                !LOCAL_PROVIDERS.includes(props.provider.name) && (
-                  <APIKeyManager
-                    provider={props.provider}
-                    apiKey={props.apiKeys[props.provider.name] || ''}
-                    setApiKey={(key) => {
-                      props.onApiKeysChange(props.provider.name, key);
-                    }}
-                  />
-                )}
-            </div>
-          )}
-        </ClientOnly>
-      </div>
+      {/*
+       * PRO-GATED (SPEC §4.6.1, §4.1, §2.3). Pro gates EXACTLY ONE thing: BYOK + model selection.
+       *
+       * `byokUnlocked` is FALSE for everyone in the shipping default (PRO_FEATURES_ENABLED=false), so
+       * the provider picker, the model selector and the key field are ABSENT from the DOM — not
+       * disabled, not collapsed, not behind a paywall banner. Credits-mode UI contains zero provider
+       * machinery, and a user in that mode never learns which model built their game.
+       *
+       * The server re-derives this on every generation (`resolveByok`), so revealing these controls
+       * by hand in DevTools gets you a picker whose choices the server ignores.
+       */}
+      {byokUnlocked && (
+        <div>
+          <ClientOnly>
+            {() => (
+              <div className={props.isModelSettingsCollapsed ? 'hidden' : ''}>
+                <ModelSelector
+                  key={props.provider?.name + ':' + props.modelList.length}
+                  model={props.model}
+                  setModel={props.setModel}
+                  modelList={props.modelList}
+                  provider={props.provider}
+                  setProvider={props.setProvider}
+                  providerList={props.providerList || (PROVIDER_LIST as ProviderInfo[])}
+                  apiKeys={props.apiKeys}
+                  modelLoading={props.isModelLoading}
+                />
+                {(props.providerList || []).length > 0 &&
+                  props.provider &&
+                  !LOCAL_PROVIDERS.includes(props.provider.name) && (
+                    <APIKeyManager
+                      provider={props.provider}
+                      apiKey={props.apiKeys[props.provider.name] || ''}
+                      setApiKey={(key) => {
+                        props.onApiKeysChange(props.provider.name, key);
+                      }}
+                    />
+                  )}
+              </div>
+            )}
+          </ClientOnly>
+        </div>
+      )}
       <FilePreview
         files={props.uploadedFiles}
         imageDataList={props.imageDataList}
@@ -330,20 +350,28 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
                 {props.chatMode === 'discuss' ? <span>Discuss</span> : <span />}
               </IconButton>
             )}
-            <IconButton
-              title="Model Settings"
-              className={classNames('transition-all flex items-center gap-1', {
-                'bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent':
-                  props.isModelSettingsCollapsed,
-                'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault':
-                  !props.isModelSettingsCollapsed,
-              })}
-              onClick={() => props.setIsModelSettingsCollapsed(!props.isModelSettingsCollapsed)}
-              disabled={!props.providerList || props.providerList.length === 0}
-            >
-              <div className={`i-ph:caret-${props.isModelSettingsCollapsed ? 'right' : 'down'} text-lg`} />
-              {props.isModelSettingsCollapsed ? <span className="text-xs">{props.model}</span> : <span />}
-            </IconButton>
+            {/*
+             * Also Pro-gated — and this one is easy to miss. When collapsed, this button RENDERS THE
+             * MODEL NAME (`props.model`). Hiding the settings panel but leaving this toggle would put
+             * "claude-sonnet-5" in the toolbar of a product whose whole premise is that credits users
+             * never see or choose a model (§4.6.1). The model is a config property, not a user choice.
+             */}
+            {byokUnlocked && (
+              <IconButton
+                title="Model Settings"
+                className={classNames('transition-all flex items-center gap-1', {
+                  'bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent':
+                    props.isModelSettingsCollapsed,
+                  'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault':
+                    !props.isModelSettingsCollapsed,
+                })}
+                onClick={() => props.setIsModelSettingsCollapsed(!props.isModelSettingsCollapsed)}
+                disabled={!props.providerList || props.providerList.length === 0}
+              >
+                <div className={`i-ph:caret-${props.isModelSettingsCollapsed ? 'right' : 'down'} text-lg`} />
+                {props.isModelSettingsCollapsed ? <span className="text-xs">{props.model}</span> : <span />}
+              </IconButton>
+            )}
           </div>
           {props.input.length > 3 ? (
             <div className="text-xs text-bolt-elements-textTertiary">

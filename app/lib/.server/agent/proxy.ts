@@ -25,9 +25,13 @@ import { createFilesContext } from '~/lib/.server/llm/utils';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
 import type { IProviderSetting } from '~/types/model';
+import type { AuthUser } from '~/lib/.server/supabase/auth';
+import { resolveByok } from '~/lib/.server/licensing/entitlements';
+import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDER, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
-import { checkCreditGate, getGenerationLog } from './usage';
+import { getGenerationLog, type GenerationRecord } from './usage';
+import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
 
 const logger = createScopedLogger('agent-proxy');
 
@@ -59,6 +63,21 @@ export interface AgentRequest {
   messages: Message[];
   files?: FileMap;
   chatId?: string;
+
+  /**
+   * The authenticated user. Resolved by the ROUTE, never by the client (§4.5.3) — the ledger is keyed
+   * on this id, so a client-supplied one would let anyone spend anyone else's credits.
+   */
+  user: AuthUser;
+
+  /** The project this generation belongs to. Ownership is proven by the route before we get here. */
+  projectId?: string;
+
+  /**
+   * Stop (§4.12). Aborting stops the stream but NOT the settlement: the tokens consumed up to the
+   * abort point were really spent, and the ledger records what happened, never the estimate.
+   */
+  abortSignal?: AbortSignal;
 
   /** Remix loader/action context — the only source of server env in a Cloudflare-shaped runtime. */
   context?: unknown;
@@ -94,17 +113,16 @@ export interface AgentGeneration {
 
   /** Resolves once the stream is fully drained. */
   usage: Promise<GenerationUsage>;
+
+  /** Resolves with what we charged, once settled. Drives the client's credit badge (§4.6). */
+  settlement: Promise<{ creditsCharged: number; balanceAfter: number } | null>;
+
+  /** e.g. "your Pro subscription lapsed, so this build used credits" (§4.6.1). Never an error. */
+  notice?: string;
 }
 
-export interface GenerationUsage {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-
-  /** Anthropic reports cached input SEPARATELY from `input_tokens` — see the note in `drain()`. */
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-}
+/** Re-exported so callers keep importing it from the proxy; the math lives in `step-usage`. */
+export type { GenerationUsage } from './step-usage';
 
 function lastUserText(messages: Message[]): string {
   const last = [...messages].reverse().find((m) => m.role === 'user');
@@ -183,9 +201,29 @@ export function buildRepairMessage(errors: string[]): string {
 
 export async function runAgentGeneration(request: AgentRequest): Promise<AgentGeneration> {
   const config = getPlatformConfig(request.context);
+  const user = request.user;
 
-  // 1. Credit gate — once, up front. In-flight generations are never killed for balance (§4.2.1).
-  const gate = await checkCreditGate();
+  /*
+   * 1. BYOK — decided by the SERVER, from a verified Pro entitlement (§4.6.1).
+   *
+   * A client can send an API key and claim anything it likes. `resolveByok` is what decides, and it
+   * reads our own entitlement store: PRO_FEATURES_ENABLED must be on AND the license service must
+   * have confirmed an active subscription (or this is local dev). A lapsed subscriber silently falls
+   * back to credits with a friendly notice — never an error, never a blocked build.
+   */
+  const byok = await resolveByok({
+    userId: user.id,
+    email: user.email,
+    isLocal: user.isLocal,
+    hasKey: Boolean(request.apiKeys?.[PLATFORM_PROVIDER]),
+    context: request.context,
+  });
+
+  /*
+   * 2. Credit gate — once, up front, and only for platform-paid generations. In-flight generations
+   * are never killed for balance (§4.2.1), so this is the ONE moment we may refuse.
+   */
+  const gate = await checkCreditGate({ userId: user.id, byok: byok.allowed, context: request.context });
 
   if (!gate.allowed) {
     const error = new Error(gate.message) as Error & { statusCode: number; isRetryable: boolean };
@@ -196,12 +234,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
-   * 2. Model + key. Credits mode is the default and uses the platform key with a FIXED model.
-   * BYOK is honored only with Pro features enabled — otherwise a client-supplied key or model is
-   * ignored outright rather than trusted (§4.6.1).
+   * 3. Model + key. Credits mode is the default: the platform key, a FIXED model, no choices to make.
+   * A client-supplied model is honored ONLY under a verified BYOK — otherwise it is ignored outright
+   * rather than trusted, because model choice is a config property, never a user input (§4.2a).
    */
-  const useByok = config.proFeaturesEnabled && Boolean(request.apiKeys?.[PLATFORM_PROVIDER]);
-  const model = config.proFeaturesEnabled && request.model ? request.model : PLATFORM_MODEL;
+  const useByok = byok.allowed;
+  const model = useByok && request.model ? request.model : PLATFORM_MODEL;
 
   if (!useByok) {
     requirePlatformKey(config);
@@ -213,7 +251,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     throw new NotConfiguredError(`The ${PLATFORM_PROVIDER} provider`, 'It is missing from the provider registry.');
   }
 
-  // 3. The active prompt version — from OUR store. Zero GitHub dependency at generation time (§4.3.2).
+  // 4. The active prompt version — from OUR store. Zero GitHub dependency at generation time (§4.3.2).
   const activePrompt = await getActivePrompt();
 
   if (!activePrompt) {
@@ -226,11 +264,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   // Bound to a const so the null-check narrowing survives into the async generator below.
   const promptVersion = activePrompt;
 
-  // 4. Explicit slash invocation force-loads its skill.
+  // 5. Explicit slash invocation force-loads its skill.
   const slash = await resolveSlashInvocation(request.messages);
   let messages = slash ? slash.messages : request.messages;
 
-  // 5. Repair turn: append the compiler output as the task.
+  // 6. Repair turn: append the compiler output as the task.
   const isRepair = Boolean(request.errors?.length);
 
   if (isRepair && (request.repairAttempt ?? 1) <= MAX_REPAIR_TURNS) {
@@ -241,7 +279,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
-   * 6. Route the on-demand doc blocks. Keyed off the user's request AND any invoked skill body, so
+   * 7. Route the on-demand doc blocks. Keyed off the user's request AND any invoked skill body, so
    * that `/bt-spec build a racing game` pulls in the RacingSystem docs even though the word "racing"
    * only appears in the task.
    */
@@ -258,7 +296,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
-   * 7. Assemble system blocks, most-stable first.
+   * 8. Assemble system blocks, most-stable first.
    *
    * Anthropic caches the prefix UP TO each breakpoint, so ordering is what makes caching pay: the
    * base prompt (the big, byte-identical chunk) leads and gets its own breakpoint; the routed blocks
@@ -300,7 +338,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     });
   }
 
-  // 8. The tool loop runs entirely server-side; the client stream stays pure text + actions.
+  // 9. The tool loop runs entirely server-side; the client stream stays pure text + actions.
   const toolContext: SkillToolContext = { loaded: new Set(slash ? [slash.skillName] : []) };
   const tools = createSkillTools(toolContext);
 
@@ -319,15 +357,23 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   const coreMessages = convertToCoreMessages(messages as any);
 
-  const totals: GenerationUsage = {
-    promptTokens: 0,
-    completionTokens: 0,
-    totalTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-  };
+  const totals: GenerationUsage = emptyUsage();
   let toolRounds = 0;
   let finishReason = 'unknown';
+
+  /*
+   * Where the wall-clock actually goes (§4.2).
+   *
+   * A generation feels slow for one of two very different reasons, and they have opposite fixes:
+   * SEQUENTIAL TOOL ROUNDS (each one re-prefills the whole prompt before the model can ask for the
+   * next thing) or DECODE (output tokens come out one at a time, ~60-90/s, and no amount of caching
+   * touches that). Guessing which is which is how you optimise the wrong one, so every step reports
+   * its own duration, tool calls, and output tokens.
+   */
+  const startedAt = Date.now();
+  let stepClock = startedAt;
+  let stepIndex = 0;
+  const stepLog: NonNullable<GenerationRecord['steps']> = [];
 
   const startStream = (history: CoreMessage[], allowTools: boolean) =>
     _streamText({
@@ -335,6 +381,40 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       messages: history,
       maxTokens: 64_000,
       tools,
+
+      onStepFinish: (step) => {
+        const now = Date.now();
+        const ms = now - stepClock;
+        stepClock = now;
+
+        const tools = step.toolCalls?.map((c) => c.toolName) ?? [];
+        const out = step.usage?.completionTokens ?? 0;
+        const meta = step.providerMetadata?.anthropic as
+          | { cacheReadInputTokens?: number; cacheCreationInputTokens?: number }
+          | undefined;
+
+        stepLog.push({
+          ms,
+          outTokens: out,
+          inTokens: step.usage?.promptTokens ?? 0,
+          cacheRead: meta?.cacheReadInputTokens ?? 0,
+          cacheWrite: meta?.cacheCreationInputTokens ?? 0,
+          tools,
+        });
+
+        logger.info(
+          `  step ${++stepIndex}: ${ms}ms · ${out} out · ` +
+            `${step.usage?.promptTokens ?? 0} in (+${meta?.cacheReadInputTokens ?? 0} cached, ` +
+            `${meta?.cacheCreationInputTokens ?? 0} written)` +
+            `${tools.length ? ` · tools: ${tools.join(', ')}` : ' · ANSWER'}`,
+        );
+      },
+
+      /*
+       * Stop (§4.12). The signal aborts the provider request, so we stop paying for tokens the moment
+       * the user says stop — but the tokens already generated are still billed, in the `finally` below.
+       */
+      abortSignal: request.abortSignal,
 
       /*
        * `toolChoice: 'none'` still passes the tool DEFINITIONS (Anthropic requires them whenever the
@@ -366,26 +446,39 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       }
     }
 
-    const usage = await result.usage;
-    totals.promptTokens += usage?.promptTokens ?? 0;
-    totals.completionTokens += usage?.completionTokens ?? 0;
-    totals.totalTokens += usage?.totalTokens ?? 0;
-
-    const anthropicMeta = (await result.providerMetadata)?.anthropic as
-      | { cacheReadInputTokens?: number; cacheCreationInputTokens?: number }
-      | undefined;
-
-    totals.cacheReadTokens += anthropicMeta?.cacheReadInputTokens ?? 0;
-    totals.cacheCreationTokens += anthropicMeta?.cacheCreationInputTokens ?? 0;
+    /*
+     * Bill from `steps`, NOT from `result.usage` + `result.providerMetadata`.
+     *
+     * Those two have different scopes: `usage` is combined across every step, while
+     * `providerMetadata` is — per its own JSDoc — "from the LAST step". Anthropic reports cache
+     * reads/writes ONLY in provider metadata, so the obvious pairing bills six rounds of input
+     * against one round of cache. `steps` is the only surface where both are per-step (§4.6).
+     */
+    const steps = await result.steps;
+    accumulateStepUsage(totals, steps as unknown as UsageStep[]);
 
     finishReason = await result.finishReason;
-    toolRounds += Math.max(0, ((await result.steps)?.length ?? 1) - 1);
+    toolRounds += Math.max(0, (steps?.length ?? 1) - 1);
   }
 
   let resolveUsage: (usage: GenerationUsage) => void;
   const usagePromise = new Promise<GenerationUsage>((resolve) => {
     resolveUsage = resolve;
   });
+
+  let resolveSettlement: (settlement: { creditsCharged: number; balanceAfter: number } | null) => void;
+  const settlementPromise = new Promise<{ creditsCharged: number; balanceAfter: number } | null>((resolve) => {
+    resolveSettlement = resolve;
+  });
+
+  /**
+   * Did this generation HARD-FAIL?
+   *
+   * Not the same as "was stopped". A stop is a user decision and the tokens it burned are genuinely
+   * owed (§4.12). A hard failure is the provider erroring out or the stream breaking — the user asked
+   * for a game and got nothing — and §4.6 is explicit that those auto-refund.
+   */
+  let failed = false;
 
   async function* run(): AsyncGenerator<string> {
     try {
@@ -423,13 +516,74 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
         yield* drain(continuation);
       }
+    } catch (error) {
+      /*
+       * A HARD FAILURE — the provider errored, or the stream broke. Distinct from a Stop, which is a
+       * user decision. Flag it, then rethrow: the client still needs to see the error.
+       *
+       * A user abort arrives here too (the abort signal rejects the stream), so exclude it — the
+       * tokens a stopped generation burned are genuinely owed (§4.12).
+       */
+      failed = !request.abortSignal?.aborted;
+      throw error;
     } finally {
       resolveUsage(totals);
 
+      /*
+       * Settle, then record — and do BOTH even when the generation threw or was stopped (§4.12).
+       *
+       * A user who hits Stop after thirty seconds consumed thirty seconds of real tokens. Anthropic
+       * has already billed us for them, so `totals` is what was actually spent, and the ledger records
+       * exactly that — never the full estimate the generation would have cost had it finished.
+       */
+      const generationId = `gen_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+      const settlement = await settleGeneration({
+        userId: user.id,
+        generationId,
+        model,
+        usage: totals,
+        byok: useByok,
+        context: request.context,
+      });
+
+      /*
+       * AUTO-REFUND on a hard failure (§4.6).
+       *
+       * The provider still bills US for the tokens a failed generation burned — we do not get that
+       * back. But the USER asked for a game and got an error, and charging them for our failure is
+       * indefensible. So we eat the cost: the debit stays in the ledger (it happened) and a
+       * compensating `refund` row sits beside it. Append-only means the history stays honest AND the
+       * balance comes out right.
+       */
+      if (failed && settlement && settlement.creditsCharged > 0) {
+        await refundGeneration(
+          user.id,
+          generationId,
+          settlement.creditsCharged,
+          'Automatic refund — the generation failed',
+          request.context,
+        );
+      }
+
+      resolveSettlement(
+        settlement
+          ? {
+              creditsCharged: failed ? 0 : settlement.creditsCharged,
+              balanceAfter: failed ? settlement.balanceAfter + settlement.creditsCharged : settlement.balanceAfter,
+            }
+          : null,
+      );
+
       await getGenerationLog().record({
+        id: generationId,
         chatId: request.chatId,
+        userId: user.id,
+        projectId: request.projectId,
         model,
         provider: PLATFORM_PROVIDER,
+        creditsCharged: failed ? 0 : (settlement?.creditsCharged ?? 0),
+        rawCostUsd: settlement?.rawCostUsd ?? 0,
         promptVersionId: promptVersion.id,
         skillsLoaded: [...toolContext.loaded],
         blocksLoaded: blocks.map((b) => b.id),
@@ -439,8 +593,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         cacheReadTokens: totals.cacheReadTokens,
         cacheCreationTokens: totals.cacheCreationTokens,
         toolRounds,
+        durationMs: Date.now() - startedAt,
+        steps: stepLog,
         repairOf: request.repairOf,
-        finishReason,
+        finishReason: failed ? 'error' : finishReason,
       });
     }
   }
@@ -452,5 +608,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     blocksLoaded: blocks.map((b) => b.id),
     toolContext,
     usage: usagePromise,
+    settlement: settlementPromise,
+    notice: byok.notice,
   };
 }
