@@ -71,8 +71,10 @@ and prompt fragments are editable without a deploy.
 Every path ends here:
 
 1. Mount the **StarterAssets** snapshot into the WebContainer
-   (submodules vendored; binaries intact; remote origin removed; `.gitignore`;
-   `public/babylon.png` + `public/spinner.png` present; StrictMode removed)
+   (self-contained — `src/babylon` vendored, NO submodules; binaries byte-intact per
+   `spec/binary-files.md`; remote origin removed; `.gitignore`; **copy
+   `src/babylon/assets/{babylon,spinner}.png` → `public/`**; StrictMode removed;
+   exact `@babylonjs/*` pins + committed lockfile)
 2. **COPY** the registry entry's `source_class` from `src/babylon/classes/`
    → **`src/scripts/<ProjectClassName>.ts`**
    (Blank Canvas → `DefaultGameMode.ts`)

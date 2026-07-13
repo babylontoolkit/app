@@ -70,6 +70,14 @@ Small unavoidable edits to upstream files (branding hooks, prompt selection) are
 - **Provider/LLM layer** (credits/Pro gating): add a "Platform" provider entry + server proxy; gate provider/model UI by mode. NEVER remove or restructure upstream's multi-provider system — BYOK (the Pro perk) and our own dev path (`PRO_FEATURES_ENABLED`) depend on it intact.
 - **Upstream's planned agent-backend / subagents rework:** anticipated as the single hardest pull. Preparation: keep ALL our generation logic server-side (agent proxy) rather than woven into their client pipeline, so their orchestration can change beneath us. When it ships, schedule it as dedicated work (not a routine monthly pull), re-evaluate §4.2's single-agent stance against what they built, and adopt their orchestration if it subsumes ours.
 
+### 2.1b Known upstream defects (fix additively; log each in FORK_BASE.md)
+
+Upstream ships real bugs that surface in our environment. Each fix is additive/localized per §2.1a and logged in FORK_BASE.md's divergence map. Known set (grows as found):
+
+- **Binary file layer destroys bytes at ingest** — the big one; see principle 10 and `spec/binary-files.md`.
+- **UnoCSS icons render blank when the dev server is launched from VS Code's integrated terminal.** `uno.config.ts` relies on `presetIcons`' filesystem loader, which upstream installs only when `!process.env.VSCODE_CWD` (it assumes "VS Code" implies the UnoCSS extension is hosting). A terminal inside VS Code inherits that var, so every `i-ph:*` / `i-svg-spinners:*` icon silently disappears — no error, just missing UI. **Fix: register the `ph` + `svg-spinners` collections explicitly in `presetIcons`**, making icon loading independent of launch environment (additive keys; upstream-mergeable).
+- **`functions/[[path]].ts` (Cloudflare Pages entry) breaks `tsc` on a fresh tree** — it imports `../build/server`, which exists only after a production build, so the pre-commit typecheck hook fails before you have ever built. We deploy to AWS Lightsail (spec/hosting.md), never CF Pages. **Fix: add `"exclude": ["functions", "node_modules", "build", "dist"]` to `tsconfig.json`.** Do NOT delete `functions/` or `wrangler.toml` (§2.1a hide-don't-delete).
+
 ### 2.2 What we KEEP from bolt.diy (audit against upstream's CURRENT feature set — it has grown; do not rebuild what exists)
 
 - Remix app shell, chat UI, streaming, code editor, file tree, diff view, terminal
@@ -245,7 +253,7 @@ Key property of this architecture: **compute for running user projects costs us 
 ### 4.3 Doc-Sync Subsystem (system prompt build, refresh, caching)
 
 **PLATFORM IDENTITY — we are a NEW HOST PLATFORM in the Agent Reference's Platform Detection Table:**
-`project-installer.md` defines a BLOCKING platform-detection procedure (Lovable / Replit / Bolt.new / Base44 / V0 / Generic), each mapping to a platform-specific reference doc. Our builder is a **distinct host platform** — a bolt.diy fork with its own runtime, file zones, and creation flow. **Action (owner, agent repo):** author a platform row + reference doc (e.g. `references/web-app-babylon-builder.md`) covering: StarterAssets clone with `--recurse-submodules`, remote-origin removal, ES6 package set, React Framework submodule at `src/babylon`, our §4.4b file zones (`src/scripts` write zone; `babylon/classes` + `babylon/system` + router read-only), the §4.4c play contract + bundle-integrity rule, and the required `public/` binary assets. Until it exists, bake **Generic** (`web-app-generic.md`) behavior. **Baked-prompt corollary:** the detection procedure's "fetch the doc" step is satisfied at doc-sync time, not per generation — the agent must NEVER be instructed to fetch platform docs at runtime (§1.3 principle 3).
+`project-installer.md` defines a BLOCKING platform-detection procedure (Lovable / Replit / Bolt.new / Base44 / V0 / Generic), each mapping to a platform-specific reference doc. Our builder is a **distinct host platform** — a bolt.diy fork with its own runtime, file zones, and creation flow. **Action (owner, agent repo):** author a platform row + reference doc (e.g. `references/web-app-babylon-builder.md`) covering: StarterAssets clone (self-contained — `src/babylon` is vendored, NO submodules), remote-origin removal, ES6 package set, our §4.4b file zones (`src/scripts` write zone; `babylon/classes` + `babylon/system` + router read-only), the §4.4c play contract + bundle-integrity rule, and the required `public/` binary assets. Until it exists, bake **Generic** (`web-app-generic.md`) behavior. **Baked-prompt corollary:** the detection procedure's "fetch the doc" step is satisfied at doc-sync time, not per generation — the agent must NEVER be instructed to fetch platform docs at runtime (§1.3 principle 3).
 
 The Agent Reference repo (`github.com/babylontoolkit/agent`) and skills repo (`github.com/babylontoolkit/skills`) remain the single editable sources of domain knowledge — **no changes to how those docs are authored or organized**. The platform consumes snapshots:
 
@@ -656,7 +664,7 @@ Per §1.3 principle 0, every feature below is BUILT during Phases 1–2 with con
 Verification checklist per credential: set config → restart → the previously-degraded UI path now completes end-to-end.
 
 ### Phase 0 — Prompt proof (days; throwaway; start immediately)
-Script: prompt → Anthropic API (system prompt assembled from Agent Reference + a hand-built skills index; `load_skill` tool resolving from a local clone of the skills repo) → parse file actions → write into a local clone of the golden starter template (`babylontoolkit/StarterAssets`, cloned with --recurse-submodules) → verify Vite HMR shows the change.
+Script: prompt → Anthropic API (system prompt assembled from Agent Reference + a hand-built skills index; `load_skill` tool resolving from a local clone of the skills repo) → parse file actions → write into a local clone of the golden starter template (`babylontoolkit/StarterAssets` — self-contained, no submodules) → verify Vite HMR shows the change.
 **Exit:** 10 varied prompts appropriate to the chosen template's genre (feature adds, visual changes, HUD elements) each yield a runnable change with ≤ 1 manual fix, and at least one prompt demonstrably triggers a skill load that improves the result. If this fails, fix the docs/skills/prompt layer before fork surgery. (APEX BURNOUT on Lovable is informal evidence this passes.)
 
 ### Phase 1 — Fork surgery (local, single-user; no external users)

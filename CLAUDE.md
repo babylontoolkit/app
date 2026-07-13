@@ -5,6 +5,11 @@
 1. **Read `SPEC.md` before doing anything.** It is the source of truth for scope, architecture, and phasing. If a request conflicts with the spec, say so and propose a spec change — do not silently diverge.
 2. This repo is a **fork of bolt.diy** (MIT). `FORK_BASE.md` records the upstream base commit. Respect the inherited Remix code structure; keep diffs against upstream minimal where practical so upstream pulls stay possible.
 3. When architecture or scope changes, **update SPEC.md in the same PR** (see SPEC §11 Working Agreement).
+4. **Run the gates before declaring ANY task done.** The repo has a husky pre-commit hook that runs typecheck → lint → tests and stops at the first failure. Never hand back work that fails it:
+   ```bash
+   pnpm typecheck && pnpm lint:fix && pnpm lint && pnpm test
+   ```
+   Fix everything it reports (`lint:fix` auto-resolves most Prettier/formatting errors). If a gate fails for a reason outside the current task (an upstream defect — see §2.1b), say so explicitly rather than silently bypassing with `--no-verify`.
 
 ## What we are building (one paragraph)
 
@@ -27,6 +32,12 @@
 - **No server-side execution of user code or skill scripts.** Ever (SPEC §5).
 - **Generations never depend on GitHub at runtime.** Docs and skills are consumed from synced, versioned snapshots (SPEC §4.3, §4.11).
 - **Grant integrity:** signup grant once per user (partial unique index). **BYOK is honored only with a server-verified active Pro entitlement**, and its UI (key entry, provider/model pickers) must not render for non-Pro users at all — credits-mode UI contains zero provider machinery (SPEC §2.3, §4.1, §4.6.1).
+
+## Known upstream defects (SPEC §2.1b — do not re-introduce)
+
+- Binary file layer destroys bytes at ingest → `spec/binary-files.md` (never regress this).
+- `uno.config.ts`: icons render blank when the dev server starts from VS Code's integrated terminal (upstream gates `presetIcons`' loader on `!process.env.VSCODE_CWD`). We register the `ph` + `svg-spinners` collections explicitly — keep it that way.
+- `tsconfig.json` excludes `functions/` (Cloudflare Pages entry imports `../build/server`, absent pre-build → `tsc` fails in the pre-commit hook). We deploy to Lightsail, not CF Pages. Keep `functions/` on disk (hide-don't-delete).
 
 ## Where things live
 
@@ -78,34 +89,18 @@ No bolt.diy marks in any user-facing surface. ALL brand output (product name, lo
 - Server code under `app/lib/.server/**` only; anything importable by the client must contain no secrets and no privileged logic.
 - Migrations: Supabase SQL migrations checked into `supabase/migrations`; RLS policies live with the table that they protect.
 - Feature flags and rates (credit rates, grant sizes, model strings) are **config**, never hardcoded.
-- Tests: unit-test the ledger math, grant uniqueness, action-parser allow-list, and prompt-builder validation — these are the money/safety paths.
+- Tests: unit-test the ledger math, grant uniqueness, action-parser allow-list, prompt-builder validation, the Anthropic provider wrappers (`anthropic.spec.ts`), and binary byte-identity round-trips (`binary-files.spec.ts`) — these are the money/safety/correctness paths.
+- **Definition of done for every task:** `pnpm typecheck && pnpm lint:fix && pnpm lint && pnpm test` all green, the app still runs (`pnpm dev`), and SPEC.md updated if reality diverged. Formatting errors are not "someone else's problem" — `lint:fix` takes two seconds.
 
 ## Domain rules the agent-facing code must preserve
 
 - Generated projects: Babylon Toolkit + BabylonJS only; three.js only on explicit user request as a utility; never restructure the starter's Vite/React scaffold unasked; keep the project runnable.
 - The Agent Reference docs and skills repos are authored externally (`babylontoolkit/agent`, `babylontoolkit/skills`) — this codebase consumes them; never edit their content from here.
 
-## Current stage
+## Current phase
 
-We build in **STAGES** (GETTING_STARTED.md Step 4) — dependency-first construction order. SPEC §9's *phases* are LAUNCH/GATING order and never bound what may be built (see the BUILD-FIRST standing rule). Nothing here is "out of scope because it's a later phase."
+Track the active phase (SPEC §9) here so sessions know what's in scope:
 
-> **Active stage: 2 — Project creation (the Toolkit core).** Build §4.4 game_registry (`source_class`, `scene_url`, `match_keywords`) + template snapshot pipeline → §4.4a new-project routing (a typed prompt SEEDS a registry entry and RUNS IMMEDIATELY — the wizard NEVER interrupts it) → §4.4b copy-from-source scaffolding → §4.4c landing-page TOTAL rewrite + play contract + bundle integrity. Verify: "make me a kart racer" → seeded from Racing → themed landing page → Play launches the project's own GameMode.
->
-> (Stage 3 is the hosted layer — §4.5 Supabase, §4.6 credits/Stripe. The Stage 1 stores are already behind interfaces — `getPromptStore()` / `getSkillStore()` / `getGenerationLog()` — with filesystem adapters writing to `.data/`; Stage 3 adds Supabase adapters and switches the factories, with no caller changes.)
->
-> **Stage 1 — the brain: DONE.** Verified 2026-07-13 against the live repos and the live Anthropic API:
-> - **§4.2a Anthropic hardening** — `@ai-sdk/anthropic ^1.2.12`; current model table; `stripSamplingParams` + `dropOrphanReasoningSignatures` in `capabilities.ts` (outside `.server/`); `DEFAULT_MODEL = claude-sonnet-5`. `anthropic.spec.ts` asserts on the serialized wire body and a replayed SSE stream, and INCLUDES the two "prove the bug exists" tests. Live calls green on sonnet-5 / haiku-4-5 / opus-4-8.
-> - **§4.3 doc-sync** — 26 docs fetched from `babylontoolkit/agent`, 143KB base prompt, 15 on-demand blocks (keyword-routed), 2 declaration files; versioned + content-addressed store; hash no-op; atomic activation + rollback; `POST /api/admin/prompt` (ADMIN_TOKEN-guarded; unset = closed). The Agent Reference is a ROUTER INDEX that tells the reader to fetch sub-docs at runtime — `sections/00-platform-identity.md` overrides that, since generation has zero network access by rule (§1.3 principle 3).
-> - **§4.11 skills** — all 9 skills synced from `babylontoolkit/skills`; frontmatter validation (invalid bundle → skip, never fatal); manifest-only resource resolution (traversal is unreachable, not "blocked"); `/` autocomplete in chat; slash force-load; auto description-triggered `load_skill` confirmed firing.
-> - **§4.2 agent proxy** — `/api/agent` (upstream `/api/chat` left intact); server-side tool loop invisible to the client; prompt-cache breakpoints (measured 114k tokens written → 84k read back); usage + cache tokens recorded per generation.
->
-> **Known Stage 1 follow-ups (behavioral, not structural):**
-> - **Skill over-loading.** On a request that merely *resembles* a skill's domain, the model can burn all 6 tool rounds loading skills and reading their resources (measured: 180k in / 75k out / >10 min for one small feature). The cap-continuation ("on cap, proceed with what's loaded") prevents the silent truncation this used to cause, but the index directive in `sections/40-skill-usage.md` still needs tuning. Simple requests that match no skill are unaffected (39s, clean artifact).
-> - **No text streams during tool rounds** — the user can watch a blank pane for minutes. Wants a progress annotation ("loading skill…"), as upstream does for context/summary.
-> - **Self-healing (§4.2.7) is server-ready but client-unwired.** The proxy accepts `errors` / `repairOf` / `repairAttempt` and caps repairs at 2; nothing on the client posts Vite compile errors to it yet.
->
-> **Stage 0 — binary-assets blocker: DONE** (commit `110d3ff`). Verified 2026-07-12: live `babylontoolkit/StarterAssets` mount carries 12/12 binaries byte-identical to GitHub raw; snapshot→restore preserves PNG bytes hash-identically (`app/lib/binary/binary-files.spec.ts`).
->
-> SPEC §9's "Phase 0 — prompt proof" (`tools/phase0` throwaway script) was **skipped deliberately**: it was a pre-fork de-risking exercise, and the fork now proves the same thing end-to-end in the real UI.
+> **Active phase: 0 — Prompt proof.** In scope: `tools/phase0` script only. Out of scope: fork surgery, Supabase, billing.
 
-(Update this block as stages complete.)
+(Update this block as phases complete.)

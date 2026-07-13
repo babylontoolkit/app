@@ -61,13 +61,16 @@ PULL COMPATIBILITY IS MANDATORY (SPEC §2.1a): additive-first, hide-don't-delete
 never removing upstream code), platform-as-provider. Extend the FilesStore and provider
 layer — never rewrite them.
 
-STAGE 0 TASK — the blocker: binary assets are dropped by the file layer (PNGs vanish; Vite
-fails on "Failed to resolve import ../assets/babylon.png"). Implement SPEC §1.3 principle
-10 across EVERY file path (template mount, git/folder import, WebContainer writes,
-snapshots, restore, GitHub sync, share builds).
-Verify: new project → src/assets PNGs present + public/babylon.png + public/spinner.png
-present → pnpm dev boots with ZERO unresolved imports → snapshot → restore → PNG bytes
-hash-identical.
+STAGE 0 TASK — the blocker: binary assets are destroyed at ingest by upstream's text-oriented
+file layer (PNGs → 0 bytes; Vite fails on "Failed to resolve import ../assets/babylon.png").
+**Follow `spec/binary-files.md` exactly** — it is the implemented contract from a prior build:
+WebContainer FS is the single source of truth for bytes; File carries isBinary+size with EMPTY
+content; NEVER route binaries through boltArtifact/boltAction (text protocol — corrupts them AND
+leaks them to the model) — write out-of-band; base64 is a wire format only. Additive module at
+app/lib/binary/ hooked at existing seams (§2.1a — #1 merge hotspot: extend, never rewrite).
+Verify (per that doc): snapshot→restore is sha256-identical for real PNGs; mount StarterAssets →
+all binaries byte-identical to a fresh clone; `vite build` → ZERO unresolved imports;
+public/babylon.png + public/spinner.png present (copied from src/babylon/assets/ at creation).
 ```
 
 ### Stage 1 — The brain (agent + knowledge)
@@ -91,8 +94,10 @@ the skill and produces its workflow output.
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §4.4 game_registry (source_class, scene_url, match_keywords) + template snapshot
-pipeline (submodules vendored, setup hygiene: remote origin removed, .gitignore, public
-PNGs, vite/tsconfig/eslint config, StrictMode removed) → §4.4a new-project routing (typed
+pipeline (StarterAssets is SELF-CONTAINED — src/babylon vendored, NO submodules; setup hygiene:
+remote origin removed, .gitignore, copy src/babylon/assets/{babylon,spinner}.png → public/,
+vite/tsconfig/eslint config, StrictMode removed; exact @babylonjs/* pins + committed lockfile —
+a floated caret breaks `npm run build` and thus Share) → §4.4a new-project routing (typed
 prompt SEEDS a registry entry and RUNS IMMEDIATELY — the wizard NEVER interrupts it; card
 path; guided-tour path) → §4.4b copy-from-source scaffolding (copy classes/<SourceClass>
 into src/scripts/<ProjectClassName>, rename class + RegisterClass; babylon/classes +
