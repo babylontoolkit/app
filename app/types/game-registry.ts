@@ -1,7 +1,7 @@
 /**
  * The game registry (SPEC §4.4).
  *
- * Genres are registry DATA, not repos: there is ONE starter (`babylontoolkit/StarterAssets`), and a
+ * Genres are registry DATA, not repos: there is ONE starter (`babylontoolkit/AppTemplate`), and a
  * genre is a row that names which demo class to copy out of its read-only library. Adding a genre is
  * adding a row — never a new repo, never a new snapshot pipeline.
  *

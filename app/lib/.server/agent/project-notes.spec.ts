@@ -42,6 +42,24 @@ describe('the MCP note (§4.14)', () => {
     expect(note).toContain('bad');
   });
 
+  it('prefers the LIVE running tools over the declared servers when the client reports them', () => {
+    const note = mcpNote(
+      files({ '.mcp.json': JSON.stringify({ mcpServers: { kie: { command: 'node_modules/.bin/kie' } } }) }),
+      [{ name: 'generate_image', description: 'Make an image', server: 'kie' }],
+    );
+
+    // The actual tool name (what the model calls) appears, framed as running + untrusted.
+    expect(note).toContain('generate_image');
+    expect(note).toMatch(/running MCP tools/i);
+    expect(note).toMatch(/untrusted/i);
+  });
+
+  it('shows a note for live tools even when there is no .mcp.json in the files', () => {
+    const note = mcpNote(undefined, [{ name: 'search', server: 'remote' }]);
+
+    expect(note).toContain('search');
+  });
+
   it('never puts an env VALUE in the note (only the key name)', () => {
     const note = mcpNote(
       files({

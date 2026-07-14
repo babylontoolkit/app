@@ -4,7 +4,7 @@
 
 Format: agentskills.io bundles — folder + `SKILL.md` with `name`/`description` frontmatter + body (≤ ~5,000 tokens) + optional `references/`. **The `description` is the trigger** — the model decides to load a skill from it alone, so descriptions state what it does AND when to use it. Draft frontmatter below is a starting point; tune after watching real trigger behavior (`generations.skills_loaded`).
 
-Test each skill in Claude Code against the StarterAssets project before considering it done — the same skill serves Claude Code, Cursor, and the platform unchanged.
+Test each skill in Claude Code against the AppTemplate project before considering it done — the same skill serves Claude Code, Cursor, and the platform unchanged.
 
 ---
 
@@ -77,5 +77,5 @@ Body: menu state machine in the GameMode; `SceneManager.PauseRenderLoop` vs. sof
 
 - [ ] Frontmatter validates against agentskills.io (name matches folder, description ≤1024 chars, states what + when)
 - [ ] Body ≤ ~5k tokens; complete code follows Toolkit conventions (namespace PROJECT, full lifecycle, `RegisterClass`, batteries-included — built-ins over custom)
-- [ ] Tested in Claude Code against a StarterAssets clone: a natural prompt ("add coins to collect") triggers the load and yields a runnable result
+- [ ] Tested in Claude Code against a AppTemplate clone: a natural prompt ("add coins to collect") triggers the load and yields a runnable result
 - [ ] Cross-references component docs instead of duplicating them

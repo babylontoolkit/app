@@ -26,21 +26,13 @@
  * public URL, and because it must run identically on the pre-share preview and on the publish itself.
  */
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
+import type { ChecklistFinding } from '~/types/share';
 
-export type FindingLevel = 'blocking' | 'warning';
-
-export interface ChecklistFinding {
-  level: FindingLevel;
-
-  /** Stable id, so the UI can render a fix affordance per rule and tests can assert without matching prose. */
-  code: string;
-
-  /** Shown to the user. Plain language — the audience is a non-developer (§4.7). */
-  message: string;
-
-  /** The file that triggered it, when there is one. */
-  path?: string;
-}
+/*
+ * Re-exported so existing importers of these types from this module keep working; the source of truth
+ * is `~/types/share` (client-safe, since the share dialog renders findings — §4.8).
+ */
+export type { ChecklistFinding, FindingLevel } from '~/types/share';
 
 export interface ChecklistResult {
   ok: boolean;

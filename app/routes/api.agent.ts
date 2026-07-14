@@ -59,6 +59,12 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
 
     /** Asset introspection summaries the client attached for referenced assets (§4.9). */
     assetNotes?: string[];
+
+    /**
+     * MCP tools actually running in the project's WebContainer (§4.14) — names/descriptions only. The
+     * proxy uses them to tell the model what it can call; execution stays client-side in the sandbox.
+     */
+    mcpTools?: Array<{ name: string; description?: string; server: string }>;
   }>();
 
   const cookies = parseCookies(request.headers.get('Cookie'));
@@ -136,6 +142,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
        */
       gameBackend: sanitizeGameBackend(body.gameBackend, context),
       assetNotes: body.assetNotes,
+      mcpLiveTools: body.mcpTools,
       apiKeys,
       providerSettings,
       context,

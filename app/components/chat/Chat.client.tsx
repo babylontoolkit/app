@@ -35,6 +35,7 @@ import { defaultDesignScheme, type DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import type { TextUIPart, FileUIPart, Attachment } from '@ai-sdk/ui-utils';
 import { useMCPStore } from '~/lib/stores/mcp';
+import { mcpToolsAtom, syncMcpBridge } from '~/lib/stores/mcpBridge';
 import type { LlmErrorAlertType } from '~/types/actions';
 import {
   decideAutoRepair,
@@ -151,6 +152,17 @@ export const ChatImpl = memo(
     const mcpSettings = useMCPStore((state) => state.settings);
 
     /*
+     * MCP bridge (§4.14): launch the project's `.mcp.json` servers INSIDE the WebContainer and expose
+     * their tools. Runs when the active project changes; the sync is idempotent and only relaunches on
+     * a real config change. The discovered tools ride in the agent body so the server knows what is
+     * available. (Servers run in the user's sandbox — never on platform infrastructure, §5.)
+     */
+    const mcpTools = useStore(mcpToolsAtom);
+    useEffect(() => {
+      syncMcpBridge().catch(() => undefined);
+    }, [activeProjectId]);
+
+    /*
      * SELF-HEALING (§4.2.7, §4.2 item 7) — the client half.
      *
      * The server has always been able to run a repair turn: it accepts `errors` / `repairOf` /
@@ -223,6 +235,25 @@ export const ChatImpl = memo(
             anonKey: supabaseConn?.credentials?.anonKey,
           },
         },
+
+        /*
+         * Game Backend (§4.15) — the SAME user-owned Supabase connection, described for the platform
+         * agent proxy so it scaffolds RLS-first. Only the PUBLIC project ref travels (never the
+         * management PAT), and the server independently refuses a ref that resolves to the platform
+         * Supabase (hard separation). This is what the `/api/agent` proxy actually reads; the upstream
+         * `supabase` block above is left in place for pull compatibility.
+         */
+        gameBackend: {
+          connected: Boolean(supabaseConn.isConnected && selectedProject),
+          projectRef: supabaseConn.selectedProjectId,
+        },
+
+        /*
+         * MCP tools actually RUNNING in this project's WebContainer (§4.14). Names + descriptions only
+         * — the server uses them to tell the model what it can call; execution stays client-side in the
+         * sandbox (`callMcpTool`). Empty when the project has no `.mcp.json` or no servers started.
+         */
+        mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description, server: t.server })),
         maxLLMSteps: mcpSettings.maxLLMSteps,
       },
       sendExtraMessageFields: true,

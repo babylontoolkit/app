@@ -1,5 +1,5 @@
 import type { TabType } from './types';
-import { User, Settings, Bell, Star, Database, Cloud, Laptop, Github, Wrench, List } from 'lucide-react';
+import { User, Settings, Bell, Star, Database, Cloud, Laptop, Github, Wrench, List, Box, Sliders } from 'lucide-react';
 
 // GitLab icon component
 const GitLabIcon = () => (
@@ -53,6 +53,8 @@ export const TAB_ICONS: Record<TabType, React.ComponentType<{ className?: string
   supabase: () => <SupabaseIcon />,
   'event-logs': List,
   mcp: Wrench,
+  assets: Box,
+  admin: Sliders,
 };
 
 export const TAB_LABELS: Record<TabType, string> = {
@@ -67,9 +69,11 @@ export const TAB_LABELS: Record<TabType, string> = {
   gitlab: 'GitLab',
   netlify: 'Netlify',
   vercel: 'Vercel',
-  supabase: 'Supabase',
+  supabase: 'Game Backend',
   'event-logs': 'Event Logs',
   mcp: 'MCP Servers',
+  assets: 'Assets',
+  admin: 'Admin',
 };
 
 export const TAB_DESCRIPTIONS: Record<TabType, string> = {
@@ -84,9 +88,11 @@ export const TAB_DESCRIPTIONS: Record<TabType, string> = {
   gitlab: 'Connect and manage GitLab integration',
   netlify: 'Configure Netlify deployment settings',
   vercel: 'Manage Vercel projects and deployments',
-  supabase: 'Setup Supabase database connection',
+  supabase: 'Connect your own Supabase project as a Game Backend (leaderboards, saves, profiles)',
   'event-logs': 'View system events and logs',
   mcp: 'Configure MCP (Model Context Protocol) servers',
+  assets: 'Browse the asset store and manage your uploaded models, textures, and audio',
+  admin: 'Platform usage, cost, gallery curation, and moderation (admins only)',
 };
 
 export const DEFAULT_TAB_CONFIG = [
@@ -103,6 +109,10 @@ export const DEFAULT_TAB_CONFIG = [
   { id: 'notifications', visible: true, window: 'user' as const, order: 9 },
   { id: 'event-logs', visible: true, window: 'user' as const, order: 10 },
   { id: 'mcp', visible: true, window: 'user' as const, order: 11 },
+  { id: 'assets', visible: true, window: 'user' as const, order: 12 },
+
+  // Admin — visible by default; the tab itself gates its content on the caller being an admin.
+  { id: 'admin', visible: true, window: 'user' as const, order: 13 },
 
   // User Window Tabs (In dropdown, initially hidden)
 ];

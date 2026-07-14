@@ -110,7 +110,7 @@ export function SupabaseConnection() {
                     crossOrigin="anonymous"
                     src="https://cdn.simpleicons.org/supabase"
                   />
-                  Connect to Supabase
+                  Connect a Game Backend
                 </DialogTitle>
 
                 <div>

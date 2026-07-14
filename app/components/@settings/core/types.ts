@@ -17,7 +17,9 @@ export type TabType =
   | 'vercel'
   | 'supabase'
   | 'event-logs'
-  | 'mcp';
+  | 'mcp'
+  | 'assets'
+  | 'admin';
 
 export type WindowType = 'user' | 'developer';
 
@@ -78,9 +80,11 @@ export const TAB_LABELS: Record<TabType, string> = {
   gitlab: 'GitLab',
   netlify: 'Netlify',
   vercel: 'Vercel',
-  supabase: 'Supabase',
+  supabase: 'Game Backend',
   'event-logs': 'Event Logs',
   mcp: 'MCP Servers',
+  assets: 'Assets',
+  admin: 'Admin',
 };
 
 export const categoryLabels: Record<SettingCategory, string> = {

@@ -22,6 +22,7 @@ import type { Snapshot } from './types';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 import { createSnapshot, restoreLatestServerCheckpoint, saveMessages } from './projects';
+import { takePendingRemix } from './pending-remix';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('ChatHistory');
@@ -249,8 +250,25 @@ ${value.content}
           toast.error('Failed to load chat: ' + error.message); // More specific error
         });
     } else {
-      // Handle case where there is no mixedId (e.g., new chat)
-      setReady(true);
+      /*
+       * No mixedId — a fresh builder. But a remix (§4.8) may have parked a cloned project id here on
+       * its way in. If so, adopt it: set the project and mount its files through the SAME
+       * server-checkpoint path a normal resume uses. The conversation is fresh (a remix starts a new
+       * chat), but the files are the cloned game, ready to build on.
+       */
+      const remixProjectId = takePendingRemix();
+
+      if (remixProjectId) {
+        projectId.set(remixProjectId);
+        chatMetadata.set({ ...chatMetadata.get(), projectId: remixProjectId });
+
+        restoreLatestServerCheckpoint(remixProjectId)
+          .then(({ files }) => (files ? workbenchStore.restoreFiles(files) : undefined))
+          .catch((error) => logger.warn(`Could not load remixed project ${remixProjectId}: ${error.message}`))
+          .finally(() => setReady(true));
+      } else {
+        setReady(true);
+      }
     }
   }, [mixedId, db, navigate, searchParams]); // Added db, navigate, searchParams dependencies
 

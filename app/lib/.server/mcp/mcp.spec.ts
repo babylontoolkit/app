@@ -7,7 +7,7 @@
  * project tree must be refused, not launched, even though the WebContainer is isolated (§4.14).
  */
 import { describe, expect, it } from 'vitest';
-import { isProjectTreeCommand, parseMcpConfig } from './project-config';
+import { isProjectTreeCommand, parseMcpConfig } from '~/lib/mcp/project-config';
 
 describe('the command allow-rule', () => {
   it.each(['node_modules/.bin/babylon-mcp', './scripts/mcp-server.js', 'node', 'npx', 'babylon-mcp'])(

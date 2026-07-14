@@ -110,6 +110,13 @@ export interface AgentRequest {
    * this project, so the agent writes logic against an asset's actual components instead of guessing.
    */
   assetNotes?: string[];
+
+  /**
+   * MCP tools actually running in the project's WebContainer (§4.14). Names/descriptions only — used to
+   * make the "available tools" note reflect what STARTED, not just what `.mcp.json` declared. Execution
+   * is client-side in the sandbox; the server never runs these.
+   */
+  mcpLiveTools?: Array<{ name: string; description?: string; server: string }>;
 }
 
 /** The skill tool set, as `streamText` sees it — keeps the result's tool types concrete. */
@@ -432,6 +439,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     files: request.files,
     gameBackend: request.gameBackend,
     assetNotes: request.assetNotes,
+    mcpLiveTools: request.mcpLiveTools,
   })) {
     system.push({ role: 'system', content: note });
   }

@@ -2,7 +2,7 @@
  * Project-scoped MCP configuration (SPEC §4.14).
  *
  * MCP is a **project file, not a platform setting**: a Claude Code-compatible `.mcp.json` at the
- * project root, shipped by the StarterAssets template and carried through snapshots, remixes and GitHub
+ * project root, shipped by the AppTemplate template and carried through snapshots, remixes and GitHub
  * sync automatically. This module is the server's read-only understanding of that file — it PARSES and
  * VALIDATES it, so the agent context can tell the model which tools exist and the runtime can decide
  * what it is allowed to launch. It never executes anything (that is the WebContainer's job, §4.14; the

@@ -68,7 +68,7 @@ WebContainer FS is the single source of truth for bytes; File carries isBinary+s
 content; NEVER route binaries through boltArtifact/boltAction (text protocol — corrupts them AND
 leaks them to the model) — write out-of-band; base64 is a wire format only. Additive module at
 app/lib/binary/ hooked at existing seams (§2.1a — #1 merge hotspot: extend, never rewrite).
-Verify (per that doc): snapshot→restore is sha256-identical for real PNGs; mount StarterAssets →
+Verify (per that doc): snapshot→restore is sha256-identical for real PNGs; mount AppTemplate →
 all binaries byte-identical to a fresh clone; `vite build` → ZERO unresolved imports;
 public/babylon.png + public/spinner.png present (copied from src/babylon/assets/ at creation).
 ```
@@ -94,7 +94,7 @@ the skill and produces its workflow output.
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §4.4 game_registry (source_class, scene_url, match_keywords) + template snapshot
-pipeline (StarterAssets is SELF-CONTAINED — src/babylon vendored, NO submodules; setup hygiene:
+pipeline (AppTemplate is SELF-CONTAINED — src/babylon vendored, NO submodules; setup hygiene:
 remote origin removed, .gitignore, copy src/babylon/assets/{babylon,spinner}.png → public/,
 vite/tsconfig/eslint config, StrictMode removed; exact @babylonjs/* pins + committed lockfile —
 a floated caret breaks `npm run build` and thus Share) → §4.4a new-project routing (typed
@@ -122,7 +122,7 @@ per-user by the license service).
 Verify: default config = credits UI only, no model names anywhere; flag on = BYOK panel appears.
 ```
 
-### Stage 4 — The full product surface - DONE
+### Stage 4 — The full product surface - IN PROGRESS
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §4.7 guided tour wizard (spec/wizard-config.md catalog) → §4.8 share / /play builds /

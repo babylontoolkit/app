@@ -21,7 +21,7 @@ The wizard is a fallback for people who don't know what to type — **not a toll
 
 1. Match the prompt against `game_registry` entries via their `match_keywords[]`
    (Racing: racing, race, kart, car, driving, drift, lap, track, speed…)
-2. Seed the project from the best match: StarterAssets snapshot + that entry's
+2. Seed the project from the best match: AppTemplate snapshot + that entry's
    `game_mode` (+ optional `scene_url`)
 3. **Run their prompt IMMEDIATELY as the first generation.** No wizard. No interstitial.
    No "now pick a template" after they already said what they want.
@@ -70,7 +70,7 @@ and prompt fragments are editable without a deploy.
 
 Every path ends here:
 
-1. Mount the **StarterAssets** snapshot into the WebContainer
+1. Mount the **AppTemplate** snapshot into the WebContainer
    (self-contained — `src/babylon` vendored, NO submodules; binaries byte-intact per
    `spec/binary-files.md`; remote origin removed; `.gitignore`; **copy
    `src/babylon/assets/{babylon,spinner}.png` → `public/`**; StrictMode removed;

@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { DeployButton } from '~/components/deploy/DeployButton';
+import { ShareButton } from '~/components/share/ShareButton';
+import { GitHubSyncButton } from '~/components/github/GitHubSyncButton';
 
 interface HeaderActionButtonsProps {
   chatStarted: boolean;
@@ -16,6 +18,12 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
 
   return (
     <div className="flex items-center gap-1">
+      {/* Share the game as a public /play build (§4.8) */}
+      {shouldShowButtons && <ShareButton />}
+
+      {/* GitHub Sync — link/push/pull, available to ALL users (§4.13) */}
+      {shouldShowButtons && <GitHubSyncButton />}
+
       {/* Deploy Button */}
       {shouldShowButtons && <DeployButton />}
 

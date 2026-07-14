@@ -27,7 +27,7 @@ import {
 
 const ENTRIES = registryData.entries as GameRegistryEntry[];
 
-/** The real `VehicleControllerDemo.ts` head, verbatim from babylontoolkit/StarterAssets@main. */
+/** The real `VehicleControllerDemo.ts` head, verbatim from babylontoolkit/AppTemplate@main. */
 const VEHICLE_DEMO = `import { AssetsManager, Quaternion, Scene, TransformNode } from "@babylonjs/core";
 import { SceneController, InputController, SceneManager } from "@babylonjs-toolkit/next/scenemanager";
 import { StandardCarController, VehicleInputController, VehicleCameraManager } from "@babylonjs-toolkit/next/project";

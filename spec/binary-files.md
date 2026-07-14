@@ -90,7 +90,7 @@ builds.
 
 1. **Round-trip is hash-identical.** snapshot → JSON transport → restore → sha256 equal to the
    original bytes. Asserted in the spec file for both synthetic and real PNGs.
-2. **End-to-end, against the real starter:** mount `babylontoolkit/StarterAssets` → every binary
+2. **End-to-end, against the real starter:** mount `babylontoolkit/AppTemplate` → every binary
    byte-identical to a fresh `git clone` → `vite build` reports **zero** `UNRESOLVED_IMPORT` →
    `vite dev` boots and serves each asset with a matching sha256, and `file(1)` still identifies
    them as PNG/WASM.
@@ -99,7 +99,7 @@ builds.
    framework requirement; copied from `src/babylon/assets/` at project creation). These two are
    the canonical smoke test: they were the observed casualties of the binary bug.
 
-Last verified against `StarterAssets@main`: 12/12 binaries byte-identical (incl. `player.png`
+Last verified against `AppTemplate@main`: 12/12 binaries byte-identical (incl. `player.png`
 109KB and `havok.wasm` 2MB), 3762 modules transformed, 0 unresolved imports, both `public/`
 framework assets present and hash-identical to their sources.
 

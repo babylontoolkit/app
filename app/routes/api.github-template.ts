@@ -193,7 +193,7 @@ async function fetchRepoContentsZip(repo: string, githubToken?: string) {
   /**
    * Fall back to the DEFAULT BRANCH zipball when a repo publishes no releases.
    *
-   * Our starter (`babylontoolkit/StarterAssets`) is a template repo tracking `main` with no
+   * Our starter (`babylontoolkit/AppTemplate`) is a template repo tracking `main` with no
    * releases at all, so requiring `releases/latest` made template mounting fail outright
    * (404) — before any binary handling even came into play (SPEC §4.4).
    */

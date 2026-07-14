@@ -1,6 +1,6 @@
 {
-  "$comment": "The game registry (SPEC §4.4) — DATA, not code. Becomes a Supabase table in Stage 3; the column names here are the column names there. `source_class` must name a file that exists in babylontoolkit/StarterAssets @ src/babylon/classes/, and `scene_url` must be servable with permissive CORS (the framework preloads it cross-origin).",
-  "starter_repo": "babylontoolkit/StarterAssets",
+  "$comment": "The game registry (SPEC §4.4) — DATA, not code. Becomes a Supabase table in Stage 3; the column names here are the column names there. `source_class` must name a file that exists in babylontoolkit/AppTemplate @ src/babylon/classes/, and `scene_url` must be servable with permissive CORS (the framework preloads it cross-origin).",
+  "starter_repo": "babylontoolkit/AppTemplate",
   "toolkit_version": "9.15",
   "entries": [
     {
