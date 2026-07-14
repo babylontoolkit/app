@@ -43,6 +43,82 @@
 > **The trap to not re-introduce:** a tool round is not "one extra API call". It re-prefills the whole
 > prompt AND invites the model to throw away everything it has written so far. Before adding a tool to
 > the loop, ask whether the thing it fetches could simply be in the cached prefix instead.
+>
+> ## The same disease, on EDIT turns — and the rule that finally kills it
+>
+> Fixing creation did not fix editing, and editing was worse. Measured on "change the CTA button's
+> colour", against the same project:
+>
+> ```
+> step 1: 30s | 2,641 out | read_skill_resource({skill: 'bt-design', paths: []})
+> step 2: 19s | 1,867 out | load_skill({name: 'bt-design'})     <- already loaded
+> step 3: 18s | 1,449 out | load_skill({name: 'bt-design'})     <- already loaded
+> step 4: 24s | 1,945 out | load_skill({name: 'bt-design'})     <- already loaded
+> step 5: 22s | 2,075 out | load_skill({name: 'bt-design'})     <- already loaded
+> step 6:  7s |   580 out | load_skill({name: 'bt-design'})     <- already loaded
+> step 7: 11s |   888 out | read_skill_resource({..., paths: ['placeholder']})
+> step 8: 19s | 1,723 out | ANSWER: ""
+> ```
+>
+> `bt-design` was ALREADY PRE-LOADED into the cached prefix, under a heading reading
+> **"ALREADY LOADED — do NOT call load_skill"**. The model called `load_skill` for it five times in a
+> row. Each call returned "already loaded, proceed with the task". Each time it called again. Then it
+> invented a resource path called `"placeholder"`. It burned all six tool rounds, ~11,000 output
+> tokens and two minutes — and returned an **empty string**. The user's file was never touched and
+> they were charged 405 credits.
+>
+> **The rule: a skill is reached EITHER by pre-loading it into the prefix OR by the model fetching it —
+> never both at once.** Offering a tool while instructing the model not to use it is not redundancy, it
+> is a trap. So `allowTools` is now `!isCreationTurn && preloaded.length === 0 && !slash`: the tools
+> exist only on the turn the keyword router could not anticipate, which is the only turn they can help.
+>
+> We tried the obvious middle ground first — keep `read_skill_resource` (so a pre-loaded skill's
+> bundled files stay reachable) and drop only `load_skill`. The model thrashed on the remaining tool
+> instead: six rounds, 160s, empty response, pulling in 101KB of hero-scroll templates to change a
+> button's colour. **The trap is the tool, not which tool.** See spec/skills.md for the limitation this
+> leaves behind and the right way to close it (a resource-level router, not the tool).
+>
+> Two defects this uncovered, both of which had been silently eating real generations:
+>
+> 1. **A zod constraint on a tool argument is a loaded gun.** The AI SDK validates arguments BEFORE
+>    `execute` runs, and a violation throws `InvalidToolArgumentsError`, which **kills the generation**.
+>    `paths: z.array(z.string()).min(1)` died on `paths: []`; `name: z.string()` died on `load_skill({})`.
+>    Both burned the user's tokens and returned a zod dump. **A tool argument the model can plausibly
+>    get wrong is validated in `execute`, never in the schema** — `execute` can return a sentence the
+>    model reads and corrects on its next step. Constrain the schema only where a violation is
+>    impossible. (`tools.spec.ts` pins this.)
+> 2. **`finishReason: 'stop'` does not mean the model said anything.** That empty answer above was a
+>    clean `stop` with 10,054 billed output tokens, `result.text === ''` and `response.messages === []`.
+>    Nothing threw. The proxy now treats a generation that produced zero text as a hard failure, which
+>    routes it to the §4.6 auto-refund instead of charging for silence.
+>
+> ## Diff-based edits (`type="edit"`)
+>
+> With the tool loop out of the way, the remaining cost of an edit turn is the file rewrite itself.
+> `type="file"` re-emits the WHOLE file, so cost scales with the size of the FILE rather than the size
+> of the CHANGE. `type="edit"` (`app/lib/runtime/edit-blocks.ts`) sends search/replace blocks instead.
+>
+> Measured end to end — "change the CTA button's colour to a vivid green and make its corners fully
+> rounded", against a real 10,532-character `Home.css`:
+>
+> | | Tool loop + full rewrite | Tools off, full rewrite | **Tools off + `edit`** |
+> |---|---|---|---|
+> | Wall clock | 121–185s | 47s | **39s** |
+> | Output tokens | 10,054–15,881 | 6,522 | **3,958** |
+> | Tool rounds | 6 (cap) | 0 | **0** |
+> | Result | **empty response** | whole file re-emitted | one block, matched exactly once |
+>
+> A second probe ("change the headline and add a subtitle") produced 2 blocks across `Home.tsx` and
+> `Home.css` — both matched exactly once — in 26s and 1,991 output tokens.
+>
+> The format is search/replace, NOT a unified diff: `@@ -41,7 +41,9 @@` makes the model count lines and
+> carry an offset, and it gets that wrong often enough that the repair turns cost more than the diff
+> saved. A search block carries its own anchor, so there is nothing to miscount.
+>
+> The safety property is that a mis-applied edit is worse than an expensive one — it corrupts a file the
+> user never asked to change. So a SEARCH that matches nothing is an error, a SEARCH that matches twice
+> is an error (never "take the first one"), and blocks apply **all-or-nothing** to an in-memory copy:
+> a half-patched file never reaches disk, even for an instant. There is no fuzzy matching, ever.
  — what the model is allowed to see
 
 > Sub-spec of SPEC §4.2.8. Sibling of `spec/binary-files.md`, and the generalization of it.

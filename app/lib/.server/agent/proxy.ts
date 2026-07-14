@@ -348,6 +348,37 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     system.push({ role: 'system', content: buildPreloadedSkillBlock(preloaded), providerOptions: CACHE_CONTROL });
   }
 
+  /*
+   * ---- If the skills are already in the prefix, the model gets NO tools. ----
+   *
+   * A skill is reached EITHER by pre-loading it into the cached prefix OR by the model fetching it.
+   * Never both. Offering a tool while telling the model not to use it is a trap, not a redundancy, and
+   * we have now watched it spring three times:
+   *
+   *   creation turn, tools on   — "never load a skill here" in the prompt; called `load_skill` 4x.
+   *                               Removing the tools took the build from 468s to 114s.
+   *   edit turn, tools on       — `bt-design` pre-loaded under a heading reading "ALREADY LOADED — do
+   *                               NOT call load_skill"; called `load_skill('bt-design')` FIVE TIMES,
+   *                               each answered "already loaded, proceed". 6 rounds, ~11,000 output
+   *                               tokens, 2 minutes, then an EMPTY response. Charged 405 credits.
+   *   edit turn, only
+   *   `read_skill_resource` on  — we tried keeping just this one, so bundled files stayed reachable.
+   *                               It thrashed on THAT instead: 6 rounds, 160s, empty response again.
+   *                               The trap is the tool, not which tool.
+   *
+   * With tools off the same edit takes 29s and produces a correct patch. So: tools exist only for the
+   * turn the keyword router could not anticipate (`preloaded.length === 0`), which is the only turn
+   * where they can do any good.
+   *
+   * KNOWN LIMITATION, recorded rather than hidden: on a pre-loaded turn the model cannot read a
+   * skill's BUNDLED RESOURCES (only its instructions are inlined). `bt-design` bundles 101KB of
+   * hero-scroll templates and its body says to read one before writing hero-scroll code. Inlining all
+   * of it on every design turn (~25k tokens) is the wrong trade for the one turn in fifty that wants
+   * it. If that workflow matters, the fix is a resource-level router that inlines the few files a
+   * request actually implies — NOT handing the tool back. See spec/skills.md.
+   */
+  const allowTools = !isCreationTurn && preloaded.length === 0 && !slash;
+
   if (request.files && Object.keys(request.files).length > 0) {
     /*
      * Binaries and opaque files arrive here as `<boltFile>` markers — never bodies (§4.2.8).
@@ -376,6 +407,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   const toolContext: SkillToolContext = {
     loaded: new Set([...(slash ? [slash.skillName] : []), ...preloaded.map((s) => s.name)]),
+
+    /*
+     * Once the router has put the skills in the prefix, `load_skill` has nothing left to fetch — so it
+     * is removed rather than merely discouraged. Discouraging it did not work: see `offerLoadSkill`.
+     */
+    offerLoadSkill: preloaded.length === 0 && !slash,
   };
   const tools = createSkillTools(toolContext);
 
@@ -389,7 +426,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   logger.info(
     `Generation: model=${model} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
-      `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION (no tools)' : ''}`,
+      `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION' : ''} ` +
+      `tools=${allowTools ? 'on' : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`}`,
   );
 
   const coreMessages = convertToCoreMessages(messages as any);
@@ -424,7 +462,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         const ms = now - stepClock;
         stepClock = now;
 
-        const tools = step.toolCalls?.map((c) => c.toolName) ?? [];
+        const tools = (step.toolCalls ?? []).flatMap((c) => (c?.toolName ? [String(c.toolName)] : []));
         const out = step.usage?.completionTokens ?? 0;
         const meta = step.providerMetadata?.anthropic as
           | { cacheReadInputTokens?: number; cacheCreationInputTokens?: number }
@@ -477,6 +515,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   async function* drain(result: StreamTextResult<SkillTools, never>): AsyncGenerator<string> {
     for await (const part of result.fullStream) {
       if (part.type === 'text-delta') {
+        if (part.textDelta.length > 0) {
+          producedText = true;
+        }
+
         yield part.textDelta;
       } else if (part.type === 'error') {
         throw part.error;
@@ -517,6 +559,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   let failed = false;
 
+  /** Did the model actually SAY anything? Zero text is a failure, whatever `finishReason` claims. */
+  let producedText = false;
+
   async function* run(): AsyncGenerator<string> {
     try {
       /*
@@ -526,7 +571,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * definitions and still drafts around them. Passing `allowTools: false` sets `maxSteps: 1`, so
        * there is exactly one LLM call and the model has no way to abandon its draft and start over.
        */
-      const first = startStream([...system, ...coreMessages], !isCreationTurn);
+      const first = startStream([...system, ...coreMessages], allowTools);
       yield* drain(first);
 
       /*
@@ -559,6 +604,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         );
 
         yield* drain(continuation);
+      }
+
+      /*
+       * A generation that produced NO TEXT is a failure, however cheerfully the provider says "stop".
+       *
+       * This is not hypothetical. The degenerate tool loop above ended exactly here: `finishReason`
+       * was `stop`, `result.text` was `""`, `response.messages` was `[]` — and 10,054 output tokens
+       * had been billed. Without this check the ledger takes 405 credits, the client renders an empty
+       * assistant bubble, and nothing anywhere reports a problem. The user just sees their request
+       * quietly do nothing, which is the worst possible failure: unattributable.
+       *
+       * So: no text, no charge. `failed` routes it to the §4.6 auto-refund, and the error gives the
+       * user something to react to (and Retry, §4.12) instead of silence.
+       */
+      if (!producedText) {
+        failed = true;
+        throw new Error(
+          'The model returned an empty response. You have not been charged for this generation — please try again.',
+        );
       }
     } catch (error) {
       /*

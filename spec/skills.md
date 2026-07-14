@@ -18,10 +18,37 @@ Claude Code-style skill support in the platform chat: the workflow skills in `gi
 ```
 
 - Tool loop lives entirely server-side inside one generation; client stream sees only text + actions.
-- `read_skill_resource` resolves strictly via the version's `resources_manifest` (exact-match path lookup; no filesystem semantics → no traversal class of bugs). Unknown skill/path → friendly tool_result error string, never an exception.
+- `read_skill_resource` resolves strictly via the version's `resources_manifest` (exact-match path lookup; no filesystem semantics → no traversal class of bugs). Unknown skill/path → friendly tool_result error string, never an exception. It takes a LIST of paths — N resources must cost one round trip, not N.
 - Loop cap: 6 tool rounds per generation (config); on cap, proceed with what's loaded.
 - Loaded bodies appended as separate `cache_control` blocks (repeat loads within TTL are cheap).
 - We NEVER execute `scripts/` server-side. Skills that ship project files direct the agent to emit them as normal file actions into the user's WebContainer.
+
+### A tool argument the model can get wrong is validated in `execute`, NEVER in the schema
+
+The AI SDK validates tool arguments against the zod schema **before `execute` runs**, and a violation throws `InvalidToolArgumentsError` — which **aborts the stream and kills the generation**. The user is billed for everything spent up to that point and gets a zod dump back.
+
+Both of these happened on real edit turns, against the real model:
+
+| Constraint | The call that killed it | Cost |
+|---|---|---|
+| `paths: z.array(z.string()).min(1)` | `read_skill_resource({skill: 'bt-design', paths: []})` | 185s, 15,881 output tokens, 497 credits |
+| `name: z.string()` (required) | `load_skill({})` | 45s, ~3,500 output tokens |
+
+Models emit degenerate tool calls; they always will. The defect is not the model's — it is that we made a *recoverable* mistake *fatal*. Every tool argument is therefore `.optional()`, and `execute` returns a sentence the model reads and corrects on its next step, inside the same generation. Constrain the schema only where a violation is genuinely impossible. `tools.spec.ts` pins this.
+
+### Pre-loading and the tool loop are ALTERNATIVES, never both at once
+
+A skill is reached **either** by pre-loading it into the cached prefix **or** by the model fetching it with a tool. Offering the tool while telling the model not to use it is a trap, not a redundancy — measured three times:
+
+- **Creation turn, tools available.** Prompt said "never load a skill on a creation turn"; the model called `load_skill` four times anyway. Removing the tools took the build from **468s → 114s**.
+- **Edit turn, tools available.** `bt-design` pre-loaded under a heading reading *"ALREADY LOADED — do NOT call load_skill"*; the model called `load_skill('bt-design')` **five times in a row**, each answered "already loaded, proceed with the task". Six rounds, ~11,000 output tokens, two minutes — then an **empty response**. Charged 405 credits.
+- **Edit turn, only `read_skill_resource` available** (kept so bundled files stayed reachable). It thrashed on *that* instead: six rounds, 160s, empty response again. **The trap is the tool, not which tool.**
+
+With tools off, the same edit takes **29–39s** and produces a correct patch. So `allowTools = !isCreationTurn && preloaded.length === 0 && !slash` — tools exist only for the turn the keyword router could not anticipate, the only turn where they can help.
+
+**Known limitation (recorded, not hidden).** On a pre-loaded turn the model cannot read a skill's **bundled resources** — only its instructions are inlined. `bt-design` bundles 101KB of hero-scroll templates (~25k tokens) and its body says to read one before writing hero-scroll code. Inlining all of it on every design turn is the wrong trade for the one turn in fifty that wants it. If that workflow becomes important, the fix is a **resource-level router** that inlines the few files a request actually implies — *not* handing the tool back.
+
+Corollary, and the reason the block does not even list the resource paths: naming a file the model has no tool to open is not information, it is a dangling instruction, and it will spend the whole turn trying to follow it.
 
 ## Invocation
 

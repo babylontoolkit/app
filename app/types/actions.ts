@@ -1,6 +1,6 @@
 import type { Change } from 'diff';
 
-export type ActionType = 'file' | 'shell' | 'supabase';
+export type ActionType = 'file' | 'edit' | 'shell' | 'supabase';
 
 export interface BaseAction {
   content: string;
@@ -8,6 +8,19 @@ export interface BaseAction {
 
 export interface FileAction extends BaseAction {
   type: 'file';
+  filePath: string;
+}
+
+/**
+ * A search/replace patch against an existing file (SPEC §4.2.8).
+ *
+ * `content` is one or more `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` blocks — see
+ * `app/lib/runtime/edit-blocks.ts`. This exists so that changing one line of a file costs one line of
+ * OUTPUT tokens instead of the whole file, which on a large stylesheet is a ~50x difference on the
+ * most expensive tokens we buy.
+ */
+export interface EditAction extends BaseAction {
+  type: 'edit';
   filePath: string;
 }
 
@@ -30,7 +43,7 @@ export interface SupabaseAction extends BaseAction {
   projectId?: string;
 }
 
-export type BoltAction = FileAction | ShellAction | StartAction | BuildAction | SupabaseAction;
+export type BoltAction = FileAction | EditAction | ShellAction | StartAction | BuildAction | SupabaseAction;
 
 export type BoltActionData = BoltAction | BaseAction;
 

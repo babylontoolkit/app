@@ -32,8 +32,8 @@ describe('the creation-turn marker', () => {
 
 describe('buildPreloadedSkillBlock', () => {
   const skills = [
-    { name: 'bt-design', body: 'Design guidance here.' },
-    { name: 'bt-hero', body: 'Hero guidance here.' },
+    { name: 'bt-design', body: 'Design guidance here.', resourcePaths: ['references/3d-hero-scroll.md'] },
+    { name: 'bt-hero', body: 'Hero guidance here.', resourcePaths: [] },
   ];
 
   it('carries every skill body', () => {
@@ -54,5 +54,25 @@ describe('buildPreloadedSkillBlock', () => {
     expect(block).toMatch(/ALREADY LOADED/i);
     expect(block).toMatch(/do NOT call load_skill/i);
     expect(block).toContain('bt-design, bt-hero');
+  });
+
+  /**
+   * Counter-intuitive, and we got it wrong in both directions before landing here — so it is pinned.
+   *
+   * `load_skill` returns a skill's bundled-resource paths, so the instinct is that a PRE-loaded skill
+   * should list them too ("a pre-loaded skill should be indistinguishable from a fetched one"). We
+   * tried exactly that, together with keeping `read_skill_resource` available so the paths meant
+   * something. The model then spent all six tool rounds and 160 seconds pulling in `bt-design`'s
+   * 101KB of hero-scroll templates — in order to change a button's colour — and returned an empty
+   * response.
+   *
+   * A pre-loaded turn has NO TOOLS. Naming a file the model cannot open is not information, it is a
+   * dangling instruction, and it will spend the whole turn trying to follow it.
+   */
+  it('does not name bundled resources, which a tool-less turn could not open anyway', () => {
+    const block = buildPreloadedSkillBlock(skills);
+
+    expect(block).not.toContain('references/3d-hero-scroll.md');
+    expect(block).not.toMatch(/read_skill_resource/);
   });
 });

@@ -618,6 +618,28 @@ export class WorkbenchStore {
         await artifact.runner.runAction(data);
         this.resetAllFileModifications();
       }
+    } else if (data.action.type === 'edit') {
+      /*
+       * An edit action is a search/replace patch (§4.2.8), so — unlike a file action — there is no
+       * content to stream into the editor as it arrives; half a SEARCH block patches nothing. The
+       * runner applies it to the WebContainer FS in one shot when the action closes, and the file
+       * watcher carries the result back into the file map and the open document.
+       *
+       * All we do here is show the user WHERE it landed.
+       */
+      const wc = await webcontainer;
+      const fullPath = path.join(wc.workdir, data.action.filePath);
+
+      if (this.selectedFile.value !== fullPath) {
+        this.setSelectedFile(fullPath);
+      }
+
+      if (this.currentView.value !== 'code') {
+        this.currentView.set('code');
+      }
+
+      await artifact.runner.runAction(data);
+      this.resetAllFileModifications();
     } else {
       await artifact.runner.runAction(data);
     }

@@ -72,6 +72,20 @@ const MAX_PRELOADED = 2;
 export interface PreloadedSkill {
   name: string;
   body: string;
+
+  /**
+   * The skill's bundled resources — the paths ONLY, never the bodies.
+   *
+   * Load-bearing, and its absence caused a two-minute failure. `load_skill`'s return value appends
+   * this list, so a model that fetches a skill the normal way learns what else it can ask for. The
+   * pre-loaded block used to omit it — and `bt-design`'s instructions say, in as many words, "read
+   * `references/3d-hero-scroll.md` BEFORE writing any code". So the model had an instruction to read a
+   * file and no idea what files existed. It called `load_skill` five times trying to get the list, then
+   * guessed a path called `"placeholder"`.
+   *
+   * Pre-loading a skill means giving the model everything `load_skill` would have — including this.
+   */
+  resourcePaths: string[];
 }
 
 /**
@@ -125,7 +139,7 @@ export async function preloadSkills(
         return null;
       }
 
-      return { name: skill.name, body: skill.body };
+      return { name: skill.name, body: skill.body, resourcePaths: skill.resourcePaths ?? [] };
     }),
   );
 
@@ -141,9 +155,20 @@ export async function preloadSkills(
 /**
  * The system block carrying the pre-loaded skills.
  *
- * The instruction at the top is load-bearing: without it the model calls `load_skill` for a skill it
- * can already see — we watched it do exactly that, four times in one generation, at thousands of
- * wasted output tokens per call.
+ * A pre-loaded turn runs with NO TOOLS (see `allowTools` in the proxy), so this block is everything
+ * the model will get. Two consequences, and the second one is counter-intuitive:
+ *
+ *   - It says the skills are already loaded, so the model does not go looking for them.
+ *
+ *   - It deliberately does NOT list a skill's bundled resource paths, even though `load_skill` does.
+ *     Naming a file the model has no tool to open is not information, it is a dangling instruction —
+ *     and a dangling instruction is what caused the thrash in the first place: with the paths listed
+ *     and `read_skill_resource` available, the model spent all six tool rounds and 160 seconds pulling
+ *     in `bt-design`'s hero-scroll templates in order to change a button's colour, then returned
+ *     nothing. Tell it about a door it cannot open and it will spend the whole turn pushing on it.
+ *
+ * The corollary — a pre-loaded skill's bundled files are unreachable — is a real limitation, recorded
+ * in the proxy and in spec/skills.md rather than papered over.
  */
 export function buildPreloadedSkillBlock(skills: PreloadedSkill[]): string {
   const names = skills.map((s) => s.name).join(', ');

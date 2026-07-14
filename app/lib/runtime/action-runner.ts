@@ -7,6 +7,8 @@ import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
 import type { BoltShell } from '~/utils/shell';
 import { isAllowedShellCommand } from './shell-allowlist';
+import { EditBlockError, applyEditBlocks, parseEditBlocks } from './edit-blocks';
+import { isBinaryPath } from '~/lib/binary/binary-files';
 
 const logger = createScopedLogger('ActionRunner');
 
@@ -164,6 +166,10 @@ export class ActionRunner {
           await this.#runFileAction(action);
           break;
         }
+        case 'edit': {
+          await this.#runEditAction(action);
+          break;
+        }
         case 'supabase': {
           try {
             await this.handleSupabaseAction(action as SupabaseAction);
@@ -226,6 +232,26 @@ export class ActionRunner {
       });
     } catch (error) {
       if (action.abortSignal.aborted) {
+        return;
+      }
+
+      /*
+       * An edit that will not apply is a REPORTABLE failure, not a silent one. The file is untouched
+       * (`applyEditBlocks` is all-or-nothing), so the user asked for a change and got nothing — they
+       * must be told, and the model must be given the error verbatim, because it says exactly which
+       * SEARCH block missed and what to do about it.
+       */
+      if (error instanceof EditBlockError) {
+        this.#updateAction(actionId, { status: 'failed', error: error.message });
+        logger.error(`[edit]:Could not apply edit\n\n`, error);
+
+        this.onAlert?.({
+          type: 'error',
+          title: 'Edit could not be applied',
+          description: 'A search/replace block did not match the file. Nothing was changed.',
+          content: error.message,
+        });
+
         return;
       }
 
@@ -368,6 +394,55 @@ export class ActionRunner {
     } catch (error) {
       logger.error('Failed to write file\n\n', error);
     }
+  }
+
+  /**
+   * Apply a search/replace patch to an existing file (SPEC §4.2.8).
+   *
+   * Unlike a file action, this one never runs mid-stream — `runAction` only executes `file` actions
+   * while `isStreaming`, so an edit is applied exactly once, when its closing tag arrives. That is not
+   * incidental: half a SEARCH block matches nothing, and a patch is not a thing you can apply in
+   * pieces the way you can progressively write a file.
+   *
+   * The read is from the WebContainer FS rather than the file map, because the FS is the source of
+   * truth — it also carries any edit the user just made by hand in the editor, which the model's copy
+   * of the file does not.
+   */
+  async #runEditAction(action: ActionState) {
+    if (action.type !== 'edit') {
+      unreachable('Expected edit action');
+    }
+
+    /*
+     * Binaries are shown to the model as empty `<boltFile binary>` markers, so it has no bytes to
+     * write a SEARCH block against. If it tries anyway, refuse: reading one as UTF-8 and writing the
+     * result back would silently destroy the file (`spec/binary-files.md`).
+     */
+    if (isBinaryPath(action.filePath)) {
+      throw new EditBlockError(
+        `${action.filePath} is a binary file and cannot be edited as text. Binary assets are replaced through the Assets tab, never through an artifact.`,
+      );
+    }
+
+    const webcontainer = await this.#webcontainer;
+    const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
+
+    let source: string;
+
+    try {
+      source = await webcontainer.fs.readFile(relativePath, 'utf-8');
+    } catch {
+      throw new EditBlockError(
+        `${action.filePath} does not exist, so there is nothing to edit. Create it with \`type="file"\` instead.`,
+      );
+    }
+
+    // Both of these throw rather than return partial work, so a failed patch never reaches disk.
+    const blocks = parseEditBlocks(action.content);
+    const patched = applyEditBlocks(source, blocks, action.filePath);
+
+    await webcontainer.fs.writeFile(relativePath, patched);
+    logger.debug(`Applied ${blocks.length} edit block(s) to ${relativePath}`);
   }
 
   #updateAction(id: string, newState: ActionStateUpdate) {
