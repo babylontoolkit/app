@@ -80,6 +80,9 @@ interface BaseChatProps {
   chatMode?: 'discuss' | 'build';
   setChatMode?: (mode: 'discuss' | 'build') => void;
   append?: (message: Message) => void;
+
+  /** Writes the "restored to checkpoint" note into the chat without starting a generation (§4.12). */
+  setMessages?: (messages: Message[]) => void;
   designScheme?: DesignScheme;
   setDesignScheme?: (scheme: DesignScheme) => void;
   selectedElement?: ElementInfo | null;
@@ -136,6 +139,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       chatMode,
       setChatMode,
       append,
+      setMessages,
       designScheme,
       setDesignScheme,
       selectedElement,
@@ -402,6 +406,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                         messages={messages}
                         isStreaming={isStreaming}
                         append={append}
+                        setMessages={setMessages}
                         chatMode={chatMode}
                         setChatMode={setChatMode}
                         provider={provider}

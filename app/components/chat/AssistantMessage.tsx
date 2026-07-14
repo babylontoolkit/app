@@ -27,7 +27,8 @@ interface AssistantMessageProps {
   onFork?: (messageId: string) => void;
 
   /** Restore the project FILES to the checkpoint taken at this message (§4.12). */
-  onRestore?: (messageId: string) => void;
+  /** `mode` selects the state BEFORE this change (the undo people want) or AFTER it (§4.12). */
+  onRestore?: (messageId: string, mode: 'before' | 'after') => void;
 
   /** Re-run this turn from the checkpoint that preceded it (§4.12). */
   onRetry?: (messageId: string) => void;
@@ -177,16 +178,33 @@ export const AssistantMessage = memo(
               {(onRewind || onFork || onRestore || onRetry) && messageId && (
                 <div className="flex gap-2 flex-col lg:flex-row ml-auto">
                   {/*
-                   * Restore the FILES to this checkpoint (§4.12) — distinct from Revert, which only
-                   * rewinds the conversation. For a non-developer who cannot read a diff to see what
-                   * the last generation broke, this is the safety net: it puts the game back.
-                   * Restoring never destroys history — the checkpoints after this one survive, so the
-                   * undo can itself be undone.
+                   * Restore the FILES (§4.12) — distinct from Revert, which only rewinds the
+                   * conversation. For a non-developer who cannot read a diff to see what the last
+                   * generation broke, this is the safety net: it puts the game back.
+                   *
+                   * BOTH directions are offered, because they answer different questions and only one
+                   * of them is the one people actually reach for:
+                   *   - BEFORE — "that change wrecked it, undo it." The common case.
+                   *   - AFTER  — "I liked it as it was here, bring that back."
+                   * Offering only "after" made undoing THIS change impossible without hunting for the
+                   * preceding message and restoring that instead.
+                   *
+                   * Neither destroys history: the checkpoints after the restore point survive, and the
+                   * restore itself is checkpointed, so the undo can always be undone.
                    */}
                   {onRestore && (
-                    <WithTooltip tooltip="Restore the project files to this point">
+                    <WithTooltip tooltip="Undo this change — restore the files to how they were BEFORE it">
                       <button
-                        onClick={() => onRestore(messageId)}
+                        onClick={() => onRestore(messageId, 'before')}
+                        key="i-ph:arrow-arc-left"
+                        className="i-ph:arrow-arc-left text-xl text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary transition-colors"
+                      />
+                    </WithTooltip>
+                  )}
+                  {onRestore && (
+                    <WithTooltip tooltip="Restore the project files to how they were AFTER this change">
+                      <button
+                        onClick={() => onRestore(messageId, 'after')}
                         key="i-ph:clock-counter-clockwise"
                         className="i-ph:clock-counter-clockwise text-xl text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary transition-colors"
                       />

@@ -36,6 +36,13 @@ import type { ElementInfo } from '~/components/workbench/Inspector';
 import type { TextUIPart, FileUIPart, Attachment } from '@ai-sdk/ui-utils';
 import { useMCPStore } from '~/lib/stores/mcp';
 import type { LlmErrorAlertType } from '~/types/actions';
+import {
+  decideAutoRepair,
+  repairMessage,
+  MAX_CLIENT_REPAIRS,
+  REPAIR_WINDOW_MS,
+  type RepairWatch,
+} from '~/lib/runtime/auto-repair';
 
 const logger = createScopedLogger('Chat');
 
@@ -143,6 +150,33 @@ export const ChatImpl = memo(
     const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
     const mcpSettings = useMCPStore((state) => state.settings);
 
+    /*
+     * SELF-HEALING (§4.2.7, §4.2 item 7) — the client half.
+     *
+     * The server has always been able to run a repair turn: it accepts `errors` / `repairOf` /
+     * `repairAttempt`, folds the compiler output into the prompt (`buildRepairMessage`), caps attempts
+     * at `MAX_REPAIR_TURNS`, and escalates the thinking effort (repair → `high`, second repair →
+     * `xhigh`). None of it ever ran, because nothing on the client sent those fields — so a generation
+     * that produced code which does not compile just left the user staring at a red error box.
+     *
+     * `repairWatch` is armed when a generation finishes and disarms itself after
+     * `REPAIR_WINDOW_MS`. Vite recompiles a moment AFTER the last file action lands, so the error we
+     * care about arrives shortly after `onFinish`, not during it. An alert outside that window is the
+     * user's own doing (they edited a file, they ran something) and must never trigger a generation we
+     * bill them for.
+     */
+    const repairWatch = useRef<RepairWatch | null>(null);
+
+    /**
+     * Which repair attempt the CURRENTLY STREAMING generation is (0 = an ordinary turn).
+     *
+     * Separate from `repairWatch` because the watch is consumed the moment a repair fires, and the
+     * count has to survive that. Without it, every repair would look like attempt 1 and the loop would
+     * never reach its cap — an agent that cannot fix the build would keep being paid to try.
+     * Reset to 0 whenever the user sends a message of their own.
+     */
+    const repairAttemptRef = useRef(0);
+
     const {
       messages,
       isLoading,
@@ -201,6 +235,28 @@ export const ChatImpl = memo(
         setData(undefined);
 
         /*
+         * Arm the self-healing watch (§4.2.7). `generationId` comes from the server's `agentMeta`
+         * annotation — a repair turn has to NAME the generation it repairs, which is what tells the
+         * server this is a repair (escalate the effort, count it against the cap, link the two rows in
+         * `generations`) rather than a fresh request the user made.
+         *
+         * `attempt` carries forward: if THIS generation was itself repair attempt 1 and its output
+         * still does not compile, the next one is attempt 2 — and there is no attempt 3. Two failed
+         * repairs means the agent is thrashing, and a third turn spends the user's credits to watch it
+         * thrash again.
+         */
+        const meta = message.annotations?.find(
+          (a): a is { type: 'agentMeta'; value: { generationId?: string } } =>
+            typeof a === 'object' && a !== null && (a as { type?: string }).type === 'agentMeta',
+        );
+
+        const generationId = meta?.value?.generationId;
+
+        repairWatch.current = generationId
+          ? { generationId, attempt: repairAttemptRef.current, until: Date.now() + REPAIR_WINDOW_MS }
+          : null;
+
+        /*
          * Checkpoint the project HERE — once, now that the generation is done and the files have
          * stopped moving (SPEC §4.5.5: "auto-snapshot after each applied generation").
          *
@@ -251,6 +307,60 @@ export const ChatImpl = memo(
       initialMessages,
       initialInput: Cookies.get(PROMPT_COOKIE_KEY) || '',
     });
+
+    /*
+     * SELF-HEALING (§4.2.7) — fire the repair turn.
+     *
+     * Runs when a build error appears while the watch is armed, i.e. the code the agent JUST wrote does
+     * not compile. Everything the server needs to recognise a repair rides in the body: `errors` (which
+     * it folds into the prompt itself — we do not paste the compiler output into a chat message),
+     * `repairOf` (the generation being repaired) and `repairAttempt` (which caps the loop and escalates
+     * the thinking effort).
+     *
+     * The guards are the whole design. Each one is a way this could spend the user's credits without
+     * their asking:
+     *   - only `source: 'preview'` — a Vite compile error. A terminal error is often the user's own
+     *     command, and repairing it uninvited is presumptuous AND billable.
+     *   - only inside the window — an alert an hour later is not our generation's fault.
+     *   - only up to MAX_CLIENT_REPAIRS — two failed repairs is thrashing, not fixing.
+     *   - never while a generation is already streaming.
+     * The watch is disarmed FIRST, so a re-render can never fire the same repair twice.
+     */
+    useEffect(() => {
+      const decision = decideAutoRepair({
+        alert: actionAlert,
+        watch: repairWatch.current,
+        isLoading,
+        now: Date.now(),
+      });
+
+      if (!decision.repair) {
+        if (decision.disarm) {
+          repairWatch.current = null;
+        }
+
+        return;
+      }
+
+      // Disarm FIRST: a re-render must never be able to fire the same repair twice.
+      repairWatch.current = null;
+      repairAttemptRef.current = decision.repairAttempt;
+
+      workbenchStore.clearAlert();
+      logger.debug(`Build failed — auto-repair attempt ${decision.repairAttempt} of ${MAX_CLIENT_REPAIRS}`);
+
+      append(
+        { role: 'user', content: repairMessage(decision.repairAttempt) },
+        {
+          body: {
+            errors: decision.errors,
+            repairOf: decision.repairOf,
+            repairAttempt: decision.repairAttempt,
+          },
+        },
+      );
+    }, [actionAlert, isLoading]);
+
     useEffect(() => {
       const prompt = searchParams.get('prompt');
 
@@ -619,6 +729,14 @@ export const ChatImpl = memo(
         return;
       }
 
+      /*
+       * A message the USER typed is not a repair, and it ends any repair chain in progress (§4.2.7).
+       * Without this reset, a build error hours later would inherit a stale attempt count and either
+       * skip the auto-fix entirely or be misfiled against a generation that is long gone.
+       */
+      repairAttemptRef.current = 0;
+      repairWatch.current = null;
+
       let finalMessageContent = messageContent;
 
       if (selectedElement) {
@@ -861,6 +979,7 @@ export const ChatImpl = memo(
         chatMode={chatMode}
         setChatMode={setChatMode}
         append={append}
+        setMessages={setMessages}
         designScheme={designScheme}
         setDesignScheme={setDesignScheme}
         selectedElement={selectedElement}

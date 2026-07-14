@@ -8,8 +8,19 @@ import { LLMManager } from '~/lib/modules/llm/manager';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/cookies';
 import { createScopedLogger } from '~/utils/logger';
+import { upstreamLlmRouteDisabled } from '~/lib/.server/llm/upstream-routes';
 
 export async function action(args: ActionFunctionArgs) {
+  /*
+   * Upstream's raw LLM passthrough. Unused by this product, and unmetered — an open path onto the
+   * platform key. Fails closed. See `upstream-routes.ts`.
+   */
+  const disabled = upstreamLlmRouteDisabled(args.context, '/api/llmcall');
+
+  if (disabled) {
+    return disabled;
+  }
+
   return llmCallAction(args);
 }
 

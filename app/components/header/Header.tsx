@@ -25,7 +25,7 @@ export function Header() {
         <div className="i-ph:sidebar-simple-duotone text-xl" />
         <a href="/" className="text-2xl font-semibold text-accent flex items-center">
           {/* sized by height: the wordmark is ~6.2:1, so a width-based size renders it tiny */}
-          <img src="/logo-babylontoolkit.svg" alt="babylontoolkit" className="h-[19px] w-auto inline-block" />
+          <img src="/logo-babylontoolkit.svg" alt="babylontoolkit" className="h-[32px] w-auto inline-block" />
         </a>
       </div>
       {chat.started ? ( // Display ChatDescription and HeaderActionButtons only when the chat has started.

@@ -6,7 +6,8 @@ import { UserMessage } from './UserMessage';
 import { useLocation } from '@remix-run/react';
 import { db, chatId, projectId } from '~/lib/persistence/useChatHistory';
 import { forkChat } from '~/lib/persistence/db';
-import { listSnapshots, readSnapshot, setCurrentSnapshot } from '~/lib/persistence/projects';
+import { createSnapshot, listSnapshots, readSnapshot, setCurrentSnapshot } from '~/lib/persistence/projects';
+import { selectRestoreTarget } from '~/lib/persistence/restore-target';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
@@ -20,6 +21,10 @@ interface MessagesProps {
   isStreaming?: boolean;
   messages?: Message[];
   append?: (message: Message) => void;
+
+  /** Used to write the "restored to checkpoint" note into the chat WITHOUT starting a generation. */
+  setMessages?: (messages: Message[]) => void;
+
   chatMode?: 'discuss' | 'build';
   setChatMode?: (mode: 'discuss' | 'build') => void;
   model?: string;
@@ -57,14 +62,29 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
     };
 
     /**
-     * Put the project files back to how they were at this message (§4.12).
+     * Put the project files back to how they were around this message (§4.12).
      *
-     * Deliberately does NOT delete the checkpoints taken after this one. History is append-only: the
-     * restore mounts the old files and then takes a NEW checkpoint, so the trail reads
-     * "… → restore → new checkpoint" and the user can always undo their undo. Destroying the future
-     * would make this button the very thing it exists to protect against.
+     * **`mode` is the whole point of the version history.** Checkpoints are taken AFTER a generation is
+     * applied, so the checkpoint anchored to an assistant message is the state that message *produced*:
+     *
+     *   - `'after'`  — the state this change produced. "I liked it here, take me back."
+     *   - `'before'` — the state that existed BEFORE this change, i.e. the previous message's
+     *     checkpoint. This is the one people actually reach for: "that last change wrecked it, undo it."
+     *     Offering only `'after'` meant the single most-wanted action — undo THIS — was impossible
+     *     without hunting for the preceding message and restoring that instead.
+     *
+     * Three properties this must never lose:
+     *
+     * 1. **Nothing is destroyed.** The checkpoints taken after the restore point survive, so the user
+     *    can undo their undo by restoring forward. Deleting the future would make this button the very
+     *    thing it exists to protect against.
+     * 2. **The restore is itself checkpointed.** History is append-only, so the state we just came FROM
+     *    stays reachable even after the next generation overwrites the working tree.
+     * 3. **The chat is told.** Without a note in the conversation, the model's history claims it wrote
+     *    code that no longer exists on disk — so its next edit would be reasoning about a file that is
+     *    gone, and the user would have no record of why their project changed under them.
      */
-    const handleRestore = async (messageId: string) => {
+    const handleRestore = async (messageId: string, mode: 'before' | 'after') => {
       const pid = activeProjectId;
 
       if (!pid) {
@@ -75,27 +95,64 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
       const toastId = toast.loading('Restoring your project…');
 
       try {
+        // Oldest-first, so "the one before this" is simply the preceding entry.
         const { snapshots } = await listSnapshots(pid);
-        const checkpoint = snapshots.find((s) => s.messageId === messageId);
+        const selection = selectRestoreTarget(snapshots, messageId, mode);
 
-        if (!checkpoint) {
+        if (!selection.ok) {
           toast.update(toastId, {
-            render: 'There is no checkpoint for this message.',
-            type: 'error',
+            render:
+              selection.reason === 'nothing-before'
+                ? 'This is the first change in the project — there is no earlier state to go back to.'
+                : 'There is no checkpoint for this message.',
+            type: selection.reason === 'nothing-before' ? 'info' : 'error',
             isLoading: false,
-            autoClose: 4000,
+            autoClose: 5000,
           });
           return;
         }
 
-        const { files } = await readSnapshot(pid, checkpoint.id);
+        const target = selection.snapshot;
+        const { files } = await readSnapshot(pid, target.id);
+
+        /*
+         * Checkpoint the state we are LEAVING, before we overwrite it (property 2). Do it first: once
+         * `restoreFiles` has run, the bytes we would have captured are gone. A failure here must not
+         * block the restore the user asked for — so it is best-effort, and loud only in the log.
+         */
+        try {
+          await createSnapshot(pid, {
+            files: await workbenchStore.serializeFiles(),
+            label: 'Before restore',
+          });
+        } catch {
+          // The restore is still safe: every earlier checkpoint remains, we just did not add one.
+        }
 
         // Byte-faithful: binaries are base64-decoded and written as bytes, never as UTF-8 text.
         await workbenchStore.restoreFiles(files);
-        await setCurrentSnapshot(pid, checkpoint.id);
+        await setCurrentSnapshot(pid, target.id);
+
+        /*
+         * Tell the conversation what happened (property 3). An assistant message, not a user one: it
+         * must NOT trigger a generation, and the model needs to read it as a statement of fact about
+         * the project it is now working on.
+         */
+        props.setMessages?.([
+          ...messages,
+          {
+            id: `restore-${Date.now()}`,
+            role: 'assistant',
+            content:
+              mode === 'before'
+                ? '↩︎ Restored the project files to the checkpoint from **before** this change. Any edits that change made are no longer on disk — work from the current files, not from what was written earlier in this conversation.'
+                : '↩︎ Restored the project files to the checkpoint taken **after** this change. Work from the current files, not from what was written later in this conversation.',
+          } as Message,
+        ]);
 
         toast.update(toastId, {
-          render: 'Project restored to this checkpoint.',
+          render:
+            mode === 'before' ? 'Project restored to before this change.' : 'Project restored to this checkpoint.',
           type: 'success',
           isLoading: false,
           autoClose: 3000,

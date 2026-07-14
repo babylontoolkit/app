@@ -1,4 +1,4 @@
-# spec/context-budget.md
+# spec/context-budget.md — what the model is allowed to see
 
 > ## OUTPUT tokens are a budget too — and on creation they were the bigger one
 >
@@ -119,11 +119,13 @@
 > user never asked to change. So a SEARCH that matches nothing is an error, a SEARCH that matches twice
 > is an error (never "take the first one"), and blocks apply **all-or-nothing** to an in-memory copy:
 > a half-patched file never reaches disk, even for an instant. There is no fuzzy matching, ever.
- — what the model is allowed to see
 
 > Sub-spec of SPEC §4.2.8. Sibling of `spec/binary-files.md`, and the generalization of it.
 >
-> **Status: implemented and measured (2026-07).**
+> **Status: implemented and measured (2026-07).** The headline levers below are built. §"The complete
+> lever inventory" and §"Levers that are NOT built" (both added 2026-07-13, after an audit found code
+> and spec had drifted apart in both directions) are the parts most likely to be out of date first —
+> check them against the code before trusting them.
 
 ## The rule
 
@@ -230,18 +232,315 @@ Folder import, git import, remix, asset add, snapshot restore, GitHub sync: **ne
 
 The default for anything **generated, vendored, or minified is opaque.**
 
+---
+
+## The complete lever inventory
+
+The sections above tell the story of the big wins. They are not the whole system. An audit (2026-07-13)
+found roughly a dozen further levers that exist **only in code** — each one load-bearing, none of them
+written down, every one of them removable by a well-meaning refactor that would throw nothing and break
+no test. They are listed here so that "why is this here?" has an answer.
+
+**Ordered by what it would cost to lose them.**
+
+### 1. The declaration file is NEVER baked into the prompt
+
+`app/lib/.server/prompt/sources.ts` — `babylon.toolkit.d.ts` is **~490KB (~130k tokens)**. It is synced
+for the *editor's* IntelliSense and deliberately kept out of `BASE_DOCS`.
+
+Putting it in the cached prefix would **dwarf every other cost in this document** — it is larger than
+the entire post-fix creation context. The instinct that would reintroduce it is a reasonable-sounding
+one ("the agent should know the API surface"), which is exactly why it needs to be written down. The
+agent learns the API from the Agent Reference prose and the `classes/` demo library, not from a type
+dump.
+
+### 2. Attachment limits — an unbounded upload is an unbounded bill
+
+`app/lib/.server/agent/attachments.ts`, enforced in `api.agent.ts` **before the credit gate and before
+the model**.
+
+| Limit | Value |
+|---|---|
+| `MAX_ATTACHMENT_BYTES` | 5,000,000 (5MB) per file |
+| `MAX_ATTACHMENT_BYTES_TOTAL` | 20,000,000 (20MB) per message |
+| `MAX_ATTACHMENTS` | 8 per message |
+
+**Vision tokens bill through the normal formula, so an unbounded attachment is an unbounded bill on OUR
+platform key.** The client's picker (`accept="image/*"`) is a UX affordance, not a control — this is a
+plain HTTP endpoint and `curl` does not run our React code.
+
+Two details that look like over-engineering and are not: size is computed by **base64 arithmetic without
+decoding** (materialising a claimed gigabyte just to measure it *is* the denial-of-service), and the
+declared MIME type must match the actual bytes (**magic-number sniff**, 12 bytes decoded) — because a
+caller can label a 40MB video `image/png`.
+
+### 3. The tool set is designed, not assembled
+
+Every one of these came out of a measured failure, and each is a whole wasted generation if removed
+(`app/lib/.server/agent/tools.ts`, `proxy.ts`):
+
+- **`MAX_TOOL_ROUNDS = 6`, consumed as `maxSteps: MAX_TOOL_ROUNDS + 1`.** The `+1` is the ANSWER step.
+  Handing the model the raw tool cap leaves it no step in which to actually reply.
+- **Forced-answer continuation.** If a generation ends on `finishReason: 'tool-calls'` (it hit the cap),
+  the proxy re-streams **once** with tools disabled and a "you have used all available tool rounds"
+  message. Without it the user gets a preamble and no artifact — a fully wasted generation.
+- **`toolChoice: 'none'` on non-tool turns.** Tool *definitions* must still be sent (Anthropic requires
+  them whenever history contains `tool_use` blocks); `none` is what forbids new calls.
+- **`read_skill_resource` takes an ARRAY of paths.** One-path-per-call made N resources cost N sequential
+  round trips — and a round trip re-prefills the entire ~133k-token prompt. Measured: a generation spent
+  **all six rounds** paging in one skill's resources, with none left to answer.
+- **An already-loaded `load_skill` returns one line**, not the skill body again. Observed: `/bt-spec`
+  calling `load_skill('bt-spec')` twice — **17KB each**.
+- **Tool descriptions say what the tool is NOT.** Models used `read_skill_resource` as a general file
+  reader (observed: burning every round trying to read `SPEC.md`, then hitting the cap with no answer).
+- **A miss is reported alongside the hits, with "do not retry with a different path."** A bad path costs
+  one cheap correction instead of a whole extra round of guessing.
+
+### 4. Preload bounds — the keyword router must not drag in the library
+
+`app/lib/.server/agent/preload-skills.ts`
+
+- **`MAX_PRELOADED = 2`** — so a keyword-soup prompt cannot pull the entire skill library into the prefix.
+- **A creation turn preloads exactly ONE skill (`bt-design`).** The routing text on a creation turn is the
+  *brief*, which is full of incidental game vocabulary that keyword-matches skills the model has no use
+  for (observed: dragging in `bt-prototype` for an already-scaffolded project).
+- **The asymmetry that sets keyword breadth:** a false positive costs cached tokens (0.1×); a false
+  negative costs a round trip (~50s plus thousands of redrafted output tokens). Lean toward loading.
+- **The preloaded block deliberately OMITS bundled resource paths.** Naming a file the model has no tool
+  to open is a dangling instruction, and it caused the 6-round/160s thrash described above.
+
+### 5. Cache-stability guards (a busted cache is a silent 10× on the prefix)
+
+- **The skills index is sorted by name** (`skills/sync.ts`, `store.ts` → `listActive()`). An unstable
+  index changes the prefix bytes and **busts the prompt cache on every generation** — a direct hit to
+  margin, with nothing in the UI to show for it.
+- **Unchanged prompt builds are skipped by content hash** (`prompt/build.ts`), so a no-op doc sync does
+  not change the prefix bytes and does not invalidate the cache.
+- **Per-STEP usage accounting** (`agent/step-usage.ts`). Billing sums `result.steps`, not `result.usage`
+  + `result.providerMetadata` — the latter is last-step-scoped. The bug this caught: a creation logging
+  **133,565 cache-read tokens ≈ exactly ONE read** of a 133k prefix, when the tool loop had read it many
+  times. Without correct accounting, caching cannot even be measured, let alone billed.
+
+### 6. What never enters the file map at all
+
+- **Template hygiene** (`app/lib/registry/hygiene.ts`): `.gitmodules`, `*.tsbuildinfo`, `.git/`,
+  `node_modules/`, `.bolt/`, and `Screenshot.png` — **2.9MB** — are never mounted, so they never reach
+  the map, the model, a snapshot, or an export.
+- **`IGNORE_PATTERNS`** (`llm/constants.ts`, applied in `createFilesContext`): `node_modules/**`,
+  `.git/**`, `dist/**`, `build/**`, `coverage/**`, `**/*.log`, lockfiles, etc.
+- **Binaries carry `content: ''` in the FilesStore itself** (`stores/files.ts`); bytes live in the
+  WebContainer and are read back via `readBinaryFile()`. See `spec/binary-files.md`.
+- **`type="edit"` refuses binaries** (`action-runner.ts`) — there are no bytes to write a SEARCH block
+  against.
+
+### 7. Output-side caps
+
+- **`maxTokens: 64_000` on every agent generation** (`proxy.ts`).
+- **Repair error output is truncated to 8,000 characters** (`proxy.ts`) before it enters the prompt. A
+  Vite error cascade is unbounded, and it arrives on the turn we can least afford to inflate.
+- **`PROVIDER_COMPLETION_LIMITS.Anthropic = 64000` is a FLOOR, not a ceiling** (`llm/constants.ts`) —
+  consulted only when a model's real cap is unknown, i.e. exactly when pessimism is correct. Undershooting
+  truncates; overshooting is a 400. Do not "helpfully" raise it. (§4.2a, `spec/anthropic-models.md`.)
+- **The prompt enhancer caps input at 10,000 characters** (`routes/api.enhancer.ts`). The prompt is echoed
+  into the model, so its length *is* the bill.
+
+### 8. Rules that live in the system prompt, not in code
+
+These are enforced by prose, so they are invisible to grep — and they are the first thing a prompt edit
+can silently delete:
+
+- `prompt/sections/40-skill-usage.md`: **"The default is ZERO skills"**; **"At most ONE skill per
+  generation"**; "Loading is not free: it costs a tool round and a large amount of context"; "Never load
+  a skill on a project-creation turn"; and the anti-chain-loading rule ("a skill that names other skills
+  as later steps is describing the USER's workflow, not yours").
+- `prompt/sections/10-action-protocol.md`: the **default-to-`edit` decision table** — "This is the single
+  biggest lever you have on how fast the user gets their result." Full rewrite only when the file does not
+  exist or more than ~half of it is changing.
+
+Note the standing lesson from §"The same disease, on EDIT turns": **instructions are not a control.** The
+prompt said "never load a skill on a project-creation turn" and the model ignored it four times. Where a
+rule can be enforced by removing the capability, enforce it there and keep the prose as explanation.
+
+---
+
+## Wasted tokens and dead time — the taxonomy, and how to see it
+
+Everything above is about not *sending* tokens. This section is about the other failure: tokens we
+**did** buy that bought us nothing. Every entry below is a real, measured generation from this project.
+
+### The physics you cannot cache your way out of
+
+Input tokens arrive in parallel and can be cached. **Output tokens leave the model SERIALLY, at roughly
+60–110 tok/s.** They are also the most expensive tokens we buy (**5× input**). So output is simultaneously
+*most of the bill* and *most of the wall clock*, and the two cannot be traded against each other:
+
+> A generation that emits 44,000 output tokens **cannot** finish in under several minutes. There is no
+> cache, no prefix, and no prompt trick that fixes it. The only fix is to emit fewer output tokens.
+
+This is why "make it faster" and "make it cheaper" are the same instruction here, and why a latency
+complaint must never be answered with more caching until the step log has been read.
+
+### The taxonomy
+
+| # | Pathology | Measured | Fix, and where it is enforced |
+|---|---|---|---|
+| 1 | **Redrafting around tool rounds.** Each tool call makes the model abandon its draft, re-read the prefix, and start over. | 29,173 output tokens across 6 tool steps to load **one** distinct skill = **68% of the bill, 75% of the wall clock**, writing code the user never saw. A tool CALL itself is ~50 tokens; the rest is redrafting. | Pre-load into the cached prefix; `allowTools = false` on creation/preloaded/slash turns (`preload-skills.ts`, `proxy.ts`). |
+| 2 | **Tokens the user never sees.** Aggregate usage hides this completely. | One generation billed **44,308 output tokens** whose final visible answer was ~9k → **~35k output tokens** spent on abandoned attempts, re-generated answers after a round cap, and verbose tool preambles. | The per-step log (below). You cannot fix what you cannot see. |
+| 3 | **Dead air — paying full output rate for reasoning returned as EMPTY text.** `thinking.display` defaults to `"omitted"`. | **90.5s of total silence** before the first byte — not even HTTP headers — on a 152s generation. Billed in full. | `display: 'summarized'` costs nothing extra and turns those tokens into a stream the user watches (`thinkingFetch`, `spec/anthropic-models.md` §3.4). |
+| 4 | **A clean `stop` that said nothing.** `finishReason: 'stop'` does not mean the model produced text. | `result.text === ''`, `response.messages === []`, nothing thrown — and **10,054 output tokens billed, 405 credits taken**. | Zero-text is a hard failure → §4.6 auto-refund (`proxy.ts`). |
+| 5 | **A tool-argument schema violation killing the generation after the tokens are spent.** The AI SDK validates args BEFORE `execute`; a violation throws `InvalidToolArgumentsError`. | `load_skill({})` killed a real edit turn: **45s and ~3,500 output tokens**, file untouched, user shown a zod dump. | All tool params optional; validate inside `execute`, which can return a correcting sentence the model reads on its next step (`tools.ts`, pinned by `tools.spec.ts`). |
+| 6 | **Hitting the tool cap with no step left to answer.** The user gets a preamble and no artifact — a 100% wasted generation. | 6 rounds consumed, empty response. | `maxSteps: MAX_TOOL_ROUNDS + 1` (the `+1` IS the answer step) plus a forced-answer continuation with tools disabled (`proxy.ts`). |
+| 7 | **Re-emitting a whole file to change one line.** Cost scales with FILE size, not CHANGE size. | 10,532-character `Home.css`: full rewrite = 6,522 output tokens / 47s. Same edit as one search/replace block = **3,958 tokens / 39s**; a two-file edit landed in **1,991 tokens / 26s**. | `type="edit"` search/replace blocks (`edit-blocks.ts`) + the default-to-`edit` rule in `10-action-protocol.md`. |
+| 8 | **Under-thinking — the most expensive saving there is.** A cheaper effort does not return a smaller correct answer; it returns a **confident wrong one**, and the repair turns cost more than the saving. | `effort: low` was 22% cheaper on a creation and, on an edit, **wrote into a read-only project zone** (`src/routing/router.tsx`, §4.4c) and abandoned diff-edits for whole-file rewrites. | `low` is DELETED from `EffortLevel`; `parseEffort()` clamps it back to `medium`. **There is no cheap tier** (`spec/anthropic-models.md` §3.5a). |
+| 9 | **Cache churn — paying to keep *creating* a cache rather than read one.** | The 5-minute default TTL expires while the user is playing the game we just built; the next turn re-writes ~111k tokens at full price. Ten turns: **~$4.16 vs ~$0.97**. | `ttl: '1h'` (§"The cache TTL is 1 hour"). |
+| 10 | **Re-sending the whole conversation, uncached, forever.** | Not yet measured — see §"Levers that are NOT built". This is the open one. | **Not fixed.** |
+
+**Two things that look like waste and are not.** A **Stop** is not waste: the tokens were really consumed
+and are billed for what was spent to the abort point (§4.12). A **hard failure** is waste, but it is *our*
+waste — the provider still bills us, and the user is auto-refunded (§4.6). Never "fix" either by charging
+the user more.
+
+### The instrumentation that finds it
+
+Aggregate numbers hide every pathology above. A generation's total says `44,308 out` and looks like a big
+answer; only the step breakdown shows that 35k of it went nowhere. So each generation records
+(`GenerationRecord`, `app/lib/.server/billing/generations.ts`):
+
+- **`steps[]`** — per tool round: `ms`, `outTokens`, `inTokens`, `cacheRead`, `cacheWrite`, `tools[]`.
+- **`toolRounds`**, **`durationMs`**, **`finishReason`**.
+- A log line carrying the **decode rate** (`out tok/s`) next to the wall clock — because that single ratio
+  is what separates the two causes of slowness, and they have **opposite fixes**:
+
+| Symptom in the step log | Cause | Fix |
+|---|---|---|
+| Many steps, each with meaningful `outTokens`, few visible in the answer | sequential tool rounds + redrafting | remove/batch the tools (pathology 1) |
+| One step, huge `outTokens`, decode rate ~normal | the answer itself is too big | emit fewer output tokens — **caching cannot help** (pathology 7) |
+| Long gap before the first byte, low visible output | thinking with `display: omitted` | pathology 3 |
+
+**Billing reads `result.steps`, NOT `result.usage` + `result.providerMetadata`** (`agent/step-usage.ts`) —
+the latter is scoped to the LAST step only. The bug this caught: a creation logging **133,565 cache-read
+tokens ≈ exactly ONE read** of a 133k prefix, when the tool loop had read it repeatedly. Under-counting
+there means both the bill and the diagnostics are wrong, in the same direction, invisibly.
+(`step-usage.spec.ts`, `spec/billing.md`.)
+
+### ⚠️ Gap: none of these diagnostics survive into production
+
+`public.generations` has columns for tokens, model, credits, and cost — and **no columns for `steps`,
+`tool_rounds`, `duration_ms`, or `finish_reason`** (`supabase/migrations/0001_*.sql`). Those fields are
+written to the local-FS generation record and **dropped on the floor in Supabase mode**
+(`SupabaseGenerationStore.upsert` maps only the columns that exist).
+
+So in production, today, **we cannot detect a single pathology in the table above.** We would see that a
+generation cost a lot; we could not see that 68% of it was spent redrafting around tool calls. Every
+number in this document was obtained locally, by hand, from a browser DevTools stream — which does not
+scale to noticing a regression across real users.
+
+Closing this needs a migration (add `tool_rounds int`, `duration_ms int`, `finish_reason text`, and
+`steps jsonb`) plus the corresponding lines in `SupabaseGenerationStore`. It is a prerequisite for the
+§4.10 admin cost dashboards being able to answer "*why* is this expensive", rather than only "*how*
+expensive is it".
+
+---
+
+## 5. The conversation history carries no file bodies (`llm/history.ts`)
+
+**The history is UNCACHED, and that is structural.** All four cache breakpoints sit on the **system**
+blocks; the messages come after them, so the conversation is outside the cached prefix. Every byte of
+every previous turn is re-sent at **full input rate on every turn, forever**, and the total grows
+monotonically with the length of the session.
+
+**Measured on the real conversations in this project: 83–87% of that history is file BODIES** inside
+`<boltAction type="file">` blocks in assistant turns. Across six real conversations: **112,121 → 17,174
+characters (−85%)**, or roughly **28,030 → 4,294 tokens re-sent on every single turn** — and those were
+only *three-message* conversations. The saving compounds with every additional turn.
+
+And every one of those bytes was **redundant**. The current, complete, and *more accurate* contents of
+those same files are sent fresh each turn in `# Current Project Files`. The copy in the history is a
+snapshot of what the model wrote several turns ago, which may since have been edited, restored, or
+deleted. We were paying, repeatedly, for a **stale second copy of something we also send correctly** —
+the same **double representation** this document diagnosed for the creation artifact (§"The two causes"),
+displaced into the conversation.
+
+So the bodies are stripped from file/edit actions in assistant turns; **the tags survive**, so the model
+still knows exactly which files it created and edited, and reads their real contents from the file
+context. User messages are never touched: what the user said exists nowhere else.
+
+A windowing backstop (`MAX_HISTORY_CHARS`) bounds the growth that scales with *conversation* length
+rather than file size, dropping the oldest turns — but **never the first user message**, which is the
+original brief and the thing the whole project exists to satisfy.
+
+### Why not cache the history instead?
+
+**Because it would cost more, not less.** A breakpoint caches the prefix *up to itself*, so caching the
+history requires everything before it to be byte-stable — and it is not: the routed doc blocks, the
+invoked skill, and the file context all vary per turn and all sit in `system`, *before* the messages. A
+breakpoint on the history would be invalidated on essentially every turn, so we would pay a **2× cache
+WRITE** each time in place of a 1× uncached read. Caching it properly means moving the volatile blocks
+*after* the history — a real restructure, to be measured against the live API rather than guessed at, and
+one that would need a fifth breakpoint or the sacrifice of an existing one. Compaction is orthogonal and
+composes with that change if it ever lands.
+
+---
+
+## Levers that are NOT built (do not read this document as a claim that they are)
+
+### (Nothing outstanding on the history — see §5 above. It was the top open item; it is now built.)
+
+### The self-healing repair loop never fires
+
+The server half is complete: `api.agent.ts` accepts `repairOf` / `repairAttempt`, `proxy.ts` enforces
+`MAX_REPAIR_TURNS = 2`, and `effort-policy.ts` escalates a repair turn to `high` and a second to `xhigh`.
+
+**No client code sends those fields.** Nothing in `app/components`, `app/lib/hooks`, or `app/lib/stores`
+references them. So SPEC §4.2 item 7's auto-repair turn does not happen, and the *entire escalation half*
+of the effort policy (`spec/anthropic-models.md` §3.6) is unreachable in practice. This costs no money —
+it costs the feature, and it means the effort policy is currently a constant.
+
+---
+
+## Dead levers — present in the tree, NOT on the live path
+
+The client posts to `/api/agent` (the platform proxy). Upstream bolt.diy's `/api/chat` and `/api/llmcall`
+now **fail closed** (404 unless `UPSTREAM_LLM_ROUTES_ENABLED` — see `app/lib/.server/llm/upstream-routes.ts`
+and SPEC §4.5.4), because they had no session check, no credit gate and no settlement.
+
+Everything reachable only from those routes is therefore **dead code**, and must not be mistaken for a live
+cost control:
+
+| Looks like a lever | Where | Reality |
+|---|---|---|
+| `selectContext` — LLM-based file selection ("only 5 files in the context buffer") | `llm/select-context.ts` | only called from `/api/chat` |
+| `createSummary` — chat history summarisation | `llm/create-summary.ts` | only called from `/api/chat` |
+| last-3-message history slice | `routes/api.chat.ts` | only on the dead path — **this is the windowing the proxy lacks** |
+| `simplifyBoltActions` — strips file bodies from assistant history | `llm/utils.ts` | used only by the two above |
+| `MAX_RESPONSE_SEGMENTS = 2` + continuation on `finishReason: 'length'` | `llm/constants.ts` | only on the dead path |
+| `MAX_TOKENS = 128000` | `llm/constants.ts` | the proxy hardcodes 64k |
+| `maxLLMSteps` (MCP setting) | `Chat.client.tsx` → `api.chat.ts` | **still posted by the client on every turn, silently ignored by the proxy** |
+
+If upstream's agent rework is ever pulled in, `select-context` and `create-summary` are the natural
+starting points for the history window above — but they are starting points, not working code.
+
 ## Where it lives
 
 | Concern | File |
 |---|---|
 | The classifier (net-new, zero merge surface) | `app/lib/context/opaque-files.ts` |
 | Its tests (both directions) | `app/lib/context/opaque-files.spec.ts` |
-| Marker emission | `app/lib/.server/llm/utils.ts` → `createFilesContext` |
-| Cache breakpoint + 1h TTL | `app/lib/.server/agent/proxy.ts` |
+| Marker emission + `IGNORE_PATTERNS` | `app/lib/.server/llm/utils.ts` → `createFilesContext` |
+| Cache breakpoints (all 4) + 1h TTL + `maxTokens` + repair-error truncation | `app/lib/.server/agent/proxy.ts` |
+| Per-step usage accounting (how caching is measured at all) | `app/lib/.server/agent/step-usage.ts` |
 | Out-of-band mount | `app/lib/registry/mount.ts` → `writeTextFiles` / `writeBinaryFiles` |
-| Artifact with no file bodies | `app/lib/registry/create-project.ts` |
+| Artifact with no file bodies + short creation brief | `app/lib/registry/create-project.ts` |
+| Template junk never mounted (2.9MB `Screenshot.png`) | `app/lib/registry/hygiene.ts` |
 | Watcher (keeps the lockfile IN the project) | `app/lib/stores/files.ts` → `watchPaths` |
 | Body-strip before POST (keeps it OUT of the wire) | `app/components/chat/Chat.client.tsx` → `agentFiles` |
+| Tool-set design (rounds, batching, forced answer, `toolChoice`) | `app/lib/.server/agent/tools.ts` |
+| Preload bounds (`MAX_PRELOADED`, creation = 1 skill) | `app/lib/.server/agent/preload-skills.ts` |
+| Effort policy (escalate-only) | `app/lib/.server/agent/effort-policy.ts` |
+| Declaration file kept OUT of the prompt (~490KB) | `app/lib/.server/prompt/sources.ts` |
+| Attachment limits (vision tokens = unbounded bill) | `app/lib/.server/agent/attachments.ts` |
+| Diff edits | `app/lib/runtime/edit-blocks.ts` |
+| Skill budget + default-to-`edit` rules (prose) | `app/lib/.server/prompt/sections/40-skill-usage.md`, `10-action-protocol.md` |
 
 ## How to re-measure (do this on any change to the above)
 

@@ -263,6 +263,13 @@ cast cannot stop an operator, `parseEffort()` clamps a literal `THINKING_EFFORT=
 
 Effort is chosen per turn by `effortForTurn()` (`app/lib/.server/agent/effort-policy.ts`).
 
+> **All three escalation rows now fire (2026-07-14).** They previously could not: the repair rows key
+> off `repairAttempt` / `errors`, which the server accepted and the proxy honoured, but **no client code
+> ever sent them** — so effort was a constant in practice and this table described a policy that never
+> ran. The client half is now built (`app/lib/runtime/auto-repair.ts`; SPEC §4.2 item 7): a Vite compile
+> error arriving within 8s of a generation finishing re-POSTs with `repairOf` + `repairAttempt`, which
+> is exactly the signal this policy reads.
+
 **It decides by turn KIND, never by reading the user's prompt.** A prose classifier ("does this sound
 hard?") is wrong in both directions, impossible to debug when a bill doubles, and puts a language model
 in charge of spend. Every signal below is one the proxy already computes deterministically, for free,

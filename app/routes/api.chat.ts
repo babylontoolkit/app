@@ -14,8 +14,20 @@ import { extractPropertiesFromMessage } from '~/lib/.server/llm/utils';
 import type { DesignScheme } from '~/types/design-scheme';
 import { MCPService } from '~/lib/services/mcpService';
 import { StreamRecoveryManager } from '~/lib/.server/llm/stream-recovery';
+import { upstreamLlmRouteDisabled } from '~/lib/.server/llm/upstream-routes';
 
 export async function action(args: ActionFunctionArgs) {
+  /*
+   * Upstream's chat route. We do not use it — the client posts to `/api/agent` — and it has no
+   * session check, no credit gate and no settlement, so on a deployed instance it is an unmetered way
+   * onto the platform key. Fails closed. See `upstream-routes.ts`.
+   */
+  const disabled = upstreamLlmRouteDisabled(args.context, '/api/chat');
+
+  if (disabled) {
+    return disabled;
+  }
+
   return chatAction(args);
 }
 

@@ -105,6 +105,40 @@ against a cached prefix) and a weighting factor is a pricing decision we have no
   cache-read tokens: suspiciously close to exactly ONE read of a 133K prefix. `steps` is the only
   surface where both numbers are per-step. Guarded by `step-usage.spec.ts`.
 
+- **The waste diagnostics ARE persisted** (migration `0002_generation_diagnostics.sql`, 2026-07-14).
+  `public.generations` carries `tool_rounds`, `duration_ms`, `finish_reason`, `repair_of` and
+  `steps jsonb` alongside the token/cost columns, and `SupabaseGenerationStore` writes them. They are not
+  decoration: aggregate usage hides every pathology in `spec/context-budget.md` §"Wasted tokens and dead
+  time" — one real generation billed 44,308 output tokens of which ~35k never reached the user, and in
+  the totals that is indistinguishable from "the model wrote a big answer". Keep them written. Without
+  them the §4.10 dashboards can chart spend but not diagnose it, and every number in the context-budget
+  doc has to be read by hand out of a DevTools stream.
+
+- **⚠️ ORDER THE LEDGER BY `seq`, NEVER BY `created_at` (migration 0003).** Balance is derived from "the
+  latest row", and a wall clock cannot tell you which that is. `created_at` defaults to `now()` — the
+  **transaction** timestamp — and rows written back-to-back routinely share one. The original function
+  ordered by `created_at desc, id desc`, and `id` is a **random uuid**, so on a tie "the latest row"
+  silently became "a random one of the rows from this millisecond" and the next append derived its
+  `balance_after` from the wrong one. **The sequence that triggers it is the one the proxy runs on every
+  failed generation**, back-to-back inside a single `finally`: settle the debit, then auto-refund it —
+  measured, the refund read the *grant* row and produced a balance that skipped the debit entirely
+  (9750 instead of 10000). Nothing throws; the append-only history looks perfectly plausible. `seq` is a
+  DB-assigned identity, and because every append serializes on the per-user advisory lock, sequence order
+  IS causal order. `SupabaseLedger.balance()` / `.list()` order by it too. **Clocks tie, and clocks go
+  backwards — never order money by one.** (`FsLedger` is immune: a JSONL file has inherent order. Which
+  is exactly why only the Postgres test could find this.)
+
+- **⚠️ The SQL is now under test — keep it that way (`ledger-sql.spec.ts`).** Every other billing test
+  runs against `FsLedger`, the local mirror, which has no foreign keys, no partial unique indexes, no
+  triggers and no advisory locks. It can only prove we implemented the rules **twice**; it cannot prove
+  the DATABASE enforces them — and the database is what runs in production. That gap is exactly how the
+  `credit_ledger.generation_id` foreign key shipped unnoticed (nothing wrote `generations`, so Postgres
+  would have rejected **every** debit, `settleGeneration` would have swallowed it, and every generation
+  would have billed ZERO — while `FsLedger` stayed perfectly happy). `ledger-sql.spec.ts` runs the real
+  migration files against an embedded Postgres (PGlite) and asserts the guarantees where they are
+  actually made: balance derivation, the FK, both partial unique indexes, the negative-balance rule, the
+  append-only trigger, `security definer` + service-role-only execute, and RLS on every user-scoped table.
+
 - **The cached prefix includes the TOOL DEFINITIONS, not just the system blocks.** Change a tool's
   schema (or the base prompt) and every user's cache entry is invalidated: the next generation pays a
   full cache WRITE at 2×. Measured: an otherwise-trivial generation cost $0.51, of which **$0.36 (71%)

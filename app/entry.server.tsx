@@ -5,6 +5,22 @@ import { renderToReadableStream } from 'react-dom/server';
 import { renderHeadToString } from 'remix-island';
 import { Head } from './root';
 import { themeStore } from '~/lib/stores/theme';
+import { assertNotLocalInProduction } from '~/lib/.server/supabase/auth';
+
+/**
+ * THE BOOT GATE (SPEC §4.5).
+ *
+ * Local mode treats every caller as a VERIFIED ADMIN — that is what makes it useful for development
+ * and catastrophic in production. It engages purely from the absence of `SUPABASE_URL` /
+ * `SUPABASE_ANON_KEY`, so a typo'd SSM path or a dropped container variable is all it takes for a
+ * production deploy to hand admin to the public internet.
+ *
+ * This must run at BOOT, at module scope, not on the first authenticated request. A per-request check
+ * lets the process come up healthy, pass its health check, take traffic, and serve every route that
+ * never happens to call `getUser` — the webhook, the admin route, every public loader. Refusing to
+ * start is the only version of this check that actually holds.
+ */
+assertNotLocalInProduction();
 
 export default async function handleRequest(
   request: Request,

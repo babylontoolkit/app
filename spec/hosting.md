@@ -37,7 +37,7 @@
 
 ## Storage integration changes (supersedes Supabase Storage mentions in SPEC §4.5.5/§4.8/§4.11)
 
-- Snapshots: tar/gzip of project sources → `s3://btk-snapshots-{env}/{userId}/{projectId}/{snapshotId}.tar.gz`; `snapshots.storage_path` stores the S3 key. Server-side access only (runtime IAM role); clients get snapshot contents via the app, never S3 URLs.
+- Snapshots: a JSON envelope of the project file map (binaries carried as base64 entries alongside their true byte `size`) → `snapshots/{projectId}/{snapshotId}.json` in the snapshot bucket; `snapshots.storage_path` stores the key. Server-side access only (runtime IAM role); clients get snapshot contents via the app, never S3 URLs. *(As built, Stage 3 — this supersedes the tar/gzip envelope this doc originally specified. base64 is lossless and the manifest carries true byte counts, so byte integrity below is unaffected; the format is an implementation detail behind the storage interface, and tar remains a valid future swap if snapshot size ever justifies it.)*
 - Shared builds: uploaded by the server after the in-WebContainer `npm run build`, to the play bucket under `{shareId}/`.
 - Skill resources (§4.11): stored under `s3://btk-snapshots-{env}/skills/{skill}/{version}/...` (same private bucket, server-read-only path).
 - Lifecycle policies: prune superseded snapshots per retention config; play builds persist while `share_id` is active, deleted on unpublish.
@@ -46,15 +46,15 @@
 
 **SDK:** `@aws-sdk/client-s3` (AWS SDK for JS v3), used **server-side only** (`app/lib/.server/storage`) with the `btk-app-runtime` credentials. An AWS key appearing in a client bundle is a critical bug (same rule as the Anthropic platform key).
 
-**Upload (snapshot):** client posts changed project files (from the WebContainer file map) to a server route → server verifies session + project ownership → builds the tar/gzip → `PutObjectCommand` → `s3://btk-snapshots-{env}/{userId}/{projectId}/{snapshotId}.tar.gz` → inserts the `snapshots` row (S3 key + manifest) in Postgres.
+**Upload (snapshot):** client posts changed project files (from the WebContainer file map — binary bytes read via `FilesStore.readBinaryFile()`, never `dirent.content`, which is always empty when `isBinary`) to a server route → server verifies session + project ownership → serializes the file map → `PutObjectCommand` → `snapshots/{projectId}/{snapshotId}.json` → inserts the `snapshots` row (storage key + manifest) in Postgres.
 
-**Download (resume):** server `GetObjectCommand` → streams the tar to the client → client unpacks over the freshly mounted template base in the WebContainer.
+**Download (resume):** server `GetObjectCommand` → streams the envelope to the client → client base64-decodes binaries back to `Uint8Array` and writes them over the freshly mounted template base in the WebContainer.
 
 **Published builds (share):** server `PutObjectCommand` per file of `dist/` → `s3://btk-play-builds-{env}/{shareId}/` → CloudFront serves it. Objects need correct `ContentType` and, for `.gz.*` assets, `ContentEncoding: gzip` (see the headers policy above).
 
 **Scaling escape hatch — presigned URLs:** proxying every byte through the Lightsail container is simple and safe but makes the app a bandwidth bottleneck for asset-heavy Toolkit projects. When project sizes warrant it, switch to server-issued **presigned S3 URLs**: the server still authorizes (it decides who gets a URL for which key) while the browser transfers directly to/from S3. Build the proxy path first; keep the storage layer behind an interface so this is a swap, not a rewrite.
 
-**BYTE INTEGRITY (required test):** the tar is built from a `Uint8Array`-faithful file map and uploaded as binary. If any step stringifies content, PNG/GLB/WASM bytes corrupt **silently** — the project looks fine now and returns broken tomorrow. Required regression test: create project → snapshot → restore → assert a known PNG's bytes are byte-identical (hash compare), and that `public/babylon.png` + `public/spinner.png` survive.
+**BYTE INTEGRITY (required test):** the envelope is built from a `Uint8Array`-faithful file map — binaries base64-encoded from real bytes, never from a UTF-8 string. If any step stringifies content, PNG/GLB/WASM bytes corrupt **silently** — the project looks fine now and returns broken tomorrow. Required regression test: create project → snapshot → restore → assert a known PNG's bytes are byte-identical (hash compare), and that `public/babylon.png` + `public/spinner.png` survive. *(Built: hash-identity in `binary-files.spec.ts`, round-trip + manifest byte counts in `snapshots.spec.ts`.)*
 
 **Local development:** with `S3_*` unset, the storage layer uses a local-filesystem adapter (build-first, SPEC §1.3 principle 0 / §9a) — no AWS account needed to develop. Dev AWS keys, when used, live in `.env.local` (gitignored) and point at **separate dev buckets**, never staging/prod.
 

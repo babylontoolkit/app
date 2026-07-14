@@ -17,6 +17,7 @@
  */
 import { createScopedLogger } from '~/utils/logger';
 import { getLedger } from './ledger';
+import { getGenerationStore } from './generations';
 import { creditsForUsage, getBillingConfig, rawCostUsd, type TokenUsage } from './rates';
 
 const logger = createScopedLogger('credit-gate');
@@ -114,6 +115,45 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
    * would be double-billing.
    */
   const credits = input.byok ? 0 : creditsForUsage(input.usage, input.model, config);
+
+  /*
+   * ⚠️ THE FOREIGN-KEY ANCHOR. This MUST happen before the debit, and it lives here rather than in the
+   * caller because `credit_ledger.generation_id` REFERENCES `generations(id)` — Postgres rejects a
+   * debit whose row does not exist yet, and the catch below would swallow that rejection and bill the
+   * user zero. Forever, on every generation, silently. See `generations.ts`.
+   *
+   * Written even when `credits` is zero (BYOK, unmetered, a generation that produced nothing): the
+   * generation HAPPENED, the admin cost dashboards are derived from these rows, and a later refund
+   * names the same id.
+   */
+  try {
+    await getGenerationStore(input.context).upsert({
+      id: input.generationId,
+      userId: input.userId,
+      model: input.model,
+      promptTokens: input.usage.promptTokens,
+      completionTokens: input.usage.completionTokens,
+      cacheReadTokens: input.usage.cacheReadTokens,
+      cacheCreationTokens: input.usage.cacheCreationTokens,
+      totalTokens: input.usage.promptTokens + input.usage.completionTokens,
+      creditsCharged: credits,
+      rawCostUsd: cost,
+
+      /*
+       * `completed`, not `running` — settlement runs AFTER the stream is drained, so by the time we
+       * are here the generation is over. The proxy overwrites this with `failed` when it was. Callers
+       * with no enrichment step (the prompt enhancer) would otherwise leave every row `running`
+       * forever, and the admin cost dashboards are derived from these rows.
+       */
+      status: 'completed',
+    });
+  } catch (error) {
+    // The debit is now guaranteed to fail. Say so plainly rather than letting it look like bad luck.
+    logger.error(
+      `Cannot anchor generation ${input.generationId} for ${input.userId} — the debit will be REJECTED ` +
+        `by the foreign key and this generation will bill ZERO: ${(error as Error).message}`,
+    );
+  }
 
   if (credits <= 0) {
     return { creditsCharged: 0, rawCostUsd: cost, balanceAfter: await getLedger(input.context).balance(input.userId) };

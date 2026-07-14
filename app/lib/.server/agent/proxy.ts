@@ -32,6 +32,7 @@ import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDE
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
 import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
+import { compactHistory, historySavings } from '~/lib/.server/llm/history';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
@@ -117,6 +118,14 @@ export interface AgentGeneration {
    * user should see: the artifact, plus the model's reasoning on a separate channel.
    */
   textStream: AsyncGenerator<AgentChunk>;
+
+  /**
+   * Minted BEFORE the stream, not in the settlement `finally`, because the CLIENT needs it: a repair
+   * turn names the generation it repairs (`repairOf`, §4.2.7), and the ledger debit references this
+   * id. An id that only exists after the generation is over cannot be pointed at.
+   */
+  generationId: string;
+
   promptVersionId: string;
   model: string;
   blocksLoaded: string[];
@@ -215,6 +224,14 @@ export function buildRepairMessage(errors: string[]): string {
 export async function runAgentGeneration(request: AgentRequest): Promise<AgentGeneration> {
   const config = getPlatformConfig(request.context);
   const user = request.user;
+
+  /*
+   * The generation's identity, minted up front. It is referenced by the ledger debit (which is why
+   * `settleGeneration` anchors a `generations` row under it) AND by the client, which needs it to name
+   * the generation a repair turn is repairing (§4.2.7). Both of those need it to exist before the
+   * generation ends.
+   */
+  const generationId = `gen_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
   /*
    * 1. BYOK — decided by the SERVER, from a verified Pro entitlement (§4.6.1).
@@ -455,7 +472,31 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       `effort=${effort ?? 'default'}`,
   );
 
-  const coreMessages = convertToCoreMessages(messages as any);
+  /*
+   * COMPACT THE HISTORY before it goes on the wire (§4.2.8, `llm/history.ts`).
+   *
+   * The conversation is UNCACHED — all four cache breakpoints are on the system blocks, and the
+   * messages come after them — so every byte of every previous turn is re-sent at FULL input rate on
+   * every turn, forever, and the bill grows with the length of the session.
+   *
+   * Measured on real conversations from this project: 83-87% of that history is file BODIES inside
+   * `<boltAction type="file">` blocks — and every one of them is redundant, because the current (and
+   * more accurate) contents of those same files are sent fresh each turn in `# Current Project Files`.
+   * We were paying, repeatedly, for a stale second copy of something we also send correctly. That is
+   * the same double-representation bug §4.2.8 found in the creation artifact, displaced into history.
+   *
+   * The tags survive, so the model still knows exactly which files it wrote and edited.
+   */
+  const compacted = compactHistory(messages);
+  const saved = historySavings(messages, compacted);
+
+  if (saved > 0) {
+    logger.info(
+      `History compacted: ${saved.toLocaleString()} chars (~${Math.round(saved / 4).toLocaleString()} tokens) removed`,
+    );
+  }
+
+  const coreMessages = convertToCoreMessages(compacted as any);
 
   const totals: GenerationUsage = emptyUsage();
   let toolRounds = 0;
@@ -678,8 +719,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * has already billed us for them, so `totals` is what was actually spent, and the ledger records
        * exactly that — never the full estimate the generation would have cost had it finished.
        */
-      const generationId = `gen_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-
       const settlement = await settleGeneration({
         userId: user.id,
         generationId,
@@ -717,7 +756,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           : null,
       );
 
-      await getGenerationLog().record({
+      /*
+       * Enriches the row `settleGeneration` already anchored (it had to — the debit's foreign key
+       * points at it). Everything the anchor could not know until the generation was over lands here:
+       * which skills fired, which doc snapshot answered, where the time actually went.
+       */
+      await getGenerationLog(request.context).record({
         id: generationId,
         chatId: request.chatId,
         userId: user.id,
@@ -739,12 +783,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         steps: stepLog,
         repairOf: request.repairOf,
         finishReason: failed ? 'error' : finishReason,
+        status: failed ? 'failed' : 'completed',
       });
     }
   }
 
   return {
     textStream: run(),
+    generationId,
     promptVersionId: promptVersion.id,
     model,
     blocksLoaded: blocks.map((b) => b.id),

@@ -198,10 +198,18 @@ async function streamGeneration(stream: DataStreamWriter, generation: Awaited<Re
     },
   });
 
-  // Traceability for the client (cost badge, and which doc snapshot produced this answer).
+  /*
+   * Traceability for the client (cost badge, and which doc snapshot produced this answer).
+   *
+   * `generationId` is here because the SELF-HEALING loop needs it (§4.2.7): if the code we just wrote
+   * fails to compile, the client re-POSTs with `repairOf: generationId`, which is what tells the server
+   * this is a repair rather than a fresh request — and that in turn is what escalates the effort level
+   * and caps the attempts.
+   */
   stream.writeMessageAnnotation({
     type: 'agentMeta',
     value: {
+      generationId: generation.generationId,
       promptVersionId: generation.promptVersionId,
       model: generation.model,
       skillsLoaded: [...generation.toolContext.loaded],

@@ -271,6 +271,15 @@ export class SupabaseLedger implements Ledger {
     return rowToEntry(Array.isArray(data) ? data[0] : data);
   }
 
+  /**
+   * The latest row, by `seq` — NEVER by `created_at`.
+   *
+   * `created_at` is `now()`, the TRANSACTION timestamp, and two ledger rows written back-to-back
+   * routinely share one. When they tie, ordering falls through to a random uuid and "the latest row"
+   * becomes "a random one of the rows from this millisecond" — so the balance read is wrong, silently.
+   * The sequence in migration 0003 exists precisely to make this ordering total. See its header for the
+   * reproduction (a generation debit followed by its auto-refund derived the wrong balance).
+   */
   async balance(userId: string): Promise<number> {
     const db = await this._db();
 
@@ -278,7 +287,7 @@ export class SupabaseLedger implements Ledger {
       .from('credit_ledger')
       .select('balance_after')
       .eq('user_id', userId)
-      .order('created_at', { ascending: false })
+      .order('seq', { ascending: false })
       .limit(1)
       .maybeSingle();
 
@@ -292,7 +301,7 @@ export class SupabaseLedger implements Ledger {
       .from('credit_ledger')
       .select()
       .eq('user_id', userId)
-      .order('created_at', { ascending: false })
+      .order('seq', { ascending: false })
       .limit(limit);
 
     return (data ?? []).map(rowToEntry);

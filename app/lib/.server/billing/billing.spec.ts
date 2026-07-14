@@ -10,8 +10,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { creditsForUsage, getBillingConfig, MODEL_RATES, rawCostUsd, ratesFor, type TokenUsage } from './rates';
-import { DuplicateGrantError, DuplicatePaymentError, ensureSignupGrant, FsLedger, setLedger } from './ledger';
+import {
+  DuplicateGrantError,
+  DuplicatePaymentError,
+  ensureSignupGrant,
+  FsLedger,
+  getLedger,
+  setLedger,
+} from './ledger';
 import { checkCreditGate, refundGeneration, settleGeneration } from './gate';
+import { setGenerationStore, type GenerationStore, type GenerationUpsert } from './generations';
 
 let tmp: string;
 let ledger: FsLedger;
@@ -385,5 +393,134 @@ describe('auto-refund on failure', () => {
     // Both rows point at the same generation, so the pairing is auditable.
     const paired = rows.filter((r) => r.generationId === 'g-fail');
     expect(paired).toHaveLength(2);
+  });
+});
+
+/**
+ * THE FOREIGN KEY (§4.5.4, `generations.ts`).
+ *
+ * `credit_ledger.generation_id` REFERENCES `generations(id)`. Postgres rejects a debit whose
+ * generation row does not exist (`23503`), and `settleGeneration` may never throw — so a missing row
+ * is caught, logged, and swallowed, and the generation bills ZERO. No crash, no failing build, no
+ * broken feature: just the entire platform running free on our own API key.
+ *
+ * `FsLedger` has no foreign key, which is exactly why this class exists. Without a ledger that
+ * enforces what Postgres enforces, the production failure is invisible to every test we have.
+ */
+class ForeignKeyLedger extends FsLedger {
+  constructor(
+    dir: string,
+    private readonly _generations: GenerationStore & { has(id: string): boolean },
+  ) {
+    super(dir);
+  }
+
+  override async append(entry: Parameters<FsLedger['append']>[0]) {
+    if (entry.generationId && !this._generations.has(entry.generationId)) {
+      throw new Error(
+        `insert or update on table "credit_ledger" violates foreign key constraint ` +
+          `"credit_ledger_generation_id_fkey"`,
+      );
+    }
+
+    return super.append(entry);
+  }
+}
+
+describe('the generation row a debit points at', () => {
+  const usage: TokenUsage = {
+    promptTokens: 1000,
+    completionTokens: 2000,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+
+  let rows: Map<string, GenerationUpsert>;
+
+  beforeEach(() => {
+    rows = new Map();
+
+    const store = {
+      has: (id: string) => rows.has(id),
+      async upsert(row: GenerationUpsert) {
+        rows.set(row.id, { ...rows.get(row.id), ...row });
+      },
+      async list() {
+        return [];
+      },
+    };
+
+    setGenerationStore(store);
+    setLedger(new ForeignKeyLedger(tmp, store));
+  });
+
+  afterEach(() => {
+    setGenerationStore(undefined);
+  });
+
+  /*
+   * The bug this test exists for: settlement appended the debit while the generation row was still
+   * only ever written to the local filesystem, so in Postgres the FK rejected every single debit and
+   * `settleGeneration` swallowed it. Every generation billed zero.
+   */
+  it('is written BEFORE the debit, so the ledger can actually charge for it', async () => {
+    await getLedger().append({ userId: 'u1', delta: 10_000, reason: 'grant' });
+
+    const settlement = await settleGeneration({
+      userId: 'u1',
+      generationId: 'g-fk',
+      model: 'claude-sonnet-5',
+      usage,
+    });
+
+    expect(settlement).not.toBeNull();
+    expect(settlement!.creditsCharged).toBeGreaterThan(0);
+    expect(await getLedger().balance('u1')).toBeLessThan(10_000);
+    expect(rows.has('g-fk')).toBe(true);
+  });
+
+  /* The anchor carries the usage, so the row is honest even if the proxy never gets to enrich it. */
+  it('anchors the row with the user, model and tokens the debit was computed from', async () => {
+    await getLedger().append({ userId: 'u1', delta: 10_000, reason: 'grant' });
+    await settleGeneration({ userId: 'u1', generationId: 'g-fk', model: 'claude-sonnet-5', usage });
+
+    expect(rows.get('g-fk')).toMatchObject({
+      id: 'g-fk',
+      userId: 'u1',
+      model: 'claude-sonnet-5',
+      promptTokens: 1000,
+      completionTokens: 2000,
+    });
+  });
+
+  /* BYOK charges nothing — but the row still has to exist, because the generation still happened. */
+  it('writes the row even for a BYOK generation that is charged zero', async () => {
+    await settleGeneration({
+      userId: 'pro',
+      generationId: 'g-byok',
+      model: 'claude-sonnet-5',
+      usage,
+      byok: true,
+    });
+
+    expect(rows.has('g-byok')).toBe(true);
+  });
+
+  /*
+   * A refund names the same generation. If the anchor were the debit's private business, the refund
+   * would hit the same FK — and a failed generation would stay charged.
+   */
+  it('lets the refund for a failed generation reference the same row', async () => {
+    await getLedger().append({ userId: 'u1', delta: 10_000, reason: 'grant' });
+
+    const settlement = await settleGeneration({
+      userId: 'u1',
+      generationId: 'g-fail',
+      model: 'claude-sonnet-5',
+      usage,
+    });
+    await refundGeneration('u1', 'g-fail', settlement!.creditsCharged, 'Automatic refund');
+
+    expect(await getLedger().balance('u1')).toBe(10_000);
   });
 });

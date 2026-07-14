@@ -1,0 +1,381 @@
+/**
+ * The money path, against a REAL Postgres (SPEC §4.6, §4.5.4, spec/billing.md).
+ *
+ * Every other billing test in this repo runs against `FsLedger` — the local-development mirror. That
+ * mirror has no foreign keys, no partial unique indexes, no triggers, and no advisory locks. It is a
+ * TypeScript reimplementation of the rules, so it can only prove that we implemented the rules twice;
+ * it cannot prove the DATABASE enforces them. And the database is the thing that actually runs in
+ * production.
+ *
+ * That gap is not hypothetical. It is exactly how the foreign key on `credit_ledger.generation_id`
+ * shipped unnoticed: nothing inserted into `generations`, so in Postgres EVERY debit would have been
+ * rejected (`23503`), `settleGeneration` would have swallowed it, and every generation on the platform
+ * would have billed **zero** — silently, forever. `FsLedger` was perfectly happy the entire time.
+ *
+ * So this file runs the ACTUAL migration files, verbatim, against an embedded Postgres (PGlite), and
+ * asserts the guarantees at the level where they are really made. If a migration is edited such that a
+ * money rule stops being enforced by the database, this is what fails.
+ */
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { PGlite } from '@electric-sql/pglite';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+let db: PGlite;
+
+const USER = '11111111-1111-4111-8111-111111111111';
+const OTHER = '22222222-2222-4222-8222-222222222222';
+
+/**
+ * The bits of Supabase the migration leans on. Not a fake of our own logic — only the platform surface
+ * that would exist in a real Supabase project (the `auth` schema, `auth.uid()`, and the three roles).
+ */
+const SUPABASE_PRELUDE = `
+  create schema if not exists auth;
+
+  -- Shaped like the real thing: migration 0001 puts an on-insert trigger on this table that reads
+  -- \`raw_user_meta_data\` and \`email\` to seed \`public.profiles\`.
+  create table if not exists auth.users (
+    id uuid primary key,
+    email text,
+    raw_user_meta_data jsonb not null default '{}'::jsonb
+  );
+  create or replace function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;
+  do $$ begin
+    if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon; end if;
+    if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated; end if;
+    if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role; end if;
+  end $$;
+`;
+
+/** Append through the function, exactly as `SupabaseLedger.append` does — never a raw insert. */
+async function append(entry: {
+  userId?: string;
+  delta: number;
+  reason: string;
+  generationId?: string | null;
+  paymentRef?: string | null;
+  allowNegative?: boolean;
+}) {
+  const result = await db.query<{ balance_after: number }>(
+    `select * from public.append_ledger_entry($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      entry.userId ?? USER,
+      entry.delta,
+      entry.reason,
+      entry.generationId ?? null,
+      null,
+      entry.paymentRef ?? null,
+      null,
+      entry.allowNegative ?? (entry.reason === 'generation' || entry.reason === 'adjustment'),
+    ],
+  );
+
+  return result.rows[0];
+}
+
+/**
+ * The latest row by `seq`, exactly as `SupabaseLedger.balance()` reads it — NOT by `created_at`.
+ * Ordering a ledger by wall-clock time is the bug migration 0003 exists to fix (see below).
+ */
+async function balance(userId = USER): Promise<number> {
+  const { rows } = await db.query<{ balance_after: number }>(
+    `select balance_after from public.credit_ledger where user_id = $1 order by seq desc limit 1`,
+    [userId],
+  );
+
+  return rows[0]?.balance_after ?? 0;
+}
+
+/** A `generations` row must exist before a debit may name it — that IS the foreign key. */
+async function createGeneration(id: string, userId = USER) {
+  await db.query(`insert into public.generations (id, user_id, model) values ($1, $2, 'claude-sonnet-5')`, [
+    id,
+    userId,
+  ]);
+}
+
+beforeAll(async () => {
+  db = new PGlite();
+  await db.exec(SUPABASE_PRELUDE);
+
+  const dir = path.resolve(process.cwd(), 'supabase/migrations');
+  const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
+
+  // The real migrations, unmodified. If one of them cannot run, that is a finding, not a test problem.
+  for (const file of files) {
+    await db.exec(await fs.readFile(path.join(dir, file), 'utf8'));
+  }
+}, 60_000);
+
+beforeEach(async () => {
+  // The ledger is append-only BY TRIGGER, so a plain delete is refused. Disable it for the reset only.
+  await db.exec(`
+    alter table public.credit_ledger disable trigger user;
+    delete from public.credit_ledger;
+    alter table public.credit_ledger enable trigger user;
+    delete from public.generations;
+    delete from auth.users cascade;
+  `);
+  await db.query(`insert into auth.users (id, email) values ($1, 'a@example.com'), ($2, 'b@example.com')`, [
+    USER,
+    OTHER,
+  ]);
+});
+
+describe('the migrations', () => {
+  it('apply cleanly to an empty database', async () => {
+    const { rows } = await db.query<{ table_name: string }>(
+      `select table_name from information_schema.tables where table_schema = 'public' order by table_name`,
+    );
+    const tables = rows.map((r) => r.table_name);
+
+    expect(tables).toEqual(
+      expect.arrayContaining(['credit_ledger', 'credit_packs', 'entitlements', 'generations', 'profiles', 'projects']),
+    );
+  });
+
+  /* RLS is the backstop behind the middleware (§4.5.3). A table without it is protected by nothing. */
+  it('enables row-level security on every user-scoped table', async () => {
+    const { rows } = await db.query<{ relname: string; relrowsecurity: boolean }>(
+      `select relname, relrowsecurity from pg_class
+       where relnamespace = 'public'::regnamespace and relkind = 'r'`,
+    );
+
+    for (const table of ['profiles', 'projects', 'snapshots', 'generations', 'credit_ledger', 'entitlements']) {
+      expect(rows.find((r) => r.relname === table)?.relrowsecurity, `${table} must have RLS enabled`).toBe(true);
+    }
+  });
+
+  /* Migration 0002: without these, production can see THAT a generation cost money, never WHY. */
+  it('adds the diagnostics columns the admin dashboards are built from', async () => {
+    const { rows } = await db.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+       where table_schema = 'public' and table_name = 'generations'`,
+    );
+    const columns = rows.map((r) => r.column_name);
+
+    expect(columns).toEqual(expect.arrayContaining(['tool_rounds', 'duration_ms', 'finish_reason', 'steps']));
+  });
+});
+
+describe('append_ledger_entry (the only way a ledger row is written)', () => {
+  it('derives balance_after from the previous row — the caller never supplies it', async () => {
+    expect((await append({ delta: 2250, reason: 'grant' })).balance_after).toBe(2250);
+    expect((await append({ delta: 5000, reason: 'purchase', paymentRef: 'pi_1' })).balance_after).toBe(7250);
+
+    await createGeneration('gen_1');
+    expect((await append({ delta: -250, reason: 'generation', generationId: 'gen_1' })).balance_after).toBe(7000);
+
+    expect(await balance()).toBe(7000);
+  });
+
+  it('keeps users isolated', async () => {
+    await append({ delta: 2250, reason: 'grant' });
+    expect(await balance(OTHER)).toBe(0);
+  });
+
+  /* `security definer` + a grant only to `service_role` is what stops a user appending their own credits. */
+  it('is security definer and executable only by the service role', async () => {
+    const { rows } = await db.query<{ prosecdef: boolean; proacl: string | null }>(
+      `select prosecdef, proacl::text from pg_proc where proname = 'append_ledger_entry'`,
+    );
+
+    expect(rows[0].prosecdef).toBe(true);
+    expect(rows[0].proacl).toContain('service_role');
+    expect(rows[0].proacl).not.toContain('anon=');
+    expect(rows[0].proacl).not.toContain('authenticated=');
+  });
+});
+
+/**
+ * THE FOREIGN KEY — the bug that would have run the whole platform for free.
+ *
+ * `settleGeneration` may never throw (§4.6), so it catches, logs, and returns null. A rejected debit
+ * therefore looks exactly like a successful one from the outside. Nothing crashes. Nothing fails a
+ * build. The user is simply never charged.
+ */
+describe('credit_ledger.generation_id → generations(id)', () => {
+  it('REJECTS a debit whose generation row does not exist', async () => {
+    await append({ delta: 10_000, reason: 'grant' });
+
+    await expect(append({ delta: -250, reason: 'generation', generationId: 'gen_missing' })).rejects.toThrow(
+      /foreign key|violates/i,
+    );
+
+    // The money was never taken: the debit did not land.
+    expect(await balance()).toBe(10_000);
+  });
+
+  it('accepts the debit once the generation row has been written first', async () => {
+    await append({ delta: 10_000, reason: 'grant' });
+    await createGeneration('gen_ok');
+
+    expect((await append({ delta: -250, reason: 'generation', generationId: 'gen_ok' })).balance_after).toBe(9750);
+  });
+
+  /* A refund names the same generation. If the anchor were the debit's private business, refunds would fail too. */
+  it('lets the refund for a failed generation reference the same row', async () => {
+    await append({ delta: 10_000, reason: 'grant' });
+    await createGeneration('gen_fail');
+    await append({ delta: -250, reason: 'generation', generationId: 'gen_fail' });
+    await append({ delta: 250, reason: 'refund', generationId: 'gen_fail' });
+
+    expect(await balance()).toBe(10_000);
+  });
+});
+
+describe('grant integrity and payment idempotency (partial unique indexes, not app checks)', () => {
+  /* Re-verification, an OAuth re-link, or two tabs racing all try to grant. Exactly one may ever land. */
+  it('refuses a second grant to the same user', async () => {
+    await append({ delta: 2250, reason: 'grant' });
+
+    await expect(append({ delta: 2250, reason: 'grant' })).rejects.toThrow(/duplicate key|unique/i);
+    expect(await balance()).toBe(2250);
+  });
+
+  it('grants each user exactly one — the index is per-user, not global', async () => {
+    await append({ delta: 2250, reason: 'grant' });
+    await append({ userId: OTHER, delta: 2250, reason: 'grant' });
+
+    expect(await balance()).toBe(2250);
+    expect(await balance(OTHER)).toBe(2250);
+  });
+
+  /* Stripe RETRIES deliveries — that is a feature. Crediting on every delivery hands out free money. */
+  it('refuses to credit the same payment twice', async () => {
+    await expect(async () => {
+      await append({ delta: 5000, reason: 'purchase', paymentRef: 'cs_test_1' });
+      await append({ delta: 5000, reason: 'purchase', paymentRef: 'cs_test_1' });
+    }).rejects.toThrow(/duplicate key|unique/i);
+
+    expect(await balance()).toBe(5000);
+  });
+
+  it('allows two different payments', async () => {
+    await append({ delta: 5000, reason: 'purchase', paymentRef: 'cs_1' });
+    await append({ delta: 5000, reason: 'purchase', paymentRef: 'cs_2' });
+
+    expect(await balance()).toBe(10_000);
+  });
+});
+
+/**
+ * ORDERING. Balance is derived from "the latest row", and `created_at` cannot tell you which that is.
+ *
+ * `now()` is the TRANSACTION timestamp, so rows written back-to-back share one. The original function
+ * ordered by `created_at desc, id desc` — and `id` is a random uuid, so on a tie "the latest row" became
+ * "a random one of the rows from this millisecond". The next append then derived its balance from the
+ * WRONG row: no error, no exception, just a quietly incorrect balance and an append-only history that
+ * looks perfectly plausible.
+ *
+ * `FsLedger` could never have caught this — it appends to a JSONL file, where order is inherent.
+ */
+describe('ordering is monotonic, not wall-clock (migration 0003)', () => {
+  /*
+   * THE EXACT SEQUENCE THE PROXY RUNS ON A FAILED GENERATION, back-to-back inside one `finally`:
+   * settle the debit, then auto-refund it. These three rows reliably share a timestamp. Before the fix
+   * this produced 9750 — the refund read the GRANT row and computed a balance that skipped the debit.
+   */
+  it('derives the right balance for a debit and its auto-refund written in the same instant', async () => {
+    await append({ delta: 10_000, reason: 'grant' });
+    await createGeneration('gen_fail');
+    await append({ delta: -250, reason: 'generation', generationId: 'gen_fail' });
+    await append({ delta: 250, reason: 'refund', generationId: 'gen_fail' });
+
+    expect(await balance()).toBe(10_000);
+  });
+
+  /* Many appends inside one clock tick must still chain correctly, every time. */
+  it('chains balances correctly across a burst of appends that share a timestamp', async () => {
+    for (let i = 0; i < 10; i++) {
+      await append({ delta: 100, reason: 'promo' });
+    }
+
+    expect(await balance()).toBe(1000);
+
+    const { rows } = await db.query<{ balance_after: number }>(
+      `select balance_after from public.credit_ledger where user_id = $1 order by seq`,
+      [USER],
+    );
+
+    expect(rows.map((r) => r.balance_after)).toEqual([100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]);
+  });
+
+  /* The premise of the bug: timestamps really do tie. If this ever stops being true, keep `seq` anyway. */
+  it('shows that created_at is NOT a usable ordering key — rows tie on it', async () => {
+    for (let i = 0; i < 5; i++) {
+      await append({ delta: 100, reason: 'promo' });
+    }
+
+    const { rows } = await db.query<{ n: number }>(
+      `select count(distinct created_at)::int as n from public.credit_ledger where user_id = $1`,
+      [USER],
+    );
+
+    /*
+     * Five rows, but far fewer distinct timestamps — which is exactly why `id` (a random uuid) was
+     * deciding "latest".
+     */
+    expect(rows[0].n).toBeLessThan(5);
+  });
+
+  it('assigns seq in insert order', async () => {
+    await append({ delta: 100, reason: 'grant' });
+    await append({ delta: 50, reason: 'promo' });
+
+    const { rows } = await db.query<{ reason: string }>(
+      `select reason from public.credit_ledger where user_id = $1 order by seq`,
+      [USER],
+    );
+
+    expect(rows.map((r) => r.reason)).toEqual(['grant', 'promo']);
+  });
+});
+
+describe('the negative-balance rule', () => {
+  /*
+   * A `generation` debit MAY overdraw: we settle AFTER the tokens are spent, and §4.2.1 forbids killing
+   * an in-flight generation for balance. Reality is allowed to overshoot; the gate on the NEXT
+   * generation is what catches it.
+   */
+  it('lets a generation debit drive the balance negative', async () => {
+    await append({ delta: 100, reason: 'grant' });
+    await createGeneration('gen_big');
+
+    const row = await append({ delta: -500, reason: 'generation', generationId: 'gen_big' });
+
+    expect(row.balance_after).toBe(-400);
+  });
+
+  /* Nothing else may. A purchase or refund that overdraws is a bug, and the database says so. */
+  it('refuses any OTHER entry that would go negative', async () => {
+    await expect(append({ delta: -500, reason: 'refund', allowNegative: false })).rejects.toThrow(
+      /insufficient credits/i,
+    );
+
+    expect(await balance()).toBe(0);
+  });
+});
+
+/**
+ * APPEND-ONLY, enforced by the database rather than by convention.
+ *
+ * A ledger that can be edited cannot answer "where did my credits go", and a corrected row destroys the
+ * evidence of what it corrected. Compensating rows only.
+ */
+describe('append-only', () => {
+  it('refuses an UPDATE to a ledger row', async () => {
+    await append({ delta: 2250, reason: 'grant' });
+
+    await expect(db.exec(`update public.credit_ledger set delta = 999999`)).rejects.toThrow(/append-only/i);
+  });
+
+  it('refuses a DELETE of a ledger row', async () => {
+    await append({ delta: 2250, reason: 'grant' });
+
+    await expect(db.exec(`delete from public.credit_ledger where reason = 'grant'`)).rejects.toThrow(/append-only/i);
+
+    expect(await balance()).toBe(2250);
+  });
+});
