@@ -171,12 +171,18 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
 /** The visible stream: prose + actions, then the annotations the client's badges are built from. */
 async function streamGeneration(stream: DataStreamWriter, generation: Awaited<ReturnType<typeof runAgentGeneration>>) {
   /*
-   * TEXT ONLY. The proxy's generator has already resolved the whole server-side tool loop —
-   * including the forced continuation when the tool-round cap is hit — so what arrives here is
-   * exactly what the user should see: prose + boltArtifact markup, and nothing else.
+   * Two channels, and they must NOT be merged.
+   *
+   * `text` is prose + boltArtifact markup, and the client feeds it straight into the artifact parser —
+   * so a sentence of the model's reasoning leaking into `text` mid-`<boltAction>` would be written
+   * into the user's file. `reasoning` rides the AI SDK's own reasoning part (`g:`), which `useChat`
+   * collects onto `message.reasoning` and never shows the parser.
+   *
+   * The proxy has already resolved the whole server-side tool loop, so what arrives here is exactly
+   * what the user should see.
    */
-  for await (const delta of generation.textStream) {
-    stream.write(formatDataStreamPart('text', delta));
+  for await (const chunk of generation.textStream) {
+    stream.write(formatDataStreamPart(chunk.type, chunk.value));
   }
 
   const usage = await generation.usage;

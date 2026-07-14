@@ -16,6 +16,7 @@ import type {
   StepStartUIPart,
 } from '@ai-sdk/ui-utils';
 import { ToolInvocations } from './ToolInvocations';
+import { ThinkingPanel } from './ThinkingPanel';
 import type { ToolCallAnnotation } from '~/types/context';
 
 interface AssistantMessageProps {
@@ -110,9 +111,23 @@ export const AssistantMessage = memo(
       (annotation) => annotation.type === 'toolCall',
     ) as ToolCallAnnotation[];
 
+    /*
+     * The model's summarized reasoning (§4.2a). It arrives on the AI SDK's own reasoning channel, so
+     * it is never fed to the artifact parser — reasoning that leaked into `text` mid-`<boltAction>`
+     * would be written into the user's file.
+     */
+    const reasoning = (parts ?? [])
+      .filter((part): part is ReasoningUIPart => part.type === 'reasoning')
+      .map((part) => part.reasoning)
+      .join('');
+
+    /* Still thinking, nothing written yet — the case that used to render as a dead spinner. */
+    const isThinking = Boolean(reasoning) && !content.trim();
+
     return (
       <div className="overflow-hidden w-full">
         <>
+          {reasoning && <ThinkingPanel reasoning={reasoning} streaming={isThinking} />}
           <div className=" flex gap-2 items-center text-sm text-bolt-elements-textSecondary mb-2">
             {(codeContext || chatSummary) && (
               <Popover side="right" align="start" trigger={<div className="i-ph:info" />}>

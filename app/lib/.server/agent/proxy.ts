@@ -30,6 +30,7 @@ import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDER, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
+import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
@@ -100,12 +101,22 @@ export interface AgentRequest {
 /** The skill tool set, as `streamText` sees it — keeps the result's tool types concrete. */
 type SkillTools = ReturnType<typeof createSkillTools>;
 
+/**
+ * One chunk of visible output.
+ *
+ * `reasoning` is kept on its OWN channel, never merged into `text` — the client feeds `text` straight
+ * into the artifact parser, so a stray sentence of the model's reasoning inside a `<boltAction>` would
+ * be written into the user's file.
+ */
+export type AgentChunk = { type: 'text'; value: string } | { type: 'reasoning'; value: string };
+
 export interface AgentGeneration {
   /**
-   * The visible output: text only. The server-side tool loop — including a forced continuation when
-   * the tool-round cap is hit — is resolved inside this generator, so the client sees pure text.
+   * The visible output. The server-side tool loop — including a forced continuation when the
+   * tool-round cap is hit — is resolved inside this generator, so what comes out is exactly what the
+   * user should see: the artifact, plus the model's reasoning on a separate channel.
    */
-  textStream: AsyncGenerator<string>;
+  textStream: AsyncGenerator<AgentChunk>;
   promptVersionId: string;
   model: string;
   blocksLoaded: string[];
@@ -416,18 +427,32 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   };
   const tools = createSkillTools(toolContext);
 
+  /*
+   * How hard to think on THIS turn (§4.2a). Decided from turn KIND — never from reading the prompt;
+   * see `effort-policy.ts`. It only ever escalates: a repair that already failed gets `high`/`xhigh`,
+   * an explicitly-invoked skill gets `high`, and everything else takes the operator's configured
+   * default. There is no cheap tier for edits — `low` breached a read-only zone when we measured it.
+   */
+  const effort = effortForTurn({
+    isRepair,
+    repairAttempt: request.repairAttempt ?? 1,
+    isSlashInvocation: Boolean(slash),
+  });
+
   const modelInstance = provider.getModelInstance({
     model,
     serverEnv: (request.context as { cloudflare?: { env?: Env } })?.cloudflare?.env as Env,
     apiKeys: useByok ? request.apiKeys : undefined,
     providerSettings: useByok ? request.providerSettings : undefined,
+    effort,
   });
 
   logger.info(
     `Generation: model=${model} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
       `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION' : ''} ` +
-      `tools=${allowTools ? 'on' : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`}`,
+      `tools=${allowTools ? 'on' : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`} ` +
+      `effort=${effort ?? 'default'}`,
   );
 
   const coreMessages = convertToCoreMessages(messages as any);
@@ -512,14 +537,23 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * measured 65,199 prompt tokens cold vs 3,996 warm for the same 143KB prefix). Billing has to see
    * the cache columns too, or it will systematically under-count input.
    */
-  async function* drain(result: StreamTextResult<SkillTools, never>): AsyncGenerator<string> {
+  async function* drain(result: StreamTextResult<SkillTools, never>): AsyncGenerator<AgentChunk> {
     for await (const part of result.fullStream) {
       if (part.type === 'text-delta') {
         if (part.textDelta.length > 0) {
           producedText = true;
         }
 
-        yield part.textDelta;
+        yield { type: 'text', value: part.textDelta };
+      } else if (part.type === 'reasoning') {
+        /*
+         * The model's summarized reasoning (`display: 'summarized'`, set in `thinkingFetch`).
+         *
+         * Forwarded on its own channel so the user sees WORK HAPPENING during the long think instead
+         * of a dead spinner. It deliberately does NOT set `producedText`: a generation that only ever
+         * thought and never wrote an artifact is still a failed generation, and must still refund.
+         */
+        yield { type: 'reasoning', value: part.textDelta };
       } else if (part.type === 'error') {
         throw part.error;
       }
@@ -562,7 +596,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /** Did the model actually SAY anything? Zero text is a failure, whatever `finishReason` claims. */
   let producedText = false;
 
-  async function* run(): AsyncGenerator<string> {
+  async function* run(): AsyncGenerator<AgentChunk> {
     try {
       /*
        * A creation turn runs with NO tools: one call, one answer, no round trips (§4.4b).

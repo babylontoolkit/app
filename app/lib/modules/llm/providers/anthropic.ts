@@ -1,8 +1,13 @@
 import { BaseProvider } from '~/lib/modules/llm/base-provider';
 import {
+  DEFAULT_EFFORT,
   dropOrphanReasoningSignatures,
+  parseEffort,
   stripSamplingParams,
   supportsSamplingParams,
+  thinkingFetch,
+  type EffortLevel,
+  type ThinkingMode,
 } from '~/lib/modules/llm/capabilities';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
@@ -109,6 +114,7 @@ export default class AnthropicProvider extends BaseProvider {
     serverEnv: Env;
     apiKeys?: Record<string, string>;
     providerSettings?: Record<string, IProviderSetting>;
+    effort?: EffortLevel;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
     const { apiKey } = this.getProviderBaseUrlAndKey({
@@ -119,8 +125,41 @@ export default class AnthropicProvider extends BaseProvider {
       defaultApiTokenKey: 'ANTHROPIC_API_KEY',
     });
 
+    /*
+     * Thinking is ON, and VISIBLE (§4.2a). Both halves matter.
+     *
+     * Current Claude models (Sonnet 5, the Opus 4.x family, Fable 5) think by default and are better
+     * for it — a game build is exactly the kind of multi-step work adaptive thinking is meant for, so
+     * turning it off to make the app feel fast would be trading quality for a progress bar.
+     *
+     * The real defect was never that the model thinks. It was that `thinking.display` defaults to
+     * `"omitted"`: the model reasons, we are billed for every token at the full output rate, and the
+     * API returns a thinking block whose text is EMPTY. We paid for reasoning and then had nothing to
+     * show, so a 90-second think rendered as a dead spinner. `display: 'summarized'` (set in
+     * `thinkingFetch`) costs NOTHING extra — thinking is billed identically under every display
+     * setting — and turns those tokens into a stream the user can watch.
+     *
+     * `THINKING_MODE=disabled` remains available as a speed lever (measured: 152s → 72s, $0.293 →
+     * $0.200 on one creation), but it is not the default: it buys latency with intelligence.
+     */
+    const thinkingMode: ThinkingMode = (serverEnv as any)?.THINKING_MODE === 'disabled' ? 'disabled' : 'adaptive';
+
+    /*
+     * Effort — the dial that bounds what thinking COSTS (§4.2a).
+     *
+     * `output_config.effort` defaults to `high` server-side. Omitting it, which is what we did until
+     * now, is not "no opinion" — it silently buys the second-most-expensive setting, and it is why one
+     * creation spent ~15,000 thinking tokens to emit ~5,500 tokens of landing page. We pay for those
+     * at the full OUTPUT rate.
+     *
+     * Precedence: the per-turn policy (the proxy knows a repair from a first draft) > the operator's
+     * `THINKING_EFFORT` > `medium`. `parseEffort` is what makes that last hop safe — a `.env` file is
+     * a string file, and it is also what refuses `low` (a measured correctness bug, not a discount).
+     */
+    const effort: EffortLevel = options.effort ?? parseEffort((serverEnv as any)?.THINKING_EFFORT) ?? DEFAULT_EFFORT;
+
     // No `output-128k-2025-02-19` beta header — that capability is GA on Claude 4+.
-    const anthropic = createAnthropic({ apiKey });
+    const anthropic = createAnthropic({ apiKey, fetch: thinkingFetch(thinkingMode, effort, model) });
 
     const instance = supportsSamplingParams(model) ? anthropic(model) : stripSamplingParams(anthropic(model));
 

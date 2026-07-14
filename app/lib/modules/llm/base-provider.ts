@@ -1,5 +1,6 @@
 import type { LanguageModelV1 } from 'ai';
 import type { ProviderInfo, ProviderConfig, ModelInfo } from './types';
+import type { EffortLevel } from './capabilities';
 import type { IProviderSetting } from '~/types/model';
 import { createOpenAI } from '@ai-sdk/openai';
 import { LLMManager } from './manager';
@@ -167,6 +168,13 @@ export abstract class BaseProvider implements ProviderInfo {
     serverEnv?: Env;
     apiKeys?: Record<string, string>;
     providerSettings?: Record<string, IProviderSetting>;
+
+    /**
+     * How hard the model should think on this turn (§4.2a). OPTIONAL and additive — every other
+     * provider ignores it, and omitting it falls back to the operator's configured default. Set by
+     * the agent proxy, which is the only caller that knows what kind of turn this is.
+     */
+    effort?: EffortLevel;
   }): LanguageModelV1;
 }
 

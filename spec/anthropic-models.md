@@ -152,6 +152,138 @@ Real reasoning and its legitimate signature pass through untouched.
 Apply it to **every** Claude model (any thinking-capable model can emit an empty thinking block), and
 note it cannot be avoided by disabling thinking, because Fable 5 won't let you.
 
+### 3.4 We were paying for reasoning and throwing it away
+
+The most expensive of the four, and the only one that throws nothing, breaks nothing, and surfaces as
+a **product** complaint rather than an error.
+
+On Sonnet 5 and the whole 4.6+ family, **omitting the `thinking` parameter does not mean "off" — it
+means adaptive thinking ON**, and `thinking.display` then defaults to `"omitted"`. So the model
+reasoned at length, we were billed for every one of those tokens at the full output rate, and the API
+returned a thinking block whose text was **empty**. Ninety seconds in which the client received
+*nothing* — not text, not even response headers. That is what the owner reported as the app "just
+sitting there... no status of what it is doing". It was not a hang and not a dev-mode artifact: it was
+the model thinking in the dark.
+
+**The wrong fix is to stop thinking.** Disabling it does make the app feel fast (measured: 152s → 72s,
+$0.293 → $0.200, first byte 90.5s → 1.6s), and that is a real lever worth keeping — but a game build
+is exactly the multi-step work adaptive thinking exists for, and buying a progress bar with
+intelligence is a bad trade.
+
+**The right fix is `display: 'summarized'`.** It costs **nothing** — thinking is billed identically
+under every display setting — and it turns the tokens we were already buying into a stream we can put
+on screen. Measured, same creation:
+
+| | first byte to the client | wall clock | output tokens | cost |
+|---|---|---|---|---|
+| adaptive + `omitted` (the accidental default) | **90.5s of dead air** | 152s | 16,619 | $0.293 |
+| adaptive + `summarized` (now the default) | **3.9s — reasoning starts streaming** | 105s | 12,209 | $0.227 |
+| `disabled` (opt-in speed lever) | 1.6s | 72s | 10,403 | $0.200 |
+
+The user now watches the model plan their game from ~4 seconds in, and the artifact follows.
+
+**And `providerOptions` cannot express any of this.** `@ai-sdk/anthropic@1.2.12` predates adaptive
+thinking: it hardcodes the LEGACY `thinking: {type: 'enabled', budget_tokens: N}` shape and *throws*
+if you omit the budget — while `budget_tokens` is exactly what current models reject with a 400. So no
+value of `providerOptions` yields `{type: 'adaptive'}` or `{type: 'disabled'}`, and the
+`LanguageModelV1` wrappers above cannot help either: they see the SDK's call options, not the JSON
+body. The body is assembled inside the provider and handed straight to `fetch`.
+
+**Fix:** `thinkingFetch(mode, modelId)` — a `fetch` wrapper that sets `thinking` on the serialized
+body. It is the only layer that can. Guarded per-model: models without adaptive thinking are left
+untouched, and Fable 5 is never sent `{type: 'disabled'}` (it thinks unconditionally; an explicit
+disable is a 400).
+
+**Config, never hardcoded:** `THINKING_MODE=adaptive|disabled`, defaulting to `adaptive`.
+
+**Reasoning is a SEPARATE CHANNEL, never merged into text.** The client feeds `text` straight into the
+artifact parser, so a sentence of reasoning leaking into a `<boltAction>` would be written into the
+user's file. It rides the AI SDK's own reasoning part (`g:`), which `useChat` collects onto
+`message.reasoning`; `ThinkingPanel` renders it. It also does **not** count as "the model produced
+output" — a generation that only ever thought and never wrote an artifact is still a failed generation
+and must still refund (§4.6).
+
+**Flipping the mode invalidates the prompt cache once** (a ~142k-token write at 2×, one generation),
+then steady state resumes. Do not mistake that one-off for a regression.
+
+### 3.5 `effort` — the default nobody chose
+
+Thinking tokens are billed as **output** tokens, at the full output rate. So "how long does it think"
+is not a UX question, it is the single biggest line on the bill — and it has exactly one control:
+`output_config.effort` (GA, no beta header; `low` | `medium` | `high` | `xhigh` | `max`).
+
+**The API default is `high`.** Omitting the field — which is what we did — is therefore not "no
+opinion". It is silently buying the second-most-expensive setting on every generation. That is how one
+creation came to spend ~15,000 thinking tokens to emit ~5,500 tokens of landing page: nobody chose
+that, and nobody could see it. (`budget_tokens` is NOT the alternative — it is a hard 400 on current
+models. `effort` replaced it.)
+
+Swept on an identical creation — same prompt, same files:
+
+| effort | wall clock | output tokens | cost | credits |
+|---|---|---|---|---|
+| `high` (the accidental default) | 103s | 12,567 | $0.232 | 78 |
+| **`medium`** (the default, and the FLOOR) | **80s** | **10,433** | **$0.200** | **67** |
+| ~~`low`~~ (removed — see §3.5a) | 58s | 7,461 | $0.156 | 52 |
+
+All three produced a full-size landing page that passed every play-contract, bundle-integrity and
+no-attribution check. On a **creation** turn the deliberation shrank and the deliverable did not — which
+is exactly what made `low` look like free money. It was not. See §3.5a.
+
+`medium` is the default: a third off the bill and a third off the clock, and Anthropic's own guidance
+puts Sonnet 5 at `medium` on par with Sonnet 4.6 at `high`.
+
+**Config, never hardcoded:** `THINKING_EFFORT=medium|high|xhigh|max` (`DEFAULT_EFFORT` in
+`capabilities.ts`). Raise it for hard work. There is nothing below `medium` to drop to.
+
+### 3.5a `low` is REMOVED — it is a correctness bug, not a discount
+
+The creation sweep above says `low` is 22% cheaper and just as good. That conclusion **does not
+survive contact with an edit turn**, and edit turns are most of a session.
+
+Measured on a substantial edit ("add a boost mechanic to the kart racer") against a real project:
+
+| effort | credits | what it actually did |
+|---|---|---|
+| `low` | 67 | edited **`src/routing/router.tsx`** — READ-ONLY SHELL (§4.4c) — and rewrote whole files instead of patching them |
+| `medium` | 125 | created `src/scripts/BoostController.ts` in the correct zone and patched the rest; **5/5** search-replace blocks matched exactly once |
+
+`low` was not a cheaper tier. It was a **wrong** one: it bought a 58-credit saving with a never-violate
+zone breach, and it discarded the diff-edit protocol that makes follow-up turns cheap in the first
+place. A model that under-thinks does not produce a smaller correct answer — it produces a confident
+wrong one, and the file zones are exactly the kind of constraint it drops first.
+
+So `low` is **not in the `EffortLevel` union at all**. It is unrepresentable in the type system, which
+means no config value, no policy branch, and no future "let's shave a bit here" refactor can reach it
+without deliberately deleting the comment that says why. Because `.env.local` is a string file and a
+cast cannot stop an operator, `parseEffort()` clamps a literal `THINKING_EFFORT=low` back up to
+`medium` with a warning, and rejects typos rather than putting a 400 on the wire mid-generation.
+
+### 3.6 Per-turn effort — escalate on evidence, never guess from prose
+
+Effort is chosen per turn by `effortForTurn()` (`app/lib/.server/agent/effort-policy.ts`).
+
+**It decides by turn KIND, never by reading the user's prompt.** A prose classifier ("does this sound
+hard?") is wrong in both directions, impossible to debug when a bill doubles, and puts a language model
+in charge of spend. Every signal below is one the proxy already computes deterministically, for free,
+before a single token is bought.
+
+| Turn | Signal (already in the proxy) | Effort |
+|---|---|---|
+| Repair, attempt 2 (the last one it gets) | `repairAttempt >= 2` | `xhigh` |
+| Repair, attempt 1 | `errors.length > 0` | `high` |
+| `/slash` skill invocation (`/bt-spec`, `/bt-prototype`) | `slash` resolved | `high` |
+| Creation and ordinary edits | — | operator default (`medium`) |
+
+Precedence: **policy > `THINKING_EFFORT` > `medium`**. The policy overriding operator config is
+deliberate — a build that has already failed twice is not the place to economise, and repairs are
+capped (`MAX_REPAIR_TURNS = 2`), so the escalated spend is bounded and rare.
+
+`xhigh` is the ceiling; `max` exists in the union but nothing selects it. **The policy only ever
+escalates.** Its value is not paying less on easy turns (there is no cheap tier — §3.5a) but paying
+more on the turns that have already *demonstrated* they need it: without this, a repair turn thinks
+exactly as hard as the turn that just failed, which is backwards.
+
 ---
 
 ## 4. Verification — do this, it is not optional
