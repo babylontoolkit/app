@@ -1,0 +1,39 @@
+{
+  "$comment": "Asset store catalog (SPEC §4.9) — DATA, not code. Store content in three forms: hosted scenes referenced by URL, interactive prefabs (GLTF carrying CVTOOLS_unity_metadata, instantly usable via InstantiatePrefabFromContainer), and downloadable file packs. `premium` items are Stripe-gated (one-time). Authored with the Babylon Toolkit Unity Exporter — the store's content pipeline IS the Pro toolchain. This seed list is expanded as content ships; user uploads are NOT here (they live in the user_assets table).",
+  "version": 1,
+  "scenes": [
+    {
+      "id": "scene_openterrain",
+      "title": "Open Terrain",
+      "description": "A large outdoor terrain with sky and lighting — drop a character or vehicle straight in.",
+      "sceneUrl": "https://repo.babylontoolkit.com/playground/openterrain.gz.gltf",
+      "premium": false
+    },
+    {
+      "id": "scene_sample",
+      "title": "Sample Scene",
+      "description": "A neutral starter environment good for prototyping any genre.",
+      "sceneUrl": "https://repo.babylontoolkit.com/playground/samplescene.gz.gltf",
+      "premium": false
+    }
+  ],
+  "prefabs": [
+    {
+      "id": "prefab_standard_car",
+      "title": "Drivable Car",
+      "description": "A car prefab wired with StandardCarController — instantly drivable on instantiation.",
+      "assetUrl": "https://repo.babylontoolkit.com/prefabs/standardcar.glb",
+      "components": ["StandardCarController", "RigidbodyPhysics", "WheelCollider"],
+      "premium": false
+    }
+  ],
+  "packs": [
+    {
+      "id": "pack_lowpoly_nature",
+      "title": "Low-Poly Nature Pack",
+      "description": "Trees, rocks, and foliage props for outdoor scenes. Downloads into public/assets/.",
+      "assetUrl": "https://repo.babylontoolkit.com/packs/lowpoly-nature.zip",
+      "premium": false
+    }
+  ]
+}

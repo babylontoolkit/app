@@ -17,6 +17,26 @@ export interface Project {
   /** Set when published (§4.8). Unique across the platform; the public `/play/[shareId]` key. */
   shareId?: string;
 
+  /** Public-facing title/blurb for the play page and gallery card. Sanitised on the way in (§5). */
+  shareTitle?: string;
+  shareDescription?: string;
+
+  /** ISO timestamp of the most recent publish. `undefined` after an unpublish — the id is kept, the link is dead. */
+  sharedAt?: string;
+
+  /** A network-capable game is launched `?solo=true` when shared, or it hangs waiting for a peer (§4.8). */
+  soloLaunch?: boolean;
+
+  /**
+   * Gallery listing state (§4.8, §5). `none` = shared but unlisted; `pending` = user asked to be
+   * featured; `approved` = an admin listed it; `rejected` = an admin declined. **Nothing is publicly
+   * listed without an admin approving it** — the user can only ever move it to `pending`.
+   */
+  galleryStatus?: 'none' | 'pending' | 'approved' | 'rejected';
+
+  /** Provenance for the remix growth loop (§4.8): the project this one was cloned from, if any. */
+  remixedFrom?: string;
+
   /** The snapshot the builder remounts on resume. */
   currentSnapshotId?: string;
 
@@ -25,6 +45,13 @@ export interface Project {
   linkedBranch?: string;
   lastSyncedCommitSha?: string;
   githubInstallationRef?: string;
+
+  /**
+   * Game Backend (§4.15) — a pointer to the user's OWN Supabase project ref. Never a credential: the
+   * anon key/URL are public-by-design and derived client-side, and the management PAT is never stored
+   * server-side. This just lets the agent know a backend is connected so it scaffolds RLS-first.
+   */
+  gameBackendRef?: string;
 
   createdAt: string;
   updatedAt: string;
@@ -79,6 +106,12 @@ export interface ProjectStore {
 
   /** Public read for `/play/[shareId]` and the gallery — the only unauthenticated project lookup. */
   getByShareId(shareId: string): Promise<Project | null>;
+
+  /** Admin-approved gallery entries, newest published first (§4.8). The only unauthenticated LIST. */
+  listGallery(limit: number): Promise<Project[]>;
+
+  /** Projects awaiting gallery curation (§4.10). Admin-only — nothing is public until approved (§5). */
+  listGallerySubmissions(limit: number): Promise<Project[]>;
 }
 
 export interface SnapshotStore {

@@ -1,10 +1,22 @@
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
 import { MCPService, type MCPConfig } from '~/lib/services/mcpService';
+import { serverSideMcpDisabled } from '~/lib/.server/mcp/server-guard';
 
 const logger = createScopedLogger('api.mcp-update-config');
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
+  /*
+   * SECURITY (SPEC §4.14, §5): this route drives `MCPService.updateConfig`, which spawns child
+   * processes for stdio servers — unauthenticated RCE as upstream ships it. MCP execution belongs in
+   * the user's WebContainer, not here. Fail closed unless an operator explicitly opts in for local dev.
+   */
+  const disabled = serverSideMcpDisabled(context, '/api/mcp-update-config');
+
+  if (disabled) {
+    return disabled;
+  }
+
   try {
     const mcpConfig = (await request.json()) as MCPConfig;
 

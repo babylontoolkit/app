@@ -122,7 +122,7 @@ per-user by the license service).
 Verify: default config = credits UI only, no model names anywhere; flag on = BYOK panel appears.
 ```
 
-### Stage 4 — The full product surface
+### Stage 4 — The full product surface - DONE
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §4.7 guided tour wizard (spec/wizard-config.md catalog) → §4.8 share / /play builds /

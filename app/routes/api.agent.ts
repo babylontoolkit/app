@@ -15,6 +15,7 @@ import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { validateAttachments } from '~/lib/.server/agent/attachments';
 import { claimProject } from '~/lib/.server/agent/inflight';
+import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
 
@@ -48,6 +49,16 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     repairOf?: string;
     repairAttempt?: number;
     model?: string;
+
+    /**
+     * A connected Game Backend (§4.15). The client sends only the PUBLIC facts — connected? which
+     * project ref? RLS confirmed? — never the management PAT (that stays in the browser). The proxy
+     * turns this into an RLS-first system note; it is never used to reach the user's Supabase from here.
+     */
+    gameBackend?: { connected: boolean; projectRef?: string; rlsConfirmed?: boolean };
+
+    /** Asset introspection summaries the client attached for referenced assets (§4.9). */
+    assetNotes?: string[];
   }>();
 
   const cookies = parseCookies(request.headers.get('Cookie'));
@@ -117,6 +128,14 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       repairOf: body.repairOf,
       repairAttempt: body.repairAttempt,
       model: body.model,
+
+      /*
+       * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
+       * Sanitise at the boundary so a claim pointing at the platform Supabase becomes "no backend"
+       * rather than an RLS-first note scaffolding game code against our own database.
+       */
+      gameBackend: sanitizeGameBackend(body.gameBackend, context),
+      assetNotes: body.assetNotes,
       apiKeys,
       providerSettings,
       context,

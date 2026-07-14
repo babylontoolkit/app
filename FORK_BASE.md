@@ -115,6 +115,14 @@ public by design. Do not merge the two.
 | `app/routes/api.export-api-keys.ts` | 🔴 **Critical secret leak, rewritten.** Upstream's loader was an **unauthenticated GET** that read every provider's key from `process.env` / the CF env / `llmManager.env` and returned the values as JSON — `curl /api/export-api-keys` → `{"Anthropic":"sk-ant-..."}`. Worse than an unmetered endpoint: a leaked key works off-platform forever. Now requires a verified user and returns ONLY the caller's own cookie-supplied BYOK keys; the server environment is never read. Pinned by `upstream-routes.spec.ts`. |
 | `app/entry.server.tsx` | Calls `assertNotLocalInProduction()` at **module scope**. Local mode treats every caller as a verified admin and engages purely from a missing `SUPABASE_URL`; a per-request check let the process boot healthy, pass its health check, and serve every route that never calls `getUser`. Two lines, additive. |
 
+## Upstream files touched — Stage 4 (full product surface, SPEC §4.8–§4.15)
+
+| File | Change |
+|---|---|
+| `app/routes/api.mcp-update-config.ts`, `app/routes/api.mcp-check.ts` | 🔴 **Critical RCE, fail-closed.** Upstream's `MCPService` spawns a child process per stdio server (`Experimental_StdioMCPTransport`), and the config arrives from an **unauthenticated** POST — `curl /api/mcp-update-config -d '{"mcpServers":{"x":{"command":"sh",...}}}'` ran arbitrary commands on the platform box. Each route now opens with a 4-line early return calling `serverSideMcpDisabled()` (404 unless `SERVER_SIDE_MCP_ENABLED`); the upstream bodies and `MCPService` are byte-untouched, so pulls still merge. MCP execution belongs in the user's WebContainer (§4.14). Pinned by `upstream-routes.spec.ts`. |
+| `app/routes/api.agent.ts` | Additive: threads `gameBackend` (through the §4.15 hard-separation `sanitizeGameBackend`) and `assetNotes` from the request body into the generation. The client already sent the Supabase connection; the server was dropping it. |
+| `app/lib/.server/agent/proxy.ts` | Additive: injects the volatile project-context notes (§4.9/§4.14/§4.15) into the system array AFTER the cached prefix, and adds `gameBackend`/`assetNotes` to `AgentRequest`. No change to the cache-breakpoint ordering. |
+
 ## Upstream files touched — Stage 2 (project creation, SPEC §4.4)
 
 | File | Change |

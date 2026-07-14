@@ -1,0 +1,90 @@
+/**
+ * Serving a published build (SPEC §4.8, §5, spec/hosting.md).
+ *
+ * In production the play bucket sits behind CloudFront on its OWN origin (`PLAY_URL`,
+ * e.g. `play.babylontoolkit.com`) and these bytes are served directly by the CDN — this module is not
+ * on the hot path there. It IS the path in local development, and it is the reference implementation of
+ * two rules that the CDN config must also honour:
+ *
+ * 1. **The origin boundary (§5).** A shared build is user code. Served on the app's own origin, its
+ *    JavaScript can read the app session cookie and every `localStorage` key we own. So the game is
+ *    always embedded in an iframe pointed at the play origin, and only when `PLAY_URL` is set is that a
+ *    genuinely different origin. `resolvePlayOrigin` makes the "are we actually isolated?" question a
+ *    value the wrapper can act on, and local dev is explicitly NOT the security boundary (documented,
+ *    and asserted in tests) — production MUST set `PLAY_URL`.
+ * 2. **Path safety.** The request path is attacker-controlled. `buildContentKey` re-derives the object
+ *    key the same rejecting way the publish path does, so `/play/:id/../../snapshots/x` cannot walk out
+ *    of the share's prefix and read another project's private snapshot.
+ */
+import { buildPrefix } from './publish';
+import { env } from '~/lib/.server/env';
+
+/** A build path that tries to escape its share prefix. 404, not 403 — do not confirm the layout. */
+export class UnsafeContentPathError extends Error {
+  readonly statusCode = 404;
+  readonly isRetryable = false;
+
+  constructor() {
+    super('Not found.');
+    this.name = 'NotFoundError';
+  }
+}
+
+/**
+ * Resolve a request path under `/play/:shareId/...` to an object key inside that share's prefix.
+ *
+ * Rejects the same shapes `buildObjectKey` rejects on the way in — absolute paths, `..`, backslashes,
+ * null bytes — and defaults a bare directory request to `index.html`, the way a static host would.
+ */
+export function buildContentKey(shareId: string, requestPath: string): string {
+  /*
+   * A bare directory request → index.html (as a static host would). A path that ARRIVES absolute is
+   * rejected, not relativised: routing never produces one, so an absolute path here is a probe.
+   */
+  const resolved = requestPath === '' ? 'index.html' : requestPath;
+
+  if (resolved.startsWith('/') || /^[a-zA-Z]:/.test(resolved) || resolved.includes('\\') || resolved.includes('\0')) {
+    throw new UnsafeContentPathError();
+  }
+
+  const segments = resolved.split('/');
+
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) {
+    throw new UnsafeContentPathError();
+  }
+
+  return `${buildPrefix(shareId)}/${segments.join('/')}`;
+}
+
+export interface PlayOrigin {
+  /** Absolute origin the game iframe is served from. Empty string means same-origin (local dev only). */
+  origin: string;
+
+  /** True when the game runs on a genuinely separate origin and cannot touch app cookies (§5). */
+  isolated: boolean;
+}
+
+export function resolvePlayOrigin(context?: unknown): PlayOrigin {
+  const playUrl = env(context, 'PLAY_URL')?.trim();
+
+  if (playUrl) {
+    return { origin: playUrl.replace(/\/+$/, ''), isolated: true };
+  }
+
+  return { origin: '', isolated: false };
+}
+
+/**
+ * Cache policy for a build asset.
+ *
+ * Vite fingerprints its `assets/*` (content hash in the name), so those are immutable forever. The
+ * entry HTML is not fingerprinted and must revalidate, or a re-publish would never reach a returning
+ * player. Splitting the two is the difference between "instant reload" and "stuck on the old version".
+ */
+export function cacheControlFor(path: string): string {
+  if (/\/assets\/|\.[0-9a-f]{8,}\./.test(path)) {
+    return 'public, max-age=31536000, immutable';
+  }
+
+  return 'public, max-age=0, must-revalidate';
+}

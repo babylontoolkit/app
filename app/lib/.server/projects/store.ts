@@ -181,6 +181,24 @@ export class FsProjectStore implements ProjectStore {
 
     return rows.find((p) => p.shareId === shareId) ?? null;
   }
+
+  async listGallery(limit: number): Promise<Project[]> {
+    const rows = await this._table.all();
+
+    return rows
+      .filter((p) => p.galleryStatus === 'approved' && p.sharedAt)
+      .sort((a, b) => (b.sharedAt ?? '').localeCompare(a.sharedAt ?? ''))
+      .slice(0, limit);
+  }
+
+  async listGallerySubmissions(limit: number): Promise<Project[]> {
+    const rows = await this._table.all();
+
+    return rows
+      .filter((p) => p.galleryStatus === 'pending' && p.sharedAt)
+      .sort((a, b) => (b.sharedAt ?? '').localeCompare(a.sharedAt ?? ''))
+      .slice(0, limit);
+  }
 }
 
 export class FsSnapshotStore implements SnapshotStore {
@@ -264,11 +282,18 @@ function rowToProject(row: Record<string, any>): Project {
     name: row.name,
     templateId: row.template_id,
     shareId: row.share_id ?? undefined,
+    shareTitle: row.share_title ?? undefined,
+    shareDescription: row.share_description ?? undefined,
+    sharedAt: row.shared_at ?? undefined,
+    soloLaunch: row.solo_launch ?? undefined,
+    galleryStatus: row.gallery_status ?? undefined,
+    remixedFrom: row.remixed_from ?? undefined,
     currentSnapshotId: row.current_snapshot_id ?? undefined,
     linkedRepo: row.linked_repo ?? undefined,
     linkedBranch: row.linked_branch ?? undefined,
     lastSyncedCommitSha: row.last_synced_commit_sha ?? undefined,
     githubInstallationRef: row.github_installation_ref ?? undefined,
+    gameBackendRef: row.game_backend_ref ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -281,11 +306,18 @@ function projectToRow(project: Partial<Project>): Record<string, any> {
     name: 'name',
     templateId: 'template_id',
     shareId: 'share_id',
+    shareTitle: 'share_title',
+    shareDescription: 'share_description',
+    sharedAt: 'shared_at',
+    soloLaunch: 'solo_launch',
+    galleryStatus: 'gallery_status',
+    remixedFrom: 'remixed_from',
     currentSnapshotId: 'current_snapshot_id',
     linkedRepo: 'linked_repo',
     linkedBranch: 'linked_branch',
     lastSyncedCommitSha: 'last_synced_commit_sha',
     githubInstallationRef: 'github_installation_ref',
+    gameBackendRef: 'game_backend_ref',
   };
 
   for (const [key, column] of Object.entries(map)) {
@@ -355,6 +387,27 @@ export class SupabaseProjectStore implements ProjectStore {
     const { data } = await db.from('projects').select().eq('share_id', shareId).maybeSingle();
 
     return data ? rowToProject(data) : null;
+  }
+
+  async listGallery(limit: number): Promise<Project[]> {
+    return this._listGalleryByStatus('approved', limit);
+  }
+
+  async listGallerySubmissions(limit: number): Promise<Project[]> {
+    return this._listGalleryByStatus('pending', limit);
+  }
+
+  private async _listGalleryByStatus(status: 'approved' | 'pending', limit: number): Promise<Project[]> {
+    const db = await this._db();
+    const { data } = await db
+      .from('projects')
+      .select()
+      .eq('gallery_status', status)
+      .not('shared_at', 'is', null)
+      .order('shared_at', { ascending: false })
+      .limit(limit);
+
+    return (data ?? []).map(rowToProject);
   }
 }
 

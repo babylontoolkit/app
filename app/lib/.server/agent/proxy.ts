@@ -34,6 +34,7 @@ import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import { compactHistory, historySavings } from '~/lib/.server/llm/history';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
+import { buildProjectNotes, type GameBackendState } from './project-notes';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
 
@@ -97,6 +98,18 @@ export interface AgentRequest {
   apiKeys?: Record<string, string>;
   providerSettings?: Record<string, IProviderSetting>;
   model?: string;
+
+  /**
+   * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
+   * RLS-first. Never a credential: only the public project ref and whether RLS is confirmed.
+   */
+  gameBackend?: GameBackendState;
+
+  /**
+   * Asset introspection notes (§4.9) — component-reference summaries for scenes/prefabs referenced by
+   * this project, so the agent writes logic against an asset's actual components instead of guessing.
+   */
+  assetNotes?: string[];
 }
 
 /** The skill tool set, as `streamText` sees it — keeps the result's tool types concrete. */
@@ -406,6 +419,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * request actually implies — NOT handing the tool back. See spec/skills.md.
    */
   const allowTools = !isCreationTurn && preloaded.length === 0 && !slash;
+
+  /*
+   * Volatile project-context notes (§4.9 assets, §4.14 MCP tools, §4.15 Game Backend).
+   *
+   * These sit in the UNCACHED tail on purpose: they change mid-session (a backend is connected, an
+   * asset is added, `.mcp.json` is edited), so a cache breakpoint here would invalidate the expensive
+   * base prefix every time one of them changed. They are small, and correctness beats caching them.
+   * Placed BEFORE the file context so the model reads "what this project has" before "what is in it".
+   */
+  for (const note of buildProjectNotes({
+    files: request.files,
+    gameBackend: request.gameBackend,
+    assetNotes: request.assetNotes,
+  })) {
+    system.push({ role: 'system', content: note });
+  }
 
   if (request.files && Object.keys(request.files).length > 0) {
     /*

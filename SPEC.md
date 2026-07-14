@@ -549,12 +549,16 @@ Wizard creates the project from the template and drops the user into the builder
 
 ### 4.8 Share, Gallery, Remix & Export
 
+> **Status: server IMPLEMENTED (Stage 4, 2026-07).** Publishing checklist (`share/checklist.ts` — a secret is a BLOCKING refusal, a debug overlay a warning the user may accept, a network game auto-launched `?solo=true`); byte-faithful build upload with a path-traversal wall (`share/publish.ts`); `/play/:shareId` served origin-isolated (`play.$.tsx` → an iframe pointed at `PLAY_URL`; local dev is explicitly NOT the security boundary); gallery returns admin-APPROVED only (`share/gallery.ts` — an allow-list projection, never the owner/project id); remix + self-remix (`share/remix.ts` — `deriveRemix` names exactly what travels: files yes, ownership/link/share id no); anonymous report → admin queue (`share/reports.ts`). Export ZIP already existed (binary-faithful, `workbench.downloadZip`). A minimal brand module (`app/config/brand.ts`) was created so the play badge is not a hardcoded mark. Remaining: the client share dialog and the `/gallery` page.
+
 - **Share:** enforce the Toolkit **Publishing Checklist** first (agent-directed pre-share pass + build-time lint: `enableDebugKeys=false` on DebugInformation, debug overlays off, network-capable games forced `?solo=true` at launch — open question #17) → run `npm run build` in the WebContainer → upload `dist/` to the S3 play bucket (CloudFront-served) → mint `share_id`. `/play/[shareId]` serves the static build full-screen with a "Made with Babylon Toolkit — Remix this game" badge.
 - **Remix:** clones the source snapshot into the visitor's account (sign-up gate) → opens in builder. Primary growth loop. **Self-remix / Duplicate:** any owner can remix their OWN projects (no share required) to spin variations — "Duplicate project" is the same snapshot-clone path within one account.
 - **Gallery:** curated grid of shared games at `/gallery`; submission flag on share; admin curation. Playing is free to us (static hosting) — the zero-cost "take a peek" funnel.
 - **Export (ALL users, never gated):** ZIP download of a proper Toolkit project (official Project Installation layout + README). Alongside **GitHub Sync (§4.13, also ungated)**, this keeps the users-own-their-games promise (§5A) true for everyone — no project is ever locked to the platform.
 
 ### 4.9 Assets Tab & GLTF Store
+
+> **Status: server IMPLEMENTED (Stage 4, 2026-07).** Asset introspection — the "agent knows what it just got" — is built: `assets/introspect.ts` scans a glTF's `CVTOOLS_unity_metadata`/`extras` into a component reference injected into agent context, `assets/glb.ts` unwraps the GLB JSON chunk (doubling as structural validation), `assets/validate.ts` gates uploads (type allow-list, size caps, per-user quota, content sniff). `user_assets` store + upload route (introspects models at upload time) + static catalog (`app/config/assets.json`). Remaining: the assets-tab UI, premium-asset Stripe gating at add-time, and client-side GLB unwrap for store-asset introspection.
 
 - Builder tab listing official/premium Toolkit content in three forms: **hosted scenes/environments referenced by URL** (one click passes the URL as `sceneUrl` or to the GameMode — instant; premium = gated URLs), **INTERACTIVE PREFABS** — GLTF/GLB carrying `CVTOOLS_unity_metadata` component descriptors authored with the Unity Exporter (a car prefab ships with its StandardCarController and tuned properties: instantly drivable on instantiation via `InstantiatePrefabFromContainer`) — and **file asset packs** downloaded into `public/assets/`.
 - **Asset introspection ("the agent knows what it just got"):** when a scene or prefab is added/referenced, the platform scans its glTF `extras` metadata and generates a **component reference** (per the workflow defined in `scene-components.md`) — a breakdown of every attached component, class, and property — injected into the agent's project context as a system note. The agent writes game logic against the asset's actual components instead of guessing.
@@ -565,6 +569,8 @@ Wizard creates the project from the template and drops the user into the builder
 - Asset licensing terms for use in user games: legal text required before premium launch (open question).
 
 ### 4.10 Admin
+
+> **Status: server IMPLEMENTED (Stage 4, 2026-07).** `admin/usage-report.ts` turns the diagnostics columns (migration 0002) into numbers that DIAGNOSE spend — cache hit rate, failure rate, wasted-output tokens (step output the user never saw), per-model cost — not merely chart it. Routes: `/api/admin/usage`, `/api/admin/gallery` (approve/reject — nothing public without this), `/api/admin/reports` (the abuse queue), `/api/admin/credits` (manual grant/refund through the append-only ledger). Prompt/skills refresh + rollback already existed (`api.admin.prompt.ts`). Remaining: the dashboard UI over these routes.
 
 - Authenticated admin routes: prompt refresh + version list/rollback; **skills list/versions/activate/rollback + per-skill load counts (§4.11)**; usage & cost dashboards (tokens, cache hit rate, credits sold vs. cost, per-model); feature flags (`BILLING_ENFORCED`, grant size, model routing); gallery curation; user/credit adjustments (granting, refunds).
 
@@ -604,6 +610,8 @@ Users of Bolt/Lovable expect to control and undo the AI. Without these, one bad 
 
 ### 4.13 GitHub Sync (two-way project ↔ repo bridge) — **AVAILABLE TO ALL USERS**
 
+> **Status: server IMPLEMENTED (Stage 4, 2026-07).** Server-side link/push/pull/divergence via the GitHub Git Data API (`github/sync.ts`, Octokit — no git binary, WebContainers never run git). The dangerous decisions are a pure, tested core (`github/sync-logic.ts`): fast-forward-only (a moved remote → the two-button divergence choice, never a merge), `.env`-family excluded from every push, byte-faithful tree building. Pull ALWAYS checkpoints the platform state first (§4.12). Ungated — no entitlement check anywhere. Remaining: the client buttons, and hardening the per-user token from the connector cookie to a server-side OAuth App.
+
 **Never gated.** GitHub Sync and Export are both available to every user, always. A person's project is never held hostage to this platform — they can leave with their code at any time, by ZIP or by repo. (Pro's only additions are BYOK + model selection, §4.6.1.)
 
 The graduate path for developers: create/vibe-code on the platform → real engineering in local git → sync back. Deliberately a **sync bridge, not a git client** — the platform tracks exactly ONE linked repo+branch per project; branching, rebasing, merging, and PRs happen in the user's own git tooling. (bolt.diy's GitHub connection + import/push machinery is the inherited base; this section defines the product behavior on top.)
@@ -638,6 +646,8 @@ The graduate path for developers: create/vibe-code on the platform → real engi
 
 ### 4.14 MCP — Project-Scoped via `.mcp.json` (Claude Code-compatible)
 
+> **Status: PARTIAL + SECURITY FIX (Stage 4, 2026-07).** 🔴 First: upstream shipped an **unauthenticated RCE** — `MCPService` spawns a child process per stdio server, driven by an unauthenticated `POST /api/mcp-update-config`. Closed fail-closed (`mcp/server-guard.ts`, 404 unless `SERVER_SIDE_MCP_ENABLED`); execution belongs in the user's WebContainer, never platform infra (§5). Built: `.mcp.json` parsing with the **command allow-rule** (a command must resolve inside the project tree — `mcp/project-config.ts`) and the agent-context note listing available tools with the untrusted-input frame (`agent/project-notes.ts`). **Not yet built: the live tool bridge** — relaying model tool calls to the WebContainer-hosted stdio servers over the session channel and back into the generation loop.
+
 MCP configuration is a **project file, not a platform setting**. Projects carry a Claude Code-compatible `.mcp.json` at the root; the StarterAssets template ships the default setup (e.g., `@babylonjs-toolkit/mcp`, kie image/video/google generators) with servers installed as project npm dependencies (`command: node_modules/.bin/...`). No platform-side MCP registry or connector UI is required at launch — editing `.mcp.json` IS the configuration surface, and MCP tooling travels with the project through snapshots, remixes, and GitHub sync automatically.
 
 **Execution model — servers run in the user's WebContainer:**
@@ -654,6 +664,8 @@ MCP configuration is a **project file, not a platform setting**. Projects carry 
 **Billing:** MCP tool traffic bills through normal generation token accounting; the MCP servers' own API costs (e.g., kie keys) are the user's, on their keys.
 
 ### 4.15 Game Backends (user-owned Supabase)
+
+> **Status: server IMPLEMENTED (Stage 4, 2026-07).** The agent is told a backend is connected via an RLS-first system note (`agent/project-notes.ts`), and the **hard separation** is enforced by `game-backend/separation.ts`: a claim whose project ref resolves to the PLATFORM Supabase is treated as "no backend", so game code (which ships the anon key) can never be scaffolded against our database. The client already sent the connection; the proxy now consumes it. Remaining: relabel the upstream connector UI to "Game Backend", and the `leaderboards` skill (skills-repo content, not platform code).
 
 Real games need leaderboards, saves, and profiles. Users connect their **own** Supabase project ("Game Backend" in UI) via the inherited connector:
 
