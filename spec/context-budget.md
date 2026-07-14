@@ -430,15 +430,13 @@ there means both the bill and the diagnostics are wrong, in the same direction, 
 written to the local-FS generation record and **dropped on the floor in Supabase mode**
 (`SupabaseGenerationStore.upsert` maps only the columns that exist).
 
-So in production, today, **we cannot detect a single pathology in the table above.** We would see that a
-generation cost a lot; we could not see that 68% of it was spent redrafting around tool calls. Every
-number in this document was obtained locally, by hand, from a browser DevTools stream — which does not
-scale to noticing a regression across real users.
-
-Closing this needs a migration (add `tool_rounds int`, `duration_ms int`, `finish_reason text`, and
-`steps jsonb`) plus the corresponding lines in `SupabaseGenerationStore`. It is a prerequisite for the
-§4.10 admin cost dashboards being able to answer "*why* is this expensive", rather than only "*how*
-expensive is it".
+**FIXED (migration `0002_generation_diagnostics.sql`, 2026-07-14).** `public.generations` now carries
+`tool_rounds`, `duration_ms`, `finish_reason`, `repair_of` and `steps jsonb`, and
+`SupabaseGenerationStore` writes them. Until it did, production could see **that** a generation cost a
+lot and never that 68% of it went on redrafting around tool calls — and every number in this document
+had to be read by hand out of a browser DevTools stream, which does not scale to noticing a regression
+across real users. **Keep writing them:** they are what lets the §4.10 dashboards answer "*why* is this
+expensive" rather than only "*how* expensive is it".
 
 ---
 
@@ -482,19 +480,15 @@ composes with that change if it ever lands.
 
 ---
 
-## Levers that are NOT built (do not read this document as a claim that they are)
+## Levers that are NOT built
 
-### (Nothing outstanding on the history — see §5 above. It was the top open item; it is now built.)
+**None outstanding.** The two that were listed here — the unwindowed history and the never-firing
+self-healing loop — are both built (§5 above; `auto-repair.ts` / SPEC §4.2 item 7, 2026-07-14).
 
-### The self-healing repair loop never fires
-
-The server half is complete: `api.agent.ts` accepts `repairOf` / `repairAttempt`, `proxy.ts` enforces
-`MAX_REPAIR_TURNS = 2`, and `effort-policy.ts` escalates a repair turn to `high` and a second to `xhigh`.
-
-**No client code sends those fields.** Nothing in `app/components`, `app/lib/hooks`, or `app/lib/stores`
-references them. So SPEC §4.2 item 7's auto-repair turn does not happen, and the *entire escalation half*
-of the effort policy (`spec/anthropic-models.md` §3.6) is unreachable in practice. This costs no money —
-it costs the feature, and it means the effort policy is currently a constant.
+The remaining known lever, deliberately not taken: **model routing** (Haiku for trivial turns, ~3×
+cheaper). It is not a free win — see §3.5a: an under-thinking model does not return a smaller correct
+answer, it returns a confident wrong one, and the repair turns cost more than the routing saved. If it is
+ever attempted, it must be routed on turn KIND (as the effort policy is), never on a prose classifier.
 
 ---
 
