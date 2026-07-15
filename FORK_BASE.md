@@ -122,11 +122,49 @@ public by design. Do not merge the two.
 | `app/routes/api.mcp-update-config.ts`, `app/routes/api.mcp-check.ts` | 🔴 **Critical RCE, fail-closed.** Upstream's `MCPService` spawns a child process per stdio server (`Experimental_StdioMCPTransport`), and the config arrives from an **unauthenticated** POST — `curl /api/mcp-update-config -d '{"mcpServers":{"x":{"command":"sh",...}}}'` ran arbitrary commands on the platform box. Each route now opens with a 4-line early return calling `serverSideMcpDisabled()` (404 unless `SERVER_SIDE_MCP_ENABLED`); the upstream bodies and `MCPService` are byte-untouched, so pulls still merge. MCP execution belongs in the user's WebContainer (§4.14). Pinned by `upstream-routes.spec.ts`. |
 | `app/routes/api.agent.ts` | Additive: threads `gameBackend` (through the §4.15 hard-separation `sanitizeGameBackend`) and `assetNotes` from the request body into the generation. The client already sent the Supabase connection; the server was dropping it. |
 | `app/lib/.server/agent/proxy.ts` | Additive: injects the volatile project-context notes (§4.9/§4.14/§4.15) into the system array AFTER the cached prefix, and adds `gameBackend`/`assetNotes`/`mcpLiveTools` to `AgentRequest`. No change to the cache-breakpoint ordering. |
-| `app/components/header/HeaderActionButtons.client.tsx` | Additive: renders `<ShareButton />` (§4.8) and `<GitHubSyncButton />` (§4.13) alongside the inherited `<DeployButton />`. ⚠️ NOTE: this file's inherited "Report Bug" button still links to bolt.diy's issue tracker — a branding-rule violation to fix in Stage 5. |
+| `app/components/header/HeaderActionButtons.client.tsx` | Additive: renders `<ShareButton />` (§4.8) and `<GitHubSyncButton />` (§4.13) alongside the inherited `<DeployButton />`. (Stage 5: the inherited "Report Bug" bolt.diy link was debranded — see the Stage 5 map below.) |
 | `app/components/chat/Chat.client.tsx` | Additive: forwards `gameBackend` (§4.15) and `mcpTools` (§4.14) in the `/api/agent` body, and runs `syncMcpBridge()` on project change to launch the WebContainer MCP servers. The upstream `supabase` body block is left in place for pull compatibility. |
 | `app/lib/persistence/useChatHistory.ts` | Additive: the no-`mixedId` (fresh builder) branch now adopts a pending remix (`takePendingRemix()`), mounting the cloned project through the same server-checkpoint path a resume uses (§4.8). |
 | `app/components/@settings/core/{types.ts,constants.tsx}`, `ControlPanel.tsx` | Additive: registered the **Assets** (§4.9) and **Admin** (§4.10) tabs, and relabelled the `supabase` tab to "Game Backend" (§4.15 — id kept for merge safety, label/description/icon changed). |
 | `app/components/chat/SupabaseConnection.tsx` | One label change: "Connect to Supabase" → "Connect a Game Backend" (§4.15). |
+
+## Upstream files touched — Stage 5 (identity + hardening, SPEC §2.3/§2.5/§4.4)
+
+**Template reliability (SPEC §4.4 divergence — live fetch, not the pinned snapshot the spec describes):**
+
+| File | Change |
+|---|---|
+| `app/routes/api.github-template.ts` | Additive last-known-good fallback. The mount is a LIVE default-branch (`main`) zipball fetch — NOT the pinned snapshot §4.4 describes (honest divergence; live-`main` kept as the deliberate default). Now: a successful, structurally-valid fetch is persisted via `saveLastKnownGood`; a fetch that fails **or** returns an unmountable result (missing `package.json` / `src/babylon/**`) serves the most recent good snapshot (`loadLastKnownGood`) instead of failing creation; `?fallback=1` forces it for a client-detected broken mount; `X-Template-Source` header reports `live`/`last-known-good`. New helper `app/lib/.server/templates/last-known-good.ts` (+ spec). Target pin-and-cache design (S3 snapshot → `toolkit_version` pinned to SHA/release → deliberate promotion → rollback) is deferred §5 work. ⚠️ Publishing a GitHub Release on AppTemplate flips creation to release-locked (`releases/latest`) and stops `main` from flowing. |
+
+**Debrand (SPEC §2.3 — route user-facing marks through `app/config/brand.ts`; §2.5 rule 1):** all additive, one string/URL each — no structural change, pull-safe.
+
+| File | Change |
+|---|---|
+| `app/routes/_index.tsx`, `app/routes/git.tsx` | Page `meta` `title:'Bolt'` / "AI assistant from StackBlitz" → `brand.productName` / `brand.metaDescription`. |
+| `app/components/chat/BaseChat.tsx` | Empty-state `#intro` heading + subheading → `brand.intro.*`. |
+| `app/components/chat/ExamplePrompts.tsx` | Generic web-dev examples (incl. "app about bolt.diy") → game-themed prompts (§2.3 removes non-game examples). |
+| `app/components/@settings/core/AvatarDropdown.tsx`, `app/components/header/HeaderActionButtons.client.tsx`, `app/components/sidebar/Menu.client.tsx` | bolt.diy Help/Docs + "Report Bug" links → `brand.urls.docs` / `mailto:brand.support.email`. |
+| `app/components/@settings/tabs/event-logs/EventLogsTab.tsx` | PDF export subtitle/footer "bolt.diy — AI Development Platform" / "Generated by bolt.diy" → `brand.*`. |
+| `app/components/deploy/GitHubDeploymentDialog.tsx`, `app/lib/services/gitlabApiService.ts` | Git/GitLab commit messages "…from Bolt.diy" → `…from ${brand.productName}` (they land in the user's repo history). |
+| `app/lib/.server/github/sync-logic.ts` | Default sync commit message hardcoded the product name → `brand.productName` (caught by the brand gate). |
+| `app/routes/api.system.git-info.ts` | `repoName` fallback `'bolt.diy'` → `'app-builder'` (build metadata; only shown if the injected constant is missing). |
+| `.github/workflows/quality.yaml`, `.husky/pre-commit`, `package.json` | Wire the brand grep-gate (`pnpm check:brand` → `scripts/check-brand.mjs`, SPEC §2.5 rule 4) into CI and the pre-commit hook. |
+
+**Visual debrand — OG/social/PWA meta + bare-"Bolt" copy (SPEC §2.3, 2026-07-14):** all additive/one-string; the visual logo/favicon assets were already Babylon-branded (no change needed). The dotted-mark brand gate does NOT catch bare "Bolt" (too many false positives: `BoltShell`, `bolt-terminal`), so these were a manual sweep.
+
+| File | Change |
+|---|---|
+| `app/root.tsx` | Added brand-driven Open Graph / Twitter / `theme-color` meta + `apple-touch-icon` + `manifest` links in `<Head>`/`links` (none existed); `favicon` href → `brand.assets.favicon`. |
+| `app/routes/manifest[.]webmanifest.ts` | **New route** — PWA manifest served from code (not a static `public/manifest.json`) so name/description come from `brand` (rule: nothing brand-shaped hardcoded in a manifest). |
+| `app/components/chat/ChatBox.tsx`, `app/components/chat/ChatAlert.tsx`, `app/components/deploy/DeployAlert.tsx` | Bare "Bolt" in the chat placeholder, error copy, and "Ask Bolt" buttons → `brand.productName`. |
+| `app/components/@settings/tabs/providers/local/SetupGuide.tsx` | "To work with Bolt DIY…" (LM Studio CORS guide) → `brand.productName`. |
+| `app/components/@settings/tabs/event-logs/EventLogsTab.tsx` | Download filenames `bolt-event-logs-*` → `${brand.productSlug}-event-logs-*`. |
+| `app/routes/api.netlify-deploy.ts`, `app/routes/api.vercel-deploy.ts`, `app/components/chat/NetlifyDeploymentLink.client.tsx`, `app/components/chat/VercelDeploymentLink.client.tsx` | Deploy site/project name prefix `bolt-diy-…` (visible in the deploy subdomain) → `${brand.productSlug}-…`; creator and link-matcher changed together so they still match. |
+| `app/components/deploy/GitHubDeploy.client.tsx`, `app/components/deploy/GitLabDeploy.client.tsx` | Repo-name fallback `'bolt-project'` → `${brand.productSlug}-project`. |
+
+New brand field: `brand.productSlug` (`babylon-toolkit`) — filesystem/URL-safe slug for filenames + deploy names (never a display string).
+
+Not touched (deliberately): HTTP `User-Agent: 'bolt.diy-app'` identifiers (functional, not rendered); `Copyright (c) StackBlitz` source headers (MIT REQUIRES retention); the dead/hidden upstream paths (`new-prompt`/`discuss-prompt`, `api.updates`, `webcontainer.connect`, `api.bug-report`) — allow-listed in the brand gate with reasons.
 
 ## Upstream files touched — Stage 2 (project creation, SPEC §4.4)
 

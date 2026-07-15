@@ -3,6 +3,7 @@ import type { LinksFunction } from '@remix-run/cloudflare';
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from '@remix-run/react';
 import tailwindReset from '@unocss/reset/tailwind-compat.css?url';
 import { themeStore } from './lib/stores/theme';
+import { brand } from './config/brand';
 import { stripIndents } from './utils/stripIndent';
 import { createHead } from 'remix-island';
 import { useEffect } from 'react';
@@ -25,9 +26,11 @@ const toastAnimation = cssTransition({
 export const links: LinksFunction = () => [
   {
     rel: 'icon',
-    href: '/favicon.ico',
+    href: brand.assets.favicon,
     type: 'image/x-icon',
   },
+  { rel: 'apple-touch-icon', href: '/apple-touch-icon.png', sizes: '180x180' },
+  { rel: 'manifest', href: '/manifest.webmanifest' },
   { rel: 'stylesheet', href: reactToastifyStyles },
   { rel: 'stylesheet', href: tailwindReset },
   { rel: 'stylesheet', href: globalStyles },
@@ -67,6 +70,25 @@ export const Head = createHead(() => (
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <Meta />
     <Links />
+
+    {/*
+     * Brand-driven social / PWA meta (SPEC §2.3, §2.5). Title + description come from each route's
+     * `meta` export (already brand-sourced); these are the Open Graph / Twitter / theme surfaces the
+     * route meta does not cover. Every value is a static brand string — no hardcoded marks. The image
+     * path is relative (the per-env absolute origin is server-only `APP_URL`, deliberately not a client
+     * brand field); crawlers resolve it against the page origin.
+     */}
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={brand.productName} />
+    <meta property="og:title" content={brand.productName} />
+    <meta property="og:description" content={brand.metaDescription} />
+    <meta property="og:image" content={brand.assets.ogImage} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={brand.productName} />
+    <meta name="twitter:description" content={brand.metaDescription} />
+    <meta name="twitter:image" content={brand.assets.ogImage} />
+
     <script dangerouslySetInnerHTML={{ __html: inlineThemeCode }} />
   </>
 ));

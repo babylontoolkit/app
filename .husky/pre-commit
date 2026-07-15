@@ -29,4 +29,12 @@ if ! pnpm lint; then
     exit 1
 fi
 
+# Run the brand grep-gate (SPEC §2.5 rule 4) — no bolt.diy/StackBlitz marks or hardcoded brand
+# strings in user-facing surfaces; everything brand-shaped goes through app/config/brand.ts.
+echo "Running brand gate..."
+if ! pnpm check:brand; then
+    echo "❌ Brand gate failed! Route the flagged strings through app/config/brand.ts."
+    exit 1
+fi
+
 echo "👍 All checks passed! Committing changes..."

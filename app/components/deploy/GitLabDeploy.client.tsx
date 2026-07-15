@@ -8,6 +8,7 @@ import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import { getLocalStorage } from '~/lib/persistence/localStorage';
 import { formatBuildFailureOutput } from './deployUtils';
+import { brand } from '~/config/brand';
 
 export function useGitLabDeploy() {
   const [isDeploying, setIsDeploying] = useState(false);
@@ -154,7 +155,7 @@ export function useGitLabDeploy() {
       return {
         success: true,
         files: fileContents,
-        projectName: artifact.title || 'bolt-project',
+        projectName: artifact.title || `${brand.productSlug}-project`,
       };
     } catch (err) {
       console.error('GitLab deploy error:', err);

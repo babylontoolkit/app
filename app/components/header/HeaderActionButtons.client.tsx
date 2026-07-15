@@ -4,6 +4,7 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { DeployButton } from '~/components/deploy/DeployButton';
 import { ShareButton } from '~/components/share/ShareButton';
 import { GitHubSyncButton } from '~/components/github/GitHubSyncButton';
+import { brand } from '~/config/brand';
 
 interface HeaderActionButtonsProps {
   chatStarted: boolean;
@@ -31,9 +32,7 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
       {shouldShowButtons && (
         <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden text-sm">
           <button
-            onClick={() =>
-              window.open('https://github.com/stackblitz-labs/bolt.diy/issues/new?template=bug_report.yml', '_blank')
-            }
+            onClick={() => window.open(`mailto:${brand.support.email}?subject=Bug%20report`, '_blank')}
             className="rounded-l-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.5"
             title="Report Bug"
           >

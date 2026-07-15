@@ -2,6 +2,7 @@ import { type ActionFunctionArgs, json } from '@remix-run/cloudflare';
 import crypto from 'crypto';
 import type { NetlifySiteInfo } from '~/types/netlify';
 import { deployFileToBytes, type DeployFile } from '~/lib/binary/binary-files';
+import { brand } from '~/config/brand';
 
 interface DeployRequestBody {
   siteId?: string;
@@ -41,7 +42,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // If no siteId provided, create a new site
     if (!targetSiteId) {
-      const siteName = `bolt-diy-${chatId}-${Date.now()}`;
+      const siteName = `${brand.productSlug}-${chatId}-${Date.now()}`;
       const createSiteResponse = await fetch('https://api.netlify.com/api/v1/sites', {
         method: 'POST',
         headers: {
@@ -94,7 +95,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
       // If no siteId provided or site doesn't exist, create a new site
       if (!targetSiteId) {
-        const siteName = `bolt-diy-${chatId}-${Date.now()}`;
+        const siteName = `${brand.productSlug}-${chatId}-${Date.now()}`;
         const createSiteResponse = await fetch('https://api.netlify.com/api/v1/sites', {
           method: 'POST',
           headers: {

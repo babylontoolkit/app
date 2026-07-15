@@ -3,6 +3,7 @@ import { vercelConnection } from '~/lib/stores/vercel';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useEffect, useState } from 'react';
+import { brand } from '~/config/brand';
 
 export function VercelDeploymentLink() {
   const connection = useStore(vercelConnection);
@@ -46,7 +47,9 @@ export function VercelDeploymentLink() {
         const chatNumber = currentChatId.split('-')[0];
 
         // Find project by matching the chat number in the name
-        const project = projects.find((p: { name: string | string[] }) => p.name.includes(`bolt-diy-${chatNumber}`));
+        const project = projects.find((p: { name: string | string[] }) =>
+          p.name.includes(`${brand.productSlug}-${chatNumber}`),
+        );
 
         if (project) {
           // Fetch project details including deployments

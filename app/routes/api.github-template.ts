@@ -1,6 +1,8 @@
 import { json } from '@remix-run/cloudflare';
 import JSZip from 'jszip';
 import { base64ToBytes, isBinaryPath } from '~/lib/binary/binary-files';
+import { getObjectStore } from '~/lib/.server/storage';
+import { loadLastKnownGood, saveLastKnownGood, validateTemplateFiles } from '~/lib/.server/templates/last-known-good';
 
 interface TemplateFile {
   name: string;
@@ -388,8 +390,29 @@ export async function loader({ request, context }: { request: Request; context: 
   const url = new URL(request.url);
   const repo = url.searchParams.get('repo');
 
+  /**
+   * `?fallback=1` — the client detected a broken mount from a live fetch and is asking for the
+   * last-known-good snapshot instead. This is the "or the mount is broken" half of the safety net
+   * (SPEC §4.4): the server cannot see a runtime-broken WebContainer, so the client requests the
+   * fallback explicitly. We still fall through to a live fetch if no snapshot exists yet.
+   */
+  const preferFallback = url.searchParams.get('fallback') === '1';
+
   if (!repo) {
     return json({ error: 'Repository name is required' }, { status: 400 });
+  }
+
+  const store = getObjectStore(context);
+
+  if (preferFallback) {
+    const cached = await loadLastKnownGood(store, repo);
+
+    if (cached) {
+      console.warn(`Serving last-known-good template for ${repo} at client request (broken mount).`);
+      return json(cached, { headers: { 'X-Template-Source': 'last-known-good' } });
+    }
+
+    // No snapshot yet — nothing to fall back to; try a live fetch below.
   }
 
   try {
@@ -409,11 +432,47 @@ export async function loader({ request, context }: { request: Request; context: 
     // Filter out .git files for both methods
     const filteredFiles = fileList.filter((file: any) => !file.path.startsWith('.git'));
 
-    return json(filteredFiles);
+    /**
+     * A fetch can "succeed" (HTTP 200) yet return something that will NOT mount — an empty/truncated
+     * zip, or a missing vendored framework when submodule resolution fails. Treat that exactly like a
+     * failed fetch: serve the last-known-good snapshot rather than mounting a dead project.
+     */
+    const check = validateTemplateFiles(filteredFiles);
+
+    if (!check.ok) {
+      const cached = await loadLastKnownGood(store, repo);
+
+      if (cached) {
+        console.warn(`Live template for ${repo} was unmountable (${check.reason}); serving last-known-good.`);
+        return json(cached, { headers: { 'X-Template-Source': 'last-known-good' } });
+      }
+
+      throw new Error(`Template fetch produced an unmountable result (${check.reason}) and no snapshot exists.`);
+    }
+
+    /*
+     * Valid live fetch — refresh the snapshot for next time. Best-effort: a store error must never
+     * fail an otherwise-good creation.
+     */
+    try {
+      await saveLastKnownGood(store, repo, filteredFiles);
+    } catch (storeError) {
+      console.warn(`Failed to persist last-known-good template for ${repo}:`, storeError);
+    }
+
+    return json(filteredFiles, { headers: { 'X-Template-Source': 'live' } });
   } catch (error) {
     console.error('Error processing GitHub template:', error);
     console.error('Repository:', repo);
     console.error('Error details:', error instanceof Error ? error.message : String(error));
+
+    // Live fetch failed outright — serve the last-known-good snapshot instead of failing creation.
+    const cached = await loadLastKnownGood(store, repo);
+
+    if (cached) {
+      console.warn(`Live template fetch for ${repo} failed; serving last-known-good snapshot.`);
+      return json(cached, { headers: { 'X-Template-Source': 'last-known-good' } });
+    }
 
     return json(
       {

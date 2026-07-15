@@ -13,6 +13,7 @@
  * this module or its routes consults entitlements.
  */
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
+import { brand } from '~/config/brand';
 
 export type Divergence =
   | { kind: 'in-sync' } // remote head == last synced: a normal fast-forward push is safe
@@ -53,7 +54,7 @@ export function buildCommitMessage(summary: string | undefined): string {
   const trimmed = summary?.trim();
 
   if (!trimmed) {
-    return 'Update from Babylon Toolkit App Builder';
+    return `Update from ${brand.productName}`;
   }
 
   // One line, bounded — a commit subject, not an essay. Keep the AI: prefix so history is readable.

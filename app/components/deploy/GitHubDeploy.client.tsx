@@ -9,6 +9,7 @@ import { chatId } from '~/lib/persistence/useChatHistory';
 import { getLocalStorage } from '~/lib/persistence/localStorage';
 import { formatBuildFailureOutput } from './deployUtils';
 import { bytesToBase64, isBinaryPath, type DeployFile } from '~/lib/binary/binary-files';
+import { brand } from '~/config/brand';
 
 export function useGitHubDeploy() {
   const [isDeploying, setIsDeploying] = useState(false);
@@ -162,7 +163,7 @@ export function useGitHubDeploy() {
       return {
         success: true,
         files: fileContents,
-        projectName: artifact.title || 'bolt-project',
+        projectName: artifact.title || `${brand.productSlug}-project`,
       };
     } catch (err) {
       console.error('GitHub deploy error:', err);

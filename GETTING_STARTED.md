@@ -122,7 +122,7 @@ per-user by the license service).
 Verify: default config = credits UI only, no model names anywhere; flag on = BYOK panel appears.
 ```
 
-### Stage 4 — The full product surface - IN PROGRESS
+### Stage 4 — The full product surface - DONE
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §4.7 guided tour wizard (spec/wizard-config.md catalog) → §4.8 share / /play builds /
@@ -132,7 +132,7 @@ WebContainer, tool bridge) → §4.15 game backends (user-owned Supabase, RLS-fi
 §4.13 GitHub sync — ALL USERS, never gated (link/push/pull/divergence) → §4.10 admin.
 ```
 
-### Stage 5 — Identity + hardening
+### Stage 5 — Identity + hardening - IN PROGRESS
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §2.5 brand module (app/config/brand.ts + app/assets/brand/ + APP_URL/PLAY_URL) +

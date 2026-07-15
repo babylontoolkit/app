@@ -3,6 +3,7 @@ import { netlifyConnection, fetchNetlifyStats } from '~/lib/stores/netlify';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useEffect } from 'react';
+import { brand } from '~/config/brand';
 
 export function NetlifyDeploymentLink() {
   const connection = useStore(netlifyConnection);
@@ -14,7 +15,9 @@ export function NetlifyDeploymentLink() {
     }
   }, [connection.token, currentChatId]);
 
-  const deployedSite = connection.stats?.sites?.find((site) => site.name.includes(`bolt-diy-${currentChatId}`));
+  const deployedSite = connection.stats?.sites?.find((site) =>
+    site.name.includes(`${brand.productSlug}-${currentChatId}`),
+  );
 
   if (!deployedSite) {
     return null;

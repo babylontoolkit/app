@@ -26,6 +26,9 @@ jobs:
       - name: Setup and Build
         uses: ./.github/actions/setup-and-build
 
+      - name: Brand gate (no bolt.diy/StackBlitz marks outside the brand module — SPEC §2.5)
+        run: pnpm check:brand
+
       - name: Check for duplicate dependencies
         run: |
           echo "Checking for duplicate dependencies..."

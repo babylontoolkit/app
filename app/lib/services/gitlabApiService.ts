@@ -6,6 +6,7 @@ import type {
   GitLabProjectResponse,
   GitLabCommitRequest,
 } from '~/types/GitLab';
+import { brand } from '~/config/brand';
 
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
@@ -296,7 +297,7 @@ export class GitLabApiService {
         visibility: isPrivate ? 'private' : 'public',
         initialize_with_readme: false, // Don't initialize with README to avoid conflicts
         default_branch: 'main', // Explicitly set default branch
-        description: `Project created from Bolt.diy`,
+        description: `Project created from ${brand.productName}`,
       }),
     });
 
@@ -443,7 +444,7 @@ export class GitLabApiService {
 
       const commitRequest: GitLabCommitRequest = {
         branch: 'main',
-        commit_message: 'Initial commit from Bolt.diy',
+        commit_message: `Initial commit from ${brand.productName}`,
         actions,
       };
 
@@ -476,7 +477,7 @@ export class GitLabApiService {
 
     const commitRequest: GitLabCommitRequest = {
       branch: 'main',
-      commit_message: 'Update from Bolt.diy',
+      commit_message: `Update from ${brand.productName}`,
       actions,
     };
 
@@ -493,7 +494,7 @@ export class GitLabApiService {
 
         const updateCommitRequest: GitLabCommitRequest = {
           branch: 'main',
-          commit_message: 'Update from Bolt.diy',
+          commit_message: `Update from ${brand.productName}`,
           actions: updateActions,
         };
 

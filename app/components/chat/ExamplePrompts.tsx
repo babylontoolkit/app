@@ -1,12 +1,16 @@
 import React from 'react';
 
+/*
+ * Domain-appropriate starter prompts. This platform builds Babylon Toolkit 3D web games only (SPEC
+ * §2.3 removes generic-website example prompts), so every example seeds a game the registry can match.
+ */
 const EXAMPLE_PROMPTS = [
-  { text: 'Create a mobile app about bolt.diy' },
-  { text: 'Build a todo app in React using Tailwind' },
-  { text: 'Build a simple blog using Astro' },
-  { text: 'Create a cookie consent form using Material UI' },
-  { text: 'Make a space invaders game' },
-  { text: 'Make a Tic Tac Toe game in html, css and js only' },
+  { text: 'Make me a kart racer where the cars are shopping carts' },
+  { text: 'Build a third-person platformer with double-jump and collectibles' },
+  { text: 'Create a top-down twin-stick shooter in a neon arena' },
+  { text: 'Make a first-person maze explorer with a flashlight' },
+  { text: 'Build a physics playground where I can knock over stacks of boxes' },
+  { text: 'Create a split-screen local-multiplayer racing game' },
 ];
 
 export function ExamplePrompts(sendMessage?: { (event: React.UIEvent, messageInput?: string): void | undefined }) {

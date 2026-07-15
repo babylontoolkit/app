@@ -1,6 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
+import { brand } from '~/config/brand';
 import { motion } from 'framer-motion';
 import { Octokit } from '@octokit/rest';
 import { classNames } from '~/utils/classNames';
@@ -433,7 +434,7 @@ export function GitHubDeploymentDialog({ isOpen, onClose, projectName, files }: 
         const { data: commitData } = await octokit.git.createCommit({
           owner: connection.user.login,
           repo: sanitizedRepoName,
-          message: !repoExists ? 'Initial commit from Bolt.diy' : 'Update from Bolt.diy',
+          message: !repoExists ? `Initial commit from ${brand.productName}` : `Update from ${brand.productName}`,
           tree: treeData.sha,
           parents: parentCommitSha ? [parentCommitSha] : [], // Use parent if available
         });
