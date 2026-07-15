@@ -148,6 +148,8 @@ One "make me a kart racer", the acceptance case, on the real starter:
 | **Total input tokens** | **1,100,188** | **111,659** |
 | Est. cost (Sonnet, in+out) | ≈ **$4.25** | ≈ **$1.35** |
 
+(Costs measured on Sonnet 5, the default at the time. The platform default is now Opus 4.8 — a uniform ~1.67x across every token class — so the "After" creation is ≈ **$2.25** of model spend on Opus. The savings *ratio* the table demonstrates is model-independent.)
+
 Output is now the dominant cost (~69%), which is the correct shape: we pay for what the model *writes*, not for what it *re-reads*.
 
 ## The two causes (both structural, neither obvious)

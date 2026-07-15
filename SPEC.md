@@ -198,7 +198,7 @@ Key property of this architecture: **compute for running user projects costs us 
 - Per-message credit cost badge in chat; generation blocked with a friendly upsell when balance ≤ 0.
 - **Two clean UI modes, one codebase — CREDITS IS THE DEFAULT BOOT STATE:** (a) **Credits mode** (default for everyone until proven otherwise): balance chip, cost badges, Standard/Max toggle — zero provider/key/model machinery rendered anywhere. This is what the app shows on first load, including when the platform Anthropic key is not yet configured (generation then returns a clear "platform key not configured" state — §1.3 principle 0 — it does NOT fall back to a provider picker). (b) **Pro mode**: adds the BYOK panel (provider picker + key entry, client-stored) and a "Pro Tools · BYOK" badge; cost badges read "BYOK".
 - **Mode resolution (server-side):** **Credits mode is the default and the norm** (Lovable-style: usage credits only, no model choice, no keys). Pro UI (provider picker + model selector + BYOK key entry) renders ONLY when **`PRO_FEATURES_ENABLED=true`** (config; **default `false`**) — and, when Pro features are enabled, an individual user gets them only with a verified Pro entitlement from the license service (§4.6.1) or when the flag is set for local development. With `PRO_FEATURES_ENABLED=false` the model selector and key fields do not exist in the UI at all, for anyone. Never derived from client state.
-- **The model is a fixed platform setting, not a user choice (§4.2a):** credits-mode generations always use upstream's `DEFAULT_MODEL` constant in `app/utils/constants.ts` (currently `claude-sonnet-5`). Changing the platform's model = editing that one constant. No env var, no UI selector.
+- **The model is a fixed platform setting, not a user choice (§4.2a):** credits-mode generations always use upstream's `DEFAULT_MODEL` constant in `app/utils/constants.ts` (currently `claude-opus-4-8` — the strongest coding model, this being a game-coding product). Changing the platform's model = editing that one constant. No env var, no UI selector. Billing is model-aware, so the higher Opus unit cost carries the margin through automatically (§4.6).
 - **Branding:** Babylon Toolkit identity throughout (see §2.3 debrand rule); no bolt.diy marks in any user-facing surface.
 - Mobile: play/gallery only for launch; editing is desktop scope.
 
@@ -265,15 +265,15 @@ This is a **money path**, in the same sense the ledger is. A regression here thr
 
 ### 4.2a Anthropic Model Configuration & Provider Hardening
 
-**Model is a single constant, never UI.** Credits-mode generations always use upstream's **`DEFAULT_MODEL`** in `app/utils/constants.ts` — currently **`claude-sonnet-5`** (upstream's original value, `claude-3-5-sonnet-latest`, was retired AND matched no `staticModels` entry). Swapping the platform model = editing that one constant. Deliberately NOT an env var: the model must always be a valid `staticModels` entry, and a typo'd env value would 404 at first generation.
+**Model is a single constant, never UI.** Credits-mode generations always use upstream's **`DEFAULT_MODEL`** in `app/utils/constants.ts` — currently **`claude-opus-4-8`**, the strongest coding model, chosen because this is a game-coding product (it superseded `claude-sonnet-5`; upstream's original value, `claude-3-5-sonnet-latest`, was retired AND matched no `staticModels` entry). Swapping the platform model = editing that one constant. Deliberately NOT an env var: the model must always be a valid `staticModels` entry, and a typo'd env value would 404 at first generation.
 
 **Current model table** (IDs are COMPLETE — never append a date or `-latest`; the dated-snapshot scheme now 404s):
 
 | Model | ID | Context (`maxTokenAllowed`) | Output (`maxCompletionTokens`) |
 |---|---|---|---|
-| Claude Sonnet 5 (platform default) | `claude-sonnet-5` | 1,000,000 | 128,000 |
+| Claude Sonnet 5 | `claude-sonnet-5` | 1,000,000 | 128,000 |
 | Claude Haiku 4.5 | `claude-haiku-4-5` | 200,000 | **64,000** ⚠️ |
-| Claude Opus 4.8 | `claude-opus-4-8` | 1,000,000 | 128,000 |
+| Claude Opus 4.8 (platform default) | `claude-opus-4-8` | 1,000,000 | 128,000 |
 | Claude Fable 5 | `claude-fable-5` | 1,000,000 | 128,000 |
 
 ⚠️ Haiku is the exception (200k/64k). Copying another row's numbers over Haiku requests more output than allowed → hard 400. Every model upstream bolt.diy shipped is retired and 404s — delete them, never keep as "fallbacks."
@@ -717,7 +717,7 @@ Real games need leaderboards, saves, and profiles. Users connect their **own** S
 ## 7. Cost Model (why this works without big capital)
 
 - User project compute: ~$0 (WebContainers run on user CPUs).
-- LLM: prepaid by credits before spend; free-grant exposure ≈ cents per user (small grant, cheap default model, cached prompt), capped by flags and Console limits.
+- LLM: prepaid by credits before spend; free-grant exposure ≈ a few dollars per user (small grant on the Opus default — ~3 creations' worth — held down by the cached prompt), capped by flags and Console limits. Purchased credits carry the margin over Opus's real cost, so paid usage is never out-of-pocket.
 - Prompt caching on the large stable system prompt is the main input-cost reducer → margin lever.
 - Fixed costs: AWS Lightsail (~$7–15/mo per env) + S3/CloudFront (cents→dollars), Supabase tier, StackBlitz plan, Stripe fees, domains — tens of dollars/month at beta scale.
 - Check Anthropic startup/credit programs and current API pricing before launch (docs.claude.com / anthropic.com).
@@ -738,7 +738,7 @@ Per §1.3 principle 0, every feature below is BUILT during Phases 1–2 with con
 
 | Credential | Unlocks | Until then (built, degraded) |
 |---|---|---|
-| `ANTHROPIC_API_KEY` (Console org) | Credits-mode generation (`DEFAULT_MODEL` = `claude-sonnet-5`) | Credits UI renders; generation returns "platform key not configured"; devs set `PRO_FEATURES_ENABLED=true` + BYOK locally |
+| `ANTHROPIC_API_KEY` (Console org) | Credits-mode generation (`DEFAULT_MODEL` = `claude-opus-4-8`) | Credits UI renders; generation returns "platform key not configured"; devs set `PRO_FEATURES_ENABLED=true` + BYOK locally |
 | License service `ValidateSubscription` live | Real Pro entitlements | Client built; returns `{active:false}` → Credits mode; `PRO_FEATURES_ENABLED` for dev |
 | `STRIPE_*` | Credit purchases | Checkout UI built; buy button shows "payments not configured"; ledger/grants fully functional |
 | `SUPABASE_*` | Hosted auth/persistence | Local/dev persistence path; feature-flagged |

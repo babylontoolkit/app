@@ -135,7 +135,7 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | Var | Default | What it does |
 |---|---|---|
 | `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone |
-| `SIGNUP_GRANT_CREDITS` | `2250` | Starter credits, once per user |
+| `SIGNUP_GRANT_CREDITS` | `2500` | Starter credits, once per user |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
 | `CREDIT_MARGIN` | `3.34` | Multiplier over raw cost |

@@ -11,9 +11,15 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * The platform model (SPEC §4.2a). Credits-mode generations always use this — swapping the
  * platform model means editing this one constant. Deliberately NOT an env var: the value must
  * always match a `staticModels` entry, and a typo'd env value would 404 at the first generation.
- * (Upstream's `claude-3-5-sonnet-latest` was retired AND matched no `staticModels` entry.)
+ *
+ * This is a GAME-CODING product, so the default is the strongest coding model — Opus 4.8
+ * (`claude-opus-4-8`). It costs ~1.67x Sonnet 5 per token (input $5 vs $3, output $25 vs $15),
+ * but the billing path is fully model-aware: `ratesFor()` prices every generation at the
+ * ACTUAL model's rates and `creditsForUsage()` applies the margin on top, so the profit-margin
+ * percentage is preserved automatically at the higher unit cost — nothing else needs to change
+ * to "burn enough credits" for Opus (see `app/lib/.server/billing/rates.ts`).
  */
-export const DEFAULT_MODEL = 'claude-sonnet-5';
+export const DEFAULT_MODEL = 'claude-opus-4-8';
 export const PROMPT_COOKIE_KEY = 'cachedPrompt';
 export const TOOL_EXECUTION_APPROVAL = {
   APPROVE: 'Yes, approved.',

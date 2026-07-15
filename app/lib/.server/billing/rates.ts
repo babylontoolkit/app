@@ -106,11 +106,17 @@ export function getBillingConfig(context?: unknown): BillingConfig {
     margin: envNumber(context, 'CREDIT_MARGIN', 3.34),
 
     /*
-     * Default 5 generations' worth (§4.6). A measured creation costs ~$1.35 of model spend, which is
-     * ~450 credits at the default unit cost and margin — so ~2,250 credits buys a new user five real
-     * projects. Sized from the measurement in §4.2.8, not from a round number.
+     * The free signup grant is PURE COST to the operator — it buys real model spend on our key with
+     * no revenue behind it — so it is sized in whole creations, not a round number, and is env-tunable
+     * (`SIGNUP_GRANT_CREDITS`) so the giveaway can be dialled without a deploy.
+     *
+     * On the Opus 4.8 default a creation costs ~$2.25 of model spend (the §4.2.8 measurement was
+     * ~$1.35 on Sonnet 5; Opus is a uniform ~1.67x across all four token classes), which is ~752
+     * credits at the default unit cost ($0.01) and margin (3.34). So 2,500 credits ≈ THREE real
+     * projects on Opus (it was ~five on Sonnet). Raise this constant if you want new users to get more
+     * free Opus projects — but note every credit here is money out of the operator's prepaid pool.
      */
-    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 2250),
+    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 2500),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
 
     stripeSecretKey: process.env.STRIPE_SECRET_KEY,
