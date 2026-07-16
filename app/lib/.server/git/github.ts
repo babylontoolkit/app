@@ -169,9 +169,23 @@ export class GitHubProvider implements GitProvider {
     } catch (error) {
       const providerError = toGitHubError(error);
 
-      // 422 = "name already exists on this account" → adopt it.
+      // 422 = "name already exists on this account".
       if (providerError.status !== 422) {
         throw providerError;
+      }
+
+      /*
+       * Adopting is a DESTRUCTIVE default and must be asked for (see `EnsureRepoInput.adoptExisting`).
+       * A caller that derived this name rather than being handed it — Save — wants the next free name,
+       * not someone's unrelated repository.
+       */
+      if (!input.adoptExisting) {
+        throw new GitProviderError({
+          kind: 'name-taken',
+          message: `A repository named ${input.name} already exists on this account.`,
+          status: 422,
+          cause: error,
+        });
       }
 
       const { data } = await mapErrors(() => this._octokit.repos.get({ owner: login, repo: input.name }));

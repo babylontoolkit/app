@@ -79,9 +79,12 @@ export function repoFullName(ref: Pick<RepoRef, 'owner' | 'repo'>): string {
  * - `not-found` — repo/branch/blob does not exist.
  * - `rate-limit` — provider rate limit or secondary limit. Always retryable.
  * - `invalid` — caller error: a malformed repo name, an over-cap repo. Not retryable.
+ * - `name-taken` — that repo name already exists on the account. Not retryable, and NOT an error the
+ *   user should ever see: Save catches it and tries the next name (`save.ts`). It is a distinct kind
+ *   because "the name is used" and "the name is bad" are both 4xx and lead to opposite behaviour.
  * - `unavailable` — transport/5xx/unknown. Retryable.
  */
-export type GitErrorKind = 'auth' | 'forbidden' | 'not-found' | 'rate-limit' | 'invalid' | 'unavailable';
+export type GitErrorKind = 'auth' | 'forbidden' | 'not-found' | 'rate-limit' | 'invalid' | 'name-taken' | 'unavailable';
 
 /**
  * A typed provider failure.
@@ -118,6 +121,21 @@ export interface EnsureRepoInput {
    */
   private: boolean;
   description?: string;
+
+  /**
+   * What to do when a repo of this name already exists on the account.
+   *
+   * 🔴 **Required, and `false` is what Save passes.** This started as unconditional adopt-on-conflict,
+   * which is correct for "link this project to the repo I just named" and destructive for "Save":
+   * Save derives a name from the project title, so a user with an unrelated `my-game` repo would have
+   * had it silently adopted, and the first push — `first-push`, since this project had never synced —
+   * builds ON its head. Their repo's HEAD becomes our game. Nothing is lost to git, and nothing looks
+   * like an error; they just find a different project in their repository.
+   *
+   * So the intent must be stated. `false` raises `name-taken` and lets the caller pick another name;
+   * `true` is only for a repo the user explicitly named and therefore explicitly meant.
+   */
+  adoptExisting: boolean;
 }
 
 export interface EnsureRepoResult {

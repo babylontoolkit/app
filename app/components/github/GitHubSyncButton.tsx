@@ -19,7 +19,9 @@ import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { Dialog, DialogRoot, DialogTitle, DialogDescription, DialogButton } from '~/components/ui/Dialog';
 import { projectId as projectIdStore } from '~/lib/persistence';
-import { getProject, createSnapshot } from '~/lib/persistence/projects';
+import { db } from '~/lib/persistence/useChatHistory';
+import { createLocalSnapshot } from '~/lib/persistence/local-snapshots';
+import { getProject } from '~/lib/persistence/projects';
 import { workbenchStore } from '~/lib/stores/workbench';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 
@@ -199,47 +201,87 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
     }
   };
 
+  /**
+   * Push what is on screen.
+   *
+   * The files travel in the request body (§4.5.4b). This used to `createSnapshot(...)` first and let
+   * the server read the project back out of our own storage — which only worked while we kept a copy
+   * of every project, the exact thing repo-primary removes. The browser holds the only copy, so the
+   * browser is what sends it.
+   */
   const push = async () => {
     setBusy(true);
 
     try {
-      // Checkpoint the current files first, so the push reflects what is on screen.
       const files = await workbenchStore.serializeFiles();
-      await createSnapshot(projectId, { files, label: 'Before GitHub push' });
-
-      const result = await call({ op: 'push' });
+      const result = await call({ op: 'push', files });
 
       if (result.ok) {
-        toast.success('Pushed to GitHub.');
+        toast.success('Saved to GitHub.');
         setDiverged(false);
       } else if (result.divergence) {
         setDiverged(true);
       } else {
-        reportFailure(result, 'Push failed.');
+        reportFailure(result, 'Could not save to GitHub.');
       }
     } finally {
       setBusy(false);
     }
   };
 
+  /**
+   * Bring the repo's version down, or push to a new branch when the two have diverged.
+   *
+   * The checkpoint before an overwrite happens HERE now (§4.12, §4.5.4b). The server used to take it,
+   * back when it held the files; it holds none, so the only party that can checkpoint the state about
+   * to be replaced is the one that has it. It is taken before `restoreFiles`, never after — the point
+   * is to capture what is being overwritten.
+   */
   const pull = async (op: 'pull' | 'resolve', choice?: string) => {
     setBusy(true);
 
     try {
-      const result = await call(choice ? { op, choice } : { op });
+      const body: Record<string, unknown> = choice ? { op, choice } : { op };
+
+      // Pushing to a new branch sends the local work; pulling sends nothing.
+      if (choice === 'push-to-new-branch') {
+        body.files = await workbenchStore.serializeFiles();
+      }
+
+      const result = await call(body);
 
       if (result.ok && result.files) {
+        await checkpointBeforeOverwrite();
         await workbenchStore.restoreFiles(result.files);
-        toast.success('Synced from GitHub.');
+        await snapshotLocally(result.files, 'Pulled from GitHub');
+        toast.success('Updated from GitHub.');
         setDiverged(false);
       } else if (result.ok && result.branch) {
-        toast.success(`Pushed your changes to a new branch: ${result.branch}`);
+        toast.success(`Saved your changes to a new branch: ${result.branch}`);
         setDiverged(false);
       } else {
-        reportFailure(result, 'Sync failed.');
+        reportFailure(result, 'Could not sync with GitHub.');
       }
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** Capture what is about to be replaced, so any regret is one restore away (§4.12). */
+  const checkpointBeforeOverwrite = async () => {
+    await snapshotLocally(await workbenchStore.serializeFiles(), 'Before updating from GitHub');
+  };
+
+  const snapshotLocally = async (files: SerializedFileMap, label: string) => {
+    if (!db) {
+      return;
+    }
+
+    try {
+      await createLocalSnapshot(db, { projectId, files, label });
+    } catch (error) {
+      // Not fatal to the sync itself, but never silent — this is the user's undo.
+      toast.warn(`Could not save a local checkpoint: ${(error as Error).message}`);
     }
   };
 

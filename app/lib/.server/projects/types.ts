@@ -5,6 +5,7 @@
  * route that touches one proves ownership before doing anything else (§4.5.3).
  */
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
+import type { GitProviderId } from '~/lib/.server/git/provider';
 
 export interface Project {
   id: string;
@@ -40,11 +41,29 @@ export interface Project {
   /** The snapshot the builder remounts on resume. */
   currentSnapshotId?: string;
 
-  /** GitHub Sync (§4.13) — exactly one linked repo + branch per project. */
+  /**
+   * The user's repo (§4.5.4b) — under repo-primary persistence this is not a sync convenience, it is
+   * the ADDRESS OF THE ONLY PERMANENT COPY of the project's code. Exactly one repo + branch.
+   *
+   * All four move together or not at all: `provider` names the adapter, `linkedRepo`/`linkedBranch`
+   * name the target. The database refuses a half-set (`projects_link_complete_check`, migration 0006),
+   * because a project holding a repo with no provider reads as LINKED in the UI while no save path can
+   * resolve an adapter — the user is told their only copy is safe while nothing is written anywhere.
+   *
+   * All absent = UNLINKED = the project lives only in this browser.
+   */
+  provider?: GitProviderId;
   linkedRepo?: string;
   linkedBranch?: string;
   lastSyncedCommitSha?: string;
   githubInstallationRef?: string;
+
+  /**
+   * Push to the linked repo on every checkpoint (§4.5.4b). ON by default and never null: a user who
+   * linked a repo asked for their work to live there, and a save preference that quietly defaults to
+   * off is a user who believes they are saved and is not. Inert while UNLINKED.
+   */
+  autoPush?: boolean;
 
   /**
    * Game Backend (§4.15) — a pointer to the user's OWN Supabase project ref. Never a credential: the

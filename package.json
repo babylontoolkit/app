@@ -195,6 +195,7 @@
     "electron-builder": "^26.0.12",
     "eslint-config-prettier": "^10.1.1",
     "eslint-plugin-prettier": "^5.2.6",
+    "fake-indexeddb": "^6.2.5",
     "fast-glob": "^3.3.2",
     "husky": "9.1.7",
     "is-ci": "^3.0.1",

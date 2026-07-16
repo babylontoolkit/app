@@ -171,9 +171,18 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
     throw new FakeHttpError(rule.status, rule.message ?? `Injected ${rule.status}`, { headers: rule.headers ?? {} });
   };
 
+  /**
+   * Record the request, THEN decide whether it fails.
+   *
+   * The order matters. `requests` means "what the provider sent us", and a request that got a 500 was
+   * still sent — so failing first made every failed call invisible. Two things that costs us: a test
+   * cannot assert "only ONE attempt was made" on an error path (the attempts leave no trace), and the
+   * contract suite's `JSON.stringify(requests)` secret scan would not see a `.env` that went out on a
+   * request the provider happened to reject.
+   */
   const record = (method: string, path: string, body?: unknown) => {
-    maybeFail(path);
     requests.push({ method, path, body });
+    maybeFail(path);
   };
 
   const octokit = {
@@ -346,6 +355,9 @@ export function createFakeGitLab(options: { login?: string; store?: FakeRepoStor
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
 
+    // Record BEFORE failing — a rejected request was still sent. See `record` in the GitHub fake.
+    requests.push({ method, path, body });
+
     const rule = failures.find((f) => path.includes(f.match) && (f.times === undefined || f.times > 0));
 
     if (rule) {
@@ -355,8 +367,6 @@ export function createFakeGitLab(options: { login?: string; store?: FakeRepoStor
 
       return json({ message: rule.message ?? `Injected ${rule.status}` }, rule.status, rule.headers);
     }
-
-    requests.push({ method, path, body });
 
     if (path === '/user') {
       return json({ username: login });

@@ -1,23 +1,28 @@
 /**
- * The client's door to server-side persistence (SPEC §4.5, §4.5.5, §4.12).
+ * The client's door to the server (SPEC §4.5, §4.5.4b, §4.12).
  *
- * Everything the browser knows about projects and checkpoints goes through here. Two rules hold the
- * design together:
+ * 🔴 **This header used to say "the server is the source of truth for FILES". That is now FALSE**, and
+ * the correction is the most important thing on this page — §4.5.4b inverted it. The server holds the
+ * project RECORD, the chat, and a pointer to the user's repo. It does not hold their code:
  *
- * 1. **The server is the source of truth for FILES.** Upstream bolt.diy keeps one snapshot per chat in
- *    IndexedDB, overwritten on every message — so a project lives in exactly one browser, has no
- *    history, and dies with the tab. Everything Stage 4 wants (share, gallery, remix, GitHub sync)
- *    means handing someone else a project, which is impossible if the project only exists locally.
+ *   - before Save, the project lives in this browser and nowhere else (`local-snapshots.ts`);
+ *   - after Save, it lives in the user's own repository, which is the only permanent copy;
+ *   - the platform relays between the two (`saveProjectToRepo`) and stores nothing on the way through.
  *
- * 2. **Never send a `projectId` we did not get from the server.** It is checked on every route
- *    (`requireOwnedProject`), and a project that is not yours reports 404 — not 403 — because a 403
- *    would confirm the id exists and turn the route into an enumeration oracle (§4.5.3).
+ * The one exception is narrow and worth naming so it is not mistaken for the old model: a REMIX SEED,
+ * the one-time copy `api.remix` writes so a clone of a shared game has something to open — necessary
+ * because the source's own repo belongs to someone else.
  *
- * Snapshot payloads are `SerializedFileMap`: the same codec the WebContainer serializes to, so binary
+ * The rule that did NOT change: **never send a `projectId` we did not get from the server.** It is
+ * checked on every route (`requireOwnedProject`), and a project that is not yours reports 404 — not
+ * 403 — because a 403 would confirm the id exists and turn the route into an enumeration oracle
+ * (§4.5.3).
+ *
+ * File payloads are `SerializedFileMap`: the same codec the WebContainer serializes to, so binary
  * bytes survive the round trip base64-encoded as a WIRE format (never as live store state).
  */
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
-import type { Project, SnapshotList, SnapshotSummary } from '~/types/project';
+import type { Project } from '~/types/project';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('projects-client');
@@ -103,29 +108,160 @@ export async function deleteProject(projectId: string): Promise<void> {
   await api<{ ok: true }>(`/api/projects/${projectId}`, { method: 'DELETE' });
 }
 
+/* ------------------------------------------------------------------- saving */
+
+export interface RepoStatus {
+  linked: boolean;
+  provider?: 'github' | 'gitlab';
+  repo?: string;
+  branch?: string;
+  lastSyncedCommitSha?: string;
+  autoPush?: boolean;
+
+  /**
+   * The repo's head. `null` = the branch has no commits. **ABSENT = we could not ask** (offline, or a
+   * lapsed token) — which `selectMountSource` treats as "unknown", never as "empty".
+   */
+  remoteHead?: string | null;
+
+  /** True when the provider could not be reached. `remoteHead` is then absent, not null. */
+  unreachable?: boolean;
+}
+
+/**
+ * Where this project is saved, and where its repo is right now.
+ *
+ * Returns `{linked: false}` rather than throwing when the server cannot be reached — opening a project
+ * must work offline, and an unlinked-looking answer with no `remoteHead` is exactly what
+ * `selectMountSource` needs to fall back to the local copy.
+ */
+export async function getRepoStatus(projectId: string): Promise<RepoStatus> {
+  try {
+    const response = await fetch(`/api/projects/${projectId}/github`, { credentials: 'same-origin' });
+
+    if (!response.ok) {
+      return { linked: false, unreachable: true };
+    }
+
+    return (await response.json()) as RepoStatus;
+  } catch {
+    return { linked: false, unreachable: true };
+  }
+}
+
+/** Pull the linked repo's files. The caller checkpoints before applying them (§4.12). */
+export async function pullFromRepo(
+  projectId: string,
+): Promise<{ files?: SerializedFileMap; head?: string; message?: string }> {
+  try {
+    const response = await fetch(`/api/projects/${projectId}/github`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'pull' }),
+    });
+
+    const payload = (await response.json().catch(() => null)) as {
+      ok?: boolean;
+      files?: SerializedFileMap;
+      head?: string;
+      message?: string;
+    } | null;
+
+    if (!payload?.ok) {
+      return { message: payload?.message ?? `Could not read the repository (${response.status}).` };
+    }
+
+    return { files: payload.files, head: payload.head };
+  } catch {
+    return { message: 'Could not reach the server.' };
+  }
+}
+
+export interface SaveOutcome {
+  ok: boolean;
+
+  /** The repo the project now lives in, `owner/name`. */
+  repo?: string;
+  branch?: string;
+  provider?: 'github' | 'gitlab';
+  commitSha?: string;
+
+  /** True when Save created the repository (first save) rather than pushing to an existing link. */
+  created?: boolean;
+
+  /** The remote moved — the caller must offer the two-button choice (§4.13). Never merge. */
+  divergence?: boolean;
+
+  /** The provider connection lapsed; send the user back through OAuth. */
+  reconnect?: boolean;
+
+  /** Worth trying again (rate limit, transport). Terminal failures are not. */
+  retryable?: boolean;
+  message?: string;
+}
+
+/**
+ * Save (§4.5.4b) — make this project permanent, in the user's own repository.
+ *
+ * On first save the server creates a private repo named after the project, pushes, and records the
+ * link; afterwards this is a push to the repo they already have. Either way the FILES travel in the
+ * body: they exist in this browser and nowhere else until this call succeeds.
+ *
+ * Never throws on a failed save — it returns the outcome. §4.5.4b requires a failed save to be LOUD,
+ * and a thrown exception at a call site that forgot a `catch` is the opposite of loud: it is a spinner
+ * that stops and a user who believes they are saved. The caller must read `ok`.
+ */
+export async function saveProjectToRepo(
+  projectId: string,
+  input: { files: SerializedFileMap; summary?: string },
+): Promise<SaveOutcome> {
+  let response: Response;
+
+  try {
+    response = await fetch(`/api/projects/${projectId}/github`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'save', ...input }),
+    });
+  } catch {
+    return { ok: false, retryable: true, message: 'Could not reach the server. Your work is still here — try again.' };
+  }
+
+  const payload = (await response.json().catch(() => null)) as SaveOutcome | null;
+
+  if (!payload) {
+    // A non-JSON body (an HTML 500 page) must not become a silent success or an unhandled throw.
+    return {
+      ok: false,
+      retryable: response.status >= 500,
+      message: `The server returned an error (${response.status}).`,
+    };
+  }
+
+  if (!payload.ok) {
+    logger.error(`Save failed for ${projectId}: ${payload.message ?? response.status}`);
+  }
+
+  return payload;
+}
+
 /* --------------------------------------------------------------- snapshots */
 
 /**
- * Take a checkpoint (§4.12).
+ * 🔴 There is no `createSnapshot` here any more (§4.5.4b), and adding one back is the regression.
  *
- * `messageId` is what makes the version history usable: it anchors the checkpoint to the assistant
- * message that produced it, which is how "restore to before this change" knows where "before" is.
+ * The browser used to POST the entire project to `/api/projects/:id/snapshots` after every generation.
+ * Under repo-primary persistence the platform does not hold the user's code: checkpoints live in
+ * IndexedDB (`local-snapshots.ts`) and saved work lives in the user's own repo. The server route
+ * refuses the write, so a call added here would fail at runtime rather than quietly re-enable the old
+ * model — but the honest place to say so is here, where someone reaching for "save the project" looks
+ * first.
+ *
+ * `listSnapshots` and `setCurrentSnapshot` are gone for the same reason: the history they described is
+ * local now.
  */
-export async function createSnapshot(
-  projectId: string,
-  input: { files: SerializedFileMap; messageId?: string; label?: string },
-): Promise<SnapshotSummary> {
-  const { snapshot } = await api<{ snapshot: SnapshotSummary }>(`/api/projects/${projectId}/snapshots`, {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
-
-  return snapshot;
-}
-
-export async function listSnapshots(projectId: string): Promise<SnapshotList> {
-  return api<SnapshotList>(`/api/projects/${projectId}/snapshots`);
-}
 
 /** Read a checkpoint's payload back. This is the only call that moves real bytes — use it sparingly. */
 export async function readSnapshot(
@@ -138,22 +274,14 @@ export async function readSnapshot(
 }
 
 /**
- * Move the project's `currentSnapshotId` pointer.
+ * Read the project's server-side SEED, if it has one.
  *
- * NOTE the route's shape: this is a POST. `DELETE` on the same URL does NOT delete a snapshot — there
- * is no snapshot-delete endpoint at all, by design. History is append-only: a restore adds a new
- * checkpoint rather than destroying the ones after it, so a user can always get back to where they
- * were (§4.12).
- */
-export async function setCurrentSnapshot(projectId: string, snapshotId: string): Promise<void> {
-  await api<{ ok: true }>(`/api/projects/${projectId}/snapshots/${snapshotId}`, { method: 'POST' });
-}
-
-/**
- * Fetch the files of the checkpoint the project currently points at — the "resume" read.
+ * The name is now slightly generous: this is not "the latest checkpoint", because the platform no
+ * longer takes checkpoints. The only thing it can return is a remix seed — the one-time copy
+ * `api.remix` leaves so a clone of a shared game has something to open, which exists because the
+ * source's own repo belongs to a different person (§4.8, §4.5.4b).
  *
- * Returns `{ files: undefined }` for a project with no checkpoint yet, which is a normal state (it
- * exists between "project created" and "first snapshot taken"), not an error.
+ * Returns `{}` for everything else, which is the normal case, not an error.
  */
 export async function restoreLatestServerCheckpoint(
   projectId: string,

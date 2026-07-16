@@ -208,9 +208,19 @@ export class GitLabProvider implements GitProvider {
     } catch (error) {
       const providerError = error instanceof GitProviderError ? error : null;
 
-      // 400 = "has already been taken" on this account → adopt it, exactly as the GitHub 422 path does.
+      // 400 = "has already been taken" on this account, the GitHub 422 path's twin.
       if (providerError?.kind !== 'invalid') {
         throw error;
+      }
+
+      // Adopting is destructive and must be asked for — see `EnsureRepoInput.adoptExisting`.
+      if (!input.adoptExisting) {
+        throw new GitProviderError({
+          kind: 'name-taken',
+          message: `A project named ${input.name} already exists on this account.`,
+          status: providerError.status,
+          cause: error,
+        });
       }
 
       const existing = await this._request<{ path_with_namespace: string; default_branch: string | null }>(

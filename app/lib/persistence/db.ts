@@ -32,7 +32,7 @@ export async function openDatabase(): Promise<IDBDatabase | undefined> {
   }
 
   return new Promise((resolve) => {
-    const request = indexedDB.open('boltHistory', 2);
+    const request = indexedDB.open('boltHistory', 3);
 
     request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
       const db = (event.target as IDBOpenDBRequest).result;
@@ -49,6 +49,32 @@ export async function openDatabase(): Promise<IDBDatabase | undefined> {
       if (oldVersion < 2) {
         if (!db.objectStoreNames.contains('snapshots')) {
           db.createObjectStore('snapshots', { keyPath: 'chatId' });
+        }
+      }
+
+      /*
+       * v3 — repo-primary persistence (§4.5.4b).
+       *
+       * The `snapshots` store above is upstream's: ONE snapshot per chat, keyed by `chatId`, and
+       * overwritten on every take. That is a cache of "the last state", not a history — it cannot
+       * answer "restore to before this change" (§4.12), which is exactly what the SERVER snapshot
+       * store used to answer. Under §4.5.4b the server no longer holds project files at all, so the
+       * checkpoint history has to live here, keyed per project and per checkpoint.
+       *
+       * Additive: upstream's store is untouched and still written, so an upstream pull keeps working
+       * and a downgrade loses history but never the current project.
+       */
+      if (oldVersion < 3) {
+        if (!db.objectStoreNames.contains('projectSnapshots')) {
+          const store = db.createObjectStore('projectSnapshots', { keyPath: 'id' });
+
+          // The history read is always "every checkpoint of THIS project, oldest first".
+          store.createIndex('projectId', 'projectId', { unique: false });
+        }
+
+        // Which checkpoint each project is currently sitting on — the pointer the server row held.
+        if (!db.objectStoreNames.contains('projectState')) {
+          db.createObjectStore('projectState', { keyPath: 'projectId' });
         }
       }
     };

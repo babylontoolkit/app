@@ -18,10 +18,28 @@ import {
   type IChatMetadata,
 } from './db';
 import type { FileMap } from '~/lib/stores/files';
+import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { Snapshot } from './types';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
-import { createSnapshot, restoreLatestServerCheckpoint, saveMessages } from './projects';
+import {
+  getRepoStatus,
+  pullFromRepo,
+  restoreLatestServerCheckpoint,
+  saveMessages,
+  saveProjectToRepo,
+  type RepoStatus,
+} from './projects';
+import {
+  createLocalSnapshot,
+  getLocalSyncState,
+  markSynced,
+  readCurrentLocalSnapshot,
+  type LocalSyncState,
+} from './local-snapshots';
+import { selectMountSource } from './mount-source';
+import { decideDependencyInstall, findLockfile, hasManifest } from './dependencies';
+import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -53,6 +71,302 @@ export const chatMetadata = atom<IChatMetadata | undefined>(undefined);
  * is what lets a reload find its way back to the project.
  */
 export const projectId = atom<string | undefined>(undefined);
+
+/**
+ * Whether the project currently on screen has work that exists only in this browser (§4.5.4b).
+ *
+ * Read by the LINKED/UNLINKED indicator, the nudges, and the beforeunload warning. An atom rather than
+ * a fetch, because those three must agree with each other and with what just happened, without three
+ * independent round-trips racing.
+ */
+export const unsavedWork = atom<boolean>(false);
+
+/** The project's repo link, as of the last time we looked. `undefined` = not loaded yet. */
+export const repoStatus = atom<RepoStatus | undefined>(undefined);
+
+/** The repo moved AND this browser has unsaved work. The user must choose (§4.13) — we never merge. */
+export const mountDivergence = atom<{ projectId: string; remoteHead: string } | undefined>(undefined);
+
+/**
+ * Put a project's files on screen (§4.5.4b) — from this browser, or from the user's repo.
+ *
+ * This is the "load from GitHub seamlessly" half. It does no deciding of its own: it gathers the three
+ * facts (is it linked, where is the repo, how far has this browser moved) and hands them to
+ * `selectMountSource`, which is pure and exhaustively tested precisely because every wrong answer here
+ * silently destroys someone's work.
+ *
+ * What it does with each answer:
+ *
+ *   - `local`     — mount this browser's current checkpoint. No network.
+ *   - `repo`      — fetch the linked repo and mount it. This is the new-device path: clear your
+ *                   storage, open the project, and the game comes back from your repository.
+ *   - `seed`      — read the one-time remix copy and adopt it as the first local checkpoint.
+ *   - `diverged`  — mount LOCAL (it is the unsaved side) and raise the two-button choice. Mounting the
+ *                   repo here would destroy the very work that caused the divergence.
+ *   - `empty`     — nothing to mount. A brand-new project before its first generation.
+ */
+async function mountProjectFiles(pid: string): Promise<void> {
+  const [status, sync] = await Promise.all([
+    getRepoStatus(pid),
+    db ? getLocalSyncState(db, pid) : Promise.resolve({} as LocalSyncState),
+  ]);
+
+  repoStatus.set(status);
+
+  const decision = selectMountSource({
+    linked: status.linked,
+    lastSyncedCommitSha: status.lastSyncedCommitSha,
+
+    // Deliberately preserves the absent/null distinction — see `RepoStatus.remoteHead`.
+    remoteHead: status.remoteHead,
+    localSeq: sync.localSeq,
+    syncedSeq: sync.syncedSeq,
+    hasServerSeed: undefined,
+  });
+
+  logger.info(`Mounting project ${pid} from: ${decision.source}`);
+
+  if (decision.source === 'local' || decision.source === 'diverged') {
+    const local = db ? await readCurrentLocalSnapshot(db, pid) : undefined;
+
+    if (local) {
+      await workbenchStore.restoreFiles(local.files);
+    }
+
+    unsavedWork.set(decision.source === 'diverged' || decision.unsavedWork);
+
+    if (decision.source === 'diverged') {
+      mountDivergence.set({ projectId: pid, remoteHead: decision.remoteHead });
+    }
+
+    return;
+  }
+
+  if (decision.source === 'repo') {
+    await mountFromRepo(pid);
+    return;
+  }
+
+  if (decision.source === 'empty') {
+    /*
+     * `empty` for a LINKED project is not necessarily nothing — it can be a remix seed we did not know
+     * about, since `hasServerSeed` needs a round-trip we do not make on the common path. Trying the
+     * seed here costs one request on a path that had nothing to show anyway.
+     */
+    await mountFromSeed(pid);
+    return;
+  }
+
+  await mountFromSeed(pid);
+}
+
+/**
+ * Fetch the linked repo and put it on screen.
+ *
+ * The pulled files become this browser's first checkpoint AND are marked as synced — they came FROM
+ * the repo, so they are by definition saved. Skipping the mark would make a freshly-opened project
+ * claim unsaved work it does not have, and nag the user to save what they just downloaded.
+ */
+async function mountFromRepo(pid: string): Promise<void> {
+  const { files, message } = await pullFromRepo(pid);
+
+  if (!files) {
+    // LOUD: this is the path where the repo is the only copy, so failing quietly means an empty screen.
+    toast.error(message ?? 'Could not load this project from its repository.');
+    return;
+  }
+
+  await workbenchStore.restoreFiles(files);
+
+  if (db) {
+    await createLocalSnapshot(db, { projectId: pid, files, label: 'Loaded from repository' });
+    await markSynced(db, pid);
+  }
+
+  unsavedWork.set(false);
+  await installDependencies(files);
+}
+
+/**
+ * Reinstall dependencies for a project that just arrived from a repo.
+ *
+ * `node_modules` is not in the repository (nor should it be), so a project mounted on a fresh device
+ * has every file and cannot run. A resumed project used to get away without this because its chat
+ * replayed an artifact carrying `npm install` as a shell action — a project mounted from a repo on a
+ * new device has no chat to replay, so without this the user sees a complete, correct, entirely
+ * non-running game, and it reads as a broken product rather than a missing install.
+ *
+ * `decideDependencyInstall` decides; this only runs it. Failure is reported, never swallowed: a
+ * project that cannot install is one the user needs to know about, and the alternative is a blank
+ * preview with no explanation.
+ */
+async function installDependencies(files: SerializedFileMap): Promise<void> {
+  const paths = Object.keys(files);
+
+  const decision = decideDependencyInstall({
+    // The repo never carries `node_modules`, and `restoreFiles` writes exactly what the repo had.
+    hasNodeModules: paths.some((path) => path.includes('/node_modules/')),
+    hasManifest: hasManifest(paths),
+    lockfile: (() => {
+      const lock = findLockfile(paths);
+      const dirent = lock ? files[lock] : undefined;
+
+      return dirent?.type === 'file' ? dirent.content : undefined;
+    })(),
+  });
+
+  if (!decision.install) {
+    return;
+  }
+
+  const shell = workbenchStore.boltTerminal;
+  const toastId = toast.loading('Getting this project ready — installing its dependencies…');
+
+  try {
+    const result = await shell.executeCommand(`deps-${Date.now()}`, 'npm install');
+
+    if (result?.exitCode !== 0) {
+      toast.update(toastId, {
+        render: 'This project loaded, but installing its dependencies failed. Open the terminal to see why.',
+        type: 'error',
+        isLoading: false,
+        autoClose: 8000,
+      });
+
+      return;
+    }
+
+    toast.update(toastId, { render: 'Ready.', type: 'success', isLoading: false, autoClose: 2000 });
+  } catch (error) {
+    toast.update(toastId, {
+      render: `Could not install this project's dependencies: ${(error as Error).message}`,
+      type: 'error',
+      isLoading: false,
+      autoClose: 8000,
+    });
+  }
+}
+
+/**
+ * The save queue for the project currently open (§4.5.4b).
+ *
+ * Rebuilt per project rather than shared: `saveState` is what the header badge reads, and a
+ * module-level queue would carry one project's `failed` badge into the next project the user opens.
+ */
+let queue: SaveQueue | undefined;
+let queueProjectId: string | undefined;
+
+function saveQueueFor(pid: string): SaveQueue {
+  if (queue && queueProjectId === pid) {
+    return queue;
+  }
+
+  queueProjectId = pid;
+  saveState.set({ status: 'idle' });
+
+  queue = new SaveQueue({
+    /*
+     * The files are read HERE, at push time — never captured when the save was requested. A retry that
+     * runs 30 seconds later would otherwise push a stale snapshot, silently reverting whatever the
+     * user did in between.
+     */
+    push: async () => {
+      const files = await workbenchStore.serializeFiles();
+      const outcome = await saveProjectToRepo(pid, { files, summary: lastSummary });
+
+      if (outcome.ok && db) {
+        /*
+         * Mark synced only after the push LANDED. This is what the indicator, the nudges and the
+         * beforeunload warning all read — marking optimistically would tell the user their only copy
+         * is safe at the exact moment it is not.
+         */
+        await markSynced(db, pid);
+        unsavedWork.set(false);
+      }
+
+      return outcome;
+    },
+  });
+
+  return queue;
+}
+
+/**
+ * What the last generation was for — becomes the commit message (§4.13).
+ *
+ * The user's own request, not the assistant's reply. It is what they would recognise scrolling their
+ * repo's history six months later ("add boost pads to the track"), and it is a single short line,
+ * where the reply is an artifact full of code. `buildCommitMessage` bounds and prefixes it.
+ */
+let lastSummary: string | undefined;
+
+/** The last thing the user asked for, as plain text. */
+function summarizeRequest(messages: Message[]): string | undefined {
+  const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+
+  if (!lastUserMessage) {
+    return undefined;
+  }
+
+  const text =
+    typeof lastUserMessage.content === 'string'
+      ? lastUserMessage.content
+      : // A multimodal message (text + images): the text parts are the request.
+        (lastUserMessage.content as Array<{ type: string; text?: string }>)
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text ?? '')
+          .join(' ');
+
+  /*
+   * Strip the model-directed prefixes the chat prepends to a user's words (skills, context markers).
+   * They are instructions to us, not something a person wants to read in their commit log.
+   */
+  return text.replace(/\[[^\]]*\]/g, '').trim() || undefined;
+}
+
+/**
+ * Push this project to its repo, if it is linked and set to save itself (§4.5.4b).
+ *
+ * Called after every checkpoint. Does nothing for an UNLINKED project — there is nowhere to push, and
+ * that is not a failure, it is the normal state of a project the user has not saved yet. The nudges
+ * are what address that; an error here would be nagging with an error dialog.
+ */
+async function autoPush(pid: string): Promise<void> {
+  const status = repoStatus.get() ?? (await getRepoStatus(pid));
+  repoStatus.set(status);
+
+  if (!status.linked || status.autoPush === false) {
+    return;
+  }
+
+  const outcome = await saveQueueFor(pid).request();
+
+  if (outcome?.divergence) {
+    /*
+     * Someone committed to the repo from elsewhere. Never merge (§4.13) — raise the choice and let the
+     * user decide. The work is still safe in this browser meanwhile.
+     */
+    mountDivergence.set({ projectId: pid, remoteHead: '' });
+  }
+}
+
+/** Read the one-time remix seed, if there is one, and adopt it as this browser's first checkpoint. */
+async function mountFromSeed(pid: string): Promise<void> {
+  const { files } = await restoreLatestServerCheckpoint(pid);
+
+  if (!files) {
+    return;
+  }
+
+  await workbenchStore.restoreFiles(files);
+
+  if (db) {
+    await createLocalSnapshot(db, { projectId: pid, files, label: 'Opened' });
+  }
+
+  unsavedWork.set(true);
+}
+
 export function useChatHistory() {
   const navigate = useNavigate();
   const { id: mixedId } = useLoaderData<{ id?: string }>();
@@ -217,24 +531,23 @@ ${value.content}
             projectId.set(storedMessages.metadata?.projectId);
 
             /*
-             * The SERVER holds the authoritative files (§4.5.5). IndexedDB is a same-browser cache;
-             * the project itself lives on the platform, so on resume we mount what the platform has —
-             * that is what makes a build openable on another machine at all.
+             * 🔴 The hierarchy INVERTED here (§4.5.4b).
              *
-             * Best-effort by design: if the network is down, the local snapshot above already put a
-             * working project on screen, and refusing to open it would be a worse answer.
+             * This used to fetch the SERVER's checkpoint and unconditionally overwrite whatever the
+             * local snapshot had just restored — because the platform was the authority on files. It
+             * holds none now, and "overwrite local with remote, always" is precisely the bug that
+             * would eat a user's unsaved work on every reload.
+             *
+             * `mountProjectFiles` decides properly: local, the linked repo, or a divergence the user
+             * resolves. Reloading a project saved on another device is what makes it come back here.
              */
             const pid = storedMessages.metadata?.projectId;
 
             if (pid) {
               try {
-                const { files } = await restoreLatestServerCheckpoint(pid);
-
-                if (files) {
-                  await workbenchStore.restoreFiles(files);
-                }
+                await mountProjectFiles(pid);
               } catch (error) {
-                logger.warn(`Could not restore project ${pid} from the server: ${(error as Error).message}`);
+                logger.warn(`Could not restore project ${pid}: ${(error as Error).message}`);
               }
             }
           } else {
@@ -252,9 +565,13 @@ ${value.content}
     } else {
       /*
        * No mixedId — a fresh builder. But a remix (§4.8) or a dashboard "Open" (§4.1) may have parked a
-       * project id here on its way in. If so, adopt it: set the project and mount its files through the
-       * SAME server-checkpoint path a normal resume uses. The conversation is fresh (both start a new
-       * chat), but the files are the real project, ready to build on.
+       * project id here on its way in. If so, adopt it and mount its files. The conversation is fresh
+       * (both start a new chat), but the files are the real project, ready to build on.
+       *
+       * Local checkpoints first, then the server SEED (§4.5.4b). The seed is not ambient persistence —
+       * it is the one-time copy a remix leaves behind so the clone has something to open (`api.remix`),
+       * and it exists precisely because the source project's own repo belongs to someone else. A
+       * project that has been worked on in this browser has local checkpoints and never reads it.
        */
       const mountProjectId = takePendingProjectMount();
 
@@ -262,8 +579,7 @@ ${value.content}
         projectId.set(mountProjectId);
         chatMetadata.set({ ...chatMetadata.get(), projectId: mountProjectId });
 
-        restoreLatestServerCheckpoint(mountProjectId)
-          .then(({ files }) => (files ? workbenchStore.restoreFiles(files) : undefined))
+        mountProjectFiles(mountProjectId)
           .catch((error) => logger.warn(`Could not load project ${mountProjectId}: ${error.message}`))
           .finally(() => setReady(true));
       } else {
@@ -321,28 +637,61 @@ ${value.content}
   const checkpointProject = useCallback(async (messageId: string) => {
     const pid = projectId.get();
 
-    if (!pid || lastCheckpointedMessage.current === messageId) {
+    if (!pid || !db || lastCheckpointedMessage.current === messageId) {
       return;
     }
 
     lastCheckpointedMessage.current = messageId;
+    lastSummary = summarizeRequest(latestMessages.current);
 
     try {
       const files = await workbenchStore.serializeFiles();
 
       /*
-       * Files and conversation together, once, at the end of a generation. The conversation belongs to
-       * the PROJECT, not to this browser — without it a build cannot be resumed on another machine and
-       * a shared or remixed project arrives with no history of how it was made (§4.5).
+       * 🔴 The FILES stay in this browser (§4.5.4b). This used to `createSnapshot(pid, …)` — uploading
+       * the entire project to our object storage after every generation. Under repo-primary
+       * persistence the platform does not hold the user's code: it lives here until they save, and in
+       * their own repo afterwards. A server-side copy of every unlinked project is not a backup, it is
+       * the old model under a new name.
+       *
+       * The CONVERSATION still goes up, and that is not an inconsistency — §4.5.4b keeps the project
+       * record and the chat on the platform. Without it a build cannot be resumed on another machine
+       * and a remixed project arrives with no history of how it was made (§4.5).
        */
-      await Promise.all([createSnapshot(pid, { files, messageId }), saveMessages(pid, latestMessages.current)]);
+      await Promise.all([
+        createLocalSnapshot(db, { projectId: pid, files, messageId }),
+        saveMessages(pid, latestMessages.current),
+      ]);
+
+      /*
+       * A generation just produced work that exists in this browser and nowhere else. Everything that
+       * warns the user — the indicator, the nudges, the beforeunload prompt — reads this atom, and it
+       * is only honest if it is set HERE, at the moment the work becomes unsaved. Auto-push (§4.5.4b)
+       * clears it again when it lands.
+       */
+      unsavedWork.set(true);
 
       logger.info(`Checkpointed project ${pid} at message ${messageId}`);
+
+      /*
+       * Auto-push (§4.5.4b), AFTER the local checkpoint is safely written and outside its try/catch.
+       *
+       * The ordering is deliberate: the local checkpoint is the only copy of this work, so it is
+       * written first and a push failure can never cost it. `autoPush` reports its own failures
+       * through `saveState` — loudly, per §4.5.4b — so it is not wrapped in the checkpoint's quiet
+       * error handling, which would swallow exactly the message the user needs.
+       */
+      void autoPush(pid);
     } catch (error) {
       /*
-       * Never surfaced to the user: their game is on disk and in IndexedDB, the build worked, and a
-       * failed checkpoint upload is our problem, not something for them to act on. Reset the guard so
-       * the next turn retries.
+       * Reset the guard so the next turn retries.
+       *
+       * Still not surfaced here, but the reasoning CHANGED and is worth stating: it used to be "their
+       * game is on disk and in IndexedDB, so a failed upload is our problem". The local half of that
+       * is now the only copy, so a failure to write it is not merely our problem. It stays quiet only
+       * because the files are still live in the WebContainer and on screen — nothing is lost yet, and
+       * the next generation checkpoints again. The LOUD path is the save to the repo (§4.5.4b), which
+       * is the one that decides whether the work survives this browser.
        */
       lastCheckpointedMessage.current = undefined;
       logger.error(`Failed to checkpoint project ${pid}: ${(error as Error).message}`);

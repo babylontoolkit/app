@@ -139,6 +139,18 @@ export class FsJsonTable<T extends { id: string }> {
   }
 }
 
+/**
+ * Apply the column defaults migration 0006 gives the real table (§4.5.4b).
+ *
+ * The FS store round-trips the domain object, so it has no DEFAULT to fall back on: a project written
+ * without `autoPush` reads back `undefined`, where Postgres would say `true`. That divergence is the
+ * whole failure mode `FsLedger` taught us about — the mirror is happy while production behaves
+ * differently — and here it would mean auto-push silently off in local mode and on in production.
+ */
+function withProjectDefaults<T extends Project | null>(project: T): T {
+  return project ? { ...project, autoPush: project.autoPush ?? true } : project;
+}
+
 export class FsProjectStore implements ProjectStore {
   private readonly _table: FsJsonTable<Project>;
 
@@ -148,20 +160,23 @@ export class FsProjectStore implements ProjectStore {
 
   async create(project: NewProject): Promise<Project> {
     const now = new Date().toISOString();
-    const row: Project = { ...project, id: newId('prj'), createdAt: now, updatedAt: now };
+    const row: Project = withProjectDefaults({ ...project, id: newId('prj'), createdAt: now, updatedAt: now });
     await this._table.put(row);
 
     return row;
   }
 
   async get(id: string): Promise<Project | null> {
-    return this._table.get(id);
+    return withProjectDefaults(await this._table.get(id));
   }
 
   async listByUser(userId: string): Promise<Project[]> {
     const rows = await this._table.all();
 
-    return rows.filter((p) => p.userId === userId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return rows
+      .filter((p) => p.userId === userId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map(withProjectDefaults);
   }
 
   async update(id: string, patch: Partial<Omit<Project, 'id' | 'userId' | 'createdAt'>>): Promise<Project> {
@@ -171,7 +186,12 @@ export class FsProjectStore implements ProjectStore {
       throw new Error(`Project not found: ${id}`);
     }
 
-    const row: Project = { ...existing, ...patch, id: existing.id, updatedAt: new Date().toISOString() };
+    const row: Project = withProjectDefaults({
+      ...existing,
+      ...patch,
+      id: existing.id,
+      updatedAt: new Date().toISOString(),
+    });
     await this._table.put(row);
 
     return row;
@@ -184,7 +204,7 @@ export class FsProjectStore implements ProjectStore {
   async getByShareId(shareId: string): Promise<Project | null> {
     const rows = await this._table.all();
 
-    return rows.find((p) => p.shareId === shareId) ?? null;
+    return withProjectDefaults(rows.find((p) => p.shareId === shareId) ?? null);
   }
 
   async listGallery(limit: number): Promise<Project[]> {
@@ -294,10 +314,14 @@ function rowToProject(row: Record<string, any>): Project {
     galleryStatus: row.gallery_status ?? undefined,
     remixedFrom: row.remixed_from ?? undefined,
     currentSnapshotId: row.current_snapshot_id ?? undefined,
+    provider: row.provider ?? undefined,
     linkedRepo: row.linked_repo ?? undefined,
     linkedBranch: row.linked_branch ?? undefined,
     lastSyncedCommitSha: row.last_synced_commit_sha ?? undefined,
     githubInstallationRef: row.github_installation_ref ?? undefined,
+
+    // `?? true` mirrors the column default, so a row written before 0006 reads as auto-push ON.
+    autoPush: row.auto_push ?? true,
     gameBackendRef: row.game_backend_ref ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -318,11 +342,13 @@ function projectToRow(project: Partial<Project>): Record<string, any> {
     galleryStatus: 'gallery_status',
     remixedFrom: 'remixed_from',
     currentSnapshotId: 'current_snapshot_id',
+    provider: 'provider',
     linkedRepo: 'linked_repo',
     linkedBranch: 'linked_branch',
     lastSyncedCommitSha: 'last_synced_commit_sha',
     githubInstallationRef: 'github_installation_ref',
     gameBackendRef: 'game_backend_ref',
+    autoPush: 'auto_push',
   };
 
   for (const [key, column] of Object.entries(map)) {

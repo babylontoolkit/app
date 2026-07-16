@@ -24,9 +24,16 @@ export interface Project {
   /** The checkpoint the builder remounts on resume. */
   currentSnapshotId?: string;
 
-  /** GitHub Sync (§4.13). */
+  /**
+   * Where this project is permanently saved (§4.5.4b). All absent = UNLINKED = it exists only in this
+   * browser, which is what the LINKED/UNLINKED indicator reads. The three always travel together.
+   */
+  provider?: 'github' | 'gitlab';
   linkedRepo?: string;
   linkedBranch?: string;
+
+  /** Push to the linked repo on every checkpoint. On by default; inert while unlinked. */
+  autoPush?: boolean;
 
   createdAt: string;
   updatedAt: string;

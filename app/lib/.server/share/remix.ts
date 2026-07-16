@@ -57,10 +57,20 @@ export function deriveRemix(source: Project, ctx: RemixContext): NewProject {
     soloLaunch: undefined,
     galleryStatus: 'none',
     currentSnapshotId: undefined,
+
+    /*
+     * A remix is born UNLINKED (§4.5.4b) — it lives in the remixer's browser until THEY save it. The
+     * repo link must never travel: it points at someone else's repository, and a clone that inherited
+     * it would push a stranger's edits into the original author's only permanent copy.
+     */
+    provider: undefined,
     linkedRepo: undefined,
     linkedBranch: undefined,
     lastSyncedCommitSha: undefined,
     githubInstallationRef: undefined,
+
+    // Not a preference worth carrying, but harmless either way: with no link, auto-push is inert.
+    autoPush: true,
     gameBackendRef: undefined,
   };
 }

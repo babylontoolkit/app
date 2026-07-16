@@ -6,7 +6,12 @@ import { UserMessage } from './UserMessage';
 import { useLocation } from '@remix-run/react';
 import { db, chatId, projectId } from '~/lib/persistence/useChatHistory';
 import { forkChat } from '~/lib/persistence/db';
-import { createSnapshot, listSnapshots, readSnapshot, setCurrentSnapshot } from '~/lib/persistence/projects';
+import {
+  createLocalSnapshot,
+  listLocalSnapshots,
+  readLocalSnapshot,
+  setCurrentLocalSnapshot,
+} from '~/lib/persistence/local-snapshots';
 import { selectRestoreTarget } from '~/lib/persistence/restore-target';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { useStore } from '@nanostores/react';
@@ -92,11 +97,21 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
         return;
       }
 
+      if (!db) {
+        toast.error('This browser cannot store checkpoints, so there is nothing to restore.');
+        return;
+      }
+
       const toastId = toast.loading('Restoring your project…');
 
       try {
-        // Oldest-first, so "the one before this" is simply the preceding entry.
-        const { snapshots } = await listSnapshots(pid);
+        /*
+         * The checkpoint history is LOCAL now (§4.5.4b). It used to be a list of server rows, back
+         * when the platform kept a copy of every project; it keeps none, so the history lives in this
+         * browser and in the linked repo. Same contract as before — oldest-first, so "the one before
+         * this" is simply the preceding entry.
+         */
+        const snapshots = await listLocalSnapshots(db, pid);
         const selection = selectRestoreTarget(snapshots, messageId, mode);
 
         if (!selection.ok) {
@@ -113,7 +128,17 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
         }
 
         const target = selection.snapshot;
-        const { files } = await readSnapshot(pid, target.id);
+        const restored = await readLocalSnapshot(db, target.id);
+
+        if (!restored) {
+          toast.update(toastId, {
+            render: 'That checkpoint is no longer available on this device.',
+            type: 'error',
+            isLoading: false,
+            autoClose: 5000,
+          });
+          return;
+        }
 
         /*
          * Checkpoint the state we are LEAVING, before we overwrite it (property 2). Do it first: once
@@ -121,7 +146,8 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
          * block the restore the user asked for — so it is best-effort, and loud only in the log.
          */
         try {
-          await createSnapshot(pid, {
+          await createLocalSnapshot(db, {
+            projectId: pid,
             files: await workbenchStore.serializeFiles(),
             label: 'Before restore',
           });
@@ -130,8 +156,8 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
         }
 
         // Byte-faithful: binaries are base64-decoded and written as bytes, never as UTF-8 text.
-        await workbenchStore.restoreFiles(files);
-        await setCurrentSnapshot(pid, target.id);
+        await workbenchStore.restoreFiles(restored.files);
+        await setCurrentLocalSnapshot(db, pid, target.id);
 
         /*
          * Tell the conversation what happened (property 3). An assistant message, not a user one: it

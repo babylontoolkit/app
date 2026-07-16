@@ -40,12 +40,21 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       return json({ ok: true });
     }
 
-    const body = await request.json<{ name?: string; linkedRepo?: string; linkedBranch?: string }>();
+    /*
+     * Rename only.
+     *
+     * `linkedRepo`/`linkedBranch` used to be settable here, one field at a time. Under §4.5.4b that is
+     * no longer a pointer to a sync convenience — it is the address of the only permanent copy of the
+     * user's game, and it is only meaningful together with a `provider` (migration 0006's
+     * `projects_link_complete_check` refuses a half-set). Linking is a real operation with an OAuth
+     * token, a repo that must exist, and a push; it lives at `/api/projects/:id/github`. A patch route
+     * that could point a project at any string was a way to make a project claim it was saved
+     * somewhere it had never written a byte.
+     */
+    const body = await request.json<{ name?: string }>();
 
     const updated = await store.update(project.id, {
       ...(body.name !== undefined ? { name: body.name.slice(0, 120) } : {}),
-      ...(body.linkedRepo !== undefined ? { linkedRepo: body.linkedRepo } : {}),
-      ...(body.linkedBranch !== undefined ? { linkedBranch: body.linkedBranch } : {}),
     });
 
     return json({ project: updated });
