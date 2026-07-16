@@ -156,25 +156,25 @@ describe('ledger', () => {
    * Exactly one may land — ever. This is the test that stands in for the partial unique index.
    */
   it('refuses a second grant to the same user', async () => {
-    await ledger.append({ userId: 'u1', delta: 2250, reason: 'grant' });
+    await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
 
-    await expect(ledger.append({ userId: 'u1', delta: 2250, reason: 'grant' })).rejects.toThrow(DuplicateGrantError);
-    expect(await ledger.balance('u1')).toBe(2250);
+    await expect(ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' })).rejects.toThrow(DuplicateGrantError);
+    expect(await ledger.balance('u1')).toBe(1000);
   });
 
   it('survives concurrent grant attempts with exactly one grant', async () => {
-    const attempts = Array.from({ length: 5 }, () => ensureSignupGrant('u1', 2250));
+    const attempts = Array.from({ length: 5 }, () => ensureSignupGrant('u1', 1000));
     await Promise.all(attempts);
 
     const rows = await ledger.list('u1');
 
     expect(rows.filter((r) => r.reason === 'grant')).toHaveLength(1);
-    expect(await ledger.balance('u1')).toBe(2250);
+    expect(await ledger.balance('u1')).toBe(1000);
   });
 
   it('reports a duplicate grant as a no-op, not an error, to the caller', async () => {
-    expect(await ensureSignupGrant('u1', 2250)).not.toBeNull();
-    expect(await ensureSignupGrant('u1', 2250)).toBeNull();
+    expect(await ensureSignupGrant('u1', 1000)).not.toBeNull();
+    expect(await ensureSignupGrant('u1', 1000)).toBeNull();
   });
 
   /*

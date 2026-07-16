@@ -161,17 +161,17 @@ describe('the migrations', () => {
 
 describe('append_ledger_entry (the only way a ledger row is written)', () => {
   it('derives balance_after from the previous row — the caller never supplies it', async () => {
-    expect((await append({ delta: 2250, reason: 'grant' })).balance_after).toBe(2250);
-    expect((await append({ delta: 5000, reason: 'purchase', paymentRef: 'pi_1' })).balance_after).toBe(7250);
+    expect((await append({ delta: 1000, reason: 'grant' })).balance_after).toBe(1000);
+    expect((await append({ delta: 5000, reason: 'purchase', paymentRef: 'pi_1' })).balance_after).toBe(6000);
 
     await createGeneration('gen_1');
-    expect((await append({ delta: -250, reason: 'generation', generationId: 'gen_1' })).balance_after).toBe(7000);
+    expect((await append({ delta: -250, reason: 'generation', generationId: 'gen_1' })).balance_after).toBe(5750);
 
-    expect(await balance()).toBe(7000);
+    expect(await balance()).toBe(5750);
   });
 
   it('keeps users isolated', async () => {
-    await append({ delta: 2250, reason: 'grant' });
+    await append({ delta: 1000, reason: 'grant' });
     expect(await balance(OTHER)).toBe(0);
   });
 
@@ -228,18 +228,18 @@ describe('credit_ledger.generation_id → generations(id)', () => {
 describe('grant integrity and payment idempotency (partial unique indexes, not app checks)', () => {
   /* Re-verification, an OAuth re-link, or two tabs racing all try to grant. Exactly one may ever land. */
   it('refuses a second grant to the same user', async () => {
-    await append({ delta: 2250, reason: 'grant' });
+    await append({ delta: 1000, reason: 'grant' });
 
-    await expect(append({ delta: 2250, reason: 'grant' })).rejects.toThrow(/duplicate key|unique/i);
-    expect(await balance()).toBe(2250);
+    await expect(append({ delta: 1000, reason: 'grant' })).rejects.toThrow(/duplicate key|unique/i);
+    expect(await balance()).toBe(1000);
   });
 
   it('grants each user exactly one — the index is per-user, not global', async () => {
-    await append({ delta: 2250, reason: 'grant' });
-    await append({ userId: OTHER, delta: 2250, reason: 'grant' });
+    await append({ delta: 1000, reason: 'grant' });
+    await append({ userId: OTHER, delta: 1000, reason: 'grant' });
 
-    expect(await balance()).toBe(2250);
-    expect(await balance(OTHER)).toBe(2250);
+    expect(await balance()).toBe(1000);
+    expect(await balance(OTHER)).toBe(1000);
   });
 
   /* Stripe RETRIES deliveries — that is a feature. Crediting on every delivery hands out free money. */
@@ -366,16 +366,16 @@ describe('the negative-balance rule', () => {
  */
 describe('append-only', () => {
   it('refuses an UPDATE to a ledger row', async () => {
-    await append({ delta: 2250, reason: 'grant' });
+    await append({ delta: 1000, reason: 'grant' });
 
     await expect(db.exec(`update public.credit_ledger set delta = 999999`)).rejects.toThrow(/append-only/i);
   });
 
   it('refuses a DELETE of a ledger row', async () => {
-    await append({ delta: 2250, reason: 'grant' });
+    await append({ delta: 1000, reason: 'grant' });
 
     await expect(db.exec(`delete from public.credit_ledger where reason = 'grant'`)).rejects.toThrow(/append-only/i);
 
-    expect(await balance()).toBe(2250);
+    expect(await balance()).toBe(1000);
   });
 });
