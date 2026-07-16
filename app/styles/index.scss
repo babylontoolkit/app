@@ -33,13 +33,17 @@ button {
  * Reserving a 340px column only makes sense with room to spare, so the reflow is gated to wide
  * viewports; below that, a docked sidebar simply stays pinned open as an overlay.
  */
-body {
+/*
+ * The docking transitions (body reflow + the header wordmark counter-slide) animate ONLY after a user
+ * toggle — `body.dock-animate`, added in `toggleSidebarDocked`. On a fresh page load the docked state
+ * is applied with NO transition, so it lands instantly instead of sliding in every navigation. (The
+ * body-padding and header transforms desync mid-load otherwise, sliding the logo in from off-screen.)
+ */
+body.dock-animate {
   transition: padding-left 0.2s ease;
 }
 
-/* The header wordmark slides in step with the docking animation so it stays anchored over the
- * sidebar instead of being pushed away with the rest of the header. */
-.header-brand {
+body.dock-animate .header-brand {
   transition: transform 0.2s ease;
 }
 
