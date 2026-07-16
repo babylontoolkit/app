@@ -562,6 +562,26 @@ export class WorkbenchStore {
     return artifact.runner.addAction(data);
   }
 
+  /**
+   * Show an action that already happened, without running it (§4.5.4b).
+   *
+   * Used only when replaying a TRANSCRIPT — a conversation restored alongside a project mounted from
+   * the user's own repository. The files are already correct; running the actions again would write
+   * stale bodies over them. See `ActionRunner.addAction`'s `asCompleted`.
+   */
+  addCompletedAction(data: ActionCallbackData) {
+    this.addToExecutionQueue(async () => {
+      const artifact = this.#getArtifact(data.artifactId);
+
+      if (!artifact) {
+        // A transcript is cosmetic. Never `unreachable()` over it — it must not break a mount.
+        return;
+      }
+
+      artifact.runner.addAction(data, { asCompleted: true });
+    });
+  }
+
   runAction(data: ActionCallbackData, isStreaming: boolean = false) {
     if (isStreaming) {
       this.actionStreamSampler(data, isStreaming);

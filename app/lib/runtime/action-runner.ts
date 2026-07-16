@@ -91,7 +91,19 @@ export class ActionRunner {
     this.onDeployAlert = onDeployAlert;
   }
 
-  addAction(data: ActionCallbackData) {
+  /**
+   * Register an action.
+   *
+   * `asCompleted` records an action that ALREADY HAPPENED, without running it or ever intending to
+   * (SPEC §4.5.4b). It exists for the transcript of a project mounted from the user's own repository:
+   * the conversation is replayed into the UI so they can read what was built, but the files are
+   * already correct — they came from the repo — and re-running a months-old `<boltAction type="file">`
+   * would write its stale body over them.
+   *
+   * Without it the only two options are both wrong: run the action (corrupt the repo's files) or add
+   * it pending (a chat full of spinners for work that finished long ago).
+   */
+  addAction(data: ActionCallbackData, options?: { asCompleted?: boolean }) {
     const { actionId } = data;
 
     const actions = this.actions.get();
@@ -106,14 +118,19 @@ export class ActionRunner {
 
     this.actions.setKey(actionId, {
       ...data.action,
-      status: 'pending',
-      executed: false,
+      status: options?.asCompleted ? 'complete' : 'pending',
+      executed: Boolean(options?.asCompleted),
       abort: () => {
         abortController.abort();
         this.#updateAction(actionId, { status: 'aborted' });
       },
       abortSignal: abortController.signal,
     });
+
+    if (options?.asCompleted) {
+      // Historical. Nothing is queued for it, so nothing must ever move it out of `complete`.
+      return;
+    }
 
     this.#currentExecutionPromise.then(() => {
       this.#updateAction(actionId, { status: 'running' });

@@ -24,6 +24,7 @@ import { detectProjectCommands, createCommandActionsString } from '~/utils/proje
 import type { ContextAnnotation } from '~/types/context';
 import {
   getRepoStatus,
+  loadMessages,
   pullFromRepo,
   restoreLatestServerCheckpoint,
   saveMessages,
@@ -39,6 +40,7 @@ import {
 } from './local-snapshots';
 import { selectMountSource } from './mount-source';
 import { protectForRepoRestore, protectNothing } from './restore-plan';
+import { hasRestorableHistory, markAsTranscript } from './transcript';
 import { decideDependencyInstall, findLockfile, hasManifest } from './dependencies';
 import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
@@ -651,13 +653,71 @@ ${value.content}
        * and it exists precisely because the source project's own repo belongs to someone else. A
        * project that has been worked on in this browser has local checkpoints and never reads it.
        */
+      /**
+       * Bring back the conversation from the server (§4.5.4b).
+       *
+       * This is the half of "server = project record + chat" that was never built: `saveMessages` had
+       * been uploading every conversation and `loadMessages` had ZERO call sites, so a project opened
+       * on a second device got its files back from the repo and lost its history entirely.
+       *
+       * 🔴 The messages are marked `NO_REPLAY` before they go anywhere near the parser. Parsing an
+       * assistant message RUNS its actions — that is how upstream rebuilds a project with no snapshot
+       * — and these files came from the user's repository moments ago. Replaying them would write
+       * stale bodies over the real ones, silently. `markAsTranscript` is what stops that, and the mark
+       * rides along into IndexedDB so a later reload cannot lose it.
+       *
+       * Cosmetic by construction: any failure leaves the user with their game and no transcript, which
+       * is exactly where they were before this existed. It must never cost them the mount.
+       */
+      const restoreTranscript = async (pid: string) => {
+        if (!db) {
+          return;
+        }
+
+        try {
+          const serverMessages = await loadMessages<Message>(pid);
+
+          if (!hasRestorableHistory(serverMessages)) {
+            return;
+          }
+
+          const transcript = markAsTranscript(serverMessages);
+          setInitialMessages(transcript);
+
+          /*
+           * Persist it as a local chat so a plain reload finds it — the pending-mount baton is
+           * one-shot (sessionStorage), so without this the history would come back once and vanish on
+           * F5. `navigateChat` uses replaceState: the URL becomes /chat/:id WITHOUT re-running this
+           * effect, which would otherwise take the mixedId branch and replay everything we just
+           * marked as not-for-replay.
+           */
+          const nextId = await getNextId(db);
+          chatId.set(nextId);
+
+          const firstUserMessage = transcript.find((message) => message.role === 'user');
+          const title = firstUserMessage ? summarizeRequest([firstUserMessage])?.slice(0, 60) : undefined;
+
+          if (title) {
+            description.set(title);
+          }
+
+          await setMessages(db, nextId, transcript, undefined, title, undefined, { projectId: pid });
+          navigateChat(nextId);
+
+          logger.info(`Restored ${transcript.length} message(s) for project ${pid} from the server.`);
+        } catch (error) {
+          // Never fatal, and never silent to US — the user still has their project.
+          logger.warn(`Could not restore the conversation for ${pid}: ${(error as Error).message}`);
+        }
+      };
+
       const mountProjectId = takePendingProjectMount();
 
       if (mountProjectId) {
         projectId.set(mountProjectId);
         chatMetadata.set({ ...chatMetadata.get(), projectId: mountProjectId });
 
-        mountProjectFiles(mountProjectId)
+        Promise.all([mountProjectFiles(mountProjectId), restoreTranscript(mountProjectId)])
           .catch((error) => logger.warn(`Could not load project ${mountProjectId}: ${error.message}`))
           .finally(() => setReady(true));
       } else {
