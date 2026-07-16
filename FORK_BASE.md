@@ -28,6 +28,13 @@ Per SPEC §2.1/§2.1a: **indefinite pull compatibility** — monthly pulls (and 
 - Skills runtime added (SPEC §4.11)
 - Branding/UX pass (SPEC §2.3, §4.1)
 - **Binary files are first-class (SPEC §1.3 principle 10, §4.4)** — see divergence map below
+- **`.env.production` untracked** (kept on disk, now matched by `.gitignore`). Upstream committed it in
+  #1537/#1978 as a *second* env template alongside `.env.example` — 141 lines of `ANTHROPIC_API_KEY=`,
+  `AWS_BEDROCK_CONFIG=`, `VITE_GITHUB_ACCESS_TOKEN=` with every value empty and a header saying
+  "Rename this file to .env once you have filled in the below". Nothing ever leaked (the committed
+  values are empty), but a *tracked* file with that name and that content is a loaded gun: `.gitignore`
+  has no effect on a tracked file, so a real key pasted into it commits silently. `.env.example` remains
+  as the one template. On an upstream pull this file may return — re-run `git rm --cached .env.production`.
 
 ## Divergence map — binary-file support (merge hotspot: file layer)
 
