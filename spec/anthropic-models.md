@@ -83,10 +83,15 @@ return dropOrphanReasoningSignatures(instance); // ALL Claude models, see §3.2
 
 ---
 
-## 3. The three failures (in the order you will hit them)
+## 3. The four failures (in the order you will hit them)
 
-Each looks like a config mistake and is not. All three live **between our code and the wire**, which
+Each looks like a config mistake and is not. All four live **between our code and the wire**, which
 is why call-site fixes bounce off them.
+
+⚠️ **The fourth (§3.3a) was found nine months after the other three, in production-shaped local use, and
+it had broken every edit turn the whole time.** The first three all fire on turn ONE, so any smoke test
+catches them. §3.3a fires only on turn TWO — and nothing had ever run a second turn. When you add a
+verification step to §4, ask what turn it exercises.
 
 ### 3.1 `temperature is deprecated for this model`
 
@@ -151,6 +156,47 @@ Real reasoning and its legitimate signature pass through untouched.
 
 Apply it to **every** Claude model (any thinking-capable model can emit an empty thinking block), and
 note it cannot be avoided by disabling thinking, because Fable 5 won't let you.
+
+### 3.3a `messages.2.content.0.thinking.signature: Field required` — the same coin, other face
+
+**Found live 2026-07-16. It had broken EVERY edit turn, on EVERY project, since thinking was enabled.**
+
+§3.3 is signatures coming **in**. This is signatures going back **out**, and it is the more expensive
+half:
+
+```
+Custom error: messages.2.content.0.thinking.signature: Field required
+```
+
+0 in, 0 out, ~0.3s, `finish=error` — the API refuses the request before generating a single token.
+Anthropic requires that any `thinking` block you send back in history carry the opaque `signature` it
+issued with it. Ours never had one, because the signature never survives our own pipeline:
+
+```ts
+// app/lib/.server/agent/proxy.ts
+export type AgentChunk = { type: 'text'; value: string } | { type: 'reasoning'; value: string };
+//                                                          ^ no signature field ANYWHERE
+```
+
+`dropOrphanReasoningSignatures` correctly passes legitimate signatures through to the AI SDK — and
+then our proxy re-emits reasoning to the client as plain **text** on its own channel. The client saves
+it, posts it back next turn, `convertToCoreMessages` rebuilds a `thinking` block with no signature, and
+Anthropic rejects it. **Creations worked (no history). Everything after turn one did not.**
+
+**Fix: STRIP prior-turn thinking in `compactHistory` (`llm/history.ts`), do not forward the signature.**
+Anthropic only requires thinking to be preserved *within* a turn (across tool results), which
+`streamText` handles internally because our whole tool loop lives in one call. Previous turns' thinking
+may simply be omitted — and omitting is also the cheaper half: the history is UNCACHED and re-sent in
+full every turn, and a real creation emits ~15k chars of reasoning summary
+(`spec/context-budget.md` §"MEASURED").
+
+⚠️ **Do NOT "fix" this by adding a signature to `AgentChunk` and threading it to the client.** That
+restores correctness while paying, forever, to re-send reasoning the model does not need — and the 400
+returns the instant any path in that chain drops the field. Pinned by `history.spec.ts`.
+
+**Why it survived 704 tests, a full spec, and nine live creations: nothing had ever exercised turn
+two.** Every measurement, every eval, every manual check pointed at the first turn. §4 below says
+verification "is not optional" — it was, and this is what it cost.
 
 ### 3.4 We were paying for reasoning and throwing it away
 
@@ -310,9 +356,21 @@ carrying text; it passed against a stream that does not exist and the bug shippe
 confirm you see the production error verbatim. Then restore. A green test you never watched fail is
 not evidence.
 
+**⚠️ EXERCISE TURN TWO. This section did not, and that is exactly what §3.3a cost.**
+
+Every check above fires a single request and inspects it. §3.3a cannot fail a single request — it
+fails only when a previous assistant turn is sent BACK, so a suite that only ever asks "is the request
+we build correct?" is structurally blind to it. It shipped past 704 tests and nine live creations.
+
+The rule, and it generalises past Anthropic: **a conversation is a state machine, and turn one is one
+state.** Anything that only round-trips on a later turn — thinking signatures, tool results, history
+compaction, cache reuse of a prior prefix — is untested until a test (or a human) sends turn two.
+`history.spec.ts` now covers the reasoning strip; the live check is: create a project, then EDIT it.
+
 ```bash
-pnpm test                       # 63 passing
+pnpm test                       # 704 passing
 npx vitest --run app/lib/modules/llm/providers/anthropic.spec.ts
+npx vitest --run app/lib/.server/llm/history.spec.ts   # §3.3a — turn two
 ```
 
 **Circular import:** the spec imports `capabilities` + the ai-sdk directly rather than
@@ -327,9 +385,14 @@ cycle that the bundler tolerates and vitest does not. Pre-existing; don't restru
   silently misses the entire server tree, including `stream-text.ts`. **Always `rg --hidden`.** I
   concluded "only one file sets temperature" off a search that never looked at the LLM server code.
 - **pnpm, not npm** (see §3.2).
-- **Fix one layer at a time and you will chase this for hours.** All three failures were live
-  simultaneously; each fix only exposed the next. Read the whole request path — call site → `ai` →
+- **Fix one layer at a time and you will chase this for hours.** The original three (§3.1–§3.3) were all
+  live simultaneously; each fix only exposed the next. Read the whole request path — call site → `ai` →
   `@ai-sdk/anthropic` → wire — before changing anything.
+- **A tidy explanation is not a diagnosis.** §3.3a presented as "edit turns fail", and a client-side
+  `ReferenceError` from an unrelated stale module was live in the same window. That was a coherent story
+  covering every symptom, and it was wrong — the bug reproduced in a clean tab. What settled it was
+  reading the actual wire frame (`3:"Custom error: …"`), not reasoning about causes. **When the request
+  path is the suspect, look at the request.**
 
 ---
 

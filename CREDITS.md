@@ -67,7 +67,7 @@ file-edit trick has no production equivalent, deliberately. `scripts/credits.mjs
 ## Reading the ledger
 
 ```
-14:36:39  grant         +2250  ->    2250   Welcome — starter credits
+14:36:39  grant         +1000  ->    1000   Welcome — starter credits
 15:01:14  generation     -716  ->    1527   claude-sonnet-5: 213348 in / 44308 out
 15:39:43  generation     -289  ->     976   claude-sonnet-5: 695 in / 33777 out
 16:10:22  adjustment   +25000  ->   25976   Admin top-up — platform owner
@@ -120,7 +120,7 @@ Measured, real "make me a kart racer" builds:
 | Raw cost | $2.14 | $0.86 |
 | **Credits** | **716** | **289** |
 
-At ~289 credits per build, the 2,250-credit signup grant is roughly **7–8 project creations**. Edit
+The 1,000-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is roughly **1 Opus project creation plus iteration room** — Opus 4.8 is the platform default and a creation runs materially higher than the old Sonnet estimate. Edit
 turns are much cheaper.
 
 > **A deploy costs money.** Tool schemas and the base prompt live *inside* the cached prefix. Change
@@ -135,7 +135,7 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | Var | Default | What it does |
 |---|---|---|
 | `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone |
-| `SIGNUP_GRANT_CREDITS` | `1000` | Starter credits, once per user |
+| `SIGNUP_GRANT_CREDITS` | `1000` | Starter credits, once per user (≈1 Opus creation + iteration) |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
 | `CREDIT_MARGIN` | `3.34` | Multiplier over raw cost |

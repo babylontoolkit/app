@@ -1,13 +1,20 @@
 /**
- * GitHub Sync — the pure decision core (SPEC §4.13).
+ * Git sync — the pure decision core, shared by EVERY provider (SPEC §4.5.4b, §4.13).
  *
- * §4.13 is deliberately a **sync bridge, not a git client**: exactly one linked repo+branch per
- * project, fast-forward-only, and the platform NEVER merges. Every one of those rules is a decision
- * that can be made without touching the network, so it lives here, tested — and the Octokit adapter
- * (`sync.ts`) is left to do nothing but I/O. The dangerous operations (overwriting the platform on
- * pull, refusing a push that would clobber remote history) are decided by pure functions with
- * exhaustive tests, the same discipline the restore-target selection got (§4.12), because the failure
- * mode is identical: silently destroy the user's work in the wrong direction.
+ * Moved here from `github/sync-logic.ts` when §4.5.4b promoted the sync bridge to the permanent store:
+ * none of these rules were ever GitHub-specific, and leaving them under a `github/` path would have
+ * meant `gitlab.ts` importing its own correctness rules from `../github/`, which reads as a mistake
+ * even when it isn't. The provider adapters (`github.ts`, `gitlab.ts`) do nothing but I/O.
+ *
+ * The platform is a **sync bridge, not a git client**: exactly one linked repo+branch per project,
+ * fast-forward-only, and the platform NEVER merges. Every one of those is decidable without touching
+ * the network, so it lives here, tested. The dangerous operations (overwriting the working copy on
+ * pull, refusing a push that would clobber remote history) are pure functions with exhaustive tests —
+ * the same discipline `restore-target.ts` got (§4.12), because the failure mode is identical: silently
+ * destroy the user's work in the wrong direction.
+ *
+ * Under §4.5.4b this is load-bearing for SAVING, not just syncing. A bug here does not degrade an
+ * optional feature; it loses the only copy of someone's game.
  *
  * Available to ALL users, never gated (§4.13) — Pro adds only BYOK + model choice (§4.6.1). Nothing in
  * this module or its routes consults entitlements.
@@ -90,7 +97,7 @@ export function mapToTreeBlobs(files: SerializedFileMap): TreeBlob[] {
       continue;
     }
 
-    const path = rawPath.replace(/^\/?(home\/project\/)?/, '').replace(/^\/+/, '');
+    const path = toRepoRelativePath(rawPath);
 
     if (!path || isSecretPath(path)) {
       continue;
@@ -106,9 +113,44 @@ export function mapToTreeBlobs(files: SerializedFileMap): TreeBlob[] {
   return blobs.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-/** Files that must never be pushed to a repo, however the sync is triggered (§4.14, §5). */
+/** Strip the WebContainer workdir prefix — a repo has no `/home/project`. */
+export function toRepoRelativePath(rawPath: string): string {
+  return rawPath.replace(/^\/?(home\/project\/)?/, '').replace(/^\/+/, '');
+}
+
+/**
+ * Files that must never be pushed to a repo, however the sync is triggered (§4.14, §5).
+ *
+ * The whole `.env` family is excluded, not just `.env` and `.env.*local`. The narrower rule this
+ * replaces (`/\.env\.[^/]*local$/`) mirrored the gitignore convention and therefore **pushed
+ * `.env.production`** — the single most dangerous file in the family — because it does not end in
+ * `local`. Nothing failed; the secrets just went to a repo. Under §4.5.4b every save is a push, so an
+ * exclusion gap is now hit on every generation rather than on an occasional manual sync.
+ *
+ * `.env.example` / `.env.sample` / `.env.template` are deliberately NOT secret: they are the
+ * placeholder files a project is *supposed* to commit, and dropping them silently would break the
+ * round-trip for anyone cloning the repo.
+ */
 export function isSecretPath(path: string): boolean {
-  return /(^|\/)\.env$/.test(path) || /(^|\/)\.env\.[^/]*local$/.test(path) || /(^|\/)\.npmrc$/.test(path);
+  const name = path.split('/').pop() ?? '';
+
+  if (name === '.npmrc') {
+    return true;
+  }
+
+  if (name === '.env') {
+    return true;
+  }
+
+  /*
+   * `.env.` with the DOT, not `.env` — `.environment.md` starts with ".env" and is an ordinary file.
+   * Over-matching is not a harmless bias here: it would silently drop the user's file from every save.
+   */
+  if (!name.startsWith('.env.')) {
+    return false;
+  }
+
+  return !/^\.env\.(example|sample|template)$/i.test(name);
 }
 
 /**

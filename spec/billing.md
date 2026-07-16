@@ -109,19 +109,42 @@ against a cached prefix) and a weighting factor is a pricing decision we have no
   `public.generations` carries `tool_rounds`, `duration_ms`, `finish_reason`, `repair_of` and
   `steps jsonb` alongside the token/cost columns, and `SupabaseGenerationStore` writes them. They are not
   decoration: aggregate usage hides every pathology in `spec/context-budget.md` §"Wasted tokens and dead
-  time" — measured across 7 live creations (2026-07-16), **~40–60% of a creation's output tokens are
-  thinking, never reaching the user** (density 1.4–2.1 chars/output token), and in the totals that is
-  indistinguishable from "the model wrote a big answer". Keep them written. Without them the §4.10
+  time" — measured across 10 live creations (2026-07-16), **5–57% of a creation's output tokens are
+  thinking that never reaches the user**, scaling with the difficulty of the ask, and in the totals that
+  is indistinguishable from "the model wrote a big answer". Keep them written. Without them the §4.10
   dashboards can chart spend but not diagnose it, and every number in the context-budget doc has to be
-  read by hand out of a DevTools stream.
+  read by hand out of a DevTools stream. ⚠️ **Do not infer that share from `charsPerOutputToken`** — the
+  3.5–4 baseline is PROSE and our output is code (~2.0–2.2 healthy); price thinking from the reasoning
+  window instead (`spec/context-budget.md` §"MEASURED").
 
-- **What a generation actually costs, measured 2026-07-16** (`claude-opus-4-8`, `medium`, 7 live
+- **What a generation actually costs, measured 2026-07-16** (`claude-opus-4-8`, `medium`, 10 live
   creations): **$0.21–0.35 warm** (whole prefix cache-hits, often `0 written`), $0.9–1.6 on a cold cache
-  or an unseen routed block — the latter a cold-start artifact that volume erases. Output is **58–88% of
+  or an unseen routed block — the latter a cold-start artifact that volume erases. Output is **58–91% of
   a warm bill**, which is the success condition, not a pathology (input was optimised away). The credit
-  math is confirmed end-to-end: one generation billed **163 credits** against an independently derived
-  raw cost of $0.485 (× 334 = 162). **The model does not change the margin, only the volume** — credits
+  math is confirmed end-to-end twice: **163 credits** vs a derived $0.485 (× 334 = 162), and **513
+  credits** vs a derived $1.5355. **The model does not change the margin, only the volume** — credits
   are cost-proportional, so "downgrade to Sonnet to save money" remains a false economy here.
+
+- **🔴 AN EDIT COSTS ABOUT WHAT THE WHOLE GAME COSTS — the open number that decides plan viability
+  (measured 2026-07-16, the first edit turns ever run).** Four turns after a 513-credit creation that
+  produced a complete playable game: **393 / 831 / 65 / 574 credits**. Edit 2 billed **1.6× the entire
+  creation** for 906 output tokens. Only **1 of 4 turns cache-HIT** — and that one cost **65 credits**
+  (`+155,815 cached, 0 written`), which is the floor. The rest paid 110–160k **cache WRITES that nothing
+  ever read**, and a write bills at **2×**, so on a churning turn caching is **worse than not caching**.
+  Cause: `selectOnDemandBlocks` runs per MESSAGE, keyed off the user's wording, and sits ahead of the
+  ~110k file context. See CLAUDE.md §"THE BIGGEST OPEN NUMBER" and `spec/context-budget.md` §"MEASURED".
+
+  **Read the margin correctly before panicking, and before "fixing" it in the wrong place: THE MARGIN IS
+  UNAFFECTED.** Credits are cost-proportional (334 credits/$ measured on both the 831 and the 65 — the
+  formula holds exactly), so a churning edit bills proportionally more and still earns ~2.78× at
+  $50/6,000. **What the bug burns is the USER'S credits, not our margin** — ~13 edits per $50 instead of
+  ~92. That makes it a **retention and value problem, not a solvency one**, and it means no pricing
+  change can fix it and no ledger alarm will ever fire on it. The only fix is to stop the prefix churn.
+
+- **A pathology can be invisible in aggregate revenue and lethal to the product.** This one bills a
+  perfect margin on every single generation while making the plan worthless — which is precisely why
+  §4.10 must diagnose spend (`steps`, cache read vs written) rather than chart it. Aggregate usage would
+  have shown healthy, growing, on-margin revenue right up until the churn.
 
 - **⚠️ ORDER THE LEDGER BY `seq`, NEVER BY `created_at` (migration 0003).** Balance is derived from "the
   latest row", and a wall clock cannot tell you which that is. `created_at` defaults to `now()` — the

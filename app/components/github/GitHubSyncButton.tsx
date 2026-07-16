@@ -5,16 +5,19 @@
  * remote has moved — the two-button divergence choice (never a merge). All the git work happens on the
  * server via the Git Data API; this UI just drives it and mounts what a pull returns.
  *
- * The user's GitHub token comes from the inherited connector (the `githubConnectionStore`); we pass it
- * in the request body so the server can act as the user against their own repo. Before a push we take a
- * fresh checkpoint of the current WebContainer files, so what lands in the repo is what is on screen —
- * not whatever the last auto-snapshot happened to capture.
+ * 🔴 **The client no longer holds or sends the token (§4.5.4b).** This dialog used to read a raw PAT
+ * out of the inherited `githubConnectionStore` (localStorage) and put it in the request body on every
+ * op. The server now resolves the token itself from its encrypted per-user store, so the browser never
+ * sees it. When the server says `reconnect`, we send the user through the platform's OAuth flow rather
+ * than asking them to paste a token anywhere.
+ *
+ * Before a push we take a fresh checkpoint of the current WebContainer files, so what lands in the repo
+ * is what is on screen — not whatever the last auto-snapshot happened to capture.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { Dialog, DialogRoot, DialogTitle, DialogDescription, DialogButton } from '~/components/ui/Dialog';
-import { isGitHubConnected, githubConnectionStore } from '~/lib/stores/githubConnection';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { getProject, createSnapshot } from '~/lib/persistence/projects';
 import { workbenchStore } from '~/lib/stores/workbench';
@@ -29,6 +32,25 @@ interface SyncResponse {
   commitSha?: string;
   branch?: string;
   message?: string;
+
+  /** The server could not authenticate to the provider — send the user through OAuth again. */
+  reconnect?: boolean;
+}
+
+/**
+ * Hand the user to the platform's OAuth flow, returning them to this exact page afterwards.
+ *
+ * The connect path is now IN this dialog. Sending the user to "Settings → Connections" to paste a
+ * personal access token was the old token model's UI, and that token no longer exists (§4.5.4b) — one
+ * button, standard OAuth, back where they started.
+ *
+ * The dialog also distinguishes three states the old one collapsed into one: still loading (never flash
+ * "connect first" at a connected user), the OPERATOR has no OAuth app configured ("not set up on this
+ * server" — nothing the user can do), and the USER has not connected (actionable).
+ */
+function startConnect(provider: 'github' | 'gitlab' = 'github') {
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  window.location.href = `/api/git/connect/${provider}?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
 export function GitHubSyncButton() {
@@ -55,36 +77,103 @@ export function GitHubSyncButton() {
 }
 
 function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
-  const connected = useStore(isGitHubConnected);
   const [busy, setBusy] = useState(false);
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');
   const [linkedRepo, setLinkedRepo] = useState<string | undefined>();
   const [linkedBranch, setLinkedBranch] = useState<string | undefined>();
   const [diverged, setDiverged] = useState(false);
-  const [loaded, setLoaded] = useState(false);
 
-  // Load the project's link state once.
-  if (!loaded) {
-    setLoaded(true);
-    getProject(projectId)
-      .then((p) => {
-        setLinkedRepo(p.linkedRepo);
-        setLinkedBranch(p.linkedBranch);
-      })
-      .catch(() => undefined);
-  }
+  /**
+   * Connection state comes from the SERVER now (§4.5.4b), not from `githubConnectionStore` in
+   * localStorage — the browser no longer holds the token, so it is no longer the authority on whether
+   * one exists. `undefined` = still loading; we must not flash "connect first" at an already-connected
+   * user.
+   */
+  const [connected, setConnected] = useState<boolean | undefined>();
+  const [configured, setConfigured] = useState<boolean>(true);
 
-  const token = () => githubConnectionStore.get().token;
+  useEffect(() => {
+    let cancelled = false;
 
+    (async () => {
+      /*
+       * Load the link state and the connection state together. Both were previously fetched during
+       * RENDER with a silent `.catch(() => undefined)`, so a transient failure left an already-linked
+       * project showing the "link a repo" form — offering to relink something already linked.
+       */
+      const [project, connections] = await Promise.all([
+        getProject(projectId).catch(() => null),
+        fetch('/api/git/connections')
+          .then((r) =>
+            r.ok ? (r.json() as Promise<{ configured: string[]; connections: Array<{ provider: string }> }>) : null,
+          )
+          .catch(() => null),
+      ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (project) {
+        setLinkedRepo(project.linkedRepo);
+        setLinkedBranch(project.linkedBranch);
+      } else {
+        toast.error('Could not load this project’s save settings. Close and try again.');
+      }
+
+      if (connections) {
+        setConfigured(connections.configured.includes('github'));
+        setConnected(connections.connections.some((c) => c.provider === 'github'));
+      } else {
+        setConnected(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  /**
+   * One call to the sync route. No token — the server holds it (§4.5.4b).
+   *
+   * This used to `response.json()` unconditionally, so a 500 returning an HTML error page threw inside
+   * the caller's `try` with no catch: the spinner stopped and the user was told nothing at all. A save
+   * path may not fail quietly, so a non-JSON or non-OK response becomes a real message.
+   */
   const call = async (body: Record<string, unknown>): Promise<SyncResponse> => {
-    const response = await fetch(`/api/projects/${projectId}/github`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, token: token() }),
-    });
+    let response: Response;
 
-    return (await response.json()) as SyncResponse;
+    try {
+      response = await fetch(`/api/projects/${projectId}/github`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      return { ok: false, message: 'Could not reach the server. Check your connection and try again.' };
+    }
+
+    const payload = (await response.json().catch(() => null)) as SyncResponse | null;
+
+    if (!payload) {
+      return { ok: false, message: `The server returned an unexpected error (${response.status}).` };
+    }
+
+    return payload;
+  };
+
+  /** Every failure path funnels through here, so none of them can end in silence. */
+  const reportFailure = (result: SyncResponse, fallback: string) => {
+    if (result.reconnect) {
+      toast.error('Your GitHub connection expired. Reconnecting…');
+      startConnect('github');
+
+      return;
+    }
+
+    toast.error(result.message ?? fallback);
   };
 
   const link = async () => {
@@ -103,7 +192,7 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
         setLinkedBranch(branch);
         toast.success('Linked. You can now push and pull.');
       } else {
-        toast.error(result.message ?? 'Could not link the repository.');
+        reportFailure(result, 'Could not link the repository.');
       }
     } finally {
       setBusy(false);
@@ -126,7 +215,7 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
       } else if (result.divergence) {
         setDiverged(true);
       } else {
-        toast.error(result.message ?? 'Push failed.');
+        reportFailure(result, 'Push failed.');
       }
     } finally {
       setBusy(false);
@@ -147,7 +236,7 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
         toast.success(`Pushed your changes to a new branch: ${result.branch}`);
         setDiverged(false);
       } else {
-        toast.error(result.message ?? 'Sync failed.');
+        reportFailure(result, 'Sync failed.');
       }
     } finally {
       setBusy(false);
@@ -165,9 +254,23 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
             </DialogDescription>
           </div>
 
-          {!connected ? (
+          {connected === undefined ? (
             <div className="rounded-lg border border-bolt-elements-borderColor p-3 text-sm text-bolt-elements-textSecondary">
-              Connect your GitHub account in Settings → Connections first, then reopen this.
+              Checking your GitHub connection…
+            </div>
+          ) : !configured ? (
+            <div className="rounded-lg border border-bolt-elements-borderColor p-3 text-sm text-bolt-elements-textSecondary">
+              Saving to GitHub is not set up on this server yet.
+            </div>
+          ) : !connected ? (
+            <div className="flex flex-col gap-3">
+              <div className="rounded-lg border border-bolt-elements-borderColor p-3 text-sm text-bolt-elements-textSecondary">
+                Connect your GitHub account to keep this project safe in your own repository. You stay the owner — we
+                only ever write to the repo you choose.
+              </div>
+              <DialogButton type="primary" onClick={() => startConnect('github')}>
+                Connect GitHub
+              </DialogButton>
             </div>
           ) : !linkedRepo ? (
             <div className="flex flex-col gap-3">

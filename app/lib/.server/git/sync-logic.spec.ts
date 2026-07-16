@@ -1,10 +1,14 @@
 /**
- * GitHub Sync decision core (SPEC §4.13).
+ * Git sync decision core (SPEC §4.5.4b, §4.13).
  *
  * The dangerous half of sync is pure and lives here: whether a push may fast-forward, what gets
  * excluded from a push, and what the divergence choices are. The failure mode if this is wrong is the
  * same as a bad restore — silently destroy the user's work in the wrong direction (force-push over a
  * teammate's commits, or leak a secret into a repo) — so every branch is asserted.
+ *
+ * Under §4.5.4b these rules are load-bearing for SAVING, not just syncing: the repo is the only
+ * permanent home for the user's game, so a wrong answer here loses the code rather than degrading an
+ * optional feature.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -14,6 +18,7 @@ import {
   isSecretPath,
   isValidDivergenceChoice,
   mapToTreeBlobs,
+  toRepoRelativePath,
 } from './sync-logic';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 
@@ -84,12 +89,42 @@ describe('tree blobs — byte-faithful, secret-free', () => {
     expect(mapToTreeBlobs(files).some((b) => b.path === '.env')).toBe(false);
   });
 
-  it.each(['.env', 'sub/.env.local', '.npmrc'])('treats %s as a secret path', (p) => {
+  it('normalises a workdir path to repo-relative', () => {
+    expect(toRepoRelativePath('/home/project/src/Game.ts')).toBe('src/Game.ts');
+    expect(toRepoRelativePath('home/project/src/Game.ts')).toBe('src/Game.ts');
+    expect(toRepoRelativePath('/src/Game.ts')).toBe('src/Game.ts');
+  });
+});
+
+describe('secret paths — the whole .env family, not just *local', () => {
+  it.each(['.env', 'sub/.env.local', '.npmrc', 'packages/app/.npmrc'])('treats %s as a secret path', (p) => {
     expect(isSecretPath(p)).toBe(true);
   });
 
-  it('does not treat .env.example as a secret', () => {
-    expect(isSecretPath('.env.example')).toBe(false);
+  /**
+   * The regression this suite exists for.
+   *
+   * The original rule was `/(^|\/)\.env\.[^/]*local$/`, which mirrors the gitignore convention and
+   * therefore did NOT match `.env.production` — the most dangerous file in the family. It was pushed to
+   * the user's repo, silently, with nothing failing. Under §4.5.4b every save is a push, so this would
+   * have fired on every generation of every linked project rather than on an occasional manual sync.
+   */
+  it.each(['.env.production', '.env.development', '.env.staging', 'sub/.env.production.local', '.env.anything'])(
+    'treats %s as a secret path — the ORIGINAL rule only caught *local and leaked this',
+    (p) => {
+      expect(isSecretPath(p)).toBe(true);
+    },
+  );
+
+  it.each(['.env.example', '.env.sample', '.env.template', '.ENV.EXAMPLE'])(
+    'does NOT treat %s as a secret — placeholder files are meant to be committed',
+    (p) => {
+      expect(isSecretPath(p)).toBe(false);
+    },
+  );
+
+  it.each(['src/environment.ts', 'docs/.environment.md', 'src/.npmrc.md'])('does not over-match %s', (p) => {
+    expect(isSecretPath(p)).toBe(false);
   });
 });
 

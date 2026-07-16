@@ -389,7 +389,7 @@ complaint must never be answered with more caching until the step log has been r
 | # | Pathology | Measured | Fix, and where it is enforced |
 |---|---|---|---|
 | 1 | **Redrafting around tool rounds.** Each tool call makes the model abandon its draft, re-read the prefix, and start over. | 29,173 output tokens across 6 tool steps to load **one** distinct skill = **68% of the bill, 75% of the wall clock**, writing code the user never saw. A tool CALL itself is ~50 tokens; the rest is redrafting. | Pre-load into the cached prefix; `allowTools = false` on creation/preloaded/slash turns (`preload-skills.ts`, `proxy.ts`). |
-| 2 | **Tokens the user never sees.** Aggregate usage hides this completely. | *(historical — this generation's six-tool-round shape no longer exists; for today's product see §"MEASURED")* One generation billed **44,308 output tokens** whose final visible answer was ~9k → **~35k output tokens** spent on abandoned attempts, re-generated answers after a round cap, and verbose tool preambles. **Today: 1.4–2.1 ch/tok, ~40–60% of output is thinking, ~10.5k tokens on the worst run.** | `steps[].textChars` + the **density** ratio (below). ⚠️ The metric that measured this was **blind to it after the pathology-1 fix** — see §"The metric that went blind". |
+| 2 | **Tokens the user never sees.** Aggregate usage hides this completely. | *(historical — this generation's six-tool-round shape no longer exists; for today's product see §"MEASURED")* One generation billed **44,308 output tokens** whose final visible answer was ~9k → **~35k output tokens** spent on abandoned attempts, re-generated answers after a round cap, and verbose tool preambles. **Today: thinking is 5–57% of output, scaling with the difficulty of the ask (measure it from the reasoning WINDOW, not from ch/tok — that constant is prose-calibrated and our output is code).** | `steps[].textChars` + the **density** ratio (below). ⚠️ The metric that measured this was **blind to it after the pathology-1 fix** — see §"The metric that went blind". |
 | 3 | **Dead air — paying full output rate for reasoning returned as EMPTY text.** `thinking.display` defaults to `"omitted"`. | **90.5s of total silence** before the first byte — not even HTTP headers — on a 152s generation. Billed in full. | `display: 'summarized'` costs nothing extra and turns those tokens into a stream the user watches (`thinkingFetch`, `spec/anthropic-models.md` §3.4). |
 | 4 | **A clean `stop` that said nothing.** `finishReason: 'stop'` does not mean the model produced text. | `result.text === ''`, `response.messages === []`, nothing thrown — and **10,054 output tokens billed, 405 credits taken**. | Zero-text is a hard failure → §4.6 auto-refund (`proxy.ts`). |
 | 5 | **A tool-argument schema violation killing the generation after the tokens are spent.** The AI SDK validates args BEFORE `execute`; a violation throws `InvalidToolArgumentsError`. | `load_skill({})` killed a real edit turn: **45s and ~3,500 output tokens**, file untouched, user shown a zod dump. | All tool params optional; validate inside `execute`, which can return a correcting sentence the model reads on its next step (`tools.ts`, pinned by `tools.spec.ts`). |
@@ -491,10 +491,11 @@ metric whose definition encodes the SHAPE of the old failure ("waste = extra ste
 shape changes — and it dies reporting zero, which reads as success. Prefer a definition tied to the thing
 itself ("output that produced no text") over one tied to the mechanism you happened to see it through.
 
-### MEASURED, 2026-07-16: seven live creations
+### MEASURED, 2026-07-16: ten live creations + four edit turns
 
-Nine real creations against `claude-opus-4-8` at `medium` effort, read off the step log and a
-client-side chunk trace:
+Real generations against `claude-opus-4-8` at `medium` effort, read off the step log and a client-side
+chunk trace. **Runs 8–10 overturned two conclusions drawn from runs 1–7 — read the whole table before
+citing any row.**
 
 | Run | Genre | out | chars text | Density | Thinking window | Thinking | Cached / written | Cost |
 |---|---|---|---|---|---|---|---|---|
@@ -507,11 +508,21 @@ client-side chunk trace:
 | 7 | racing (warm) | 8,267 | 16,264 | 2.0 | 10s of 93s | **11%** | 113,762 / 175 | $0.27 |
 | 8 | third-person (warm) | 24,438 | 31,033 | 1.3 | 157s of 290s | **54%** | 114,227 / **0** | $0.67 |
 | 9 | physics (new blocks) | 5,477 | 11,110 | 2.0 | **3.1s of 61s** | **5%** | 43,269 / 56,874 | $0.73 |
+| 10 | "subway-surfer clone" (7 blocks) | 30,475 | 37,917 | 1.2 | **219s of 384s** | **57%** | 43,269 / 74,829 | $1.54 · **513 cr** |
 
-**Thinking is 5–54%, scaling with the difficulty of the ask** — not a flat rate. A physics playground
-barely thinks (3.1s); a third-person platformer with a character controller thinks for 157s. That is
-effort proportional to difficulty, i.e. correct behaviour, not waste. The `~35k` figure is retired: the
-heaviest real run spent ~13.2k output tokens thinking.
+**EDIT turns on run 10's project — a different animal, see §"Edit turns" below:**
+
+| Turn | out | Cached / written | Credits | Cost |
+|---|---|---|---|---|
+| edit 1 (`blocks=[racing-system]`) | 461 | **0** / 113,394 | 393 | $1.18 |
+| edit 2 (`blocks=[4]`, + a spurious forced continuation) | 906 | 87,257 / **223,654** | **831** | $2.49 |
+| edit 3 (same 4 blocks) | 771 | **155,815 / 0** | **65** | **$0.19** |
+| repair(1) (`skills=[bt-design]` appears) | 324 | **0** / 160,604 | 574 | $1.72 |
+
+**Thinking is 5–57%, scaling with the difficulty of the ask** — not a flat rate. A physics playground
+barely thinks (3.1s); the hardest ask of the session thought for 219 of its 384 seconds. That is effort
+proportional to difficulty, i.e. correct behaviour, not waste. The `~35k` figure is retired: the
+heaviest real run spent ~17.3k output tokens thinking.
 
 ### ⚠️ `charsPerOutputToken` is calibrated for PROSE and will libel every code generation
 
@@ -522,8 +533,8 @@ So **~2.0–2.2 IS the healthy baseline for this product**, and a 3.5–4 thresh
 generation as "billed for thinking, not artifact" — a false positive on literally every creation,
 reported confidently, forever.
 
-Subtracting the measured thinking window from `outTokens` gives the real code density across runs 6–9:
-**2.14 / 2.21 / 2.54 / 2.77** — consistent, and nowhere near 3.8.
+Subtracting the measured thinking window from `outTokens` gives the real code density across runs 6–10:
+**2.14 / 2.21 / 2.54 / 2.77 / 2.88** — consistent, and nowhere near 3.8.
 
 **Use the reasoning WINDOW, not density, to price thinking.** It is a direct measurement (`g:` channel
 first-to-last timestamp × the decode rate) and needs no per-language constant. Density is an indirect
@@ -552,6 +563,49 @@ byte-identical starter file context — because the blocks sit ahead of the file
 > creations and wrong for edits, and sticky/append-only/sorted block routing may beat reordering outright.
 > The general lesson is the one this session kept re-learning: **a conclusion drawn from one turn type is
 > not a conclusion about the system.**
+
+### 🔴 Edit turns — the biggest open number in the product
+
+**An edit costs about what building the whole game costs.** Measured 2026-07-16 (see the edit table
+above): after a **513-credit** creation that produced a complete playable game, four edits billed
+**393 / 831 / 65 / 574**. Edit 2 cost **1.6× the entire creation** for 906 output tokens.
+
+**Only 1 of 4 turns cache-HIT, and that one is the floor: 65 credits** (`+155,815 cached, 0 written`).
+The others paid 110–160k **cache WRITES that nothing ever read**. A write bills at **2×**, so on a
+churning turn **caching is not neutral — it is ~2× worse than sending the prefix uncached.** Edits are
+running **6–12× their own floor**.
+
+**Cause: the prefix churns.** `selectOnDemandBlocks` runs **per message**, keyed off the user's wording,
+and those volatile blocks sit AHEAD of the ~110k file context:
+
+```
+edit 1  blocks=[racing-system]                                        → 0 cached
+edit 2  blocks=[react-training, scene-manager, script-component, …]   → base only
+edit 3  same four                                                     → 155,815 cached, 65 credits ✅
+repair  skills=[bt-design] appears                                    → 0 cached
+```
+
+**What it costs the user, and what it does NOT cost us.** Credits are cost-proportional (334 credits/$
+measured on both the 831 and the 65 — the formula holds exactly), so **the margin is ~2.78× either
+way**. A churning edit does not dent the P&L; it burns the USER's balance: **~13 edits per $50 instead
+of ~92.** That makes it a retention/value problem, invisible to every revenue metric we have — aggregate
+usage would show healthy, on-margin revenue right up until users leave.
+
+**Candidate fix — measure, do not assume.** Reordering is the obvious move and may be wrong (it could
+help edits and hurt creations, where blocks ARE stable and files are new). The likelier fix is **sticky
++ append-only + sorted block routing per conversation**, so the prefix only ever GROWS and a new block
+tacks onto a cached prefix instead of rewriting it. That is this file's own lesson — *"the skills index
+is sorted / prompt builds are hash-skipped because an unstable prefix busts the cache on every
+generation"* — never applied to on-demand blocks.
+
+**Caveat: four turns, one session.** The mechanism is clear and edit 3 bounds the win; the magnitude
+needs more turns.
+
+**Bolt.diy has neither ingredient** (no on-demand blocks, no cache control anywhere in
+`app/lib/.server/llm/`), so it pays full uncached input every turn — ~$0.60 for a comparable project.
+Our warm edit beats that 3×; our churning edit is 2.6× WORSE than the thing we forked. It went unnoticed
+upstream because bolt.diy is BYOK: no ledger, no credit counter, nobody ever sees the number. **We only
+found this because we built the metering.**
 
 **⚠️ Thinking spend has ~8× run-to-run variance and CANNOT be tuned from a handful of runs.** Run 6 thought
 for 87 seconds; run 7 for 10 — same model, same effort, same prompt shape. Any effort change measured on a

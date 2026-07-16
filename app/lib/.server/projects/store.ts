@@ -74,7 +74,12 @@ const decoder = new TextDecoder();
  * ---------------------------------------------------------------------------------------------
  */
 
-class FsJsonTable<T extends { id: string }> {
+/**
+ * Exported so the git token store (§4.5.4b) reuses this exact table rather than writing a second,
+ * subtly-different one — the temp-file-then-rename in `put` is what makes a local write atomic, and a
+ * copy that forgot it would corrupt a row on a crash.
+ */
+export class FsJsonTable<T extends { id: string }> {
   constructor(private readonly _dir: string) {}
 
   private _file(id: string) {
