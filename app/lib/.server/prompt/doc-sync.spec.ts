@@ -5,11 +5,13 @@
  * produces a complete, validated prompt or it fails and leaves the previous version active.
  */
 import fs from 'node:fs/promises';
+import { readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsPromptStore, getPromptStore, setPromptStore, sha256 } from './store';
 import { BASE_DOCS, DECLARATION_FILES, ON_DEMAND_BLOCKS, selectOnDemandBlocks } from './sources';
+import { isOpaqueToModel } from '~/lib/context/opaque-files';
 
 /*
  * Doc bodies keyed by URL, plus the agent repo's HEAD, so a test can move ONE of them and rebuild.
@@ -21,13 +23,24 @@ const { fixtures, head } = vi.hoisted(() => ({
   head: { sha: 'commit-sha' },
 }));
 
+/** Fixture sentinel: a doc whose fetch fails outright (404, network error, redirect to login). */
+const UNFETCHABLE = '__UNFETCHABLE__';
+
 vi.mock('./github', () => ({
-  githubText: async (url: string) => fixtures.get(url) ?? `BODY OF ${url}`,
+  githubText: async (url: string) => {
+    const body = fixtures.get(url);
+
+    if (body === '__UNFETCHABLE__') {
+      throw new Error('404 Not Found');
+    }
+
+    return body ?? `BODY OF ${url}`;
+  },
   githubJson: async () => ({ sha: head.sha }),
 }));
 
 // Imported after the mock so the build never reaches the network.
-const { buildSystemPrompt } = await import('./build');
+const { buildSystemPrompt, assemblePrompt } = await import('./build');
 
 let root: string;
 let store: FsPromptStore;
@@ -193,6 +206,46 @@ describe('prompt version store', () => {
 });
 
 /**
+ * What a doc-sync can and cannot take away.
+ *
+ * The platform sections are `?raw` imports — compiled into the bundle, versioned with this code, and
+ * never fetched. A docs push therefore cannot delete the play contract or the no-clone rule. What a
+ * bad push CAN do is return an empty or missing doc, and the guarantee there is that the build fails
+ * whole rather than activating a partial prompt (spec/doc-sync.md).
+ */
+describe('every refresh still carries what the agent needs', () => {
+  const dir = new URL('./sections/', import.meta.url);
+
+  /*
+   * The silent one: add a section file, forget the import in `build.ts`, and it never reaches a
+   * single generation. Nothing throws — the rule simply is not there. Globbing the directory means
+   * this test fails the moment a section is authored but not wired.
+   */
+  it('assembles EVERY section file on disk into the prompt', () => {
+    const prompt = assemblePrompt([], 'skills index');
+    const files = readdirSync(dir).filter((f) => f.endsWith('.md'));
+
+    expect(files.length).toBeGreaterThanOrEqual(6);
+
+    for (const file of files) {
+      const heading = readFileSync(new URL(file, dir), 'utf8').split('\n')[0].trim();
+      expect(prompt, `${file} is on disk but never reaches the prompt — is it imported in build.ts?`).toContain(
+        heading,
+      );
+    }
+  });
+
+  it('keeps the platform rules even when every fetched doc comes back empty-ish', () => {
+    // Docs are inputs; the rules are not. Assembling with NO reference docs at all still yields them.
+    const prompt = assemblePrompt([], '');
+
+    expect(prompt).toMatch(/THE PLAY CONTRACT/);
+    expect(prompt).toMatch(/never clone/i);
+    expect(prompt).toMatch(/# The Project Spec/);
+  });
+});
+
+/**
  * The no-op that decides whether a sync produced a new version.
  *
  * This is a SILENT path: every failure here reports `ok: true` and serves stale docs forever. There
@@ -295,6 +348,52 @@ describe('build no-op', () => {
     expect((await getPromptStore().get(unchanged.version.id))?.content).toContain('Platform Identity');
   });
 
+  /*
+   * THE GUARANTEE (spec/doc-sync.md): a broken docs push can never take generation down, and can
+   * never quietly activate a prompt with a doc missing from it. Failing loud beats a silently
+   * truncated system prompt — the agent would improvise exactly where the missing doc mattered.
+   */
+  it('fails the whole build on an empty doc, leaving the previous version active and intact', async () => {
+    const good = await buildSystemPrompt({ skillsIndex: 'index' });
+    const activeBefore = await getPromptStore().getActive();
+
+    // A docs push lands a truncated file.
+    fixtures.set(BASE_DOCS[0].url, '   \n  ');
+
+    await expect(buildSystemPrompt({ skillsIndex: 'index' })).rejects.toThrow(/is empty/i);
+
+    const activeAfter = await getPromptStore().getActive();
+    expect(activeAfter?.id).toBe(good.version.id);
+    expect(activeAfter?.content).toBe(activeBefore?.content);
+    expect(await store.list()).toHaveLength(1);
+  });
+
+  it('fails the whole build when a doc cannot be fetched at all', async () => {
+    await buildSystemPrompt({ skillsIndex: 'index' });
+
+    const active = await getPromptStore().getActive();
+
+    // Someone renames a doc in the agent repo; the URL now 404s.
+    fixtures.set(BASE_DOCS[0].url, UNFETCHABLE);
+
+    await expect(buildSystemPrompt({ skillsIndex: 'index' })).rejects.toThrow(/404/);
+    expect((await getPromptStore().getActive())?.content).toBe(active?.content);
+  });
+
+  /*
+   * An on-demand doc is not "optional" — it is the doc a baked reference points at. A build that
+   * quietly activated without it would ship the dangling-pointer bug all over again.
+   */
+  it('fails the whole build when an ON-DEMAND doc goes missing, not just a baked one', async () => {
+    await buildSystemPrompt({ skillsIndex: 'index' });
+
+    const active = await getPromptStore().getActive();
+    fixtures.set(ON_DEMAND_BLOCKS[0].url, UNFETCHABLE);
+
+    await expect(buildSystemPrompt({ skillsIndex: 'index' })).rejects.toThrow(/404/);
+    expect((await getPromptStore().getActive())?.content).toBe(active?.content);
+  });
+
   it('rebuilds when a base doc changes', async () => {
     await buildSystemPrompt({ skillsIndex: 'index' });
     fixtures.set(racing.url, 'irrelevant');
@@ -385,6 +484,93 @@ describe('on-demand block routing', () => {
     expect(selectOnDemandBlocks('show me the simplest script that will rotate a cube').map((b) => b.id)).toContain(
       'demo-rotator',
     );
+  });
+
+  it('routes an install request to the project installer', () => {
+    expect(selectOnDemandBlocks('npm install a physics helper package').map((b) => b.id)).toContain(
+      'project-installer',
+    );
+  });
+
+  /*
+   * The point of unbaking it: a turn that is not about installing anything must not pay ~12k tokens
+   * for the installer, on every request, forever.
+   */
+  it('does NOT route the installer into an ordinary gameplay edit', () => {
+    expect(selectOnDemandBlocks('the car flips over when it lands, fix the suspension').map((b) => b.id)).not.toContain(
+      'project-installer',
+    );
+  });
+});
+
+/**
+ * The user project's own `SPEC.md` (the one at the root of the GAME the user is building — not this
+ * platform's spec, which the agent never sees).
+ *
+ * The rule is only enforceable because the file is already in context: `.md` is not ignored, not
+ * opaque, and not binary, so `createFilesContext` sends `SPEC.md` in full on every turn. If that ever
+ * changes, this section becomes an instruction to consult a document the model cannot see — the exact
+ * confabulation shape the reachability rules exist to prevent. `opaque-files.spec.ts` guards the
+ * other half; this guards the prompt half.
+ */
+describe('project SPEC.md workflow', () => {
+  const section = readFileSync(new URL('./sections/25-project-spec.md', import.meta.url), 'utf8');
+
+  it.each([
+    [/source of truth/i, 'the spec outranks the agent defaults'],
+    [/flag conflicts/i, 'conflicts are surfaced, not silently resolved'],
+    [/same response/i, 'the spec is updated in the turn that outdates it'],
+
+    // `\s+` because markdown wraps this line — do not tighten it back to a literal space.
+    [/never scaffold a `SPEC\.md`\s+unasked/i, 'no spec is invented for projects that never wanted one'],
+    [/Current Project Files/, 'it tells the model the file is already in context, not fetchable'],
+  ])('states %s — %s', (pattern) => {
+    expect(section).toMatch(pattern);
+  });
+
+  it('reaches the assembled prompt', () => {
+    const prompt = assemblePrompt([], 'skills index');
+
+    expect(prompt).toMatch(/# The Project Spec/);
+
+    /*
+     * The platform's own non-negotiables still come first — a project spec cannot license
+     * writing to a read-only zone or breaking the play contract.
+     */
+    expect(prompt.indexOf('# Hard Constraints')).toBeLessThan(prompt.indexOf('# The Project Spec'));
+  });
+
+  /*
+   * A project SPEC.md must never be classified opaque — the whole workflow depends on the model
+   * seeing its contents, not a `<boltFile … opaque>` marker.
+   */
+  it.each([['SPEC.md'], ['docs/SPEC.md']])('%s is never opaque to the model', (path) => {
+    expect(isOpaqueToModel(path)).toBe(false);
+  });
+});
+
+/**
+ * The installer doc's STEP 0 is a BLOCKING "detect the host, clone StarterAssets.git" procedure.
+ * This platform mounts the starter before the agent's first turn and has no `git`, so that procedure
+ * is not merely useless here — following it would destroy or duplicate the user's project.
+ *
+ * Routing the doc out of the cached prefix does NOT fix that: a creation turn matches its keywords
+ * and pulls it straight back in. The override therefore lives in the ALWAYS-BAKED identity section,
+ * which is why these assertions are on the section file rather than on the routing.
+ */
+describe('the no-clone override is unconditional', () => {
+  const identity = readFileSync(new URL('./sections/00-platform-identity.md', import.meta.url), 'utf8');
+
+  it.each([[/never clone/i], [/never scaffold a new project/i], [/does not apply here/i], [/already scaffolded/i]])(
+    'the baked identity section states %s',
+    (pattern) => {
+      expect(identity).toMatch(pattern);
+    },
+  );
+
+  it('names the cloning procedure it is overriding, so the rule survives a docs rewrite', () => {
+    expect(identity).toMatch(/StarterAssets\.git/);
+    expect(identity).toMatch(/git.{0,40}(does not exist|NOT available)/is);
   });
 });
 

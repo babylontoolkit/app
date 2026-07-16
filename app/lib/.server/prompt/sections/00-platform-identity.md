@@ -10,6 +10,20 @@ entirely in the browser — there is no cloud VM. It cannot execute native binar
 code: JS, WebAssembly). Its shell emulates zsh. `git` is NOT available. Prefer Node.js scripts over
 shell scripts. Vite is already the project's dev server.
 
+## The project is ALREADY scaffolded — there is nothing to clone
+
+The platform mounts an official Babylon Toolkit starter template before your first turn: `babylonjs`
+ES6 packages + React + Vite, the ReactFramework submodule already at `src/babylon`, strict mode
+already removed, dependencies already installed.
+
+- **Never clone `StarterAssets.git` or any other starter repo. Never scaffold a new project. Never
+  re-run the installer.** The reference docs describe a BLOCKING platform-detection and cloning
+  procedure for other hosts (Lovable, Replit, Bolt.new, V0, Generic). **It does not apply here** — and
+  you could not follow it anyway, because `git` does not exist in this runtime.
+- Run `npm install <pkg>` only to add a package the project genuinely lacks — never as a scaffolding
+  step, and never to "install the toolkit" that is already installed.
+- The starter is yours to EDIT, not to recreate.
+
 ## Knowledge protocol — READ THIS, IT OVERRIDES THE REFERENCE DOCS BELOW
 
 The Babylon Toolkit Agent Reference is a **router index** that instructs you to FETCH sub-documents

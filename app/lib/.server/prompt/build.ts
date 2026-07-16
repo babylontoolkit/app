@@ -13,6 +13,7 @@ import { createScopedLogger } from '~/utils/logger';
 import identitySection from './sections/00-platform-identity.md?raw';
 import actionProtocolSection from './sections/10-action-protocol.md?raw';
 import hardConstraintsSection from './sections/20-hard-constraints.md?raw';
+import projectSpecSection from './sections/25-project-spec.md?raw';
 import selfHealingSection from './sections/30-self-healing.md?raw';
 import skillUsageSection from './sections/40-skill-usage.md?raw';
 import { githubJson, githubText } from './github';
@@ -88,6 +89,12 @@ export function assemblePrompt(docs: Array<{ source: DocSource; body: string }>,
     skillsIndex.trim(),
     actionProtocolSection.trim(),
     hardConstraintsSection.trim(),
+
+    /*
+     * After the hard constraints, before self-healing: the project's own `SPEC.md` outranks the
+     * agent's defaults but never the platform's non-negotiables (file zones, the play contract).
+     */
+    projectSpecSection.trim(),
     selfHealingSection.trim(),
     skillUsageSection.trim(),
   ]

@@ -59,20 +59,20 @@ export const BASE_DOCS: DocSource[] = [
     path: 'references/training-reference.md',
     url: RAW(AGENT_REPO, 'references/training-reference.md'),
   },
-  {
-    id: 'project-installer',
-    path: 'references/project-installer.md',
-    url: RAW(AGENT_REPO, 'references/project-installer.md'),
-  },
 
   /*
    * PLATFORM DETECTION (SPEC §4.3): `project-installer.md` runs a BLOCKING platform-detection
-   * procedure that maps each host (Lovable / Replit / Bolt.new / Base44 / V0 / Generic) to a
-   * reference doc. We are a distinct host platform, but `references/web-app-builder.md`
-   * does not exist in the agent repo yet (owner action). Until it does we bake GENERIC, exactly as
-   * the spec directs. When the babylon-builder doc lands, swap this entry and resync.
+   * procedure mapping each host to a reference doc. We used to bake GENERIC as a stand-in, which was
+   * wrong twice over: generic still says to clone `StarterAssets.git`, and the detection table
+   * resolved us to **Bolt.new** anyway (its signal is "running in a StackBlitz WebContainer" — which
+   * is us), pointing at a doc we do not sync.
+   *
+   * `web-app-builder.md` is OUR host row (agent repo, 2026-07-16): it says the starter is already
+   * mounted, there is nothing to clone, there is no network, and skills are pre-loaded. Cheap enough
+   * to bake and correct on every turn. The always-baked platform-identity section states the same
+   * no-clone rule independently — belt and braces, since this doc is authored in another repo.
    */
-  { id: 'platform-host', path: 'references/web-app-generic.md', url: RAW(AGENT_REPO, 'references/web-app-generic.md') },
+  { id: 'platform-host', path: 'references/web-app-builder.md', url: RAW(AGENT_REPO, 'references/web-app-builder.md') },
 
   // Component Reference OVERVIEW is baked; the 14 system docs below are on-demand.
   {
@@ -99,6 +99,46 @@ export const BASE_DOCS: DocSource[] = [
  * neutralizes the router's pointer to it.
  */
 export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
+  /*
+   * UNBAKED 2026-07-16 — measured at 11,987 tokens, 19.8% of the entire cached prefix, on EVERY
+   * request. Its STEP 0 is a BLOCKING platform-detection + `StarterAssets.git` cloning procedure that
+   * this platform must never run: the starter template is mounted before the agent's first turn, and
+   * `git` does not exist in WebContainer. A fifth of every request was teaching a procedure the
+   * platform forbids — not dead weight but CONTRADICTION, the most expensive kind of token.
+   *
+   * It stays reachable because its package lists, version pins, and content-creation-tool sections
+   * are genuinely useful when a request is actually about installing something. Keywords are the
+   * agent repo's own Reference Index row, verbatim.
+   *
+   * ⚠️ Routing alone does NOT resolve the contradiction — a creation turn ("new project", "scaffold")
+   * matches these keywords and pulls the clone procedure back in at the worst possible moment. The
+   * BAKED platform-identity section carries the standing "already scaffolded, never clone" rule, so
+   * the override is present on every turn whether or not this block routes in. Do not remove it.
+   */
+  {
+    id: 'project-installer',
+    title: 'Project Installation & Packages',
+    path: 'references/project-installer.md',
+    url: RAW(AGENT_REPO, 'references/project-installer.md'),
+    keywords: [
+      'new project',
+      'scaffold',
+      'setup',
+      'install toolkit',
+      'npm package',
+      'npm install',
+      'package version',
+      'git submodule',
+      'starter asset',
+      'starter repo',
+      'starterassets',
+      'vercelassets',
+      'project deployment',
+      'add a package',
+      'dependency',
+    ],
+  },
+
   /*
    * `references/react-framework.md` is BAKED and tells the model to "always reference" this doc — so
    * it must be reachable. Deliberately not baked itself: at ~55KB it is the largest prose doc in the
