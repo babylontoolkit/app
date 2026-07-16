@@ -68,7 +68,7 @@ export const BASE_DOCS: DocSource[] = [
   /*
    * PLATFORM DETECTION (SPEC §4.3): `project-installer.md` runs a BLOCKING platform-detection
    * procedure that maps each host (Lovable / Replit / Bolt.new / Base44 / V0 / Generic) to a
-   * reference doc. We are a distinct host platform, but `references/web-app-babylon-builder.md`
+   * reference doc. We are a distinct host platform, but `references/web-app-builder.md`
    * does not exist in the agent repo yet (owner action). Until it does we bake GENERIC, exactly as
    * the spec directs. When the babylon-builder doc lands, swap this entry and resync.
    */
