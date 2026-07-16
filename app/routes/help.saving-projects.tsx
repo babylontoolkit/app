@@ -68,8 +68,14 @@ export default function SavingProjects() {
             </p>
             <p>
               The first save is the one we cannot do for you, because it has to go somewhere that belongs to{' '}
-              <em>you</em>. We do not keep a copy of your game on our servers. That is deliberate: your game is yours,
-              and it should not stop existing because you stopped using this website.
+              <em>you</em>. We do not keep a copy of your game on our servers — only a note of what it is called and the
+              conversation you had with us while making it. That is deliberate: your game is yours, and it should not
+              stop existing because you stopped using this website.
+            </p>
+            <p className="text-sm text-bolt-elements-textTertiary">
+              The one exception is a game you <strong>publish</strong> for other people to play. Then we do keep a copy,
+              because that is what makes it playable and remixable by everyone else — and it only happens when you ask
+              for it.
             </p>
           </Question>
 

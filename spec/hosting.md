@@ -37,6 +37,15 @@
 
 ## Storage integration changes (supersedes Supabase Storage mentions in SPEC §4.5.5/§4.8/§4.11)
 
+> **⚠️ SNAPSHOTS ARE NO LONGER THE PROJECT STORE (SPEC §4.5.4b, 2026-07-16).** This document was written when the platform snapshotted every project after every generation; it does not any more. **The user's code lives in their own repo, and their in-progress checkpoints live in their browser** (`local-snapshots.ts`, IndexedDB). `POST /api/projects/:id/snapshots` refuses (405).
+>
+> Everything below about snapshot ENVELOPES and TRANSPORT is still exactly right — it just has two remaining readers instead of "every project":
+>
+> 1. the **remix seed** (§4.8) — deposited when an owner publishes, so strangers can remix a game whose repo is private;
+> 2. the **dormant `ObjectStore` fallback**, kept behind the storage interface.
+>
+> The snapshot BUCKET is unaffected and still carries template pins (§4.4) and skill resources (§4.11) under their own prefixes. **Sizing note: the snapshot bucket no longer grows with every generation of every project** — it grows with publishes.
+
 - Snapshots: a JSON envelope of the project file map (binaries carried as base64 entries alongside their true byte `size`) → `snapshots/{projectId}/{snapshotId}.json` in the snapshot bucket; `snapshots.storage_path` stores the key. Server-side access only (runtime IAM role); clients get snapshot contents via the app, never S3 URLs. *(As built, Stage 3 — this supersedes the tar/gzip envelope this doc originally specified. base64 is lossless and the manifest carries true byte counts, so byte integrity below is unaffected; the format is an implementation detail behind the storage interface, and tar remains a valid future swap if snapshot size ever justifies it.)*
 - Shared builds: uploaded by the server after the in-WebContainer `npm run build`, to the play bucket under `{shareId}/`.
 - Skill resources (§4.11): stored under `s3://btk-snapshots-{env}/skills/{skill}/{version}/...` (same private bucket, server-read-only path).

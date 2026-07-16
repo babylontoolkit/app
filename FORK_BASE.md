@@ -22,7 +22,7 @@ Per SPEC §2.1/§2.1a: **indefinite pull compatibility** — monthly pulls (and 
 
 - System prompt pipeline replaced (SPEC §4.3)
 - Project creation: templates-only (SPEC §4.4)
-- Persistence: Supabase hosted layer replaces local-first storage (SPEC §4.5)
+- Persistence: Supabase hosted layer replaces local-first storage (SPEC §4.5) — **and as of §4.5.4b the FILES go to the user's own git repo, not to us at all.** See the Stage-6 map below; this is the single largest behavioural divergence from upstream, since bolt.diy persists projects locally and we persist them in the user's GitHub/GitLab account.
 - LLM calls moved server-side behind agent proxy + credit gate (SPEC §3, §4.2)
 - Provider picker demoted to Settings › Advanced / BYOK (SPEC §2.3)
 - Skills runtime added (SPEC §4.11)
@@ -135,6 +135,27 @@ public by design. Do not merge the two.
 | `app/lib/persistence/useChatHistory.ts` | Additive: the no-`mixedId` (fresh builder) branch now adopts a pending remix (`takePendingRemix()`), mounting the cloned project through the same server-checkpoint path a resume uses (§4.8). |
 | `app/components/@settings/core/{types.ts,constants.tsx}`, `ControlPanel.tsx` | Additive: registered the **Assets** (§4.9) and **Admin** (§4.10) tabs, and relabelled the `supabase` tab to "Game Backend" (§4.15 — id kept for merge safety, label/description/icon changed). |
 | `app/components/chat/SupabaseConnection.tsx` | One label change: "Connect to Supabase" → "Connect a Game Backend" (§4.15). |
+
+## Upstream files touched — Stage 6 (repo-primary persistence, SPEC §4.5.4b)
+
+**The merge picture:** upstream bolt.diy persists a project in the browser (IndexedDB) and has no concept of a permanent home for it. We now persist it in the USER'S OWN git repo. That is a bigger philosophical divergence than the diff suggests — but the diff itself stays modest, because almost all of it is new files. The upstream file that matters on a pull is `app/lib/persistence/useChatHistory.ts`.
+
+| File | Change |
+|---|---|
+| `app/lib/persistence/useChatHistory.ts` | **The one real hotspot.** Additive atoms (`unsavedWork`, `repoStatus`, `mountDivergence`, `generationCount`) + `mountProjectFiles` (which consults the pure `selectMountSource` instead of restoring a server checkpoint), the save queue, `autoPush` on checkpoint, and `requestSave`. The inherited snapshot/restore flow is untouched; we added a parallel local-checkpoint path beside it. A pull touching this file should be replayed carefully — our changes cluster in the mount + checkpoint functions. |
+| `app/lib/persistence/projects.ts` | `createSnapshot` / `listSnapshots` / `setCurrentSnapshot` **DELETED** (the header's old claim — "the server is the source of truth for FILES" — is now false, and the correction is the first thing in the file). Added `getRepoStatus`, `pullFromRepo`, `saveProjectToRepo`, `resolveDivergence`. Ours already, not upstream's. |
+| `app/lib/persistence/db.ts` | Schema v2 → v3: two object stores for local checkpoints. Additive; upstream's stores untouched. |
+| `app/components/header/HeaderActionButtons.client.tsx` | Additive: `<SaveStatus />`, deliberately OUTSIDE the `shouldShowButtons` (activePreview) gate that wraps every other button — a project that failed to build is exactly the one whose code the user cannot afford to lose. |
+| `app/routes/_index.tsx` | Additive: `<SavingSurface />` (nudges + unload warning + divergence dialog). `chat.$id` re-exports this route, so one mount covers a fresh build and a resumed one. |
+| `app/components/github/GitHubSyncButton.tsx` | The client no longer reads a PAT from `githubConnectionStore` (localStorage) or sends a token; push sends FILES from the browser; the pre-pull checkpoint moved client-side. Connection state now comes from the server (it is the only party that knows). |
+| `app/components/projects/ProjectsDashboard.client.tsx` | Card badge always renders (was: repo chip only when linked — so browser-only, the state worth warning about, was the one state that said nothing). Duplicate sends this browser's checkpoint, since the server has no copy to clone. |
+| `app/routes/api.projects.$projectId.snapshots.ts` | POST now **405s** after both walls (404 for someone else's id — never an enumeration oracle). The read path stays: remix seeds only. |
+| `app/routes/api.projects.$projectId.github.ts` | Rewritten as a relay: server-side token resolution, `save` op (create-repo-then-push), files in the body, GET status loader. |
+| `app/routes/api.remix.ts` | Files now come from the caller (self-remix) or the published seed (shared remix) — `currentSnapshotId` alone became `undefined` for every ordinary project when server snapshots went away, which silently cloned empty projects. |
+| `app/routes/api.projects.$projectId.publish.ts` | Additive: accepts `source`, deposits the `.env`-stripped remix seed after the upload (best-effort — a seed failure must not cost the user their share). |
+| *(new)* `app/lib/.server/git/**`, `app/lib/.server/share/remix-seed.ts`, `app/lib/persistence/{local-snapshots,mount-source,save-queue,save-status,dependencies}.ts`, `app/components/persistence/**`, `app/config/saving.ts`, `app/routes/help.saving-projects.tsx`, `supabase/migrations/0006_*.sql` | All additive. No upstream file involved. |
+
+**Deliberately NOT done (hide-don't-delete):** upstream's `githubConnectionStore` and its Settings connection tab still exist and still work for the inherited deploy flows. Our save path simply never reads them.
 
 ## Upstream files touched — Stage 5 (identity + hardening, SPEC §2.3/§2.5/§4.4)
 

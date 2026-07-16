@@ -132,10 +132,20 @@ export function useShareGame() {
       const buildPath = await buildProject();
       const dist = await readDist(buildPath);
 
+      /*
+       * The SOURCE travels too, so the game can be remixed (§4.8, §4.5.4b).
+       *
+       * Under repo-primary persistence the platform holds no copy of anyone's project, and the owner's
+       * repo is private — so this is the only moment a remixable copy can exist, and this browser is
+       * the only party that has one. Without it, remixing a shared game silently produces an empty
+       * project. The server strips the `.env` family (`buildRemixSeed`) before storing any of it.
+       */
+      const source = await workbenchStore.serializeFiles();
+
       const response = await fetch(`/api/projects/${activeProjectId}/publish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dist, ...options }),
+        body: JSON.stringify({ dist, source, ...options }),
       });
 
       const data = (await response.json()) as {

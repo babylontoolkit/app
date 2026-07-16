@@ -21,6 +21,7 @@ import { db, getAll, deleteById, type ChatHistoryItem } from '~/lib/persistence'
 import { listProjects, deleteProject, renameProject, ApiError } from '~/lib/persistence/projects';
 import { setPendingOpenProject, PENDING_REMIX_KEY } from '~/lib/persistence/pending-remix';
 import { describeProjectSaveBadge } from '~/lib/persistence/save-status';
+import { readCurrentLocalSnapshot } from '~/lib/persistence/local-snapshots';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
 import type { Project } from '~/types/project';
 import { classNames } from '~/utils/classNames';
@@ -126,11 +127,24 @@ export function ProjectsDashboard() {
       setBusyId(project.id);
 
       try {
+        /*
+         * Send this browser's copy of the project (§4.5.4b).
+         *
+         * Duplicating one of my own projects has nothing on the server to copy: the platform holds no
+         * files, and this project's repo (if it even has one) is private and belongs to me. The only
+         * copy is the checkpoint in this browser — so the dashboard hands it over.
+         *
+         * `undefined` when this browser has never seen the project (made on another device). The
+         * server then falls back to the published seed if there is one; a duplicate that comes out
+         * empty is honest in that case, because we genuinely have nothing to copy from here.
+         */
+        const local = db ? await readCurrentLocalSnapshot(db, project.id) : undefined;
+
         const response = await fetch('/api/remix', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
-          body: JSON.stringify({ projectId: project.id }),
+          body: JSON.stringify({ projectId: project.id, files: local?.files }),
         });
 
         const data = (await response.json()) as { projectId?: string; message?: string };

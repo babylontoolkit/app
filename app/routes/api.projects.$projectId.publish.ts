@@ -20,13 +20,51 @@ import { errorResponse } from '~/lib/.server/http';
 import { runPublishingChecklist } from '~/lib/.server/share/checklist';
 import { publishBuild, unpublish } from '~/lib/.server/share/publish';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
+import { buildRemixSeed } from '~/lib/.server/share/remix-seed';
+import { getProjectStore, getSnapshotStore } from '~/lib/.server/projects/store';
+import { createScopedLogger } from '~/utils/logger';
+import type { AppLoadContext } from '@remix-run/cloudflare';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
+
+const logger = createScopedLogger('share.publish.route');
+
+/**
+ * Store the source a remix will be cloned from (§4.8).
+ *
+ * Never throws: publishing succeeded before this ran, and the user is owed their share link whatever
+ * happens here. A failure is logged rather than surfaced — the visible consequence (a remix arrives
+ * empty) is the same as it has always been for an unseeded project.
+ */
+async function depositRemixSeed(projectId: string, source: SerializedFileMap, context: AppLoadContext) {
+  try {
+    const { files, excludedSecrets } = buildRemixSeed(source);
+
+    if (excludedSecrets.length > 0) {
+      // Not an error — this is the exclusion doing its job. Worth a line: it is a security boundary.
+      logger.info(`Remix seed for ${projectId} withheld ${excludedSecrets.length} secret file(s).`);
+    }
+
+    const snapshot = await getSnapshotStore(context).create({ projectId, files, label: 'Shared' });
+    await getProjectStore(context).update(projectId, { currentSnapshotId: snapshot.id });
+  } catch (error) {
+    logger.error(`Could not store the remix seed for ${projectId}: ${(error as Error).message}`);
+  }
+}
 
 interface PublishBody {
   dist: SerializedFileMap;
   submitToGallery?: boolean;
   title?: string;
   description?: string;
+
+  /**
+   * The project's SOURCE, so the game can be remixed (§4.8, §4.5.4b).
+   *
+   * Optional on the wire and deliberately non-fatal when absent: a publish that cannot be remixed is
+   * still a perfectly good publish, and refusing one over it would break sharing to fix remixing.
+   * `buildRemixSeed` strips the `.env` family before any of it is stored.
+   */
+  source?: SerializedFileMap;
 
   /** Set true to publish despite non-blocking warnings (debug overlays etc). Blocking findings still refuse. */
   acknowledgeWarnings?: boolean;
@@ -80,6 +118,21 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       },
       context,
     );
+
+    /*
+     * Deposit the remix seed (§4.8, §4.5.4b).
+     *
+     * AFTER the upload, deliberately: the share is the thing the user asked for, and a seed that fails
+     * to store must not cost them the publish. It is best-effort and says so — a project with no seed
+     * remixes as an empty one, which is the pre-existing (documented) behaviour for a source with no
+     * snapshot.
+     *
+     * The seed is the ONLY reason the platform holds source at all under repo-primary persistence, and
+     * it exists only for projects the owner deliberately made public.
+     */
+    if (body.source) {
+      await depositRemixSeed(project.id, body.source, context);
+    }
 
     /*
      * Funnel (§5A). SHARE_PUBLISHED fires on every publish; FIRST_PLAYABLE only when this project had

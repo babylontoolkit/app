@@ -84,7 +84,7 @@ Upstream ships real bugs that surface in our environment. Each fix is additive/l
 - WebContainers boot/mount/preview integration
 - The artifact/action streaming protocol (`boltArtifact`/`boltAction` file + shell actions) and its parser — we adopt it as-is rather than inventing a new protocol
 - Multi-provider LLM layer (kept to power the Pro-only BYOK feature and for internal model experiments)
-- **Snapshot restoration & revert-to-earlier-versions** — upstream already has these; §4.12 checkpoints ADAPT this machinery to server-side snapshots rather than building new
+- **Snapshot restoration & revert-to-earlier-versions** — upstream already has these; §4.12 checkpoints ADAPT this machinery rather than building new (to LOCAL checkpoints — §4.5.4b moved the bytes out of our servers)
 - **Image attachments in chat** — upstream already has this; §4.12 keeps it, rerouted through the server agent proxy so vision tokens hit billing
 - **Git clone/import** — reused as the AppTemplate template-mounting mechanism (§4.4)
 - **ZIP download / folder sync** — base of §4.8 export (add Toolkit README matching official Project Installation layout)
@@ -480,9 +480,17 @@ Credits are meaningless without identity — the ledger is keyed on `user_id`, a
 7. **Every debit's `generations` row is written BEFORE the debit (added 2026-07-13).** `credit_ledger.generation_id` is a foreign key to `generations(id)`, and `settleGeneration` may never throw (§4.6) — so a missing row is a `23503` that gets caught, logged, and swallowed, and **the generation bills zero**. Silently, on every generation, forever. The row is therefore anchored inside `settleGeneration` itself (`app/lib/.server/billing/generations.ts`), not left to a caller's ordering, so every settlement path gets it for free. Pinned by `billing.spec.ts` with a ledger that enforces the same foreign key Postgres does — `FsLedger` has none, which is exactly how this survived to production.
 6. **BYOK is Pro-gated:** the `byok_enabled` profile flag is honored ONLY while an active Pro Tools entitlement exists (checked server-side per generation — a lapsed subscription silently falls back to credits with a friendly notice). Key stored client-side only; generations are still recorded (tokens, `credits_charged=0`) and rate limits still enforced.
 
-#### 4.5.4b Persistence model — REPO-PRIMARY (TARGET; approved 2026-07-16, NOT YET BUILT)
+#### 4.5.4b Persistence model — REPO-PRIMARY (BUILT 2026-07-16)
 
-> **Status: DESIGN — the next major feature.** Today's built reality: projects persist via the inherited IndexedDB (browser) plus server snapshots where configured; §4.13 GitHub Sync is BUILT as an optional bridge. This section is the approved target that PROMOTES that bridge to the permanent store. Until it ships, §4.13's current behavior stands.
+> **Status: BUILT.** The user's game code lives in their own GitHub/GitLab repo; the platform holds the project record + chat and no files. §4.13's GitHub Sync is no longer an optional bridge — it IS the storage backbone. **Seven deviations from the design above, each with a reason — read them before changing this area:**
+>
+> 1. **`buildCommit` is not a seam method.** The design listed it alongside `fastForwardPush`; making it one would have forced GitLab to fake GitHub's four-call blob/tree/commit/ref dance (GitLab commits atomically, one call with `actions[]`). The seam is `fastForwardPush` — the *outcome*. A seam that encodes one vendor's call shape is not an abstraction, it is GitHub with a second implementation bolted on.
+> 2. **`ensureRepo` takes a required `adoptExisting`, and Save passes `false`.** Save DERIVES the repo name from the project title, so `deriveRepoName("My Game")` → `my-game` → a user with an unrelated `my-game` gets 422 → the original code ADOPTED it → their repo's HEAD silently becomes this game. Save now walks to `my-game-2`. Linking a repo the user *named* still adopts, which is the correct behaviour for that verb — hence a required flag rather than a default.
+> 3. **Local checkpoints are ordered by a monotonic `seq`, never `createdAt`.** Two checkpoints in one millisecond tie on a clock, and the tiebreak decides which one undo restores and which one the 20-checkpoint trim discards. This is migration 0003's ledger bug (`order by seq desc`, never `created_at`) in a second place — clocks tie and clocks go backwards, so never order anything that matters by one.
+> 4. **`remoteHead: undefined` (could not ask) is not `null` (branch is empty).** `selectMountSource` keeps them distinct: collapsing them lets a reload on a flaky connection decide the browser is authoritative and push over a repo it never read.
+> 5. **The link is a TUPLE — `provider` + `linked_repo` + `linked_branch` are all-or-nothing** (migration 0006 constraint). It caught two live half-link writers on the way in: the sync route's `link` op never set `provider`, and `PATCH /api/projects/:id` let any caller set `linkedRepo` alone.
+> 6. **A remix SEED is deposited at publish time** — the one thing the platform still stores of a user's source, and only for a game they deliberately made public. Removing server snapshots quietly broke §4.8 remix: `currentSnapshotId` became `undefined` for every ordinary project, so a stranger's remix cloned nothing and produced an empty editor, silently. The owner's repo cannot fill the gap (it is private and it is theirs). `buildRemixSeed` strips the `.env` family — sharper than the push path, since a seed is handed to strangers — reusing `isSecretPath` rather than writing a second copy of "what counts as a secret".
+> 7. **Self-remix (Duplicate) sends its files from the browser.** There is no server copy of an unshared project to clone. The caller owns both sides (`requireOwnedProject`), so their own bytes are authoritative. `body.files` is IGNORED on the `shareId` path: a visitor's files are not the owner's game.
 
 **The model (settled):** the user's game code is permanently stored in **their own GitHub or GitLab repository** — never on our servers. Our servers hold only the lightweight **project record** (name, thumbnail, chat/messages, registry seed, `provider`, `linked_repo`, `linked_branch`, `last_synced_commit_sha`, `auto_push`). The working copy lives **in the browser** (WebContainer + inherited IndexedDB), exactly as today.
 
@@ -510,8 +518,14 @@ profiles         -- id (= auth.users.id), display_name, avatar_url,
                  -- stripe_customer_id?, byok_enabled bool, is_admin bool,
                  -- created_at, updated_at
 projects         -- id, user_id, name, template_id, share_id (nullable unique),
-                 -- current_snapshot_id, linked_repo?, linked_branch?,
+                 -- current_snapshot_id (§4.5.4b: now ONLY a remix seed, never a backup),
+                 -- provider?, linked_repo?, linked_branch?,   -- all-or-nothing (0006 constraint)
+                 -- auto_push (not null, default true),
                  -- last_synced_commit_sha?, github_installation_ref?, created_at, updated_at
+git_tokens       -- user_id, provider, access_token_encrypted, refresh_token_encrypted?,
+                 -- expires_at?, provider_login, created_at, updated_at
+                 -- pk (user_id, provider). RLS ENABLED WITH NO POLICY, deliberately:
+                 -- service-role only. A user's own session must never read these rows.
 templates        -- (see 4.4)
 snapshots        -- id, project_id, storage_path (S3 key; base64-JSON envelope of the
                  -- project file map — binaries as base64 entries, `spec/hosting.md`;
@@ -534,7 +548,7 @@ entitlements     -- id, user_id, source ('protools_subscription'), tier
                  -- subscriber_email, last_validated_at, expires_at?, created_at
 ```
 
-- Snapshot policy: project-local sources only; never `node_modules`. Auto-snapshot after each applied generation and on editor idle; manual save too. Resume = mount template base + overlay snapshot (npm install only if lockfile changed).
+- **Snapshot policy — REWRITTEN by §4.5.4b (2026-07-16).** The platform no longer auto-snapshots a user's project at all: checkpoints are **local** (IndexedDB, `local-snapshots.ts`, 20 per project, ordered by monotonic `seq`), and durable history is the commits in the user's own repo. `POST /api/projects/:id/snapshots` **refuses (405)** — after both walls, and 404 for someone else's id, so it is not an enumeration oracle. The `snapshots` table survives for exactly two readers: the **remix seed** (§4.8, deposited at publish) and the dormant `ObjectStore` fallback. Resume = `selectMountSource` → local / repo / seed / diverged (`npm install` only when `node_modules` is absent or the lockfile moved).
 - Balance = latest `balance_after`; ledger append-only, never a mutable counter.
 
 ### 4.6 Credits & Billing
@@ -642,7 +656,7 @@ The point of this subsystem: **the skills in `github.com/babylontoolkit/skills` 
 Users of Bolt/Lovable expect to control and undo the AI. Without these, one bad generation strands a non-developer.
 
 - **Stop:** a Stop button aborts the in-flight stream. Actions already applied stay applied (next point covers recovery). Billing: charged for tokens actually consumed to the abort point (the ledger row reflects real usage; never the full estimate).
-- **Checkpoints & restore:** upstream bolt.diy ALREADY ships snapshot restoration and revert-to-earlier-versions — adapt that machinery to our server-side snapshots (§4.5.5) rather than building new. Surface as a **version history**: each assistant message carries a "Restore to before/after this change" affordance → remount WebContainer from that snapshot, append a system note to chat ("restored to checkpoint N"), and snapshot the restore itself (history is never destroyed, only appended). This is the single most important safety net for non-developers — **Phase 2**, not a nice-to-have.
+- **Checkpoints & restore:** upstream bolt.diy ALREADY ships snapshot restoration and revert-to-earlier-versions — adapt that machinery rather than building new. **⚠️ This used to read "our server-side snapshots (§4.5.5)"; §4.5.4b made that false.** Checkpoints are LOCAL (IndexedDB, `local-snapshots.ts`) — in-session restore stays fast and needs no network, and for a LINKED project the durable history is the commits in the user's own repo. The affordances below are unchanged; only where the bytes live moved. Surface as a **version history**: each assistant message carries a "Restore to before/after this change" affordance → remount WebContainer from that snapshot, append a system note to chat ("restored to checkpoint N"), and snapshot the restore itself (history is never destroyed, only appended). This is the single most important safety net for non-developers — **Phase 2**, not a nice-to-have.
 - **Retry / refine:** "Try again" on a failed or disliked generation re-runs from the pre-generation checkpoint (normal credit charge; auto-refund already covers hard failures per §4.6).
 - **Attachments in chat:** upstream ALREADY supports image attachments — keep, rerouted through the server agent proxy so vision tokens are billed through the normal formula; add server-side size/type validation and small text/code file support. Phase 3 hardening, not a new build. (User 3D asset uploads are §4.9, not chat attachments.)
 - **Concurrency guard:** one in-flight generation per project; queued or rejected with a friendly message, never interleaved (interleaved file actions would corrupt the working tree).
@@ -651,7 +665,13 @@ Users of Bolt/Lovable expect to control and undo the AI. Without these, one bad 
 
 ### 4.13 GitHub Sync (two-way project ↔ repo bridge) — **AVAILABLE TO ALL USERS**
 
-> **Pending role upgrade (§4.5.4b, approved):** this bridge becomes THE permanent store — "Save" = link+push, reload = fetch+mount, GitLab joins via the `GitProvider` seam. Everything below (fast-forward-only, two-button divergence, .env exclusion, byte-faithful trees, checkpoint-before-pull) becomes load-bearing for SAVING, not just syncing.
+> **Role upgrade DONE (§4.5.4b, 2026-07-16): this is no longer a bridge, it is the storage backbone.** "Save" = link+push, reload = fetch+mount, GitLab joins via the `GitProvider` seam. Everything below (fast-forward-only, two-button divergence, `.env` exclusion, byte-faithful trees, checkpoint-before-pull) is now load-bearing for SAVING, not just syncing — a defect here loses the user's only copy, where before it merely failed to sync one.
+>
+> **What changed in this section's own machinery:**
+> - **The client no longer holds or sends a token.** It used to read a raw PAT out of `githubConnectionStore` (localStorage) and put it in the request body of every op. The server resolves the token itself from an encrypted per-user store (`git_tokens`, service-role only); the browser never sees it, and `no-client-token.spec.ts` pins that the route cannot accept one again — behaviourally AND at source level.
+> - **Push takes its files from the request body,** because the platform has no copy to read. The old flow snapshotted server-side first, which only worked while we kept every project.
+> - **The checkpoint before a pull happens client-side** for the same reason: the only party holding the files is the one about to overwrite them.
+> - **`.env` exclusion got sharper for a reason worth keeping.** The rule was `/\.env\.[^/]*local$/` — mirroring the gitignore convention — so it **pushed `.env.production`**, the most dangerous file in the family, because it does not end in `local`. Nothing failed; the secrets just went to a repo. Under §4.5.4b every save is a push, so the blast radius went from "if you clicked Sync" to "always". One rule (`isSecretPath`), one place, reused by the remix seed.
 
 > **Status: IMPLEMENTED (Stage 4, 2026-07).** Server: link/push/pull/divergence via the GitHub Git Data API (`github/sync.ts`, Octokit — no git binary, WebContainers never run git). The dangerous decisions are a pure, tested core (`github/sync-logic.ts`): fast-forward-only (a moved remote → the two-button divergence choice, never a merge), `.env`-family excluded from every push, byte-faithful tree building. Pull ALWAYS checkpoints the platform state first (§4.12). Client: a **GitHub Sync** header button + dialog (`components/github/GitHubSyncButton.tsx`) covering link, push (snapshots current files first), pull (mounts the result), and the two-button divergence resolution. Ungated — no entitlement check anywhere; the user's token comes from the inherited connector. Remaining: hardening that per-user token from the connector cookie to a server-side OAuth App.
 

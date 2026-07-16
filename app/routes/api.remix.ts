@@ -23,11 +23,26 @@ import { deriveRemix } from '~/lib/.server/share/remix';
 import { errorResponse } from '~/lib/.server/http';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import type { Project } from '~/lib/.server/projects/types';
+import type { SerializedFileMap } from '~/lib/binary/binary-files';
 
 interface RemixBody {
   shareId?: string;
   projectId?: string;
   name?: string;
+
+  /**
+   * The files to clone, supplied by the caller — SELF-REMIX ONLY (§4.5.4b).
+   *
+   * Under repo-primary persistence the platform holds no copy of an unshared project, so a Duplicate
+   * has nothing on the server to clone from: the only copy is in the user's browser. They own both
+   * sides (`requireOwnedProject` above), so their own bytes are the authoritative source and there is
+   * nothing to trust: it is their project, being copied into their account.
+   *
+   * 🔴 IGNORED on the `shareId` path, deliberately. Honouring it there would let any visitor post
+   * arbitrary files and have the platform store them against a stranger's shared game — the remix of a
+   * public game must come from what the OWNER published (`buildRemixSeed`), never from the requester.
+   */
+  files?: SerializedFileMap;
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -59,11 +74,27 @@ export async function action({ request, context }: ActionFunctionArgs) {
     }
 
     /*
-     * Clone the CURRENT snapshot's files, if the source has one. A source with no snapshot yet (brand
-     * new project) clones as an empty project — still valid, just nothing to copy.
+     * Where the clone's files come from (§4.5.4b).
+     *
+     * 🔴 This used to read `source.currentSnapshotId` and nothing else, back when the platform kept a
+     * server-side snapshot of every project after every generation. It does not any more — so that
+     * lookup now returns `undefined` for every ordinary project, and this route quietly produced an
+     * EMPTY clone. The comment that used to sit here ("a source with no snapshot yet clones as an
+     * empty project — still valid, just nothing to copy") described a rare edge case that had silently
+     * become the universal one.
+     *
+     * The two paths that DO have files, and no others:
+     *
+     *   - self-remix: the caller's own browser sends them (`body.files`). They own both projects.
+     *   - shared remix: the seed the OWNER deposited when they published (`buildRemixSeed`), which is
+     *     what `currentSnapshotId` now points at.
+     *
+     * `body.files` is honoured ONLY for a self-remix. On the shareId path a visitor's files are not
+     * the owner's game, and storing them against a stranger's share would be letting the requester
+     * dictate what a public remix contains.
      */
-    const sourceSnapshotId = source.currentSnapshotId;
-    const files = sourceSnapshotId ? await snapshots.read(sourceSnapshotId) : null;
+    const seeded = source.currentSnapshotId ? await snapshots.read(source.currentSnapshotId) : null;
+    const files = (isSelfRemix && body.files) || seeded;
 
     const created = await projects.create(deriveRemix(source, { newOwnerId: user.id, name: body.name, isSelfRemix }));
 

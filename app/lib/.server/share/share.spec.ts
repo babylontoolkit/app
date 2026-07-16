@@ -192,8 +192,16 @@ describe('remix — what travels and what must not', () => {
     sharedAt: '2026-07-14T00:00:00.000Z',
     galleryStatus: 'approved',
     currentSnapshotId: 'snp_1',
+
+    /*
+     * A COMPLETE link (§4.5.4b): provider + repo + branch always travel together, and the database
+     * refuses a half-set one. The fixture used to omit `provider`, which made it an impossible project
+     * — and quietly made any assertion about `remix.provider` pass for the wrong reason.
+     */
+    provider: 'github',
     linkedRepo: 'ownerA/kart',
     linkedBranch: 'main',
+    autoPush: true,
     lastSyncedCommitSha: 'deadbeef',
     githubInstallationRef: 'inst_1',
     gameBackendRef: 'backend_1',
@@ -216,12 +224,35 @@ describe('remix — what travels and what must not', () => {
     expect(remix.shareId).toBeUndefined();
     expect(remix.sharedAt).toBeUndefined();
     expect(remix.galleryStatus).toBe('none');
+    expect(remix.provider).toBeUndefined();
     expect(remix.linkedRepo).toBeUndefined();
     expect(remix.linkedBranch).toBeUndefined();
     expect(remix.lastSyncedCommitSha).toBeUndefined();
     expect(remix.githubInstallationRef).toBeUndefined();
     expect(remix.gameBackendRef).toBeUndefined();
     expect(remix.currentSnapshotId).toBeUndefined();
+  });
+
+  /**
+   * 🔴 A remix is born UNLINKED (§4.5.4b), and the link is a TUPLE — `provider`, `linkedRepo`,
+   * `linkedBranch` are all-or-nothing (migration 0006 enforces it).
+   *
+   * Asserting the fields one at a time is how two thirds of an invariant ships: the test above names
+   * the fields that existed when it was written, and `provider` was added later. This asserts the
+   * PROPERTY instead, so a field added to the link tomorrow has to be reset or explained.
+   *
+   * What is at stake is not tidiness. A remix that inherited the link points at the ORIGINAL author's
+   * repository — so the remixer's first auto-push would commit a stranger's edits into the only
+   * permanent copy of someone else's game.
+   */
+  it('is born UNLINKED — no part of the source’s link survives, and the link is all-or-nothing', () => {
+    const remix = deriveRemix(source, { newOwnerId: 'visitor_B' });
+    const linkFields = [remix.provider, remix.linkedRepo, remix.linkedBranch];
+
+    expect(linkFields.every((field) => field === undefined)).toBe(true);
+
+    // And the fixture really was linked — otherwise the assertion above proves nothing.
+    expect([source.provider, source.linkedRepo, source.linkedBranch].every((field) => field !== undefined)).toBe(true);
   });
 
   it('names a stranger remix "(remix)" and a self-remix "(copy)"', () => {
