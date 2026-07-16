@@ -28,8 +28,23 @@ export interface McpLiveTool {
 export interface McpToolCallEvent {
   toolCallId: string;
   toolName: string;
+
+  /**
+   * Which server owns the tool. Load-bearing, not decorative: two servers may expose the SAME tool name
+   * (`read_file`, `search`), and without this the client resolves the call by name alone and runs it
+   * against whichever server happens to be first in the list — the wrong process, silently.
+   */
+  server: string;
   args: unknown;
 }
+
+/**
+ * How much of a tool's JSON Schema we show the model.
+ *
+ * The schema is client-supplied and third-party (§4.14) — an MCP server can declare an arbitrarily large
+ * one, and this text rides in the tool definitions of every generation for that project (§4.2.8). Cap it.
+ */
+const MAX_SCHEMA_CHARS = 1500;
 
 export interface McpRelayContext {
   generationId: string;
@@ -42,7 +57,38 @@ export interface McpRelayContext {
 
 /** A safe MCP tool name for the AI SDK: it keys tools by name and rejects odd characters. */
 function safeName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'tool';
+}
+
+/**
+ * A key no other tool in this set already has.
+ *
+ * The tool set is a Record keyed by name, so a duplicate key does not error — it OVERWRITES, and the
+ * model is simply never told the shadowed tool exists. Two ways that happens for real: two servers both
+ * exposing a common name (`read_file`), and two distinct names that normalise to the same key
+ * (`search web` / `search-web` → `search_web`). Qualify with the server, then disambiguate with a
+ * counter, so every declared tool stays reachable.
+ */
+function uniqueKey(t: McpLiveTool, used: Set<string>): string {
+  const bare = safeName(t.name);
+
+  if (!used.has(bare)) {
+    return bare;
+  }
+
+  const qualified = safeName(`${t.server}_${t.name}`);
+
+  if (!used.has(qualified)) {
+    return qualified;
+  }
+
+  for (let i = 2; ; i++) {
+    const candidate = `${qualified.slice(0, 60)}_${i}`;
+
+    if (!used.has(candidate)) {
+      return candidate;
+    }
+  }
 }
 
 export function createMcpRelayTools(
@@ -50,11 +96,19 @@ export function createMcpRelayTools(
   ctx: McpRelayContext,
 ): Record<string, ReturnType<typeof tool>> {
   const tools: Record<string, ReturnType<typeof tool>> = {};
+  const used = new Set<string>();
 
   for (const t of liveTools) {
-    const key = safeName(t.name);
+    const key = uniqueKey(t, used);
+    used.add(key);
+
+    /*
+     * The schema is how the model knows what ARGUMENTS this tool takes. Without it the relay still works
+     * mechanically and the model still calls the tool — blind, with invented arguments — and the MCP
+     * server rejects it. So this must survive the trip from the sandbox (`Chat.client.tsx` forwards it).
+     */
     const schemaHint = t.inputSchema
-      ? `\n\nInput schema (JSON Schema): ${JSON.stringify(t.inputSchema).slice(0, 1500)}`
+      ? `\n\nInput schema (JSON Schema): ${JSON.stringify(t.inputSchema).slice(0, MAX_SCHEMA_CHARS)}`
       : '';
 
     /*
@@ -68,8 +122,8 @@ export function createMcpRelayTools(
       parameters: z.object({}).passthrough(),
 
       execute: async (args, { toolCallId, abortSignal }) => {
-        // Tell the client to run this tool in its sandbox.
-        ctx.emit({ toolCallId, toolName: t.name, args });
+        // Tell the client to run this tool in its sandbox — by its REAL name, on its OWN server.
+        ctx.emit({ toolCallId, toolName: t.name, server: t.server, args });
 
         // Block THIS generation's tool loop until the client posts the result back (or times out / aborts).
         const outcome = await awaitClientToolResult({

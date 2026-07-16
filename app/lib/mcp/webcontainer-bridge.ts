@@ -210,12 +210,21 @@ export class McpBridge {
     return bridge;
   }
 
-  /** Execute a tool call against the server that owns it. Result is UNTRUSTED input (§4.14). */
-  async callTool(toolName: string, args: unknown): Promise<unknown> {
-    const tool = this._tools.find((t) => t.name === toolName);
+  /**
+   * Execute a tool call against the server that owns it. Result is UNTRUSTED input (§4.14).
+   *
+   * `server` disambiguates: tool names are unique per server, NOT across servers, so two servers can both
+   * expose `read_file`. Matching on the name alone silently runs the call against whichever was launched
+   * first — a different process, with different files and different credentials. The relay always names
+   * the server the model's tool was built from; it is optional only for callers that predate it.
+   */
+  async callTool(toolName: string, args: unknown, server?: string): Promise<unknown> {
+    const tool = server
+      ? this._tools.find((t) => t.name === toolName && t.server === server)
+      : this._tools.find((t) => t.name === toolName);
 
     if (!tool) {
-      throw new Error(`Unknown MCP tool: ${toolName}`);
+      throw new Error(`Unknown MCP tool: ${toolName}${server ? ` on server "${server}"` : ''}`);
     }
 
     const connection = this._connections.get(tool.server);

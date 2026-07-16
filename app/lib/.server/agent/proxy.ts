@@ -117,11 +117,12 @@ export interface AgentRequest {
   assetNotes?: string[];
 
   /**
-   * MCP tools actually running in the project's WebContainer (§4.14). Names/descriptions only — used to
-   * make the "available tools" note reflect what STARTED, not just what `.mcp.json` declared. Execution
-   * is client-side in the sandbox; the server never runs these.
+   * MCP tools actually running in the project's WebContainer (§4.14) — used to make the "available
+   * tools" note reflect what STARTED, not just what `.mcp.json` declared, and to build the relay tools
+   * the model calls. `inputSchema` is how the model learns each tool's arguments. Execution is
+   * client-side in the sandbox; the server never runs these.
    */
-  mcpLiveTools?: Array<{ name: string; description?: string; server: string }>;
+  mcpLiveTools?: Array<{ name: string; description?: string; server: string; inputSchema?: unknown }>;
 }
 
 /** The skill tool set, as `streamText` sees it — keeps the result's tool types concrete. */

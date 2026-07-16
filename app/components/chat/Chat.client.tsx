@@ -257,11 +257,20 @@ export const ChatImpl = memo(
         },
 
         /*
-         * MCP tools actually RUNNING in this project's WebContainer (§4.14). Names + descriptions only
-         * — the server uses them to tell the model what it can call; execution stays client-side in the
-         * sandbox (`callMcpTool`). Empty when the project has no `.mcp.json` or no servers started.
+         * MCP tools actually RUNNING in this project's WebContainer (§4.14). The server uses these to
+         * tell the model what it can call; execution stays client-side in the sandbox (`callMcpTool`).
+         * Empty when the project has no `.mcp.json` or no servers started.
+         *
+         * `inputSchema` must travel: it is how the model learns each tool's ARGUMENTS. Dropped, the model
+         * calls the tool with invented arguments and the MCP server rejects every call — a relay that
+         * looks wired up and never does useful work. The server caps how much of it reaches the prompt.
          */
-        mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description, server: t.server })),
+        mcpTools: mcpTools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          server: t.server,
+          inputSchema: t.inputSchema,
+        })),
 
         /* Store-asset component references (§4.9), introspected client-side when an asset was added. */
         assetNotes,
@@ -375,6 +384,7 @@ export const ChatImpl = memo(
           generationId?: string;
           toolCallId?: string;
           toolName?: string;
+          server?: string;
           args?: unknown;
         };
 
@@ -393,7 +403,7 @@ export const ChatImpl = memo(
           let error: string | undefined;
 
           try {
-            result = await callMcpTool(call.toolName!, call.args);
+            result = await callMcpTool(call.toolName!, call.args, call.server);
           } catch (e) {
             error = (e as Error).message;
           }

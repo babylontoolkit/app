@@ -73,13 +73,18 @@ export async function syncMcpBridge(): Promise<void> {
   }
 }
 
-/** Execute an MCP tool call in the WebContainer. The result is untrusted (§4.14). */
-export async function callMcpTool(toolName: string, args: unknown): Promise<unknown> {
+/**
+ * Execute an MCP tool call in the WebContainer. The result is untrusted (§4.14).
+ *
+ * `server` comes from the relay event and pins the call to the server the model's tool was built from —
+ * without it, two servers exposing the same tool name resolve to whichever launched first.
+ */
+export async function callMcpTool(toolName: string, args: unknown, server?: string): Promise<unknown> {
   if (!_bridge) {
     throw new Error('No MCP servers are running for this project.');
   }
 
-  return _bridge.callTool(toolName, args);
+  return _bridge.callTool(toolName, args, server);
 }
 
 export async function teardownMcpBridge(resetConfig = true): Promise<void> {

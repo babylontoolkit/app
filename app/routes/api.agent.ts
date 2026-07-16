@@ -63,10 +63,12 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     assetNotes?: string[];
 
     /**
-     * MCP tools actually running in the project's WebContainer (§4.14) — names/descriptions only. The
-     * proxy uses them to tell the model what it can call; execution stays client-side in the sandbox.
+     * MCP tools actually running in the project's WebContainer (§4.14). The proxy uses them to tell the
+     * model what it can call — `inputSchema` is what tells it the arguments; execution stays client-side
+     * in the sandbox. All third-party and untrusted: the proxy caps how much of a schema reaches the
+     * prompt, and the sandbox's own server is the real validator of any call.
      */
-    mcpTools?: Array<{ name: string; description?: string; server: string }>;
+    mcpTools?: Array<{ name: string; description?: string; server: string; inputSchema?: unknown }>;
   }>();
 
   const cookies = parseCookies(request.headers.get('Cookie'));
@@ -229,6 +231,9 @@ async function streamGeneration(
       generationId: generation.generationId,
       toolCallId: event.toolCallId,
       toolName: event.toolName,
+
+      // Pins the call to the server that owns the tool — two servers may expose the same tool name.
+      server: event.server,
       args: event.args as any,
     });
   });

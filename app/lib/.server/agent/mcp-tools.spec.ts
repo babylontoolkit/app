@@ -35,7 +35,7 @@ describe('createMcpRelayTools', () => {
     // Give the microtask that emits a chance to run.
     await Promise.resolve();
 
-    expect(emitted).toEqual([{ toolCallId: 'call-1', toolName: 'echo', args: { text: 'hi' } }]);
+    expect(emitted).toEqual([{ toolCallId: 'call-1', toolName: 'echo', server: 's1', args: { text: 'hi' } }]);
 
     // The client runs it in its sandbox and posts the result back.
     const delivered = deliverClientToolResult({
@@ -62,5 +62,58 @@ describe('createMcpRelayTools', () => {
     deliverClientToolResult({ generationId: 'gen-y', toolCallId: 'call-2', userId: 'u1', error: 'no server running' });
 
     await expect(execPromise).resolves.toBe('The MCP tool "boom" could not run: no server running');
+  });
+
+  /*
+   * The tool set is a Record. A duplicate key does not error — it overwrites, and the model is simply
+   * never told the shadowed tool exists. Two servers exposing `read_file` is the ordinary case, not an
+   * exotic one, so every declared tool must survive with its OWN identity.
+   */
+  it('keeps every tool reachable when names collide across servers', () => {
+    const tools = createMcpRelayTools(
+      [
+        { name: 'read_file', server: 'fs' },
+        { name: 'read_file', server: 'docs' },
+        { name: 'read file', server: 'other' },
+      ],
+      { generationId: 'g1', userId: 'u1', emit: () => undefined },
+    );
+
+    expect(Object.keys(tools)).toHaveLength(3);
+    expect(Object.keys(tools)).toEqual(['read_file', 'docs_read_file', 'other_read_file']);
+  });
+
+  it('routes a colliding tool-call to the server that owns it, under its real name', async () => {
+    const emitted: McpToolCallEvent[] = [];
+    const tools = createMcpRelayTools(
+      [
+        { name: 'read_file', server: 'fs' },
+        { name: 'read_file', server: 'docs' },
+      ],
+      { generationId: 'gen-dup', userId: 'u1', emit: (e) => emitted.push(e) },
+    );
+
+    void (tools.docs_read_file as any).execute({ path: 'a.md' }, { toolCallId: 'call-3', messages: [] });
+    await Promise.resolve();
+
+    // The client must be told "docs", not "fs" — and the tool's REAL name, not our mangled key.
+    expect(emitted).toEqual([{ toolCallId: 'call-3', toolName: 'read_file', server: 'docs', args: { path: 'a.md' } }]);
+
+    deliverClientToolResult({ generationId: 'gen-dup', toolCallId: 'call-3', userId: 'u1', result: 'ok' });
+  });
+
+  it("shows the model each tool's input schema, capped", () => {
+    const tools = createMcpRelayTools(
+      [
+        { name: 'sized', server: 's1', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
+        { name: 'huge', server: 's1', inputSchema: { type: 'object', blob: 'x'.repeat(50_000) } },
+      ],
+      { generationId: 'g1', userId: 'u1', emit: () => undefined },
+    );
+
+    expect((tools.sized as any).description).toContain('"properties":{"path":{"type":"string"}}');
+
+    // A third-party server must not be able to spend our context budget without limit (§4.2.8, §4.14).
+    expect((tools.huge as any).description.length).toBeLessThan(2000);
   });
 });
