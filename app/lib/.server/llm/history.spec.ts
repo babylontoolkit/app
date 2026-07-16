@@ -12,7 +12,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { Message } from 'ai';
-import { compactHistory, historySavings, MAX_HISTORY_CHARS } from './history';
+import { compactHistory, historySavings, HISTORY_WINDOW_TURNS, MAX_HISTORY_CHARS } from './history';
 
 const bigFile = 'const x = 1;\n'.repeat(400); // ~5KB, the size of a real generated source file
 
@@ -161,5 +161,65 @@ describe('the windowing backstop', () => {
     const history = [userTurn('hi'), { id: 'a', role: 'assistant', content: 'hello' } as Message];
 
     expect(compactHistory(history)).toEqual(history);
+  });
+});
+
+describe('the turn-count window (HISTORY_WINDOW_TURNS)', () => {
+  /*
+   * The char cap bounds by SIZE; the turn cap bounds by COUNT. A long session of many SMALL messages
+   * stays under the char cap forever, so without a turn cap it would still re-send an unbounded number
+   * of turns every turn. This bounds that.
+   */
+  it('keeps the brief + the most-recent N messages when the turn count is exceeded', () => {
+    const brief = userTurn('make me a kart racer');
+    const history: Message[] = [brief];
+
+    // Many small messages: well under MAX_HISTORY_CHARS in total, so only the TURN cap can bite.
+    for (let i = 0; i < 20; i++) {
+      history.push(userTurn(`small change ${i}`));
+    }
+
+    const compacted = compactHistory(history, { maxTurns: 5 });
+
+    // First brief + exactly the 5 most-recent messages.
+    expect(compacted).toHaveLength(6);
+    expect(compacted[0].content).toBe(brief.content);
+    expect(compacted[compacted.length - 1].content).toContain('small change 19');
+    expect(compacted[1].content).toContain('small change 15');
+  });
+
+  /* The first brief is never dropped, even by the turn cap. */
+  it('never drops the first user message via the turn cap', () => {
+    const brief = userTurn('the original brief that must survive');
+    const history: Message[] = [brief];
+
+    for (let i = 0; i < 30; i++) {
+      history.push(userTurn(`msg ${i}`));
+    }
+
+    expect(compactHistory(history, { maxTurns: 4 })[0].content).toBe(brief.content);
+  });
+
+  /* Disabled (0) → only the char cap applies, so a short conversation is untouched. */
+  it('is disabled when maxTurns is 0', () => {
+    const history: Message[] = [userTurn('brief')];
+
+    for (let i = 0; i < 10; i++) {
+      history.push(userTurn(`m${i}`));
+    }
+
+    expect(compactHistory(history, { maxTurns: 0 })).toHaveLength(history.length);
+  });
+
+  /* Never duplicates the first message when it is already inside the recent window. */
+  it('does not duplicate the brief when the whole conversation fits the window', () => {
+    const history = [userTurn('brief'), userTurn('a'), userTurn('b')];
+
+    expect(compactHistory(history, { maxTurns: 5 })).toHaveLength(3);
+  });
+
+  /* The exported default is a sane positive number, so the proxy has a real turn cap out of the box. */
+  it('defaults to a positive turn cap', () => {
+    expect(HISTORY_WINDOW_TURNS).toBeGreaterThan(0);
   });
 });

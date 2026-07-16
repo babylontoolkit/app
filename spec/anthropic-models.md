@@ -189,8 +189,9 @@ value of `providerOptions` yields `{type: 'adaptive'}` or `{type: 'disabled'}`, 
 `LanguageModelV1` wrappers above cannot help either: they see the SDK's call options, not the JSON
 body. The body is assembled inside the provider and handed straight to `fetch`.
 
-**Fix:** `thinkingFetch(mode, modelId)` — a `fetch` wrapper that sets `thinking` on the serialized
-body. It is the only layer that can. Guarded per-model: models without adaptive thinking are left
+**Fix:** `thinkingFetch(mode, effort, modelId)` — a `fetch` wrapper that sets `thinking` (and the
+`effort`, §3.5, which likewise cannot go through `providerOptions`) on the serialized body. It is the
+only layer that can. Guarded per-model: models without adaptive thinking are left
 untouched, and Fable 5 is never sent `{type: 'disabled'}` (it thinks unconditionally; an explicit
 disable is a 400).
 

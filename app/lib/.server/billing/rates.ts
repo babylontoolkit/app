@@ -107,16 +107,27 @@ export function getBillingConfig(context?: unknown): BillingConfig {
 
     /*
      * The free signup grant is PURE COST to the operator — it buys real model spend on our key with
-     * no revenue behind it — so it is sized in whole creations, not a round number, and is env-tunable
-     * (`SIGNUP_GRANT_CREDITS`) so the giveaway can be dialled without a deploy.
+     * no revenue behind it — so it is sized against a concrete intent, not a round number, and is
+     * env-tunable (`SIGNUP_GRANT_CREDITS`) so the giveaway can be dialled without a deploy.
      *
-     * On the Opus 4.8 default a creation costs ~$2.25 of model spend (the §4.2.8 measurement was
-     * ~$1.35 on Sonnet 5; Opus is a uniform ~1.67x across all four token classes), which is ~752
-     * credits at the default unit cost ($0.01) and margin (3.34). So 2,500 credits ≈ THREE real
-     * projects on Opus (it was ~five on Sonnet). Raise this constant if you want new users to get more
-     * free Opus projects — but note every credit here is money out of the operator's prepaid pool.
+     * COST OF ONE CREATION ON OPUS 4.8 — measured, not scaled. The optimized creation ("make me a
+     * kart racer", `spec/context-budget.md`) is 12,862 output + 111,659 input tokens. On Opus rates
+     * (out $25, cache-read $0.5, cache-write $10 per MTok) the credit cost turns entirely on cache
+     * warmth:
+     *   - WARM prefix (the normal production state — the base prompt is byte-identical across every
+     *     user on our one key, 1h TTL, so traffic keeps it primed): ~$0.42 raw ≈ **~140 credits**.
+     *   - COLD prefix (first creation in an hour — pays the cache WRITE, which the user's own later
+     *     edits then read back at 0.1x): ~$1.44 raw ≈ **~480 credits**.
+     * A vibe-code EDIT turn (warm prefix, ~2-4k output + thinking) is ~$0.10-0.15 ≈ 40-70 credits.
+     * (An earlier comment here claimed ~752 credits/creation; that was a PRE-optimization Sonnet cost
+     * scaled to Opus, and is wrong — the code has the optimization.)
+     *
+     * The default is sized for **1 creation + some room to iterate** even in the COLD worst case:
+     * ~480 (cold build) + ~500 (~10 edit turns) ≈ **1,000 credits ≈ $3.00 raw / user** (retail $10);
+     * in warm production that same grant buys several creations. Raise for more free iteration (e.g.
+     * 3,500 ≈ ~3 cold creations + edits) — every credit here is money out of the operator's pool.
      */
-    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 2500),
+    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 1000),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
 
     stripeSecretKey: process.env.STRIPE_SECRET_KEY,

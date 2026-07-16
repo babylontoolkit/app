@@ -34,7 +34,8 @@ import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
-import { compactHistory, historySavings } from '~/lib/.server/llm/history';
+import { compactHistory, historySavings, HISTORY_WINDOW_TURNS } from '~/lib/.server/llm/history';
+import { envNumber } from '~/lib/.server/env';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
 import { buildProjectNotes, type GameBackendState } from './project-notes';
 import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
@@ -574,8 +575,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * the same double-representation bug §4.2.8 found in the creation artifact, displaced into history.
    *
    * The tags survive, so the model still knows exactly which files it wrote and edited.
+   *
+   * Windowing runs in the SAME pass (it only ever touches the messages, never the cached system
+   * prefix): a char cap plus an env-tunable turn cap (`HISTORY_WINDOW_TURNS`) drop the oldest turns
+   * once a long session outgrows either bound, always keeping the first brief and the current turn.
    */
-  const compacted = compactHistory(messages);
+  const maxTurns = envNumber(request.context, 'HISTORY_WINDOW_TURNS', HISTORY_WINDOW_TURNS);
+  const compacted = compactHistory(messages, { maxTurns });
   const saved = historySavings(messages, compacted);
 
   if (saved > 0) {

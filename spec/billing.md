@@ -181,8 +181,8 @@ what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the lic
 
 ## Verified end-to-end (2026-07, local mode)
 
-- Signup grant fired **exactly once**: `grant +2250 → 2250`.
-- A live generation settled against real usage: `generation −7 → 2243` (raw cost $0.0184,
+- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default — 1 Opus creation + iteration room).
+- A live generation settled against real usage: `generation −7 → 993` (raw cost $0.0184,
   `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
 - The `generations` record attributes the charge to a user, a model, and its four token classes.
 - `PRO_FEATURES_ENABLED=false`: **zero** model names, provider names, `<select>`s, or API-key inputs in

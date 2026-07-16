@@ -53,6 +53,25 @@ const logger = createScopedLogger('history');
 export const MAX_HISTORY_CHARS = 60_000;
 
 /**
+ * A turn-based complement to `MAX_HISTORY_CHARS`, env-tunable via `HISTORY_WINDOW_TURNS`.
+ *
+ * The char cap bounds history by SIZE; this bounds it by COUNT — keep the first user brief plus the N
+ * most-recent messages verbatim, dropping the whole turns in between. The two compose: whichever bites
+ * first wins, and the char cap still trims within the retained window if those messages are large.
+ *
+ * A "turn" here is one entry in the `Message[]` array (user and assistant messages alternate). The
+ * default is generous — a request essentially never needs more than this many recent messages for
+ * continuity — so on a normal session neither backstop fires. Set `HISTORY_WINDOW_TURNS=0` to disable
+ * the turn cap and fall back to the char cap alone.
+ *
+ * Why no summary model call for the dropped turns: after compaction strips the 83–87% that is file
+ * bodies, what remains is prose, and a `createSummary`-style round trip would bill its own output tokens
+ * on every long turn — routinely MORE than the handful of retained prose messages cost. A straight
+ * window is the cheapest correct option (`spec/context-budget.md` §5).
+ */
+export const HISTORY_WINDOW_TURNS = 30;
+
+/**
  * The body of a file/edit action in an assistant turn. Non-greedy, so consecutive actions do not merge.
  * Deliberately matches `type="file"` and `type="edit"` only — never `shell`, whose one-line command IS
  * the information.
@@ -79,7 +98,7 @@ function compactContent(content: string): string {
  * User messages are never touched. What the user said is the one thing in the history that exists
  * nowhere else.
  */
-export function compactHistory(messages: Message[]): Message[] {
+export function compactHistory(messages: Message[], options: { maxTurns?: number } = {}): Message[] {
   const compacted = messages.map((message) => {
     if (message.role !== 'assistant' || typeof message.content !== 'string') {
       return message;
@@ -90,26 +109,47 @@ export function compactHistory(messages: Message[]): Message[] {
     return content === message.content ? message : { ...message, content };
   });
 
-  return windowHistory(compacted);
+  return windowHistory(compacted, options.maxTurns ?? HISTORY_WINDOW_TURNS);
 }
 
 /**
- * The backstop: drop the OLDEST turns until the history fits.
+ * The backstop: drop the OLDEST turns until the history fits, by COUNT then by SIZE.
  *
  * **The first user message is never dropped.** It is the original brief — the request the whole project
  * exists to satisfy — and losing it makes the agent forget what it is building. Everything else is
  * fair game, oldest first, because recent turns are what the current request refers to.
+ *
+ * Two bounds, applied in order:
+ *   1. **Turn cap** (`maxTurns`, from `HISTORY_WINDOW_TURNS`): keep the first brief plus the N
+ *      most-recent messages, dropping the whole turns in between. A whole message is dropped or kept as
+ *      a unit, so an assistant turn is never severed from the request it answered. (Our persisted
+ *      history is plain user/assistant text — the tool loop lives inside a single `streamText` call —
+ *      so there are no raw tool_use/tool_result blocks to orphan.) `maxTurns <= 0` disables this bound.
+ *   2. **Char cap** (`MAX_HISTORY_CHARS`): trim the retained window further if those messages are large.
  */
-function windowHistory(messages: Message[]): Message[] {
+function windowHistory(messages: Message[], maxTurns: number): Message[] {
   const size = (list: Message[]) =>
     list.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
 
-  if (size(messages) <= MAX_HISTORY_CHARS || messages.length <= 3) {
-    return messages;
+  let windowed = messages;
+
+  /*
+   * 1. Turn cap: first brief + the most-recent `maxTurns` messages. Guard `> maxTurns + 1` so the first
+   * message is genuinely OUTSIDE the recent window before we prepend it (never duplicate it).
+   */
+  if (maxTurns > 0 && messages.length > maxTurns + 1) {
+    const recent = messages.slice(-maxTurns);
+    windowed = [messages[0], ...recent];
+    logger.info(`History exceeded ${maxTurns} turns — kept the brief + the ${maxTurns} most recent message(s).`);
   }
 
-  const first = messages[0];
-  const rest = messages.slice(1);
+  // 2. Char cap: nothing more to do if the (possibly turn-capped) window already fits.
+  if (size(windowed) <= MAX_HISTORY_CHARS || windowed.length <= 3) {
+    return windowed;
+  }
+
+  const first = windowed[0];
+  const rest = windowed.slice(1);
   let dropped = 0;
 
   // Keep at least the two most recent messages — the turn we are answering needs its own context.

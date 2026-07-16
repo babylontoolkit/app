@@ -38,7 +38,9 @@
 > | Credits | 470 | **106** |
 >
 > Quality was verified unchanged: landing page rewritten from scratch, play contract intact, binaries
-> byte-faithful. The signup grant went from ~5 creations to ~21.
+> byte-faithful. Cost per creation dropped **470 → 106 credits** (this table's Sonnet-5 measurement; the
+> Opus default is ~140 credits warm / ~480 cold — see `rates.ts`), so a fixed signup grant buys ~4.4x
+> more creations than before the optimization.
 >
 > **The trap to not re-introduce:** a tool round is not "one extra API call". It re-prefills the whole
 > prompt AND invites the model to throw away everything it has written so far. Before adding a tool to
@@ -395,7 +397,7 @@ complaint must never be answered with more caching until the step log has been r
 | 7 | **Re-emitting a whole file to change one line.** Cost scales with FILE size, not CHANGE size. | 10,532-character `Home.css`: full rewrite = 6,522 output tokens / 47s. Same edit as one search/replace block = **3,958 tokens / 39s**; a two-file edit landed in **1,991 tokens / 26s**. | `type="edit"` search/replace blocks (`edit-blocks.ts`) + the default-to-`edit` rule in `10-action-protocol.md`. |
 | 8 | **Under-thinking — the most expensive saving there is.** A cheaper effort does not return a smaller correct answer; it returns a **confident wrong one**, and the repair turns cost more than the saving. | `effort: low` was 22% cheaper on a creation and, on an edit, **wrote into a read-only project zone** (`src/routing/router.tsx`, §4.4c) and abandoned diff-edits for whole-file rewrites. | `low` is DELETED from `EffortLevel`; `parseEffort()` clamps it back to `medium`. **There is no cheap tier** (`spec/anthropic-models.md` §3.5a). |
 | 9 | **Cache churn — paying to keep *creating* a cache rather than read one.** | The 5-minute default TTL expires while the user is playing the game we just built; the next turn re-writes ~111k tokens at full price. Ten turns: **~$4.16 vs ~$0.97**. | `ttl: '1h'` (§"The cache TTL is 1 hour"). |
-| 10 | **Re-sending the whole conversation, uncached, forever.** | Not yet measured — see §"Levers that are NOT built". This is the open one. | **Not fixed.** |
+| 10 | **Re-sending the whole conversation, uncached, forever.** | Turn 5 of a real build: **9,476 → 512 tokens re-sent per turn (−94.6%)** from compaction; a long prose session shaves a further ~49% on top once the turn cap bites. | **Fixed** — compaction + a char cap + a turn cap (`llm/history.ts`, §5 below). |
 
 **Two things that look like waste and are not.** A **Stop** is not waste: the tokens were really consumed
 and are billed for what was spent to the abort point (§4.12). A **hard failure** is waste, but it is *our*
@@ -465,9 +467,22 @@ So the bodies are stripped from file/edit actions in assistant turns; **the tags
 still knows exactly which files it created and edited, and reads their real contents from the file
 context. User messages are never touched: what the user said exists nowhere else.
 
-A windowing backstop (`MAX_HISTORY_CHARS`) bounds the growth that scales with *conversation* length
-rather than file size, dropping the oldest turns — but **never the first user message**, which is the
-original brief and the thing the whole project exists to satisfy.
+A windowing backstop bounds the growth that scales with *conversation* length rather than file size,
+dropping the oldest turns — but **never the first user message**, which is the original brief and the
+thing the whole project exists to satisfy. It has two bounds, applied in order: a **char cap**
+(`MAX_HISTORY_CHARS`, ~15k tokens) that trims by SIZE, and a **turn cap** (`HISTORY_WINDOW_TURNS`,
+env-tunable, default 30 messages; `0` disables it) that trims by COUNT — the char cap alone never fires
+on a long session of many *small* messages, so the turn cap keeps the first brief plus the N most-recent
+messages and drops the whole turns in between (a message is kept or dropped as a unit, so an assistant
+turn is never severed from the request it answered). Measured: turn 5 of a real build is **9,476 → 512
+tokens** re-sent per turn from compaction alone; a 61-message prose session is trimmed a further **−49%**
+by the turn cap over the char cap alone.
+
+**No summary model call.** Once compaction has stripped the 83–87% that is file bodies, the surviving
+prose is small, and a `createSummary`-style round trip would bill its own output tokens on every long
+turn — routinely more than the handful of retained messages cost. A straight window is the cheapest
+correct option (this is the trade §"Dead levers" below refers to when it points at `createSummary` as a
+*starting point*, not working code).
 
 ### Why not cache the history instead?
 
@@ -485,7 +500,9 @@ composes with that change if it ever lands.
 ## Levers that are NOT built
 
 **None outstanding.** The two that were listed here — the unwindowed history and the never-firing
-self-healing loop — are both built (§5 above; `auto-repair.ts` / SPEC §4.2 item 7, 2026-07-14).
+self-healing loop — are both built (§5 above; `auto-repair.ts` / SPEC §4.2 item 7, 2026-07-14). History
+windowing was completed with an env-tunable turn cap (`HISTORY_WINDOW_TURNS`) alongside the char cap on
+2026-07-15; the deliberate non-choice there is **no summary model call** — see §5.
 
 The remaining known lever, deliberately not taken: **model routing** (Haiku for trivial turns, ~3×
 cheaper). It is not a free win — see §3.5a: an under-thinking model does not return a smaller correct
@@ -507,7 +524,7 @@ cost control:
 |---|---|---|
 | `selectContext` — LLM-based file selection ("only 5 files in the context buffer") | `llm/select-context.ts` | only called from `/api/chat` |
 | `createSummary` — chat history summarisation | `llm/create-summary.ts` | only called from `/api/chat` |
-| last-3-message history slice | `routes/api.chat.ts` | only on the dead path — **this is the windowing the proxy lacks** |
+| last-3-message history slice | `routes/api.chat.ts` | only on the dead path — the proxy does its OWN windowing (`llm/history.ts`, §5), so this is redundant, not a missing lever |
 | `simplifyBoltActions` — strips file bodies from assistant history | `llm/utils.ts` | used only by the two above |
 | `MAX_RESPONSE_SEGMENTS = 2` + continuation on `finishReason: 'length'` | `llm/constants.ts` | only on the dead path |
 | `MAX_TOKENS = 128000` | `llm/constants.ts` | the proxy hardcodes 64k |

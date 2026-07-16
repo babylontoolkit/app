@@ -67,6 +67,7 @@ send files no correct edit exists for. Implemented additively: a net-new classif
 **New (net-new files — zero merge surface):**
 - `app/lib/context/opaque-files.ts` — the classifier: generated / vendored / image-ish text
 - `app/lib/context/opaque-files.spec.ts` — guards BOTH directions (hidden stays hidden; readable stays readable)
+- `app/lib/.server/llm/history.ts` — conversation-history compaction (strip stale `<boltAction type="file|edit">` bodies, −85%) + windowing (a char cap `MAX_HISTORY_CHARS` and an env-tunable turn cap `HISTORY_WINDOW_TURNS`, default 30, `0` disables); called from `proxy.ts` before `convertToCoreMessages`. Deliberately NO summary model call — see `spec/context-budget.md` §5. Replaces upstream's dead-path `createSummary`/last-3-slice (only ever reachable from the fail-closed `/api/chat`). `app/lib/.server/llm/history.spec.ts` pins both directions (strips bodies; keeps tags, the first brief, and the current turn).
 
 **Contract:** a file is in the project OR in the conversation, never in the conversation twice. The
 WebContainer FS is how files reach the project; the artifact is a message to the model. Opaque and

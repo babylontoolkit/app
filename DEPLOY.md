@@ -179,7 +179,7 @@ DNS: CNAME `staging.app.babylontoolkit.com` → the Lightsail service hostname. 
 
 ## 3. Webhooks & external registrations (per env)
 
-- [ ] **Stripe:** Dashboard → Webhooks → add `https://staging.app.babylontoolkit.com/api/stripe/webhook` (test mode for staging) → copy signing secret into SSM → redeploy.
+- [ ] **Stripe:** Dashboard → Webhooks → add `https://staging.app.babylontoolkit.com/api/stripe-webhook` (test mode for staging; the route is `api.stripe-webhook` → `/api/stripe-webhook`, NOT `/api/stripe/webhook`) → copy signing secret into SSM → redeploy.
 - [ ] **Supabase Auth:** set Site URL + redirect URLs to the env domain (and OAuth providers' consoles: Google/GitHub redirect URIs).
 - [ ] **GitHub doc-sync webhook (Phase 3):** on `babylontoolkit/agent` and `/skills` repos → `https://.../api/admin/webhooks/github`, secret from SSM, push events only.
 
