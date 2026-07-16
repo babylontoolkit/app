@@ -15,12 +15,19 @@ Consumes the Agent Reference repo into versioned, cached system prompts. The Git
 1. Fetch all sources (fail the build on any HTTP error or empty body — never activate a partial prompt).
 2. Record source repo `main` HEAD SHA (`source_commit_sha`).
 3. Assemble in fixed order: reference docs → skills index → platform sections (action protocol rules, hard constraints, self-healing directive, skill-usage directive — templates live in `app/lib/.server/prompt/sections/*.md`, versioned with the code).
-4. Compute `content_hash` (sha256). If identical to the active version's hash → no-op (log "unchanged").
+4. Compute `content_hash` (sha256 of the base prompt) **and `build_hash`** — a fingerprint over the base prompt **plus every on-demand block and declaration file**. If `build_hash` is identical to the active version's → no-op (log "unchanged").
 5. Insert `prompt_versions` row; activation is a separate step.
+
+**The no-op keys on `build_hash`, never on `content_hash`.** `content_hash` covers only the cached prefix, but on-demand blocks and declarations are persisted by the same insert this no-op skips. Keyed on `content_hash`, an edit confined to a system doc (`training/components/*.md`, `shader-materials.md`, a `.d.ts`) was fetched, reported `ok: true, status: "unchanged"`, and discarded — the active version kept the old blobs and served stale docs indefinitely. Nothing threw. Both hashes are kept and distinct: `content_hash` is the identity of the cached prefix (§4.2.8), `build_hash` is the identity of the build.
+
+`build_hash` is **derived from the per-artefact content hashes, never stored** — bodies are content-addressed, so the version record already contains every hash it needs. A persisted copy could drift from the blobs it claims to describe.
+
+The version id is suffixed with `build_hash`, not `content_hash`: the id's timestamp resolves only to the second, so two versions sharing a base prompt would otherwise collide and overwrite each other's record.
 
 ```sql
 prompt_versions: id, content, content_hash, source_commit_sha,
                  skills_set_hash, created_at, is_active (exactly one true)
+-- build_hash is derived at read time from the stored blob refs, not a column.
 ```
 
 ## Activation, rollback, refresh
@@ -43,4 +50,5 @@ prompt_versions: id, content, content_hash, source_commit_sha,
 
 ## Tests (money/safety paths)
 
-- Build fails on missing/empty doc; activation atomicity; hash no-op; rollback restores byte-identical content; webhook HMAC rejection.
+- Build fails on missing/empty doc; activation atomicity; rollback restores byte-identical content; webhook HMAC rejection.
+- **The no-op, both directions** — it must still skip an identical rebuild (a spurious version churns the cached prefix, §4.2.8), AND it must rebuild when ONLY an on-demand block or declaration changed, with the active version serving the new bytes. This path is silent in both failure modes: a stale-doc bug reports `ok: true` and throws nothing, so these tests are the only thing between a docs push and an agent quietly working from last week's reference.

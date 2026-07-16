@@ -17,7 +17,7 @@ import selfHealingSection from './sections/30-self-healing.md?raw';
 import skillUsageSection from './sections/40-skill-usage.md?raw';
 import { githubJson, githubText } from './github';
 import { AGENT_REPO, BASE_DOCS, DECLARATION_FILES, ON_DEMAND_BLOCKS, type DocSource } from './sources';
-import { getPromptStore, sha256, type PromptVersionMeta } from './store';
+import { computeBuildHash, getPromptStore, sha256, type NewPromptVersion, type PromptVersionMeta } from './store';
 
 const logger = createScopedLogger('doc-sync');
 
@@ -122,24 +122,36 @@ export async function buildSystemPrompt(options: BuildOptions): Promise<BuildRes
   );
 
   const content = assemblePrompt(docs, skillsIndex);
-  const contentHash = sha256(content);
   const fetched = docs.length + Object.keys(onDemand).length + Object.keys(declarations).length;
 
-  const active = await store.getActive();
-
-  if (active?.contentHash === contentHash) {
-    logger.info(`Prompt unchanged (${contentHash.slice(0, 12)}) — keeping active version ${active.id}`);
-
-    return { status: 'unchanged', version: active, sourceCommitSha, fetched };
-  }
-
-  const version = await store.put({
+  const candidate: NewPromptVersion = {
     content,
     sourceCommitSha,
     skillsSetHash: sha256(skillsIndex),
     onDemand,
     declarations,
-  });
+  };
+
+  /*
+   * The no-op is keyed on the WHOLE build, not on `contentHash`.
+   *
+   * On-demand blocks and declarations are fetched right here but persisted ONLY by `store.put()`,
+   * which this early return skips. Keyed on `contentHash` (the base prompt alone), an edit confined
+   * to a system doc — `training/components/*.md`, `shader-materials.md`, a declaration file — was
+   * fetched, reported `ok: true, status: "unchanged"`, and then dropped on the floor: the active
+   * version kept pointing at the old blobs and the agent served stale docs until something happened
+   * to change a base doc. Nothing threw. Nothing broke. It was just quietly wrong.
+   */
+  const buildHash = computeBuildHash(candidate);
+  const active = await store.getActive();
+
+  if (active?.buildHash === buildHash) {
+    logger.info(`Build unchanged (${buildHash.slice(0, 12)}) — keeping active version ${active.id}`);
+
+    return { status: 'unchanged', version: active, sourceCommitSha, fetched };
+  }
+
+  const version = await store.put(candidate);
 
   if (activate) {
     await store.activate(version.id);

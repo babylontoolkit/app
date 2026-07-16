@@ -7,9 +7,23 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { FsPromptStore, sha256 } from './store';
-import { selectOnDemandBlocks } from './sources';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FsPromptStore, getPromptStore, setPromptStore, sha256 } from './store';
+import { DECLARATION_FILES, ON_DEMAND_BLOCKS, selectOnDemandBlocks } from './sources';
+
+/*
+ * Doc bodies keyed by URL, so a test can change ONE doc and rebuild. `vi.hoisted` because `vi.mock`
+ * is hoisted above the imports and its factory cannot close over an ordinary top-level binding.
+ */
+const { fixtures } = vi.hoisted(() => ({ fixtures: new Map<string, string>() }));
+
+vi.mock('./github', () => ({
+  githubText: async (url: string) => fixtures.get(url) ?? `BODY OF ${url}`,
+  githubJson: async () => ({ sha: 'commit-sha' }),
+}));
+
+// Imported after the mock so the build never reaches the network.
+const { buildSystemPrompt } = await import('./build');
 
 let root: string;
 let store: FsPromptStore;
@@ -92,6 +106,40 @@ describe('prompt version store', () => {
     expect(await store.readDeclaration(meta.id, 'babylon.toolkit.d.ts')).toBe('declare module TOOLKIT {}');
   });
 
+  /*
+   * `buildHash` is what the no-op keys on, so it must move when ANY artefact moves — including the
+   * ones `contentHash` deliberately ignores.
+   */
+  it('fingerprints the whole build, not just the base prompt', async () => {
+    const base = await store.put(version('SAME PROMPT'));
+
+    const changedBlock = await store.put({
+      ...version('SAME PROMPT'),
+      onDemand: { 'racing-system': 'DIFFERENT RACING DOCS' },
+    });
+
+    const changedDecl = await store.put({
+      ...version('SAME PROMPT'),
+      declarations: { 'babylon.toolkit.d.ts': 'declare module TOOLKIT { const v: 2; }' },
+    });
+
+    // Same base prefix in all three...
+    expect(changedBlock.contentHash).toBe(base.contentHash);
+    expect(changedDecl.contentHash).toBe(base.contentHash);
+
+    // ...but three distinct builds.
+    expect(changedBlock.buildHash).not.toBe(base.buildHash);
+    expect(changedDecl.buildHash).not.toBe(base.buildHash);
+    expect(changedDecl.buildHash).not.toBe(changedBlock.buildHash);
+  });
+
+  it('fingerprints identically for identical builds', async () => {
+    const first = await store.put(version('P'));
+    const second = await store.put(version('P'));
+
+    expect(second.buildHash).toBe(first.buildHash);
+  });
+
   it('content-addresses bodies so identical docs are not duplicated across versions', async () => {
     await store.put(version('A'));
     await store.put(version('B'));
@@ -101,6 +149,96 @@ describe('prompt version store', () => {
 
     // 2 distinct base prompts + 1 shared on-demand + 1 shared declaration.
     expect(blobs).toHaveLength(4);
+  });
+});
+
+/**
+ * The no-op that decides whether a sync produced a new version.
+ *
+ * This is a SILENT path: every failure here reports `ok: true` and serves stale docs forever. There
+ * is no error to notice, so the tests are the only thing standing between a docs push and the agent
+ * quietly working from last week's reference.
+ */
+describe('build no-op', () => {
+  const racing = ON_DEMAND_BLOCKS.find((b) => b.id === 'racing-system')!;
+  const toolkitDts = DECLARATION_FILES.find((d) => d.id === 'babylon.toolkit.d.ts')!;
+
+  beforeEach(() => {
+    fixtures.clear();
+    setPromptStore(store);
+  });
+
+  afterEach(() => {
+    setPromptStore(undefined);
+  });
+
+  /*
+   * The no-op has to keep working: a spurious new version on every refresh would churn the prompt
+   * and throw away the cached prefix (§4.2.8) — the exact cost the hash check exists to avoid.
+   */
+  it('reports unchanged when nothing moved, without writing a new version', async () => {
+    const first = await buildSystemPrompt({ skillsIndex: 'index' });
+    const second = await buildSystemPrompt({ skillsIndex: 'index' });
+
+    expect(first.status).toBe('built');
+    expect(second.status).toBe('unchanged');
+    expect(second.version.id).toBe(first.version.id);
+    expect(await store.list()).toHaveLength(1);
+  });
+
+  it('rebuilds when a base doc changes', async () => {
+    await buildSystemPrompt({ skillsIndex: 'index' });
+    fixtures.set(racing.url, 'irrelevant');
+    fixtures.set(ON_DEMAND_BLOCKS[0].url, 'irrelevant');
+
+    const rebuilt = await buildSystemPrompt({ skillsIndex: 'A DIFFERENT SKILLS INDEX' });
+
+    expect(rebuilt.status).toBe('built');
+    expect((await getPromptStore().get(rebuilt.version.id))?.content).toContain('A DIFFERENT SKILLS INDEX');
+  });
+
+  /*
+   * THE REGRESSION. `contentHash` covers the base prompt only, so an on-demand-only edit hashed
+   * identical, took the early return, and never reached `store.put()` — the fetched bytes were
+   * discarded and the active version kept serving the old blob.
+   */
+  it('rebuilds when ONLY an on-demand block changes, and serves the new bytes', async () => {
+    fixtures.set(racing.url, 'RACING DOCS V1');
+
+    const first = await buildSystemPrompt({ skillsIndex: 'index' });
+    expect(await getPromptStore().readOnDemand(first.version.id, 'racing-system')).toBe('RACING DOCS V1');
+
+    fixtures.set(racing.url, 'RACING DOCS V2 — cornering rewritten');
+
+    const second = await buildSystemPrompt({ skillsIndex: 'index' });
+
+    expect(second.status).toBe('built');
+    expect(second.version.id).not.toBe(first.version.id);
+
+    // The base prefix is untouched, which is exactly why the old check missed this.
+    expect(second.version.contentHash).toBe(first.version.contentHash);
+
+    const active = await getPromptStore().getActive();
+    expect(active?.id).toBe(second.version.id);
+    expect(await getPromptStore().readOnDemand(active!.id, 'racing-system')).toBe(
+      'RACING DOCS V2 — cornering rewritten',
+    );
+  });
+
+  it('rebuilds when ONLY a declaration file changes', async () => {
+    fixtures.set(toolkitDts.url, 'declare module TOOLKIT { const v: 1; }');
+
+    const first = await buildSystemPrompt({ skillsIndex: 'index' });
+
+    fixtures.set(toolkitDts.url, 'declare module TOOLKIT { const v: 2; }');
+
+    const second = await buildSystemPrompt({ skillsIndex: 'index' });
+
+    expect(second.status).toBe('built');
+    expect(second.version.contentHash).toBe(first.version.contentHash);
+    expect(await getPromptStore().readDeclaration(second.version.id, 'babylon.toolkit.d.ts')).toBe(
+      'declare module TOOLKIT { const v: 2; }',
+    );
   });
 });
 

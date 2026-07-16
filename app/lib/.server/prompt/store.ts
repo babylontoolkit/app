@@ -16,7 +16,22 @@ import path from 'node:path';
 
 export interface PromptVersionMeta {
   id: string;
+
+  /**
+   * Hash of the BASE prompt only — the cached prefix we pay cached-input rates on (§4.2.8).
+   * Deliberately narrow: it is the identity of what the model sees on every generation.
+   *
+   * NOT the right key for "did this build change" — see `buildHash`.
+   */
   contentHash: string;
+
+  /**
+   * Hash of the WHOLE build: base prompt + every on-demand block + every declaration file.
+   *
+   * Derived from the stored blob hashes, never persisted — a stored copy could drift from the blobs
+   * it claims to describe, and there is nothing this field knows that the record does not.
+   */
+  buildHash: string;
 
   /** `main` HEAD of the agent repo at build time — makes a prompt traceable to a doc commit. */
   sourceCommitSha: string;
@@ -61,6 +76,39 @@ export interface PromptStore {
 
 export function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/**
+ * Fingerprint every artefact a build produces, from the hashes of their bodies.
+ *
+ * Ids are sorted so the fingerprint depends on CONTENT, not on the order `Promise.all` happened to
+ * populate the maps in — an unstable fingerprint would report a spurious change on every build.
+ */
+function fingerprintFromHashes(
+  baseHash: string,
+  onDemand: Record<string, string>,
+  declarations: Record<string, string>,
+): string {
+  const canonical = (map: Record<string, string>) =>
+    Object.keys(map)
+      .sort()
+      .map((id) => `${id}:${map[id]}`)
+      .join(',');
+
+  return sha256([baseHash, canonical(onDemand), canonical(declarations)].join('|'));
+}
+
+/**
+ * The fingerprint of a candidate build — the ONLY correct key for a "has anything changed?" no-op.
+ *
+ * `contentHash` covers the base prompt alone, so keying the no-op on it silently discarded any
+ * update confined to an on-demand block or a declaration file (see `buildSystemPrompt`).
+ */
+export function computeBuildHash(version: NewPromptVersion): string {
+  const hashBodies = (map: Record<string, string>) =>
+    Object.fromEntries(Object.entries(map).map(([id, body]) => [id, sha256(body)]));
+
+  return fingerprintFromHashes(sha256(version.content), hashBodies(version.onDemand), hashBodies(version.declarations));
 }
 
 interface VersionRecord {
@@ -153,6 +201,13 @@ export class FsPromptStore implements PromptStore {
     return {
       id: record.id,
       contentHash: record.contentHash,
+
+      /*
+       * Derived from the record's own blob refs, which ARE the content hashes (blobs are
+       * content-addressed). So this needs no stored field and no migration: versions written before
+       * `buildHash` existed fingerprint correctly on read.
+       */
+      buildHash: fingerprintFromHashes(record.contentHash, record.onDemand, record.declarations),
       sourceCommitSha: record.sourceCommitSha,
       skillsSetHash: record.skillsSetHash,
       createdAt: record.createdAt,
@@ -170,7 +225,12 @@ export class FsPromptStore implements PromptStore {
     const createdAt = new Date().toISOString();
 
     const record: VersionRecord = {
-      id: `pv_${createdAt.replace(/[-:.TZ]/g, '').slice(0, 14)}_${contentHash.slice(0, 8)}`,
+      /*
+       * Suffixed with the BUILD hash, not `contentHash`: the timestamp only resolves to the second,
+       * so two versions sharing a base prompt (an on-demand-only change) would otherwise collide on
+       * id and silently overwrite each other's record.
+       */
+      id: `pv_${createdAt.replace(/[-:.TZ]/g, '').slice(0, 14)}_${computeBuildHash(version).slice(0, 8)}`,
       contentHash,
       sourceCommitSha: version.sourceCommitSha,
       skillsSetHash: version.skillsSetHash,
