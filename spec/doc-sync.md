@@ -5,7 +5,7 @@ Consumes the Agent Reference repo into versioned, cached system prompts. The Git
 ## Sources
 
 - Root: `https://raw.githubusercontent.com/babylontoolkit/agent/main/reference.md`
-- Sub-docs (baked into base prompt, in order): `references/node-esm.md` (primary style), `references/scene-components.md`, `references/react-framework.md`, `references/ui-design-system.md`, `references/training-reference.md`
+- Sub-docs (baked into base prompt, in order): `references/node-esm.md` (primary style), `references/scene-components.md`, `references/react-framework.md`, `references/ui-design-system.md` (architecture only — the `@babylonjs/gui` API reference is the on-demand `babylon-gui` block, see spec/context-budget.md), `references/training-reference.md`
 - On-demand blocks: `references/shader-materials.md`, the 14 `training/components/*.md` system docs, **`training/react/README.md`** (the ~55KB Agentic AI Game Builder reference — routed, never baked), **`references/web-kie-servers.md`** (MCP image/video/texture generation), **`training/playgrounds/01–05`** (example patterns)
 - Excluded: `references/classic.md` (UMD — platform is ESM-only); `references/skills-repository.md` (installs skills into the project via `.claude/skills` / plugin marketplaces — another host's mechanism; here the server pre-loads skills into the cached prefix or serves `load_skill`, §4.11); the other `web-app-*.md` / `lovable.md` / `vercel-app-builder.md` host docs (we bake `web-app-generic.md`, §4.3)
 

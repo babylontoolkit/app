@@ -9,15 +9,39 @@
  * showing a meaningless "∞".
  */
 import { useStore } from '@nanostores/react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import { classNames } from '~/utils/classNames';
 import { sessionStore } from '~/lib/stores/session';
+
+interface MySubscription {
+  planId: string;
+  status: string;
+  cancelAtPeriodEnd: boolean;
+  creditsPerMonth: number;
+}
 
 export function CreditsIndicator() {
   const session = useStore(sessionStore);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
+  const [subscription, setSubscription] = useState<MySubscription | null>(null);
+
+  /*
+   * Resolved only when the panel is actually opened. "Am I subscribed?" costs a Stripe API call, so it
+   * is not in the session — paying for it on every page load, for every user, to answer a question
+   * nobody asked, is exactly the kind of tax that never shows up in a profiler as one big number.
+   */
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    fetch('/api/credits')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && setSubscription((data as { subscription: MySubscription | null }).subscription))
+      .catch(() => undefined);
+  }, [open]);
 
   if (session.loading || !session.authenticated) {
     return null;
@@ -36,32 +60,37 @@ export function CreditsIndicator() {
     );
   }
 
-  const { balance, enforced, purchasable, packs } = session.credits;
+  const { balance, enforced, purchasable, packs, plans } = session.credits;
   const empty = balance <= 0;
 
-  const buy = async (packId: string) => {
+  /** Every payment path is the same shape: ask the server for a Stripe URL, then hand over the browser. */
+  const redirectToStripe = async (endpoint: string, body?: Record<string, string>) => {
     setBusy(true);
 
     try {
-      const response = await fetch('/api/checkout', {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ packId }),
+        body: JSON.stringify(body ?? {}),
       });
 
       const data = (await response.json()) as { url?: string; message?: string };
 
       if (!response.ok || !data.url) {
-        throw new Error(data.message || 'Could not start checkout.');
+        throw new Error(data.message || 'Could not reach Stripe.');
       }
 
-      // Stripe Checkout is a full redirect — cards, Apple/Google Pay and Link come with it.
+      // Stripe Checkout/Portal is a full redirect — cards, Apple/Google Pay and Link come with it.
       window.location.href = data.url;
     } catch (error) {
       toast.error((error as Error).message);
       setBusy(false);
     }
   };
+
+  const buy = (packId: string) => redirectToStripe('/api/checkout', { packId });
+  const subscribe = (planId: string) => redirectToStripe('/api/subscribe', { planId });
+  const manage = () => redirectToStripe('/api/billing-portal');
 
   return (
     <div className="relative">
@@ -97,6 +126,57 @@ export function CreditsIndicator() {
 
           {purchasable ? (
             <div className="flex flex-col gap-1">
+              {/*
+               * A subscriber sees their plan and a way OUT of it — never another subscribe button. Making
+               * cancellation easy to find is not a concession; a plan you cannot see how to leave is the
+               * kind of thing that produces chargebacks instead of churn.
+               */}
+              {subscription ? (
+                <>
+                  <div className="flex items-center justify-between px-2 py-1.5 rounded text-xs bg-bolt-elements-background-depth-3">
+                    <span className="text-bolt-elements-textPrimary">
+                      {subscription.creditsPerMonth.toLocaleString()}/mo
+                    </span>
+                    <span className="text-bolt-elements-textSecondary">
+                      {subscription.cancelAtPeriodEnd ? 'ends this period' : subscription.status}
+                    </span>
+                  </div>
+                  <button
+                    disabled={busy}
+                    onClick={manage}
+                    className="px-2 py-1.5 rounded text-xs text-left
+                      bg-bolt-elements-background-depth-3 hover:bg-bolt-elements-item-backgroundActive
+                      text-bolt-elements-textSecondary disabled:opacity-50"
+                  >
+                    Manage subscription
+                  </button>
+                </>
+              ) : (
+                plans.length > 0 && (
+                  <>
+                    <p className="text-[10px] text-bolt-elements-textTertiary uppercase tracking-wide">Monthly</p>
+                    {plans.map((plan) => (
+                      <button
+                        key={plan.id}
+                        disabled={busy}
+                        onClick={() => subscribe(plan.id)}
+                        className="flex items-center justify-between px-2 py-1.5 rounded text-xs
+                          bg-bolt-elements-background-depth-3 hover:bg-bolt-elements-item-backgroundActive
+                          text-bolt-elements-textPrimary disabled:opacity-50"
+                      >
+                        <span>
+                          {plan.name} — {plan.creditsPerMonth.toLocaleString()}/mo
+                        </span>
+                        <span className="text-bolt-elements-textSecondary">
+                          ${(plan.priceCents / 100).toFixed(0)}/mo
+                        </span>
+                      </button>
+                    ))}
+                  </>
+                )
+              )}
+
+              <p className="text-[10px] text-bolt-elements-textTertiary uppercase tracking-wide mt-1">One-time</p>
               {packs.map((pack) => (
                 <button
                   key={pack.id}

@@ -241,7 +241,7 @@ describe('every refresh still carries what the agent needs', () => {
 
     expect(prompt).toMatch(/THE PLAY CONTRACT/);
     expect(prompt).toMatch(/never clone/i);
-    expect(prompt).toMatch(/# The Project Spec/);
+    expect(prompt).toMatch(/# The Project's Own Documents/);
   });
 });
 
@@ -476,6 +476,39 @@ describe('on-demand block routing', () => {
     expect(ids).toContain('react-training');
   });
 
+  /**
+   * The `@babylonjs/gui` reference is on-demand (it was half of `ui-design-system.md`, which was 31% of
+   * the cached prefix). The RISK of that split is a FALSE NEGATIVE, and it is silent: the model decides
+   * from the still-baked decision matrix that it needs GPU GUI, does not have the API, and improvises an
+   * `AdvancedDynamicTexture` that does not exist. So the phrasings a user actually reaches for — none of
+   * which contain the word "gui" — are pinned here rather than trusted.
+   */
+  describe.each([
+    ['show a health bar above each enemy', 'the matrix says linkWithMesh; a HUD bar in DOM would not'],
+    ['add floating damage numbers when you hit something', 'world-space text is GPU GUI only'],
+    ['put name tags over the other players', 'name tags track a mesh'],
+    ['render a speedometer onto the cockpit screen', 'texture mode on a mesh — DOM cannot do this at all'],
+    ['make the menu work in VR', 'DOM is invisible in WebXR'],
+    ['add a minimap', 'render-to-texture is a GPU GUI path'],
+    ['use AdvancedDynamicTexture for this', 'named outright'],
+  ])('routes %s to the GUI reference', (prompt) => {
+    it('— because guessing that API is worse than not having it', () => {
+      expect(selectOnDemandBlocks(prompt).map((b) => b.id)).toContain('babylon-gui');
+    });
+  });
+
+  /*
+   * The other half of the split: ordinary DOM/React UI must NOT drag 8.7k tokens of GPU GUI in. The
+   * decision matrix (baked) says these all belong in `CustomOverlay`.
+   */
+  it.each([
+    ['redesign the landing page with a hero section'],
+    ['add a pause menu with a settings panel'],
+    ['show the score and ammo in the corner'],
+  ])('does NOT route %s to the GUI reference', (prompt) => {
+    expect(selectOnDemandBlocks(prompt).map((b) => b.id)).not.toContain('babylon-gui');
+  });
+
   it('routes an image-generation request to the kie MCP docs', () => {
     expect(selectOnDemandBlocks('generate a texture for the car using MCP').map((b) => b.id)).toContain('kie-servers');
   });
@@ -531,13 +564,13 @@ describe('project SPEC.md workflow', () => {
   it('reaches the assembled prompt', () => {
     const prompt = assemblePrompt([], 'skills index');
 
-    expect(prompt).toMatch(/# The Project Spec/);
+    expect(prompt).toMatch(/# The Project's Own Documents/);
 
     /*
      * The platform's own non-negotiables still come first — a project spec cannot license
      * writing to a read-only zone or breaking the play contract.
      */
-    expect(prompt.indexOf('# Hard Constraints')).toBeLessThan(prompt.indexOf('# The Project Spec'));
+    expect(prompt.indexOf('# Hard Constraints')).toBeLessThan(prompt.indexOf("# The Project's Own Documents"));
   });
 
   /*
@@ -546,6 +579,29 @@ describe('project SPEC.md workflow', () => {
    */
   it.each([['SPEC.md'], ['docs/SPEC.md']])('%s is never opaque to the model', (path) => {
     expect(isOpaqueToModel(path)).toBe(false);
+  });
+
+  /*
+   * The CLAUDE.md half. The FILE is promoted to its own system block by the proxy
+   * (`project-instructions.ts`) — these assertions cover the always-baked rules ABOUT it, which must
+   * hold on every turn whether or not a given project has one.
+   */
+  describe.each([
+    [/`CLAUDE\.md` outranks your defaults/i, 'the user’s project instructions beat the agent’s habits'],
+    [/never outranks the platform's non-negotiables/i, 'but never the rules the project needs to run'],
+    [/Ignore its host-setup directives/i, 'a CLAUDE.md written for another tool cannot stall the agent'],
+    [/disagree, say so and ask/i, 'a CLAUDE.md/SPEC.md conflict is surfaced, never silently resolved'],
+    [/Never create a `CLAUDE\.md` unasked/i, 'no instructions file is invented'],
+  ])('the CLAUDE.md rules state %s', (pattern) => {
+    it('— and it reaches the assembled prompt', () => {
+      expect(section).toMatch(pattern);
+      expect(assemblePrompt([], '')).toMatch(pattern);
+    });
+  });
+
+  it('CLAUDE.md is never opaque to the model', () => {
+    // If it were, the proxy would lift an empty marker into the system block — instructions with no text.
+    expect(isOpaqueToModel('CLAUDE.md')).toBe(false);
   });
 });
 

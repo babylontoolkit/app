@@ -54,11 +54,21 @@ export interface UsageReport {
   avgToolRounds: number;
 
   /**
-   * Output tokens spent on steps whose text the user never saw — the "wasted output" pathology. Derived
-   * from `steps`: total step output minus the final visible answer's tokens. A big number here means we
-   * are paying decode rate for redrafts/abandoned attempts, which caching cannot fix.
+   * Output tokens billed on steps that emitted NO text — thinking and tool calls the user never saw.
+   * Exact (see `silentStepOutput`). Caching cannot touch this; only emitting less output can.
    */
-  estimatedWastedOutputTokens: number;
+  silentStepOutputTokens: number;
+
+  /**
+   * Characters of text actually streamed, and chars-per-output-token across the sample.
+   *
+   * **This is the number that answers "where did the output go".** Text runs ~3.5–4 chars per output
+   * token. Near that, the bill bought the artifact. Far below it, the bill bought thinking, redrafts and
+   * tool preambles — and no amount of prompt trimming will help, because output is 5× input and decodes
+   * serially at 60–110 tok/s (`spec/context-budget.md`).
+   */
+  visibleTextChars: number;
+  charsPerOutputToken: number;
 
   byModel: ModelUsage[];
 }
@@ -82,7 +92,9 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
     cacheHitRate: 0,
     avgDurationMs: 0,
     avgToolRounds: 0,
-    estimatedWastedOutputTokens: 0,
+    silentStepOutputTokens: 0,
+    visibleTextChars: 0,
+    charsPerOutputToken: 0,
     byModel: [],
   };
 
@@ -111,7 +123,8 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
       durationCount++;
     }
 
-    report.estimatedWastedOutputTokens += wastedOutput(rec);
+    report.silentStepOutputTokens += silentStepOutput(rec);
+    report.visibleTextChars += visibleTextChars(rec);
 
     const key = rec.model || 'unknown';
     const m = models.get(key) ?? {
@@ -143,24 +156,40 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
   report.avgDurationMs = durationCount ? Math.round(durationSum / durationCount) : 0;
   report.avgToolRounds = records.length ? toolRoundSum / records.length : 0;
 
+  /*
+   * Density across the whole sample. Guarded: with no output tokens there is no ratio, and 0/0 must not
+   * become NaN and render as "NaN ch/tok" on the dashboard.
+   */
+  report.charsPerOutputToken = report.completionTokens ? report.visibleTextChars / report.completionTokens : 0;
+
   report.byModel = [...models.values()].sort((a, b) => b.rawCostUsd - a.rawCostUsd);
 
   return report;
 }
 
 /**
- * Output tokens on a generation that never reached the user.
+ * Output tokens on steps that emitted NO TEXT AT ALL — exact, not estimated.
  *
- * The last step's output IS the visible answer (the model's final text); everything before it was tool
- * preambles, abandoned drafts, and post-cap regeneration. So: sum of all-but-last step outputs. Zero
- * when there is no step breakdown or only one step (nothing was wasted).
+ * A step's billed output is thinking + tool-call JSON + text, and only text can reach the user. A step
+ * with zero text therefore produced literally nothing for the user and was billed at decode rate for it.
+ * That is unambiguous: no heuristic, no assumption about which step is "the answer".
+ *
+ * **This replaces "sum of all-but-last step outputs", which was blind to the case it was named for.**
+ * That definition assumed waste means EXTRA STEPS — true when it was written, and made false by the fix
+ * for the very pathology it measured: pre-loading skills sets `allowTools:false` → `maxSteps:1`, so a
+ * creation now runs as exactly ONE step, hits the `steps.length <= 1` guard, and reports **zero wasted
+ * output** — on the single most expensive generation in the product (~44k output tokens, ~$1.11). The
+ * metric said "no waste" precisely where all the money was, and it said it in good faith.
+ *
+ * Steps recorded before `textChars` existed are skipped rather than counted: `undefined` is "we did not
+ * measure", not "no text", and treating it as zero would report every historical generation as 100%
+ * waste.
  */
-function wastedOutput(rec: GenerationRecord): number {
-  const steps = rec.steps;
+function silentStepOutput(rec: GenerationRecord): number {
+  return (rec.steps ?? []).reduce((sum, s) => (s.textChars === 0 ? sum + n(s.outTokens) : sum), 0);
+}
 
-  if (!steps || steps.length <= 1) {
-    return 0;
-  }
-
-  return steps.slice(0, -1).reduce((sum, s) => sum + n(s.outTokens), 0);
+/** Characters of text a generation actually streamed. Paired with output tokens, this is the density. */
+function visibleTextChars(rec: GenerationRecord): number {
+  return (rec.steps ?? []).reduce((sum, s) => sum + n(s.textChars), 0);
 }

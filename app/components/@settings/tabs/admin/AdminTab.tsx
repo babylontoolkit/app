@@ -20,7 +20,9 @@ interface UsageReport {
   rawCostUsd: number;
   cacheHitRate: number;
   avgDurationMs: number;
-  estimatedWastedOutputTokens: number;
+  silentStepOutputTokens: number;
+  visibleTextChars: number;
+  charsPerOutputToken: number;
   byModel: Array<{ model: string; generations: number; rawCostUsd: number }>;
 }
 interface Submission {
@@ -36,12 +38,28 @@ interface Report {
   reason?: string;
   createdAt: string;
 }
+interface TemplatePin {
+  sha: string;
+  ref: string;
+  pinnedAt: string;
+  pinnedBy: 'auto' | 'promote' | 'rollback';
+  fileCount: number;
+}
+interface TemplateState {
+  repo: string;
+  pinningEnabled: boolean;
+  pin: TemplatePin | null;
+  snapshots: Array<{ sha: string; size: number; storedAt?: string; active: boolean }>;
+  storage: string;
+}
 
 export function AdminTab() {
   const [forbidden, setForbidden] = useState(false);
   const [report, setReport] = useState<UsageReport | null>(null);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
+  const [template, setTemplate] = useState<TemplateState | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const load = () => {
     fetch('/api/admin/usage')
@@ -65,9 +83,46 @@ export function AdminTab() {
       .then((r) => (r.ok ? r.json() : { reports: [] }))
       .then((data) => setReports((data as { reports: Report[] }).reports ?? []))
       .catch(() => undefined);
+
+    fetch('/api/admin/template')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && setTemplate(data as TemplateState))
+      .catch(() => undefined);
   };
 
   useEffect(load, []);
+
+  /**
+   * Promotion and rollback both re-point what EVERY new project mounts (§4.4), so they confirm first —
+   * this is the one control on this tab whose blast radius is every future user, not one game.
+   */
+  const moveTemplatePin = async (body: { action: 'promote'; ref?: string } | { action: 'rollback'; sha: string }) => {
+    setBusy(true);
+
+    try {
+      const r = await fetch('/api/admin/template', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = (await r.json()) as { ok?: boolean; pin?: TemplatePin; message?: string };
+
+      if (!r.ok || !data.ok) {
+        // A refused promotion leaves the pin exactly where it was — say so, rather than a bare "failed".
+        toast.error(data.message ?? 'Could not move the template pin.');
+        return;
+      }
+
+      toast.success(
+        body.action === 'promote'
+          ? `Promoted ${data.pin?.ref} → ${data.pin?.sha.slice(0, 8)}. New projects mount this.`
+          : `Rolled back to ${data.pin?.sha.slice(0, 8)}.`,
+      );
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const curate = async (projectId: string, decision: 'approve' | 'reject') => {
     const r = await fetch('/api/admin/gallery', {
@@ -114,7 +169,13 @@ export function AdminTab() {
               <Stat label="Raw cost" value={`$${report.rawCostUsd.toFixed(2)}`} />
               <Stat label="Cache hit rate" value={`${(report.cacheHitRate * 100).toFixed(1)}%`} />
               <Stat label="Avg duration" value={`${(report.avgDurationMs / 1000).toFixed(1)}s`} />
-              <Stat label="Wasted output" value={`${report.estimatedWastedOutputTokens.toLocaleString()} tok`} />
+              {/*
+               * Output is 5x input and decodes serially, so it is most of the bill AND most of the wall
+               * clock. Density is the diagnostic: real text runs ~3.5-4 chars per output token, so a low
+               * number means we paid decode rate for thinking and redrafts the user never saw.
+               */}
+              <Stat label="Output density" value={`${report.charsPerOutputToken.toFixed(1)} ch/tok`} />
+              <Stat label="Silent output" value={`${report.silentStepOutputTokens.toLocaleString()} tok`} />
             </div>
             {report.byModel.length > 0 && (
               <div className="mt-3 text-xs text-bolt-elements-textSecondary">
@@ -212,6 +273,89 @@ export function AdminTab() {
                 </button>
               </div>
             ))}
+          </div>
+        )}
+      </section>
+
+      {/*
+       * Template pin (§4.4). This is the supply chain: whatever is pinned here is the code every new
+       * project starts from. Promotion is the ONLY way a push to the starter repo reaches users, and
+       * rollback is the way back — so both the current pin and its provenance are shown, never implied.
+       */}
+      <section>
+        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Starter template</h3>
+        {!template ? (
+          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+        ) : (
+          <div className="mt-2 flex flex-col gap-2">
+            <div className="text-xs text-bolt-elements-textTertiary">
+              {template.repo} · snapshots in {template.storage}
+            </div>
+
+            {!template.pinningEnabled && (
+              <div className="text-xs px-3 py-2 rounded-md bg-amber-500/10 text-amber-600">
+                Pinning is disabled (TEMPLATE_PINNING_ENABLED=false) — new projects track live main.
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor">
+              <div className="flex-1 min-w-0">
+                {template.pin ? (
+                  <>
+                    <div className="text-sm text-bolt-elements-textPrimary truncate">
+                      {template.pin.ref} · {template.pin.sha.slice(0, 8)} · {template.pin.fileCount} files
+                    </div>
+                    <div className="text-xs text-bolt-elements-textTertiary">
+                      pinned {new Date(template.pin.pinnedAt).toLocaleString()}
+                      {template.pin.pinnedBy === 'auto' && ' · auto (never reviewed)'}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-sm text-bolt-elements-textSecondary">
+                    No pin yet — the next new project fetches live and pins the result.
+                  </div>
+                )}
+              </div>
+              <button
+                className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
+                disabled={busy}
+                onClick={() => {
+                  if (confirm('Promote the latest starter commit? Every new project will mount it.')) {
+                    void moveTemplatePin({ action: 'promote' });
+                  }
+                }}
+              >
+                Promote latest
+              </button>
+            </div>
+
+            {template.snapshots
+              .filter((s) => !s.active)
+              .map((snap) => (
+                <div
+                  key={snap.sha}
+                  className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-bolt-elements-textPrimary truncate">{snap.sha.slice(0, 8)}</div>
+                    <div className="text-xs text-bolt-elements-textTertiary">
+                      {snap.storedAt ? new Date(snap.storedAt).toLocaleString() : 'stored'} ·{' '}
+                      {Math.round(snap.size / 1024)}KB
+                    </div>
+                  </div>
+                  <button
+                    className="text-xs px-2 py-1 rounded bg-red-500/10 text-red-500 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => {
+                      if (confirm(`Roll new projects back to ${snap.sha.slice(0, 8)}?`)) {
+                        void moveTemplatePin({ action: 'rollback', sha: snap.sha });
+                      }
+                    }}
+                  >
+                    Roll back
+                  </button>
+                </div>
+              ))}
           </div>
         )}
       </section>

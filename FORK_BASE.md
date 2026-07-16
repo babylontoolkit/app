@@ -131,11 +131,13 @@ public by design. Do not merge the two.
 
 ## Upstream files touched — Stage 5 (identity + hardening, SPEC §2.3/§2.5/§4.4)
 
-**Template reliability (SPEC §4.4 divergence — live fetch, not the pinned snapshot the spec describes):**
+**Template pin-and-cache (SPEC §4.4 — the divergence is now CLOSED; new projects mount a pinned snapshot, not live `main`):**
 
 | File | Change |
 |---|---|
-| `app/routes/api.github-template.ts` | Additive last-known-good fallback. The mount is a LIVE default-branch (`main`) zipball fetch — NOT the pinned snapshot §4.4 describes (honest divergence; live-`main` kept as the deliberate default). Now: a successful, structurally-valid fetch is persisted via `saveLastKnownGood`; a fetch that fails **or** returns an unmountable result (missing `package.json` / `src/babylon/**`) serves the most recent good snapshot (`loadLastKnownGood`) instead of failing creation; `?fallback=1` forces it for a client-detected broken mount; `X-Template-Source` header reports `live`/`last-known-good`. New helper `app/lib/.server/templates/last-known-good.ts` (+ spec). Target pin-and-cache design (S3 snapshot → `toolkit_version` pinned to SHA/release → deliberate promotion → rollback) is deferred §5 work. ⚠️ Publishing a GitHub Release on AppTemplate flips creation to release-locked (`releases/latest`) and stops `main` from flowing. |
+| `app/routes/api.github-template.ts` | **Reduced to a loader.** All fetching moved to `app/lib/.server/templates/fetch.ts` (verbatim, plus an explicit commit SHA on every call) because promotion and bootstrap need the same fetch; the decision of WHAT to serve moved to `templates/pin.ts` (`decideTemplateSource`). Behaviourally: the mount is now the **pinned snapshot** — no GitHub call once pinned — falling through to live only to bootstrap the first pin, or when a pin's object is missing. Keeps the last-known-good net (`?fallback=1` deliberately outranks the pin — it is the only signal a structurally-valid template is broken at RUNTIME). `X-Template-Source: pinned \| live \| last-known-good` + `X-Template-Sha`. **This is a big diff against upstream** — the upstream file was already ~90% ours (binary base64 handling, size caps, gitlink vendoring, token guard), so the extraction moves our code, not theirs; a future upstream pull touching this route should be replayed onto `templates/fetch.ts`. |
+| *(new)* `app/lib/.server/templates/{pin,fetch,config}.ts`, `api.admin.template.ts` | Additive — pin/snapshot storage + the pure decision core, the shared fetch, `TEMPLATE_PINNING_ENABLED` (default ON), and the admin promote/rollback route (session-`requireAdmin`). No upstream file involved. |
+| ~~⚠️ Release-lock footgun~~ | **Gone.** `resolveTemplateRef` resolves the default branch deliberately and never consults `releases/latest`. Publishing a Release on AppTemplate no longer changes what new projects mount; only a promotion does. |
 
 **Debrand (SPEC §2.3 — route user-facing marks through `app/config/brand.ts`; §2.5 rule 1):** all additive, one string/URL each — no structural change, pull-safe.
 

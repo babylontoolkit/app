@@ -323,6 +323,93 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
   },
 
   /*
+   * The `@babylonjs/gui` API reference (agent repo, 2026-07-16 split).
+   *
+   * `ui-design-system.md` was 15,595 tokens — 31% of the whole cached prefix, and the single largest
+   * doc we bake. Compacting its prose could never pay: it is 66% code fences. The real shape of it was
+   * that TWO documents were living in one file — the UI *architecture* (the Scene Viewer's three
+   * layers, the z-index stack, `CustomOverlay`) which nearly every UI turn needs, and the complete GPU
+   * GUI *API reference* which most turns never touch. A landing page, a React HUD, a gameplay tweak:
+   * none of them need `AdvancedDynamicTexture`. Splitting on that seam took the baked doc to 7,739
+   * tokens (−50%) with no prose rewritten and nothing lost.
+   *
+   * **The decision matrix stayed BAKED on purpose** — it is the routing brain ("health bar above a 3D
+   * character → GPU GUI, `linkWithMesh`"), so the agent still knows GPU GUI is the right answer even on
+   * a turn where this block does not load. And because a false-negative here is otherwise SILENT, the
+   * baked doc now ends with an explicit instruction: if you need the GPU GUI API and this reference is
+   * not in front of you, SAY SO — never reconstruct the API from general BabylonJS knowledge.
+   *
+   * Keywords are taken from the decision matrix's own rows, not invented: they are the situations the
+   * doc itself says require GPU GUI.
+   */
+  {
+    id: 'babylon-gui',
+    title: 'BabylonJS GUI (@babylonjs/gui) API Reference',
+    path: 'references/babylon-gui.md',
+    url: RAW(AGENT_REPO, 'references/babylon-gui.md'),
+    keywords: [
+      // The library and its API surface, by name.
+      'babylon gui',
+      '@babylonjs/gui',
+      'babylonjs/gui',
+      'gpu gui',
+      'advanceddynamictexture',
+      'fullscreen ui',
+      'createfullscreenui',
+      'createformesh',
+      'linkwithmesh',
+      'textblock',
+      'stackpanel',
+      'scrollviewer',
+      'virtualkeyboard',
+      'colorpicker',
+      'layermask',
+      'idealwidth',
+
+      // The situations the decision matrix says GPU GUI owns.
+      'health bar',
+      'healthbar',
+      'hp bar',
+      'name tag',
+      'nametag',
+      'nameplate',
+      'name plate',
+      'damage number',
+      'floating text',
+      'floating label',
+      'above the player',
+      'above the character',
+      'above their heads',
+      'world space ui',
+      'in-world ui',
+      'in-world screen',
+      'on a mesh',
+      'onto a mesh',
+      'cockpit',
+      'cockpit display',
+      'in-game monitor',
+      'in-game screen',
+      'billboard gui',
+      'minimap',
+
+      /*
+       * WebXR: DOM is invisible in VR, so a VR interface is ALWAYS GPU GUI — the one row in the matrix
+       * with no DOM option at all. Matching is `includes`, so a bare 'vr' is unusable (it fires on
+       * "vroom", "servers", "swerve"); these are the phrasings that carry the meaning.
+       */
+      'webxr',
+      'virtual reality',
+      'in vr',
+      'for vr',
+      'vr mode',
+      'vr ui',
+      'vr interface',
+      'vr headset',
+      'vr panel',
+    ],
+  },
+
+  /*
    * Playground examples. `references/training-reference.md` is BAKED, lists these five by URL, and
    * says "Check for a matching example before writing code from scratch" — an instruction that was
    * impossible to follow, since none of them were synced.

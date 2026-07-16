@@ -19,6 +19,7 @@ import {
   setLedger,
 } from './ledger';
 import { checkCreditGate, refundGeneration, settleGeneration } from './gate';
+import { CREDIT_PACKS, MIN_PACK_MARGIN, packMargin } from './stripe';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from './generations';
 
 let tmp: string;
@@ -522,5 +523,77 @@ describe('the generation row a debit points at', () => {
     await refundGeneration('u1', 'g-fail', settlement!.creditsCharged, 'Automatic refund');
 
     expect(await getLedger().balance('u1')).toBe(10_000);
+  });
+});
+
+/**
+ * Pack pricing vs. the credit-charging formula — the two halves of the margin (SPEC §4.6).
+ *
+ * `credits_charged = ceil(raw / CREDIT_UNIT_COST_USD * CREDIT_MARGIN)` only earns `CREDIT_MARGIN` if a
+ * credit RETAILS at `CREDIT_UNIT_COST_USD`. Nothing in the code connected those two facts, and they
+ * drifted: packs shipped at $0.003/credit against a 3.34x setting, so the real margin was 1.01x on the
+ * smallest pack and **0.84x on the largest** — losing ~19% on every generation, worst on the best
+ * customers, silently, because each file was internally sensible.
+ *
+ * This is the money path with no error state: a wrong margin does not throw, fail a test, or alert. It
+ * just quietly sells below cost until someone does the division by hand.
+ */
+describe('credit pack margins', () => {
+  const config = { creditUnitCostUsd: 0.01, margin: 3.34 };
+
+  it.each(CREDIT_PACKS.filter((p) => p.isActive).map((p) => [p.id, p] as const))(
+    '%s earns at least the floor',
+    (_id, pack) => {
+      expect(packMargin(pack, config)).toBeGreaterThanOrEqual(MIN_PACK_MARGIN);
+    },
+  );
+
+  it('never sells a credit below what the formula assumes one is worth', () => {
+    // The direct statement of the bug: price per credit < CREDIT_UNIT_COST_USD shrinks CREDIT_MARGIN.
+    for (const pack of CREDIT_PACKS.filter((p) => p.isActive)) {
+      const pricePerCredit = pack.priceCents / 100 / pack.credits;
+      expect(pricePerCredit).toBeGreaterThan(config.creditUnitCostUsd * 0.6);
+    }
+  });
+
+  it('lets bigger packs discount, but never inverts into losing more on better customers', () => {
+    const sorted = [...CREDIT_PACKS.filter((p) => p.isActive)].sort((a, b) => a.credits - b.credits);
+    const margins = sorted.map((p) => packMargin(p, config));
+
+    // A volume discount is fine (margins may fall); dropping under the floor is not.
+    expect(Math.min(...margins)).toBeGreaterThanOrEqual(MIN_PACK_MARGIN);
+  });
+
+  it('reproduces the shipped defect, so the arithmetic is pinned and not merely asserted', () => {
+    const shipped = { id: 'studio', name: 'Studio', credits: 40_000, priceCents: 10_000, isActive: true };
+
+    // $100 / 40,000 credits = $0.0025 each -> 3.34 x (0.0025/0.01) = 0.835x. Below 1: a loss per sale.
+    expect(packMargin(shipped, config)).toBeCloseTo(0.835, 3);
+    expect(packMargin(shipped, config)).toBeLessThan(1);
+  });
+
+  /*
+   * The whole point, end to end, on the REAL measured creation rather than a magic number: the
+   * optimized "make me a kart racer" (spec/context-budget.md) is 12,862 output tokens against a
+   * 111,659-token cold prefix. Whatever we charge for that must exceed what it costs us — on EVERY
+   * pack, including the biggest, which is exactly where it did not.
+   */
+  it('covers a real cold creation on every pack, largest included', () => {
+    const coldCreation: TokenUsage = {
+      promptTokens: 0,
+      completionTokens: 12_862,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 111_659,
+    };
+
+    const raw = rawCostUsd(coldCreation, 'claude-opus-4-8');
+    expect(raw).toBeCloseTo(1.44, 2);
+
+    const credits = creditsForUsage(coldCreation, 'claude-opus-4-8', { ...config } as never);
+
+    for (const pack of CREDIT_PACKS.filter((p) => p.isActive)) {
+      const revenue = credits * (pack.priceCents / 100 / pack.credits);
+      expect(revenue).toBeGreaterThan(raw);
+    }
   });
 });

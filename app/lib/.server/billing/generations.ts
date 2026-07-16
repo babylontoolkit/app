@@ -108,6 +108,20 @@ export interface GenerationRecord {
     cacheRead: number;
     cacheWrite: number;
     tools: string[];
+
+    /**
+     * Characters of TEXT this step actually streamed, and of reasoning summary — the only exact way to
+     * attribute a step's output.
+     *
+     * A step's billed `outTokens` is thinking + tool-call JSON + text, and Anthropic reports them as one
+     * number. Only `text` can ever reach the user. So `textChars` is what makes "we were billed 44,308
+     * output tokens" answerable: at ~3.5–4 chars per token, a step whose text is 36,000 chars spent its
+     * budget on the artifact, and a step whose text is 9,000 chars spent ~35k of it somewhere else.
+     * Without this the two are indistinguishable in a total, which is exactly how ~35k of output went
+     * unexplained.
+     */
+    textChars?: number;
+    reasoningChars?: number;
   }>;
 
   /** Set when this is a self-healing repair turn; points at the generation it repairs (§4.2.7). */

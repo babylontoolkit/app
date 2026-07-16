@@ -21,6 +21,14 @@ export interface CreditPack {
   priceCents: number;
 }
 
+/** A monthly plan (§4.6). Same credits, arriving every month instead of when you remember to buy. */
+export interface SubscriptionPlan {
+  id: string;
+  name: string;
+  creditsPerMonth: number;
+  priceCents: number;
+}
+
 export interface SessionUser {
   id: string;
   email: string;
@@ -46,6 +54,12 @@ export interface SessionState {
     enforced: boolean;
     purchasable: boolean;
     packs: CreditPack[];
+
+    /**
+     * The plans on offer. Static config, so it costs nothing to carry here — unlike whether THIS user
+     * is subscribed, which needs a Stripe call and is fetched by the billing UI on demand.
+     */
+    plans: SubscriptionPlan[];
   };
 
   pro: {
@@ -65,7 +79,7 @@ export const EMPTY_SESSION: SessionState = {
   loading: true,
   authenticated: false,
   accountsEnabled: false,
-  credits: { balance: 0, enforced: false, purchasable: false, packs: [] },
+  credits: { balance: 0, enforced: false, purchasable: false, packs: [], plans: [] },
   pro: { proFeaturesEnabled: false, byokUnlocked: false, tier: null, status: null, subscriberEmail: null },
 };
 

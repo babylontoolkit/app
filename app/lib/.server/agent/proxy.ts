@@ -31,6 +31,7 @@ import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.serv
 import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDER, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
+import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
 import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
@@ -487,6 +488,27 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * base prefix every time one of them changed. They are small, and correctness beats caching them.
    * Placed BEFORE the file context so the model reads "what this project has" before "what is in it".
    */
+  /*
+   * The project's own `CLAUDE.md` (§4.2), promoted from "a file" to "instructions".
+   *
+   * It goes FIRST in the volatile tail: it is the user telling us how to work on this project, and it
+   * outranks every note below it. It is also LIFTED OUT of the file context immediately below — the same
+   * bytes must never be sent twice (paid twice per turn, and two copies to disagree after an edit).
+   */
+  const instructions = buildProjectInstructions(request.files);
+  let contextFiles = request.files;
+
+  if (instructions) {
+    system.push({ role: 'system', content: instructions.block });
+
+    const { [instructions.key]: _lifted, ...rest } = request.files!;
+    contextFiles = rest;
+
+    if (instructions.truncated) {
+      logger.warn(`Project CLAUDE.md exceeded ${MAX_INSTRUCTIONS_CHARS} chars and was truncated`);
+    }
+  }
+
   for (const note of buildProjectNotes({
     files: request.files,
     gameBackend: request.gameBackend,
@@ -496,7 +518,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     system.push({ role: 'system', content: note });
   }
 
-  if (request.files && Object.keys(request.files).length > 0) {
+  if (contextFiles && Object.keys(contextFiles).length > 0) {
     /*
      * Binaries and opaque files arrive here as `<boltFile>` markers — never bodies (§4.2.8).
      *
@@ -510,7 +532,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      */
     system.push({
       role: 'system',
-      content: `# Current Project Files\n\n${createFilesContext(request.files, true)}`,
+      content: `# Current Project Files\n\n${createFilesContext(contextFiles, true)}`,
       providerOptions: CACHE_CONTROL,
     });
   }
@@ -629,6 +651,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           | { cacheReadInputTokens?: number; cacheCreationInputTokens?: number }
           | undefined;
 
+        /*
+         * What this step's output actually BECAME. `outTokens` alone cannot answer that: it bundles
+         * thinking, tool-call JSON and text into one number, and only text can reach the user.
+         */
+        const textChars = step.text?.length ?? 0;
+        const reasoningChars = step.reasoning?.length ?? 0;
+
         stepLog.push({
           ms,
           outTokens: out,
@@ -636,10 +665,26 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           cacheRead: meta?.cacheReadInputTokens ?? 0,
           cacheWrite: meta?.cacheCreationInputTokens ?? 0,
           tools,
+          textChars,
+          reasoningChars,
         });
 
+        /*
+         * The two numbers that diagnose a slow/expensive step, and they are different questions:
+         *
+         *   tok/s   — HOW FAST the tokens came out. Low = the provider/model was slow.
+         *   chars/tok — WHAT the tokens were. Text runs ~3.5–4 chars per output token, so a step near
+         *               that ratio spent its budget writing the artifact. A step far below it was billed
+         *               for thinking and tool calls the user never sees. `spec/context-budget.md` says
+         *               a latency complaint must never be answered with caching until this log is read —
+         *               it is what tells "the answer is big" apart from "we paid for invisible output".
+         */
+        const rate = ms > 0 ? Math.round((out / ms) * 1000) : 0;
+        const density = out > 0 ? (textChars / out).toFixed(1) : '0.0';
+
         logger.info(
-          `  step ${++stepIndex}: ${ms}ms · ${out} out · ` +
+          `  step ${++stepIndex}: ${ms}ms · ${out} out (${rate} tok/s · ${textChars} chars text = ${density} ch/tok` +
+            `${reasoningChars ? `, ${reasoningChars} chars reasoning` : ''}) · ` +
             `${step.usage?.promptTokens ?? 0} in (+${meta?.cacheReadInputTokens ?? 0} cached, ` +
             `${meta?.cacheCreationInputTokens ?? 0} written)` +
             `${tools.length ? ` · tools: ${tools.join(', ')}` : ' · ANSWER'}`,

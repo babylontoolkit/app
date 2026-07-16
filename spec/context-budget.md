@@ -389,7 +389,7 @@ complaint must never be answered with more caching until the step log has been r
 | # | Pathology | Measured | Fix, and where it is enforced |
 |---|---|---|---|
 | 1 | **Redrafting around tool rounds.** Each tool call makes the model abandon its draft, re-read the prefix, and start over. | 29,173 output tokens across 6 tool steps to load **one** distinct skill = **68% of the bill, 75% of the wall clock**, writing code the user never saw. A tool CALL itself is ~50 tokens; the rest is redrafting. | Pre-load into the cached prefix; `allowTools = false` on creation/preloaded/slash turns (`preload-skills.ts`, `proxy.ts`). |
-| 2 | **Tokens the user never sees.** Aggregate usage hides this completely. | One generation billed **44,308 output tokens** whose final visible answer was ~9k → **~35k output tokens** spent on abandoned attempts, re-generated answers after a round cap, and verbose tool preambles. | The per-step log (below). You cannot fix what you cannot see. |
+| 2 | **Tokens the user never sees.** Aggregate usage hides this completely. | One generation billed **44,308 output tokens** whose final visible answer was ~9k → **~35k output tokens** spent on abandoned attempts, re-generated answers after a round cap, and verbose tool preambles. | `steps[].textChars` + the **density** ratio (below). ⚠️ The metric that measured this was **blind to it after the pathology-1 fix** — see §"The metric that went blind". |
 | 3 | **Dead air — paying full output rate for reasoning returned as EMPTY text.** `thinking.display` defaults to `"omitted"`. | **90.5s of total silence** before the first byte — not even HTTP headers — on a 152s generation. Billed in full. | `display: 'summarized'` costs nothing extra and turns those tokens into a stream the user watches (`thinkingFetch`, `spec/anthropic-models.md` §3.4). |
 | 4 | **A clean `stop` that said nothing.** `finishReason: 'stop'` does not mean the model produced text. | `result.text === ''`, `response.messages === []`, nothing thrown — and **10,054 output tokens billed, 405 credits taken**. | Zero-text is a hard failure → §4.6 auto-refund (`proxy.ts`). |
 | 5 | **A tool-argument schema violation killing the generation after the tokens are spent.** The AI SDK validates args BEFORE `execute`; a violation throws `InvalidToolArgumentsError`. | `load_skill({})` killed a real edit turn: **45s and ~3,500 output tokens**, file untouched, user shown a zod dump. | All tool params optional; validate inside `execute`, which can return a correcting sentence the model reads on its next step (`tools.ts`, pinned by `tools.spec.ts`). |
@@ -412,13 +412,18 @@ answer; only the step breakdown shows that 35k of it went nowhere. So each gener
 
 - **`steps[]`** — per tool round: `ms`, `outTokens`, `inTokens`, `cacheRead`, `cacheWrite`, `tools[]`.
 - **`toolRounds`**, **`durationMs`**, **`finishReason`**.
-- A log line carrying the **decode rate** (`out tok/s`) next to the wall clock — because that single ratio
-  is what separates the two causes of slowness, and they have **opposite fixes**:
+- **`steps[].textChars`** and **`reasoningChars`** — how much TEXT the step actually streamed. Anthropic
+  bills thinking + tool-call JSON + text as one `outTokens` number, and only text can reach the user, so
+  this is the only exact way to attribute a step's output.
+- A log line carrying the **decode rate** (`out tok/s`) and the **density** (`chars text / out token`)
+  next to the wall clock — because those two ratios separate the causes of slowness, and they have
+  **opposite fixes**:
 
 | Symptom in the step log | Cause | Fix |
 |---|---|---|
 | Many steps, each with meaningful `outTokens`, few visible in the answer | sequential tool rounds + redrafting | remove/batch the tools (pathology 1) |
-| One step, huge `outTokens`, decode rate ~normal | the answer itself is too big | emit fewer output tokens — **caching cannot help** (pathology 7) |
+| One step, huge `outTokens`, decode rate ~normal, **density ~3.5–4** | the answer itself is too big | emit fewer output tokens — **caching cannot help** (pathology 7) |
+| One step, huge `outTokens`, **density well below ~3.5** | we are billed for thinking/redrafting, not artifact | effort policy (pathology 8) — and measure before touching it |
 | Long gap before the first byte, low visible output | thinking with `display: omitted` | pathology 3 |
 
 **Billing reads `result.steps`, NOT `result.usage` + `result.providerMetadata`** (`agent/step-usage.ts`) —
@@ -426,6 +431,63 @@ the latter is scoped to the LAST step only. The bug this caught: a creation logg
 tokens ≈ exactly ONE read** of a 133k prefix, when the tool loop had read it repeatedly. Under-counting
 there means both the bill and the diagnostics are wrong, in the same direction, invisibly.
 (`step-usage.spec.ts`, `spec/billing.md`.)
+
+### The metric that went blind (2026-07-16)
+
+**A fix can silently disable the metric that measures the thing it fixed.** This one did, and it took
+five months to notice because the dashboard read a confident, wrong **zero**.
+
+`wastedOutput()` was defined as *"sum of all-but-last step outputs"* — i.e. **waste means extra steps**.
+That was correct when it was written, against the generation in pathology 1: six tool rounds, 29,173
+output tokens, one skill loaded.
+
+Then we fixed pathology 1. Pre-loading skills sets `allowTools: false` → `maxSteps: 1`. So a creation now
+runs as **exactly one step** — and the metric's `if (steps.length <= 1) return 0` guard fired. The admin
+dashboard reported **zero wasted output on every creation**: the most expensive generation in the product
+(~44k output tokens ≈ $1.11, ~70% of its own bill). All the money moved inside a single step, where the
+metric could not see, and the number that would have told us went quiet instead of loud.
+
+**Why a total can never answer this.** A step's billed `outTokens` bundles three things and Anthropic
+reports them as one number:
+
+    outTokens  =  thinking  +  tool-call JSON  +  text
+                  (invisible)  (~50 tok)         (the only part that can reach the user)
+
+`display: 'summarized'` does not help: we are billed for the FULL thinking and handed a summary, so the
+reasoning we can see is not the reasoning we paid for. There is no provider field that separates them.
+
+**What is exact, free, and sufficient: `textChars`.** We are streaming the text — we can just count it.
+Real text runs **~3.5–4 characters per output token**. So:
+
+| Step | Density | Reading |
+|---|---|---|
+| 44,308 out, ~168,000 chars text | **3.8 ch/tok** | healthy — the bill bought the artifact |
+| 44,308 out, ~34,200 chars text (the measured case: ~9k *tokens* of visible answer) | **0.77 ch/tok** | ~35k of that output was thinking/redrafting |
+| 5,000 out, **0 chars text** | **0** | produced literally nothing for the user (`silentStepOutputTokens`) |
+
+⚠️ **Read the units.** The pathology-2 figure "visible answer was ~9k" is ~9k **tokens**, not characters
+— ≈34,200 chars. Confusing the two makes healthy generations look catastrophic (and is exactly the class
+of error that made a chars/4 token estimate come out 38% low elsewhere in this doc). **Density compares
+chars to tokens on purpose: `textChars` is exact and free, and tokenizing server-side is neither.**
+
+Two metrics, because they catch different failures: **`silentStepOutputTokens`** (exact — output on steps
+that emitted no text at all) catches redrafting across steps; **`charsPerOutputToken`** catches a single
+fat step that thought far more than it wrote. The old metric caught only the first, and only when the
+first still existed.
+
+**The rule, generalised: when you fix a pathology, re-derive whether its metric still measures it.** A
+metric whose definition encodes the SHAPE of the old failure ("waste = extra steps") dies the moment the
+shape changes — and it dies reporting zero, which reads as success. Prefer a definition tied to the thing
+itself ("output that produced no text") over one tied to the mechanism you happened to see it through.
+
+⚠️ **Not yet measured:** whether real creations today are near 3.8 ch/tok (healthy — the artifact IS the
+output) or near 0.2 (35k of thinking). The old metric could not tell us and the new one has no production
+data yet. **Do not "fix" the effort policy on the strength of the pre-fix 35k figure** — that number was
+measured on a six-tool-round generation that no longer exists. Read the density first. (And note
+pathology 8: `low` is deleted because a cheaper tier returned confident wrong answers, so "think less" is
+not sitting there waiting to be switched on.)
+
+---
 
 ### ⚠️ Gap: none of these diagnostics survive into production
 
@@ -494,6 +556,46 @@ WRITE** each time in place of a 1× uncached read. Caching it properly means mov
 *after* the history — a real restructure, to be measured against the live API rather than guessed at, and
 one that would need a fifth breakpoint or the sacrifice of an existing one. Compaction is orthogonal and
 composes with that change if it ever lands.
+
+---
+
+## Splitting a doc on its real seam — the `ui-design-system.md` case (2026-07-16)
+
+**15,595 → 7,739 baked tokens (−50%), nothing rewritten, nothing lost.**
+
+`ui-design-system.md` was the largest doc we baked: 31% of the whole cached prefix. The tempting lever
+was "write it more concisely", and that lever does not exist — the doc is **66% code fences**, so
+compacting the prose could have reclaimed a few hundred tokens at best. (Same for `react-framework.md`
+at 78% and `project-installer.md` at 64%. **Verbiage is never the lever in a reference doc.**)
+
+The real shape of it was that **two documents were living in one file**:
+
+- the UI **architecture** — the Scene Viewer's three layers, the z-index stack, `CustomOverlay`, HUDs,
+  popups, modals — which nearly every UI turn needs; and
+- the complete `@babylonjs/gui` **API reference** — which most turns never touch. A landing page, a
+  React HUD, a gameplay tweak: none of them need `AdvancedDynamicTexture`.
+
+Splitting on that seam moved 7,856 tokens out of the prefix and into an on-demand block
+(`references/babylon-gui.md`, agent repo). **The generalisable rule: look for a doc that is really two
+documents — one about how the system is put together, one that is an API surface for a specific
+technology. The API surface routes; the architecture bakes.**
+
+**Two rules made the split safe, and both must survive:**
+
+1. **The decision matrix stayed BAKED.** It is the routing brain — "health bar above a 3D character →
+   GPU GUI, `linkWithMesh`". Route it out and the model no longer knows GPU GUI is even the right
+   answer, which is a far worse failure than not having the API.
+2. **The baked doc ends with an explicit refusal instruction:** if you need the GPU GUI API and the
+   reference is not in front of you, SAY SO — never reconstruct the API from general BabylonJS
+   knowledge. A false-negative route is otherwise **silent**: the model invents a control that does not
+   exist and the user finds out at runtime.
+
+Keywords come from the decision matrix's own rows (the situations the doc itself says require GPU GUI),
+not from imagination, and the phrasings a user actually reaches for — "floating damage numbers", "name
+tags over the other players", "make the menu work in VR" — are pinned in `doc-sync.spec.ts`. That test
+earned its keep immediately: it caught "make the menu work in VR" matching **nothing**, because the
+keyword list had `vr ui` but not `in vr`, and `includes()` makes a bare `vr` unusable (it fires on
+"vroom", "servers", "swerve").
 
 ---
 
