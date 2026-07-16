@@ -105,8 +105,8 @@ export class WorkbenchStore {
   }
 
   /** Materialize a serialized project back into the WebContainer, byte-faithfully. */
-  restoreFiles(files: SerializedFileMap): Promise<void> {
-    return this.#filesStore.restoreFiles(files);
+  restoreFiles(files: SerializedFileMap, options?: { protect: (path: string) => boolean }): Promise<void> {
+    return this.#filesStore.restoreFiles(files, options);
   }
 
   /** Read a binary file's real bytes. `File.content` is always empty for binaries. */

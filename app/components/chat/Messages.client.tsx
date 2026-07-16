@@ -13,6 +13,7 @@ import {
   setCurrentLocalSnapshot,
 } from '~/lib/persistence/local-snapshots';
 import { selectRestoreTarget } from '~/lib/persistence/restore-target';
+import { protectNothing } from '~/lib/persistence/restore-plan';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
@@ -155,8 +156,16 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
           // The restore is still safe: every earlier checkpoint remains, we just did not add one.
         }
 
-        // Byte-faithful: binaries are base64-decoded and written as bytes, never as UTF-8 text.
-        await workbenchStore.restoreFiles(restored.files);
+        /*
+         * Byte-faithful: binaries are base64-decoded and written as bytes, never as UTF-8 text.
+         *
+         * `protectNothing` makes this a real restore rather than an overlay (§4.12): a file the
+         * checkpoint does not have is DELETED, because the checkpoint is a serialization of the whole
+         * store and its absence means the project genuinely did not have that file at that moment.
+         * Without it, undoing past the generation that added `Boss.ts` left `Boss.ts` on disk — the
+         * undo silently did not undo, which is the one thing this button exists to do.
+         */
+        await workbenchStore.restoreFiles(restored.files, { protect: protectNothing });
         await setCurrentLocalSnapshot(db, pid, target.id);
 
         /*

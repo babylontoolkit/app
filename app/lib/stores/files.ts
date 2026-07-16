@@ -10,6 +10,7 @@ import { path } from '~/utils/path';
 import { bufferWatchEvents } from '~/utils/buffer';
 import { WORK_DIR } from '~/utils/constants';
 import { computeFileModifications } from '~/utils/diff';
+import { planRestore } from '~/lib/persistence/restore-plan';
 import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
 import {
@@ -806,13 +807,56 @@ export class FilesStore {
   /**
    * Materialize a serialized project back into the WebContainer, byte-faithfully.
    * Used by snapshot restore and checkpoint restore (SPEC §4.12).
+   *
+   * 🔴 **Without `protect`, this is an OVERLAY, not a restore** — it writes what it is given and
+   * deletes nothing, so a file the incoming map does not have simply survives. That made undo not
+   * undo (§4.12) and made "use the version from my repository" produce a third version that is neither
+   * (§4.13). Both silent. Pass `protect` and it deletes what the map genuinely dropped; the decision
+   * is `planRestore`, which is pure and exhaustively tested because it is the code that destroys the
+   * user's files.
+   *
+   * The overlay behaviour is kept as the DEFAULT deliberately: a caller that has not thought about
+   * what its map is authoritative about must not be silently upgraded into one that deletes things.
+   * `protect` is how a caller says it has thought about it (`protectForRepoRestore` /
+   * `protectNothing`).
    */
-  async restoreFiles(files: SerializedFileMap): Promise<void> {
+  async restoreFiles(files: SerializedFileMap, options?: { protect: (path: string) => boolean }): Promise<void> {
     const webcontainer = await this.#webcontainer;
 
-    await writeSerializedFileMap(files, webcontainer.fs, (filePath) =>
-      filePath.startsWith(webcontainer.workdir) ? path.relative(webcontainer.workdir, filePath) : filePath,
-    );
+    const toContainerPath = (filePath: string) =>
+      filePath.startsWith(webcontainer.workdir) ? path.relative(webcontainer.workdir, filePath) : filePath;
+
+    await writeSerializedFileMap(files, webcontainer.fs, toContainerPath);
+
+    if (!options) {
+      return;
+    }
+
+    /*
+     * Deletions come AFTER the writes. If anything fails partway, the project is left with too many
+     * files rather than too few — the recoverable direction. (`node_modules` and `.git` are excluded
+     * from the watcher, so they are not in this map and can never be planned for deletion.)
+     */
+    const { toDelete } = planRestore({
+      current: Object.entries(this.files.get())
+        .filter(([, dirent]) => dirent?.type === 'file')
+        .map(([filePath]) => filePath),
+      incoming: Object.keys(files),
+      protect: options.protect,
+    });
+
+    for (const filePath of toDelete) {
+      try {
+        await this.deleteFile(filePath);
+      } catch (error) {
+        // Never fatal: the restore itself landed. A file we could not remove is visible, not lost.
+        logger.error(`Failed to delete ${filePath} during restore`, error);
+      }
+    }
+
+    if (toDelete.length > 0) {
+      logger.info(`Restore removed ${toDelete.length} file(s) the incoming version does not have.`);
+    }
   }
 
   async createFile(filePath: string, content: string | Uint8Array = '') {

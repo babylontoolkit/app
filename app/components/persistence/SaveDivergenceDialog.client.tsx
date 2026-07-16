@@ -27,6 +27,7 @@ import { mountDivergence, repoStatus, startGitConnect, unsavedWork } from '~/lib
 import { db } from '~/lib/persistence/useChatHistory';
 import { createLocalSnapshot, markSynced } from '~/lib/persistence/local-snapshots';
 import { resolveDivergence, type DivergenceChoice } from '~/lib/persistence/projects';
+import { protectForRepoRestore } from '~/lib/persistence/restore-plan';
 import { workbenchStore } from '~/lib/stores/workbench';
 
 export function SaveDivergenceDialog() {
@@ -80,7 +81,12 @@ export function SaveDivergenceDialog() {
           });
         }
 
-        await workbenchStore.restoreFiles(result.files);
+        /*
+         * A real switch, not an overlay: the user asked for the repo's version, and an overlay would
+         * hand them a THIRD version — the repo's files plus every file only this browser had.
+         * `protectForRepoRestore` keeps the secrets the repo never carried.
+         */
+        await workbenchStore.restoreFiles(result.files, { protect: protectForRepoRestore });
 
         if (db) {
           /*

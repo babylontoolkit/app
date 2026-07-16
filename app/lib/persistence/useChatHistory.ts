@@ -38,6 +38,7 @@ import {
   type LocalSyncState,
 } from './local-snapshots';
 import { selectMountSource } from './mount-source';
+import { protectForRepoRestore, protectNothing } from './restore-plan';
 import { decideDependencyInstall, findLockfile, hasManifest } from './dependencies';
 import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
@@ -148,7 +149,12 @@ async function mountProjectFiles(pid: string): Promise<void> {
     const local = db ? await readCurrentLocalSnapshot(db, pid) : undefined;
 
     if (local) {
-      await workbenchStore.restoreFiles(local.files);
+      /*
+       * A local checkpoint is the whole truth (it serialized the entire store), so `protectNothing`:
+       * a file it does not have is one the project does not have. Without this the mount is an
+       * overlay, and a file deleted before the checkpoint would come back from the template mount.
+       */
+      await workbenchStore.restoreFiles(local.files, { protect: protectNothing });
     }
 
     unsavedWork.set(decision.source === 'diverged' || decision.unsavedWork);
@@ -194,7 +200,12 @@ async function mountFromRepo(pid: string): Promise<void> {
     return;
   }
 
-  await workbenchStore.restoreFiles(files);
+  /*
+   * `protectForRepoRestore`: the repo is authoritative about everything EXCEPT the `.env` family and
+   * `.npmrc`, which `isSecretPath` kept out of every push — so their absence from the tree says
+   * nothing, and deleting them would destroy the user's keys, the one thing here with no other copy.
+   */
+  await workbenchStore.restoreFiles(files, { protect: protectForRepoRestore });
 
   if (db) {
     await createLocalSnapshot(db, { projectId: pid, files, label: 'Loaded from repository' });
@@ -424,7 +435,8 @@ async function mountFromSeed(pid: string): Promise<void> {
     return;
   }
 
-  await workbenchStore.restoreFiles(files);
+  // The seed is built with the same secret rule (`buildRemixSeed` → `isSecretPath`), so it is protected the same way.
+  await workbenchStore.restoreFiles(files, { protect: protectForRepoRestore });
 
   if (db) {
     await createLocalSnapshot(db, { projectId: pid, files, label: 'Opened' });

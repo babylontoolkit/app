@@ -19,6 +19,7 @@
  * Available to ALL users, never gated (§4.13) — Pro adds only BYOK + model choice (§4.6.1). Nothing in
  * this module or its routes consults entitlements.
  */
+import { isSecretPath, toRepoRelativePath } from '~/lib/git/paths';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { brand } from '~/config/brand';
 
@@ -113,45 +114,20 @@ export function mapToTreeBlobs(files: SerializedFileMap): TreeBlob[] {
   return blobs.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-/** Strip the WebContainer workdir prefix — a repo has no `/home/project`. */
-export function toRepoRelativePath(rawPath: string): string {
-  return rawPath.replace(/^\/?(home\/project\/)?/, '').replace(/^\/+/, '');
-}
-
 /**
- * Files that must never be pushed to a repo, however the sync is triggered (§4.14, §5).
+ * 🔴 `toRepoRelativePath` and `isSecretPath` MOVED to `~/lib/git/paths.ts` (client-safe) and are
+ * re-exported here so every existing server importer keeps working.
  *
- * The whole `.env` family is excluded, not just `.env` and `.env.*local`. The narrower rule this
- * replaces (`/\.env\.[^/]*local$/`) mirrored the gitignore convention and therefore **pushed
- * `.env.production`** — the single most dangerous file in the family — because it does not end in
- * `local`. Nothing failed; the secrets just went to a repo. Under §4.5.4b every save is a push, so an
- * exclusion gap is now hit on every generation rather than on an occasional manual sync.
+ * They moved because the CLIENT needs the identical rules: the restore path (`restore-plan.ts`) must
+ * normalise paths exactly as the push did — or it compares `/home/project/src/main.ts` against the
+ * repo's `src/main.ts`, concludes every file was deleted, and wipes the project — and it must know
+ * that a repo's file map is never authoritative about the `.env` family, or pulling deletes the user's
+ * keys. `.server/**` cannot be imported by client code, so the rule moved rather than being copied.
  *
- * `.env.example` / `.env.sample` / `.env.template` are deliberately NOT secret: they are the
- * placeholder files a project is *supposed* to commit, and dropping them silently would break the
- * round-trip for anyone cloning the repo.
+ * Do not reintroduce a local copy. A second copy of "what counts as a secret" is exactly how
+ * `.env.production` got pushed.
  */
-export function isSecretPath(path: string): boolean {
-  const name = path.split('/').pop() ?? '';
-
-  if (name === '.npmrc') {
-    return true;
-  }
-
-  if (name === '.env') {
-    return true;
-  }
-
-  /*
-   * `.env.` with the DOT, not `.env` — `.environment.md` starts with ".env" and is an ordinary file.
-   * Over-matching is not a harmless bias here: it would silently drop the user's file from every save.
-   */
-  if (!name.startsWith('.env.')) {
-    return false;
-  }
-
-  return !/^\.env\.(example|sample|template)$/i.test(name);
-}
+export { isSecretPath, toRepoRelativePath } from '~/lib/git/paths';
 
 /**
  * The divergence resolution the user picked (§4.13). The platform offers exactly two, and NEVER a

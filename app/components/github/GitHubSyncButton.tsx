@@ -23,6 +23,7 @@ import { db } from '~/lib/persistence/useChatHistory';
 import { createLocalSnapshot } from '~/lib/persistence/local-snapshots';
 import { getProject } from '~/lib/persistence/projects';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { protectForRepoRestore } from '~/lib/persistence/restore-plan';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 
 interface SyncResponse {
@@ -252,7 +253,7 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
 
       if (result.ok && result.files) {
         await checkpointBeforeOverwrite();
-        await workbenchStore.restoreFiles(result.files);
+        await workbenchStore.restoreFiles(result.files, { protect: protectForRepoRestore });
         await snapshotLocally(result.files, 'Pulled from GitHub');
         toast.success('Updated from GitHub.');
         setDiverged(false);
