@@ -23,9 +23,22 @@ const logger = createScopedLogger('doc-sync');
 
 export interface BuildResult {
   status: 'built' | 'unchanged';
+
+  /**
+   * Metadata ONLY — never the prompt body. Both paths must agree on this: `unchanged` reads the
+   * active version (which carries `content`) while `built` gets a meta back from the store, so
+   * returning the read straight through made the admin refresh response ~150KB on one path and a few
+   * hundred bytes on the other, for the same call.
+   */
   version: PromptVersionMeta;
   sourceCommitSha: string;
   fetched: number;
+}
+
+/** Drop the body from a full version read, so `content` cannot ride out through a metadata field. */
+function toMeta(version: PromptVersionMeta & { content?: string }): PromptVersionMeta {
+  const { content: _content, ...meta } = version;
+  return meta;
 }
 
 /**
@@ -159,7 +172,7 @@ export async function buildSystemPrompt(options: BuildOptions): Promise<BuildRes
         `confirmed current at ${sourceCommitSha.slice(0, 8)}`,
     );
 
-    return { status: 'unchanged', version: (await store.get(active.id)) ?? active, sourceCommitSha, fetched };
+    return { status: 'unchanged', version: toMeta((await store.get(active.id)) ?? active), sourceCommitSha, fetched };
   }
 
   const version = await store.put(candidate);

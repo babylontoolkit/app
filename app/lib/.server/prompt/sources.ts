@@ -86,8 +86,50 @@ export const BASE_DOCS: DocSource[] = [
  * Kept out of the base prefix and appended only when keyword-routed in. This is what keeps the
  * cached prefix stable (and therefore cheap) while still giving the model deep system docs when a
  * request actually needs them.
+ *
+ * EVERY doc a baked reference points at must be reachable from here, or the pointer is a lie: there
+ * is no network at generation time, so a doc that is neither baked nor routed simply does not exist
+ * for the model — which is told the routing step is already complete and never to report a failed
+ * fetch. The result is silent improvisation in the exact area the doc was meant to cover.
+ *
+ * `references/skills-repository.md` is the one deliberate exception: it instructs an agent to copy
+ * skill folders into the project (`.claude/skills`, plugin marketplaces), which is a DIFFERENT host's
+ * mechanism. Here the server pre-loads skills into the cached prefix or serves them via `load_skill`
+ * (§4.11), so that doc would actively mislead. It stays unsynced and the platform-identity section
+ * neutralizes the router's pointer to it.
  */
 export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
+  /*
+   * `references/react-framework.md` is BAKED and tells the model to "always reference" this doc — so
+   * it must be reachable. Deliberately not baked itself: at ~55KB it is the largest prose doc in the
+   * repo, and the baked React reference already covers the common path.
+   */
+  {
+    id: 'react-training',
+    title: 'React Framework — Agentic AI Game Builder Reference',
+    path: 'training/react/README.md',
+    url: RAW(AGENT_REPO, 'training/react/README.md'),
+    keywords: [
+      'react',
+      'jsx',
+      'tsx',
+      'hook',
+      'scenecontroller',
+      'scene controller',
+      'babylonsceneviewer',
+      'scene viewer',
+      'babylonmount',
+      'createscene',
+      'gamemanager',
+      'game manager',
+      'custom overlay',
+      'hud',
+      'landing page',
+      'home screen',
+      'frontend',
+      'web app',
+    ],
+  },
   {
     id: 'shader-materials',
     title: 'Shader Materials',
@@ -201,6 +243,84 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
     path: 'training/components/14-GamePatterns.md',
     url: RAW(AGENT_REPO, 'training/components/14-GamePatterns.md'),
     keywords: ['game pattern', 'game loop', 'score', 'health', 'inventory', 'menu', 'spawn', 'pickup', 'level'],
+  },
+
+  /*
+   * MCP image/video/texture generation (kie.ai). Keywords are the agent repo's OWN Reference Index
+   * row for this doc, copied verbatim — that table is the authoritative routing spec, and inventing
+   * our own would drift from it silently.
+   *
+   * MCP servers run in the USER's WebContainer (§4.14, §5) — never on platform infra.
+   */
+  {
+    id: 'kie-servers',
+    title: 'Image And Video Generation (MCP)',
+    path: 'references/web-kie-servers.md',
+    url: RAW(AGENT_REPO, 'references/web-kie-servers.md'),
+    keywords: [
+      'mcp',
+      'mcp server',
+      '.mcp.json',
+      'model context protocol',
+      'kie.ai',
+      'kie_key',
+      '@babylonjs-toolkit/mcp',
+      'kie-image-mcp',
+      'image generation',
+      'video generation',
+      'texture generation',
+      'generate an image',
+      'generate a texture',
+      'nano banana',
+      'imagen',
+      'flux',
+      'seedream',
+      'kling',
+      'seedance',
+      'grok imagine',
+      'veo',
+    ],
+  },
+
+  /*
+   * Playground examples. `references/training-reference.md` is BAKED, lists these five by URL, and
+   * says "Check for a matching example before writing code from scratch" — an instruction that was
+   * impossible to follow, since none of them were synced.
+   */
+  {
+    id: 'demo-rotator',
+    title: 'Playground: DemoRotator (minimal ScriptComponent)',
+    path: 'training/playgrounds/01-DemoRotator.md',
+    url: RAW(AGENT_REPO, 'training/playgrounds/01-DemoRotator.md'),
+    keywords: ['rotator', 'rotate', 'spin', 'simplest script', 'minimal script', 'first script'],
+  },
+  {
+    id: 'demo-bobber',
+    title: 'Playground: DemoBobber (parameterized motion)',
+    path: 'training/playgrounds/02-DemoBobber.md',
+    url: RAW(AGENT_REPO, 'training/playgrounds/02-DemoBobber.md'),
+    keywords: ['bobber', 'bob', 'oscillate', 'hover motion', 'script property', 'exposed property'],
+  },
+  {
+    id: 'demo-user-input',
+    title: 'Playground: DemoUserInput (input-driven movement)',
+    path: 'training/playgrounds/03-DemoUserInput.md',
+    url: RAW(AGENT_REPO, 'training/playgrounds/03-DemoUserInput.md'),
+    keywords: ['mouse look', 'user input', 'wasd', 'input driven', 'move the player'],
+  },
+  {
+    id: 'demo-player-scene',
+    title: 'Playground: DemoPlayerScene (async load + physics + player)',
+    path: 'training/playgrounds/04-DemoPlayerScene.md',
+    url: RAW(AGENT_REPO, 'training/playgrounds/04-DemoPlayerScene.md'),
+    keywords: ['player scene', 'async scene', 'load a scene', 'sample scene', 'demo scene'],
+  },
+  {
+    id: 'demo-vehicle-scene',
+    title: 'Playground: DemoVehicleScene (async load + physics + vehicle)',
+    path: 'training/playgrounds/05-DemoVehicleScene.md',
+    url: RAW(AGENT_REPO, 'training/playgrounds/05-DemoVehicleScene.md'),
+    keywords: ['vehicle scene', 'vehicle controller', 'car demo', 'vehicle demo'],
   },
 ];
 

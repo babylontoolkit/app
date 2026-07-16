@@ -6,8 +6,16 @@ Consumes the Agent Reference repo into versioned, cached system prompts. The Git
 
 - Root: `https://raw.githubusercontent.com/babylontoolkit/agent/main/reference.md`
 - Sub-docs (baked into base prompt, in order): `references/node-esm.md` (primary style), `references/scene-components.md`, `references/react-framework.md`, `references/ui-design-system.md`, `references/training-reference.md`
-- On-demand block: `references/shader-materials.md`
-- Excluded: `references/classic.md` (UMD — platform is ESM-only)
+- On-demand blocks: `references/shader-materials.md`, the 14 `training/components/*.md` system docs, **`training/react/README.md`** (the ~55KB Agentic AI Game Builder reference — routed, never baked), **`references/web-kie-servers.md`** (MCP image/video/texture generation), **`training/playgrounds/01–05`** (example patterns)
+- Excluded: `references/classic.md` (UMD — platform is ESM-only); `references/skills-repository.md` (installs skills into the project via `.claude/skills` / plugin marketplaces — another host's mechanism; here the server pre-loads skills into the cached prefix or serves `load_skill`, §4.11); the other `web-app-*.md` / `lovable.md` / `vercel-app-builder.md` host docs (we bake `web-app-generic.md`, §4.3)
+
+### Reachability is an invariant, not a preference
+
+**Every doc a baked reference points at must be baked or routed.** There is no network at generation time, and the platform-identity section tells the model the routing step is complete and never to report a failed fetch — so an unreachable doc does not error, it just gets improvised around, silently, in precisely the area it was meant to cover.
+
+This shipped broken and is worth remembering: `react-framework.md` (baked) said "**always reference**" `training/react/README.md`, `training-reference.md` (baked) listed all five playgrounds under "check for a matching example before writing code from scratch", and the Reference Index routed image generation to `web-kie-servers.md` — **none of the four were synced by any path**. The model was told to always consult a 55KB doc, told it was already inlined, given no way to read it, and told not to mention the failure. `doc-sync.spec.ts` now pins each pointer's target as reachable.
+
+A doc that must NOT reach the model (`classic.md`, `skills-repository.md`) is neutralized **in the platform-identity section**, which is ordered first and declared to override the reference docs. Deleting the pointer at the source is an **agent-repo** change: this codebase consumes those docs and never edits them (§4.3).
 - Skills index text is supplied by the skills subsystem (spec/skills.md) and concatenated into the base prompt.
 
 ## Build pipeline — `buildSystemPrompt()`

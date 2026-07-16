@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsPromptStore, getPromptStore, setPromptStore, sha256 } from './store';
-import { DECLARATION_FILES, ON_DEMAND_BLOCKS, selectOnDemandBlocks } from './sources';
+import { BASE_DOCS, DECLARATION_FILES, ON_DEMAND_BLOCKS, selectOnDemandBlocks } from './sources';
 
 /*
  * Doc bodies keyed by URL, plus the agent repo's HEAD, so a test can move ONE of them and rebuild.
@@ -277,6 +277,24 @@ describe('build no-op', () => {
     );
   });
 
+  /*
+   * Both paths must return the SAME shape. `unchanged` reads the active version (which carries the
+   * body) and `built` gets a meta back from the store, so returning the read straight through made
+   * one path answer with ~150KB and the other with a few hundred bytes, for the same admin call.
+   */
+  it('returns metadata without the prompt body, on both paths', async () => {
+    const built = await buildSystemPrompt({ skillsIndex: 'index' });
+    const unchanged = await buildSystemPrompt({ skillsIndex: 'index' });
+
+    expect(built.status).toBe('built');
+    expect(unchanged.status).toBe('unchanged');
+    expect(built.version).not.toHaveProperty('content');
+    expect(unchanged.version).not.toHaveProperty('content');
+
+    // The body is still reachable where it belongs.
+    expect((await getPromptStore().get(unchanged.version.id))?.content).toContain('Platform Identity');
+  });
+
   it('rebuilds when a base doc changes', async () => {
     await buildSystemPrompt({ skillsIndex: 'index' });
     fixtures.set(racing.url, 'irrelevant');
@@ -352,5 +370,82 @@ describe('on-demand block routing', () => {
 
   it('is case-insensitive', () => {
     expect(selectOnDemandBlocks('Add HAVOK Physics').map((b) => b.id)).toContain('rigidbody-physics');
+  });
+
+  it('routes a React game-builder request to the React training reference', () => {
+    const ids = selectOnDemandBlocks('wire up the SceneController and a custom overlay HUD').map((b) => b.id);
+    expect(ids).toContain('react-training');
+  });
+
+  it('routes an image-generation request to the kie MCP docs', () => {
+    expect(selectOnDemandBlocks('generate a texture for the car using MCP').map((b) => b.id)).toContain('kie-servers');
+  });
+
+  it('routes an example request to the matching playground', () => {
+    expect(selectOnDemandBlocks('show me the simplest script that will rotate a cube').map((b) => b.id)).toContain(
+      'demo-rotator',
+    );
+  });
+});
+
+/**
+ * THE INVARIANT: there is no network at generation time, and the model is told the routing step is
+ * complete and never to report a failed fetch. So a doc that is neither baked nor routed does not
+ * exist for the model — it improvises instead, silently, in exactly the area the doc covered.
+ *
+ * These pin the docs a BAKED reference explicitly points at. `references/react-framework.md` says
+ * "always reference" the React training doc; `references/training-reference.md` lists all five
+ * playgrounds and says to check them before writing code from scratch; the Reference Index routes
+ * image/video generation to the kie doc. Each was configured nowhere and therefore unreachable.
+ */
+describe('reachability of docs the baked references point at', () => {
+  const reachable = new Set([
+    ...BASE_DOCS.map((d) => d.path),
+    ...ON_DEMAND_BLOCKS.map((b) => b.path),
+    ...DECLARATION_FILES.map((d) => d.path),
+  ]);
+
+  it.each([
+    ['training/react/README.md', 'references/react-framework.md says to always reference it'],
+    ['training/playgrounds/01-DemoRotator.md', 'training-reference.md lists it as an example to check'],
+    ['training/playgrounds/02-DemoBobber.md', 'training-reference.md lists it as an example to check'],
+    ['training/playgrounds/03-DemoUserInput.md', 'training-reference.md lists it as an example to check'],
+    ['training/playgrounds/04-DemoPlayerScene.md', 'training-reference.md lists it as an example to check'],
+    ['training/playgrounds/05-DemoVehicleScene.md', 'training-reference.md lists it as an example to check'],
+    ['references/web-kie-servers.md', 'the Reference Index routes image/video generation to it'],
+  ])('%s is reachable — %s', (path) => {
+    expect(reachable).toContain(path);
+  });
+
+  /*
+   * The deliberate exclusions. `classic.md` is UMD and this platform is ESM-only; `skills-repository`
+   * describes installing skills into the project, which is another host's mechanism (§4.11). Both are
+   * neutralized in the platform-identity section rather than synced.
+   */
+  it.each([['references/classic.md'], ['references/skills-repository.md']])('%s stays unsynced', (path) => {
+    expect(reachable).not.toContain(path);
+  });
+
+  /*
+   * Ids key the stored blob maps and paths key the fetch, so a duplicate of either silently drops a
+   * doc: the second write wins and the first block becomes unreachable with nothing thrown. Cheap to
+   * assert, invisible if it ever happens.
+   */
+  it('has unique ids and paths across every synced doc', () => {
+    const all = [...BASE_DOCS, ...ON_DEMAND_BLOCKS, ...DECLARATION_FILES];
+    const ids = all.map((d) => d.id);
+    const paths = all.map((d) => d.path);
+
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  it('gives every on-demand block at least one routable keyword', () => {
+    for (const block of ON_DEMAND_BLOCKS) {
+      expect(block.keywords.length, `${block.id} has no keywords and can never be routed in`).toBeGreaterThan(0);
+      expect(block.keywords, `${block.id} has a non-lowercase keyword; routing lowercases the haystack`).toEqual(
+        block.keywords.map((k) => k.toLowerCase()),
+      );
+    }
   });
 });
