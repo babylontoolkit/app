@@ -109,10 +109,19 @@ against a cached prefix) and a weighting factor is a pricing decision we have no
   `public.generations` carries `tool_rounds`, `duration_ms`, `finish_reason`, `repair_of` and
   `steps jsonb` alongside the token/cost columns, and `SupabaseGenerationStore` writes them. They are not
   decoration: aggregate usage hides every pathology in `spec/context-budget.md` §"Wasted tokens and dead
-  time" — one real generation billed 44,308 output tokens of which ~35k never reached the user, and in
-  the totals that is indistinguishable from "the model wrote a big answer". Keep them written. Without
-  them the §4.10 dashboards can chart spend but not diagnose it, and every number in the context-budget
-  doc has to be read by hand out of a DevTools stream.
+  time" — measured across 7 live creations (2026-07-16), **~40–60% of a creation's output tokens are
+  thinking, never reaching the user** (density 1.4–2.1 chars/output token), and in the totals that is
+  indistinguishable from "the model wrote a big answer". Keep them written. Without them the §4.10
+  dashboards can chart spend but not diagnose it, and every number in the context-budget doc has to be
+  read by hand out of a DevTools stream.
+
+- **What a generation actually costs, measured 2026-07-16** (`claude-opus-4-8`, `medium`, 7 live
+  creations): **$0.21–0.35 warm** (whole prefix cache-hits, often `0 written`), $0.9–1.6 on a cold cache
+  or an unseen routed block — the latter a cold-start artifact that volume erases. Output is **58–88% of
+  a warm bill**, which is the success condition, not a pathology (input was optimised away). The credit
+  math is confirmed end-to-end: one generation billed **163 credits** against an independently derived
+  raw cost of $0.485 (× 334 = 162). **The model does not change the margin, only the volume** — credits
+  are cost-proportional, so "downgrade to Sonnet to save money" remains a false economy here.
 
 - **⚠️ ORDER THE LEDGER BY `seq`, NEVER BY `created_at` (migration 0003).** Balance is derived from "the
   latest row", and a wall clock cannot tell you which that is. `created_at` defaults to `now()` — the

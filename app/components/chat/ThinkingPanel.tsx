@@ -16,8 +16,11 @@
  * under every display setting — and turns those tokens into this panel. The fix for a long think is to
  * SHOW it, not to stop thinking.
  */
-import { memo, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { classNames } from '~/utils/classNames';
+
+/** Px from the bottom still counted as "at the bottom" — covers sub-pixel rounding and momentum. */
+const STICK_THRESHOLD_PX = 24;
 
 interface ThinkingPanelProps {
   reasoning: string;
@@ -34,6 +37,39 @@ export const ThinkingPanel = memo(({ reasoning, streaming }: ThinkingPanelProps)
    * user's actual game off the screen.
    */
   const [expanded, setExpanded] = useState(streaming);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  /*
+   * Follow the thinking as it streams — but ONLY while the user is already at the bottom.
+   *
+   * A think runs 157 seconds on a real creation and this box is 16rem tall, so without this every new
+   * sentence lands below the fold and the user has to hand-scroll to watch the thing we deliberately
+   * pay to show them. The `stuck` flag is the whole design: the instant they scroll UP (to re-read a
+   * decision the model just made) we stop yanking them back down. An auto-scroll that cannot be
+   * escaped is worse than none — it makes the panel unreadable rather than merely static.
+   */
+  const [stuck, setStuck] = useState(true);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+
+    if (!el || !expanded || !stuck) {
+      return;
+    }
+
+    el.scrollTop = el.scrollHeight;
+  }, [reasoning, expanded, stuck]);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+
+    if (!el) {
+      return;
+    }
+
+    setStuck(el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_THRESHOLD_PX);
+  };
 
   if (!reasoning.trim()) {
     return null;
@@ -56,7 +92,11 @@ export const ThinkingPanel = memo(({ reasoning, streaming }: ThinkingPanelProps)
       </button>
 
       {expanded && (
-        <div className="px-3 pb-3 pt-1 text-sm text-bolt-elements-textSecondary whitespace-pre-wrap border-t border-bolt-elements-borderColor max-h-64 overflow-y-auto">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="px-3 pb-3 pt-1 text-sm text-bolt-elements-textSecondary whitespace-pre-wrap border-t border-bolt-elements-borderColor max-h-64 overflow-y-auto"
+        >
           {reasoning}
         </div>
       )}

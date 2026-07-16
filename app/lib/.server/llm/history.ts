@@ -88,6 +88,49 @@ function compactContent(content: string): string {
 }
 
 /**
+ * Strip thinking from a PRIOR assistant turn — required for correctness, not just for cost.
+ *
+ * ## The bug this fixes: every edit turn returned a 400, on every project
+ *
+ *   Custom error: messages.2.content.0.thinking.signature: Field required
+ *
+ * Anthropic requires every `thinking` block sent back in history to carry the opaque `signature` it
+ * issued with it. Our proxy streams reasoning to the client on its own channel as TEXT — `AgentChunk`
+ * is `{type:'text'|'reasoning'}` and has no signature field at all — so the client stores the model's
+ * reasoning with no signature, posts it back on the next turn, and the API rejects the request before
+ * generating a single token. 0 in, 0 out, ~0.3s, `finish=error`. Creations worked (no history);
+ * everything after turn one did not.
+ *
+ * ## Why STRIP rather than forward the signature
+ *
+ * Anthropic only requires thinking blocks to survive WITHIN a turn (across tool results) — which
+ * `streamText` handles internally, since our tool loop lives inside one call. Previous turns' thinking
+ * may simply be omitted. Stripping is therefore the smaller change AND the cheaper one: the history is
+ * UNCACHED and re-sent in full every turn, and a real creation emitted 14,874 chars of reasoning
+ * summary (§"MEASURED"). Forwarding the signature would restore correctness while making us pay,
+ * forever, to re-send reasoning the model does not need.
+ *
+ * The same argument as file bodies, one field over: if the model does not need it next turn, it must
+ * not be in the history.
+ *
+ * ⚠️ Do NOT "fix" this by adding a signature to `AgentChunk` and threading it to the client. That
+ * re-introduces the per-turn cost this avoids, and the 400 comes back the moment any path drops it.
+ */
+function stripReasoning(message: Message): Message {
+  const parts = message.parts?.filter((part) => part.type !== 'reasoning');
+  const hadReasoning = message.reasoning !== undefined || (parts && parts.length !== message.parts?.length);
+
+  if (!hadReasoning) {
+    return message;
+  }
+
+  const next = { ...message, parts } as Message & { reasoning?: string };
+  delete next.reasoning;
+
+  return next;
+}
+
+/**
  * Compact prior assistant turns.
  *
  * Every assistant message is compacted, including the most recent one: the file-context block is a
@@ -100,13 +143,20 @@ function compactContent(content: string): string {
  */
 export function compactHistory(messages: Message[], options: { maxTurns?: number } = {}): Message[] {
   const compacted = messages.map((message) => {
-    if (message.role !== 'assistant' || typeof message.content !== 'string') {
+    if (message.role !== 'assistant') {
       return message;
     }
 
-    const content = compactContent(message.content);
+    // Thinking first: it must go whether or not the content is a plain string (see `stripReasoning`).
+    const stripped = stripReasoning(message);
 
-    return content === message.content ? message : { ...message, content };
+    if (typeof stripped.content !== 'string') {
+      return stripped;
+    }
+
+    const content = compactContent(stripped.content);
+
+    return content === stripped.content ? stripped : { ...stripped, content };
   });
 
   return windowHistory(compacted, options.maxTurns ?? HISTORY_WINDOW_TURNS);

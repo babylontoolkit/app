@@ -20,7 +20,6 @@
  * the turn that just failed — which is precisely backwards.
  */
 import type { EffortLevel } from '~/lib/modules/llm/capabilities';
-import { DEFAULT_EFFORT, parseEffort } from '~/lib/modules/llm/capabilities';
 
 export interface TurnShape {
   /** A Vite compile error was fed back to the model (§4.2 self-healing). */
@@ -66,13 +65,13 @@ export function effortForTurn(turn: TurnShape): EffortLevel | undefined {
   return undefined;
 }
 
-/**
- * Resolve the effort actually sent: the turn policy, else the operator's config, else the default.
+/*
+ * There is deliberately no `resolveEffort` here.
  *
- * The policy WINS over config on purpose. If an operator sets `THINKING_EFFORT=medium` to save money,
- * a second consecutive repair still runs at `xhigh` — a build that has already failed twice is not the
- * place to economise, and the repair budget is capped (`MAX_REPAIR_TURNS`) so the spend is bounded.
+ * One existed — `effortForTurn(turn) ?? parseEffort(configured) ?? DEFAULT_EFFORT` — and nothing but
+ * its own spec ever called it, because the provider already applies that exact chain where the request
+ * is actually built (`providers/anthropic.ts` → `getModelInstance`). Two copies of a precedence rule
+ * is one copy too many: the dead one reads as authoritative, so a future reader "wires it up" and now
+ * the rule is enforced twice, in two places, free to disagree. The proxy passes this function's
+ * `undefined` straight through and the provider fills in `THINKING_EFFORT`, else `medium`.
  */
-export function resolveEffort(turn: TurnShape, configured?: string): EffortLevel {
-  return effortForTurn(turn) ?? parseEffort(configured) ?? DEFAULT_EFFORT;
-}

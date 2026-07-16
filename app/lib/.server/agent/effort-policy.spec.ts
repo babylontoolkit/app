@@ -7,7 +7,7 @@
  * principles in six months.
  */
 import { describe, expect, it } from 'vitest';
-import { effortForTurn, resolveEffort } from './effort-policy';
+import { effortForTurn } from './effort-policy';
 
 const EDIT = { isRepair: false, repairAttempt: 1, isSlashInvocation: false };
 
@@ -23,29 +23,13 @@ describe('effortForTurn', () => {
    *
    * `low` was not cheaper, it was WRONG: a never-violate zone breach is a correctness bug, not a
    * missing polish. So an ordinary turn takes the configured default and this policy stays silent.
+   *
+   * `undefined` IS the contract, not a gap: it means "no opinion, use the operator's default", which
+   * the provider resolves to `THINKING_EFFORT` else `medium` (`providers/anthropic.ts`, whose spec
+   * owns the precedence chain and the `low` clamp — this file must not grow a second copy of them).
    */
   it('does NOT downgrade an ordinary edit turn — `low` breached a read-only zone when we measured it', () => {
     expect(effortForTurn(EDIT)).toBeUndefined();
-    expect(resolveEffort(EDIT)).toBe('medium');
-  });
-
-  it('leaves the operator config authoritative on ordinary turns', () => {
-    expect(resolveEffort(EDIT, 'high')).toBe('high');
-    expect(resolveEffort(EDIT, 'xhigh')).toBe('xhigh');
-  });
-
-  /**
-   * `low` is not merely unused — it is unreachable. An operator who sets `THINKING_EFFORT=low` in
-   * `.env.local` (a string file; the type system cannot stop them) gets clamped back up to `medium`,
-   * because the measurement above says `low` is a correctness bug wearing a discount's clothes.
-   */
-  it('refuses a `low` operator config and clamps it to `medium`', () => {
-    expect(resolveEffort(EDIT, 'low')).toBe('medium');
-  });
-
-  it('falls back to the default on a typo rather than putting garbage on the wire', () => {
-    expect(resolveEffort(EDIT, 'hgih')).toBe('medium');
-    expect(resolveEffort(EDIT, '')).toBe('medium');
   });
 
   /**
@@ -60,9 +44,14 @@ describe('effortForTurn', () => {
     expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: false })).toBe('xhigh');
   });
 
-  /** Escalation beats operator config: a failing build is not the place to economise. */
-  it('escalates a repair even when the operator configured a cheaper default', () => {
-    expect(resolveEffort({ isRepair: true, repairAttempt: 2, isSlashInvocation: false }, 'medium')).toBe('xhigh');
+  /**
+   * Escalation beats operator config: a failing build is not the place to economise. The policy speaks
+   * (a concrete level) rather than staying silent, and the provider's `options.effort ?? …` chain takes
+   * whatever it says first — so a `THINKING_EFFORT=medium` operator still gets `xhigh` on a 2nd repair.
+   */
+  it('speaks up on a repair rather than deferring to the operator default', () => {
+    expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: false })).toBe('xhigh');
+    expect(effortForTurn(EDIT)).toBeUndefined();
   });
 
   /** `/bt-spec`, `/bt-prototype` — the user explicitly asked for deep work. Answer the question asked. */

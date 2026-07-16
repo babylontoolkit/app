@@ -389,7 +389,7 @@ complaint must never be answered with more caching until the step log has been r
 | # | Pathology | Measured | Fix, and where it is enforced |
 |---|---|---|---|
 | 1 | **Redrafting around tool rounds.** Each tool call makes the model abandon its draft, re-read the prefix, and start over. | 29,173 output tokens across 6 tool steps to load **one** distinct skill = **68% of the bill, 75% of the wall clock**, writing code the user never saw. A tool CALL itself is ~50 tokens; the rest is redrafting. | Pre-load into the cached prefix; `allowTools = false` on creation/preloaded/slash turns (`preload-skills.ts`, `proxy.ts`). |
-| 2 | **Tokens the user never sees.** Aggregate usage hides this completely. | One generation billed **44,308 output tokens** whose final visible answer was ~9k → **~35k output tokens** spent on abandoned attempts, re-generated answers after a round cap, and verbose tool preambles. | `steps[].textChars` + the **density** ratio (below). ⚠️ The metric that measured this was **blind to it after the pathology-1 fix** — see §"The metric that went blind". |
+| 2 | **Tokens the user never sees.** Aggregate usage hides this completely. | *(historical — this generation's six-tool-round shape no longer exists; for today's product see §"MEASURED")* One generation billed **44,308 output tokens** whose final visible answer was ~9k → **~35k output tokens** spent on abandoned attempts, re-generated answers after a round cap, and verbose tool preambles. **Today: 1.4–2.1 ch/tok, ~40–60% of output is thinking, ~10.5k tokens on the worst run.** | `steps[].textChars` + the **density** ratio (below). ⚠️ The metric that measured this was **blind to it after the pathology-1 fix** — see §"The metric that went blind". |
 | 3 | **Dead air — paying full output rate for reasoning returned as EMPTY text.** `thinking.display` defaults to `"omitted"`. | **90.5s of total silence** before the first byte — not even HTTP headers — on a 152s generation. Billed in full. | `display: 'summarized'` costs nothing extra and turns those tokens into a stream the user watches (`thinkingFetch`, `spec/anthropic-models.md` §3.4). |
 | 4 | **A clean `stop` that said nothing.** `finishReason: 'stop'` does not mean the model produced text. | `result.text === ''`, `response.messages === []`, nothing thrown — and **10,054 output tokens billed, 405 credits taken**. | Zero-text is a hard failure → §4.6 auto-refund (`proxy.ts`). |
 | 5 | **A tool-argument schema violation killing the generation after the tokens are spent.** The AI SDK validates args BEFORE `execute`; a violation throws `InvalidToolArgumentsError`. | `load_skill({})` killed a real edit turn: **45s and ~3,500 output tokens**, file untouched, user shown a zod dump. | All tool params optional; validate inside `execute`, which can return a correcting sentence the model reads on its next step (`tools.ts`, pinned by `tools.spec.ts`). |
@@ -398,11 +398,21 @@ complaint must never be answered with more caching until the step log has been r
 | 8 | **Under-thinking — the most expensive saving there is.** A cheaper effort does not return a smaller correct answer; it returns a **confident wrong one**, and the repair turns cost more than the saving. | `effort: low` was 22% cheaper on a creation and, on an edit, **wrote into a read-only project zone** (`src/routing/router.tsx`, §4.4c) and abandoned diff-edits for whole-file rewrites. | `low` is DELETED from `EffortLevel`; `parseEffort()` clamps it back to `medium`. **There is no cheap tier** (`spec/anthropic-models.md` §3.5a). |
 | 9 | **Cache churn — paying to keep *creating* a cache rather than read one.** | The 5-minute default TTL expires while the user is playing the game we just built; the next turn re-writes ~111k tokens at full price. Ten turns: **~$4.16 vs ~$0.97**. | `ttl: '1h'` (§"The cache TTL is 1 hour"). |
 | 10 | **Re-sending the whole conversation, uncached, forever.** | Turn 5 of a real build: **9,476 → 512 tokens re-sent per turn (−94.6%)** from compaction; a long prose session shaves a further ~49% on top once the turn cap bites. | **Fixed** — compaction + a char cap + a turn cap (`llm/history.ts`, §5 below). |
+| 11 | **Dead time that costs ZERO tokens — text we already had, withheld by our own filter.** The bill is not the only thing a generation spends. | Measured on a live creation: the server-side shell-strip buffered EVERY `<boltAction>` until its close tag, including `type="file"`. A 13,776-char game script reached the browser **51 seconds** after the model began sending it, as one lump — 18 text chunks for the whole generation, biggest silences 51.5s / 31.1s / 12.6s. Nothing threw; the artifact was byte-perfect; the product just looked frozen, and the freeze scaled with file size. | **Fixed 2026-07-16** — a file action forwards its opening tag and streams its body on arrival; only `shell`/`start` (which genuinely cannot be judged half-read) still buffer (`agent/shell-strip.ts`). After: **157 chunks, max 222 chars, zero silences ≥2s.** |
 
 **Two things that look like waste and are not.** A **Stop** is not waste: the tokens were really consumed
 and are billed for what was spent to the abort point (§4.12). A **hard failure** is waste, but it is *our*
 waste — the provider still bills us, and the user is auto-refunded (§4.6). Never "fix" either by charging
 the user more.
+
+**⚠️ And one that costs nothing and is still real (pathology 11).** Every other row here is measured in
+tokens, which trains the eye to price a defect by its bill — so a defect with a bill of **$0** reads as
+"not a problem" and survives. The 51-second freeze cost nothing, changed no bytes, broke no test, and was
+the single worst thing about using the product. **A latency complaint must be traced to where the time
+actually went** (§"The instrumentation that finds it") — the step log said `92s · 89 tok/s`, entirely
+normal, because the time was lost AFTER the model and the server-side log stops at the model. It took a
+client-side chunk trace to see it. When someone says "it feels slow", the answer is a measurement, never
+an explanation of why it must be fast.
 
 ### The instrumentation that finds it
 
@@ -462,7 +472,8 @@ Real text runs **~3.5–4 characters per output token**. So:
 | Step | Density | Reading |
 |---|---|---|
 | 44,308 out, ~168,000 chars text | **3.8 ch/tok** | healthy — the bill bought the artifact |
-| 44,308 out, ~34,200 chars text (the measured case: ~9k *tokens* of visible answer) | **0.77 ch/tok** | ~35k of that output was thinking/redrafting |
+| 44,308 out, ~34,200 chars text (the historical case: ~9k *tokens* of visible answer) | **0.77 ch/tok** | ~35k of that output was thinking/redrafting |
+| 8,037 out, 15,049 chars text (a real warm creation, 2026-07-16) | **1.9 ch/tok** | ~half that output was thinking — **this is today's normal**, see §"MEASURED" |
 | 5,000 out, **0 chars text** | **0** | produced literally nothing for the user (`silentStepOutputTokens`) |
 
 ⚠️ **Read the units.** The pathology-2 figure "visible answer was ~9k" is ~9k **tokens**, not characters
@@ -480,12 +491,83 @@ metric whose definition encodes the SHAPE of the old failure ("waste = extra ste
 shape changes — and it dies reporting zero, which reads as success. Prefer a definition tied to the thing
 itself ("output that produced no text") over one tied to the mechanism you happened to see it through.
 
-⚠️ **Not yet measured:** whether real creations today are near 3.8 ch/tok (healthy — the artifact IS the
-output) or near 0.2 (35k of thinking). The old metric could not tell us and the new one has no production
-data yet. **Do not "fix" the effort policy on the strength of the pre-fix 35k figure** — that number was
-measured on a six-tool-round generation that no longer exists. Read the density first. (And note
-pathology 8: `low` is deleted because a cheaper tier returned confident wrong answers, so "think less" is
-not sitting there waiting to be switched on.)
+### MEASURED, 2026-07-16: seven live creations
+
+Nine real creations against `claude-opus-4-8` at `medium` effort, read off the step log and a
+client-side chunk trace:
+
+| Run | Genre | out | chars text | Density | Thinking window | Thinking | Cached / written | Cost |
+|---|---|---|---|---|---|---|---|---|
+| 1 | racing (cold) | 6,050 | 12,615 | 2.1 | — | — | 0 / 146,097 | $1.61 |
+| 2 | racing (warm) | 8,037 | 15,049 | 1.9 | — | — | 113,762 / 8,745 | $0.35 |
+| 3 | adventure (new blocks) | 7,378 | 15,316 | 2.1 | — | — | 43,269 / 67,267 | $0.88 |
+| 4 | adventure (warm) | 6,180 | 12,822 | 2.1 | — | — | 110,536 / **0** | **$0.21** |
+| 5 | third-person (new block) | 14,906 | 28,034 | 1.9 | — | — | 43,269 / 70,958 | $1.11 |
+| 6 | third-person (warm) | 16,983 | 24,375 | 1.4 | 82s of 189s | **43%** | 114,227 / **0** | $0.49 |
+| 7 | racing (warm) | 8,267 | 16,264 | 2.0 | 10s of 93s | **11%** | 113,762 / 175 | $0.27 |
+| 8 | third-person (warm) | 24,438 | 31,033 | 1.3 | 157s of 290s | **54%** | 114,227 / **0** | $0.67 |
+| 9 | physics (new blocks) | 5,477 | 11,110 | 2.0 | **3.1s of 61s** | **5%** | 43,269 / 56,874 | $0.73 |
+
+**Thinking is 5–54%, scaling with the difficulty of the ask** — not a flat rate. A physics playground
+barely thinks (3.1s); a third-person platformer with a character controller thinks for 157s. That is
+effort proportional to difficulty, i.e. correct behaviour, not waste. The `~35k` figure is retired: the
+heaviest real run spent ~13.2k output tokens thinking.
+
+### ⚠️ `charsPerOutputToken` is calibrated for PROSE and will libel every code generation
+
+**The "~3.5–4 chars/output token" baseline is English text. Our output is TypeScript and CSS, which
+tokenize far denser** — punctuation, identifiers and indentation each cost tokens. Measured here, a
+near-pure code artifact with almost no thinking (**run 9: 3.1s of thinking**) comes in at **2.0 ch/tok**.
+So **~2.0–2.2 IS the healthy baseline for this product**, and a 3.5–4 threshold flags every good
+generation as "billed for thinking, not artifact" — a false positive on literally every creation,
+reported confidently, forever.
+
+Subtracting the measured thinking window from `outTokens` gives the real code density across runs 6–9:
+**2.14 / 2.21 / 2.54 / 2.77** — consistent, and nowhere near 3.8.
+
+**Use the reasoning WINDOW, not density, to price thinking.** It is a direct measurement (`g:` channel
+first-to-last timestamp × the decode rate) and needs no per-language constant. Density is an indirect
+proxy whose constant depends on what the model is writing — and this product writes code, not prose.
+Density is still useful for one thing: a step far below the ~2.0 code baseline (run 8's 1.3) is thinking
+heavy. Reading it against 3.8 is what produces the false alarm.
+
+**This is the third time a metric here has confidently encoded a wrong assumption** (`wastedOutput`'s
+step-shape, the units error below, and now a prose constant on code). The pattern: **a metric that
+requires a magic constant will be wrong the moment the thing it measures changes character.** Prefer the
+measurement that needs no constant.
+
+**Caching needs nothing ON A CREATION.** A warm creation hits its whole prefix (`0 written`, runs 4 and
+6). Cold starts and new-block genres cost $0.9–1.6 once, then volume erases them. Note runs 3 and 5: a
+routed block the prefix has not seen before invalidates everything downstream of it — including the
+byte-identical starter file context — because the blocks sit ahead of the file context in the system array.
+
+> 🔴 **The paragraph that used to live here said that ordering "optimises EDIT turns, where files change
+> every turn and blocks never do, and must not be fixed." That was WRONG IN BOTH HALVES, and it was
+> written from creation data before a single edit turn had ever been measured.** Blocks change PER
+> MESSAGE (`selectOnDemandBlocks` is keyed off the user's wording); files often do NOT change (an
+> answer-only edit touches nothing). Measured 2026-07-16: **only 1 of 4 edit turns cache-hit**, the rest
+> paid ~110–160k writes that nothing read — at 2×, i.e. **worse than not caching at all** — and edits ran
+> **6–12× the 65-credit floor** that a warm edit demonstrates. See CLAUDE.md §"THE BIGGEST OPEN NUMBER".
+> **Do not act on the old claim OR its inverse without measuring**: reordering may still be right for
+> creations and wrong for edits, and sticky/append-only/sorted block routing may beat reordering outright.
+> The general lesson is the one this session kept re-learning: **a conclusion drawn from one turn type is
+> not a conclusion about the system.**
+
+**⚠️ Thinking spend has ~8× run-to-run variance and CANNOT be tuned from a handful of runs.** Run 6 thought
+for 87 seconds; run 7 for 10 — same model, same effort, same prompt shape. Any effort change measured on a
+few generations is indistinguishable from that noise. This does not license touching the effort policy: it
+prices the eval work. Thinking is worth ~⅓ of COGS, so an output-quality eval suite now has a quantified
+payoff rather than being hygiene — and until it exists, "think less" trades unmeasured quality for
+unmeasured savings. (Pathology 8 stands: `low` is deleted because the cheaper tier returned confident wrong
+answers, so there is no cheap tier waiting to be switched on.)
+
+**Output being most of the bill is the SUCCESS condition, not a pathology.** Input was driven from
+1,100,188 → ~110k and most of that now cache-reads at 0.1×; when input is optimised away, output becomes
+the majority by arithmetic. Roughly half of it is the artifact itself — the files the user asked for — which
+is not waste at any price. Only the thinking half is even a candidate.
+
+**The credit math is confirmed end-to-end:** run 6 billed **163 credits** against an independently derived
+raw cost of $0.485 (× 334 = 162). The ledger charges what the generation costs.
 
 ---
 

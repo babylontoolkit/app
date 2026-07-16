@@ -223,3 +223,74 @@ describe('the turn-count window (HISTORY_WINDOW_TURNS)', () => {
     expect(HISTORY_WINDOW_TURNS).toBeGreaterThan(0);
   });
 });
+
+/**
+ * Thinking must not survive into the next turn — a CORRECTNESS rule, not a budget one.
+ *
+ * Measured live, 2026-07-16: every edit turn died with
+ *
+ *   Custom error: messages.2.content.0.thinking.signature: Field required
+ *
+ * 0 in, 0 out, ~0.3s, `finish=error` — the API refused the request before generating a token. The
+ * proxy streams reasoning to the client as plain text (`AgentChunk` has no signature field), so the
+ * saved message carries thinking WITHOUT the signature Anthropic issued, and posting it back is
+ * rejected. Creations were fine (no history); every turn after the first was broken, on every project.
+ */
+describe('compactHistory — thinking never survives the turn', () => {
+  const withReasoning = (): Message =>
+    ({
+      id: 'a1',
+      role: 'assistant',
+      content: 'Built it.',
+      reasoning: 'Let me think about the character controller...',
+      parts: [
+        { type: 'reasoning', reasoning: 'Let me think about the character controller...' },
+        { type: 'text', text: 'Built it.' },
+      ],
+    }) as unknown as Message;
+
+  it('strips the reasoning part that the API rejects without a signature', () => {
+    const [out] = compactHistory([withReasoning()]) as Array<Message & { reasoning?: string }>;
+
+    expect(out.parts?.some((p) => p.type === 'reasoning')).toBe(false);
+    expect(out.reasoning).toBeUndefined();
+  });
+
+  it('keeps the answer itself — only the thinking goes', () => {
+    const [out] = compactHistory([withReasoning()]);
+
+    expect(out.content).toBe('Built it.');
+    expect(out.parts?.some((p) => p.type === 'text')).toBe(true);
+  });
+
+  it('leaves a message with no reasoning untouched (same object, no needless copy)', () => {
+    const plain = userTurn('add a boost');
+    const [out] = compactHistory([plain]);
+
+    expect(out).toBe(plain);
+  });
+
+  it('strips reasoning even when content is not a plain string', () => {
+    const message = {
+      id: 'a2',
+      role: 'assistant',
+      content: undefined,
+      parts: [
+        { type: 'reasoning', reasoning: 'thinking...' },
+        { type: 'text', text: 'done' },
+      ],
+    } as unknown as Message;
+
+    const [out] = compactHistory([message]);
+
+    expect(out.parts?.some((p) => p.type === 'reasoning')).toBe(false);
+    expect(out.parts?.some((p) => p.type === 'text')).toBe(true);
+  });
+
+  it('never touches a user message', () => {
+    const user = { id: 'u1', role: 'user', content: 'make it faster' } as Message;
+    const [out] = compactHistory([user]);
+
+    expect(out).toBe(user);
+  });
+});
