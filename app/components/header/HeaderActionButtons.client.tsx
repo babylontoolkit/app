@@ -4,6 +4,7 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { DeployButton } from '~/components/deploy/DeployButton';
 import { ShareButton } from '~/components/share/ShareButton';
 import { GitHubSyncButton } from '~/components/github/GitHubSyncButton';
+import { SaveStatus } from '~/components/persistence/SaveStatus.client';
 import { brand } from '~/config/brand';
 
 interface HeaderActionButtonsProps {
@@ -19,6 +20,17 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
 
   return (
     <div className="flex items-center gap-1">
+      {/*
+       * Save + the saved/not-saved indicator (§4.5.4b).
+       *
+       * 🔴 Deliberately NOT behind `shouldShowButtons`. Everything else here needs a running preview —
+       * you cannot share or deploy a game that has not built. Saving is the opposite: a project that
+       * failed to build is precisely the one whose code the user cannot afford to lose, and under
+       * repo-primary persistence this button is the only thing standing between them and a closed tab.
+       * `SaveStatus` renders nothing until there is a project, which is the correct gate.
+       */}
+      <SaveStatus />
+
       {/* Share the game as a public /play build (§4.8) */}
       {shouldShowButtons && <ShareButton />}
 

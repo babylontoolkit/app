@@ -178,6 +178,58 @@ export async function pullFromRepo(
   }
 }
 
+/** The two buttons (§4.13). There is deliberately no third option, and `merge` is not coming. */
+export type DivergenceChoice = 'pull-overwrite' | 'push-to-new-branch';
+
+export interface ResolveOutcome {
+  ok: boolean;
+
+  /** `pull-overwrite` — the repo's files, to mount. The caller checkpoints BEFORE applying them. */
+  files?: SerializedFileMap;
+
+  /** `push-to-new-branch` — where the user's work went. Worth showing them; it is theirs to find. */
+  branch?: string;
+
+  reconnect?: boolean;
+  message?: string;
+}
+
+/**
+ * Answer a divergence (§4.13) — the repo moved AND this browser has work that was never saved.
+ *
+ * The platform never merges, so there are exactly two answers and the user picks one. Both are
+ * lossless: `pull-overwrite` is preceded by a local checkpoint (the caller's job — it holds the files),
+ * and `push-to-new-branch` puts the user's version somewhere new rather than over anything.
+ */
+export async function resolveDivergence(
+  projectId: string,
+  choice: DivergenceChoice,
+  input?: { files?: SerializedFileMap; summary?: string },
+): Promise<ResolveOutcome> {
+  try {
+    const response = await fetch(`/api/projects/${projectId}/github`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'resolve', choice, ...input }),
+    });
+
+    const payload = (await response.json().catch(() => null)) as ResolveOutcome | null;
+
+    if (!payload) {
+      return { ok: false, message: `The server returned an error (${response.status}).` };
+    }
+
+    if (!payload.ok) {
+      logger.error(`Resolve (${choice}) failed for ${projectId}: ${payload.message ?? response.status}`);
+    }
+
+    return payload;
+  } catch {
+    return { ok: false, message: 'Could not reach the server. Your work is still here — try again.' };
+  }
+}
+
 export interface SaveOutcome {
   ok: boolean;
 

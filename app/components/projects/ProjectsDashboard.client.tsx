@@ -20,6 +20,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { db, getAll, deleteById, type ChatHistoryItem } from '~/lib/persistence';
 import { listProjects, deleteProject, renameProject, ApiError } from '~/lib/persistence/projects';
 import { setPendingOpenProject, PENDING_REMIX_KEY } from '~/lib/persistence/pending-remix';
+import { describeProjectSaveBadge } from '~/lib/persistence/save-status';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
 import type { Project } from '~/types/project';
 import { classNames } from '~/utils/classNames';
@@ -299,11 +300,40 @@ export function ProjectsDashboard() {
                         <span className="i-ph:globe-simple" /> Shared
                       </span>
                     )}
-                    {project.linkedRepo && (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bolt-elements-background-depth-3">
-                        <span className="i-ph:github-logo" /> {project.linkedRepo}
-                      </span>
-                    )}
+                    {/*
+                     * Where this project is saved (§4.5.4b).
+                     *
+                     * 🔴 This badge ALWAYS renders. It used to appear only when `linkedRepo` was set —
+                     * so the state worth warning about (this game exists in one browser and nowhere
+                     * else) was the one state the dashboard said nothing at all about, and silence
+                     * reads as "fine".
+                     */}
+                    {(() => {
+                      const badge = describeProjectSaveBadge(project);
+
+                      return (
+                        <span
+                          title={badge.detail}
+                          className={classNames(
+                            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full',
+                            badge.tone === 'warning'
+                              ? 'bg-amber-500/10 text-amber-400'
+                              : 'bg-bolt-elements-background-depth-3',
+                          )}
+                        >
+                          <span
+                            className={classNames(
+                              badge.tone === 'warning'
+                                ? 'i-ph:warning-circle'
+                                : project.provider === 'gitlab'
+                                  ? 'i-ph:gitlab-logo-simple'
+                                  : 'i-ph:github-logo',
+                            )}
+                          />{' '}
+                          {badge.label}
+                        </span>
+                      );
+                    })()}
                   </div>
 
                   <div className="mt-2 text-xs text-bolt-elements-textTertiary">

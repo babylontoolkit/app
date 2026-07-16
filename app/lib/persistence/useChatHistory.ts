@@ -88,6 +88,17 @@ export const repoStatus = atom<RepoStatus | undefined>(undefined);
 export const mountDivergence = atom<{ projectId: string; remoteHead: string } | undefined>(undefined);
 
 /**
+ * How many things the user has made in this project — the nudge MILESTONE counter (§4.5.4b).
+ *
+ * §4.5.4b forbids a timed nudge, so this is the only clock the nudges get: the user's own progress. It
+ * counts checkpoints rather than generations exactly (a pull or a restore also checkpoints), and that
+ * imprecision is fine and deliberate — it drives chrome, never a decision about anyone's files. It is
+ * seeded on mount from the local checkpoint seq, which is monotonic and survives the 20-checkpoint
+ * trim, so a long-lived project's milestones do not silently stop at the trim boundary.
+ */
+export const generationCount = atom<number>(0);
+
+/**
  * Put a project's files on screen (§4.5.4b) — from this browser, or from the user's repo.
  *
  * This is the "load from GitHub seamlessly" half. It does no deciding of its own: it gathers the three
@@ -112,6 +123,13 @@ async function mountProjectFiles(pid: string): Promise<void> {
   ]);
 
   repoStatus.set(status);
+
+  /*
+   * Seed the milestone counter (§4.5.4b). `localSeq` is monotonic and unaffected by the checkpoint
+   * trim, so a project reopened after twenty generations resumes counting where it was rather than
+   * restarting its nudges from zero.
+   */
+  generationCount.set(sync.localSeq === undefined ? 0 : sync.localSeq + 1);
 
   const decision = selectMountSource({
     linked: status.linked,
@@ -348,6 +366,54 @@ async function autoPush(pid: string): Promise<void> {
      */
     mountDivergence.set({ projectId: pid, remoteHead: '' });
   }
+}
+
+/**
+ * Save, because the user pressed Save (§4.5.4b).
+ *
+ * The same queue and the same route as auto-push — deliberately. A manual Save that took its own path
+ * could race the automatic one and produce the spurious divergence the queue exists to prevent, and it
+ * would need its own copy of the "did it land?" logic, which is the half that must never be wrong.
+ *
+ * The difference from `autoPush` is only in what it does about being UNLINKED: auto-push does nothing
+ * (that is the normal state of a project nobody has saved yet), whereas pressing Save is the user
+ * asking for exactly the thing that makes it linked, so the route creates the repository.
+ *
+ * Never throws. The outcome is reported through `saveState`, which the header badge reads.
+ */
+export async function requestSave(pid: string): Promise<void> {
+  const outcome = await saveQueueFor(pid).request();
+
+  if (!outcome) {
+    // Coalesced into a save already in flight. That save reports for both of us.
+    return;
+  }
+
+  if (outcome.divergence) {
+    mountDivergence.set({ projectId: pid, remoteHead: '' });
+    return;
+  }
+
+  if (outcome.reconnect) {
+    // The badge offers the reconnect button; `saveState` already carries it. Nothing to add here.
+    return;
+  }
+
+  if (outcome.ok) {
+    /*
+     * Refresh the link. On a FIRST save this is what turns the badge from "browser only" into the
+     * user's own repo name — the whole point of having pressed the button, and invisible without it.
+     */
+    repoStatus.set(await getRepoStatus(pid));
+
+    toast.success(outcome.created ? `Saved. Your game is now in your own repository.` : 'Saved.');
+  }
+}
+
+/** Send the user through OAuth and bring them back to this page. */
+export function startGitConnect(provider: 'github' | 'gitlab' = 'github'): void {
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  window.location.href = `/api/git/connect/${provider}?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
 /** Read the one-time remix seed, if there is one, and adopt it as this browser's first checkpoint. */
@@ -670,6 +736,7 @@ ${value.content}
        * clears it again when it lands.
        */
       unsavedWork.set(true);
+      generationCount.set(generationCount.get() + 1);
 
       logger.info(`Checkpointed project ${pid} at message ${messageId}`);
 
