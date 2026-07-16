@@ -19,6 +19,7 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { errorResponse } from '~/lib/.server/http';
 import { runPublishingChecklist } from '~/lib/.server/share/checklist';
 import { publishBuild, unpublish } from '~/lib/.server/share/publish';
+import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 
 interface PublishBody {
@@ -79,6 +80,23 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       },
       context,
     );
+
+    /*
+     * Funnel (§5A). SHARE_PUBLISHED fires on every publish; FIRST_PLAYABLE only when this project had
+     * no `shareId` before — i.e. its first public, playable URL. The two are distinct funnel stages, so
+     * the "first playable → share" progression is measurable rather than collapsed into one event.
+     */
+    const monitor = getMonitor(context);
+
+    if (!project.shareId) {
+      monitor.track(FUNNEL_EVENTS.FIRST_PLAYABLE, { userId: user.id, projectId: project.id });
+    }
+
+    monitor.track(FUNNEL_EVENTS.SHARE_PUBLISHED, {
+      userId: user.id,
+      projectId: project.id,
+      gallery: Boolean(body.submitToGallery),
+    });
 
     return json(result, { status: 201 });
   } catch (error) {

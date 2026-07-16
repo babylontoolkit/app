@@ -1,6 +1,10 @@
 /* Color Tokens Light Theme */
+/* The bare `[data-theme]` selectors (not just `:root[...]`) let any nested element re-scope the whole
+ * token set — this is what makes an always-dark chrome (sidebar, header) possible while the page stays
+ * on the user's chosen theme. */
 :root,
-:root[data-theme='light'] {
+:root[data-theme='light'],
+[data-theme='light'] {
   --bolt-elements-borderColor: theme('colors.alpha.gray.10');
   --bolt-elements-borderColorActive: theme('colors.accent.600');
 
@@ -108,7 +112,8 @@
 
 /* Color Tokens Dark Theme */
 :root,
-:root[data-theme='dark'] {
+:root[data-theme='dark'],
+[data-theme='dark'] {
   --bolt-elements-borderColor: theme('colors.alpha.white.10');
   --bolt-elements-borderColorActive: theme('colors.accent.500');
 

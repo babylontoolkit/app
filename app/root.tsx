@@ -1,9 +1,10 @@
 import { useStore } from '@nanostores/react';
 import type { LinksFunction } from '@remix-run/cloudflare';
-import { Links, Meta, Outlet, Scripts, ScrollRestoration } from '@remix-run/react';
+import { Links, Meta, Outlet, Scripts, ScrollRestoration, isRouteErrorResponse, useRouteError } from '@remix-run/react';
 import tailwindReset from '@unocss/reset/tailwind-compat.css?url';
 import { themeStore } from './lib/stores/theme';
 import { brand } from './config/brand';
+import { captureClientError } from './lib/monitoring/client';
 import { stripIndents } from './utils/stripIndent';
 import { createHead } from 'remix-island';
 import { useEffect } from 'react';
@@ -80,12 +81,12 @@ export const Head = createHead(() => (
      */}
     <meta name="theme-color" content="#0a0a0a" />
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content={brand.productName} />
-    <meta property="og:title" content={brand.productName} />
+    <meta property="og:site_name" content={brand.productFullName} />
+    <meta property="og:title" content={brand.productFullName} />
     <meta property="og:description" content={brand.metaDescription} />
     <meta property="og:image" content={brand.assets.ogImage} />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content={brand.productName} />
+    <meta name="twitter:title" content={brand.productFullName} />
     <meta name="twitter:description" content={brand.metaDescription} />
     <meta name="twitter:image" content={brand.assets.ogImage} />
 
@@ -135,6 +136,40 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 import { logStore } from './lib/stores/logs';
+
+/**
+ * Root error boundary (SPEC §5A — client error tracking).
+ *
+ * Catches anything a route throws that no closer boundary handled, forwards it to the vendor-neutral
+ * monitor (no-op until a collector is configured), and shows a brand-driven fallback instead of a blank
+ * screen. Ordinary 404 route responses are NOT captured — a mistyped URL is not an error to page ops
+ * about. `Layout` (above) wraps this automatically in Remix v2, so it renders inside the app shell.
+ */
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const isNotFound = isRouteErrorResponse(error) && error.status === 404;
+
+  useEffect(() => {
+    if (!isNotFound) {
+      captureClientError(error, 'root-error-boundary');
+    }
+  }, [error, isNotFound]);
+
+  const heading = isNotFound ? 'Page not found' : 'Something went wrong';
+  const detail = isNotFound
+    ? "The page you're looking for doesn't exist."
+    : 'An unexpected error occurred. Please try again.';
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen gap-4 p-8 text-center">
+      <h1 className="text-2xl font-semibold text-bolt-elements-textPrimary">{heading}</h1>
+      <p className="text-bolt-elements-textSecondary">{detail}</p>
+      <a href="/" className="text-bolt-elements-item-contentAccent underline">
+        Back to {brand.productName}
+      </a>
+    </div>
+  );
+}
 
 export default function App() {
   const theme = useStore(themeStore);

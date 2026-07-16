@@ -13,6 +13,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { createRequestClient, isSupabaseConfigured } from '~/lib/.server/supabase/client';
 import { errorResponse } from '~/lib/.server/http';
 import { env } from '~/lib/.server/env';
+import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 
 const logger = createScopedLogger('api.auth');
 
@@ -67,6 +68,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
         if (error) {
           return json({ error: true, message: error.message }, { status: 400, headers });
         }
+
+        // Funnel entry point (§5A). The grant — and the VERIFIED event — come later, once confirmed.
+        getMonitor(context).track(FUNNEL_EVENTS.SIGNUP);
 
         return json(
           { ok: true, message: 'Check your inbox to verify your email, then you can start building.' },

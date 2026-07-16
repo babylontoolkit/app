@@ -11,7 +11,7 @@ import { brand } from '~/config/brand';
 
 export function loader() {
   const manifest = {
-    name: brand.productName,
+    name: brand.productFullName,
     short_name: brand.productName,
     description: brand.metaDescription,
     start_url: '/',

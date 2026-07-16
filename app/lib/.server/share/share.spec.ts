@@ -14,7 +14,7 @@
 import { describe, expect, it } from 'vitest';
 import { runPublishingChecklist } from './checklist';
 import { buildObjectKey, buildPrefix, contentTypeFor, generateShareId, UnsafeBuildPathError } from './publish';
-import { buildContentKey, cacheControlFor, resolvePlayOrigin } from './serve';
+import { buildContentKey, cacheControlFor, isPlayServableInProduction, resolvePlayOrigin } from './serve';
 import { deriveRemix } from './remix';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { Project } from '~/lib/.server/projects/types';
@@ -138,6 +138,19 @@ describe('play origin isolation (§5)', () => {
     const origin = resolvePlayOrigin({ cloudflare: { env: { PLAY_URL: 'https://play.example.com/' } } });
 
     expect(origin).toEqual({ origin: 'https://play.example.com', isolated: true });
+  });
+
+  it('serves in local dev even without PLAY_URL (dev is not the boundary)', () => {
+    expect(isPlayServableInProduction({ cloudflare: { env: { NODE_ENV: 'development' } } })).toBe(true);
+  });
+
+  it('REFUSES to serve in production when PLAY_URL is unset (fail closed)', () => {
+    expect(isPlayServableInProduction({ cloudflare: { env: { NODE_ENV: 'production' } } })).toBe(false);
+  });
+
+  it('serves in production once PLAY_URL points at a separate origin', () => {
+    const context = { cloudflare: { env: { NODE_ENV: 'production', PLAY_URL: 'https://play.example.com' } } };
+    expect(isPlayServableInProduction(context)).toBe(true);
   });
 });
 

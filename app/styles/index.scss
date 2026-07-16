@@ -14,7 +14,73 @@ body {
   background-color: var(--bolt-elements-bg-depth-1);
 }
 
+/*
+ * `@unocss/reset/tailwind-compat` intentionally KEEPS the native button background (#efefef), unlike
+ * full Tailwind's preflight. That makes any bare <button> render as a light box — white-on-white in
+ * dark theme. Zero it here; buttons that want a fill set a `bg-*` utility, which wins on specificity.
+ */
+button {
+  background-color: transparent;
+}
+
+/*
+ * Docked sidebar (§4.1). The sidebar drawer is `position: fixed`, so it does not move with body
+ * padding — reserving that space on <body> reflows all NORMAL-FLOW page content to the RIGHT of the
+ * pinned sidebar instead of letting it overlap. The `.sidebar-docked` class is toggled by the Menu
+ * component (only mounted where a sidebar exists), so no sidebar-less route ever gets a phantom gap.
+ * border-box is in effect app-wide, so this shrinks content width rather than causing overflow.
+ *
+ * Reserving a 340px column only makes sense with room to spare, so the reflow is gated to wide
+ * viewports; below that, a docked sidebar simply stays pinned open as an overlay.
+ */
+body {
+  transition: padding-left 0.2s ease;
+}
+
+/* The header wordmark slides in step with the docking animation so it stays anchored over the
+ * sidebar instead of being pushed away with the rest of the header. */
+.header-brand {
+  transition: transform 0.2s ease;
+}
+
+@media (min-width: 1024px) {
+  body.sidebar-docked .header-brand {
+    transform: translateX(calc(-1 * var(--sidebar-dock-width, 340px)));
+  }
+
+  body.sidebar-docked {
+    padding-left: var(--sidebar-dock-width, 340px);
+
+    /*
+     * The builder splits into an in-flow chat column + an in-flow workbench SPACER (sized by
+     * `--workbench-width`), with the real workbench panel `position: fixed` on top of that spacer
+     * (sized by `--workbench-inner-width`, placed by `--workbench-left`). The spacer already tracks
+     * the padded flow width — so DO NOT touch `--workbench-width` (that double-shrinks it and the chat
+     * flex-grows under the panel). Only the fixed panel needs correcting: its `100%` is the viewport,
+     * which body padding does not shrink, so recompute it against (viewport − dock) to line the panel
+     * up flush with its spacer instead of spilling over the chat.
+     */
+    --workbench-inner-width: min(calc(100% - var(--sidebar-dock-width) - var(--chat-min-width)), 2536px);
+    --workbench-left: calc(100% - var(--workbench-inner-width));
+  }
+
+  /*
+   * Chat-hidden mode gives the workbench the full width; when docked it must start after the sidebar.
+   * Targeted by data-attribute (the `.BaseChat` class is CSS-module-hashed, unreachable from here).
+   */
+  body.sidebar-docked [data-chat-visible='false'] {
+    --workbench-inner-width: calc(100% - var(--sidebar-dock-width));
+    --workbench-left: var(--sidebar-dock-width);
+  }
+}
+
 :root {
+  --sidebar-dock-width: 340px;
+
+  /* The dark-purple "chrome" gradient shared by the header and the sidebar's top row so the two top
+   * bars are the exact same colour and read as one continuous bar. Defined once to prevent drift. */
+  --chrome-gradient: linear-gradient(180deg, #2a1550 0%, #1a1030 100%);
+
   --gradient-opacity: 0.8;
   --primary-color: rgba(158, 117, 240, var(--gradient-opacity));
   --secondary-color: rgba(138, 43, 226, var(--gradient-opacity));

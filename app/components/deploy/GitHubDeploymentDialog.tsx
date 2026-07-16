@@ -434,7 +434,9 @@ export function GitHubDeploymentDialog({ isOpen, onClose, projectName, files }: 
         const { data: commitData } = await octokit.git.createCommit({
           owner: connection.user.login,
           repo: sanitizedRepoName,
-          message: !repoExists ? `Initial commit from ${brand.productName}` : `Update from ${brand.productName}`,
+          message: !repoExists
+            ? `Initial commit from ${brand.productFullName}`
+            : `Update from ${brand.productFullName}`,
           tree: treeData.sha,
           parents: parentCommitSha ? [parentCommitSha] : [], // Use parent if available
         });

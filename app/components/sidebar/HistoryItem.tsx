@@ -127,7 +127,7 @@ export function HistoryItem({
               />
               {onDuplicate && (
                 <ChatActionButton
-                  toolTipContent="Duplicate"
+                  toolTipContent="Remix"
                   icon="i-ph:copy h-4 w-4"
                   onClick={(event) => {
                     event.preventDefault();

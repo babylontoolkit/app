@@ -2,6 +2,7 @@ import React, { Component } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
 import { Button } from '~/components/ui/Button';
 import { AlertTriangle } from 'lucide-react';
+import { captureClientError } from '~/lib/monitoring/client';
 
 interface Props {
   children: ReactNode;
@@ -26,6 +27,9 @@ export class GitHubErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error('GitHub Error Boundary caught an error:', error, errorInfo);
+
+    // Forward to the vendor-neutral monitor (§5A) — no-op until a collector is configured.
+    captureClientError(error, 'github-error-boundary');
 
     if (this.props.onError) {
       this.props.onError(error, errorInfo);
@@ -93,10 +97,8 @@ export function useGitHubErrorHandler() {
   const handleError = React.useCallback((error: unknown, context?: string) => {
     console.error(`GitHub Error ${context ? `(${context})` : ''}:`, error);
 
-    /*
-     * You could integrate with error tracking services here
-     * For example: Sentry, LogRocket, etc.
-     */
+    // Route through the vendor-neutral monitor (§5A) rather than a hardcoded vendor SDK.
+    captureClientError(error, `github:${context ?? 'async'}`);
 
     return error instanceof Error ? error.message : 'An unknown error occurred';
   }, []);

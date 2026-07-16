@@ -18,12 +18,28 @@
 import type { LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { getObjectStore } from '~/lib/.server/storage';
-import { buildContentKey, cacheControlFor, resolvePlayOrigin } from '~/lib/.server/share/serve';
+import {
+  buildContentKey,
+  cacheControlFor,
+  isPlayServableInProduction,
+  resolvePlayOrigin,
+} from '~/lib/.server/share/serve';
 import { contentTypeFor } from '~/lib/.server/share/publish';
 import { renderPlayWrapper } from '~/lib/.server/share/wrapper';
 
 function notFound(): Response {
   return new Response('This game is not available.', { status: 404, headers: { 'content-type': 'text/plain' } });
+}
+
+/**
+ * Refuse (fail closed) to serve a shared build same-origin in production (§5). A game is user code; on
+ * the app origin its JS could read app cookies. Only the play PATH is refused, never the whole app.
+ */
+function playNotIsolated(): Response {
+  return new Response(
+    'This game cannot be served from this origin. The play domain (PLAY_URL) is not configured on this server.',
+    { status: 503, headers: { 'content-type': 'text/plain' } },
+  );
 }
 
 export async function loader({ params, request, context }: LoaderFunctionArgs) {
@@ -35,6 +51,15 @@ export async function loader({ params, request, context }: LoaderFunctionArgs) {
 
   if (!shareId) {
     return notFound();
+  }
+
+  /*
+   * In production, refuse to serve a shared build without a genuinely separate play origin (§5). This
+   * loader is a local-dev / fallback path (CloudFront serves the real bytes on PLAY_URL); reaching it
+   * in production with PLAY_URL unset would serve user code on the app origin — a cross-site hole.
+   */
+  if (!isPlayServableInProduction(context)) {
+    return playNotIsolated();
   }
 
   const project = await getProjectStore(context).getByShareId(shareId);

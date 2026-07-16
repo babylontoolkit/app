@@ -18,6 +18,7 @@ import { getPromptStore } from '~/lib/.server/prompt/store';
 import { syncSkills } from '~/lib/.server/skills/sync';
 import { getSkillStore } from '~/lib/.server/skills/store';
 import { getPlatformConfig } from '~/lib/.server/agent/config';
+import { getMonitor, ALERT_SIGNALS } from '~/lib/.server/monitoring';
 
 const logger = createScopedLogger('api.admin.prompt');
 
@@ -96,9 +97,18 @@ export async function action({ request, context }: ActionFunctionArgs) {
     if (body.action === 'refresh') {
       /*
        * Skills sync first: the skills index is an INPUT to the prompt build (§4.11), so syncing
-       * after the build would leave the active prompt advertising a stale skill set.
+       * after the build would leave the active prompt advertising a stale skill set. A skills-sync
+       * failure gets its OWN alert signal (§5A) before it propagates to the shared doc-sync handler,
+       * so ops can tell "the skills repo push broke" apart from "the docs build broke".
        */
-      const skills = await syncSkills(config.githubToken);
+      const skills = await syncSkills(config.githubToken).catch((error: unknown) => {
+        getMonitor(context).alert(
+          ALERT_SIGNALS.SKILLSSYNC_BUILD_FAILURE,
+          `Skills sync failed: ${(error as Error).message}`,
+          { severity: 'warning' },
+        );
+        throw error;
+      });
       const build = await buildSystemPrompt({
         skillsIndex: skills.skillsIndex,
         githubToken: config.githubToken,
@@ -125,6 +135,17 @@ export async function action({ request, context }: ActionFunctionArgs) {
   } catch (error) {
     // Previous version stays active. This is the guarantee, not a consolation.
     logger.error(`Doc-sync failed: ${(error as Error).message}`);
+
+    /*
+     * A doc/skills sync that could not build is an ops signal (§5A): generation keeps working on the
+     * previous version, so no user sees an error — which is exactly why it needs to be surfaced, or a
+     * broken docs push sits unnoticed until someone wonders why new features never reach the prompt.
+     */
+    getMonitor(context).alert(
+      ALERT_SIGNALS.DOCSYNC_BUILD_FAILURE,
+      `Doc-sync ${body.action} failed: ${(error as Error).message}`,
+      { severity: 'warning' },
+    );
 
     const active = await getPromptStore().getActive();
 

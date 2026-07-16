@@ -18,6 +18,7 @@
 import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
 import { handleWebhook } from '~/lib/.server/billing/stripe';
+import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
 
 const logger = createScopedLogger('api.stripe-webhook');
 
@@ -38,6 +39,11 @@ export async function action({ request, context }: ActionFunctionArgs) {
   try {
     const result = await handleWebhook(rawBody, signature, context);
 
+    // Purchase funnel event (§5A) — only on the delivery that actually credited, never on a duplicate.
+    if (result.applied) {
+      getMonitor(context).track(FUNNEL_EVENTS.PURCHASE_COMPLETED);
+    }
+
     // 200 either way: "already credited" is a success, and anything else makes Stripe retry forever.
     return json({ received: true, ...result });
   } catch (error) {
@@ -48,6 +54,14 @@ export async function action({ request, context }: ActionFunctionArgs) {
      * help, and it means someone is poking at the endpoint.
      */
     if (message.includes('signature')) {
+      /*
+       * A bad signature means someone is POKING at a credit-granting endpoint — an operational signal,
+       * not a transient failure. Alert on it so a probing attempt is visible in ops (§5A).
+       */
+      getMonitor(context).alert(ALERT_SIGNALS.WEBHOOK_FAILURE, 'Stripe webhook rejected: invalid signature', {
+        severity: 'warning',
+      });
+
       return json({ error: true, message: 'Invalid signature.' }, { status: 400 });
     }
 
@@ -56,6 +70,15 @@ export async function action({ request, context }: ActionFunctionArgs) {
      * has paid, and dropping the event here would take their money and give them nothing.
      */
     logger.error(`Webhook processing failed, asking Stripe to retry: ${message}`);
+
+    /*
+     * A real processing failure on a PAID event (the ledger was unreachable). The customer's money is
+     * in limbo until Stripe's retry succeeds — critical, because dropping it silently takes their money
+     * and gives them nothing (§5A alerting on webhook failures).
+     */
+    getMonitor(context).alert(ALERT_SIGNALS.WEBHOOK_FAILURE, `Stripe webhook processing failed: ${message}`, {
+      severity: 'critical',
+    });
 
     return json({ error: true, message: 'Could not process the event.' }, { status: 500 });
   }

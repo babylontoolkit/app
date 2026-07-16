@@ -30,11 +30,15 @@ import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDER, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
+import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
+import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import { compactHistory, historySavings } from '~/lib/.server/llm/history';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
 import { buildProjectNotes, type GameBackendState } from './project-notes';
+import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
+import { sharedFailureRate } from '~/lib/.server/monitoring/failure-rate';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
 
@@ -161,6 +165,13 @@ export interface AgentGeneration {
 
   /** e.g. "your Pro subscription lapsed, so this build used credits" (§4.6.1). Never an error. */
   notice?: string;
+
+  /**
+   * Subscribe to MCP tool-calls the model makes during this generation (§4.14). The route forwards each
+   * to the client (which runs it in the WebContainer and posts the result back to `/api/agent/tool-result`).
+   * No-op when the project has no MCP servers. Subscribe BEFORE draining `textStream`.
+   */
+  onMcpToolCall(listener: (event: McpToolCallEvent) => void): void;
 }
 
 /** Re-exported so callers keep importing it from the proxy; the math lives in `step-usage`. */
@@ -244,6 +255,7 @@ export function buildRepairMessage(errors: string[]): string {
 export async function runAgentGeneration(request: AgentRequest): Promise<AgentGeneration> {
   const config = getPlatformConfig(request.context);
   const user = request.user;
+  const monitor = getMonitor(request.context);
 
   /*
    * The generation's identity, minted up front. It is referenced by the ledger debit (which is why
@@ -282,6 +294,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
     throw error;
   }
+
+  // Funnel: the generation cleared the gate and is about to run (§5A). Outcome is tracked at settle.
+  monitor.track(FUNNEL_EVENTS.GENERATION_STARTED, {
+    userId: user.id,
+    projectId: request.projectId,
+    repair: Boolean(request.errors?.length),
+  });
 
   /*
    * 3. Model + key. Credits mode is the default: the platform key, a FIXED model, no choices to make.
@@ -425,7 +444,38 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * it. If that workflow matters, the fix is a resource-level router that inlines the few files a
    * request actually implies — NOT handing the tool back. See spec/skills.md.
    */
-  const allowTools = !isCreationTurn && preloaded.length === 0 && !slash;
+  /*
+   * MCP relay tools (§4.14). A project's WebContainer MCP servers become tools the model can call; the
+   * platform never executes them (§5) — each tool's `execute` EMITS the call to the client and AWAITS
+   * the result posted back to `/api/agent/tool-result`, all inside THIS one generation (one settlement,
+   * one cached prefix). Empty when the project declared/started no MCP servers, in which case everything
+   * below behaves exactly as it did before MCP existed.
+   */
+  const mcpListeners: Array<(event: McpToolCallEvent) => void> = [];
+  const emitMcpCall = (event: McpToolCallEvent) => {
+    for (const listener of mcpListeners) {
+      listener(event);
+    }
+  };
+
+  const mcpRelayTools =
+    request.mcpLiveTools && request.mcpLiveTools.length > 0
+      ? createMcpRelayTools(request.mcpLiveTools, {
+          generationId,
+          userId: user.id,
+          abortSignal: request.abortSignal,
+          emit: emitMcpCall,
+        })
+      : {};
+  const hasMcpTools = Object.keys(mcpRelayTools).length > 0;
+
+  /*
+   * When the project has MCP tools, the tool loop MUST be on — otherwise the model cannot call them.
+   * That re-enables the loop the skill-preload path deliberately disables (see the note above), which is
+   * the correct trade: a project with running MCP servers wants those tools reachable, and MCP is a
+   * minority of generations. Without MCP tools, `allowTools` is exactly what it always was.
+   */
+  const allowTools = !isCreationTurn && (hasMcpTools || (preloaded.length === 0 && !slash));
 
   /*
    * Volatile project-context notes (§4.9 assets, §4.14 MCP tools, §4.15 Game Backend).
@@ -479,7 +529,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      */
     offerLoadSkill: preloaded.length === 0 && !slash,
   };
-  const tools = createSkillTools(toolContext);
+
+  const tools = { ...createSkillTools(toolContext), ...mcpRelayTools } as SkillTools;
 
   /*
    * How hard to think on THIS turn (§4.2a). Decided from turn KIND — never from reading the prompt;
@@ -822,6 +873,37 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         finishReason: failed ? 'error' : finishReason,
         status: failed ? 'failed' : 'completed',
       });
+
+      /*
+       * Ops + funnel (§5A). A HARD FAILURE is recorded to the rolling failure-rate window; a stop is
+       * not a failure (§4.12), so it feeds the window as a success — the tokens it burned were owed and
+       * the generation did what the user asked (it stopped). When the failing fraction over the recent
+       * window crosses the threshold, one alert fires (the window self-cools so it does not spam).
+       */
+      const outcome = sharedFailureRate().record(failed);
+
+      if (outcome.shouldAlert) {
+        monitor.alert(
+          ALERT_SIGNALS.GENERATION_FAILURE_RATE,
+          `Generation failure rate ${(outcome.rate * 100).toFixed(0)}% ` +
+            `(${outcome.failures}/${outcome.window} recent generations)`,
+          { severity: 'critical' },
+        );
+      }
+
+      monitor.track(failed ? FUNNEL_EVENTS.GENERATION_FAILED : FUNNEL_EVENTS.GENERATION_COMPLETED, {
+        userId: user.id,
+        projectId: request.projectId,
+        model,
+        durationMs: Date.now() - startedAt,
+      });
+
+      /*
+       * Settle any MCP tool-call still waiting on the client (§4.14). If the stream ended — normally, on
+       * a Stop, or on an error — while an MCP `execute` was blocked awaiting a sandbox result, this
+       * unblocks it with an error rather than leaking a promise that never resolves.
+       */
+      cancelGenerationToolCalls(generationId);
     }
   }
 
@@ -835,5 +917,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     usage: usagePromise,
     settlement: settlementPromise,
     notice: byok.notice,
+    onMcpToolCall: (listener) => mcpListeners.push(listener),
   };
 }

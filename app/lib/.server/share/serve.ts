@@ -75,6 +75,28 @@ export function resolvePlayOrigin(context?: unknown): PlayOrigin {
 }
 
 /**
+ * FAIL CLOSED in production without a separate play origin (§5).
+ *
+ * Serving a shared build same-origin lets the user's game JavaScript read the app session cookie and
+ * every `localStorage` key we own. Local dev accepts that (it is explicitly not the security boundary,
+ * documented above and asserted in tests); PRODUCTION must not. Mirrors `assertNotLocalInProduction`:
+ * rather than a config comment nobody reads, the play PATH refuses to serve until `PLAY_URL` points at
+ * a genuinely separate origin. It is a TARGETED refusal — only `/play` is affected, not the whole app —
+ * because a same-origin game is a cross-site hole, not a mere misconfiguration.
+ *
+ * `false` → do not serve; return the refusal. `true` → isolated (prod) or local dev.
+ */
+export function isPlayServableInProduction(context?: unknown): boolean {
+  const isProduction = (env(context, 'NODE_ENV') ?? process.env.NODE_ENV) === 'production';
+
+  if (!isProduction) {
+    return true;
+  }
+
+  return resolvePlayOrigin(context).isolated;
+}
+
+/**
  * Cache policy for a build asset.
  *
  * Vite fingerprints its `assets/*` (content hash in the name), so those are immutable forever. The

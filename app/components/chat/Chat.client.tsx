@@ -35,7 +35,8 @@ import { defaultDesignScheme, type DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import type { TextUIPart, FileUIPart, Attachment } from '@ai-sdk/ui-utils';
 import { useMCPStore } from '~/lib/stores/mcp';
-import { mcpToolsAtom, syncMcpBridge } from '~/lib/stores/mcpBridge';
+import { mcpToolsAtom, syncMcpBridge, callMcpTool } from '~/lib/stores/mcpBridge';
+import { assetNotesAtom } from '~/lib/stores/assetNotes';
 import type { LlmErrorAlertType } from '~/types/actions';
 import {
   decideAutoRepair,
@@ -163,6 +164,13 @@ export const ChatImpl = memo(
     }, [activeProjectId]);
 
     /*
+     * Store-asset component references (§4.9). When a user adds a store scene/prefab, the assets tab
+     * introspects its GLB in the browser and pushes the component reference here; it rides in the agent
+     * body so the model scaffolds against the asset's real components.
+     */
+    const assetNotes = useStore(assetNotesAtom);
+
+    /*
      * SELF-HEALING (§4.2.7, §4.2 item 7) — the client half.
      *
      * The server has always been able to run a repair turn: it accepts `errors` / `repairOf` /
@@ -254,6 +262,9 @@ export const ChatImpl = memo(
          * sandbox (`callMcpTool`). Empty when the project has no `.mcp.json` or no servers started.
          */
         mcpTools: mcpTools.map((t) => ({ name: t.name, description: t.description, server: t.server })),
+
+        /* Store-asset component references (§4.9), introspected client-side when an asset was added. */
+        assetNotes,
         maxLLMSteps: mcpSettings.maxLLMSteps,
       },
       sendExtraMessageFields: true,
@@ -338,6 +349,68 @@ export const ChatImpl = memo(
       initialMessages,
       initialInput: Cookies.get(PROMPT_COOKIE_KEY) || '',
     });
+
+    /*
+     * MCP tool-call relay — the CLIENT half (§4.14).
+     *
+     * The server streams `mcp-tool-call` data parts while a generation's tool loop is blocked awaiting a
+     * tool the model called. We run each ONCE in the project's WebContainer (`callMcpTool`) and POST the
+     * result back to `/api/agent/tool-result`, which unblocks the waiting server-side `execute`. MCP
+     * servers run only in the user's sandbox — never on platform infrastructure (§5) — and their results
+     * are untrusted input. `handledToolCalls` dedupes by tool-call id so a re-render never double-runs one.
+     */
+    const handledToolCalls = useRef<Set<string>>(new Set());
+    useEffect(() => {
+      if (!chatData) {
+        return;
+      }
+
+      for (const part of chatData) {
+        if (!part || typeof part !== 'object') {
+          continue;
+        }
+
+        const call = part as {
+          type?: string;
+          generationId?: string;
+          toolCallId?: string;
+          toolName?: string;
+          args?: unknown;
+        };
+
+        if (call.type !== 'mcp-tool-call' || !call.toolCallId || !call.generationId || !call.toolName) {
+          continue;
+        }
+
+        if (handledToolCalls.current.has(call.toolCallId)) {
+          continue;
+        }
+
+        handledToolCalls.current.add(call.toolCallId);
+
+        void (async () => {
+          let result: unknown;
+          let error: string | undefined;
+
+          try {
+            result = await callMcpTool(call.toolName!, call.args);
+          } catch (e) {
+            error = (e as Error).message;
+          }
+
+          await fetch('/api/agent/tool-result', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              generationId: call.generationId,
+              toolCallId: call.toolCallId,
+              result,
+              error,
+            }),
+          }).catch(() => undefined);
+        })();
+      }
+    }, [chatData]);
 
     /*
      * SELF-HEALING (§4.2.7) — fire the repair turn.

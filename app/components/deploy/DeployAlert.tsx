@@ -173,7 +173,7 @@ export default function DeployChatAlert({ alert, clearAlert, postMessage }: Depl
                     )}
                   >
                     <div className="i-ph:chat-circle-duotone"></div>
-                    Ask {brand.productName}
+                    Ask {brand.company}
                   </button>
                 )}
                 <button

@@ -15,6 +15,7 @@
  */
 import { createScopedLogger } from '~/utils/logger';
 import { env } from '~/lib/.server/env';
+import { getMonitor, ALERT_SIGNALS } from '~/lib/.server/monitoring';
 
 const logger = createScopedLogger('licenser');
 
@@ -116,6 +117,12 @@ export async function validateSubscription(email: string, context?: unknown): Pr
 
     if (!response.ok) {
       logger.warn(`License service returned ${response.status} — treating as unreachable`);
+      getMonitor(context).alert(
+        ALERT_SIGNALS.LICENSE_SERVICE_UNREACHABLE,
+        `License service returned HTTP ${response.status}`,
+        { severity: 'warning' },
+      );
+
       return { active: false, unreachable: true };
     }
 
@@ -139,6 +146,9 @@ export async function validateSubscription(email: string, context?: unknown): Pr
      */
     const reason = (error as Error).name === 'AbortError' ? 'timed out' : (error as Error).message;
     logger.warn(`License service unreachable (${reason}) — no entitlement change`);
+    getMonitor(context).alert(ALERT_SIGNALS.LICENSE_SERVICE_UNREACHABLE, `License service unreachable: ${reason}`, {
+      severity: 'warning',
+    });
 
     return { active: false, unreachable: true };
   } finally {

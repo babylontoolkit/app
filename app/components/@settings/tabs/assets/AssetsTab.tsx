@@ -15,6 +15,8 @@ import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { bytesToBase64 } from '~/lib/binary/binary-files';
+import { introspectStoreAssetUrl } from '~/lib/assets/store-introspect';
+import { addAssetNote } from '~/lib/stores/assetNotes';
 
 interface CatalogScene {
   id: string;
@@ -28,6 +30,7 @@ interface CatalogPrefab {
   title: string;
   description: string;
   components: string[];
+  assetUrl?: string;
   premium: boolean;
 }
 interface CatalogPack {
@@ -57,6 +60,7 @@ export function AssetsTab() {
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [assets, setAssets] = useState<UserAsset[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [addingId, setAddingId] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/assets/catalog')
@@ -109,6 +113,81 @@ export function AssetsTab() {
       }
     } finally {
       setUploading(false);
+    }
+  };
+
+  /**
+   * Add a store-catalog asset to the current project (§4.9). The server gate decides: a free item is
+   * added; a premium item the user does not own returns 402, and we start the one-time purchase. On a
+   * successful add of a scene/prefab we introspect its GLB IN THE BROWSER so the agent learns its real
+   * components (the server never fetches a hosted store URL).
+   */
+  const onAddCatalog = async (item: { id: string; title: string; premium: boolean; url?: string }) => {
+    if (!activeProjectId) {
+      toast.error('Open a project first.');
+      return;
+    }
+
+    setAddingId(item.id);
+
+    try {
+      const response = await fetch(`/api/projects/${activeProjectId}/assets/catalog`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assetId: item.id }),
+      });
+
+      const data = (await response.json()) as {
+        ok?: boolean;
+        message?: string;
+        reason?: string;
+        item?: { url?: string };
+      };
+
+      if (response.ok && data.ok) {
+        const url = data.item?.url ?? item.url;
+
+        if (url) {
+          const intro = await introspectStoreAssetUrl(url);
+
+          if (intro.reference) {
+            addAssetNote(intro.reference);
+          }
+        }
+
+        toast.success(`Added "${item.title}" — the agent can use it now.`);
+
+        return;
+      }
+
+      if (response.status === 402 && data.reason === 'needs-purchase') {
+        const purchase = await fetch('/api/assets/purchase', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assetId: item.id }),
+        });
+        const pdata = (await purchase.json()) as { url?: string; message?: string };
+
+        if (purchase.ok && pdata.url) {
+          window.location.href = pdata.url; // Off to Stripe Checkout; the webhook grants on return.
+          return;
+        }
+
+        toast.error(pdata.message ?? 'Could not start the purchase.');
+
+        return;
+      }
+
+      if (response.status === 402 && data.reason === 'payments-not-configured') {
+        toast.info('Premium purchases are not available on this server yet.');
+        return;
+      }
+
+      toast.error(data.message ?? 'Could not add this asset.');
+    } catch {
+      toast.error('Could not reach the server. Please try again.');
+    } finally {
+      setAddingId(null);
     }
   };
 
@@ -206,6 +285,30 @@ export function AssetsTab() {
                 {'components' in item && item.components.length > 0 && (
                   <div className="mt-1.5 text-xs text-bolt-elements-textTertiary">{item.components.join(' · ')}</div>
                 )}
+                <button
+                  className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs bg-bolt-elements-button-secondary-background text-bolt-elements-textPrimary hover:bg-bolt-elements-button-secondary-backgroundHover disabled:opacity-60"
+                  disabled={!activeProjectId || addingId === item.id}
+                  title={activeProjectId ? undefined : 'Open a project first'}
+                  onClick={() =>
+                    onAddCatalog({
+                      id: item.id,
+                      title: item.title,
+                      premium: item.premium,
+                      url: 'assetUrl' in item ? item.assetUrl : 'sceneUrl' in item ? item.sceneUrl : undefined,
+                    })
+                  }
+                >
+                  <span
+                    className={
+                      addingId === item.id
+                        ? 'i-svg-spinners:90-ring-with-bg'
+                        : item.premium
+                          ? 'i-ph:lock-key'
+                          : 'i-ph:plus'
+                    }
+                  />
+                  {item.premium ? 'Buy & add' : 'Add to project'}
+                </button>
               </div>
             ))}
           </div>

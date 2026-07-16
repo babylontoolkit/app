@@ -20,6 +20,7 @@ import { ensureSignupGrant, getLedger } from '~/lib/.server/billing/ledger';
 import { getEntitlement } from '~/lib/.server/licensing/entitlements';
 import { isStripeConfigured, CREDIT_PACKS } from '~/lib/.server/billing/stripe';
 import { errorResponse } from '~/lib/.server/http';
+import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   try {
@@ -43,7 +44,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
     // The grant. Idempotent — a partial unique index means exactly one lands, however many race.
     if (user.emailVerified && billing.grantsEnabled) {
-      await ensureSignupGrant(user.id, billing.signupGrantCredits, context);
+      const granted = await ensureSignupGrant(user.id, billing.signupGrantCredits, context);
+
+      /*
+       * The funnel's "verified" stage (§5A). `ensureSignupGrant` returns the entry only on the FIRST
+       * verified session (null on every later idempotent call), so this fires exactly once per user —
+       * the natural place to record it, since OAuth users never touch the sign-up route.
+       */
+      if (granted) {
+        getMonitor(context).track(FUNNEL_EVENTS.VERIFIED, { userId: user.id });
+      }
     }
 
     const [balance, entitlement] = await Promise.all([

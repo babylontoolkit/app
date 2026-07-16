@@ -54,7 +54,7 @@ export function buildCommitMessage(summary: string | undefined): string {
   const trimmed = summary?.trim();
 
   if (!trimmed) {
-    return `Update from ${brand.productName}`;
+    return `Update from ${brand.productFullName}`;
   }
 
   // One line, bounded — a commit subject, not an essay. Keep the AI: prefix so history is readable.

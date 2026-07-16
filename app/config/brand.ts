@@ -97,21 +97,21 @@ export interface Brand {
 }
 
 export const brand: Brand = {
-  productName: 'Babylon Toolkit App Builder',
+  productName: 'App Builder',
   productFullName: 'Babylon Toolkit App Builder',
   productSlug: 'babylon-toolkit',
-  tagline: 'Build 3D web games with AI',
+  tagline: 'Build 3D Web Games With AI',
   metaDescription:
     'Build and play Babylon Toolkit 3D web games with AI — describe your game and watch it come to life.',
   intro: {
-    heading: 'Build a 3D game with AI',
-    subheading: 'Describe your game and watch it come to life — playable in seconds, exportable as real code.',
+    heading: 'Build A 3D Game With AI',
+    subheading: 'Describe your game and watch it come to life — playable in minutes, exportable as real code.',
   },
   poweredBy: {
     name: 'Babylon Toolkit',
     url: 'https://www.babylontoolkit.com',
   },
-  company: 'Babylon Toolkit',
+  company: 'codewrx.ai',
   urls: {
     marketing: 'https://www.babylontoolkit.com',
     docs: 'https://doc.babylontoolkit.com',

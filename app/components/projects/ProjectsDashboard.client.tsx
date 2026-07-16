@@ -1,0 +1,392 @@
+/**
+ * "All Projects" — the project grid (SPEC §4.1 Dashboard).
+ *
+ * A project is the platform's real unit of work: the files, the server checkpoints, ownership, sharing
+ * and remixing all hang off the server `Project` row (§4.5.5). The sidebar only ever showed *local*
+ * chats (IndexedDB, this-browser-only), so there was no way to see your library across devices. This
+ * page fetches the authoritative list from `/api/projects` and lets you open, remix, rename or delete
+ * each one.
+ *
+ * Two data sources are merged here:
+ *   - the SERVER project list (`listProjects`) — the source of truth, works on any device;
+ *   - the LOCAL chats (`getAll`) — used only to resolve a project's `/chat/:urlId` so "Open" lands the
+ *     user back in the exact conversation when it exists in this browser. When it does not, we fall back
+ *     to mounting the project's files fresh through the shared pending-mount baton.
+ */
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from '@remix-run/react';
+import { toast } from 'react-toastify';
+import { formatDistanceToNow } from 'date-fns';
+import { db, getAll, deleteById, type ChatHistoryItem } from '~/lib/persistence';
+import { listProjects, deleteProject, renameProject, ApiError } from '~/lib/persistence/projects';
+import { setPendingOpenProject, PENDING_REMIX_KEY } from '~/lib/persistence/pending-remix';
+import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
+import type { Project } from '~/types/project';
+import { classNames } from '~/utils/classNames';
+import { Dialog, DialogButton, DialogDescription, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
+
+/** The subset of a local chat we need to resolve "open in the same conversation". */
+interface LocalChatRef {
+  urlId?: string;
+  id: string;
+}
+
+function buildLocalChatIndex(chats: ChatHistoryItem[]): Map<string, LocalChatRef> {
+  const byProject = new Map<string, LocalChatRef>();
+
+  for (const chat of chats) {
+    const pid = chat.metadata?.projectId;
+
+    if (pid && !byProject.has(pid)) {
+      byProject.set(pid, { urlId: chat.urlId, id: chat.id });
+    }
+  }
+
+  return byProject;
+}
+
+export function ProjectsDashboard() {
+  const navigate = useNavigate();
+  const { entries } = useGameRegistry();
+
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [localChats, setLocalChats] = useState<Map<string, LocalChatRef>>(new Map());
+  const [error, setError] = useState<string | null>(null);
+  const [needsAuth, setNeedsAuth] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+
+  /** templateId → friendly game-type title ("gm_racing_v1" → "Arcade Racing"). */
+  const templateTitles = useMemo(() => {
+    const map = new Map<string, string>();
+
+    for (const entry of entries) {
+      map.set(entry.id, entry.title);
+    }
+
+    return map;
+  }, [entries]);
+
+  const load = useCallback(async () => {
+    setError(null);
+
+    try {
+      const [serverProjects, chats] = await Promise.all([
+        listProjects(),
+        db ? getAll(db) : Promise.resolve([] as ChatHistoryItem[]),
+      ]);
+
+      // Newest activity first — the project you touched last is the one you probably want.
+      serverProjects.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+
+      setProjects(serverProjects);
+      setLocalChats(buildLocalChatIndex(chats));
+    } catch (err) {
+      if (err instanceof ApiError && err.statusCode === 401) {
+        setNeedsAuth(true);
+        setProjects([]);
+
+        return;
+      }
+
+      setError(err instanceof Error ? err.message : 'Could not load your projects.');
+      setProjects([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const openProject = useCallback(
+    (project: Project) => {
+      const chat = localChats.get(project.id);
+
+      if (chat?.urlId) {
+        // The conversation lives in this browser — reopen it exactly where it was left.
+        navigate(`/chat/${chat.urlId}`);
+        return;
+      }
+
+      /*
+       * No local chat (another device, or a remix left before its first message persisted): mount the
+       * project's files fresh through the same baton a remix uses.
+       */
+      setPendingOpenProject(project.id);
+      navigate('/');
+    },
+    [localChats, navigate],
+  );
+
+  const remixProject = useCallback(
+    async (project: Project) => {
+      setBusyId(project.id);
+
+      try {
+        const response = await fetch('/api/remix', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ projectId: project.id }),
+        });
+
+        const data = (await response.json()) as { projectId?: string; message?: string };
+
+        if (response.ok && data.projectId) {
+          sessionStorage.setItem(PENDING_REMIX_KEY, data.projectId);
+          navigate('/');
+          toast.success('Project remixed');
+
+          return;
+        }
+
+        toast.error(data.message ?? 'Failed to remix project');
+      } catch {
+        toast.error('Failed to remix project');
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [navigate],
+  );
+
+  const doDelete = useCallback(
+    async (project: Project) => {
+      setConfirmDelete(null);
+      setBusyId(project.id);
+
+      try {
+        await deleteProject(project.id);
+
+        // Keep the sidebar in sync: drop the matching local chat if this browser has one.
+        const chat = localChats.get(project.id);
+
+        if (chat && db) {
+          await deleteById(db, chat.id).catch(() => undefined);
+        }
+
+        setProjects((prev) => (prev ? prev.filter((p) => p.id !== project.id) : prev));
+        toast.success('Project deleted');
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Failed to delete project');
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [localChats],
+  );
+
+  const startRename = useCallback((project: Project) => {
+    setRenamingId(project.id);
+    setRenameValue(project.name);
+  }, []);
+
+  const commitRename = useCallback(
+    async (project: Project) => {
+      const name = renameValue.trim();
+
+      setRenamingId(null);
+
+      if (!name || name === project.name) {
+        return;
+      }
+
+      // Optimistic: reflect the new name immediately, roll back on failure.
+      setProjects((prev) => (prev ? prev.map((p) => (p.id === project.id ? { ...p, name } : p)) : prev));
+
+      try {
+        await renameProject(project.id, name);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Failed to rename project');
+        setProjects((prev) =>
+          prev ? prev.map((p) => (p.id === project.id ? { ...p, name: project.name } : p)) : prev,
+        );
+      }
+    },
+    [renameValue],
+  );
+
+  return (
+    <main className="flex-1 w-full max-w-6xl mx-auto px-6 py-10">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-semibold text-bolt-elements-textPrimary">Your Projects</h1>
+          <p className="text-bolt-elements-textSecondary mt-1">
+            Every game you have built. Open one to keep working, or start something new.
+          </p>
+        </div>
+        <a
+          href="/"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white bg-accent-500 hover:bg-bolt-elements-button-primary-backgroundHover"
+        >
+          <span className="i-ph:plus-circle" /> New Project
+        </a>
+      </div>
+
+      {projects === null ? (
+        <div className="mt-16 flex items-center justify-center text-bolt-elements-textSecondary gap-2">
+          <span className="i-svg-spinners:90-ring-with-bg" /> Loading your projects…
+        </div>
+      ) : needsAuth ? (
+        <div className="mt-16 text-center text-bolt-elements-textSecondary">Sign in to see your projects.</div>
+      ) : error ? (
+        <div className="mt-16 text-center">
+          <p className="text-bolt-elements-textSecondary">{error}</p>
+          <button
+            onClick={load}
+            className="mt-3 px-4 py-2 rounded-lg text-sm border border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3"
+          >
+            Try again
+          </button>
+        </div>
+      ) : projects.length === 0 ? (
+        <div className="mt-16 text-center text-bolt-elements-textSecondary">
+          No projects yet. Click <span className="text-bolt-elements-textPrimary">New Project</span> to build your first
+          game.
+        </div>
+      ) : (
+        <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+          {projects.map((project) => {
+            const typeTitle = templateTitles.get(project.templateId);
+            const isBusy = busyId === project.id;
+
+            return (
+              <div
+                key={project.id}
+                className={classNames(
+                  'rounded-xl border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 overflow-hidden flex flex-col transition-opacity',
+                  { 'opacity-60 pointer-events-none': isBusy },
+                )}
+              >
+                <div className="p-4 flex-1">
+                  <div className="flex items-start justify-between gap-2">
+                    {renamingId === project.id ? (
+                      <input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onBlur={() => commitRename(project)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            commitRename(project);
+                          } else if (e.key === 'Escape') {
+                            setRenamingId(null);
+                          }
+                        }}
+                        className="flex-1 bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary rounded-md px-2 py-1 text-sm border border-bolt-elements-borderColor focus:outline-none focus:ring-1 focus:ring-purple-500/50"
+                      />
+                    ) : (
+                      <button
+                        onClick={() => openProject(project)}
+                        className="text-left text-lg font-medium text-bolt-elements-textPrimary truncate hover:text-accent"
+                        title={project.name}
+                      >
+                        {project.name}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center flex-wrap gap-2 mt-2 text-xs text-bolt-elements-textSecondary">
+                    {typeTitle && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bolt-elements-background-depth-3">
+                        <span className="i-ph:game-controller" /> {typeTitle}
+                      </span>
+                    )}
+                    {project.shareId && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-500/10 text-green-500">
+                        <span className="i-ph:globe-simple" /> Shared
+                      </span>
+                    )}
+                    {project.linkedRepo && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-bolt-elements-background-depth-3">
+                        <span className="i-ph:github-logo" /> {project.linkedRepo}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+                    Updated {formatUpdated(project.updatedAt)}
+                  </div>
+                </div>
+
+                <div className="flex border-t border-bolt-elements-borderColor text-sm">
+                  <button
+                    onClick={() => openProject(project)}
+                    className="flex-1 text-center py-2.5 font-medium text-white bg-accent-500 hover:bg-bolt-elements-button-primary-backgroundHover flex items-center justify-center gap-1.5"
+                  >
+                    <span className="i-ph:arrow-square-out" /> Open
+                  </button>
+                  {project.shareId && (
+                    <a
+                      href={`/play/${project.shareId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-3 py-2.5 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3 flex items-center justify-center border-l border-bolt-elements-borderColor"
+                      title="Play the shared build"
+                    >
+                      <span className="i-ph:play" />
+                    </a>
+                  )}
+                  <button
+                    onClick={() => remixProject(project)}
+                    className="px-3 py-2.5 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3 flex items-center justify-center border-l border-bolt-elements-borderColor"
+                    title="Remix into a new project"
+                  >
+                    <span className="i-ph:git-fork" />
+                  </button>
+                  <button
+                    onClick={() => startRename(project)}
+                    className="px-3 py-2.5 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3 flex items-center justify-center border-l border-bolt-elements-borderColor"
+                    title="Rename"
+                  >
+                    <span className="i-ph:pencil-simple" />
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(project)}
+                    className="px-3 py-2.5 text-bolt-elements-textPrimary hover:text-red-500 hover:bg-bolt-elements-background-depth-3 flex items-center justify-center border-l border-bolt-elements-borderColor"
+                    title="Delete"
+                  >
+                    <span className="i-ph:trash" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <DialogRoot open={confirmDelete !== null}>
+        <Dialog onClose={() => setConfirmDelete(null)}>
+          <DialogTitle>Delete project?</DialogTitle>
+          <DialogDescription>
+            <p>
+              <strong className="text-bolt-elements-textPrimary">{confirmDelete?.name}</strong> and its saved
+              checkpoints will be permanently removed. This cannot be undone.
+            </p>
+          </DialogDescription>
+          <div className="px-5 pb-4 flex gap-2 justify-end">
+            <DialogButton type="secondary" onClick={() => setConfirmDelete(null)}>
+              Cancel
+            </DialogButton>
+            <DialogButton type="danger" onClick={() => confirmDelete && doDelete(confirmDelete)}>
+              Delete
+            </DialogButton>
+          </div>
+        </Dialog>
+      </DialogRoot>
+    </main>
+  );
+}
+
+/** A resilient relative timestamp — never throw a page over a malformed date string. */
+function formatUpdated(iso: string): string {
+  try {
+    return formatDistanceToNow(new Date(iso), { addSuffix: true });
+  } catch {
+    return 'recently';
+  }
+}
+
+export default ProjectsDashboard;

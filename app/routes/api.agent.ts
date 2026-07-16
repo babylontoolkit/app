@@ -16,6 +16,8 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { validateAttachments } from '~/lib/.server/agent/attachments';
 import { claimProject } from '~/lib/.server/agent/inflight';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
+import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
+import { getMonitor } from '~/lib/.server/monitoring';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
 
@@ -151,7 +153,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     const dataStream = createDataStream({
       async execute(stream) {
         try {
-          await streamGeneration(stream, generation);
+          await streamGeneration(stream, generation, context);
         } finally {
           releaseProject?.();
         }
@@ -195,7 +197,11 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
 }
 
 /** The visible stream: prose + actions, then the annotations the client's badges are built from. */
-async function streamGeneration(stream: DataStreamWriter, generation: Awaited<ReturnType<typeof runAgentGeneration>>) {
+async function streamGeneration(
+  stream: DataStreamWriter,
+  generation: Awaited<ReturnType<typeof runAgentGeneration>>,
+  context: unknown,
+) {
   /*
    * Two channels, and they must NOT be merged.
    *
@@ -206,9 +212,54 @@ async function streamGeneration(stream: DataStreamWriter, generation: Awaited<Re
    *
    * The proxy has already resolved the whole server-side tool loop, so what arrives here is exactly
    * what the user should see.
+   *
+   * The TEXT channel is passed through the shell-action strip (§4.2.5, §5): a disallowed
+   * `<boltAction type="shell">` in the model's output is dropped server-side before it reaches the
+   * client — defense-in-depth behind the client executor's allow-list. Reasoning is never filtered.
    */
+  /*
+   * MCP tool-call relay (§4.14). Subscribe BEFORE draining, so no tool-call the model makes early can be
+   * missed. Each call is written to the client as a data part; the client runs it in its WebContainer
+   * and POSTs the result to `/api/agent/tool-result`, which unblocks the server-side `execute` that is
+   * awaiting it. Execution NEVER happens on platform infrastructure (§5).
+   */
+  generation.onMcpToolCall((event) => {
+    stream.writeData({
+      type: 'mcp-tool-call',
+      generationId: generation.generationId,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      args: event.args as any,
+    });
+  });
+
+  const shellFilter = new ShellActionStreamFilter();
+
   for await (const chunk of generation.textStream) {
-    stream.write(formatDataStreamPart(chunk.type, chunk.value));
+    if (chunk.type === 'text') {
+      const safe = shellFilter.push(chunk.value);
+
+      if (safe.length > 0) {
+        stream.write(formatDataStreamPart('text', safe));
+      }
+    } else {
+      stream.write(formatDataStreamPart(chunk.type, chunk.value));
+    }
+  }
+
+  const tail = shellFilter.flush();
+
+  if (tail.length > 0) {
+    stream.write(formatDataStreamPart('text', tail));
+  }
+
+  // Surface any disallowed command the model tried — the client already refuses it; this makes it visible.
+  if (shellFilter.stripped.length > 0) {
+    getMonitor(context).captureMessage(
+      `Stripped ${shellFilter.stripped.length} disallowed shell action(s): ` +
+        shellFilter.stripped.map((s) => s.command).join(' | '),
+      { scope: 'shell-strip', level: 'warning' },
+    );
   }
 
   const usage = await generation.usage;

@@ -22,6 +22,8 @@ import { createScopedLogger } from '~/utils/logger';
 import { NotConfiguredError } from '~/lib/.server/env';
 import { DuplicatePaymentError, getLedger } from './ledger';
 import { getBillingConfig } from './rates';
+import { findCatalogItem } from '~/lib/.server/assets/catalog';
+import { getAssetEntitlementStore } from '~/lib/.server/assets/entitlements';
 
 const logger = createScopedLogger('stripe');
 
@@ -121,6 +123,67 @@ export async function createCheckoutSession(input: CheckoutInput): Promise<{ url
   return { url: session.url, sessionId: session.id };
 }
 
+export interface AssetCheckoutInput {
+  userId: string;
+  userEmail: string;
+  assetId: string;
+  successUrl: string;
+  cancelUrl: string;
+  context?: unknown;
+}
+
+/**
+ * Start a ONE-TIME purchase of a premium store asset (§4.9).
+ *
+ * Same money rules as a credit pack: the price is looked up server-side from the catalog (never from
+ * the client), and the webhook grants ownership to the SERVER-ASSERTED user id in the metadata. The
+ * `kind: 'asset'` marker is what routes the webhook to the entitlement grant instead of the ledger.
+ */
+export async function createAssetCheckoutSession(
+  input: AssetCheckoutInput,
+): Promise<{ url: string; sessionId: string }> {
+  const item = findCatalogItem(input.assetId);
+
+  if (!item) {
+    throw new Error(`Unknown catalog asset: ${input.assetId}`);
+  }
+
+  if (!item.premium || !item.priceCents) {
+    throw new Error(`Asset ${input.assetId} is not a premium purchasable item.`);
+  }
+
+  const stripe = await getStripe(input.context);
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    customer_email: input.userEmail,
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: 'usd',
+          unit_amount: item.priceCents,
+          product_data: { name: item.title, description: item.description ?? 'Premium store asset.' },
+        },
+      },
+    ],
+
+    // The webhook reads THIS (not the browser) — a purchase can never grant on the wrong account.
+    metadata: { userId: input.userId, assetId: item.id, kind: 'asset' },
+
+    success_url: input.successUrl,
+    cancel_url: input.cancelUrl,
+  });
+
+  if (!session.url) {
+    throw new Error('Stripe did not return a checkout URL.');
+  }
+
+  logger.info(`Asset checkout ${session.id} created for ${input.userId} (${item.id})`);
+
+  return { url: session.url, sessionId: session.id };
+}
+
 /**
  * Verify and apply a webhook.
  *
@@ -159,6 +222,31 @@ export async function handleWebhook(
 
   if (session.payment_status !== 'paid') {
     return { applied: false, reason: `Session ${session.id} is not paid (${session.payment_status})` };
+  }
+
+  /*
+   * A premium ASSET purchase (§4.9) rather than a credit pack. Marked by `kind: 'asset'` in the
+   * metadata the SERVER set at checkout. Grants durable ownership (idempotent on payment_ref via the DB
+   * unique index) instead of consumable credits.
+   */
+  if (session.metadata?.kind === 'asset') {
+    const assetUserId = session.metadata?.userId;
+    const assetId = session.metadata?.assetId;
+
+    if (!assetUserId || !assetId) {
+      logger.error(`Paid asset session ${session.id} is missing usable metadata — cannot grant`);
+      return { applied: false, reason: 'Asset session metadata is missing a user or asset id.' };
+    }
+
+    const { granted } = await getAssetEntitlementStore(context).grant(assetUserId, assetId, session.id);
+
+    if (granted) {
+      logger.info(`Granted asset ${assetId} to ${assetUserId} for ${session.id}`);
+      return { applied: true, reason: `Granted asset ${assetId}.` };
+    }
+
+    // Replayed delivery / already owned — 2xx so Stripe stops retrying.
+    return { applied: false, reason: 'Asset already granted (duplicate delivery).' };
   }
 
   const userId = session.metadata?.userId;

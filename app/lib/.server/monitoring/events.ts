@@ -1,0 +1,47 @@
+/**
+ * The vocabulary of what we observe (SPEC §5A).
+ *
+ * Kept in its own module — with NO server-only imports — so the client error-capture route and any
+ * future client emitter can share the exact event names the server records. A funnel that names its
+ * stages differently on the two sides is a funnel that cannot be joined.
+ */
+
+/**
+ * The acquisition funnel (§5A). These are the stages management charts to tell the growth story:
+ * signup → verified → first generation → first playable → share → purchase, plus the retention
+ * signals in between. The NAMES are the contract with whatever analytics sink is wired in later —
+ * changing one renames a column in someone's dashboard, so treat them as stable identifiers.
+ */
+export const FUNNEL_EVENTS = {
+  SIGNUP: 'signup',
+  VERIFIED: 'verified',
+  PROJECT_CREATED: 'project_created',
+  GENERATION_STARTED: 'generation_started',
+  GENERATION_COMPLETED: 'generation_completed',
+  GENERATION_FAILED: 'generation_failed',
+  FIRST_PLAYABLE: 'first_playable',
+  SHARE_PUBLISHED: 'share_published',
+  REMIX_CREATED: 'remix_created',
+  PURCHASE_COMPLETED: 'purchase_completed',
+} as const;
+
+export type FunnelEvent = (typeof FUNNEL_EVENTS)[keyof typeof FUNNEL_EVENTS];
+
+/**
+ * Operational alert signals (§5A). These are the "wake someone up" conditions — distinct from funnel
+ * events, which are just history. Each maps to a threshold or a failure the operator needs to know
+ * about before a user reports it: a spike in failed generations, a webhook we could not verify, a
+ * doc/skill sync that could not build, the license service being unreachable.
+ */
+export const ALERT_SIGNALS = {
+  GENERATION_FAILURE_RATE: 'generation_failure_rate',
+  GENERATION_FAILED: 'generation_failed',
+  WEBHOOK_FAILURE: 'webhook_failure',
+  DOCSYNC_BUILD_FAILURE: 'docsync_build_failure',
+  SKILLSSYNC_BUILD_FAILURE: 'skillssync_build_failure',
+  LICENSE_SERVICE_UNREACHABLE: 'license_service_unreachable',
+} as const;
+
+export type AlertSignal = (typeof ALERT_SIGNALS)[keyof typeof ALERT_SIGNALS];
+
+export type AlertSeverity = 'info' | 'warning' | 'critical';

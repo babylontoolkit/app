@@ -49,7 +49,11 @@ describe('commit messages', () => {
   });
 
   it('falls back to a default and stays a single bounded line', () => {
-    expect(buildCommitMessage(undefined)).toMatch(/Babylon Toolkit/);
+    /*
+     * Brand-agnostic: assert the fallback SHAPE, not a specific product name (which lives in brand.ts
+     * and changes on a rebrand). The default is "Update from <product name>".
+     */
+    expect(buildCommitMessage(undefined)).toMatch(/^Update from \S/);
     expect(buildCommitMessage('x'.repeat(200)).length).toBeLessThanOrEqual(76);
     expect(buildCommitMessage('line one\nline two')).toBe('AI: line one');
   });

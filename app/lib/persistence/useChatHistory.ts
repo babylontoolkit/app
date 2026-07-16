@@ -22,7 +22,7 @@ import type { Snapshot } from './types';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 import { createSnapshot, restoreLatestServerCheckpoint, saveMessages } from './projects';
-import { takePendingRemix } from './pending-remix';
+import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('ChatHistory');
@@ -251,20 +251,20 @@ ${value.content}
         });
     } else {
       /*
-       * No mixedId — a fresh builder. But a remix (§4.8) may have parked a cloned project id here on
-       * its way in. If so, adopt it: set the project and mount its files through the SAME
-       * server-checkpoint path a normal resume uses. The conversation is fresh (a remix starts a new
-       * chat), but the files are the cloned game, ready to build on.
+       * No mixedId — a fresh builder. But a remix (§4.8) or a dashboard "Open" (§4.1) may have parked a
+       * project id here on its way in. If so, adopt it: set the project and mount its files through the
+       * SAME server-checkpoint path a normal resume uses. The conversation is fresh (both start a new
+       * chat), but the files are the real project, ready to build on.
        */
-      const remixProjectId = takePendingRemix();
+      const mountProjectId = takePendingProjectMount();
 
-      if (remixProjectId) {
-        projectId.set(remixProjectId);
-        chatMetadata.set({ ...chatMetadata.get(), projectId: remixProjectId });
+      if (mountProjectId) {
+        projectId.set(mountProjectId);
+        chatMetadata.set({ ...chatMetadata.get(), projectId: mountProjectId });
 
-        restoreLatestServerCheckpoint(remixProjectId)
+        restoreLatestServerCheckpoint(mountProjectId)
           .then(({ files }) => (files ? workbenchStore.restoreFiles(files) : undefined))
-          .catch((error) => logger.warn(`Could not load remixed project ${remixProjectId}: ${error.message}`))
+          .catch((error) => logger.warn(`Could not load project ${mountProjectId}: ${error.message}`))
           .finally(() => setReady(true));
       } else {
         setReady(true);
@@ -464,17 +464,54 @@ ${value.content}
        */
       latestMessages.current = allMessages;
     },
+
+    /**
+     * Remix — clone this project into a new owned copy (SPEC §4.8 self-remix).
+     *
+     * The platform's unit is the server PROJECT (files + snapshot), not the local conversation. So this
+     * runs the self-remix (`/api/remix { projectId }`, `deriveRemix`) using the project id in the chat's
+     * metadata, and hands the clone to the builder's resume path (the same baton a shared-game remix
+     * uses). Only a pure-legacy chat with no server project (`metadata.projectId` absent) falls back to
+     * cloning just the local conversation, so the action never silently produces a dangling copy.
+     */
     duplicateCurrentChat: async (listItemId: string) => {
-      if (!db || (!mixedId && !listItemId)) {
+      const id = mixedId || listItemId;
+
+      if (!db || !id) {
         return;
       }
 
       try {
-        const newId = await duplicateChat(db, mixedId || listItemId);
+        const chat = await getMessages(db, id);
+        const sourceProjectId = chat?.metadata?.projectId;
+
+        if (sourceProjectId) {
+          const response = await fetch('/api/remix', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projectId: sourceProjectId }),
+          });
+          const data = (await response.json()) as { projectId?: string; message?: string };
+
+          if (response.ok && data.projectId) {
+            sessionStorage.setItem(PENDING_REMIX_KEY, data.projectId);
+            navigate('/', { replace: true });
+            toast.success('Project remixed');
+
+            return;
+          }
+
+          toast.error(data.message ?? 'Failed to remix project');
+
+          return;
+        }
+
+        // Legacy fallback: a local-only chat with no server project — clone just the conversation.
+        const newId = await duplicateChat(db, id);
         navigate(`/chat/${newId}`);
-        toast.success('Chat duplicated successfully');
+        toast.success('Chat remixed successfully');
       } catch (error) {
-        toast.error('Failed to duplicate chat');
+        toast.error('Failed to remix');
         console.log(error);
       }
     },

@@ -297,7 +297,7 @@ export class GitLabApiService {
         visibility: isPrivate ? 'private' : 'public',
         initialize_with_readme: false, // Don't initialize with README to avoid conflicts
         default_branch: 'main', // Explicitly set default branch
-        description: `Project created from ${brand.productName}`,
+        description: `Project created from ${brand.productFullName}`,
       }),
     });
 
@@ -444,7 +444,7 @@ export class GitLabApiService {
 
       const commitRequest: GitLabCommitRequest = {
         branch: 'main',
-        commit_message: `Initial commit from ${brand.productName}`,
+        commit_message: `Initial commit from ${brand.productFullName}`,
         actions,
       };
 
@@ -477,7 +477,7 @@ export class GitLabApiService {
 
     const commitRequest: GitLabCommitRequest = {
       branch: 'main',
-      commit_message: `Update from ${brand.productName}`,
+      commit_message: `Update from ${brand.productFullName}`,
       actions,
     };
 
@@ -494,7 +494,7 @@ export class GitLabApiService {
 
         const updateCommitRequest: GitLabCommitRequest = {
           branch: 'main',
-          commit_message: `Update from ${brand.productName}`,
+          commit_message: `Update from ${brand.productFullName}`,
           actions: updateActions,
         };
 

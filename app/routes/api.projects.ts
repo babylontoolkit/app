@@ -5,6 +5,7 @@ import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-r
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { errorResponse } from '~/lib/.server/http';
+import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   try {
@@ -46,6 +47,12 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
       name: (body.name || 'Untitled Game').slice(0, 120),
       templateId: body.templateId || 'blank-canvas',
+    });
+
+    // Funnel: a new project exists (§5A). "First playable" and "share" come later in the same story.
+    getMonitor(context).track(FUNNEL_EVENTS.PROJECT_CREATED, {
+      userId: user.id,
+      templateId: project.templateId,
     });
 
     return json({ project }, { status: 201 });

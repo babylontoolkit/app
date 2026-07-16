@@ -21,6 +21,7 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { getProjectStore, getSnapshotStore } from '~/lib/.server/projects/store';
 import { deriveRemix } from '~/lib/.server/share/remix';
 import { errorResponse } from '~/lib/.server/http';
+import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import type { Project } from '~/lib/.server/projects/types';
 
 interface RemixBody {
@@ -74,6 +75,9 @@ export async function action({ request, context }: ActionFunctionArgs) {
       });
       await projects.update(created.id, { currentSnapshotId: snapshot.id });
     }
+
+    // Growth-loop signal (§5A) — self-remix and shared-game remix are distinguished for the funnel.
+    getMonitor(context).track(FUNNEL_EVENTS.REMIX_CREATED, { userId: user.id, self: isSelfRemix });
 
     return json({ projectId: created.id, name: created.name }, { status: 201 });
   } catch (error) {

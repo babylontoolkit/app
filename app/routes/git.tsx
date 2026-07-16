@@ -8,7 +8,7 @@ import BackgroundRays from '~/components/ui/BackgroundRays';
 import { brand } from '~/config/brand';
 
 export const meta: MetaFunction = () => {
-  return [{ title: brand.productName }, { name: 'description', content: brand.metaDescription }];
+  return [{ title: brand.productFullName }, { name: 'description', content: brand.metaDescription }];
 };
 
 export async function loader(args: LoaderFunctionArgs) {
