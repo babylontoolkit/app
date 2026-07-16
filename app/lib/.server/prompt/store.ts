@@ -33,8 +33,28 @@ export interface PromptVersionMeta {
    */
   buildHash: string;
 
-  /** `main` HEAD of the agent repo at build time — makes a prompt traceable to a doc commit. */
+  /**
+   * `main` HEAD of the agent repo when this version was FIRST built — immutable provenance.
+   *
+   * Not "the current docs commit": docs move on without changing a single baked byte, and this
+   * version was genuinely built from THIS commit. For "are we current?", read `lastSeenCommitSha`.
+   */
   sourceCommitSha: string;
+
+  /**
+   * The most recent agent-repo commit confirmed to rebuild byte-identically to this version, and
+   * when we confirmed it.
+   *
+   * Observation, NOT build identity — which is why it can be updated on an immutable version. A
+   * refresh that finds nothing changed has still learned something real: this content is current as
+   * of a newer commit. Without it, `sourceCommitSha` reads as stale against HEAD and there is no way
+   * to tell "the docs moved and we never resynced" (a bug) from "the docs moved and nothing we bake
+   * changed" (correct, and the common case).
+   *
+   * Falls back to build time for versions written before these fields existed.
+   */
+  lastSeenCommitSha: string;
+  lastSeenAt: string;
 
   /** Hash of the skills index text baked into this prompt (§4.11). */
   skillsSetHash: string;
@@ -66,6 +86,14 @@ export interface PromptStore {
   getActive(): Promise<PromptVersion | null>;
   list(): Promise<PromptVersionMeta[]>;
   activate(id: string): Promise<void>;
+
+  /**
+   * Record that `commitSha` was confirmed to rebuild byte-identically to this version.
+   *
+   * Touches ONLY the observation fields — never content, hashes, or `sourceCommitSha`. The build
+   * stays immutable; all that changed is what we know about it.
+   */
+  recordSeen(id: string, commitSha: string): Promise<void>;
 
   /** On-demand block body (a system doc routed in by keyword). Null when absent from this version. */
   readOnDemand(versionId: string, blockId: string): Promise<string | null>;
@@ -115,6 +143,10 @@ interface VersionRecord {
   id: string;
   contentHash: string;
   sourceCommitSha: string;
+
+  /** Optional: absent on versions written before observation tracking existed. */
+  lastSeenCommitSha?: string;
+  lastSeenAt?: string;
   skillsSetHash: string;
   createdAt: string;
   baseBytes: number;
@@ -209,6 +241,13 @@ export class FsPromptStore implements PromptStore {
        */
       buildHash: fingerprintFromHashes(record.contentHash, record.onDemand, record.declarations),
       sourceCommitSha: record.sourceCommitSha,
+
+      /*
+       * A version never observed since it was built has been seen exactly once: at build time, from
+       * the commit it was built from. That is also the honest reading of a legacy record.
+       */
+      lastSeenCommitSha: record.lastSeenCommitSha ?? record.sourceCommitSha,
+      lastSeenAt: record.lastSeenAt ?? record.createdAt,
       skillsSetHash: record.skillsSetHash,
       createdAt: record.createdAt,
       isActive: record.id === activeId,
@@ -311,6 +350,26 @@ export class FsPromptStore implements PromptStore {
 
     await fs.mkdir(this._root, { recursive: true });
     await this._atomicWrite(this._activePath, JSON.stringify({ versionId: id }, null, 2));
+  }
+
+  /**
+   * Stamp an observation onto an existing version.
+   *
+   * Read-modify-write of the record's observation fields only: everything that gives the version its
+   * identity (`content*`, `sourceCommitSha`, the blob refs) is carried across untouched, so this
+   * cannot rewrite what a version IS. Silently no-ops on an unknown id — an observation is a note in
+   * the margin, and failing a refresh over one would invert the cost of getting this wrong.
+   */
+  async recordSeen(id: string, commitSha: string): Promise<void> {
+    const record = await this._readRecord(id);
+
+    if (!record) {
+      return;
+    }
+
+    const updated: VersionRecord = { ...record, lastSeenCommitSha: commitSha, lastSeenAt: new Date().toISOString() };
+
+    await this._atomicWrite(path.join(this._versionsDir, `${record.id}.json`), JSON.stringify(updated, null, 2));
   }
 
   async readOnDemand(versionId: string, blockId: string): Promise<string | null> {

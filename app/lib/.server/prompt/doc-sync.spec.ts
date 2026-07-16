@@ -12,14 +12,18 @@ import { FsPromptStore, getPromptStore, setPromptStore, sha256 } from './store';
 import { DECLARATION_FILES, ON_DEMAND_BLOCKS, selectOnDemandBlocks } from './sources';
 
 /*
- * Doc bodies keyed by URL, so a test can change ONE doc and rebuild. `vi.hoisted` because `vi.mock`
- * is hoisted above the imports and its factory cannot close over an ordinary top-level binding.
+ * Doc bodies keyed by URL, plus the agent repo's HEAD, so a test can move ONE of them and rebuild.
+ * `vi.hoisted` because `vi.mock` is hoisted above the imports and its factory cannot close over an
+ * ordinary top-level binding.
  */
-const { fixtures } = vi.hoisted(() => ({ fixtures: new Map<string, string>() }));
+const { fixtures, head } = vi.hoisted(() => ({
+  fixtures: new Map<string, string>(),
+  head: { sha: 'commit-sha' },
+}));
 
 vi.mock('./github', () => ({
   githubText: async (url: string) => fixtures.get(url) ?? `BODY OF ${url}`,
-  githubJson: async () => ({ sha: 'commit-sha' }),
+  githubJson: async () => ({ sha: head.sha }),
 }));
 
 // Imported after the mock so the build never reaches the network.
@@ -140,6 +144,42 @@ describe('prompt version store', () => {
     expect(second.buildHash).toBe(first.buildHash);
   });
 
+  /*
+   * Versions written before observation tracking have no `lastSeen*` fields. They must read as "seen
+   * once, at build time" — never as `undefined` leaking into an admin listing or a staleness check.
+   */
+  it('reads a version with no recorded observation as seen at build time', async () => {
+    const meta = await store.put(version('LEGACY'));
+
+    // Strip the fields exactly as a record written by the old code would lack them.
+    const file = path.join(root, 'versions', `${meta.id}.json`);
+    const record = JSON.parse(await fs.readFile(file, 'utf8'));
+    delete record.lastSeenCommitSha;
+    delete record.lastSeenAt;
+    await fs.writeFile(file, JSON.stringify(record));
+
+    const read = await store.get(meta.id);
+
+    expect(read?.lastSeenCommitSha).toBe('abc123');
+    expect(read?.lastSeenAt).toBe(read?.createdAt);
+  });
+
+  it('records an observation without touching the build, and ignores an unknown version', async () => {
+    const meta = await store.put(version('P'));
+
+    await store.recordSeen(meta.id, 'a-newer-commit');
+
+    const read = await store.get(meta.id);
+
+    expect(read?.lastSeenCommitSha).toBe('a-newer-commit');
+    expect(read?.sourceCommitSha).toBe('abc123');
+    expect(read?.content).toBe('P');
+    expect(read?.buildHash).toBe(meta.buildHash);
+
+    // A note in the margin must not be able to fail a refresh.
+    await expect(store.recordSeen('pv_nope', 'sha')).resolves.toBeUndefined();
+  });
+
   it('content-addresses bodies so identical docs are not duplicated across versions', async () => {
     await store.put(version('A'));
     await store.put(version('B'));
@@ -165,6 +205,7 @@ describe('build no-op', () => {
 
   beforeEach(() => {
     fixtures.clear();
+    head.sha = 'commit-sha';
     setPromptStore(store);
   });
 
@@ -184,6 +225,56 @@ describe('build no-op', () => {
     expect(second.status).toBe('unchanged');
     expect(second.version.id).toBe(first.version.id);
     expect(await store.list()).toHaveLength(1);
+  });
+
+  /*
+   * The traceability half of "unchanged". Docs move without changing a byte we bake — a commit that
+   * only touches skill bodies, or an excluded doc. If an unchanged build recorded nothing, the active
+   * version's `sourceCommitSha` would sit behind HEAD forever, indistinguishable from a sync that
+   * silently never ran.
+   */
+  it('records the confirming commit on an unchanged build, without rewriting provenance', async () => {
+    head.sha = 'sha-at-build-time';
+
+    const first = await buildSystemPrompt({ skillsIndex: 'index' });
+    expect(first.version.sourceCommitSha).toBe('sha-at-build-time');
+    expect(first.version.lastSeenCommitSha).toBe('sha-at-build-time');
+
+    // The docs repo moves on, but nothing this prompt bakes actually changed.
+    head.sha = 'sha-that-changed-nothing-we-bake';
+
+    const second = await buildSystemPrompt({ skillsIndex: 'index' });
+
+    expect(second.status).toBe('unchanged');
+    expect(second.version.id).toBe(first.version.id);
+
+    // Provenance is immutable: this version really was built from the older commit...
+    expect(second.version.sourceCommitSha).toBe('sha-at-build-time');
+
+    // ...but we now know it is current as of the newer one.
+    expect(second.version.lastSeenCommitSha).toBe('sha-that-changed-nothing-we-bake');
+    expect(await store.list()).toHaveLength(1);
+  });
+
+  it('carries the observation through activation and rollback, leaving the build untouched', async () => {
+    head.sha = 'sha-one';
+
+    const first = await buildSystemPrompt({ skillsIndex: 'index' });
+    const before = await getPromptStore().get(first.version.id);
+
+    head.sha = 'sha-two';
+    await buildSystemPrompt({ skillsIndex: 'index' });
+
+    const after = await getPromptStore().get(first.version.id);
+
+    // An observation must never disturb what the version IS.
+    expect(after?.content).toBe(before?.content);
+    expect(after?.contentHash).toBe(before?.contentHash);
+    expect(after?.buildHash).toBe(before?.buildHash);
+    expect(after?.isActive).toBe(true);
+    expect(await getPromptStore().readOnDemand(first.version.id, 'racing-system')).toBe(
+      await store.readOnDemand(first.version.id, 'racing-system'),
+    );
   });
 
   it('rebuilds when a base doc changes', async () => {

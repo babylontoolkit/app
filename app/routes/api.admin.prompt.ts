@@ -123,6 +123,13 @@ export async function action({ request, context }: ActionFunctionArgs) {
         version: build.version,
         docsFetched: build.fetched,
         agentCommitSha: build.sourceCommitSha,
+
+        /*
+         * `status: "unchanged"` reads as "did the sync even run?" on its own — it is the same word
+         * whether we fetched HEAD and found nothing to bake, or never looked. Say which: the commit
+         * we just confirmed the active version against.
+         */
+        confirmedCurrentAt: build.version.lastSeenCommitSha,
         skills: {
           commitSha: skills.sourceCommitSha,
           synced: skills.synced,

@@ -146,9 +146,20 @@ export async function buildSystemPrompt(options: BuildOptions): Promise<BuildRes
   const active = await store.getActive();
 
   if (active?.buildHash === buildHash) {
-    logger.info(`Build unchanged (${buildHash.slice(0, 12)}) — keeping active version ${active.id}`);
+    /*
+     * "Unchanged" is a real finding, so record it: this content is current as of THIS commit. The
+     * version keeps the commit it was built from (immutable provenance) — without the observation,
+     * `sourceCommitSha` drifts behind HEAD forever and reads as staleness, leaving no way to tell a
+     * sync that never ran from a sync that ran and correctly found nothing to do.
+     */
+    await store.recordSeen(active.id, sourceCommitSha);
 
-    return { status: 'unchanged', version: active, sourceCommitSha, fetched };
+    logger.info(
+      `Build unchanged (${buildHash.slice(0, 12)}) — keeping active version ${active.id}, ` +
+        `confirmed current at ${sourceCommitSha.slice(0, 8)}`,
+    );
+
+    return { status: 'unchanged', version: (await store.get(active.id)) ?? active, sourceCommitSha, fetched };
   }
 
   const version = await store.put(candidate);
