@@ -89,6 +89,28 @@ const CACHE_CONTROL = { anthropic: { cacheControl: { type: 'ephemeral' as const,
 export const MAX_CACHE_BREAKPOINTS = 4;
 
 /**
+ * Should the tool loop be forced to write a final answer? (§4.6, §4.10 — a MONEY gate.)
+ *
+ * Pure and exported because a `true` here BUYS A SECOND FULL GENERATION on the user's credits without
+ * them asking — the same category as the auto-repair loop and restore-target selection, which CLAUDE.md
+ * requires be pure functions with exhaustive tests rather than logic inlined where nothing can reach it.
+ *
+ * 🔴 **BOTH conditions are load-bearing, and `finishReason` alone is a PROVIDER CLAIM, not a fact.** The
+ * AI SDK propagates it verbatim and never checks it against whether a tool call was emitted, so a
+ * provider reporting `tool-calls` on a step that made none used to send this gate into a whole second
+ * generation to "finish" an answer that was already written — measured at +111,827 cache tokens for 682
+ * chars, billing one real edit 831 credits against ~415 warranted.
+ *
+ * ⚠️ Do NOT reduce this to `!producedText`. A genuine cut-off has usually ALREADY emitted text ("Let me
+ * load the design skill...") before its tool call, so that gate would skip the rescue precisely when it
+ * is needed and restore the silent truncation this exists to prevent. The question is never "did it say
+ * anything" — it is "was it interrupted mid-tool-loop". See `forced-continuation.spec.ts`.
+ */
+export function shouldForceContinuation(result: { finishReason: string; lastStepToolCalls: number }): boolean {
+  return result.finishReason === 'tool-calls' && result.lastStepToolCalls > 0;
+}
+
+/**
  * Count the cache breakpoints in an assembled system array.
  *
  * Exported so the budget is testable rather than a claim in a comment. The comment on `CACHE_CONTROL`
@@ -729,6 +751,27 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   let toolRounds = 0;
   let finishReason = 'unknown';
 
+  /**
+   * Did the LAST step actually call a tool? The only trustworthy sign the model was cut off mid-loop.
+   *
+   * 🔴 `finishReason` ALONE CANNOT ANSWER THIS, AND TRUSTING IT COST ~2x ON AN EDIT TURN. The AI SDK
+   * propagates the provider's finish reason VERBATIM — it never cross-checks it against whether a tool
+   * call was emitted. So a provider that reports `tool-calls` on a step that made none produces exactly
+   * this, proven against the real `streamText` in `forced-continuation.spec.ts`:
+   *
+   *   { finishReason: 'tool-calls', stepCount: 1, lastStepToolCalls: 0, text: '<the whole artifact>' }
+   *
+   * Measured live: a complete answer on step 1, then a forced continuation that re-sent the entire
+   * prefix — **111,827 more cache tokens for 682 chars of text** — billing one real edit 831 credits
+   * where ~415 were warranted. Note the SDK had 6 steps left and did NOT use them: with no tool call to
+   * execute there was nothing to loop on, so the cap was never reached and the warning text was a
+   * fiction. The gate's own comment said "its last act was a tool call" — it just never checked.
+   */
+  let lastStepToolCalls = 0;
+
+  /** Did a forced continuation actually run? Recorded, because `finishReason` gets overwritten below. */
+  let forcedContinuation = false;
+
   /*
    * Where the wall-clock actually goes (§4.2).
    *
@@ -862,6 +905,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     accumulateStepUsage(totals, steps as unknown as UsageStep[]);
 
     finishReason = await result.finishReason;
+    lastStepToolCalls = steps?.[steps.length - 1]?.toolCalls?.length ?? 0;
     toolRounds += Math.max(0, (steps?.length ?? 1) - 1);
   }
 
@@ -902,13 +946,21 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       /*
        * "On cap, proceed with what's loaded" (spec/skills.md) — the half that is easy to forget.
        *
-       * `finishReason === 'tool-calls'` means the loop stopped because it ran out of STEPS, not
-       * because the model was done: its last act was a tool call, so it never wrote an answer. Left
-       * alone this is a silent truncation — the user gets a few sentences of preamble and no
-       * artifact, which is exactly what we observed. So we continue the conversation once more with
-       * tools disabled, forcing it to finish with whatever it managed to load.
+       * The loop ran out of STEPS with a tool call outstanding, so the model never wrote an answer.
+       * Left alone that is a silent truncation — the user gets a few sentences of preamble and no
+       * artifact. So continue once more with tools disabled, forcing it to finish with what it loaded.
+       *
+       * ⚠️ BOTH CONDITIONS ARE LOAD-BEARING; `finishReason` alone is not a fact (see `lastStepToolCalls`).
+       * A provider may report `tool-calls` on a step that made none, and this gate then re-runs a
+       * COMPLETE generation — measured at +111,827 cache tokens for 682 chars, ~2x on a real edit.
+       *
+       * ⚠️ And do NOT "simplify" this to `!producedText`. A genuine cut-off usually HAS emitted text
+       * ("Let me load the design skill...") before its tool call, so that gate would skip the
+       * continuation exactly when it is needed and restore the silent truncation this exists to fix.
+       * The question is not "did it say anything", it is "was it interrupted mid-tool-loop".
        */
-      if (finishReason === 'tool-calls') {
+      if (shouldForceContinuation({ finishReason, lastStepToolCalls })) {
+        forcedContinuation = true;
         logger.warn(`Tool-round cap (${MAX_TOOL_ROUNDS}) reached — forcing a final answer with tools disabled`);
 
         const priorMessages = (await first.response).messages;
@@ -1035,7 +1087,18 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         durationMs: Date.now() - startedAt,
         steps: stepLog,
         repairOf: request.repairOf,
-        finishReason: failed ? 'error' : finishReason,
+
+        /*
+         * ⚠️ A FORCED CONTINUATION IS INVISIBLE HERE UNLESS IT IS SAID OUT LOUD (§4.10).
+         *
+         * `drain` runs twice and OVERWRITES `finishReason`, so a generation that paid for two full
+         * prefixes records the continuation's `stop` — the doubling leaves no trace. That is exactly how
+         * the spurious-continuation bug hid: the live usage line read `finish=stop · 0 tool rounds` on a
+         * generation that had just been billed twice, which reads as a completely ordinary turn.
+         * (`toolRounds` is no help either — it counts steps BEYOND the first, and both drains ran one
+         * step, so it summed to 0 while the warning was firing.)
+         */
+        finishReason: failed ? 'error' : forcedContinuation ? `${finishReason}+forced-continuation` : finishReason,
         status: failed ? 'failed' : 'completed',
       });
 
