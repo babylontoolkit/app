@@ -116,14 +116,14 @@ export interface Settlement {
  */
 export async function settleGeneration(input: SettleInput): Promise<Settlement | null> {
   const config = getBillingConfig(input.context);
-  const cost = rawCostUsd(input.usage, input.model, input.provider);
+  const cost = rawCostUsd(input.usage, input.model, input.provider, input.context);
 
   /*
    * BYOK: record zero. The generation still exists in the ledger's sibling `generations` record for
    * rate limits and analytics, but the user's own key paid the provider, so charging credits as well
    * would be double-billing.
    */
-  const credits = input.byok ? 0 : creditsForUsage(input.usage, input.model, input.provider, config);
+  const credits = input.byok ? 0 : creditsForUsage(input.usage, input.model, input.provider, config, input.context);
 
   /*
    * ⚠️ THE FOREIGN-KEY ANCHOR. This MUST happen before the debit, and it lives here rather than in the

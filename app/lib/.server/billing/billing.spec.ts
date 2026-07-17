@@ -14,12 +14,15 @@ import {
   creditsForUsage,
   getBillingConfig,
   grantHeadroom,
+  kieModelOverride,
+  kieRates,
   KIE_MODEL_RATES,
   MIN_GRANT_HEADROOM,
   MODEL_RATES,
-  PROVIDER_RATES,
+  providerRates,
   rawCostUsd,
   ratesFor,
+  ratesFromBase,
   type TokenUsage,
 } from './rates';
 import {
@@ -45,7 +48,28 @@ import { setGenerationStore, type GenerationStore, type GenerationUpsert } from 
 let tmp: string;
 let ledger: FsLedger;
 
+/**
+ * ⚠️ THE `oauth.spec.ts` TRAP, and it is armed for every test in this file.
+ *
+ * `env()` falls back to `process.env`, and vitest loads `.env.local` — so an "empty" context is NOT
+ * empty, it is the developer's real configuration. Once `KIE_DEFAULT_MODEL`/`KIE_*_DOLLARS` became
+ * config, every rate assertion below silently read whatever the operator happened to be running: the
+ * derivation invariants would fail on the machine of the one person who had configured a custom rate,
+ * and CI (which has no `.env.local`) would stay green and call them wrong. Scrub first, stub per-test.
+ */
+const KIE_ENV = [
+  'KIE_DEFAULT_MODEL',
+  'KIE_INPUT_DOLLARS',
+  'KIE_OUTPUT_DOLLARS',
+  'KIE_CACHED_INPUT',
+  'KIE_CACHED_WRITES',
+] as const;
+
 beforeEach(async () => {
+  for (const key of KIE_ENV) {
+    vi.stubEnv(key, undefined as unknown as string);
+  }
+
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'ledger-'));
   ledger = new FsLedger(tmp);
   setLedger(ledger);
@@ -71,7 +95,7 @@ describe('rate table', () => {
    * past a table these loops did not visit.
    */
   it('bills cache WRITES at 2x input on every provider — the 1h tier, not the 1.25x default', () => {
-    for (const [provider, table] of Object.entries(PROVIDER_RATES)) {
+    for (const [provider, table] of Object.entries(providerRates())) {
       for (const [model, rates] of Object.entries(table)) {
         expect(rates.cacheWritePerMTok, `${provider}/${model}`).toBeCloseTo(rates.inputPerMTok * 2, 5);
       }
@@ -79,7 +103,7 @@ describe('rate table', () => {
   });
 
   it('bills cache READS at 0.1x input on every provider — the margin lever', () => {
-    for (const [provider, table] of Object.entries(PROVIDER_RATES)) {
+    for (const [provider, table] of Object.entries(providerRates())) {
       for (const [model, rates] of Object.entries(table)) {
         expect(rates.cacheReadPerMTok, `${provider}/${model}`).toBeCloseTo(rates.inputPerMTok * 0.1, 5);
       }
@@ -122,8 +146,34 @@ describe('rate table', () => {
    */
   it('has a rate table for every provider the platform can be switched to', () => {
     for (const provider of PLATFORM_PROVIDERS) {
-      expect(PROVIDER_RATES[provider], `${provider} can be selected but has no rates`).toBeDefined();
-      expect(PROVIDER_RATES[provider][PLATFORM_MODEL], `${provider} cannot price the platform model`).toBeDefined();
+      expect(providerRates()[provider], `${provider} can be selected but has no rates`).toBeDefined();
+      expect(providerRates()[provider][PLATFORM_MODEL], `${provider} cannot price the platform model`).toBeDefined();
+    }
+  });
+
+  /*
+   * ⚠️ THE INVARIANT THAT LETS `KIE_INPUT_DOLLARS` BE SAFE ON ITS OWN.
+   *
+   * `ratesFromBase` derives the two cache classes from input, and an operator repricing a model states
+   * only input+output. That is only honest if derivation reproduces every hand-written row we have —
+   * otherwise the derived numbers are a second, quietly different opinion about a price we already
+   * know. If a vendor ever quotes cache off-multiple, this test is where that fact must be recorded
+   * (by passing explicit values), rather than discovered later in an invoice.
+   */
+  it('derives every baked row exactly, so the derivation is not a second opinion on a known price', () => {
+    for (const [provider, table] of Object.entries(providerRates())) {
+      for (const [model, rates] of Object.entries(table)) {
+        const derived = ratesFromBase(rates.inputPerMTok, rates.outputPerMTok);
+
+        /*
+         * `toBeCloseTo`, not `toEqual`: 3 * 0.1 is 0.30000000000000004 in binary float, so a derived
+         * Sonnet row is not BIT-identical to its hand-written one. That is an artifact of the
+         * representation and not a disagreement about the price — the claim under test is that the
+         * numbers are the same money, and at 1e-9 of a dollar per million tokens they are.
+         */
+        expect(derived.cacheReadPerMTok, `${provider}/${model} cache read`).toBeCloseTo(rates.cacheReadPerMTok, 9);
+        expect(derived.cacheWritePerMTok, `${provider}/${model} cache write`).toBeCloseTo(rates.cacheWritePerMTok, 9);
+      }
     }
   });
 });
@@ -166,6 +216,178 @@ describe('KIE rates', () => {
     const onKie = creditsForUsage(COLD_CREATION_USAGE, PLATFORM_MODEL, 'KIE', config);
 
     expect(onAnthropic / onKie).toBeCloseTo(2.5, 1);
+  });
+});
+
+/**
+ * `KIE_DEFAULT_MODEL` + its rates (2026-07-17).
+ *
+ * KIE resells many vendors' models at prices only the operator can see, so — unlike Anthropic, whose
+ * list we can look up and bake — "which model" and "what it costs" are ONE fact held outside this
+ * repo. Every test here guards a way of getting that wrong that would bill real money and throw
+ * nothing.
+ */
+describe('the KIE model + rate override', () => {
+  const setKie = (vars: Record<string, string | undefined>) => {
+    for (const [key, value] of Object.entries(vars)) {
+      vi.stubEnv(key, value as string);
+    }
+  };
+
+  /* The baseline: nothing set, nothing changes. */
+  it('leaves the baked table alone when unset', () => {
+    expect(kieModelOverride()).toBeUndefined();
+    expect(kieRates()).toEqual(KIE_MODEL_RATES);
+  });
+
+  /*
+   * 🔴 THE RULE THIS WHOLE FEATURE RESTS ON.
+   *
+   * `ratesFor` falls back to the provider's MOST EXPENSIVE row for a model it does not know — so
+   * naming a model without pricing it does not fail, it bills every generation at Opus 4.8's price,
+   * forever, silently, at whatever margin that happens to imply. "Is this model configured?" and "do
+   * we know what it costs?" are the same question, and this is the answer.
+   */
+  it('refuses a model it has no baked rates for unless BOTH prices are given', () => {
+    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol' });
+    expect(() => kieModelOverride()).toThrow(/KIE_INPUT_DOLLARS and KIE_OUTPUT_DOLLARS/);
+
+    setKie({ KIE_INPUT_DOLLARS: '1.57' });
+    expect(() => kieModelOverride(), 'input alone is still unpriced output').toThrow(/KIE_OUTPUT_DOLLARS/);
+
+    setKie({ KIE_OUTPUT_DOLLARS: '8.4' });
+
+    const override = kieModelOverride();
+    expect(override?.model).toBe('gpt-5-6-sol');
+    expect(override?.rates.inputPerMTok).toBe(1.57);
+    expect(override?.rates.outputPerMTok).toBe(8.4);
+    expect(override?.rates.cacheReadPerMTok, 'derived 0.1x').toBeCloseTo(0.157, 5);
+    expect(override?.rates.cacheWritePerMTok, 'derived 2x — the 1h tier').toBeCloseTo(3.14, 5);
+  });
+
+  /*
+   * The operator's own example. Explicit cache quotes override the derivation — a vendor whose cache
+   * multipliers differ from Anthropic's is the entire reason these two vars exist separately.
+   */
+  it('takes explicit cache prices over the derived ones', () => {
+    setKie({
+      KIE_DEFAULT_MODEL: 'gpt-5-6-sol',
+      KIE_INPUT_DOLLARS: '1.57',
+      KIE_OUTPUT_DOLLARS: '8.4',
+      KIE_CACHED_WRITES: '1.74',
+      KIE_CACHED_INPUT: '0.14',
+    });
+
+    expect(ratesFor('gpt-5-6-sol', 'KIE')).toEqual({
+      inputPerMTok: 1.57,
+      outputPerMTok: 8.4,
+      cacheReadPerMTok: 0.14,
+      cacheWritePerMTok: 1.74,
+    });
+  });
+
+  /*
+   * 🔴 A ROW MUST NOT BE HALF-BAKED AND HALF-CONFIGURED — the `packMargin` shape of bug.
+   *
+   * Overriding input while cache stays quoted against the OLD input rate is two numbers, each locally
+   * sensible, disagreeing about what one thing costs. Halving input must halve the cache prices with
+   * it, or the user is billed cache at a rate the operator never agreed to.
+   */
+  it('re-derives cache from the NEW input rate when a baked model is repriced', () => {
+    setKie({ KIE_DEFAULT_MODEL: 'claude-opus-4-8', KIE_INPUT_DOLLARS: '1' });
+
+    const rates = ratesFor('claude-opus-4-8', 'KIE');
+    expect(rates.inputPerMTok).toBe(1);
+    expect(rates.outputPerMTok, 'output is not overridden, so the baked price stands').toBe(10);
+    expect(rates.cacheReadPerMTok, 'NOT the baked 0.2').toBeCloseTo(0.1, 5);
+    expect(rates.cacheWritePerMTok, 'NOT the baked 4.0').toBeCloseTo(2.0, 5);
+  });
+
+  /*
+   * The derivation is not a second opinion about a known price: naming the baked model and changing
+   * nothing must reproduce the baked row exactly. If this ever fails, the multipliers and the table
+   * have drifted and one of them is lying.
+   */
+  it('reproduces the baked row byte-for-byte when only the model is named', () => {
+    setKie({ KIE_DEFAULT_MODEL: 'claude-opus-4-8' });
+    expect(kieRates()['claude-opus-4-8']).toEqual(KIE_MODEL_RATES['claude-opus-4-8']);
+  });
+
+  /* Prices that name no model price NOTHING — they are a typo that reads as configured. */
+  it('refuses rates with no model rather than ignoring them', () => {
+    setKie({ KIE_INPUT_DOLLARS: '1.57', KIE_OUTPUT_DOLLARS: '8.4' });
+    expect(() => kieRates()).toThrow(/KIE_DEFAULT_MODEL/);
+  });
+
+  /*
+   * ⚠️ NOT `envNumber`. That returns its fallback for an unparseable value, which is right for a turn
+   * cap and catastrophic for a price: `$2` would silently bill at some other model's rate. A price the
+   * operator tried and failed to state is an error. `0` too — a free model does not exist, and it
+   * would zero-rate every generation on it.
+   */
+  it.each([['$2'], ['two'], ['0'], ['-1']])('refuses a price it cannot trust: %s', (bad) => {
+    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol', KIE_INPUT_DOLLARS: bad, KIE_OUTPUT_DOLLARS: '8.4' });
+    expect(() => kieModelOverride()).toThrow(/KIE_INPUT_DOLLARS/);
+  });
+
+  /* The configured model becomes KIE's default — that is what "default" in the name means. */
+  it('becomes the platform model on KIE, priced by its own row', () => {
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
+    vi.stubEnv('LLM_MODEL', undefined as unknown as string);
+    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol', KIE_INPUT_DOLLARS: '1.57', KIE_OUTPUT_DOLLARS: '8.4' });
+
+    expect(getPlatformModel({})).toBe('gpt-5-6-sol');
+    expect(
+      rawCostUsd(
+        { promptTokens: 1_000_000, completionTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        'gpt-5-6-sol',
+        'KIE',
+      ),
+    ).toBeCloseTo(1.57, 5);
+  });
+
+  /*
+   * 🔴 THE TWO VARS MUST NOT MEAN "the model" AND "the price of a DIFFERENT model".
+   *
+   * `LLM_MODEL` outranks `KIE_DEFAULT_MODEL`. That is only safe because whatever wins must be priced
+   * in its own right — otherwise `LLM_MODEL=x` with `KIE_DEFAULT_MODEL=y` would run `x` and bill it at
+   * `y`'s rates, which is the precise failure this precedence chain could otherwise introduce.
+   */
+  it('never prices LLM_MODEL at KIE_DEFAULT_MODEL rates', () => {
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
+    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol', KIE_INPUT_DOLLARS: '1.57', KIE_OUTPUT_DOLLARS: '8.4' });
+
+    // Priced in its own right: allowed, at ITS price, not gpt's.
+    vi.stubEnv('LLM_MODEL', 'claude-opus-4-8');
+    expect(getPlatformModel({})).toBe('claude-opus-4-8');
+    expect(ratesFor('claude-opus-4-8', 'KIE').inputPerMTok).toBe(2.0);
+
+    // Unpriced: refused, rather than borrowing the override's rates.
+    vi.stubEnv('LLM_MODEL', 'some-third-model');
+    expect(() => getPlatformModel({})).toThrow(/some-third-model/);
+  });
+
+  /*
+   * 🔴 A MODEL THAT IS PRICED BUT NOT LISTED IS BILLED AS ITSELF AND RUN AS SOMETHING ELSE.
+   *
+   * `stream-text.ts` (the enhancer's path) falls back to `modelsList[0]` for a model it cannot find,
+   * behind a `logger.warn` — so a priced-but-unlisted model would run Opus 4.8 while settlement charged
+   * the configured model's rates. The proxy hands `model` straight to `getModelInstance` and never had
+   * the problem, which is exactly why this would have hidden. The provider must OFFER what we price.
+   */
+  it('reaches the provider model list, so both money paths run what we bill', async () => {
+    const kieModule = await import('~/lib/modules/llm/providers/kie');
+    const provider = new kieModule.default();
+
+    expect(await provider.getDynamicModels(undefined, undefined, {})).toEqual([]);
+
+    const listed = await provider.getDynamicModels(undefined, undefined, { KIE_DEFAULT_MODEL: 'gpt-5-6-sol' });
+    expect(listed.map((m) => m.name)).toEqual(['gpt-5-6-sol']);
+
+    expect(
+      await provider.getDynamicModels(undefined, undefined, { KIE_DEFAULT_MODEL: 'claude-opus-4-8' }),
+      'already a static row — listing it twice is not a fix',
+    ).toEqual([]);
   });
 });
 
@@ -294,7 +516,7 @@ describe('the platform model switch', () => {
   it('has a priced default for every provider', () => {
     for (const provider of PLATFORM_PROVIDERS) {
       const model = PLATFORM_MODEL_BY_PROVIDER[provider];
-      expect(PROVIDER_RATES[provider]?.[model], `${provider}'s default model ${model} has no rates`).toBeDefined();
+      expect(providerRates()[provider]?.[model], `${provider}'s default model ${model} has no rates`).toBeDefined();
     }
   });
 });

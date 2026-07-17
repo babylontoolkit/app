@@ -97,3 +97,40 @@ export const KIE_MODELS: ModelInfo[] = [
     maxCompletionTokens: 128_000,
   },
 ];
+
+/**
+ * The operator's `KIE_DEFAULT_MODEL`, as a model the provider will actually SERVE.
+ *
+ * 🔴 **A model that is priced but not LISTED is billed as itself and run as something else.**
+ * `stream-text.ts` (the enhancer's path, upstream code) looks the model up in the provider's list and,
+ * on a miss, falls back to `modelsList[0]` behind a `logger.warn` — so `KIE_DEFAULT_MODEL=some-model`
+ * would quietly run Opus 4.8 while `settleGeneration` charged `some-model`'s rates. Wrong model, wrong
+ * price, no error. Hence this: the model reaches the list through upstream's own `getDynamicModels`
+ * seam, so both money paths agree on what is running. (The proxy hands `model` straight to
+ * `getModelInstance` and was never affected — which is exactly why this would have hidden.)
+ *
+ * ⚠️ **The env var has TWO readers, deliberately, and they must never disagree about its VALUE.**
+ * Billing reads it via `env(context, ...)` because it must also work from a Cloudflare loader context;
+ * this file cannot — it is client-importable, so `~/lib/.server/env` is off limits (the registry is
+ * imported by the browser bundle, which is why `capabilities.ts` lives outside `.server` too). Same
+ * variable, two doors. `serverEnv ?? process.env` mirrors `base-provider.ts`'s own key lookup exactly.
+ *
+ * There is no validation here on purpose: this answers "what will KIE serve", and the operator's rate
+ * table answers "may we bill it". `agent/config.ts` refuses an unpriced model before a request is ever
+ * made, so a model listed here without rates is unreachable rather than mis-billed.
+ */
+export function kieEnvModel(serverEnv?: Record<string, string>): ModelInfo | undefined {
+  const name = (serverEnv?.KIE_DEFAULT_MODEL || process?.env?.KIE_DEFAULT_MODEL)?.trim();
+
+  if (!name || KIE_MODELS.some((m) => m.name === name)) {
+    return undefined;
+  }
+
+  return {
+    name,
+    label: `${name} (KIE)`,
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  };
+}

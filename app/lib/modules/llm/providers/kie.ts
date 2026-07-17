@@ -54,7 +54,7 @@ import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
-import { kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
+import { kieEnvModel, kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 
 export default class KieProvider extends BaseProvider {
@@ -67,6 +67,24 @@ export default class KieProvider extends BaseProvider {
   };
 
   staticModels: ModelInfo[] = KIE_MODELS;
+
+  /**
+   * The operator's `KIE_DEFAULT_MODEL`, if it is not already a static row — see `kieEnvModel`.
+   *
+   * "Dynamic" here means "from config", not "from the vendor's API": KIE publishes no model-list
+   * endpoint, and guessing ids is what `anthropic.ts` warns against. This is upstream's seam for
+   * exactly this, and using it is what keeps `stream-text.ts` from silently running a different model
+   * than the one we bill for.
+   */
+  async getDynamicModels(
+    _apiKeys?: Record<string, string>,
+    _settings?: IProviderSetting,
+    serverEnv?: Record<string, string>,
+  ): Promise<ModelInfo[]> {
+    const model = kieEnvModel(serverEnv);
+
+    return model ? [model] : [];
+  }
 
   getModelInstance: (options: {
     model: string;

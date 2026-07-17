@@ -7,7 +7,7 @@
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
-import { PROVIDER_RATES } from '~/lib/.server/billing/rates';
+import { kieModelOverride, providerRates } from '~/lib/.server/billing/rates';
 
 /** Re-exported: this was the original home of the error, and several routes import it from here. */
 export { NotConfiguredError };
@@ -128,24 +128,46 @@ export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = 
  */
 export function getPlatformModel(context?: unknown): string {
   const provider = getPlatformProvider(context);
-  const raw = env(context, 'LLM_MODEL')?.trim();
+  const model = env(context, 'LLM_MODEL')?.trim() || defaultModelFor(provider, context);
+  const priced = providerRates(context)[provider] ?? {};
 
-  if (!raw) {
-    return PLATFORM_MODEL_BY_PROVIDER[provider];
-  }
-
-  const priced = PROVIDER_RATES[provider] ?? {};
-
-  if (!priced[raw]) {
+  if (!priced[model]) {
     throw new NotConfiguredError(
-      `LLM_MODEL="${raw}" on provider ${provider}`,
-      `We have no rates for it, so we cannot bill it. Add it to ${
-        provider === 'KIE' ? 'KIE_MODEL_RATES' : 'MODEL_RATES'
-      } in billing/rates.ts first. Priced models: ${Object.keys(priced).join(', ') || '(none)'}.`,
+      `LLM_MODEL="${model}" on provider ${provider}`,
+      `We have no rates for it, so we cannot bill it. ${
+        provider === 'KIE'
+          ? 'Set KIE_DEFAULT_MODEL to it along with KIE_INPUT_DOLLARS and KIE_OUTPUT_DOLLARS, or add a row to KIE_MODEL_RATES in billing/rates.ts.'
+          : 'Add it to MODEL_RATES in billing/rates.ts first.'
+      } Priced models: ${Object.keys(priced).join(', ') || '(none)'}.`,
     );
   }
 
-  return raw;
+  return model;
+}
+
+/**
+ * The provider's default model when `LLM_MODEL` is unset.
+ *
+ * ⚠️ **`LLM_MODEL` and `KIE_DEFAULT_MODEL` are not rivals, and the precedence is the point.**
+ * `KIE_DEFAULT_MODEL` states what KIE serves AND what it costs (`kieModelOverride` — on KIE those are
+ * one fact, since they resell at prices only the operator can see). `LLM_MODEL` picks a model across
+ * whichever provider is configured. So: `LLM_MODEL` > `KIE_DEFAULT_MODEL` > baked default.
+ *
+ * That ordering is safe ONLY because the check above prices whatever wins. Setting `LLM_MODEL=x` while
+ * `KIE_DEFAULT_MODEL=y` does NOT price `x` at `y`'s rates — `x` needs its own row or it is refused,
+ * which is exactly what stops the two vars from quietly meaning "the model" and "the price of a
+ * different model".
+ */
+function defaultModelFor(provider: PlatformProviderName, context?: unknown): string {
+  if (provider === 'KIE') {
+    const override = kieModelOverride(context);
+
+    if (override) {
+      return override.model;
+    }
+  }
+
+  return PLATFORM_MODEL_BY_PROVIDER[provider];
 }
 
 /**

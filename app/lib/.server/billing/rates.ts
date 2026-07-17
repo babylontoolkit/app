@@ -15,7 +15,7 @@
  * | cache write    | **2x**                 | we use the 1-HOUR tier (§4.2.8), not the 1.25x default |
  * | output         | 5x (model-specific)    | what the model writes                                  |
  */
-import { envFlag, envNumber } from '~/lib/.server/env';
+import { env, envFlag, envNumber, NotConfiguredError } from '~/lib/.server/env';
 
 /** USD per million tokens, per model. Verified against Anthropic's published pricing (2026-07). */
 export interface ModelRates {
@@ -31,6 +31,41 @@ export interface ModelRates {
    * here would under-charge every single generation (§4.2.8).
    */
   cacheWritePerMTok: number;
+}
+
+/**
+ * The two cache classes are DERIVED from base input, not independently quoted.
+ *
+ * Both Anthropic and KIE price caching as a multiple of the model's own input rate, and every row in
+ * every table below satisfies it exactly (`billing.spec.ts` pins that as an invariant). That is what
+ * makes `KIE_INPUT_DOLLARS` safe to expose on its own: an operator who reprices input WITHOUT these
+ * would otherwise leave the cache numbers quoted against the OLD input rate — a row half-priced from
+ * each, which is the `packMargin()` bug in miniature (two numbers, each locally sensible, disagreeing
+ * about what one thing costs). So cache always re-derives from the FINAL input rate unless the
+ * operator quotes it explicitly.
+ *
+ * ⚠️ The write multiple is **2x** because `proxy.ts` writes every entry at the 1-HOUR tier — NOT the
+ * 1.25x of the 5-minute default (§4.2.8). Billing must agree with that choice or every generation
+ * under-charges, silently.
+ */
+export const CACHE_READ_MULTIPLIER = 0.1;
+export const CACHE_WRITE_MULTIPLIER = 2.0;
+
+/**
+ * A full rate row from the two numbers a vendor actually publishes, with optional explicit cache
+ * quotes for a vendor whose multipliers ever diverge from the pair above.
+ */
+export function ratesFromBase(
+  inputPerMTok: number,
+  outputPerMTok: number,
+  cache?: { cacheReadPerMTok?: number; cacheWritePerMTok?: number },
+): ModelRates {
+  return {
+    inputPerMTok,
+    outputPerMTok,
+    cacheReadPerMTok: cache?.cacheReadPerMTok ?? inputPerMTok * CACHE_READ_MULTIPLIER,
+    cacheWritePerMTok: cache?.cacheWritePerMTok ?? inputPerMTok * CACHE_WRITE_MULTIPLIER,
+  };
 }
 
 /**
@@ -90,11 +125,122 @@ export const KIE_MODEL_RATES: Record<string, ModelRates> = {
   },
 };
 
-/** Every provider the PLATFORM can bill for. BYOK is charged zero, so it never reaches this table. */
-export const PROVIDER_RATES: Record<string, Record<string, ModelRates>> = {
-  Anthropic: MODEL_RATES,
-  KIE: KIE_MODEL_RATES,
-};
+/**
+ * A price, from the environment. **Not `envNumber` — a typo here is not survivable.**
+ *
+ * `envNumber` returns its fallback for an unparseable value, which is right for a turn cap and wrong
+ * for money: `KIE_INPUT_DOLLARS=$2` would silently price every generation at some other model's rate
+ * and throw nothing. A price the operator tried and failed to state is a config error, never a default.
+ * Zero is refused for the same reason — a free model does not exist, so `=0` is a mistake, and it would
+ * zero-rate every generation on it (the exact revenue leak `ratesFor`'s fallbacks exist to prevent).
+ */
+function envMoney(context: unknown, key: string): number | undefined {
+  const raw = env(context, key)?.trim();
+
+  if (!raw) {
+    return undefined;
+  }
+
+  const parsed = Number(raw);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new NotConfiguredError(`${key}="${raw}"`, 'It must be a positive number of US dollars per million tokens.');
+  }
+
+  return parsed;
+}
+
+/** The KIE rate vars, as one list — so a "you set rates but no model" check cannot miss one. */
+const KIE_RATE_ENV = ['KIE_INPUT_DOLLARS', 'KIE_OUTPUT_DOLLARS', 'KIE_CACHED_INPUT', 'KIE_CACHED_WRITES'] as const;
+
+/**
+ * The operator's KIE model + its price, from the environment (2026-07-17).
+ *
+ * ## Why the model and its rates are ONE variable group, and not two
+ *
+ * KIE resells many vendors' models and reprices them independently of anyone's list. So unlike
+ * Anthropic — whose prices we can look up and bake — "which KIE model" and "what does it cost" are a
+ * single fact that only the operator holds, and splitting them across a config knob and a code table
+ * is what guarantees they drift. `KIE_INPUT_DOLLARS` therefore prices exactly `KIE_DEFAULT_MODEL`:
+ * they are one ROW, entered together, or neither is accepted.
+ *
+ * ## The rules, each of which exists because its absence is a SILENT mis-bill
+ *
+ *  - **Rates with no model are refused.** They would price nothing, so they are a typo — and a typo
+ *    that reads as configured. The operator would see their numbers in `.env` and believe them.
+ *  - **A model we have no baked row for REQUIRES input+output.** This is the whole point. `ratesFor`
+ *    falls back to the provider's most expensive row for an unknown model, so `KIE_DEFAULT_MODEL=x`
+ *    alone would bill every generation at Opus 4.8's price, forever, and throw nothing. "Is this model
+ *    configured?" and "do we know what it costs?" are the same question (see `agent/config.ts`).
+ *  - **Cache re-derives from the FINAL input rate** unless quoted — see `CACHE_READ_MULTIPLIER`. For
+ *    `KIE_DEFAULT_MODEL=claude-opus-4-8` with nothing else set, the derivation reproduces the baked
+ *    row byte-for-byte ($2 -> $0.2 read / $4 write), which is why this is a safe default rather than
+ *    a second opinion about a known price.
+ *  - **A baked row supplies input/output only, never cache.** Overriding input alone must not leave
+ *    cache quoted against the old base.
+ *
+ * Returns `undefined` when nothing is set — the baked table stands, unchanged.
+ */
+export interface KieModelOverride {
+  model: string;
+  rates: ModelRates;
+}
+
+export function kieModelOverride(context?: unknown): KieModelOverride | undefined {
+  const model = env(context, 'KIE_DEFAULT_MODEL')?.trim();
+
+  const input = envMoney(context, 'KIE_INPUT_DOLLARS');
+  const output = envMoney(context, 'KIE_OUTPUT_DOLLARS');
+  const cacheReadPerMTok = envMoney(context, 'KIE_CACHED_INPUT');
+  const cacheWritePerMTok = envMoney(context, 'KIE_CACHED_WRITES');
+
+  if (!model) {
+    const quoted = KIE_RATE_ENV.filter((key) => env(context, key)?.trim());
+
+    if (quoted.length) {
+      throw new NotConfiguredError(
+        `${quoted.join(', ')} (set) but KIE_DEFAULT_MODEL`,
+        'Those rates price KIE_DEFAULT_MODEL, so on their own they price nothing and are silently ignored. Set KIE_DEFAULT_MODEL, or remove them.',
+      );
+    }
+
+    return undefined;
+  }
+
+  const baked = KIE_MODEL_RATES[model];
+  const finalInput = input ?? baked?.inputPerMTok;
+  const finalOutput = output ?? baked?.outputPerMTok;
+
+  if (finalInput === undefined || finalOutput === undefined) {
+    throw new NotConfiguredError(
+      `KIE_DEFAULT_MODEL="${model}"`,
+      'We have no rates baked in for it, so KIE_INPUT_DOLLARS and KIE_OUTPUT_DOLLARS are both required — a model we cannot price is a model we cannot bill, and an unpriced model does not bill as free, it bills at the most expensive model we know of. Get the numbers from the KIE console. ' +
+        `Models priced without them: ${Object.keys(KIE_MODEL_RATES).join(', ')}.`,
+    );
+  }
+
+  return { model, rates: ratesFromBase(finalInput, finalOutput, { cacheReadPerMTok, cacheWritePerMTok }) };
+}
+
+/** KIE's rate table: the baked rows, with the operator's `KIE_DEFAULT_MODEL` row added or overriding. */
+export function kieRates(context?: unknown): Record<string, ModelRates> {
+  const override = kieModelOverride(context);
+
+  return override ? { ...KIE_MODEL_RATES, [override.model]: override.rates } : KIE_MODEL_RATES;
+}
+
+/**
+ * Every provider the PLATFORM can bill for. BYOK is charged zero, so it never reaches this table.
+ *
+ * A FUNCTION, not a constant, since 2026-07-17: KIE's row is the operator's to state (`kieRates`), and
+ * a module-level constant would freeze whatever the environment held at import time.
+ */
+export function providerRates(context?: unknown): Record<string, Record<string, ModelRates>> {
+  return {
+    Anthropic: MODEL_RATES,
+    KIE: kieRates(context),
+  };
+}
 
 /**
  * Rates for a model on a given provider.
@@ -110,8 +256,8 @@ export const PROVIDER_RATES: Record<string, Record<string, ModelRates>> = {
  * model's rates on that provider, then to that provider's most expensive tier, and finally to
  * Anthropic Opus — the most expensive thing we know of. Every fallback is in the safe direction.
  */
-export function ratesFor(model: string, provider: string): ModelRates {
-  const table = PROVIDER_RATES[provider] ?? MODEL_RATES;
+export function ratesFor(model: string, provider: string, context?: unknown): ModelRates {
+  const table = providerRates(context)[provider] ?? MODEL_RATES;
 
   return table[model] ?? mostExpensive(table) ?? MODEL_RATES['claude-opus-4-8'];
 }
@@ -210,8 +356,8 @@ export interface TokenUsage {
 }
 
 /** Raw model cost of a generation, in USD. The honest number, before any margin. */
-export function rawCostUsd(usage: TokenUsage, model: string, provider: string): number {
-  const rates = ratesFor(model, provider);
+export function rawCostUsd(usage: TokenUsage, model: string, provider: string, context?: unknown): number {
+  const rates = ratesFor(model, provider, context);
 
   return (
     (usage.promptTokens * rates.inputPerMTok +
@@ -229,8 +375,14 @@ export function rawCostUsd(usage: TokenUsage, model: string, provider: string): 
  * to zero would let a user with an empty balance keep generating forever, one cheap turn at a time.
  * A generation that produced nothing at all (an immediate abort) is genuinely free.
  */
-export function creditsForUsage(usage: TokenUsage, model: string, provider: string, config: BillingConfig): number {
-  const cost = rawCostUsd(usage, model, provider);
+export function creditsForUsage(
+  usage: TokenUsage,
+  model: string,
+  provider: string,
+  config: BillingConfig,
+  context?: unknown,
+): number {
+  const cost = rawCostUsd(usage, model, provider, context);
 
   if (cost <= 0) {
     return 0;
@@ -273,8 +425,8 @@ export const COLD_CREATION_USAGE: TokenUsage = {
  * That failure would be silent and would land on the ONE moment the funnel depends on — a new user's
  * first prototype. `billing.spec.ts` asserts this floor so the two numbers cannot drift apart.
  */
-export function grantHeadroom(config: BillingConfig, model: string, provider: string): number {
-  return config.signupGrantCredits / creditsForUsage(COLD_CREATION_USAGE, model, provider, config);
+export function grantHeadroom(config: BillingConfig, model: string, provider: string, context?: unknown): number {
+  return config.signupGrantCredits / creditsForUsage(COLD_CREATION_USAGE, model, provider, config, context);
 }
 
 /**
