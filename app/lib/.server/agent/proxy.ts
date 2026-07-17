@@ -50,8 +50,20 @@ const logger = createScopedLogger('agent-proxy');
 export const MAX_REPAIR_TURNS = 2;
 
 /**
- * Prompt-cache breakpoints (SPEC §4.2.8). Anthropic permits four; we spend all four — the base
- * prompt, the routed doc blocks, an invoked skill, and the project files. There are none spare.
+ * Prompt-cache breakpoints (SPEC §4.2.8). Anthropic permits four, and we spend all four:
+ *
+ *   1. the base prompt
+ *   2. the routed doc blocks (one breakpoint for the whole set — `selectStickyBlocks`)
+ *   3. skills — the invoked `/slash` skill AND the pre-loaded skills, sharing ONE block
+ *   4. the project files
+ *
+ * ⚠️ **There are none spare, and this list is the reason to believe it.** The previous version of this
+ * comment said the same sentence while naming only base/blocks/skill/files — accurate when written,
+ * and then the pre-loaded-skills block was added with a fifth breakpoint and nobody re-counted. Every
+ * `/slash` turn that also routed a doc block sent five and the API refused it outright (HTTP 400,
+ * "A maximum of 4 blocks with cache_control may be provided. Found 5") — 0 tokens, dead generation.
+ * `countCacheBreakpoints` + `cache-breakpoints.spec.ts` now enforce what this comment asserts, because
+ * a comment cannot fail. **Adding a fifth means MERGING two of the above, not adding a breakpoint.**
  *
  * **The TTL is the whole point.** The default `ephemeral` tier expires after 5 MINUTES, and an app
  * builder is exactly the workload that defeats it: the user generates a game, then spends several
@@ -69,6 +81,24 @@ export const MAX_REPAIR_TURNS = 2;
  * seven minutes later — i.e. it is genuinely 1h and not a silent fall back to the 5m tier.
  */
 const CACHE_CONTROL = { anthropic: { cacheControl: { type: 'ephemeral' as const, ttl: '1h' as const } } };
+
+/**
+ * Anthropic's hard limit. A FIFTH breakpoint is not degraded caching — it is HTTP 400 and a dead
+ * generation: "A maximum of 4 blocks with cache_control may be provided. Found 5." (verified live).
+ */
+export const MAX_CACHE_BREAKPOINTS = 4;
+
+/**
+ * Count the cache breakpoints in an assembled system array.
+ *
+ * Exported so the budget is testable rather than a claim in a comment. The comment on `CACHE_CONTROL`
+ * asserted "there are none spare" and was true when written — then a fifth was added and nobody
+ * re-counted, so every `/slash` turn that also routed a doc block 400'd. A sentence in a doc comment
+ * cannot fail; this can.
+ */
+export function countCacheBreakpoints(system: CoreMessage[]): number {
+  return system.filter((m) => (m as { providerOptions?: unknown }).providerOptions !== undefined).length;
+}
 
 export interface AgentRequest {
   messages: Message[];
@@ -425,10 +455,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     });
   });
 
-  if (slash) {
-    system.push({ role: 'system', content: slash.skillBlock, providerOptions: CACHE_CONTROL });
-  }
-
   /*
    * Hand the model the skills it is obviously going to want, instead of making it fetch them.
    *
@@ -450,8 +476,35 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const skillRoutingTexts = [...userTexts.filter((t) => !t.includes(CREATION_BRIEF_MARKER)), skillText];
   const preloaded = await preloadSkills(skillRoutingTexts, slash?.skillName, isCreationTurn);
 
-  if (preloaded.length > 0) {
-    system.push({ role: 'system', content: buildPreloadedSkillBlock(preloaded), providerOptions: CACHE_CONTROL });
+  /*
+   * 🔴 THE INVOKED SKILL AND THE PRE-LOADED SKILLS SHARE ONE BREAKPOINT — because ANTHROPIC ALLOWS
+   * EXACTLY FOUR AND WE HAD FIVE (found + fixed 2026-07-17).
+   *
+   * The budget is base + routed blocks + skills + project files = 4, and the comment on `CACHE_CONTROL`
+   * has always said "there are none spare". It was right when it was written; the pre-loaded-skills
+   * block was added later and nobody re-counted. So any `/slash` turn that ALSO routed a doc block sent
+   * five, and the API refuses the request outright:
+   *
+   *   HTTP 400 — "A maximum of 4 blocks with cache_control may be provided. Found 5."
+   *
+   * That is a HARD failure before a single token: 0 in, 0 out, the whole generation dead. Exactly the
+   * shape of the edit-turn `thinking.signature` bug (CLAUDE.md) — a path that every test drove around
+   * and no measurement pointed at, because slash invocations are rare and creations never use one.
+   *
+   * Merging is the STRUCTURAL fix rather than a counter: two skill blocks cannot become three, so five
+   * is now unreachable by construction instead of by arithmetic someone has to redo. They also belong
+   * together — both answer "which skills does the model already have?" — and one breakpoint for both is
+   * what the budget could always afford.
+   *
+   * ⚠️ Do not "tidy" this back into two `system.push` calls with their own `providerOptions`.
+   */
+  const skillBlocks = [
+    ...(slash ? [slash.skillBlock] : []),
+    ...(preloaded.length > 0 ? [buildPreloadedSkillBlock(preloaded)] : []),
+  ];
+
+  if (skillBlocks.length > 0) {
+    system.push({ role: 'system', content: skillBlocks.join('\n\n'), providerOptions: CACHE_CONTROL });
   }
 
   /*
@@ -571,6 +624,27 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       content: `# Current Project Files\n\n${createFilesContext(contextFiles, true)}`,
       providerOptions: CACHE_CONTROL,
     });
+  }
+
+  /*
+   * The breakpoint budget, enforced where it is spent rather than asserted in a comment.
+   *
+   * A fifth breakpoint is HTTP 400 and a dead generation — so dropping the extra is strictly better
+   * than letting the request fail, and it degrades exactly where it hurts least: the LAST breakpoint
+   * is the project files, whose entry is the most volatile and therefore the cheapest to lose. Loud,
+   * because a silent drop here is a permanent 2x on someone's bill.
+   */
+  if (countCacheBreakpoints(system) > MAX_CACHE_BREAKPOINTS) {
+    logger.error(
+      `Cache breakpoint budget exceeded (${countCacheBreakpoints(system)} > ${MAX_CACHE_BREAKPOINTS}) — dropping the last one. ` +
+        `This would otherwise be an HTTP 400 and a dead generation. Fix the assembly above, do not rely on this.`,
+    );
+
+    for (let i = system.length - 1; i >= 0 && countCacheBreakpoints(system) > MAX_CACHE_BREAKPOINTS; i--) {
+      if ((system[i] as { providerOptions?: unknown }).providerOptions !== undefined) {
+        delete (system[i] as { providerOptions?: unknown }).providerOptions;
+      }
+    }
   }
 
   /*
