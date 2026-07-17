@@ -18,6 +18,7 @@ import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-r
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { getProjectStore } from '~/lib/.server/projects/store';
+import { messagesKey } from '~/lib/.server/projects/message-store';
 import { getObjectStore } from '~/lib/.server/storage';
 import { errorResponse } from '~/lib/.server/http';
 import { createScopedLogger } from '~/utils/logger';
@@ -30,10 +31,6 @@ const logger = createScopedLogger('api.project-messages');
  * cannot push unbounded bytes into our object store on the platform's dime.
  */
 const MAX_MESSAGES_BYTES = 25_000_000;
-
-function messagesKey(projectId: string): string {
-  return `messages/${projectId}.json`;
-}
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
   try {

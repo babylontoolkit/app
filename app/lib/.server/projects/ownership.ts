@@ -14,7 +14,7 @@
  * project id from the client into a project.
  */
 import { createScopedLogger } from '~/utils/logger';
-import { ForbiddenError, type AuthUser } from '~/lib/.server/supabase/auth';
+import { type AuthUser } from '~/lib/.server/supabase/auth';
 import { getProjectStore } from './store';
 import type { Project } from './types';
 
@@ -52,10 +52,15 @@ export async function requireOwnedProject(user: AuthUser, projectId: string, con
   return project;
 }
 
-/** Same, for routes that also need the snapshot to belong to that project. */
-export async function assertSnapshotBelongsTo(project: Project, snapshotProjectId: string): Promise<void> {
-  if (snapshotProjectId !== project.id) {
-    logger.warn(`Snapshot/project mismatch: snapshot belongs to ${snapshotProjectId}, not ${project.id}`);
-    throw new ForbiddenError('That checkpoint does not belong to this project.');
-  }
-}
+/*
+ * 🔴 `assertSnapshotBelongsTo` is gone, and it does not need a replacement (§4.5.4b).
+ *
+ * It closed a real hole: a snapshot was addressed by its own id, so owning project A and naming project
+ * B's snapshot id in A's URL would have read B's files. That hole existed because an id supplied by the
+ * caller decided which object got read.
+ *
+ * Nothing on the server is addressed that way now. The one remaining payload — a published game's remix
+ * seed — lives at a key DERIVED from the project id (`share/seed-store.ts`), so `requireOwnedProject`
+ * alone is sufficient: there is no second id to cross-check, and no way to name someone else's bytes.
+ * If you ever reintroduce a caller-supplied storage id, this check has to come back with it.
+ */

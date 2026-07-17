@@ -299,54 +299,41 @@ export async function saveProjectToRepo(
   return payload;
 }
 
-/* --------------------------------------------------------------- snapshots */
+/* -------------------------------------------------------------- remix seed */
 
 /**
- * 🔴 There is no `createSnapshot` here any more (§4.5.4b), and adding one back is the regression.
+ * 🔴 There is no snapshot API here any more (§4.5.4b), and adding one back is the regression.
  *
- * The browser used to POST the entire project to `/api/projects/:id/snapshots` after every generation.
- * Under repo-primary persistence the platform does not hold the user's code: checkpoints live in
- * IndexedDB (`local-snapshots.ts`) and saved work lives in the user's own repo. The server route
- * refuses the write, so a call added here would fail at runtime rather than quietly re-enable the old
- * model — but the honest place to say so is here, where someone reaching for "save the project" looks
- * first.
+ * The browser used to POST the entire project to `/api/projects/:id/snapshots` after every generation,
+ * and read a version history back. Under repo-primary persistence the platform does not hold the user's
+ * code: checkpoints live in IndexedDB (`local-snapshots.ts`) and saved work lives in the user's own
+ * repo. The server routes are gone entirely — `createSnapshot`, `listSnapshots`, `setCurrentSnapshot`
+ * and `readSnapshot` with them — so a call added here has nothing to reach. The honest place to say so
+ * is here, where someone reaching for "save the project on the server" looks first.
  *
- * `listSnapshots` and `setCurrentSnapshot` are gone for the same reason: the history they described is
- * local now.
+ * `no-server-storage.spec.ts` scans this directory for anyone re-adding one.
  */
-
-/** Read a checkpoint's payload back. This is the only call that moves real bytes — use it sparingly. */
-export async function readSnapshot(
-  projectId: string,
-  snapshotId: string,
-): Promise<{ snapshot: { id: string; label?: string; createdAt: string }; files: SerializedFileMap }> {
-  return api<{ snapshot: { id: string; label?: string; createdAt: string }; files: SerializedFileMap }>(
-    `/api/projects/${projectId}/snapshots/${snapshotId}`,
-  );
-}
 
 /**
- * Read the project's server-side SEED, if it has one.
+ * Read the project's remix SEED, if it has one.
  *
- * The name is now slightly generous: this is not "the latest checkpoint", because the platform no
- * longer takes checkpoints. The only thing it can return is a remix seed — the one-time copy
- * `api.remix` leaves so a clone of a shared game has something to open, which exists because the
- * source's own repo belongs to a different person (§4.8, §4.5.4b).
+ * The one thing the platform still stores of a user's source: the copy left behind when a shared game
+ * is published, so that a clone of it has something to open (§4.8). It is not a checkpoint and not a
+ * backup — an ordinary project has no seed, which is why `{}` here is the normal case rather than an
+ * error.
  *
- * Returns `{}` for everything else, which is the normal case, not an error.
+ * Skips the request entirely unless the project record says a seed exists, so the common path costs
+ * nothing. `remixSeedAt` is only a hint: if it disagrees with storage the fetch 404s and this returns
+ * `{}` anyway, which is the same answer.
  */
-export async function restoreLatestServerCheckpoint(
-  projectId: string,
-): Promise<{ snapshotId?: string; files?: SerializedFileMap }> {
+export async function readRemixSeed(projectId: string): Promise<{ files?: SerializedFileMap }> {
   const project = await getProject(projectId);
 
-  if (!project.currentSnapshotId) {
+  if (!project.remixSeedAt) {
     return {};
   }
 
-  const { files } = await readSnapshot(projectId, project.currentSnapshotId);
-
-  return { snapshotId: project.currentSnapshotId, files };
+  return api<{ files: SerializedFileMap }>(`/api/projects/${projectId}/seed`);
 }
 
 /* ---------------------------------------------------------------- messages */

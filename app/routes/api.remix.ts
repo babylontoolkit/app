@@ -18,7 +18,8 @@
 import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
-import { getProjectStore, getSnapshotStore } from '~/lib/.server/projects/store';
+import { getProjectStore } from '~/lib/.server/projects/store';
+import { getRemixSeed, putRemixSeed } from '~/lib/.server/share/seed-store';
 import { deriveRemix } from '~/lib/.server/share/remix';
 import { errorResponse } from '~/lib/.server/http';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
@@ -51,7 +52,6 @@ export async function action({ request, context }: ActionFunctionArgs) {
     const body = await request.json<RemixBody>();
 
     const projects = getProjectStore(context);
-    const snapshots = getSnapshotStore(context);
 
     let source: Project;
     let isSelfRemix = false;
@@ -78,7 +78,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
      *
      * 🔴 This used to read `source.currentSnapshotId` and nothing else, back when the platform kept a
      * server-side snapshot of every project after every generation. It does not any more — so that
-     * lookup now returns `undefined` for every ordinary project, and this route quietly produced an
+     * lookup returned `undefined` for every ordinary project, and this route quietly produced an
      * EMPTY clone. The comment that used to sit here ("a source with no snapshot yet clones as an
      * empty project — still valid, just nothing to copy") described a rare edge case that had silently
      * become the universal one.
@@ -86,25 +86,27 @@ export async function action({ request, context }: ActionFunctionArgs) {
      * The two paths that DO have files, and no others:
      *
      *   - self-remix: the caller's own browser sends them (`body.files`). They own both projects.
-     *   - shared remix: the seed the OWNER deposited when they published (`buildRemixSeed`), which is
-     *     what `currentSnapshotId` now points at.
+     *   - shared remix: the seed the OWNER deposited when they published (`buildRemixSeed`).
      *
      * `body.files` is honoured ONLY for a self-remix. On the shareId path a visitor's files are not
      * the owner's game, and storing them against a stranger's share would be letting the requester
      * dictate what a public remix contains.
      */
-    const seeded = source.currentSnapshotId ? await snapshots.read(source.currentSnapshotId) : null;
+    const seeded = await getRemixSeed(source.id, context);
     const files = (isSelfRemix && body.files) || seeded;
 
     const created = await projects.create(deriveRemix(source, { newOwnerId: user.id, name: body.name, isSelfRemix }));
 
+    /*
+     * The clone gets its OWN seed, under its own project id — not a reference to the source's.
+     *
+     * It is what the clone mounts from on first open, on whatever device opens it, and it must survive
+     * the source being unpublished (which deletes the source's seed) or deleted outright. A shared
+     * pointer would make one user's decision silently empty another user's project.
+     */
     if (files) {
-      const snapshot = await snapshots.create({
-        projectId: created.id,
-        files,
-        label: 'Remixed',
-      });
-      await projects.update(created.id, { currentSnapshotId: snapshot.id });
+      await putRemixSeed(created.id, files, context);
+      await projects.update(created.id, { remixSeedAt: new Date().toISOString() });
     }
 
     // Growth-loop signal (§5A) — self-remix and shared-game remix are distinguished for the funnel.

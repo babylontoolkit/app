@@ -7,7 +7,9 @@
 import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
-import { getProjectStore, getSnapshotStore } from '~/lib/.server/projects/store';
+import { getProjectStore } from '~/lib/.server/projects/store';
+import { deleteMessages } from '~/lib/.server/projects/message-store';
+import { deleteRemixSeed } from '~/lib/.server/share/seed-store';
 import { errorResponse } from '~/lib/.server/http';
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
@@ -29,12 +31,24 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
     if (request.method === 'DELETE') {
       /*
-       * Snapshots first. If the project row went first and the snapshot delete then failed, the
-       * payload bytes would be orphaned in object storage with nothing left pointing at them — an
-       * invisible, unbillable, un-deletable leak. Losing a snapshot whose project survives is
-       * recoverable; the reverse is not.
+       * Bytes first, row second — every time.
+       *
+       * The project id is the ONLY handle on this user's bytes: the seed and the conversation are both
+       * stored at keys derived from it. Delete the row first and a failure here strands them with
+       * nothing left that can name them — invisible, un-deletable, and (for the chat) still ours after
+       * the user pressed Delete believing it gone. Losing bytes whose project survives is recoverable;
+       * the reverse is not.
+       *
+       * 🔴 The MESSAGES delete is not tidiness. It did not exist: `DELETE /api/projects/:id` removed
+       * the row and left `messages/{projectId}.json` behind forever, because the key was private to the
+       * messages route and nothing else could address it. "Delete my project" left the conversation on
+       * our servers.
+       *
+       * Both are unconditional: deleting an absent object is a no-op, and asking a hint first
+       * (`remixSeedAt`) leaves the bytes behind on any disagreement between hint and storage.
        */
-      await getSnapshotStore(context).deleteByProject(project.id);
+      await deleteRemixSeed(project.id, context);
+      await deleteMessages(project.id, context);
       await store.delete(project.id);
 
       return json({ ok: true });

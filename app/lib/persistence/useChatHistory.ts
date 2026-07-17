@@ -26,7 +26,7 @@ import {
   getRepoStatus,
   loadMessages,
   pullFromRepo,
-  restoreLatestServerCheckpoint,
+  readRemixSeed,
   saveMessages,
   saveProjectToRepo,
   type RepoStatus,
@@ -431,7 +431,7 @@ export function startGitConnect(provider: 'github' | 'gitlab' = 'github'): void 
 
 /** Read the one-time remix seed, if there is one, and adopt it as this browser's first checkpoint. */
 async function mountFromSeed(pid: string): Promise<void> {
-  const { files } = await restoreLatestServerCheckpoint(pid);
+  const { files } = await readRemixSeed(pid);
 
   if (!files) {
     return;

@@ -21,8 +21,14 @@ export interface Project {
   /** Set once published (§4.8) — the public `/play/:shareId` key. */
   shareId?: string;
 
-  /** The checkpoint the builder remounts on resume. */
-  currentSnapshotId?: string;
+  /**
+   * When a remix seed was deposited for this project (§4.8) — absent on almost every project.
+   *
+   * Read as a boolean: it is what tells the client whether `/api/projects/:id/seed` is worth asking
+   * for. It replaces `currentSnapshotId`, whose name promised a server-side version history that no
+   * longer exists (§4.5.4b).
+   */
+  remixSeedAt?: string;
 
   /**
    * Where this project is permanently saved (§4.5.4b). All absent = UNLINKED = it exists only in this
@@ -39,27 +45,10 @@ export interface Project {
   updatedAt: string;
 }
 
-/**
- * A checkpoint as the LIST route returns it — metadata only.
+/*
+ * 🔴 `SnapshotSummary` and `SnapshotList` are gone (§4.5.4b).
  *
- * The file payload is deliberately not here: a project's snapshot can be many megabytes, and the
- * version-history UI needs to show twenty of them without downloading twenty copies of the game.
- * Bytes come from `readSnapshot()`, one at a time, only when actually restoring.
+ * They described a SERVER-side version history — the shape of `GET /api/projects/:id/snapshots`, a
+ * route that no longer exists. The checkpoint history is local now and has its own types, next to the
+ * store that owns them: `LocalSnapshot` / `LocalSnapshotSummary` in `~/lib/persistence/local-snapshots`.
  */
-export interface SnapshotSummary {
-  id: string;
-  label?: string;
-
-  /** The message this checkpoint was taken after — what anchors "restore to before this change". */
-  messageId?: string;
-
-  createdAt: string;
-  fileCount: number;
-  totalBytes?: number;
-}
-
-/** What `GET /api/projects/:id/snapshots` returns. */
-export interface SnapshotList {
-  currentSnapshotId: string | null;
-  snapshots: SnapshotSummary[];
-}

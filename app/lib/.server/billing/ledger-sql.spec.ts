@@ -142,9 +142,38 @@ describe('the migrations', () => {
        where relnamespace = 'public'::regnamespace and relkind = 'r'`,
     );
 
-    for (const table of ['profiles', 'projects', 'snapshots', 'generations', 'credit_ledger', 'entitlements']) {
+    for (const table of ['profiles', 'projects', 'generations', 'credit_ledger', 'entitlements']) {
       expect(rows.find((r) => r.relname === table)?.relrowsecurity, `${table} must have RLS enabled`).toBe(true);
     }
+  });
+
+  /**
+   * The platform stores no project files (§4.5.4b, migration 0007).
+   *
+   * `snapshots` was dropped rather than left empty, and the difference matters: a table with a live RLS
+   * policy is a place to write, and 0006 left this one standing for a full release after the behaviour
+   * that used it was removed. Asserted against the REAL migrations because the TypeScript mirror cannot
+   * see a table nothing references.
+   */
+  it('has no snapshots table — the platform stores no project files', async () => {
+    const { rows } = await db.query<{ relname: string }>(
+      `select relname from pg_class where relnamespace = 'public'::regnamespace and relkind = 'r'`,
+    );
+
+    expect(rows.map((r) => r.relname)).not.toContain('snapshots');
+  });
+
+  it('has no current_snapshot_id column left on projects', async () => {
+    const { rows } = await db.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+       where table_schema = 'public' and table_name = 'projects'`,
+    );
+    const columns = rows.map((r) => r.column_name);
+
+    expect(columns).not.toContain('current_snapshot_id');
+
+    // What replaced it: a hint that a published game has a remix seed (§4.8), named for what it means.
+    expect(columns).toContain('remix_seed_at');
   });
 
   /* Migration 0002: without these, production can see THAT a generation cost money, never WHY. */

@@ -7,7 +7,7 @@
  *   - an unsanitised `returnTo` turns our own signed URL into an open redirect;
  *   - a token that round-trips wrong is a save that fails at 3am with no way to tell why.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildAuthorizeUrl,
   configuredProviders,
@@ -25,6 +25,43 @@ import { decryptToken, encryptToken } from './token-store';
 /** A fake Remix/CF context — `env()` reads `context.cloudflare.env` before `process.env`. */
 const ctx = (vars: Record<string, string>) => ({ cloudflare: { env: vars } });
 
+/**
+ * 🔴 `ctx({})` does not mean "nothing is configured", and that is the whole reason this block exists.
+ *
+ * `env()` falls back to `process.env` (it must — that is how we run on Node as well as Cloudflare), and
+ * vitest loads `.env.local`. So on a developer's machine with real OAuth apps set up, an "empty"
+ * context silently resolved their actual credentials, and every assertion here about the UNCONFIGURED
+ * state failed — while CI, which has no `.env.local`, stayed green.
+ *
+ * That is the worst shape a test failure can take: it fires only for the person who configured the
+ * feature, blames code they did not touch, and teaches them that a red suite is normal. Worse, the
+ * property under test — "absent credentials degrade, never crash" — became unverifiable on the only
+ * machines where anyone would notice it breaking.
+ *
+ * So the environment is emptied explicitly. These tests are about what the CONTEXT says, and nothing
+ * else may answer for it.
+ */
+const OAUTH_ENV_KEYS = [
+  'GITHUB_OAUTH_CLIENT_ID',
+  'GITHUB_OAUTH_CLIENT_SECRET',
+  'GITLAB_OAUTH_CLIENT_ID',
+  'GITLAB_OAUTH_CLIENT_SECRET',
+  'GITLAB_HOST',
+  'GIT_OAUTH_STATE_SECRET',
+  'GIT_TOKEN_ENCRYPTION_KEY',
+  'APP_URL',
+];
+
+beforeEach(() => {
+  for (const key of OAUTH_ENV_KEYS) {
+    vi.stubEnv(key, undefined as unknown as string);
+  }
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 const SECRET = { GIT_OAUTH_STATE_SECRET: 'a-server-only-signing-secret' };
 
 const state = (over: Partial<OAuthState> = {}): OAuthState => ({
@@ -41,6 +78,33 @@ describe('provider configuration — absent credentials degrade, never crash', (
     expect(getOAuthConfig(ctx({}), 'github')).toBeNull();
     expect(isProviderConfigured(ctx({}), 'github')).toBe(false);
     expect(configuredProviders(ctx({}))).toEqual([]);
+  });
+
+  /**
+   * The control for the `stubEnv` block above — it makes the trap visible instead of merely avoided.
+   *
+   * `env()` really does fall back to `process.env`, by design: it is how the same call sites work on
+   * Node and on Cloudflare. The consequence is that an "empty" context is empty only while the
+   * environment is, which is why the tests above must clear it. If someone deletes that `beforeEach`,
+   * CI still passes (no `.env.local` there) and the suite silently starts failing for exactly the
+   * developers who have OAuth set up. This test states the mechanism so the next reader does not have
+   * to rediscover it from a confusing red run.
+   */
+  it('falls back to process.env when the context does not answer — hence the stubs above', () => {
+    vi.stubEnv('GITHUB_OAUTH_CLIENT_ID', 'from-the-environment');
+    vi.stubEnv('GITHUB_OAUTH_CLIENT_SECRET', 'also-from-the-environment');
+
+    expect(getOAuthConfig(ctx({}), 'github')?.clientId).toBe('from-the-environment');
+  });
+
+  /** The context is authoritative when it answers — the environment must not override a real config. */
+  it('prefers the context over the environment', () => {
+    vi.stubEnv('GITHUB_OAUTH_CLIENT_ID', 'from-the-environment');
+    vi.stubEnv('GITHUB_OAUTH_CLIENT_SECRET', 'also-from-the-environment');
+
+    const context = ctx({ GITHUB_OAUTH_CLIENT_ID: 'from-the-context', GITHUB_OAUTH_CLIENT_SECRET: 'shh' });
+
+    expect(getOAuthConfig(context, 'github')?.clientId).toBe('from-the-context');
   });
 
   it('needs BOTH id and secret — half a config is no config', () => {

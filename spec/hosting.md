@@ -37,33 +37,34 @@
 
 ## Storage integration changes (supersedes Supabase Storage mentions in SPEC §4.5.5/§4.8/§4.11)
 
-> **⚠️ SNAPSHOTS ARE NO LONGER THE PROJECT STORE (SPEC §4.5.4b, 2026-07-16).** This document was written when the platform snapshotted every project after every generation; it does not any more. **The user's code lives in their own repo, and their in-progress checkpoints live in their browser** (`local-snapshots.ts`, IndexedDB). `POST /api/projects/:id/snapshots` refuses (405).
+> **⚠️ THE PROJECT SNAPSHOT STORE IS DELETED — not narrowed, not dormant (SPEC §4.5.4b; migration 0007, 2026-07-16).** This document was written when the platform snapshotted every project after every generation. **The user's code lives in their own repo, and their in-progress checkpoints live in their browser** (`local-snapshots.ts`, IndexedDB). There is no `snapshots` table, no `SnapshotStore`, and no snapshot route — `POST /api/projects/:id/snapshots` does not refuse, it does not exist.
 >
-> Everything below about snapshot ENVELOPES and TRANSPORT is still exactly right — it just has two remaining readers instead of "every project":
+> An earlier revision of this warning said the envelope had "two remaining readers": the remix seed, and a **dormant `ObjectStore` fallback**. The fallback is gone — keeping a project-storing route locked rather than removed is a door, and a `snapshots` table with a live RLS policy is somewhere to write. One reader remains:
 >
-> 1. the **remix seed** (§4.8) — deposited when an owner publishes, so strangers can remix a game whose repo is private;
-> 2. the **dormant `ObjectStore` fallback**, kept behind the storage interface.
+> - the **remix seed** (§4.8) — deposited when an owner publishes, so strangers can remix a game whose repo is private. It is one object per project at **`seeds/{projectId}.json`** (`share/seed-store.ts`), read-only over `GET /api/projects/:id/seed`, deleted on unpublish.
 >
-> The snapshot BUCKET is unaffected and still carries template pins (§4.4) and skill resources (§4.11) under their own prefixes. **Sizing note: the snapshot bucket no longer grows with every generation of every project** — it grows with publishes.
+> Everything below about the base64 ENVELOPE and its byte integrity is still exactly right — it is the same `SerializedFileMap` codec, now on the seed path. The BUCKET is unaffected and still carries template pins (§4.4) and skill resources (§4.11) under their own prefixes. **Sizing note: it no longer grows with every generation of every project** — it grows with publishes.
 
-- Snapshots: a JSON envelope of the project file map (binaries carried as base64 entries alongside their true byte `size`) → `snapshots/{projectId}/{snapshotId}.json` in the snapshot bucket; `snapshots.storage_path` stores the key. Server-side access only (runtime IAM role); clients get snapshot contents via the app, never S3 URLs. *(As built, Stage 3 — this supersedes the tar/gzip envelope this doc originally specified. base64 is lossless and the manifest carries true byte counts, so byte integrity below is unaffected; the format is an implementation detail behind the storage interface, and tar remains a valid future swap if snapshot size ever justifies it.)*
+- Remix seeds: a JSON envelope of the project file map (binaries carried as base64 entries alongside their true byte `size`) → `seeds/{projectId}.json`. The key is **derived from the project id** — there is no stored path and no row, so nothing can point at the wrong object, and no caller-supplied id can name someone else's bytes. Server-side access only (runtime IAM role); clients get contents via the app, never S3 URLs. *(base64 is lossless and carries true byte counts, so byte integrity below is unaffected; the format is an implementation detail behind the storage interface.)*
 - Shared builds: uploaded by the server after the in-WebContainer `npm run build`, to the play bucket under `{shareId}/`.
 - Skill resources (§4.11): stored under `s3://btk-snapshots-{env}/skills/{skill}/{version}/...` (same private bucket, server-read-only path).
-- Lifecycle policies: prune superseded snapshots per retention config; play builds persist while `share_id` is active, deleted on unpublish.
+- Lifecycle policies: a seed is deleted on unpublish and on project delete (there is nothing to prune on a schedule — one object per published project, overwritten in place on re-publish); play builds persist while `share_id` is active, deleted on unpublish.
 
-## Snapshot & build transport (how bytes actually move)
+## Seed & build transport (how bytes actually move)
 
 **SDK:** `@aws-sdk/client-s3` (AWS SDK for JS v3), used **server-side only** (`app/lib/.server/storage`) with the `btk-app-runtime` credentials. An AWS key appearing in a client bundle is a critical bug (same rule as the Anthropic platform key).
 
-**Upload (snapshot):** client posts changed project files (from the WebContainer file map — binary bytes read via `FilesStore.readBinaryFile()`, never `dirent.content`, which is always empty when `isBinary`) to a server route → server verifies session + project ownership → serializes the file map → `PutObjectCommand` → `snapshots/{projectId}/{snapshotId}.json` → inserts the `snapshots` row (storage key + manifest) in Postgres.
+**Upload (publish):** the client posts its source alongside the `dist/` build (binary bytes read via `FilesStore.readBinaryFile()`, never `dirent.content`, which is always empty when `isBinary`) → server verifies session + project ownership → `buildRemixSeed` strips the `.env` family and the generated bulk → `PutObjectCommand` → `seeds/{projectId}.json`, then stamps `projects.remix_seed_at`. Object first, pointer second: a failed write leaves the project honestly reading as "no seed".
 
-**Download (resume):** server `GetObjectCommand` → streams the envelope to the client → client base64-decodes binaries back to `Uint8Array` and writes them over the freshly mounted template base in the WebContainer.
+> **There is no upload path for an ordinary project, and that absence is the design (§4.5.4b).** The browser cannot ask the platform to store its files; a seed is deposited only by publishing or remixing, both deliberate acts on a game meant to be public.
+
+**Download (a remix's first mount):** server `GetObjectCommand` → streams the envelope to the client → client base64-decodes binaries back to `Uint8Array` and writes them over the freshly mounted template base in the WebContainer, then adopts the result as that browser's first local checkpoint.
 
 **Published builds (share):** server `PutObjectCommand` per file of `dist/` → `s3://btk-play-builds-{env}/{shareId}/` → CloudFront serves it. Objects need correct `ContentType` and, for `.gz.*` assets, `ContentEncoding: gzip` (see the headers policy above).
 
 **Scaling escape hatch — presigned URLs:** proxying every byte through the Lightsail container is simple and safe but makes the app a bandwidth bottleneck for asset-heavy Toolkit projects. When project sizes warrant it, switch to server-issued **presigned S3 URLs**: the server still authorizes (it decides who gets a URL for which key) while the browser transfers directly to/from S3. Build the proxy path first; keep the storage layer behind an interface so this is a swap, not a rewrite.
 
-**BYTE INTEGRITY (required test):** the envelope is built from a `Uint8Array`-faithful file map — binaries base64-encoded from real bytes, never from a UTF-8 string. If any step stringifies content, PNG/GLB/WASM bytes corrupt **silently** — the project looks fine now and returns broken tomorrow. Required regression test: create project → snapshot → restore → assert a known PNG's bytes are byte-identical (hash compare), and that `public/babylon.png` + `public/spinner.png` survive. *(Built: hash-identity in `binary-files.spec.ts`, round-trip + manifest byte counts in `snapshots.spec.ts`.)*
+**BYTE INTEGRITY (required test):** the envelope is built from a `Uint8Array`-faithful file map — binaries base64-encoded from real bytes, never from a UTF-8 string. If any step stringifies content, PNG/GLB/WASM bytes corrupt **silently** — the project looks fine now and returns broken tomorrow. *(Built: hash-identity in `binary-files.spec.ts`; the round-trip against hostile bytes in `seed-store.spec.ts`, ported from the deleted `snapshots.spec.ts` when the store went — **the store was removable, the invariant was not**. The local checkpoint path has its own in `local-snapshots.spec.ts`.)*
 
 **Local development:** with `S3_*` unset, the storage layer uses a local-filesystem adapter (build-first, SPEC §1.3 principle 0 / §9a) — no AWS account needed to develop. Dev AWS keys, when used, live in `.env.local` (gitignored) and point at **separate dev buckets**, never staging/prod.
 

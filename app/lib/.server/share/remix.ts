@@ -56,7 +56,13 @@ export function deriveRemix(source: Project, ctx: RemixContext): NewProject {
     sharedAt: undefined,
     soloLaunch: undefined,
     galleryStatus: 'none',
-    currentSnapshotId: undefined,
+
+    /*
+     * The clone has no seed AT THIS POINT. `api.remix` deposits one immediately after, under the new
+     * project's own id, and sets this then — a clone must never be handed a pointer to the source's
+     * bytes (see the note there).
+     */
+    remixSeedAt: undefined,
 
     /*
      * A remix is born UNLINKED (§4.5.4b) — it lives in the remixer's browser until THEY save it. The

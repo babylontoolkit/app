@@ -1,10 +1,13 @@
 /**
- * Projects and snapshots (SPEC §4.5.5).
+ * Projects (SPEC §4.5.5, §4.5.4b).
  *
  * These are the rows the two-wall rule protects: a project belongs to exactly one user, and every
  * route that touches one proves ownership before doing anything else (§4.5.3).
+ *
+ * A project row is metadata and nothing else — the platform stores no project FILES. The code lives in
+ * the user's own repo (§4.5.4b); see the note above `ProjectStore` for why there is no snapshot store
+ * here any more.
  */
-import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { GitProviderId } from '~/lib/.server/git/provider';
 
 export interface Project {
@@ -38,8 +41,20 @@ export interface Project {
   /** Provenance for the remix growth loop (§4.8): the project this one was cloned from, if any. */
   remixedFrom?: string;
 
-  /** The snapshot the builder remounts on resume. */
-  currentSnapshotId?: string;
+  /**
+   * When a remix seed was deposited for this project (§4.8) — `undefined` for the overwhelming
+   * majority of projects, which never have one.
+   *
+   * 🔴 This replaces `currentSnapshotId`, and the rename is the point. That field's name promised a
+   * version history the platform stopped keeping in §4.5.4b; what it actually held, on the small number
+   * of projects that had anything at all, was a pointer to a remix seed. A field whose name describes a
+   * deleted system is how a reader concludes the system still exists.
+   *
+   * It is a HINT, not an address: the seed's key is derived from the project id (`seed-store.ts`), so
+   * nothing here can point at the wrong object. If this says a seed exists and storage disagrees, the
+   * read returns null and the caller falls back exactly as it would for a project with no seed.
+   */
+  remixSeedAt?: string;
 
   /**
    * The user's repo (§4.5.4b) — under repo-primary persistence this is not a sync convenience, it is
@@ -78,44 +93,23 @@ export interface Project {
 
 export type NewProject = Omit<Project, 'id' | 'createdAt' | 'updatedAt'>;
 
-/** One file in a snapshot's manifest — enough to render a diff without fetching the payload. */
-export interface ManifestEntry {
-  path: string;
-  size: number;
-  isBinary: boolean;
-}
-
-export interface Snapshot {
-  id: string;
-  projectId: string;
-
-  /** Object-store key of the payload. The bytes never live in the database. */
-  storagePath: string;
-
-  fileManifest: ManifestEntry[];
-
-  /**
-   * The assistant message this snapshot was taken AFTER — the anchor for "restore to before this
-   * change" (§4.12). Null for the creation snapshot and for manual saves.
-   */
-  messageId?: string;
-
-  /** Human label for the version history ("before kart physics", "restored to checkpoint 3"). */
-  label?: string;
-
-  createdAt: string;
-}
-
 /**
- * A snapshot's payload.
+ * 🔴 There is no `SnapshotStore` here, and adding one back is the regression (§4.5.4b).
  *
- * `SerializedFileMap` is the byte-faithful wire format the binary work already established
- * (spec/binary-files.md): text inline, binary base64. Reusing it — rather than inventing a tar here —
- * is what makes the snapshot→restore round-trip preserve bytes exactly, because it is the SAME codec
- * the WebContainer writes and reads through.
+ * The platform used to keep a per-project version history: a `Snapshot` row per generation, its payload
+ * in object storage, addressed by `projects.current_snapshot_id`. Repo-primary persistence deleted the
+ * premise — the user's code lives in THEIR repo and nowhere else, and checkpoints live in their browser
+ * (`app/lib/persistence/local-snapshots.ts`). A server-side copy of every project is not a backup; it
+ * is the old model under a new name.
+ *
+ * The store outlived the behaviour by one release — migration 0006 removed the writes but left the
+ * table, the interface, and both backends standing to serve a single caller: the remix seed. That seed
+ * is now stored as what it is, one object at a derived key (`share/seed-store.ts`), and none of this
+ * needs to exist.
+ *
+ * `no-server-storage.spec.ts` pins the invariant, including a source scan for anyone re-adding a client
+ * call to a server snapshot route.
  */
-export type SnapshotPayload = SerializedFileMap;
-
 export interface ProjectStore {
   create(project: NewProject): Promise<Project>;
   get(id: string): Promise<Project | null>;
@@ -131,19 +125,4 @@ export interface ProjectStore {
 
   /** Projects awaiting gallery curation (§4.10). Admin-only — nothing is public until approved (§5). */
   listGallerySubmissions(limit: number): Promise<Project[]>;
-}
-
-export interface SnapshotStore {
-  /** Write the payload to object storage and record the row. Returns the recorded snapshot. */
-  create(input: { projectId: string; files: SnapshotPayload; messageId?: string; label?: string }): Promise<Snapshot>;
-
-  get(id: string): Promise<Snapshot | null>;
-
-  /** The payload bytes, decoded back to a `SerializedFileMap`. Null when the object is gone. */
-  read(id: string): Promise<SnapshotPayload | null>;
-
-  listByProject(projectId: string): Promise<Snapshot[]>;
-
-  /** Used by account deletion and project delete — removes rows AND objects. */
-  deleteByProject(projectId: string): Promise<void>;
 }

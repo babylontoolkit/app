@@ -6,11 +6,16 @@
  * "back up the project" call, everything works, and the platform is quietly a file host again — which
  * is the exact model §4.5.4b removed, now with nobody aware it came back.
  *
- * Three things are pinned here, and each is a different way in:
+ * ## What changed, and why the assertions got stronger
  *
- *   1. The snapshot WRITE route refuses. An uncalled route that stores a whole project is a door.
- *   2. It refuses AFTER the two walls, so it cannot be used to probe which project ids exist (§4.5.3).
- *   3. No client module can even ask for it — the helper that used to is gone, not just unused.
+ * This file used to pin that the snapshot WRITE route *refused* (405, after both walls). That was the
+ * right test for a route that still existed. It does not any more, and neither does the store behind
+ * it — so the pin is now structural: **the routes are absent, the store is absent, no client helper
+ * exists, and no client module hand-rolls a fetch to either.** An uncalled route that can store a whole
+ * project is a door; the fix was to remove the door, not to lock it.
+ *
+ * The one deliberate exception is the remix seed — a published game's source, which the OWNER chose to
+ * make public (§4.8). It is pinned here too: it must stay a READ, and it must stay derived.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -45,72 +50,72 @@ afterEach(async () => {
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
-const files = { 'src/game.ts': { type: 'file' as const, content: 'const x = 1;', isBinary: false } };
+const routeExists = async (name: string) =>
+  fs
+    .access(path.resolve(process.cwd(), 'app/routes', name))
+    .then(() => true)
+    .catch(() => false);
 
-async function postSnapshot(projectId: string) {
-  const { action } = await import('~/routes/api.projects.$projectId.snapshots');
-
-  return action({
-    request: new Request('https://app.example.com/api/projects/p/snapshots', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ files, label: 'Backup' }),
-    }),
-    params: { projectId },
-    context: {},
-  } as never);
-}
-
-describe('the snapshot write path is closed', () => {
-  it('REFUSES to store a project, however well-formed the request', async () => {
-    const response = await postSnapshot(mine.id);
-
-    expect(response.status).toBe(405);
-    expect((await response.json()) as { message: string }).toMatchObject({
-      error: true,
-      message: expect.stringMatching(/not stored on the platform/i),
-    });
+describe('there is no server-side snapshot machinery', () => {
+  /**
+   * A route file is the door itself. Remix maps the filename to a URL, so re-adding
+   * `api.projects.$projectId.snapshots.ts` re-opens the write path by existing — no import, no call
+   * site, nothing else to review.
+   */
+  it('has no snapshot routes at all', async () => {
+    expect(await routeExists('api.projects.$projectId.snapshots.ts')).toBe(false);
+    expect(await routeExists('api.projects.$projectId.snapshots.$snapshotId.ts')).toBe(false);
   });
 
-  /** Nothing may be written on the way to the refusal — not the row, not the bytes. */
-  it('records nothing at all', async () => {
-    await postSnapshot(mine.id);
+  it('exports no snapshot store to write one with', async () => {
+    const store = await import('./store');
 
-    const { getSnapshotStore } = await import('./store');
-
-    expect(await getSnapshotStore({}).listByProject(mine.id)).toEqual([]);
-    expect((await new FsProjectStore(tmp).get(mine.id))!.currentSnapshotId).toBeUndefined();
+    expect(store).not.toHaveProperty('getSnapshotStore');
+    expect(store).not.toHaveProperty('setSnapshotStore');
+    expect(store).not.toHaveProperty('FsSnapshotStore');
+    expect(store).not.toHaveProperty('SupabaseSnapshotStore');
   });
 
   /**
-   * The refusal must not become an enumeration oracle. Someone else's project id has to be
-   * indistinguishable from a nonexistent one (§4.5.3: 404, never 403 — and here, never 405 either,
-   * which would confirm the id is real by answering the same way a real one does).
+   * `currentSnapshotId` is gone from the project record, and its absence is load-bearing rather than
+   * tidy. It kept a real meaning (a pointer to a remix seed) under a name describing the deleted
+   * version history, which is how the deleted system finds its way back.
    */
-  it('still 404s for someone else’s project — the walls come first', async () => {
-    expect((await postSnapshot(theirs.id)).status).toBe(404);
+  it('has no currentSnapshotId on a project', async () => {
+    expect(mine).not.toHaveProperty('currentSnapshotId');
+    expect(await new FsProjectStore(tmp).get(mine.id)).not.toHaveProperty('currentSnapshotId');
   });
 
-  it('404s for an id that does not exist, identically', async () => {
-    expect((await postSnapshot('prj_does_not_exist')).status).toBe(404);
+  it('starts a new project with no seed', async () => {
+    expect(mine.remixSeedAt).toBeUndefined();
   });
 });
 
 describe('the client cannot ask for it', () => {
-  it('has no createSnapshot helper to call', async () => {
+  it('has no snapshot helpers to call', async () => {
     const client = await import('~/lib/persistence/projects');
 
     expect(client).not.toHaveProperty('createSnapshot');
     expect(client).not.toHaveProperty('listSnapshots');
+    expect(client).not.toHaveProperty('setCurrentSnapshot');
+    expect(client).not.toHaveProperty('readSnapshot');
+    expect(client).not.toHaveProperty('restoreLatestServerCheckpoint');
   });
 
   /**
-   * The stronger half: no client module POSTs to the snapshots route. A helper removed from one file
+   * The stronger half: no client module reaches a snapshots URL by hand. A helper removed from one file
    * and hand-rolled with `fetch` in another is the same regression with better camouflage.
+   *
+   * Comments are stripped BEFORE the scan, and that is not a detail — the files that explain why this
+   * route is gone necessarily name it, and a scanner that reads prose flags the documentation of the
+   * fix as the bug. Stripping first is also what lets the pattern be loose enough to catch a URL built
+   * by concatenation rather than only a template literal.
    */
-  it('no client module posts to the snapshots route', async () => {
+  it('no client module references a snapshots route', async () => {
     const dirs = ['app/components', 'app/lib/persistence', 'app/lib/stores', 'app/routes'];
     const offenders: string[] = [];
+
+    const stripComments = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
     for (const dir of dirs) {
       for (const file of await fs.readdir(path.resolve(process.cwd(), dir), { recursive: true })) {
@@ -120,15 +125,62 @@ describe('the client cannot ask for it', () => {
           continue;
         }
 
-        const source = await fs.readFile(full, 'utf8');
+        const code = stripComments(await fs.readFile(full, 'utf8'));
 
-        // A fetch/POST aimed at the snapshots collection — the write, not the `/:snapshotId` read.
-        if (/['"`]\/api\/projects\/\$\{[^}]+\}\/snapshots['"`]/.test(source) && /method:\s*'POST'/.test(source)) {
+        // Any URL aimed at a project's snapshots — the read is as gone as the write.
+        if (/\/api\/projects\/.{0,40}?\/snapshots/.test(code)) {
           offenders.push(full);
         }
       }
     }
 
     expect(offenders).toEqual([]);
+  });
+
+  /**
+   * The control. Without it, a scanner broken into always-passing (a bad regex, a wrong directory
+   * list, a `readdir` that silently returns nothing) reports a clean bill of health forever — the
+   * failure mode this whole file exists to prevent, wearing the costume of the test that prevents it.
+   */
+  it('the scanner can actually find a snapshots URL', () => {
+    const scan = (code: string) => /\/api\/projects\/.{0,40}?\/snapshots/.test(code);
+
+    expect(scan('await fetch(`/api/projects/${id}/snapshots`, { method: "POST" })')).toBe(true);
+    expect(scan("await fetch('/api/projects/' + id + '/snapshots')")).toBe(true);
+    expect(scan('await fetch(`/api/projects/${id}/snapshots/${snapshotId}`)')).toBe(true);
+    expect(scan('await fetch(`/api/projects/${id}/seed`)')).toBe(false);
+  });
+});
+
+describe('the remix seed — the one deliberate exception (§4.8)', () => {
+  const getSeed = async (projectId: string) => {
+    const { loader } = await import('~/routes/api.projects.$projectId.seed');
+
+    return loader({
+      request: new Request('https://app.example.com/api/projects/p/seed'),
+      params: { projectId },
+      context: {},
+    } as never);
+  };
+
+  /** It is a READ. A write method here would be server-side project storage under another name. */
+  it('offers no way to write a seed from the browser', async () => {
+    const route = await import('~/routes/api.projects.$projectId.seed');
+
+    expect(route).not.toHaveProperty('action');
+    expect(route).toHaveProperty('loader');
+  });
+
+  it('404s for a project with no seed — the normal case', async () => {
+    expect((await getSeed(mine.id)).status).toBe(404);
+  });
+
+  /**
+   * The walls come first. Someone else's project id must be indistinguishable from a nonexistent one
+   * (§4.5.3: 404, never 403 — a 403 confirms the id is real).
+   */
+  it('404s for someone else’s project, identically', async () => {
+    expect((await getSeed(theirs.id)).status).toBe(404);
+    expect((await getSeed('prj_does_not_exist')).status).toBe(404);
   });
 });

@@ -24,6 +24,7 @@ import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { base64ToBytes } from '~/lib/binary/binary-files';
 import { getObjectStore } from '~/lib/.server/storage';
 import { getProjectStore } from '~/lib/.server/projects/store';
+import { deleteRemixSeed } from './seed-store';
 import type { Project } from '~/lib/.server/projects/types';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -190,10 +191,17 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
 }
 
 /**
- * Unpublish: the URL stops working and the files are deleted.
+ * Unpublish: the URL stops working, the build is deleted, and the remix seed is forgotten.
  *
  * The share id is NOT released back — it stays on the project (as `sharedAt: undefined`) so that a
  * later re-publish reuses it. Recycling ids would let a stale link land on somebody else's game.
+ *
+ * 🔴 The SEED goes too (§4.8, §4.5.4b), and that is not housekeeping. The seed is the only source the
+ * platform holds, and the sole justification for holding it is that the owner deliberately made this
+ * game public. Unpublishing withdraws exactly that. Keeping the seed would mean "make it private
+ * again" left our copy of their code sitting in storage — the §4.5.4b promise reduced to a claim.
+ *
+ * An existing remix is unaffected: a clone has its own seed, under its own project id.
  */
 export async function unpublish(project: Project, context?: unknown): Promise<void> {
   if (!project.shareId) {
@@ -206,9 +214,14 @@ export async function unpublish(project: Project, context?: unknown): Promise<vo
     await objects.delete(object.key);
   }
 
-  await getProjectStore(context).update(project.id, { sharedAt: undefined, galleryStatus: 'none' });
+  await deleteRemixSeed(project.id, context);
+  await getProjectStore(context).update(project.id, {
+    sharedAt: undefined,
+    galleryStatus: 'none',
+    remixSeedAt: undefined,
+  });
 
-  logger.info(`Unpublished ${project.id} (${project.shareId})`);
+  logger.info(`Unpublished ${project.id} (${project.shareId}) and deleted its remix seed`);
 }
 
 const CONTENT_TYPES: Record<string, string> = {

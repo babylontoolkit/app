@@ -21,7 +21,8 @@ import { runPublishingChecklist } from '~/lib/.server/share/checklist';
 import { publishBuild, unpublish } from '~/lib/.server/share/publish';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import { buildRemixSeed } from '~/lib/.server/share/remix-seed';
-import { getProjectStore, getSnapshotStore } from '~/lib/.server/projects/store';
+import { putRemixSeed } from '~/lib/.server/share/seed-store';
+import { getProjectStore } from '~/lib/.server/projects/store';
 import { createScopedLogger } from '~/utils/logger';
 import type { AppLoadContext } from '@remix-run/cloudflare';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
@@ -44,8 +45,13 @@ async function depositRemixSeed(projectId: string, source: SerializedFileMap, co
       logger.info(`Remix seed for ${projectId} withheld ${excludedSecrets.length} secret file(s).`);
     }
 
-    const snapshot = await getSnapshotStore(context).create({ projectId, files, label: 'Shared' });
-    await getProjectStore(context).update(projectId, { currentSnapshotId: snapshot.id });
+    /*
+     * Object first, pointer second. If the write fails we have stored nothing and `remixSeedAt` stays
+     * unset — the project reads as "no seed", which is true. The reverse order would advertise a seed
+     * that does not exist.
+     */
+    await putRemixSeed(projectId, files, context);
+    await getProjectStore(context).update(projectId, { remixSeedAt: new Date().toISOString() });
   } catch (error) {
     logger.error(`Could not store the remix seed for ${projectId}: ${(error as Error).message}`);
   }
@@ -124,11 +130,10 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
      *
      * AFTER the upload, deliberately: the share is the thing the user asked for, and a seed that fails
      * to store must not cost them the publish. It is best-effort and says so — a project with no seed
-     * remixes as an empty one, which is the pre-existing (documented) behaviour for a source with no
-     * snapshot.
+     * remixes as an empty one.
      *
      * The seed is the ONLY reason the platform holds source at all under repo-primary persistence, and
-     * it exists only for projects the owner deliberately made public.
+     * it exists only for projects the owner deliberately made public. `unpublish` deletes it again.
      */
     if (body.source) {
       await depositRemixSeed(project.id, body.source, context);

@@ -191,7 +191,7 @@ describe('remix — what travels and what must not', () => {
     shareTitle: 'My Kart Racer',
     sharedAt: '2026-07-14T00:00:00.000Z',
     galleryStatus: 'approved',
-    currentSnapshotId: 'snp_1',
+    remixSeedAt: '2026-07-14T00:00:00.000Z',
 
     /*
      * A COMPLETE link (§4.5.4b): provider + repo + branch always travel together, and the database
@@ -230,7 +230,13 @@ describe('remix — what travels and what must not', () => {
     expect(remix.lastSyncedCommitSha).toBeUndefined();
     expect(remix.githubInstallationRef).toBeUndefined();
     expect(remix.gameBackendRef).toBeUndefined();
-    expect(remix.currentSnapshotId).toBeUndefined();
+
+    /*
+     * The clone must not be handed the SOURCE's seed pointer. `api.remix` deposits the clone its own
+     * copy under its own project id immediately after this — a shared pointer would mean unpublishing
+     * the original (which deletes its seed) silently empties every remix of it.
+     */
+    expect(remix.remixSeedAt).toBeUndefined();
   });
 
   /**
