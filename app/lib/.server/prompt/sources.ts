@@ -472,9 +472,66 @@ export const DECLARATION_FILES: DocSource[] = [
 /**
  * Route a user request to the on-demand blocks it needs.
  * Substring match on a lowercased haystack — cheap, and a false positive only costs cached tokens.
+ *
+ * ⚠️ Per-MESSAGE routing is a money bug — see `selectStickyBlocks`, which is what the proxy calls.
+ * This stays exported because it is the per-message primitive the sticky router is built from.
  */
 export function selectOnDemandBlocks(requestText: string): OnDemandBlock[] {
   const haystack = requestText.toLowerCase();
 
   return ON_DEMAND_BLOCKS.filter((block) => block.keywords.some((keyword) => haystack.includes(keyword)));
+}
+
+/**
+ * 🔴 THE BLOCK SET IS STICKY AND APPEND-ONLY, BECAUSE THE PREFIX IS MONEY (2026-07-17).
+ *
+ * The proxy used to route from the LAST user message alone. The routed blocks sit AHEAD of the ~110k
+ * file context in the system array, so the block set is part of the cached prefix — which meant **the
+ * user's choice of words silently set the price of their edit.** Measured live on one project, four
+ * consecutive turns, same model, same provider:
+ *
+ * | turn     | blocks               | cached  | written | credits |
+ * |----------|----------------------|---------|---------|---------|
+ * | creation | 6 blocks             | 0       | 157,983 | 233     |
+ * | edit 1   | []                   | 0       |  92,385 | 130     |
+ * | edit 2   | []                   | 92,385  |       0 | **12**  |
+ * | edit 3   | [racing-system]      | 0       | 114,274 | **160** |
+ *
+ * Edits 2 and 3 are THE SAME trivial change ("make the boost pad glow"). Edit 3 merely said "racing
+ * track" and "kart lap timing", which routed one extra block — and cost **13x** more. A cache WRITE
+ * bills at 2x, so a churning turn is worse than never caching at all. At ~130 credits an edit a
+ * $50/6,000-credit plan buys ~46 edits; at 12 it buys ~500.
+ *
+ * Two rules, and BOTH are load-bearing:
+ *
+ *  1. **Sticky** — route from every user message in the conversation, not the last. A block that was
+ *     ever needed stays. The set only grows, so it converges after a turn or two and then every
+ *     subsequent turn is a pure cache read.
+ *  2. **First-seen order, NOT declaration order** — this is the half that is easy to miss and silently
+ *     undoes the other. `selectOnDemandBlocks` filters `ON_DEMAND_BLOCKS` in DECLARATION order, so a
+ *     newly-matched block that happens to be declared early gets INSERTED AT THE FRONT, shifting every
+ *     block behind it and invalidating the prefix — the exact thing being fixed. Ordering by when a
+ *     block entered the conversation is what makes "append-only" true at the byte level.
+ *
+ * Stateless by construction: the answer is a pure function of the message history, which only ever
+ * grows, so there is no server-side session to keep in sync and a replay of the same conversation
+ * routes identically. That is also why this cannot be memoised per-conversation in a Map — the proxy
+ * is per-request, and a cache keyed on a conversation id would be a second source of truth.
+ *
+ * The cost of being wrong in this direction is bounded and cheap: a block that is no longer relevant
+ * keeps costing cache READS at 0.1x. The cost of being wrong the other way is a 2x write of the whole
+ * prefix, every turn, forever. Not close.
+ */
+export function selectStickyBlocks(userTexts: string[]): OnDemandBlock[] {
+  const seen = new Map<string, OnDemandBlock>();
+
+  for (const text of userTexts) {
+    for (const block of selectOnDemandBlocks(text)) {
+      if (!seen.has(block.id)) {
+        seen.set(block.id, block);
+      }
+    }
+  }
+
+  return [...seen.values()];
 }

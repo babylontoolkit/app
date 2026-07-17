@@ -89,18 +89,49 @@ export interface PreloadedSkill {
 }
 
 /**
+ * The skills any user message in this conversation asked for, in the order they first appeared.
+ *
+ * Pure and exported so the ordering property can be tested directly — "the set only ever grows, and
+ * grows at the END" is the whole point, and it is invisible from the outside otherwise.
+ */
+export function stickySkillNames(routingTexts: string[], slashSkill?: string): string[] {
+  const seen: string[] = [];
+
+  for (const text of routingTexts) {
+    const haystack = text.toLowerCase();
+
+    for (const [name, keywords] of Object.entries(SKILL_KEYWORDS)) {
+      if (name === slashSkill || seen.includes(name)) {
+        continue;
+      }
+
+      if (keywords.some((keyword) => haystack.includes(keyword))) {
+        seen.push(name);
+      }
+    }
+  }
+
+  return seen;
+}
+
+/**
  * Choose the skills to inline for this request.
  *
  * `slashSkill` is the skill the user explicitly invoked (`/bt-design`). It is already injected by the
  * proxy, so it must not be pre-loaded twice.
+ *
+ * ⚠️ `routingTexts` is EVERY user message in the conversation (oldest first), not the current one —
+ * the pre-loaded skill block is part of the CACHED PREFIX, so routing it per-message makes the user's
+ * phrasing invalidate ~110k of context behind it. Same money bug, same fix, as `selectStickyBlocks`:
+ * sticky, and ordered by FIRST SEEN rather than by `SKILL_KEYWORDS` declaration order, because a newly
+ * matched skill that happens to be declared early would otherwise be inserted at the FRONT of the block
+ * and shift every byte behind it.
  */
 export async function preloadSkills(
-  routingText: string,
+  routingTexts: string[],
   slashSkill?: string,
   isCreation = false,
 ): Promise<PreloadedSkill[]> {
-  const haystack = routingText.toLowerCase();
-
   /*
    * A creation turn gets exactly ONE skill: the design skill.
    *
@@ -112,10 +143,7 @@ export async function preloadSkills(
    */
   const candidates = isCreation
     ? ['bt-design'].filter((name) => name !== slashSkill)
-    : Object.entries(SKILL_KEYWORDS)
-        .filter(([name]) => name !== slashSkill)
-        .filter(([, keywords]) => keywords.some((keyword) => haystack.includes(keyword)))
-        .map(([name]) => name);
+    : stickySkillNames(routingTexts, slashSkill);
 
   const wanted = candidates.slice(0, MAX_PRELOADED);
 

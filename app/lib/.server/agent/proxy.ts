@@ -18,7 +18,7 @@ import {
 import { createScopedLogger } from '~/utils/logger';
 import { getActivePrompt } from '~/lib/.server/prompt/active';
 import { getPromptStore } from '~/lib/.server/prompt/store';
-import { selectOnDemandBlocks } from '~/lib/.server/prompt/sources';
+import { selectStickyBlocks } from '~/lib/.server/prompt/sources';
 import { getSkillStore } from '~/lib/.server/skills/store';
 import { parseSlashInvocation } from '~/lib/skills/slash';
 import { createFilesContext } from '~/lib/.server/llm/utils';
@@ -187,6 +187,23 @@ function lastUserText(messages: Message[]): string {
 }
 
 /**
+ * Every user message, oldest first — the routing input for the CACHED prefix (`selectStickyBlocks`).
+ *
+ * ⚠️ Deliberately NOT `lastUserText`. Routing the cached prefix from one message means the user's
+ * wording sets the price of their turn: measured live, "make the boost pad glow dimmer" cost 12 credits
+ * and "make the boost pad on the racing track glow brighter for the kart lap timing" cost 160 — the
+ * same edit, 13x, because the second phrasing routed one extra block and invalidated ~114k behind it.
+ *
+ * Assistant turns are excluded on purpose. The model echoes topic words constantly ("I've updated the
+ * racing line..."), so routing on them would let the MODEL's prose pull blocks into the prefix — an
+ * unstable input we do not control, which is the same class of mistake as letting a prose classifier
+ * pick the effort level (`effort-policy.ts`).
+ */
+function allUserTexts(messages: Message[]): string[] {
+  return messages.filter((m) => m.role === 'user' && typeof m.content === 'string').map((m) => m.content as string);
+}
+
+/**
  * Resolve an explicit `/skill-name <task>` invocation.
  *
  * The user asked for this skill by name, so it is FORCE-LOADED — no description matching, no
@@ -351,11 +368,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
-   * 7. Route the on-demand doc blocks. Keyed off the user's request AND any invoked skill body, so
-   * that `/bt-spec build a racing game` pulls in the RacingSystem docs even though the word "racing"
-   * only appears in the task.
+   * 7. Route the on-demand doc blocks — from the WHOLE CONVERSATION, not the last message.
+   *
+   * Keyed off every user request AND any invoked skill body, so that `/bt-spec build a racing game`
+   * pulls in the RacingSystem docs even though the word "racing" only appears in the task.
+   *
+   * ⚠️ These blocks are part of the CACHED PREFIX, so routing them per-message made the user's phrasing
+   * set the price of their turn (12 credits vs 160 for the same edit — see `selectStickyBlocks`). The
+   * set is sticky and append-only.
+   *
+   * There is deliberately no single-message `routingText` left in this function. Everything routed from
+   * here lands in the cached prefix, so a per-message input is always wrong; if a future feature wants
+   * only the current ask, it must be something that sits AFTER the last breakpoint (the volatile tail),
+   * and it should say so where it is written rather than reviving a variable that reads as general.
    */
-  const routingText = `${lastUserText(messages)}\n${slash?.skillBlock ?? ''}`;
+  const userTexts = allUserTexts(messages);
+  const skillText = slash?.skillBlock ?? '';
 
   /*
    * Is this the turn that BUILDS the project? (§4.4b)
@@ -369,7 +397,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const store = getPromptStore();
   const blocks: Array<{ id: string; title: string; body: string }> = [];
 
-  for (const block of selectOnDemandBlocks(routingText)) {
+  for (const block of selectStickyBlocks([...userTexts, skillText])) {
     const body = await store.readOnDemand(promptVersion.id, block.id);
 
     if (body) {
@@ -412,7 +440,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    *
    * `load_skill` remains for anything the router does not anticipate.
    */
-  const preloaded = await preloadSkills(routingText, slash?.skillName, isCreationTurn);
+  /*
+   * ⚠️ The creation BRIEF is excluded from skill routing, deliberately, and this is not the same list
+   * the doc blocks route from. The brief is machine-written and full of incidental vocabulary
+   * ("created", "starter", "scaffold") that keyword-matches skills the model has no use for — the
+   * reason `isCreation` short-circuits to `bt-design` at all. Feeding it into the STICKY router would
+   * make that mistake permanent for the life of the conversation instead of lasting one turn.
+   */
+  const skillRoutingTexts = [...userTexts.filter((t) => !t.includes(CREATION_BRIEF_MARKER)), skillText];
+  const preloaded = await preloadSkills(skillRoutingTexts, slash?.skillName, isCreationTurn);
 
   if (preloaded.length > 0) {
     system.push({ role: 'system', content: buildPreloadedSkillBlock(preloaded), providerOptions: CACHE_CONTROL });
