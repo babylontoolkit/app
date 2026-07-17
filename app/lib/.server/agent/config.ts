@@ -7,6 +7,7 @@
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
+import { PROVIDER_RATES } from '~/lib/.server/billing/rates';
 
 /** Re-exported: this was the original home of the error, and several routes import it from here. */
 export { NotConfiguredError };
@@ -71,10 +72,81 @@ export interface PlatformConfig {
 }
 
 /**
- * The platform model. A config CONSTANT, never a user choice and never an env var (§4.2a): the value
- * must always match a `staticModels` entry, and a typo'd env value would 404 at the first generation.
+ * The platform model. Never a USER choice (§4.2a) — but, since 2026-07-17, an OPERATOR one.
+ *
+ * ⚠️ This used to be a bare constant, with the comment "never an env var: a typo'd env value would 404
+ * at the first generation". That reasoning was wrong, and the owner called it: **the answer to "a typo
+ * would break it" is to VALIDATE the value, not to forbid the knob.** It is the same argument that
+ * already applies to `LLM_PROVIDER`, which is env-driven and validated three lines down. Left as a
+ * constant, moving to a different model — Fable 5, a new Opus — meant a code change and a redeploy for
+ * something that is a pure operator decision, which is precisely what "config, never hardcoded" exists
+ * to prevent.
  */
 export const PLATFORM_MODEL = DEFAULT_MODEL;
+
+/**
+ * The model each provider serves by DEFAULT, when `LLM_MODEL` is unset.
+ *
+ * Per-provider because the right answer differs, and not for reasons of taste — MEASURED 2026-07-17:
+ *
+ * | KIE model | TTFT (3 trials)         | thinking text | 20k-word prompt |
+ * |-----------|-------------------------|---------------|-----------------|
+ * | opus-4-6  | 11648, 11294, 7970 ms   | 26ch          | 25213 ms        |
+ * | opus-4-7  | 10076, 7665, 12406 ms   | 266ch ✅      | 11576 ms        |
+ * | opus-4-8  | 3022, 2458, 2110 ms     | **0ch** ❌    | 3541 ms         |
+ *
+ * (Anthropic's own opus-4-8: 1022/985/944 ms TTFT — ~1s and rock-steady, with thinking text.)
+ *
+ * 🔴 **On KIE there is no free option.** Its only fast model is the one whose thinking text their
+ * adapter cannot return; the two that CAN return it cost 8–12s of dead air before the first byte, and
+ * 4-7 additionally hard-500s on non-streaming requests with large prompts. So KIE defaults to 4-8:
+ * dead air during thinking is at least bounded by how hard the model thought, whereas 4-6/4-7 charge
+ * it up front on every single turn including trivial ones. Revisit the moment KIE's adapter covers 4-8.
+ */
+export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = {
+  Anthropic: DEFAULT_MODEL,
+  KIE: 'claude-opus-4-8',
+};
+
+/**
+ * The platform model — `LLM_MODEL`, validated, else the configured provider's default.
+ *
+ * ⚠️ **A model is only usable if we can BILL it.** Validation is against `PROVIDER_RATES`, not against
+ * a list of names, because `ratesFor` falls back to the provider's most expensive row for a model it
+ * does not know: an unpriced `LLM_MODEL` would bill every generation at some other model's price,
+ * silently and forever. So "is this model configured?" and "do we know what it costs?" are the SAME
+ * question, and this is the one place that asks it.
+ *
+ * That is what makes the knob safe, and it is the answer to the old "never an env var" rule: a typo, or
+ * a real model we simply have no rates for, is a describable error at config time — not a 404 at the
+ * first generation, and not a silent mis-bill.
+ *
+ * To move to a new model (Fable 5, a newer Opus): add its row to the provider's rate table, then set
+ * `LLM_MODEL`. The rate row is a code change because a PRICE cannot be guessed — but it is one table
+ * entry, not a rebuild of the billing path, and `SIGNUP_GRANT_CREDITS` should be re-checked against
+ * `grantHeadroom()` afterwards since a cheaper model makes the grant go further.
+ */
+export function getPlatformModel(context?: unknown): string {
+  const provider = getPlatformProvider(context);
+  const raw = env(context, 'LLM_MODEL')?.trim();
+
+  if (!raw) {
+    return PLATFORM_MODEL_BY_PROVIDER[provider];
+  }
+
+  const priced = PROVIDER_RATES[provider] ?? {};
+
+  if (!priced[raw]) {
+    throw new NotConfiguredError(
+      `LLM_MODEL="${raw}" on provider ${provider}`,
+      `We have no rates for it, so we cannot bill it. Add it to ${
+        provider === 'KIE' ? 'KIE_MODEL_RATES' : 'MODEL_RATES'
+      } in billing/rates.ts first. Priced models: ${Object.keys(priced).join(', ') || '(none)'}.`,
+    );
+  }
+
+  return raw;
+}
 
 /**
  * Which provider the platform buys tokens from — `LLM_PROVIDER`, validated.

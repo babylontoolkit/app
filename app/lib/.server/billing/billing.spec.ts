@@ -24,8 +24,10 @@ import {
 } from './rates';
 import {
   DEFAULT_PLATFORM_PROVIDER,
+  getPlatformModel,
   getPlatformProvider,
   PLATFORM_MODEL,
+  PLATFORM_MODEL_BY_PROVIDER,
   PLATFORM_PROVIDERS,
 } from '~/lib/.server/agent/config';
 import {
@@ -231,6 +233,69 @@ describe('the platform provider switch', () => {
   it('refuses a provider it does not know rather than falling back', () => {
     vi.stubEnv('LLM_PROVIDER', 'Kei');
     expect(() => getPlatformProvider({})).toThrow(/Kei/);
+  });
+});
+
+describe('the platform model switch', () => {
+  /*
+   * The owner's question: "what if I ever want to update to Fable 5 — would I have to rebuild the whole
+   * app with adjusted billing numbers?" The answer this encodes: NO for the model (env), YES for its
+   * price (one table row) — because a price cannot be guessed, only looked up.
+   */
+  it('defaults per provider when LLM_MODEL is unset', () => {
+    vi.stubEnv('LLM_MODEL', '');
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
+    expect(getPlatformModel({})).toBe(PLATFORM_MODEL_BY_PROVIDER.KIE);
+
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    expect(getPlatformModel({})).toBe(PLATFORM_MODEL_BY_PROVIDER.Anthropic);
+  });
+
+  it('honours LLM_MODEL for a model the provider is priced for', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('LLM_MODEL', 'claude-sonnet-5');
+    expect(getPlatformModel({})).toBe('claude-sonnet-5');
+  });
+
+  /*
+   * 🔴 THE RULE THAT MAKES THE KNOB SAFE.
+   *
+   * `ratesFor` falls back to the provider's most expensive row for a model it does not know, so an
+   * UNPRICED `LLM_MODEL` would not fail — it would bill every generation at some other model's price,
+   * silently and forever. "Is this model configured?" and "do we know what it costs?" are therefore the
+   * same question. This is why the old "never an env var" rule was wrong: the answer to "a typo would
+   * break it" is to validate, not to forbid the knob.
+   */
+  it('refuses a model it cannot bill rather than mis-pricing every generation', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('LLM_MODEL', 'claude-fable-5'); // a REAL model — we just have no rates for it
+    expect(() => getPlatformModel({})).toThrow(/fable/i);
+  });
+
+  /* A model priced on one provider but not the other is refused on the one that cannot bill it. */
+  it('validates against the CONFIGURED provider, not against models in general', () => {
+    vi.stubEnv('LLM_MODEL', 'claude-sonnet-5');
+
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    expect(getPlatformModel({})).toBe('claude-sonnet-5'); // priced in MODEL_RATES
+
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
+    expect(() => getPlatformModel({})).toThrow(/sonnet/i); // not in KIE_MODEL_RATES
+  });
+
+  /* A typo is a describable config error, never a 404 at the first generation. */
+  it('refuses a typo loudly', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('LLM_MODEL', 'claude-opus-4-8-latest');
+    expect(() => getPlatformModel({})).toThrow(/claude-opus-4-8-latest/);
+  });
+
+  /* Every per-provider default must itself be priced, or the no-env-file path mis-bills on boot. */
+  it('has a priced default for every provider', () => {
+    for (const provider of PLATFORM_PROVIDERS) {
+      const model = PLATFORM_MODEL_BY_PROVIDER[provider];
+      expect(PROVIDER_RATES[provider]?.[model], `${provider}'s default model ${model} has no rates`).toBeDefined();
+    }
   });
 });
 

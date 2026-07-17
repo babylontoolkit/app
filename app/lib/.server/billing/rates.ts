@@ -15,7 +15,6 @@
  * | cache write    | **2x**                 | we use the 1-HOUR tier (§4.2.8), not the 1.25x default |
  * | output         | 5x (model-specific)    | what the model writes                                  |
  */
-import { PLATFORM_MODEL } from '~/lib/.server/agent/config';
 import { envFlag, envNumber } from '~/lib/.server/env';
 
 /** USD per million tokens, per model. Verified against Anthropic's published pricing (2026-07). */
@@ -114,7 +113,22 @@ export const PROVIDER_RATES: Record<string, Record<string, ModelRates>> = {
 export function ratesFor(model: string, provider: string): ModelRates {
   const table = PROVIDER_RATES[provider] ?? MODEL_RATES;
 
-  return table[model] ?? table[PLATFORM_MODEL] ?? MODEL_RATES[PLATFORM_MODEL] ?? MODEL_RATES['claude-opus-4-8'];
+  return table[model] ?? mostExpensive(table) ?? MODEL_RATES['claude-opus-4-8'];
+}
+
+/**
+ * The priciest row we know of, as the fallback for an unpriced model.
+ *
+ * This used to fall back to the PLATFORM model's rates, which was wrong twice over. It made this file
+ * import `PLATFORM_MODEL` from the agent config — the cycle that stopped the config from validating a
+ * model against these tables at all — and, worse, it meant an unpriced model billed at whatever the
+ * platform model happened to cost, which is arbitrary: cheaper than reality if the platform model is
+ * cheap, and silently under-charging us. Fall back to the most expensive thing instead. Every fallback
+ * in this file errs in the same direction, because the alternative is a revenue leak with a friendly
+ * face. Being wrong in our own favour is recoverable; being wrong the other way is invisible.
+ */
+function mostExpensive(table: Record<string, ModelRates>): ModelRates | undefined {
+  return Object.values(table).sort((a, b) => b.outputPerMTok - a.outputPerMTok)[0];
 }
 
 export interface BillingConfig {

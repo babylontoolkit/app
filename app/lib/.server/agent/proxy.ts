@@ -28,7 +28,7 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, requirePlatformKey } from './config';
+import { getPlatformConfig, getPlatformModel, NotConfiguredError, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
@@ -311,7 +311,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * rather than trusted, because model choice is a config property, never a user input (§4.2a).
    */
   const useByok = byok.allowed;
-  const model = useByok && request.model ? request.model : PLATFORM_MODEL;
+  const model = useByok && request.model ? request.model : getPlatformModel(request.context);
 
   if (!useByok) {
     requirePlatformKey(config);
