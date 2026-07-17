@@ -25,6 +25,7 @@ import { detectProjectCommands, createCommandActionsString } from '~/utils/proje
 import type { ContextAnnotation } from '~/types/context';
 import {
   getRepoStatus,
+  isServerChatId,
   listAllChats,
   listChats,
   loadMessages,
@@ -651,6 +652,34 @@ export function useChatHistory() {
         getSnapshot(db, mixedId), // Fetch snapshot from DB
       ])
         .then(async ([storedMessages, snapshot]) => {
+          /**
+           * 🔴 ALWAYS FETCH. The server is the truth; the browser is a staging area (§4.5.6, §4.5.4b).
+           *
+           * This used to be local-first with no freshness check — the `storedMessages` branch below ran
+           * whenever the browser had a copy, and the server was consulted only when it did not. That was
+           * survivable while the sidebar listed only THIS browser's chats, because a stale local copy
+           * was the only copy you could reach. Making the list account-wide turned it into a data-loss
+           * path AND made it the common one:
+           *
+           *   1. Desktop opens chat X — local copy, 10 messages.
+           *   2. Laptop continues X — the server now has 15.
+           *   3. Desktop opens X from the sidebar → the local copy wins → the 5 newer are invisible.
+           *   4. Desktop sends a message → `putChat` is a blind overwrite → the laptop's 5 are GONE.
+           *
+           * One user, two devices — the exact case "chats follow you" exists to serve.
+           *
+           * The local read above is not wasted: it is the FALLBACK. If the server cannot answer (offline,
+           * a blip) we still open the browser's copy, because stale-but-present beats a conversation that
+           * appears to have vanished, and the next successful open reconciles it. That is also why the
+           * local record is kept rather than deleted — `storeMessageHistory` writes it on every message
+           * while the server is only written at the END of a generation (`checkpointProject`), so it is
+           * the write-ahead buffer that survives a crash, a closed tab, or a failed generation.
+           */
+          if (isServerChatId(mixedId) && (await openFromServer(mixedId))) {
+            setReady(true);
+            return;
+          }
+
           if (storedMessages && storedMessages.messages.length > 0) {
             /*
              * const snapshotStr = localStorage.getItem(`snapshot:${mixedId}`); // Remove localStorage usage
@@ -801,7 +830,8 @@ ${value.content}
                 logger.warn(`Could not restore project ${pid}: ${(error as Error).message}`);
               }
             }
-          } else if (!(await openFromServer(mixedId))) {
+          } else {
+            // The server did not have it and neither does this browser. Nothing to open.
             navigate('/', { replace: true });
           }
 

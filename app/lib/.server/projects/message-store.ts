@@ -93,19 +93,16 @@ export function messagesKey(projectId: string, serverChatId: string): string {
   return `${messagesPrefix(projectId)}${serverChatId}.json`;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * Is this an id we could have minted?
  *
- * Deliberately strict. It rejects `..`, slashes, and the empty string by rejecting everything that is
- * not a UUID — a whitelist, so a new way to write a nasty string is refused by default rather than
- * needing a new rule. It also rejects `"1"`, which is the interesting case: that is what a browser's
- * local chat id looks like, and accepting it is how the cross-device collision gets in.
+ * ONE rule in ONE place (`~/lib/persistence/chat-id`), shared with the client rather than copied. The
+ * client decides from it whether `/chat/:id` is worth asking us about; we decide from it what may
+ * become an object key. Two copies would drift, and the drift reads as "the sidebar links somewhere the
+ * server 400s on". The reasons the rule is a whitelist live with the rule.
  */
-export function isValidChatId(serverChatId: string): boolean {
-  return UUID_RE.test(serverChatId);
-}
+export { isServerChatId as isValidChatId } from '~/lib/persistence/chat-id';
+import { isServerChatId as isValidChatId } from '~/lib/persistence/chat-id';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

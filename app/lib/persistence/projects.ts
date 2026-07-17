@@ -361,6 +361,9 @@ export function mintServerChatId(): string {
   return crypto.randomUUID();
 }
 
+/** What a chat id is — the shared rule (`chat-id.ts`), re-exported so callers here have it to hand. */
+export { isServerChatId } from './chat-id';
+
 /** Every conversation on a project, newest activity first. */
 export async function listChats(projectId: string): Promise<ChatSummary[]> {
   const { chats } = await api<{ chats: ChatSummary[] }>(`/api/projects/${projectId}/messages`);
