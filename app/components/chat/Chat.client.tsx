@@ -151,17 +151,33 @@ export const ChatImpl = memo(
     /*
      * A mounted project means we are BUILDING, even with nothing said yet (§4.5.6).
      *
-     * `chatStarted` is seeded from `initialMessages.length > 0`, which is false for an empty chat on an
-     * existing game — so "New chat, same game" landed the user on the marketing intro ("Build A 3D Game
-     * With AI", the example prompts, "start from a game type") for a project they were already in.
+     * 🔴 ALL THREE, or the user gets a dead screen. "Opened" is not one flag, it is three, and they are
+     * normally set in two different places that a chat-less project reaches NEITHER of:
+     *
+     *   - `chatStarted`            — local; hides the landing intro.        (`runAnimation`)
+     *   - `chatStore.started`      — the HEADER: project name, Save, Share.  (`runAnimation`)
+     *   - `showWorkbench`          — file tree, editor, preview.  (the message parser's onArtifactOpen)
+     *
+     * `runAnimation` only runs when a message is SENT, and the parser only runs when there are
+     * MESSAGES. Open a project with no chats — entirely normal now that deleting a chat leaves the game
+     * (§4.5.6) — and none of them fire. Setting only `chatStarted` (the first version of this) hid the
+     * intro and left the rest: no workbench, no project name, no Save, just a chat box floating on an
+     * empty page. It looked like the landing page had broken.
      *
      * The mount is async and `ready` is `!mixedId || ready` — always true on `/` — so this cannot be a
      * `useState` initializer: the component mounts BEFORE the baton is read. It has to react.
+     *
+     * No animation: `runAnimation` fades the intro out because the user is watching it go. Arriving
+     * from the dashboard there is nothing to fade — the intro was never theirs to see.
      */
     useEffect(() => {
-      if (activeProjectId) {
-        setChatStarted(true);
+      if (!activeProjectId) {
+        return;
       }
+
+      setChatStarted(true);
+      chatStore.setKey('started', true);
+      workbenchStore.showWorkbench.set(true);
     }, [activeProjectId]);
 
     const [animationScope, animate] = useAnimate();
