@@ -132,7 +132,7 @@ WebContainer, tool bridge) → §4.15 game backends (user-owned Supabase, RLS-fi
 §4.13 GitHub sync — ALL USERS, never gated (link/push/pull/divergence) → §4.10 admin.
 ```
 
-### Stage 5 — Identity + hardening - IN PROGRESS
+### Stage 5 — Identity + hardening - DONE
 ```
 Continue per CLAUDE.md/SPEC.md.
 Build: §2.5 brand module (app/config/brand.ts + app/assets/brand/ + APP_URL/PLAY_URL) +
