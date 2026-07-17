@@ -28,6 +28,12 @@ dist-ssr
 functions/build/
 .env.local
 .env
+# ⚠️ EVERY .env variant EXCEPT the checked-in example. `.env.local` + `.env` alone left
+# `.env.production` tracked — the most dangerous file in the family, and the one that does not end in
+# `local` (the same blind spot `isSecretPath` had in git/sync-logic.ts). Deployed values come from
+# SSM -> container env (DEPLOY.md); no .env file belongs in the repo but the example.
+.env.*
+!.env.example
 .dev.vars
 *.vars
 .wrangler

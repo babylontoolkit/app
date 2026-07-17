@@ -184,9 +184,28 @@ describe('KIE rates', () => {
    * repair all scale by the same factor. If a future KIE reprice breaks that uniformity, every credit
    * projection built on it (grant sizing, pack sizing) silently stops being true — so it is pinned.
    */
+  /*
+   * ⚠️ Models with NO Anthropic row cannot be cross-checked, so they are named here rather than
+   * skipped. A bare `if (!direct) continue` would let a future KIE model silently escape the ratio
+   * check — the "scan that matches nothing reports a clean bill of health forever" failure that
+   * `no-server-storage.spec.ts` needed a control to catch. Naming them makes the exemption a decision.
+   *
+   * `claude-fable-5`: we bill it on KIE at a MEASURED $4/$20, but we have no Anthropic rates for it, so
+   * there is nothing to take a ratio against. Note the 0.4x rule would IMPLY an Anthropic list of
+   * $10/$50 — that is a prediction, not a price, and a price cannot be guessed. If Anthropic's fable-5
+   * rates ever get added, delete this exemption and let the ratio test judge it.
+   */
+  const NO_ANTHROPIC_ROW = new Set(['claude-fable-5']);
+
   it('is a uniform 0.4x of Anthropic list across all four token classes', () => {
     for (const [model, kie] of Object.entries(KIE_MODEL_RATES)) {
       const direct = MODEL_RATES[model];
+
+      if (NO_ANTHROPIC_ROW.has(model)) {
+        expect(direct, `${model} is exempt from the ratio check but now HAS an Anthropic row`).toBeUndefined();
+        continue;
+      }
+
       expect(direct, `KIE prices ${model} but Anthropic has no row to compare against`).toBeDefined();
 
       expect(kie.inputPerMTok / direct.inputPerMTok, `${model} input`).toBeCloseTo(0.4, 5);

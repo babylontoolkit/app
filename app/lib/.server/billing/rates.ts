@@ -123,7 +123,43 @@ export const KIE_MODEL_RATES: Record<string, ModelRates> = {
     cacheReadPerMTok: 0.2, // 0.1x of the $2 base
     cacheWritePerMTok: 4.0, // 2x of the $2 base — the 1h tier, matching `proxy.ts`
   },
+
+  /**
+   * MEASURED against KIE's own `credits_consumed`, 2026-07-17 — not published, not guessed.
+   *
+   * A four-point input sweep (2,126 -> 25,227 tokens) converges $4.069 -> $4.011 -> **$4.006**, and an
+   * output-dominated probe returns **$19.99**. Both land on round numbers, and the same method with
+   * `claude-opus-4-8` as a CONTROL reproduces its published $2.00 / $10.00 exactly — which is the only
+   * reason these two numbers are in a rate table rather than in a comment.
+   *
+   * ⚠️ **Fable 5 is 2x Opus 4.8 on KIE, not cheaper.** It is here because it is the strongest model KIE
+   * serves whose thinking text their adapter actually returns (`kie-wire.ts`: 224/223 chars with
+   * `thinkingFlag`, against 4-8's 0/0/0). That is the trade — visible reasoning at double the price.
+   */
+  'claude-fable-5': {
+    inputPerMTok: 4.0,
+    outputPerMTok: 20.0,
+    cacheReadPerMTok: 0.4, // 0.1x — the multiplier is CONFIRMED on KIE, see below
+    cacheWritePerMTok: 8.0, // 2x of the $4 base — the 1h tier, matching `proxy.ts`
+  },
 };
+
+/*
+ * 🔴 HOW THE CACHE MULTIPLIERS STOPPED BEING AN ASSUMPTION (2026-07-17).
+ *
+ * The sweep above accidentally proved the 0.1x read multiplier on KIE. Early probes showed opus-4-8
+ * missing its published price by a CONSTANT 0.79 credits on every request, which read exactly like a
+ * flat per-request fee — a plausible, wrong, and expensive conclusion. It was `cache_read_input_tokens`:
+ * KIE was serving 19,787 cached tokens of the repeated probe prefix, and 19,787 x $0.20/Mtok is
+ * $0.0039574 = 0.79 credits, to four significant figures. Not a fee — a token class left out of the
+ * equation. $0.20 is 0.1 x $2, so `CACHE_READ_MULTIPLIER` is now measured on this vendor rather than
+ * inherited from Anthropic's docs.
+ *
+ * The lesson is the method, not the number: the CONTROL is what caught it. Fable's rates fitted their
+ * probes beautifully while the control silently disagreed with a price we already knew — and without
+ * the control, "it fits" would have shipped $4/$20 for the right reason and $2.36/$13.27 for the wrong
+ * one, indistinguishably.
+ */
 
 /**
  * A price, from the environment. **Not `envNumber` — a typo here is not survivable.**
