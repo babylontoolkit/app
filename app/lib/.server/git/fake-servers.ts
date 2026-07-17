@@ -193,7 +193,20 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
       },
     },
     repos: {
-      createForAuthenticatedUser: async (params: { name: string; private: boolean; description?: string }) => {
+      /**
+       * ⚠️ `auto_init` IS MODELLED, because ignoring it is what let `auto_init:false` ship.
+       *
+       * Real GitHub's Git Data API refuses to work at all on a repository with no commits — blobs,
+       * trees and commits all answer 409. So `auto_init:true` is not cosmetic: it is the difference
+       * between a usable repo and a total outage of Save. A fake that ignores the flag cannot tell those
+       * two worlds apart, and every test passes in both.
+       */
+      createForAuthenticatedUser: async (params: {
+        name: string;
+        private: boolean;
+        description?: string;
+        auto_init?: boolean;
+      }) => {
         record('POST', '/user/repos', params);
 
         const fullName = `${login}/${params.name}`;
@@ -206,6 +219,15 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
         }
 
         store.repos.add(fullName);
+
+        /*
+         * auto_init makes GitHub write an initial commit (a README) — which is what makes the repo
+         * non-empty, and therefore what makes the Git Data API usable at all.
+         */
+        if (params.auto_init) {
+          const tree = store.putTree([{ path: 'README.md', sha: store.putBlobUtf8(`# ${params.name}\n`) }]);
+          store.branches.set('main', store.putCommit(tree, [], 'Initial commit'));
+        }
 
         return { data: { full_name: fullName, default_branch: 'main' } };
       },
@@ -222,6 +244,24 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
       },
     },
     git: {
+      /**
+       * 🔴 AN EMPTY REPOSITORY ANSWERS 409, NOT 404 — the fake said 404 and that hid a total outage.
+       *
+       * This one line asserted a belief about GitHub that is FALSE, and every test agreed with it. Real
+       * GitHub distinguishes two states this used to collapse into one:
+       *
+       *   - the REPOSITORY has no commits at all -> 409 "Git Repository is empty."
+       *   - the repo has commits, this BRANCH does not exist -> 404 "Not Found"
+       *
+       * `Save` CREATES the repo (§4.5.4b), so the first state is the one every new project hits, on its
+       * very first save — and `getBranchHead` only mapped 404 to null, so it threw and the save failed
+       * with "Not saved". **The one path every new project must take had never worked**, and the whole
+       * suite was green because the fake was wrong in exactly the same direction as the code.
+       *
+       * Found by pushing to real github.com (2026-07-17), which CLAUDE.md said was the honest next thing
+       * and predicted this precise failure: "every test points at a fake server that we wrote to match
+       * our own understanding of the API".
+       */
       getRef: async (params: { ref: string }) => {
         record('GET', `/git/ref/${params.ref}`);
 
@@ -229,13 +269,27 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
         const head = store.branches.get(branch);
 
         if (!head) {
-          throw new FakeHttpError(404, 'Not Found', { headers: {} });
+          throw store.commits.size === 0
+            ? new FakeHttpError(409, 'Git Repository is empty.', { headers: {} })
+            : new FakeHttpError(404, 'Not Found', { headers: {} });
         }
 
         return { data: { object: { sha: head } } };
       },
       createBlob: async (params: { content: string; encoding: 'utf-8' | 'base64' }) => {
         record('POST', '/git/blobs', params);
+
+        /*
+         * 🔴 THE WALL. Real GitHub's Git Data API refuses EVERYTHING on a repository with no commits —
+         * not just ref reads. This is the 409 that actually broke Save (measured live 2026-07-17: eight
+         * retried `POST /git/blobs -> 409` before the save gave up), and it is why `auto_init` must be
+         * true: there is no way to write the first commit through this API at all.
+         *
+         * Modelled here so nobody can "tidy" `auto_init` back to false and still see a green suite.
+         */
+        if (store.commits.size === 0) {
+          throw new FakeHttpError(409, 'Git Repository is empty.', { headers: {} });
+        }
 
         /*
          * Real GitHub normalises both encodings to stored BYTES. Reproducing that is what makes the

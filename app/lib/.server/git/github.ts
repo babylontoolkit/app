@@ -120,6 +120,26 @@ export function toGitHubError(error: unknown): GitProviderError {
   return new GitProviderError({ kind: 'unavailable', message, cause: error });
 }
 
+/**
+ * Is this the 409 GitHub returns from a REF READ against a repository with no commits?
+ *
+ * ⚠️ **Deliberately NOT folded into `toGitHubError`, and deliberately NOT matched on the message.**
+ *
+ * Not in `toGitHubError`, because 409 is endpoint-specific: on a ref READ it means "the repo is empty";
+ * on a ref UPDATE it means the ref moved under us — a genuine conflict, and treating THAT as "no such
+ * branch" would let a push force-create over commits it never saw. The meaning belongs to the caller
+ * that knows which endpoint it asked, so only `getBranchHead` may use this.
+ *
+ * Not on the message ("Git Repository is empty."), because GitHub's prose is not an API contract, and
+ * the failure modes are wildly asymmetric: a message check that stops matching after a GitHub copy edit
+ * silently restores a bug that breaks EVERY first save, reported to the user only as "Not saved". A
+ * status check that is too broad can only mis-handle a 409 that this read endpoint does not return.
+ * Prefer the failure that cannot hide.
+ */
+export function isEmptyRepository(error: unknown): boolean {
+  return error instanceof GitProviderError && error.status === 409;
+}
+
 async function mapErrors<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -149,6 +169,27 @@ export class GitHubProvider implements GitProvider {
    * exists under this account, so we re-read it and link. Any other owner is a `forbidden` — silently
    * linking a project to a repo the user does not own would make every later save fail with a
    * permission error nobody could explain.
+   *
+   * 🔴 **`auto_init` MUST BE TRUE: GITHUB'S GIT DATA API DOES NOT WORK ON AN EMPTY REPOSITORY** (found by
+   * pushing to real github.com, 2026-07-17). This shipped `false` — the tidier-looking choice, since we
+   * are about to push the real files and want no stray README — and it broke **every first save**, which
+   * is the only path a new project can take (§4.5.4b). An empty repo answers 409 to the whole API:
+   *
+   *   GET  /git/ref/heads/{branch}  -> 409 "Git Repository is empty."
+   *   POST /git/blobs               -> 409   <- and this one is the real wall
+   *
+   * The ref read can be interpreted away (`isEmptyRepository`), but blobs/trees/commits cannot: there is
+   * no way to write the first commit through the Git Data API at all. The repo needs one commit to exist
+   * before that API will speak to it, and `auto_init: true` is GitHub's own supported way to get one.
+   *
+   * The stray README does not survive: `fastForwardPush` builds its tree with **no `base_tree`**, so the
+   * first save replaces the tree wholesale and the README is gone in that commit. And it is a true
+   * fast-forward, not a clobber — `detectPushDivergence` returns `first-push` when the project has no
+   * `lastSyncedCommitSha`, and the commit's parent IS the auto-init head, so `updateRef` runs with
+   * `force: false` and GitHub accepts it. The cost is one extra commit in the user's history.
+   *
+   * ⚠️ Do not "clean this up" back to `false`. It reads like a harmless tidy and it is a total outage of
+   * Save, reported to the user as nothing more than "Not saved".
    */
   async ensureRepo(input: EnsureRepoInput): Promise<EnsureRepoResult> {
     const { login } = await this.getCurrentUser();
@@ -159,7 +200,7 @@ export class GitHubProvider implements GitProvider {
           name: input.name,
           private: input.private,
           description: input.description,
-          auto_init: false,
+          auto_init: true,
         }),
       );
 
@@ -196,6 +237,31 @@ export class GitHubProvider implements GitProvider {
     }
   }
 
+  /**
+   * The branch's head sha, or `null` when the branch has no commits.
+   *
+   * 🔴 **AN EMPTY REPOSITORY ANSWERS 409, NOT 404 — AND THAT BROKE EVERY FIRST SAVE (found live
+   * 2026-07-17).** `Save` CREATES the repo (§4.5.4b), so the very next thing it does is ask a repo that
+   * is empty *by construction* for its branch head. GitHub replies:
+   *
+   *   GET /repos/{owner}/{repo}/git/ref/heads%2F{branch} -> 409 "Git Repository is empty."
+   *
+   * which `toGitHubError` mapped to `kind:'invalid'` (the `status >= 400` catch-all), so this threw and
+   * the save failed with "Not saved". **The one path that every new project must take had never worked
+   * against real GitHub.** Every test passed because our fake server returns 404 for a missing ref — a
+   * reasonable guess that is simply not what GitHub does on an empty repo. CLAUDE.md predicted this exact
+   * failure ("every test points at a fake server we wrote to match our own understanding of the API");
+   * this is what it looks like.
+   *
+   * ⚠️ **The 409 is swallowed HERE and must never be swallowed in `toGitHubError`.** 409 is
+   * endpoint-specific: on a ref UPDATE it means the ref moved under us (a real conflict), and mapping
+   * that to "the branch does not exist" would let a push force-create over someone else's commits. The
+   * only endpoint where 409 means "empty" is this read.
+   *
+   * ⚠️ And it returns `null` (branch empty), never `undefined` (could not ask) — collapsing those two
+   * lets a flaky connection declare the browser authoritative and push over a repo it never read
+   * (`mount-source.ts`). An empty repo genuinely HAS no branch, so `null` is the honest answer.
+   */
   async getBranchHead(ref: RepoRef): Promise<string | null> {
     try {
       const { data } = await mapErrors(() =>
@@ -204,7 +270,7 @@ export class GitHubProvider implements GitProvider {
 
       return data.object.sha;
     } catch (error) {
-      if (error instanceof GitProviderError && error.kind === 'not-found') {
+      if (error instanceof GitProviderError && (error.kind === 'not-found' || isEmptyRepository(error))) {
         return null;
       }
 

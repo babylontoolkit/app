@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createFakeGitHub } from './fake-servers';
-import { GitHubProvider } from './github';
+import { GitHubProvider, toGitHubError } from './github';
 import { FALLBACK_REPO_NAME, candidateRepoName, deriveRepoName } from './repo-name';
 import { saveToNewRepo } from './save';
 import { bytesToBase64, type SerializedFileMap } from '~/lib/binary/binary-files';
@@ -30,6 +30,72 @@ function harness() {
 
   return { ...fake, provider: new GitHubProvider('token', fake.octokit) };
 }
+
+/**
+ * 🔴 THE BUG THAT BROKE EVERY FIRST SAVE, AND THE ONLY THING THAT FOUND IT WAS REAL GITHUB.
+ *
+ * `Save` CREATES the repo (§4.5.4b), so the next thing it does is ask a repository that is empty BY
+ * CONSTRUCTION for its branch head. Real GitHub answers **409 "Git Repository is empty."** — not 404.
+ * `getBranchHead` mapped only 404 to null, so it threw, and the save died. The user saw "Not saved".
+ *
+ * **The one path every new project must take had never worked against real github.com**, and the whole
+ * suite was green — because `fake-servers.ts` returned 404 for any missing branch. The fake was wrong in
+ * exactly the same direction as the code, so the tests agreed with the bug. Reverting the `github.ts`
+ * fix against the CORRECTED fake turns this file red, which is the proof the tests were always right and
+ * only the fake lied.
+ *
+ * These tests exist so the 409 is a named, deliberate behaviour rather than a line someone tidies away.
+ */
+describe('a brand-new repo is EMPTY, and GitHub says 409 — not 404', () => {
+  it('treats the empty-repo 409 as "no branch yet" instead of throwing', async () => {
+    const { provider, store } = harness();
+    store.repos.add('testuser/fresh-repo');
+
+    expect(store.commits.size, 'precondition: the repo has no commits — it was just created').toBe(0);
+
+    await expect(
+      provider.getBranchHead({ owner: 'testuser', repo: 'fresh-repo', branch: 'main' }),
+      'a 409 here is "empty", and an empty repo genuinely has no branch',
+    ).resolves.toBeNull();
+  });
+
+  /*
+   * The other half of the distinction the fake used to collapse. Once a repo HAS commits, a missing
+   * branch is an ordinary 404 — and that must still resolve to null, not throw.
+   */
+  it('still treats a missing branch on a NON-empty repo as "no branch yet"', async () => {
+    const { provider, store } = harness();
+    store.repos.add('testuser/has-commits');
+
+    const tree = store.putTree([{ path: 'README.md', sha: store.putBlobUtf8('# hi\n') }]);
+    store.commits.set('c1', { treeSha: tree, parents: [], message: 'init' });
+    store.branches.set('main', 'c1');
+
+    await expect(
+      provider.getBranchHead({ owner: 'testuser', repo: 'has-commits', branch: 'nonexistent' }),
+    ).resolves.toBeNull();
+  });
+
+  /**
+   * ⚠️ THE FIX MUST NOT BECOME "409 MEANS NO BRANCH" EVERYWHERE.
+   *
+   * 409 is endpoint-specific. On a ref UPDATE it means the ref moved under us — a genuine conflict — and
+   * if `toGitHubError` mapped 409 to `not-found` globally, `getBranchHead` would report "no branch" for a
+   * branch that very much exists, and the push above it would force-create over commits it never read.
+   * That is data loss on the only copy of someone's game (§4.5.4b).
+   *
+   * So the interpretation lives in `isEmptyRepository`, applied ONLY by `getBranchHead`; the shared error
+   * mapper must keep a 409 as a plain, un-special error.
+   */
+  it('keeps 409 OUT of the shared error mapper — only the ref read may interpret it', () => {
+    const mapped = toGitHubError({ status: 409, message: 'Reference cannot be updated' });
+
+    expect(mapped.kind, 'a global 409 -> not-found would let a push force-create over real commits').not.toBe(
+      'not-found',
+    );
+    expect(mapped.status).toBe(409);
+  });
+});
 
 describe('deriveRepoName', () => {
   it.each([
