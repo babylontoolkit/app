@@ -15,6 +15,15 @@ export interface Project {
   id: string;
   name: string;
 
+  /**
+   * How many conversations this project has (§4.5.6) — server-counted, added by `GET /api/projects`.
+   *
+   * `undefined` means "not counted" (an older response, or the count failed), which the UI must render
+   * as nothing rather than as zero: claiming a project has no chats when we simply did not look is a
+   * lie about someone's data. Zero is a real state — deleting a chat never deletes the game.
+   */
+  chatCount?: number;
+
   /** The `game_registry` entry this project was seeded from (§4.4). */
   templateId: string;
 

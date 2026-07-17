@@ -644,7 +644,18 @@ and the skills index. A new chat sees the whole game; it just does not see the t
   `urlIdRef` (a ref updates synchronously; state does not) plus a title/slug fallback to the user's
   first message. **Any new read of `urlId` inside an async callback is this bug again.**
 
-Pinned by `message-store.spec.ts` (the collision, the sweep, legacy adoption + migration),
+**Deleting a chat NEVER deletes the game, and the card says how many chats there are.** Reported as a
+bug ("I deleted KartRacer from side bar and its still in dashboard"), it is the correct behaviour and
+the confusion was ours: the dashboard gave no way to tell "I deleted its only conversation" from "this
+is an orphan". A chat delete cannot cascade to the project, because for an UNLINKED project the browser
+holds the game's ONLY copy (§4.5.4b) — cascading would let deleting a conversation destroy a game that
+was never saved. So `GET /api/projects` returns a server-side `chatCount` (`countChats` — one prefix
+listing per project, reads no bodies) and a card reads "2 chats" or "No chats yet". `chatCount:
+undefined` renders NOTHING: it means we did not count, and saying "No chats yet" because a listing
+failed is a lie about someone's data.
+
+Pinned by `message-store.spec.ts` (the collision, the sweep, legacy adoption + migration, the count —
+including that a migrated legacy chat is counted ONCE),
 `chat-routes.spec.ts` (both walls, the id whitelist, and that the chat cap never refuses to save a chat
 the user is IN), `pending-remix.spec.ts` (the stale-slot cases), and `chat-visibility.spec.ts` (the slug
 is never empty; four opens leave ONE local chat, not four).

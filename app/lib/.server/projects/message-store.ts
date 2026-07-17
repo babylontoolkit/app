@@ -259,6 +259,38 @@ export async function getChatOrLegacy(
 }
 
 /**
+ * How many conversations a project has (§4.5.6) — WITHOUT reading any of them.
+ *
+ * `listChats` costs one `get` per chat because it needs titles. The dashboard only needs a number, and
+ * doing it the expensive way would mean fetching every conversation on the platform to render a card.
+ * This is one prefix listing per project.
+ *
+ * It exists because a project with no chats looked like an orphan: the owner deleted a project's only
+ * conversation, the project correctly stayed (deleting a chat must never destroy an UNLINKED game —
+ * the browser is its only copy, §4.5.4b), and the dashboard gave no way to see that "no chats" was a
+ * real, deliberate state rather than something broken.
+ */
+export async function countChats(projectId: string, context?: unknown): Promise<number> {
+  const store = getObjectStore(context);
+  const objects = await store.list(messagesPrefix(projectId));
+
+  const own = objects.filter((object) => {
+    const id = object.key.slice(messagesPrefix(projectId).length, -'.json'.length);
+    return object.key.endsWith('.json') && isValidChatId(id);
+  });
+
+  /*
+   * The legacy transcript counts as one, and only if it has not already been migrated to its own
+   * object — otherwise a continued legacy chat is counted twice (`listChats` resolves the same
+   * duplicate, for the same reason).
+   */
+  const migrated = own.some((object) => object.key.endsWith(`${legacyChatId(projectId)}.json`));
+  const legacy = migrated ? null : await store.get(legacyMessagesKey(projectId));
+
+  return own.length + (legacy ? 1 : 0);
+}
+
+/**
  * Forget ONE conversation. The project and its other chats are untouched.
  *
  * Unconditional and idempotent: deleting an object that is not there is a no-op, so the caller never

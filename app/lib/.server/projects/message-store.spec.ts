@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FsObjectStore } from '~/lib/.server/storage/store';
 import { setObjectStore } from '~/lib/.server/storage';
 import {
+  countChats,
   deleteChat,
   deleteMessages,
   getChat,
@@ -220,6 +221,69 @@ describe('conversations from before §4.5.6 still open', () => {
     await deleteChat(PROJECT, legacyChatId(PROJECT));
 
     expect(await listChats(PROJECT)).toEqual([]);
+  });
+});
+
+/**
+ * The dashboard's chat count (§4.5.6).
+ *
+ * It exists because a project with no chats looked like an orphan: deleting a project's only
+ * conversation correctly leaves the project (a chat delete must never destroy an UNLINKED game — the
+ * browser holds its only copy, §4.5.4b), and the card gave no way to see that "no chats" was deliberate.
+ */
+describe('counting a project’s chats', () => {
+  it('counts none for a project that has never chatted', async () => {
+    expect(await countChats(PROJECT)).toBe(0);
+  });
+
+  it('counts each chat once', async () => {
+    await putChat(PROJECT, chat(CHAT_A));
+    expect(await countChats(PROJECT)).toBe(1);
+
+    await putChat(PROJECT, chat(CHAT_B));
+    expect(await countChats(PROJECT)).toBe(2);
+  });
+
+  it('does not count another project’s chats', async () => {
+    await putChat('prj_other', chat(CHAT_A));
+    expect(await countChats(PROJECT)).toBe(0);
+  });
+
+  it('drops to zero when the last chat is deleted — the reported case', async () => {
+    await putChat(PROJECT, chat(CHAT_A));
+    await deleteChat(PROJECT, CHAT_A);
+
+    expect(await countChats(PROJECT)).toBe(0);
+  });
+
+  it('counts a pre-§4.5.6 transcript as one', async () => {
+    await objects.put(legacyMessagesKey(PROJECT), new TextEncoder().encode('{"messages":[]}'));
+
+    expect(await countChats(PROJECT)).toBe(1);
+  });
+
+  /** 🔴 A continued legacy chat exists at two keys until the migrating delete lands. It is ONE chat. */
+  it('does not double-count a legacy chat that has been migrated', async () => {
+    await objects.put(legacyMessagesKey(PROJECT), new TextEncoder().encode('{"messages":[]}'));
+    await putChat(PROJECT, chat(legacyChatId(PROJECT)));
+
+    expect(await countChats(PROJECT)).toBe(1);
+    expect(await listChats(PROJECT)).toHaveLength(1);
+  });
+
+  it('agrees with listChats', async () => {
+    await putChat(PROJECT, chat(CHAT_A));
+    await putChat(PROJECT, chat(CHAT_B));
+    await objects.put(legacyMessagesKey(PROJECT), new TextEncoder().encode('{"messages":[]}'));
+
+    expect(await countChats(PROJECT)).toBe((await listChats(PROJECT)).length);
+  });
+
+  /** It must not read the bodies — that is the entire reason it is not `listChats().length`. */
+  it('ignores a stray non-chat object under the prefix', async () => {
+    await objects.put(`${'messages/' + PROJECT + '/'}notes.txt`, new TextEncoder().encode('x'));
+
+    expect(await countChats(PROJECT)).toBe(0);
   });
 });
 

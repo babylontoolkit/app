@@ -387,8 +387,31 @@ export function ProjectsDashboard() {
                     })()}
                   </div>
 
-                  <div className="mt-2 text-xs text-bolt-elements-textTertiary">
-                    Updated {formatUpdated(project.updatedAt)}
+                  <div className="mt-2 text-xs text-bolt-elements-textTertiary flex items-center gap-1.5">
+                    <span>Updated {formatUpdated(project.updatedAt)}</span>
+
+                    {/*
+                     * How many conversations this game has (§4.5.6).
+                     *
+                     * "No chats yet" is a REAL state, not an orphan: deleting a chat never deletes the
+                     * game, because for an UNLINKED project this browser holds its only copy (§4.5.4b).
+                     * Without this the card gave no way to tell "I deleted its only conversation" from
+                     * "something is broken" — which is exactly how it was reported.
+                     *
+                     * `undefined` renders NOTHING. It means we did not count, and saying "No chats yet"
+                     * because a listing failed would be a lie about someone's data.
+                     */}
+                    {project.chatCount !== undefined && (
+                      <>
+                        <span aria-hidden>·</span>
+                        <span className="flex items-center gap-1">
+                          <span className="i-ph:chat-teardrop-dots" />
+                          {project.chatCount === 0
+                            ? 'No chats yet'
+                            : `${project.chatCount} chat${project.chatCount === 1 ? '' : 's'}`}
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
 
