@@ -22,6 +22,7 @@ import type { ProviderInfo } from '~/types/model';
 import { useSearchParams } from '@remix-run/react';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
+import { waitForMountVisible } from '~/lib/registry/mount';
 import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registry/match';
 import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
 import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
@@ -723,7 +724,7 @@ export const ChatImpl = memo(
       const title = prompt ? deriveProjectTitle(prompt, entry.title) : entry.title;
 
       try {
-        const { assistantMessage, userMessage, className } = await createProjectFromRegistry({
+        const { assistantMessage, userMessage, className, mustBeVisible } = await createProjectFromRegistry({
           entry,
           title,
           prompt,
@@ -779,6 +780,31 @@ export const ChatImpl = memo(
 
         const reloadOptions =
           uploadedFiles.length > 0 ? { experimental_attachments: await filesToAttachments(uploadedFiles) } : undefined;
+
+        /*
+         * 🔴 THE LAST THING BEFORE THE MOST EXPENSIVE GENERATION IN THE PRODUCT. Do not move it, and do
+         * not move anything that sets state below it.
+         *
+         * Two things have to be true before the model is worth paying for, and neither was:
+         *
+         *   1. **The project must be VISIBLE, not merely written.** The writes above are awaited, so the
+         *      bytes are on disk — but the model reads `workbenchStore.files`, which a watcher fills
+         *      asynchronously. Measured: the request fired at 5405ms, the store filled at 5531ms, and
+         *      the model was asked to write a racing game having been shown SEVEN files, none of them
+         *      source. It told the owner so — "I can't see its source" — and we read that as caution.
+         *
+         *   2. **`projectId` must have reached a COMMITTED render.** The AI SDK refreshes its request
+         *      body from a `useEffect` (`extraMetadataRef`), so it only ever sends values from a render
+         *      that has committed. `createProject` above sets the atom, but `reload()` runs in the same
+         *      synchronous block, so the body still carried `projectId: undefined` on every creation —
+         *      the server's ownership check and its per-project attribution both got nothing. Fixing
+         *      only (1) left this one standing, silently: the files came through and the id did not.
+         *
+         * Awaiting here fixes both, because it yields — the store update and the `projectId.set` above
+         * both land in a commit before `reload()` reads the ref. That is also why the wait is HERE and
+         * not inside `createProjectFromRegistry`, which returns before the project is registered.
+         */
+        await waitForMountVisible(mustBeVisible);
 
         reload(reloadOptions);
 

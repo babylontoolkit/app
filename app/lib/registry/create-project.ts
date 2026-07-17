@@ -15,6 +15,7 @@
 import registryData from '~/config/game-registry.json';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import type { TemplateFile } from '~/types/template';
+import { WORK_DIR } from '~/utils/constants';
 import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
 import { ensureFrameworkPublicAssets, writeBinaryFiles, writeTextFiles } from './mount';
@@ -42,6 +43,14 @@ export interface CreatedProject {
 
   /** The project's own GameMode class (§4.4b) — the only name the play contract may reference. */
   className: string;
+
+  /**
+   * Store paths the caller MUST `waitForMountVisible` on before generating (§4.2.8).
+   *
+   * Not a suggestion: skipping it means the model is handed a half-mounted project and writes the game
+   * without ever seeing it.
+   */
+  mustBeVisible: string[];
 }
 
 async function fetchStarterFiles(): Promise<TemplateFile[]> {
@@ -157,6 +166,26 @@ export async function createProjectFromRegistry(options: {
     assistantMessage,
     userMessage: buildCreationBrief({ entry, title, className, prompt, images: listAvailableImages(binaries) }),
     className,
+
+    /*
+     * 🔴 The files the caller must see IN THE STORE before it may generate (§4.2.8) — see
+     * `waitForMountVisible`, and DO NOT move the wait back in here.
+     *
+     * The writes above put the bytes on disk. The model reads `workbenchStore.files`, which a watcher
+     * fills asynchronously, so creation used to fire the generation 126ms early and send SEVEN files
+     * instead of 78 — no scaffolded GameMode, no `classes/`, no `globals.ts`.
+     *
+     * The wait belongs at the END of the caller's sequence, not here, because the caller ALSO sets
+     * state the request needs (`projectId`, from the server registration that happens after this
+     * returns) and the AI SDK reads its body from a ref refreshed in a `useEffect` — i.e. only from
+     * COMMITTED renders. Waiting here fixed the files and left `projectId` undefined on every
+     * creation, which is the same bug wearing a different hat. One wait, after everything.
+     *
+     * Sentinels rather than a count: a count is a guess about a number that moves when the template
+     * does, while these are exactly what §4.4b just produced or edited — and the one whose absence the
+     * owner reported ("the ai does not see KartRacerMode").
+     */
+    mustBeVisible: [`${WORK_DIR}/${gameMode.path}`, `${WORK_DIR}/${GLOBALS_PATH}`, `${WORK_DIR}/${sourcePath}`],
   };
 }
 
