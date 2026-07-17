@@ -13,6 +13,7 @@ import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 
 export default class AnthropicProvider extends BaseProvider {
   name = 'Anthropic';
@@ -158,8 +159,19 @@ export default class AnthropicProvider extends BaseProvider {
      */
     const effort: EffortLevel = options.effort ?? parseEffort((serverEnv as any)?.THINKING_EFFORT) ?? DEFAULT_EFFORT;
 
-    // No `output-128k-2025-02-19` beta header — that capability is GA on Claude 4+.
-    const anthropic = createAnthropic({ apiKey, fetch: thinkingFetch(thinkingMode, effort, model) });
+    /*
+     * No `output-128k-2025-02-19` beta header — that capability is GA on Claude 4+.
+     *
+     * `rateLimitFetch` sits UNDER `thinkingFetch`, closest to the network: it is the one that may send
+     * the finished body again, so it must see the request exactly as Anthropic will. It honours
+     * `retry-after` (the SDK's own retry backs off on a fixed 2s/4s and ignores the header Anthropic
+     * actually sends) and reports every absorbed 429, so throttling on a shared platform key is visible
+     * rather than something we infer from failed generations (§5A).
+     */
+    const anthropic = createAnthropic({
+      apiKey,
+      fetch: thinkingFetch(thinkingMode, effort, model, rateLimitFetch({ provider: this.name })),
+    });
 
     const instance = supportsSamplingParams(model) ? anthropic(model) : stripSamplingParams(anthropic(model));
 

@@ -55,6 +55,7 @@ import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
+import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 
 export default class KieProvider extends BaseProvider {
   name = 'KIE';
@@ -102,12 +103,21 @@ export default class KieProvider extends BaseProvider {
       headers: { Authorization: `Bearer ${apiKey}` },
 
       /*
-       * ORDER MATTERS. `thinkingFetch` parses the body, sets `thinking`/`output_config`, re-stringifies
-       * and hands off to its baseFetch — so `kieFetch` runs LAST and adds `thinkingFlag` to the body
-       * that already carries the thinking settings. Both must be on the same request or KIE thinks
-       * without telling us (see `kieFetch`).
+       * ORDER MATTERS, and the chain reads outside-in: thinkingFetch -> kieFetch -> rateLimitFetch.
+       *
+       * `thinkingFetch` parses the body and sets `thinking`/`output_config`, then hands to `kieFetch`,
+       * which adds `thinkingFlag` to THAT body (both must be on the same request or KIE thinks without
+       * telling us). `rateLimitFetch` sits at the bottom, closest to the network, because it is the only
+       * one that decides whether to send the finished body AGAIN — it must see the request exactly as
+       * the vendor will.
+       *
+       * ⚠️ KIE publishes NO rate-limit headers, so throttling here is invisible by default. Measured
+       * 2026-07-17: 60 concurrent requests (71/10s, 3.5x their documented 20/10s cap) returned zero
+       * 429s — that cap governs their image/video task API, not this endpoint — but p95 latency went
+       * 349ms -> 7,474ms. **KIE soft-throttles by QUEUEING rather than rejecting**, which no retry can
+       * see and no header reports. `onThrottled` is what makes the 429 case visible if it ever starts.
        */
-      fetch: thinkingFetch(thinkingMode, effort, model, kieFetch()),
+      fetch: thinkingFetch(thinkingMode, effort, model, kieFetch(rateLimitFetch({ provider: this.name }))),
     });
 
     const instance = supportsSamplingParams(model) ? kie(model) : stripSamplingParams(kie(model));
