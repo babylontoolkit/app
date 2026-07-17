@@ -146,6 +146,23 @@ export const ChatImpl = memo(
     });
     const { showChat } = useStore(chatStore);
     const activeProjectId = useStore(projectId);
+
+    /*
+     * A mounted project means we are BUILDING, even with nothing said yet (§4.5.6).
+     *
+     * `chatStarted` is seeded from `initialMessages.length > 0`, which is false for an empty chat on an
+     * existing game — so "New chat, same game" landed the user on the marketing intro ("Build A 3D Game
+     * With AI", the example prompts, "start from a game type") for a project they were already in.
+     *
+     * The mount is async and `ready` is `!mixedId || ready` — always true on `/` — so this cannot be a
+     * `useState` initializer: the component mounts BEFORE the baton is read. It has to react.
+     */
+    useEffect(() => {
+      if (activeProjectId) {
+        setChatStarted(true);
+      }
+    }, [activeProjectId]);
+
     const [animationScope, animate] = useAnimate();
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [chatMode, setChatMode] = useState<'discuss' | 'build'>('build');
@@ -862,7 +879,19 @@ export const ChatImpl = memo(
 
       runAnimation();
 
-      if (!chatStarted) {
+      /*
+       * 🔴 "Do we need to CREATE a project?" — never "is the chat empty?" (§4.5.6).
+       *
+       * This was `if (!chatStarted)`, and `chatStarted` is seeded from `initialMessages.length > 0`. An
+       * empty chat on an EXISTING project — "New chat, same game", or a dashboard Open of a project
+       * whose conversation lives on another device — satisfied that, so the first message ran the
+       * new-project path: it mounted a fresh template over the user's game and registered a SECOND
+       * project named after their prompt. Measured: opening "Kart Racer" and typing "add a boost pad to
+       * the track" created a new project called "Add A Boost Pad".
+       *
+       * The question the branch is actually asking is whether a project exists yet, so it asks that.
+       */
+      if (!chatStarted && !activeProjectId) {
         setFakeLoading(true);
 
         /*

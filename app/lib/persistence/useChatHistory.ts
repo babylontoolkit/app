@@ -6,6 +6,7 @@ import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
 import {
+  getAll,
   getMessages,
   getNextId,
   getUrlId,
@@ -46,6 +47,7 @@ import { hasRestorableHistory, markAsTranscript } from './transcript';
 import { decideDependencyInstall, findLockfile, hasManifest } from './dependencies';
 import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
+import { slugForChat } from './chat-slug';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('ChatHistory');
@@ -466,6 +468,18 @@ export function useChatHistory() {
   const latestMessages = useRef<Message[]>([]);
 
   /**
+   * The chat's `urlId`, mirrored in a ref because `storeMessageHistory` needs it SYNCHRONOUSLY.
+   *
+   * 🔴 `setUrlId` is a React state setter: it does not update the `urlId` captured by the current
+   * closure. `storeMessageHistory` fires many times per generation (every mutation of the message
+   * array), so a guard reading the state variable is still `undefined` on the second call and mints a
+   * SECOND slug — whose `getUrlId` then collides with the chat the first call just wrote and returns
+   * `…-2`. Measured: a brand-new chat, alone in the database, landed on
+   * `/chat/how-does-the-boost-pad-work-in-this-game-2`, renaming its own URL mid-generation.
+   */
+  const urlIdRef = useRef<string | undefined>(undefined);
+
+  /**
    * When THIS chat began (§4.5.6).
    *
    * Sent on every save so the server's `createdAt` stays the chat's real birthday rather than becoming
@@ -615,6 +629,8 @@ ${value.content}
 
             setInitialMessages(filteredMessages);
 
+            // Ref and state together, always — `storeMessageHistory` reads the ref (see `urlIdRef`).
+            urlIdRef.current = storedMessages.urlId;
             setUrlId(storedMessages.urlId);
             description.set(storedMessages.description);
             chatId.set(storedMessages.id);
@@ -707,16 +723,6 @@ ${value.content}
           const transcript = markAsTranscript(serverMessages);
           setInitialMessages(transcript);
 
-          /*
-           * Persist it as a local chat so a plain reload finds it — the pending-mount baton is
-           * one-shot (sessionStorage), so without this the history would come back once and vanish on
-           * F5. `navigateChat` uses replaceState: the URL becomes /chat/:id WITHOUT re-running this
-           * effect, which would otherwise take the mixedId branch and replay everything we just
-           * marked as not-for-replay.
-           */
-          const nextId = await getNextId(db);
-          chatId.set(nextId);
-
           const firstUserMessage = transcript.find((message) => message.role === 'user');
           const title =
             wanted.title ?? (firstUserMessage ? summarizeRequest([firstUserMessage])?.slice(0, 60) : undefined);
@@ -724,6 +730,36 @@ ${value.content}
           if (title) {
             description.set(title);
           }
+
+          /*
+           * Persist it as a local chat so a plain reload finds it — the pending-mount baton is
+           * one-shot (sessionStorage), so without this the history would come back once and vanish on
+           * F5. `navigateChat` uses replaceState: the URL becomes /chat/:id WITHOUT re-running this
+           * effect, which would otherwise take the mixedId branch and replay everything we just
+           * marked as not-for-replay.
+           *
+           * 🔴 REUSE the local chat this conversation already has, if there is one. This used to mint a
+           * fresh `getNextId` every time, so every open of the same project deposited ANOTHER local copy
+           * of the same conversation: four opens of "Kart Racer" left four identical chats, all carrying
+           * the same `serverChatId`. The server id is the conversation's identity (§4.5.6) — the local
+           * record is just this browser's cache of it, so there must be at most one per server id.
+           */
+          const existing = (await getAll(db)).find((chat) => chat.metadata?.serverChatId === wanted.serverChatId);
+          const localId = existing?.id ?? (await getNextId(db));
+          chatId.set(localId);
+
+          /*
+           * 🔴 A chat with no `urlId` is INVISIBLE: the sidebar renders only `urlId && description`, so
+           * this passing `undefined` meant every restored conversation vanished from the history list —
+           * present in IndexedDB, addressable by nobody. It was reported as "no chats at all show in the
+           * sidebar", and it is the reason `getUrlId` (which de-duplicates against existing slugs) is
+           * called here rather than a raw slug being trusted.
+           */
+          const urlSlug = existing?.urlId ?? (await getUrlId(db, slugForChat(title, pid)));
+
+          // Ref and state together, always — `storeMessageHistory` reads the ref (see `urlIdRef`).
+          urlIdRef.current = urlSlug;
+          setUrlId(urlSlug);
 
           /*
            * The chat keeps its SERVER id across the device switch — that is the whole point. Minting a
@@ -734,8 +770,8 @@ ${value.content}
           chatMetadata.set(metadata);
           chatCreatedAt.current = wanted.createdAt;
 
-          await setMessages(db, nextId, transcript, undefined, title, undefined, metadata);
-          navigateChat(nextId);
+          await setMessages(db, localId, transcript, urlSlug, title, undefined, metadata);
+          navigateChat(urlSlug);
 
           logger.info(`Restored ${transcript.length} message(s) for project ${pid} from the server.`);
         } catch (error) {
@@ -831,10 +867,21 @@ ${value.content}
     const metadata: IChatMetadata = { ...chatMetadata.get(), serverChatId: mintServerChatId() };
     chatMetadata.set(metadata);
 
-    await setMessages(db, id, latestMessages.current, urlId, description.get(), undefined, metadata);
+    /*
+     * `urlIdRef.current`, NOT `urlId` — the stale-state trap again, and here it WIPES.
+     *
+     * This runs from `checkpointProject` at the end of a generation, after `storeMessageHistory` has
+     * already written the chat's slug. Passing this closure's `urlId` (still `undefined`, because
+     * `setUrlId` never updates a captured value) rewrote the record with NO urlId — so the chat became
+     * invisible in the sidebar at the exact moment it was first saved to the server. Measured: a chat
+     * with a correct `/chat/how-does-the-boost-pad-work-in-this-game` URL and no sidebar entry.
+     */
+    await setMessages(db, id, latestMessages.current, urlIdRef.current, description.get(), undefined, metadata);
 
     return metadata.serverChatId;
-  }, [urlId]);
+
+    // No deps: everything read here is a ref or an atom, deliberately — that is what makes it not stale.
+  }, []);
 
   /** Upload THIS conversation to its own object (§4.5.6) — one chat among the project's many. */
   const saveCurrentChat = useCallback(
@@ -955,7 +1002,8 @@ ${value.content}
       }
 
       try {
-        await setMessages(db, id, initialMessages, urlId, description.get(), undefined, metadata);
+        // `urlIdRef.current` — see `urlIdRef`. The state variable is stale here too, and writing it wipes the slug.
+        await setMessages(db, id, initialMessages, urlIdRef.current ?? urlId, description.get(), undefined, metadata);
         chatMetadata.set(metadata);
       } catch (error) {
         toast.error('Failed to update chat metadata');
@@ -973,13 +1021,39 @@ ${value.content}
       const { firstArtifact } = workbenchStore;
       messages = messages.filter((m) => !m.annotations?.includes('no-store'));
 
-      let _urlId = urlId;
+      /*
+       * 🔴 A chat is INVISIBLE without BOTH a `urlId` and a `description` — that is what the sidebar
+       * filters on — and upstream sourced BOTH solely from `firstArtifact`. So any conversation the
+       * model never wrote a file in simply never appeared: a question answered in prose, a generation
+       * that failed, a Stop before the first artifact.
+       *
+       * That was survivable when a chat was always a brand-new project whose first act was writing a
+       * game. It is not now: "New chat, same game" (§4.5.6) makes "ask a question about the project I
+       * already have" an ordinary thing to do, and every one of those conversations would vanish.
+       *
+       * The title is settled FIRST because the slug falls back to it. The artifact is preferred for
+       * both (it names the game, which is the nicest title and URL); the user's own first message is the
+       * fallback, which is what `restoreTranscript` already does for a chat coming back from the server.
+       */
+      if (!description.get()) {
+        const firstUserMessage = messages.find((message) => message.role === 'user');
+        description.set(
+          firstArtifact?.title ?? (firstUserMessage ? summarizeRequest([firstUserMessage])?.slice(0, 60) : undefined),
+        );
+      }
 
-      if (!urlId && firstArtifact?.id) {
-        const urlId = await getUrlId(db, firstArtifact.id);
-        _urlId = urlId;
-        navigateChat(urlId);
-        setUrlId(urlId);
+      // The REF, not the state — see `urlIdRef`. Reading `urlId` here mints a second slug and lands on `…-2`.
+      let _urlId = urlIdRef.current ?? urlId;
+
+      if (!_urlId) {
+        // `slugForChat` never returns empty and `getUrlId` de-duplicates against existing slugs.
+        const base = firstArtifact?.id ?? slugForChat(description.get(), projectId.get() ?? 'chat');
+        const slug = await getUrlId(db, base);
+
+        _urlId = slug;
+        urlIdRef.current = slug;
+        navigateChat(slug);
+        setUrlId(slug);
       }
 
       let chatSummary: string | undefined = undefined;
@@ -999,9 +1073,10 @@ ${value.content}
 
       takeSnapshot(messages[messages.length - 1].id, workbenchStore.files.get(), _urlId, chatSummary);
 
-      if (!description.get() && firstArtifact?.title) {
-        description.set(firstArtifact?.title);
-      }
+      /*
+       * The title is set above, before the slug that falls back to it. This used to happen here, which
+       * was fine while the slug came only from the artifact and the two never referred to each other.
+       */
 
       // Ensure chatId.get() is used here as well
       if (initialMessages.length === 0 && !chatId.get()) {
@@ -1009,7 +1084,19 @@ ${value.content}
 
         chatId.set(nextId);
 
-        if (!urlId) {
+        /*
+         * `_urlId`, NOT `urlId` — the same stale-state trap as above, and this one CLOBBERS.
+         *
+         * It runs after the slug navigation, so reading the state variable (still `undefined` on this
+         * first call) sent the user to `/chat/1`, overwriting `/chat/kart-racer`. It hid because the
+         * NEXT `storeMessageHistory` re-minted the slug and navigated again — landing on `…-2`, since
+         * `getUrlId` now collided with the chat just written. Two bugs cancelling into a plausible URL:
+         * the `-2` on a brand-new chat, alone in the database, was the only visible trace.
+         *
+         * `_urlId` is always set by now (`slugForChat` never returns empty), so this no longer fires —
+         * a chat with a real slug never wants a numeric URL.
+         */
+        if (!_urlId) {
           navigateChat(nextId);
         }
       }
@@ -1026,11 +1113,22 @@ ${value.content}
 
       const allMessages = [...archivedMessages, ...messages];
 
+      /*
+       * `_urlId`, NOT `urlId` — the slug just computed above, not the stale render's state.
+       *
+       * `setUrlId` is a React state setter: it does not update the `urlId` captured by THIS closure, so
+       * on a new chat's first save this wrote `urlId: undefined` — and a chat with no `urlId` is
+       * invisible in the sidebar (it renders only `urlId && description`). It self-healed on the next
+       * save, which is why it survived: `storeMessageHistory` fires many times per generation, so the
+       * chat appeared a moment later and nobody caught the gap. A generation that failed or was stopped
+       * before its second save left an invisible chat permanently. `_urlId` was computed for exactly
+       * this and then not used.
+       */
       await setMessages(
         db,
         finalChatId, // Use the potentially updated chatId
         allMessages,
-        urlId,
+        _urlId,
         description.get(),
         undefined,
         chatMetadata.get(),

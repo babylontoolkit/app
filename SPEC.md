@@ -619,9 +619,39 @@ and the skills index. A new chat sees the whole game; it just does not see the t
   old key (`putChat`) — otherwise the same conversation lists twice, forever. `listChats` prefers the
   real object, so a failed migrating delete never becomes visible.
 
+**Two more, found only by driving the real UI (2026-07-16). Both were reported by the owner, and the
+1,109 passing tests saw neither:**
+
+- 🔴 **"Do we need to CREATE a project?" is never "is the chat empty?"** `sendMessage` branched on
+  `!chatStarted`, which is seeded from `initialMessages.length > 0`. An empty chat on an EXISTING
+  project satisfies that, so the first message ran the new-project path: it mounted a fresh template
+  over the user's game and registered a SECOND project named after the prompt. Measured: opening "Kart
+  Racer" and typing "add a boost pad to the track" produced a new project called "Add A Boost Pad". It
+  is not specific to §4.5.6 — a dashboard Open of a project whose chat lives on another device had it
+  too; the new-chat feature just made it the common path. The branch now asks `!activeProjectId`, and
+  `chatStarted` reacts to a mounted project so the builder stops showing the marketing intro for a game
+  the user is already in.
+- 🔴 **`setUrlId` is a React state setter, and FOUR call sites read the value it does not update.** A
+  chat is invisible without BOTH a `urlId` and a `description` — that is what the sidebar filters on —
+  and upstream sourced both SOLELY from `firstArtifact`. So any conversation the model never wrote a
+  file in never appeared: a question answered in prose, a failed generation, a Stop. Reported as "no
+  chats at all show in the left sidebar". The stale-closure reads then made it worse in ways that
+  cancelled out and looked plausible: `storeMessageHistory` wrote `urlId: undefined` on a new chat's
+  first save; the chat-id block navigated to `/chat/1` over the slug; the next save re-minted the slug,
+  collided with the record it had just written, and landed on `…-2`; and `ensureServerChatId` rewrote
+  the record with `undefined`, wiping the slug at the exact moment the chat was first saved. Fixed with
+  `urlIdRef` (a ref updates synchronously; state does not) plus a title/slug fallback to the user's
+  first message. **Any new read of `urlId` inside an async callback is this bug again.**
+
 Pinned by `message-store.spec.ts` (the collision, the sweep, legacy adoption + migration),
 `chat-routes.spec.ts` (both walls, the id whitelist, and that the chat cap never refuses to save a chat
-the user is IN), and `pending-remix.spec.ts` (the stale-slot cases).
+the user is IN), `pending-remix.spec.ts` (the stale-slot cases), and `chat-visibility.spec.ts` (the slug
+is never empty; four opens leave ONE local chat, not four).
+
+⚠️ **The lesson, and it is the same one §4.5.4b already recorded.** Every invariant above was tested and
+green while the feature was unusable end-to-end: the tests drove the stores and the routes, and every
+bug lived in the wiring between them. "Correct by construction" is what the §4.14 MCP relay also was.
+**Drive the real UI before claiming a user-facing feature works.**
 
 ⚠️ **A spec file must not live in `app/routes/`** — Remix compiles it as a route, so the manifest imports
 `vitest` at runtime and *every request 500s*. Route tests live beside the code they exercise.
