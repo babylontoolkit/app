@@ -23,9 +23,16 @@ const addCompletedAction = vi.fn();
 const addArtifact = vi.fn();
 const updateArtifact = vi.fn();
 
+/**
+ * 🔴 Hoisted so it can be ASSERTED on. It used to be an anonymous `vi.fn()` inline in the mock below —
+ * which meant the test mocked the exact call that was missing from the transcript parser, and no test
+ * could see it. The project view vanished for every restored conversation and this file stayed green.
+ */
+const showWorkbench = vi.fn();
+
 vi.mock('~/lib/stores/workbench', () => ({
   workbenchStore: {
-    showWorkbench: { set: vi.fn() },
+    showWorkbench: { set: (...args: unknown[]) => showWorkbench(...args) },
     addArtifact: (...args: unknown[]) => addArtifact(...args),
     updateArtifact: (...args: unknown[]) => updateArtifact(...args),
     addAction: (...args: unknown[]) => addAction(...args),
@@ -72,6 +79,12 @@ describe('an ordinary generation still applies its files', () => {
     expect(runAction).toHaveBeenCalled();
     expect(addAction).toHaveBeenCalled();
   });
+
+  it('opens the workbench', () => {
+    parse([artifactMessage('live-2')]);
+
+    expect(showWorkbench).toHaveBeenCalledWith(true);
+  });
 });
 
 describe('a restored transcript writes nothing', () => {
@@ -95,6 +108,22 @@ describe('a restored transcript writes nothing', () => {
 
     expect(addArtifact).toHaveBeenCalled();
     expect(updateArtifact).toHaveBeenCalled();
+  });
+
+  /**
+   * 🔴 The reported bug: "where is the project view?"
+   *
+   * Opening a panel writes no files and re-runs nothing — it is UI, and a restored project deserves
+   * the same UI as a live one. This parser dropped it along with `runAction`, which it was right to
+   * drop, and the file tree, editor and preview were gone for a project the user was looking at.
+   *
+   * "Writes nothing" is about the FILESYSTEM. It was never about the screen.
+   */
+  it('opens the workbench — a restored project is still a project', () => {
+    parse([artifactMessage('restored-workbench', [NO_REPLAY])]);
+
+    expect(showWorkbench).toHaveBeenCalledWith(true);
+    expect(runAction).not.toHaveBeenCalled();
   });
 
   it('still returns the rendered content for the message', () => {

@@ -648,6 +648,16 @@ Pinned by `message-store.spec.ts` (the collision, the sweep, legacy adoption + m
 the user is IN), `pending-remix.spec.ts` (the stale-slot cases), and `chat-visibility.spec.ts` (the slug
 is never empty; four opens leave ONE local chat, not four).
 
+- 🔴 **"Writes nothing" is about the FILESYSTEM, never the screen.** The `transcriptParser` (§4.5.4b) is
+  a copy of the live parser with `runAction` removed — correctly, since replaying a stale
+  `<boltAction type="file">` over the user's repo is the bug it exists to prevent. But it also dropped
+  `showWorkbench.set(true)`, which writes no files and re-runs nothing, so **the project view vanished
+  for every restored conversation**: chat and artifact bubbles rendered, file tree / editor / preview
+  simply absent, for a project the user was looking straight at. Its test mocked the exact call that
+  was missing (`showWorkbench: { set: vi.fn() }`, anonymous and inline), so nothing could assert it.
+  Hoisted and pinned on both parsers now, verified to fail without the fix. **When you strip behaviour
+  from a copy of a code path, strip only what is unsafe — and assert the rest is still there.**
+
 ⚠️ **The lesson, and it is the same one §4.5.4b already recorded.** Every invariant above was tested and
 green while the feature was unusable end-to-end: the tests drove the stores and the routes, and every
 bug lived in the wiring between them. "Correct by construction" is what the §4.14 MCP relay also was.

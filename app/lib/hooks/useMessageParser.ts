@@ -72,6 +72,21 @@ const messageParser = new EnhancedStreamingMessageParser({
 const transcriptParser = new EnhancedStreamingMessageParser({
   callbacks: {
     onArtifactOpen: (data) => {
+      /*
+       * 🔴 BOTH of these, exactly like the live parser.
+       *
+       * This shipped with only `addArtifact`, and the project view VANISHED for every restored
+       * conversation: the chat came back, the artifact bubbles rendered, and the file tree, editor and
+       * preview were simply not there — for a project the user was looking straight at.
+       *
+       * The cause was conflating two different things while writing this parser. Dropping `runAction`
+       * is the entire point of it (replaying a stale `<boltAction type="file">` over the user's repo is
+       * the bug it exists to prevent). Dropping `showWorkbench` was collateral: opening a panel writes
+       * no files and re-runs nothing. It is UI, and a restored project deserves the same UI as a live
+       * one — reaching the workbench should not require a generation.
+       */
+      workbenchStore.showWorkbench.set(true);
+
       // The artifact still has to exist, or the chat renders a bubble that resolves to nothing.
       workbenchStore.addArtifact(data);
     },
