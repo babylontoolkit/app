@@ -54,12 +54,7 @@ import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
-
-/**
- * The `/v1` suffix is REQUIRED — the SDK appends `/messages` to whatever it is given.
- * Overridable via `KIE_BASE_URL` so a vendor path change is a config edit, not a deploy.
- */
-export const KIE_DEFAULT_BASE_URL = 'https://api.kie.ai/claude/v1';
+import { kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
 
 export default class KieProvider extends BaseProvider {
   name = 'KIE';
@@ -70,19 +65,7 @@ export default class KieProvider extends BaseProvider {
     apiTokenKey: 'KIE_API_KEY',
   };
 
-  /*
-   * Confirmed against the KIE console. Same ids as Anthropic's — this is a passthrough, so the model
-   * strings are Anthropic's own and carry no date/`-latest` suffix (those 404).
-   */
-  staticModels: ModelInfo[] = [
-    {
-      name: 'claude-opus-4-8',
-      label: 'Claude Opus 4.8 (KIE)',
-      provider: 'KIE',
-      maxTokenAllowed: 1_000_000,
-      maxCompletionTokens: 128_000,
-    },
-  ];
+  staticModels: ModelInfo[] = KIE_MODELS;
 
   getModelInstance: (options: {
     model: string;
@@ -117,7 +100,14 @@ export default class KieProvider extends BaseProvider {
        * authenticates on `Authorization: Bearer`. Sending both is harmless — the unused one is ignored.
        */
       headers: { Authorization: `Bearer ${apiKey}` },
-      fetch: thinkingFetch(thinkingMode, effort, model),
+
+      /*
+       * ORDER MATTERS. `thinkingFetch` parses the body, sets `thinking`/`output_config`, re-stringifies
+       * and hands off to its baseFetch — so `kieFetch` runs LAST and adds `thinkingFlag` to the body
+       * that already carries the thinking settings. Both must be on the same request or KIE thinks
+       * without telling us (see `kieFetch`).
+       */
+      fetch: thinkingFetch(thinkingMode, effort, model, kieFetch()),
     });
 
     const instance = supportsSamplingParams(model) ? kie(model) : stripSamplingParams(kie(model));
