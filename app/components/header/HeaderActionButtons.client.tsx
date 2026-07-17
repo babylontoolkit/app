@@ -5,6 +5,7 @@ import { DeployButton } from '~/components/deploy/DeployButton';
 import { ShareButton } from '~/components/share/ShareButton';
 import { GitHubSyncButton } from '~/components/github/GitHubSyncButton';
 import { SaveStatus } from '~/components/persistence/SaveStatus.client';
+import { NewChatButton } from '~/components/chat/NewChatButton.client';
 import { brand } from '~/config/brand';
 
 interface HeaderActionButtonsProps {
@@ -30,6 +31,15 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
        * `SaveStatus` renders nothing until there is a project, which is the correct gate.
        */}
       <SaveStatus />
+
+      {/*
+       * New chat, same game (§4.5.6).
+       *
+       * Also NOT behind `shouldShowButtons`, and for a related reason: a project whose preview is broken
+       * is one of the likeliest times to want a clean context to debug from. It gates itself on there
+       * being a project, which is the only precondition it actually has.
+       */}
+      <NewChatButton />
 
       {/* Share the game as a public /play build (§4.8) */}
       {shouldShowButtons && <ShareButton />}

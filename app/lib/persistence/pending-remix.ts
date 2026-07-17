@@ -19,10 +19,46 @@
 export const PENDING_REMIX_KEY = 'pendingRemixProjectId';
 export const PENDING_OPEN_KEY = 'pendingOpenProjectId';
 
-/** Park a project id for the builder to mount on its next load (dashboard "Open" with no local chat). */
-export function setPendingOpenProject(projectId: string): void {
-  if (typeof sessionStorage !== 'undefined') {
-    sessionStorage.setItem(PENDING_OPEN_KEY, projectId);
+/**
+ * Which of the project's chats to open (§4.5.6) — optional, and only meaningful alongside a pending
+ * open. Absent means "the one I was last in", which is what someone clicking a project means.
+ */
+export const PENDING_CHAT_KEY = 'pendingOpenChatId';
+
+/**
+ * "Mount this project, restore NO conversation" — New chat, same game (§4.5.6).
+ *
+ * A separate key rather than a sentinel in the chat slot. A sentinel would have to be a string that no
+ * real chat id can equal, which is a collision waiting to be introduced by someone who changes how ids
+ * are minted and has no reason to look here.
+ */
+export const PENDING_FRESH_CHAT_KEY = 'pendingOpenFreshChat';
+
+/**
+ * Park a project id for the builder to mount on its next load.
+ *
+ * `chat` picks which conversation comes back: a specific id, `'latest'` (the one you were last in — the
+ * default, and what clicking a project means), or `'fresh'` for a new chat on the same game.
+ */
+export function setPendingOpenProject(projectId: string, chat: string | 'latest' | 'fresh' = 'latest'): void {
+  if (typeof sessionStorage === 'undefined') {
+    return;
+  }
+
+  sessionStorage.setItem(PENDING_OPEN_KEY, projectId);
+
+  /*
+   * Always write BOTH slots, clearing what does not apply. A stale id or flag left from a previous open
+   * would silently reopen the wrong conversation — or none — which looks exactly like data loss to the
+   * user ("where did my chat go?") while everything is in fact still there.
+   */
+  sessionStorage.removeItem(PENDING_CHAT_KEY);
+  sessionStorage.removeItem(PENDING_FRESH_CHAT_KEY);
+
+  if (chat === 'fresh') {
+    sessionStorage.setItem(PENDING_FRESH_CHAT_KEY, '1');
+  } else if (chat !== 'latest') {
+    sessionStorage.setItem(PENDING_CHAT_KEY, chat);
   }
 }
 
@@ -45,11 +81,35 @@ export function takePendingRemix(): string | null {
   return takeKey(PENDING_REMIX_KEY);
 }
 
+export interface PendingMount {
+  projectId: string;
+
+  /** A specific conversation to restore. Absent means the most recently touched one. */
+  serverChatId?: string;
+
+  /** New chat, same game (§4.5.6): mount the files, restore nothing. */
+  freshChat: boolean;
+}
+
 /**
  * The single reader the builder calls on a fresh mount: either a just-cloned remix or a dashboard
- * "open" resolves to the same thing — a project id whose files should be mounted into a fresh chat.
- * Open takes precedence (it is the more explicit user action), then remix.
+ * "open" resolves to the same thing — a project id whose files should be mounted. Open takes precedence
+ * (it is the more explicit user action), then remix.
+ *
+ * Both chat slots are consumed unconditionally, even on the remix path. A remix is a NEW project born
+ * with no chats at all, so a leftover id from a previous open would otherwise ask the clone for a
+ * conversation belonging to the project it was cloned FROM.
  */
-export function takePendingProjectMount(): string | null {
-  return takeKey(PENDING_OPEN_KEY) ?? takeKey(PENDING_REMIX_KEY);
+export function takePendingProjectMount(): PendingMount | null {
+  const open = takeKey(PENDING_OPEN_KEY);
+  const serverChatId = takeKey(PENDING_CHAT_KEY) ?? undefined;
+  const freshChat = takeKey(PENDING_FRESH_CHAT_KEY) !== null;
+
+  if (open) {
+    return { projectId: open, serverChatId, freshChat };
+  }
+
+  const remix = takeKey(PENDING_REMIX_KEY);
+
+  return remix ? { projectId: remix, freshChat: false } : null;
 }

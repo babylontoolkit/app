@@ -6,7 +6,8 @@ import { ThemeSwitch } from '~/components/ui/ThemeSwitch';
 import { ControlPanel } from '~/components/@settings/core/ControlPanel';
 import { SettingsButton, HelpButton } from '~/components/ui/SettingsButton';
 import { Button } from '~/components/ui/Button';
-import { db, deleteById, getAll, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
+import { db, deleteById, getAll, getMessages, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
+import { deleteChat as deleteServerChat } from '~/lib/persistence/projects';
 import { cubicEasingFn } from '~/utils/easings';
 import { HistoryItem } from './HistoryItem';
 import { binDates } from './date-binning';
@@ -94,22 +95,50 @@ export const Menu = () => {
     }
   }, []);
 
+  /**
+   * Delete one conversation — locally AND on the server (§4.5.6).
+   *
+   * 🔴 **The server half was missing, and the result was worse than a leak.** This deleted the
+   * IndexedDB record and stopped, so `messages/{projectId}/…` survived — and since `restoreTranscript`
+   * pulls the server's copy when a project is opened, the chat the user deleted CAME BACK on the next
+   * open. The delete did not delete it; it hid it until the next mount.
+   *
+   * It was upstream's code, and upstream had no server: there the chat WAS the project, and IndexedDB
+   * was the only place it lived. We added a server copy underneath and never revisited this.
+   *
+   * The project is deliberately untouched. Under §4.5.6 a project holds many chats, so removing one is
+   * removing one — the game, its files, and its other conversations all survive. Deleting the PROJECT
+   * is the dashboard's job, and it sweeps every chat with it.
+   */
   const deleteChat = useCallback(
     async (id: string): Promise<void> => {
       if (!db) {
         throw new Error('Database not available');
       }
 
-      // Delete chat snapshot from localStorage
+      const chat = await getMessages(db, id).catch(() => undefined);
+      const { projectId, serverChatId } = chat?.metadata ?? {};
+
+      /*
+       * Server first, while the local record still holds the ids that address it. Delete locally first
+       * and a failure here strands the transcript with nothing left that can name it — the orphan shape
+       * §4.5.4b keeps producing. If the server delete throws, the whole action fails and the chat stays
+       * in the sidebar, which is honest: the user can see it, and can try again.
+       */
+      if (projectId && serverChatId) {
+        await deleteServerChat(projectId, serverChatId);
+      }
+
+      /*
+       * Upstream's per-chat localStorage snapshot. Dead in our fork (§4.12 checkpoints are IndexedDB),
+       * but old browsers still carry the keys, so keep reaping them.
+       */
       try {
-        const snapshotKey = `snapshot:${id}`;
-        localStorage.removeItem(snapshotKey);
-        console.log('Removed snapshot for chat:', id);
+        localStorage.removeItem(`snapshot:${id}`);
       } catch (snapshotError) {
         console.error(`Error deleting snapshot for chat ${id}:`, snapshotError);
       }
 
-      // Delete the chat from the database
       await deleteById(db, id);
       console.log('Successfully deleted chat:', id);
     },

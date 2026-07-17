@@ -24,7 +24,9 @@ import { detectProjectCommands, createCommandActionsString } from '~/utils/proje
 import type { ContextAnnotation } from '~/types/context';
 import {
   getRepoStatus,
+  listChats,
   loadMessages,
+  mintServerChatId,
   pullFromRepo,
   readRemixSeed,
   saveMessages,
@@ -463,6 +465,15 @@ export function useChatHistory() {
   /** The conversation as last stored locally — uploaded to the server once a generation finishes. */
   const latestMessages = useRef<Message[]>([]);
 
+  /**
+   * When THIS chat began (§4.5.6).
+   *
+   * Sent on every save so the server's `createdAt` stays the chat's real birthday rather than becoming
+   * "the last time it was written" — which is what `updatedAt` already means, and what a chat picker
+   * would otherwise sort by twice.
+   */
+  const chatCreatedAt = useRef<string>(new Date().toISOString());
+
   useEffect(() => {
     if (!db) {
       setReady(true);
@@ -669,13 +680,25 @@ ${value.content}
        * Cosmetic by construction: any failure leaves the user with their game and no transcript, which
        * is exactly where they were before this existed. It must never cost them the mount.
        */
-      const restoreTranscript = async (pid: string) => {
+      const restoreTranscript = async (pid: string, wantedChatId?: string) => {
         if (!db) {
           return;
         }
 
         try {
-          const serverMessages = await loadMessages<Message>(pid);
+          /*
+           * A project has MANY chats (§4.5.6), so "restore the conversation" is now a choice. Default to
+           * the most recently touched one — `listChats` sorts newest-first, and the chat you were last
+           * in is the one you meant. The dashboard can ask for a specific one by id.
+           */
+          const chats = await listChats(pid);
+          const wanted = wantedChatId ? chats.find((chat) => chat.serverChatId === wantedChatId) : chats[0];
+
+          if (!wanted) {
+            return;
+          }
+
+          const serverMessages = await loadMessages<Message>(pid, wanted.serverChatId);
 
           if (!hasRestorableHistory(serverMessages)) {
             return;
@@ -695,13 +718,23 @@ ${value.content}
           chatId.set(nextId);
 
           const firstUserMessage = transcript.find((message) => message.role === 'user');
-          const title = firstUserMessage ? summarizeRequest([firstUserMessage])?.slice(0, 60) : undefined;
+          const title =
+            wanted.title ?? (firstUserMessage ? summarizeRequest([firstUserMessage])?.slice(0, 60) : undefined);
 
           if (title) {
             description.set(title);
           }
 
-          await setMessages(db, nextId, transcript, undefined, title, undefined, { projectId: pid });
+          /*
+           * The chat keeps its SERVER id across the device switch — that is the whole point. Minting a
+           * new one here would upload this same conversation a second time under a second id, so the
+           * user would watch their chat list grow by one every time they opened the project elsewhere.
+           */
+          const metadata: IChatMetadata = { projectId: pid, serverChatId: wanted.serverChatId };
+          chatMetadata.set(metadata);
+          chatCreatedAt.current = wanted.createdAt;
+
+          await setMessages(db, nextId, transcript, undefined, title, undefined, metadata);
           navigateChat(nextId);
 
           logger.info(`Restored ${transcript.length} message(s) for project ${pid} from the server.`);
@@ -711,13 +744,25 @@ ${value.content}
         }
       };
 
-      const mountProjectId = takePendingProjectMount();
+      const pendingMount = takePendingProjectMount();
 
-      if (mountProjectId) {
+      if (pendingMount) {
+        const { projectId: mountProjectId, serverChatId, freshChat } = pendingMount;
+
         projectId.set(mountProjectId);
         chatMetadata.set({ ...chatMetadata.get(), projectId: mountProjectId });
 
-        Promise.all([mountProjectFiles(mountProjectId), restoreTranscript(mountProjectId)])
+        /*
+         * `freshChat` is "New chat, same game" (§4.5.6): mount the files, restore NO transcript. It is
+         * deliberately not a variant of `restoreTranscript` — the whole point of the feature is that
+         * the conversation does NOT come back, so the code path that brings conversations back is not
+         * involved. The files still mount, which is the other half of the point: the new chat opens on
+         * the same game, and the agent reads it from the FS the way it always does.
+         */
+        Promise.all([
+          mountProjectFiles(mountProjectId),
+          freshChat ? Promise.resolve() : restoreTranscript(mountProjectId, serverChatId),
+        ])
           .catch((error) => logger.warn(`Could not load project ${mountProjectId}: ${error.message}`))
           .finally(() => setReady(true));
       } else {
@@ -759,6 +804,56 @@ ${value.content}
   );
 
   /**
+   * This chat's identity on the server, minting one if it does not have it yet (§4.5.6).
+   *
+   * 🔴 The id is a UUID and deliberately NOT the local chat id: `getNextId` is a per-browser counter,
+   * so every browser's first chat is "1" and keying the server transcript by it would make two devices
+   * collide on one object. See `IChatMetadata.serverChatId`.
+   *
+   * Minted at FIRST SAVE rather than at chat creation, so an abandoned empty chat costs nothing. It is
+   * written into IndexedDB here rather than left on the atom for the next `storeMessageHistory` to
+   * persist: if the tab closed in between, the id would be lost, and the next save would mint a second
+   * one — quietly duplicating the conversation on the server.
+   */
+  const ensureServerChatId = useCallback(async (): Promise<string | undefined> => {
+    const existing = chatMetadata.get()?.serverChatId;
+
+    if (existing) {
+      return existing;
+    }
+
+    const id = chatId.get();
+
+    if (!db || !id) {
+      return undefined;
+    }
+
+    const metadata: IChatMetadata = { ...chatMetadata.get(), serverChatId: mintServerChatId() };
+    chatMetadata.set(metadata);
+
+    await setMessages(db, id, latestMessages.current, urlId, description.get(), undefined, metadata);
+
+    return metadata.serverChatId;
+  }, [urlId]);
+
+  /** Upload THIS conversation to its own object (§4.5.6) — one chat among the project's many. */
+  const saveCurrentChat = useCallback(
+    async (pid: string) => {
+      const serverChatId = await ensureServerChatId();
+
+      if (!serverChatId) {
+        return;
+      }
+
+      await saveMessages(pid, serverChatId, latestMessages.current, {
+        title: description.get(),
+        createdAt: chatCreatedAt.current,
+      });
+    },
+    [ensureServerChatId],
+  );
+
+  /**
    * Push a checkpoint to the server (§4.5.5, §4.12).
    *
    * DELIBERATELY NOT called from `takeSnapshot`. Upstream fires that on every mutation of the message
@@ -796,10 +891,7 @@ ${value.content}
        * record and the chat on the platform. Without it a build cannot be resumed on another machine
        * and a remixed project arrives with no history of how it was made (§4.5).
        */
-      await Promise.all([
-        createLocalSnapshot(db, { projectId: pid, files, messageId }),
-        saveMessages(pid, latestMessages.current),
-      ]);
+      await Promise.all([createLocalSnapshot(db, { projectId: pid, files, messageId }), saveCurrentChat(pid)]);
 
       /*
        * A generation just produced work that exists in this browser and nowhere else. Everything that

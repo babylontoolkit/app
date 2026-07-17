@@ -538,7 +538,11 @@ templates        -- (see 4.4)
 --                  Checkpoints are local (IndexedDB); the one server-held copy of a
 --                  user's source is a published game's remix seed, and it is an OBJECT
 --                  at seeds/{projectId}.json, not a row. See §4.5.5.
-messages         -- id, project_id, role, content, actions jsonb, generation_id, created_at
+-- messages      -- NOT a table. A project's conversations are OBJECTS at
+--                  messages/{projectId}/{serverChatId}.json — written whole every turn,
+--                  read whole on resume, never queried by row, and megabytes. MANY per
+--                  project (§4.5.6). The table can be added beside them if per-message
+--                  queries (admin search, analytics) are ever actually needed.
 generations      -- id, project_id, message_id, model, prompt_version_id,
                  -- input_tokens, cached_input_tokens, output_tokens,
                  -- skills_loaded text[], credits_charged, status, error, created_at
@@ -561,6 +565,66 @@ entitlements     -- id, user_id, source ('protools_subscription'), tier
   - **`current_snapshot_id` → `remix_seed_at`, and the rename is the point.** The field kept a real meaning on published projects (it pointed at a remix seed) under a name describing the per-generation history that no longer existed. A field named for a deleted system is how the deleted system comes back. The seed is now one object at a key **derived** from the project id (`share/seed-store.ts`) — so there is no id to keep in sync, and no caller-supplied id to cross-check, which is why `assertSnapshotBelongsTo` needed no replacement.
   - Pinned by `no-server-storage.spec.ts` (routes absent, store absent, no client helper, a comment-stripped source scan **with a control proving the scanner works**) and by `ledger-sql.spec.ts` against the real migrations under PGlite (no `snapshots` table, no `current_snapshot_id`, `remix_seed_at` present).
 - Balance = latest `balance_after`; ledger append-only, never a mutable counter.
+
+#### 4.5.6 Many chats per project — "New chat, same game" (BUILT 2026-07-16)
+
+**A project holds many conversations.** A user can start a fresh context on a game they are already
+building: the files stay exactly where they are, the history does not come along. The existing chats are
+untouched — this is another conversation, not a replacement.
+
+**Why.** A project used to hold exactly ONE chat. That was never a decision — it was upstream's model
+showing through, where the chat *was* the project and 1:1 was a tautology. Two things make it wrong here:
+
+- **Game projects are long and phase-shaped.** The `bt-spec` → `bt-plan` → `bt-execute` loop has natural
+  context boundaries, and each phase is grounded by artefacts on disk (`SPEC.md`, `CLAUDE.md`, the plan)
+  rather than by the talking that produced them.
+- **The conversation is the one thing we re-send at full rate, forever.** It is UNCACHED (§4.2.8, all
+  four breakpoints are on the system blocks) and grows without bound, so by the execute phase every turn
+  pays to re-send the spec discussion. `HISTORY_WINDOW_TURNS` bounds that bill, but it does so by
+  *forgetting* — on a mature project you pay to re-send a conversation that has been silently truncated
+  anyway. Starting a new chat is the honest version of the same saving.
+
+**Nothing is lost, because the conversation was never the grounding.** Every turn the agent is sent the
+project's files fresh from the WebContainer FS, the project's `CLAUDE.md` as its own instructions block,
+and the skills index. A new chat sees the whole game; it just does not see the talking.
+
+**Never regress these — each fails silently:**
+
+- 🔴 **The chat's server id is a minted UUID, NEVER the browser's chat id.** `getNextId` is
+  `max(local keys) + 1` — a per-browser counter that hands out `"1"`, `"2"`, `"3"`. Keying the server
+  transcript by it makes this laptop's chat "1" and that desktop's chat "1" **the same object**: two
+  devices, one project, one silently destroys the other. Under §4.5.4b the conversation is the only
+  thing we still store for the user, so that overwrite is data loss. The id lives in
+  `IChatMetadata.serverChatId`, is minted at FIRST SAVE (an abandoned empty chat costs nothing), and
+  `messagesKey` accepts a UUID and nothing else — a whitelist, so `"1"` and `../../seeds/{other}` are
+  both refused by default. Upstream keeps `getNextId` and the URL scheme; we add ours beside it (§2.1a).
+- 🔴 **Deleting a project sweeps a PREFIX, not a key.** `deleteMessages` deleted one object because
+  there only was one; left alone it would delete a key that no longer exists, report success, and strand
+  every real transcript with nothing left that can name them. It sweeps `messages/{projectId}/` and the
+  legacy key.
+- 🔴 **Deleting a chat deletes it on the SERVER too, or it resurrects.** The sidebar's delete was
+  upstream's: it removed the IndexedDB record and stopped. Since `restoreTranscript` reads the server
+  copy on open, the chat the user deleted **came back on the next open** — the delete did not delete it,
+  it hid it until the next mount. Server first, while the local record still holds the ids that address
+  it; the project and its other chats are deliberately untouched.
+- **A restore keeps the chat's server id.** Minting a new one on a device switch uploads the same
+  conversation again under a second id, so the user's chat list grows by one every time they open the
+  project elsewhere.
+- **The mount baton's chat slots are always written, never merely set.** A leftover id from a previous
+  open silently restores the WRONG conversation — which reads as data loss while everything is in fact
+  still there. A remix never inherits one: it is a new project, and that id names a conversation
+  belonging to the project it was cloned FROM.
+- **Pre-§4.5.6 transcripts are adopted on READ**, at a synthetic id derived from the project id and
+  shaped so no minted v4 UUID can equal it. Continuing one migrates it to its own object and drops the
+  old key (`putChat`) — otherwise the same conversation lists twice, forever. `listChats` prefers the
+  real object, so a failed migrating delete never becomes visible.
+
+Pinned by `message-store.spec.ts` (the collision, the sweep, legacy adoption + migration),
+`chat-routes.spec.ts` (both walls, the id whitelist, and that the chat cap never refuses to save a chat
+the user is IN), and `pending-remix.spec.ts` (the stale-slot cases).
+
+⚠️ **A spec file must not live in `app/routes/`** — Remix compiles it as a route, so the manifest imports
+`vitest` at runtime and *every request 500s*. Route tests live beside the code they exercise.
 
 ### 4.6 Credits & Billing
 

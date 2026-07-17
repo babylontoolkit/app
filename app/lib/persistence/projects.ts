@@ -338,14 +338,56 @@ export async function readRemixSeed(projectId: string): Promise<{ files?: Serial
 
 /* ---------------------------------------------------------------- messages */
 
-export async function saveMessages(projectId: string, messages: unknown[]): Promise<void> {
-  await api<{ ok: true }>(`/api/projects/${projectId}/messages`, {
+/** A conversation as the server holds it, without its body (§4.5.6). */
+export interface ChatSummary {
+  serverChatId: string;
+  title?: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+/**
+ * Mint a chat's server identity (§4.5.6).
+ *
+ * 🔴 **Never use the local chat id for this.** `getNextId` is `max(local keys) + 1` — a per-browser
+ * counter — so every browser's first chat is "1". Keying the server transcript by it makes this
+ * laptop's chat "1" and that desktop's chat "1" the same object, and one silently destroys the other.
+ * A UUID is minted here, at first save, and lives in the chat's metadata from then on.
+ */
+export function mintServerChatId(): string {
+  return crypto.randomUUID();
+}
+
+/** Every conversation on a project, newest activity first. */
+export async function listChats(projectId: string): Promise<ChatSummary[]> {
+  const { chats } = await api<{ chats: ChatSummary[] }>(`/api/projects/${projectId}/messages`);
+  return chats;
+}
+
+export async function saveMessages(
+  projectId: string,
+  serverChatId: string,
+  messages: unknown[],
+  meta?: { title?: string; createdAt?: string },
+): Promise<void> {
+  await api<{ ok: true }>(`/api/projects/${projectId}/messages/${serverChatId}`, {
     method: 'PUT',
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, ...meta }),
   });
 }
 
-export async function loadMessages<T = unknown>(projectId: string): Promise<T[]> {
-  const { messages } = await api<{ messages: T[] }>(`/api/projects/${projectId}/messages`);
-  return messages;
+export async function loadMessages<T = unknown>(projectId: string, serverChatId: string): Promise<T[]> {
+  const { chat } = await api<{ chat: { messages: T[] } }>(`/api/projects/${projectId}/messages/${serverChatId}`);
+  return chat.messages;
+}
+
+/**
+ * Forget one conversation. The project and its other chats survive.
+ *
+ * Absent-is-fine: a chat that was never saved to the server (nothing in it yet, or an older local-only
+ * chat) has no server id, so the caller simply does not call this.
+ */
+export async function deleteChat(projectId: string, serverChatId: string): Promise<void> {
+  await api<{ ok: true }>(`/api/projects/${projectId}/messages/${serverChatId}`, { method: 'DELETE' });
 }

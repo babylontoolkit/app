@@ -18,8 +18,28 @@ export interface IChatMetadata {
    * This is the ONLY link between the browser's chat and the project that lives on the platform. It
    * is what makes a build resumable on another machine, shareable, and remixable — without it the
    * project exists solely in this IndexedDB and dies with the profile.
+   *
+   * MANY chats may carry the same `projectId` (§4.5.6) — that is the point of "New chat, same game".
    */
   projectId?: string;
+
+  /**
+   * This chat's identity ON THE SERVER (§4.5.6) — `messages/{projectId}/{serverChatId}.json`.
+   *
+   * 🔴 **This exists because the obvious key is a data-loss bug.** A chat's local id (`ChatHistoryItem.id`,
+   * the IndexedDB key, the thing in the URL) comes from `getNextId`, which is `max(local keys) + 1` — a
+   * PER-BROWSER counter that hands out "1", "2", "3". It is unique inside one IndexedDB and nowhere
+   * else, so keying the server transcript by it means this laptop's chat "1" and that desktop's chat
+   * "1" are the SAME OBJECT: two devices, one project, one silently overwrites the other. Under
+   * §4.5.4b the conversation is the only thing we still store for the user — losing it is losing it.
+   *
+   * So the server id is a UUID minted here, and it is deliberately NOT the local id: upstream owns
+   * `getNextId` and the URL scheme, we own this. Additive — upstream pulls still merge (§2.1a).
+   *
+   * Absent on chats created before §4.5.6, and on any chat that has never been saved to the server
+   * (it is minted at first save, not at chat creation — an abandoned empty chat should cost nothing).
+   */
+  serverChatId?: string;
 }
 
 const logger = createScopedLogger('ChatHistory');

@@ -31,17 +31,34 @@ import { Dialog, DialogButton, DialogDescription, DialogRoot, DialogTitle } from
 interface LocalChatRef {
   urlId?: string;
   id: string;
+  timestamp: string;
 }
 
-function buildLocalChatIndex(chats: ChatHistoryItem[]): Map<string, LocalChatRef> {
-  const byProject = new Map<string, LocalChatRef>();
+/**
+ * A project's local chats, most recent first (§4.5.6).
+ *
+ * This used to keep the FIRST chat it met per project and drop the rest on the floor — which was
+ * invisible while a project could only have one chat, and became "Open sends me to a random old
+ * conversation" the moment it could have several. IndexedDB iteration order is not recency, so even at
+ * 1:1 the "first" was arbitrary; it just never had a sibling to be wrong about.
+ */
+function buildLocalChatIndex(chats: ChatHistoryItem[]): Map<string, LocalChatRef[]> {
+  const byProject = new Map<string, LocalChatRef[]>();
 
   for (const chat of chats) {
     const pid = chat.metadata?.projectId;
 
-    if (pid && !byProject.has(pid)) {
-      byProject.set(pid, { urlId: chat.urlId, id: chat.id });
+    if (!pid) {
+      continue;
     }
+
+    const refs = byProject.get(pid) ?? [];
+    refs.push({ urlId: chat.urlId, id: chat.id, timestamp: chat.timestamp });
+    byProject.set(pid, refs);
+  }
+
+  for (const refs of byProject.values()) {
+    refs.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
   }
 
   return byProject;
@@ -52,7 +69,7 @@ export function ProjectsDashboard() {
   const { entries } = useGameRegistry();
 
   const [projects, setProjects] = useState<Project[] | null>(null);
-  const [localChats, setLocalChats] = useState<Map<string, LocalChatRef>>(new Map());
+  const [localChats, setLocalChats] = useState<Map<string, LocalChatRef[]>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -104,22 +121,37 @@ export function ProjectsDashboard() {
 
   const openProject = useCallback(
     (project: Project) => {
-      const chat = localChats.get(project.id);
+      const [mostRecent] = localChats.get(project.id) ?? [];
 
-      if (chat?.urlId) {
+      if (mostRecent?.urlId) {
         // The conversation lives in this browser — reopen it exactly where it was left.
-        navigate(`/chat/${chat.urlId}`);
+        navigate(`/chat/${mostRecent.urlId}`);
         return;
       }
 
       /*
        * No local chat (another device, or a remix left before its first message persisted): mount the
-       * project's files fresh through the same baton a remix uses.
+       * project's files fresh through the same baton a remix uses, and let the builder pull the most
+       * recent conversation back from the server.
        */
-      setPendingOpenProject(project.id);
+      setPendingOpenProject(project.id, 'latest');
       navigate('/');
     },
     [localChats, navigate],
+  );
+
+  /**
+   * New chat, same game (§4.5.6).
+   *
+   * Mounts the project's files and starts an empty conversation. The existing chats are untouched —
+   * this is a fresh context on the same game, not a replacement for what came before.
+   */
+  const newChatOnProject = useCallback(
+    (project: Project) => {
+      setPendingOpenProject(project.id, 'fresh');
+      navigate('/');
+    },
+    [navigate],
   );
 
   const remixProject = useCallback(
@@ -175,11 +207,16 @@ export function ProjectsDashboard() {
       try {
         await deleteProject(project.id);
 
-        // Keep the sidebar in sync: drop the matching local chat if this browser has one.
-        const chat = localChats.get(project.id);
+        /*
+         * Keep the sidebar in sync: drop EVERY local chat for this project, not just one (§4.5.6).
+         * The server sweeps its whole prefix; a browser that dropped only the first would leave the
+         * siblings in the sidebar, pointing at a project that no longer exists.
+         */
+        const chats = localChats.get(project.id) ?? [];
+        const database = db;
 
-        if (chat && db) {
-          await deleteById(db, chat.id).catch(() => undefined);
+        if (database) {
+          await Promise.all(chats.map((chat) => deleteById(database, chat.id).catch(() => undefined)));
         }
 
         setProjects((prev) => (prev ? prev.filter((p) => p.id !== project.id) : prev));
@@ -373,6 +410,13 @@ export function ProjectsDashboard() {
                       <span className="i-ph:play" />
                     </a>
                   )}
+                  <button
+                    onClick={() => newChatOnProject(project)}
+                    className="px-3 py-2.5 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3 flex items-center justify-center border-l border-bolt-elements-borderColor"
+                    title="New chat, same game — a fresh context on this project"
+                  >
+                    <span className="i-ph:chat-teardrop-dots" />
+                  </button>
                   <button
                     onClick={() => remixProject(project)}
                     className="px-3 py-2.5 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3 flex items-center justify-center border-l border-bolt-elements-borderColor"

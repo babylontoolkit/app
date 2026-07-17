@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsObjectStore } from '~/lib/.server/storage/store';
 import { setObjectStore } from '~/lib/.server/storage';
 import { FsProjectStore, setProjectStore } from './store';
-import { messagesKey } from './message-store';
+import { listChats, putChat } from './message-store';
 import { putRemixSeed, seedKey } from '~/lib/.server/share/seed-store';
 import type { Project } from './types';
 
@@ -67,17 +67,42 @@ const deleteProject = async (projectId: string) => {
   } as never);
 };
 
-const giveItAChat = (projectId: string) =>
-  objects.put(messagesKey(projectId), new TextEncoder().encode(JSON.stringify([{ role: 'user', content: 'hi' }])));
+/**
+ * A project has many chats (§4.5.6), so "give it a chat" gives it several — the reaper's job is to
+ * sweep the prefix, and a fixture with one chat cannot tell a prefix sweep from a key delete.
+ */
+const giveItAChat = async (projectId: string, count = 2) => {
+  for (let i = 0; i < count; i++) {
+    await putChat(projectId, {
+      serverChatId: crypto.randomUUID(),
+      title: `Chat ${i}`,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+  }
+};
 
 describe('deleting a project leaves nothing behind', () => {
-  it('deletes the conversation — the bug this file exists for', async () => {
+  it('deletes the conversations — the bug this file exists for', async () => {
     await giveItAChat(mine.id);
-    expect(await objects.get(messagesKey(mine.id))).not.toBeNull();
+    expect(await listChats(mine.id)).toHaveLength(2);
 
     await deleteProject(mine.id);
 
-    expect(await objects.get(messagesKey(mine.id))).toBeNull();
+    expect(await listChats(mine.id)).toEqual([]);
+  });
+
+  /**
+   * 🔴 A key-delete would pass the test above only if it happened to delete the single key a fixture
+   * created. With many chats it deletes nothing and reports success, so this pins the SWEEP.
+   */
+  it('deletes every chat, not merely the first', async () => {
+    await giveItAChat(mine.id, 5);
+
+    await deleteProject(mine.id);
+
+    expect(await objects.list(`messages/${mine.id}/`)).toEqual([]);
   });
 
   it('deletes the remix seed', async () => {
@@ -126,7 +151,7 @@ describe('a delete cannot reach across projects', () => {
     expect((await deleteProject(theirs.id)).status).toBe(404);
 
     expect(await projects.get(theirs.id)).not.toBeNull();
-    expect(await objects.get(messagesKey(theirs.id))).not.toBeNull();
+    expect(await listChats(theirs.id)).toHaveLength(2);
   });
 
   it('404s for an id that does not exist, identically', async () => {
@@ -139,7 +164,7 @@ describe('a delete cannot reach across projects', () => {
 
     await deleteProject(mine.id);
 
-    expect(await objects.get(messagesKey(theirs.id))).not.toBeNull();
+    expect(await listChats(theirs.id)).toHaveLength(2);
   });
 });
 
