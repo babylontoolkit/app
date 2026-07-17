@@ -47,6 +47,7 @@ import { hasRestorableHistory, markAsTranscript } from './transcript';
 import { decideDependencyInstall, findLockfile, hasManifest } from './dependencies';
 import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
+import { identityForMount } from './mount-identity';
 import { slugForChat } from './chat-slug';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -786,7 +787,46 @@ ${value.content}
         const { projectId: mountProjectId, serverChatId, freshChat } = pendingMount;
 
         projectId.set(mountProjectId);
-        chatMetadata.set({ ...chatMetadata.get(), projectId: mountProjectId });
+
+        /*
+         * 🔴 A NEW CHAT MUST BE BORN WITH NO IDENTITY — these atoms are MODULE-level, and "New chat"
+         * reaches this code by `navigate('/')`, which is an SPA transition. Nothing unloads. So every
+         * atom below arrives still holding the PREVIOUS chat's values, and the previous chat is a real
+         * conversation with a real transcript.
+         *
+         * This block used to be `chatMetadata.set({ ...chatMetadata.get(), projectId })`, which spread
+         * the old metadata forward — carrying `serverChatId` into a chat that is not that chat. Three
+         * things then quietly destroyed the old conversation on the first message of the new one:
+         *
+         *   - `ensureServerChatId` returns the EXISTING id if the atom has one, so the new chat saved
+         *     its messages over the old chat's server object (§4.5.4b: the only copy we hold).
+         *   - `storeMessageHistory` mints a local id only `if (!chatId.get())`, so the new chat also
+         *     wrote over the old chat's IndexedDB record.
+         *   - `description` survived, so the header labelled the new chat "start dev server" — the old
+         *     chat's title. That was the only visible symptom, and it read as a cosmetic glitch.
+         *
+         * Net effect: "New chat, same game" REPLACED the chat you started it from, on both copies, and
+         * the sidebar count never moved. The decision is `identityForMount` — pure and exhaustively
+         * tested, like every other path that overwrites the user's data without being asked.
+         */
+        const identity = identityForMount({
+          current: {
+            chatId: chatId.get(),
+            description: description.get(),
+            urlId: urlIdRef.current,
+            metadata: chatMetadata.get() ?? {},
+          },
+          projectId: mountProjectId,
+          freshChat,
+        });
+
+        chatId.set(identity.chatId);
+        description.set(identity.description);
+        chatMetadata.set(identity.metadata);
+
+        // Ref and state together, always — `storeMessageHistory` reads the ref (see `urlIdRef`).
+        urlIdRef.current = identity.urlId;
+        setUrlId(identity.urlId);
 
         /*
          * `freshChat` is "New chat, same game" (§4.5.6): mount the files, restore NO transcript. It is

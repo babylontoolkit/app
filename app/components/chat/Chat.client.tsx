@@ -169,14 +169,32 @@ export const ChatImpl = memo(
      *
      * No animation: `runAnimation` fades the intro out because the user is watching it go. Arriving
      * from the dashboard there is nothing to fade — the intro was never theirs to see.
+     *
+     * 🔴 THIS IS THE ONLY PLACE THAT OPENS THE CHAT ON MOUNT — do not add a second one.
+     *
+     * It used to share the job with an upstream `useEffect(..., [])` that did
+     * `setKey('started', initialMessages.length > 0)` unconditionally. Both ran on the same mount, this
+     * one first, and the loser was whichever React called first — so on "New chat, same game" (where the
+     * baton resolves BEFORE mount, so `activeProjectId` is already set on render 1) this set `started`
+     * true and the `[]` effect immediately set it back to FALSE.
+     *
+     * The result was a half-open screen that nothing flagged: workbench and file tree present (those are
+     * not driven by `started`), but the header stripped back to just the credits — no project name, no
+     * Save, no Share, no New chat. Reported as "the screen is so plain i don't know that i am at a new
+     * chat". Merging the two removes the race rather than ordering it, because an ordering fix here only
+     * holds until someone adds the third writer.
      */
     useEffect(() => {
-      if (!activeProjectId) {
+      const opened = initialMessages.length > 0 || !!activeProjectId;
+
+      // The `false` branch is upstream's reset — landing page, no project, nothing said yet.
+      chatStore.setKey('started', opened);
+
+      if (!opened) {
         return;
       }
 
       setChatStarted(true);
-      chatStore.setKey('started', true);
       workbenchStore.showWorkbench.set(true);
     }, [activeProjectId]);
 
@@ -529,9 +547,11 @@ export const ChatImpl = memo(
 
     const TEXTAREA_MAX_HEIGHT = chatStarted ? 400 : 200;
 
-    useEffect(() => {
-      chatStore.setKey('started', initialMessages.length > 0);
-    }, []);
+    /*
+     * (Upstream's `useEffect(() => chatStore.setKey('started', initialMessages.length > 0), [])` lived
+     * here. It is folded into the open-state effect above — see the 🔴 note there. It was a second,
+     * unconditional writer of the same flag on the same mount, and it won.)
+     */
 
     useEffect(() => {
       processSampledMessages({

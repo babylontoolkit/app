@@ -20,6 +20,7 @@ import GitCloneButton from './GitCloneButton';
 import type { ProviderInfo } from '~/types/model';
 import { GameRegistryCards } from './GameRegistryCards';
 import { StartedFromChip } from './StartedFromChip';
+import { NewChatIntro } from './NewChatIntro';
 import { VaguePromptOffer } from './VaguePromptOffer';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import type { WizardSelection } from '~/lib/registry/wizard';
@@ -399,6 +400,12 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                     <StartedFromChip onReseed={onReseed} canChange={canReseed} />
                   </div>
                 )}
+                {/*
+                 * "New chat, same game" (§4.5.6): started, on a project, nothing said yet. Without this
+                 * the column is a void — no landing intro (the game exists) and no messages — which is
+                 * indistinguishable from a screen that failed to load.
+                 */}
+                {chatStarted && messages?.length === 0 && <ClientOnly>{() => <NewChatIntro />}</ClientOnly>}
                 <ClientOnly>
                   {() => {
                     return chatStarted ? (

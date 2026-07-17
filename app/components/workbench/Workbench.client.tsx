@@ -372,13 +372,37 @@ export const Workbench = memo(
       }
     }, []);
 
+    /*
+     * 🔴 `lg:shrink-0` on the spacer below IS LOAD-BEARING — without it the chat column lays out
+     * UNDERNEATH the workbench panel, and how far under depends on what the user has been TALKING about.
+     *
+     * The split is an in-flow chat column + an in-flow SPACER (width `--workbench-width`), with the real
+     * panel `position: fixed` on top of the spacer (placed at `--workbench-left`, which is computed as
+     * "where the chat ends IF the chat is exactly `--chat-min-width` wide"). That formula is the
+     * contract: the spacer must actually occupy the geometry the fixed panel is placed into, or the two
+     * silently disagree.
+     *
+     * Flex-shrink broke the contract. The chat column is `flex-grow` with `basis:auto`, so its basis is
+     * its CONTENT — and a wide code block in a message pushes the row over its container. Flex resolves
+     * that by shrinking the spacer, and the chat grows into the space. The fixed panel does not move (it
+     * is placed by a CSS formula, not by flex), so it overlaps the chat by however much the spacer shrank.
+     *
+     * Measured at 1988px with one ordinary conversation loaded: spacer 1115 → 1077, chat 533 → 571,
+     * panel still at 873 = a 38px overlap that ate the chat's entire 24px right padding and 14px of the
+     * prompt box. An EMPTY chat had no overflow, so it did not shrink and looked correct — which is why
+     * this read as "the pane is a different size once a chat loads".
+     *
+     * `shrink-0` pins the spacer to its computed width, so the chat gets exactly the remainder
+     * (`--chat-min-width`) and the panel lands flush against it. `lg:` because below that breakpoint the
+     * row is `flex-col`, where shrink would apply to HEIGHT instead.
+     */
     return (
       chatStarted && (
         <motion.div
           initial="closed"
           animate={showWorkbench ? 'open' : 'closed'}
           variants={workbenchVariants}
-          className="z-workbench"
+          className="z-workbench lg:shrink-0"
         >
           <div
             className={classNames(
