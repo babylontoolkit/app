@@ -28,15 +28,21 @@
  */
 import { getObjectStore } from '~/lib/.server/storage';
 import { createScopedLogger } from '~/utils/logger';
+import { getChatIndex, type ChatIndexRow } from './chat-index';
 
 const logger = createScopedLogger('message-store');
 
 /**
  * A stored conversation.
  *
- * The title rides WITH the messages rather than in a separate index: an index is a second copy of the
- * truth, and the moment it can disagree with the objects it names, it will. Listing costs one `get`
- * per chat, which is fine for a bounded list and honest about where the data is.
+ * The title rides WITH the messages, and ALSO in the index (`chat-index.ts`). That is a second copy,
+ * which this module originally refused to have — the objects were the single home for the truth and
+ * listing cost one `get` per chat, which is fine for a project's bounded list.
+ *
+ * It stopped being fine when the sidebar became server-backed (§4.5.6): a GLOBAL list would have meant
+ * reading every transcript body on the platform to render a row of titles. So the index exists, and the
+ * rule that keeps it honest is written here: **the object is the truth, the row is a cache.** The title
+ * stays in the object so a lost index can be rebuilt from storage alone.
  */
 export interface StoredChat {
   serverChatId: string;
@@ -47,7 +53,7 @@ export interface StoredChat {
 }
 
 /** What a chat looks like WITHOUT its body — enough to render a picker, cheap enough to list. */
-export type ChatSummary = Omit<StoredChat, 'messages'> & { messageCount: number };
+export type ChatSummary = Omit<StoredChat, 'messages'> & { messageCount: number; projectId: string };
 
 /**
  * A guard rail on count, not a policy on behaviour.
@@ -117,11 +123,41 @@ export async function putChat(projectId: string, chat: StoredChat, context?: unk
   const store = getObjectStore(context);
   const bytes = encoder.encode(JSON.stringify(chat));
 
+  /*
+   * 🔴 OBJECT FIRST, INDEX SECOND — the order is the safety property, not a style choice.
+   *
+   * If the index write fails after this, the conversation is intact and `listChats` finds it by prefix
+   * and backfills the row. If the order were reversed and the OBJECT write failed, the sidebar would
+   * list a chat that opens empty — and worse, a reader that trusted the row could conclude the bytes
+   * were the stale side. The object is the record; the row is a cache of its metadata.
+   */
   await store.put(messagesKey(projectId, chat.serverChatId), bytes, 'application/json');
 
   if (chat.serverChatId === legacyChatId(projectId)) {
     await store.delete(legacyMessagesKey(projectId));
   }
+
+  /*
+   * A failed index write must not fail the SAVE. The user's conversation is already durable at this
+   * point; throwing here would report a lost save that did not happen, and the reconciliation in
+   * `listChats` repairs the row on the next listing anyway. Loud in the log, invisible to the user.
+   */
+  try {
+    await getChatIndex(context).upsert(summaryToRow(projectId, chat));
+  } catch (error) {
+    logger.error(`Chat ${chat.serverChatId} saved but not indexed: ${(error as Error).message}`);
+  }
+}
+
+function summaryToRow(projectId: string, chat: StoredChat): ChatIndexRow {
+  return {
+    id: chat.serverChatId,
+    projectId,
+    title: chat.title,
+    messageCount: chat.messages.length,
+    createdAt: chat.createdAt,
+    updatedAt: chat.updatedAt,
+  };
 }
 
 export async function getChat(projectId: string, serverChatId: string, context?: unknown): Promise<StoredChat | null> {
@@ -170,27 +206,66 @@ function parseChat(bytes: Uint8Array, serverChatId: string): StoredChat | null {
  * that can half-finish, and there is no deadline forcing one.
  */
 export async function listChats(projectId: string, context?: unknown): Promise<ChatSummary[]> {
-  const store = getObjectStore(context);
-  const objects = await store.list(messagesPrefix(projectId));
+  return listChatsForProjects([projectId], context);
+}
+
+/**
+ * The chats of MANY projects — the server-backed sidebar (§4.5.6).
+ *
+ * One index query for the metadata, plus one prefix listing per project to establish what actually
+ * exists. Neither reads a transcript body in the steady state, which is the entire reason the index
+ * exists: the previous implementation read every chat's messages to display its title, and doing that
+ * across a whole account would have been megabytes per sidebar render.
+ *
+ * 🔴 **The OBJECTS decide what exists; the index only decorates.** Both halves matter:
+ *
+ *   - An object with no row is still listed, and its row is backfilled. A failed index write must never
+ *     make a conversation disappear — that is the §4.5.4b orphan (bytes outliving the record that named
+ *     them), and here it would be silent and permanent.
+ *   - A row with no object is NOT listed. A stale row would otherwise show a ghost chat that opens
+ *     empty, which reads as data loss to the person who deleted it.
+ *
+ * The ghost row is left in place rather than pruned. A `list` that transiently returned nothing would
+ * then delete a healthy account's whole sidebar index — and since the row is not the record, leaving it
+ * costs nothing but a byte. It is repaired by the next save, or reaped with its project.
+ */
+export async function listChatsForProjects(projectIds: string[], context?: unknown): Promise<ChatSummary[]> {
+  if (projectIds.length === 0) {
+    return [];
+  }
+
+  const index = getChatIndex(context);
+  const [rows, perProject] = await Promise.all([
+    index.listByProjects(projectIds).catch((error) => {
+      // A dead index degrades to the old behaviour (read the bodies) rather than an empty sidebar.
+      logger.error(`Chat index unavailable, falling back to object reads: ${(error as Error).message}`);
+      return [] as ChatIndexRow[];
+    }),
+    Promise.all(projectIds.map(async (projectId) => ({ projectId, ids: await listChatIds(projectId, context) }))),
+  ]);
+
+  const indexed = new Map(rows.map((row) => [row.id, row]));
 
   const chats = await Promise.all(
-    objects
-      .filter((object) => object.key.endsWith('.json'))
-      .map(async (object) => {
-        const serverChatId = object.key.slice(messagesPrefix(projectId).length, -'.json'.length);
+    perProject.flatMap(({ projectId, ids }) =>
+      ids.map(async (serverChatId) => {
+        const row = indexed.get(serverChatId);
 
-        if (!isValidChatId(serverChatId)) {
-          logger.warn(`Ignoring object with a non-chat key: ${object.key}`);
-          return null;
+        if (row) {
+          return rowToSummary(row);
         }
 
-        const bytes = await store.get(object.key);
-
-        return bytes ? parseChat(bytes, serverChatId) : null;
+        /*
+         * Un-indexed: a chat saved before the index existed, or one whose row write failed. Read this
+         * ONE body to learn its title, and backfill the row so the next listing is cheap again. The
+         * index heals itself by being used.
+         */
+        return backfill(projectId, serverChatId, context);
       }),
+    ),
   );
 
-  const found = chats.filter((chat): chat is StoredChat => chat !== null);
+  const found = chats.filter((chat): chat is ChatSummary => chat !== null);
 
   /*
    * The real object wins.
@@ -199,16 +274,72 @@ export async function listChats(projectId: string, context?: unknown): Promise<C
    * same conversation is readable at BOTH keys and the user would see their history listed twice. This
    * makes the duplicate unobservable rather than trusting the delete to have worked.
    */
-  const alreadyMigrated = found.some((chat) => chat.serverChatId === legacyChatId(projectId));
-  const legacy = alreadyMigrated ? null : await adoptLegacyChat(projectId, context);
+  const legacies = await Promise.all(
+    projectIds.map(async (projectId) => {
+      if (found.some((chat) => chat.projectId === projectId && chat.serverChatId === legacyChatId(projectId))) {
+        return null;
+      }
 
-  if (legacy) {
-    found.push(legacy);
+      const legacy = await adoptLegacyChat(projectId, context);
+
+      return legacy ? toSummary(projectId, legacy) : null;
+    }),
+  );
+
+  found.push(...legacies.filter((chat): chat is ChatSummary => chat !== null));
+
+  return found.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.serverChatId.localeCompare(b.serverChatId));
+}
+
+/** The chat ids a project's prefix actually holds — keys only, no bodies. */
+async function listChatIds(projectId: string, context?: unknown): Promise<string[]> {
+  const objects = await getObjectStore(context).list(messagesPrefix(projectId));
+
+  return objects
+    .filter((object) => object.key.endsWith('.json'))
+    .map((object) => object.key.slice(messagesPrefix(projectId).length, -'.json'.length))
+    .filter((serverChatId) => {
+      if (isValidChatId(serverChatId)) {
+        return true;
+      }
+
+      logger.warn(`Ignoring object with a non-chat key in ${projectId}: ${serverChatId}`);
+
+      return false;
+    });
+}
+
+async function backfill(projectId: string, serverChatId: string, context?: unknown): Promise<ChatSummary | null> {
+  const chat = await getChat(projectId, serverChatId, context);
+
+  if (!chat) {
+    return null;
   }
 
-  return found
-    .map(({ messages, ...summary }) => ({ ...summary, messageCount: messages.length }))
-    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  try {
+    await getChatIndex(context).upsert(summaryToRow(projectId, chat));
+  } catch (error) {
+    // Listing is a read. It must not fail because a repair failed — the next listing tries again.
+    logger.warn(`Could not backfill the index for chat ${serverChatId}: ${(error as Error).message}`);
+  }
+
+  return toSummary(projectId, chat);
+}
+
+function toSummary(projectId: string, chat: StoredChat): ChatSummary {
+  const { messages, ...rest } = chat;
+  return { ...rest, projectId, messageCount: messages.length };
+}
+
+function rowToSummary(row: ChatIndexRow): ChatSummary {
+  return {
+    serverChatId: row.id,
+    projectId: row.projectId,
+    title: row.title,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    messageCount: row.messageCount,
+  };
 }
 
 /**
@@ -309,6 +440,13 @@ export async function deleteChat(projectId: string, serverChatId: string, contex
   if (serverChatId === legacyChatId(projectId)) {
     await store.delete(legacyMessagesKey(projectId));
   }
+
+  /*
+   * The row goes too. It is only a cache, so a survivor is not a resurrection — `listChats` will not
+   * show a chat whose object is gone — but a stale row is a lie in the table and the next reader may
+   * not be `listChats`. Unconditional and idempotent, like the object deletes above.
+   */
+  await getChatIndex(context).remove(serverChatId);
 }
 
 /**
@@ -326,4 +464,11 @@ export async function deleteMessages(projectId: string, context?: unknown): Prom
 
   await Promise.all(objects.map((object) => store.delete(object.key)));
   await store.delete(legacyMessagesKey(projectId));
+
+  /*
+   * The index rows too, by PROJECT — the same prefix-not-key argument one level up. Supabase would
+   * cascade these from the project row, but the filesystem backend has no foreign keys, and a reaper
+   * that only works on one of two backends is a reaper that works in tests and leaks in local dev.
+   */
+  await getChatIndex(context).removeByProject(projectId);
 }

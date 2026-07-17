@@ -25,6 +25,7 @@ import { detectProjectCommands, createCommandActionsString } from '~/utils/proje
 import type { ContextAnnotation } from '~/types/context';
 import {
   getRepoStatus,
+  listAllChats,
   listChats,
   loadMessages,
   mintServerChatId,
@@ -502,6 +503,148 @@ export function useChatHistory() {
       return;
     }
 
+    /**
+     * Bring back the conversation from the server (§4.5.4b).
+     *
+     * This is the half of "server = project record + chat" that was never built: `saveMessages` had
+     * been uploading every conversation and `loadMessages` had ZERO call sites, so a project opened
+     * on a second device got its files back from the repo and lost its history entirely.
+     *
+     * 🔴 The messages are marked `NO_REPLAY` before they go anywhere near the parser. Parsing an
+     * assistant message RUNS its actions — that is how upstream rebuilds a project with no snapshot
+     * — and these files came from the user's repository moments ago. Replaying them would write
+     * stale bodies over the real ones, silently. `markAsTranscript` is what stops that, and the mark
+     * rides along into IndexedDB so a later reload cannot lose it.
+     *
+     * Cosmetic by construction: any failure leaves the user with their game and no transcript, which
+     * is exactly where they were before this existed. It must never cost them the mount.
+     */
+    const restoreTranscript = async (pid: string, wantedChatId?: string) => {
+      if (!db) {
+        return;
+      }
+
+      try {
+        /*
+         * A project has MANY chats (§4.5.6), so "restore the conversation" is now a choice. Default to
+         * the most recently touched one — `listChats` sorts newest-first, and the chat you were last
+         * in is the one you meant. The dashboard can ask for a specific one by id.
+         */
+        const chats = await listChats(pid);
+        const wanted = wantedChatId ? chats.find((chat) => chat.serverChatId === wantedChatId) : chats[0];
+
+        if (!wanted) {
+          return;
+        }
+
+        const serverMessages = await loadMessages<Message>(pid, wanted.serverChatId);
+
+        if (!hasRestorableHistory(serverMessages)) {
+          return;
+        }
+
+        const transcript = markAsTranscript(serverMessages);
+        setInitialMessages(transcript);
+
+        const firstUserMessage = transcript.find((message) => message.role === 'user');
+        const title =
+          wanted.title ?? (firstUserMessage ? summarizeRequest([firstUserMessage])?.slice(0, 60) : undefined);
+
+        if (title) {
+          description.set(title);
+        }
+
+        /*
+         * Persist it as a local chat so a plain reload finds it — the pending-mount baton is
+         * one-shot (sessionStorage), so without this the history would come back once and vanish on
+         * F5. `navigateChat` uses replaceState: the URL becomes /chat/:id WITHOUT re-running this
+         * effect, which would otherwise take the mixedId branch and replay everything we just
+         * marked as not-for-replay.
+         *
+         * 🔴 REUSE the local chat this conversation already has, if there is one. This used to mint a
+         * fresh `getNextId` every time, so every open of the same project deposited ANOTHER local copy
+         * of the same conversation: four opens of "Kart Racer" left four identical chats, all carrying
+         * the same `serverChatId`. The server id is the conversation's identity (§4.5.6) — the local
+         * record is just this browser's cache of it, so there must be at most one per server id.
+         */
+        const existing = (await getAll(db)).find((chat) => chat.metadata?.serverChatId === wanted.serverChatId);
+        const localId = existing?.id ?? (await getNextId(db));
+        chatId.set(localId);
+
+        /*
+         * The chat's SERVER id is its URL — see `mintUrlId` for why that is a uuid and not a title.
+         *
+         * This used to mint `getUrlId(db, slugForChat(title, pid))`: a slug of the title, de-duplicated
+         * against THIS browser's IndexedDB. On a restore that is doubly wrong. It is not unique across
+         * users (every account that types "start dev server" gets the same one, and the de-duplication
+         * cannot see them), and it means the SAME conversation gets a different URL on every device —
+         * on a machine that already had an unrelated `start-dev-server`, this one silently became
+         * `start-dev-server-2`. Measured: the sidebar linked `/chat/ed04b49f-…`, the chat opened
+         * correctly, and then this rewrote the address bar to `/chat/start-dev-server`.
+         *
+         * A chat has one identity. It is the id, and it is the same everywhere.
+         */
+        const urlSlug = wanted.serverChatId;
+
+        // Ref and state together, always — `storeMessageHistory` reads the ref (see `urlIdRef`).
+        urlIdRef.current = urlSlug;
+        setUrlId(urlSlug);
+
+        /*
+         * The chat keeps its SERVER id across the device switch — that is the whole point. Minting a
+         * new one here would upload this same conversation a second time under a second id, so the
+         * user would watch their chat list grow by one every time they opened the project elsewhere.
+         */
+        const metadata: IChatMetadata = { projectId: pid, serverChatId: wanted.serverChatId };
+        chatMetadata.set(metadata);
+        chatCreatedAt.current = wanted.createdAt;
+
+        await setMessages(db, localId, transcript, urlSlug, title, undefined, metadata);
+        navigateChat(urlSlug);
+
+        logger.info(`Restored ${transcript.length} message(s) for project ${pid} from the server.`);
+      } catch (error) {
+        // Never fatal, and never silent to US — the user still has their project.
+        logger.warn(`Could not restore the conversation for ${pid}: ${(error as Error).message}`);
+      }
+    };
+
+    /**
+     * Open `/chat/:id` for a chat this browser has never seen (§4.5.6, §4.5.4b).
+     *
+     * This is what makes a chat URL mean anything on a second device. Before it, the miss branch was a
+     * bare `navigate('/')`: IndexedDB had no record, so the URL was treated as garbage and the user was
+     * bounced to the landing page — even though the conversation was sitting on the server the whole
+     * time. A link to your own chat, opened on your own laptop, went nowhere.
+     *
+     * The id is the chat's `serverChatId` (see `mintUrlId` for why it is a UUID and not a title slug).
+     * Ownership is the server's business: `/api/chats` only ever returns the caller's own chats, so a
+     * UUID belonging to someone else simply is not in the list and falls through to the landing page —
+     * the same answer as a nonexistent one, which is the 404-not-403 rule (§4.5.3) applied to a URL.
+     *
+     * Returns false for "not mine / not found", so the caller keeps its existing behaviour.
+     */
+    const openFromServer = async (id: string): Promise<boolean> => {
+      try {
+        const chats = await listAllChats();
+        const chat = chats.find((candidate) => candidate.serverChatId === id);
+
+        if (!chat) {
+          return false;
+        }
+
+        projectId.set(chat.projectId);
+        chatMetadata.set({ projectId: chat.projectId, serverChatId: chat.serverChatId });
+
+        await Promise.all([mountProjectFiles(chat.projectId), restoreTranscript(chat.projectId, chat.serverChatId)]);
+
+        return true;
+      } catch (error) {
+        logger.warn(`Could not open chat ${id} from the server: ${(error as Error).message}`);
+        return false;
+      }
+    };
+
     if (mixedId) {
       Promise.all([
         getMessages(db, mixedId),
@@ -658,7 +801,7 @@ ${value.content}
                 logger.warn(`Could not restore project ${pid}: ${(error as Error).message}`);
               }
             }
-          } else {
+          } else if (!(await openFromServer(mixedId))) {
             navigate('/', { replace: true });
           }
 
@@ -681,105 +824,6 @@ ${value.content}
        * and it exists precisely because the source project's own repo belongs to someone else. A
        * project that has been worked on in this browser has local checkpoints and never reads it.
        */
-      /**
-       * Bring back the conversation from the server (§4.5.4b).
-       *
-       * This is the half of "server = project record + chat" that was never built: `saveMessages` had
-       * been uploading every conversation and `loadMessages` had ZERO call sites, so a project opened
-       * on a second device got its files back from the repo and lost its history entirely.
-       *
-       * 🔴 The messages are marked `NO_REPLAY` before they go anywhere near the parser. Parsing an
-       * assistant message RUNS its actions — that is how upstream rebuilds a project with no snapshot
-       * — and these files came from the user's repository moments ago. Replaying them would write
-       * stale bodies over the real ones, silently. `markAsTranscript` is what stops that, and the mark
-       * rides along into IndexedDB so a later reload cannot lose it.
-       *
-       * Cosmetic by construction: any failure leaves the user with their game and no transcript, which
-       * is exactly where they were before this existed. It must never cost them the mount.
-       */
-      const restoreTranscript = async (pid: string, wantedChatId?: string) => {
-        if (!db) {
-          return;
-        }
-
-        try {
-          /*
-           * A project has MANY chats (§4.5.6), so "restore the conversation" is now a choice. Default to
-           * the most recently touched one — `listChats` sorts newest-first, and the chat you were last
-           * in is the one you meant. The dashboard can ask for a specific one by id.
-           */
-          const chats = await listChats(pid);
-          const wanted = wantedChatId ? chats.find((chat) => chat.serverChatId === wantedChatId) : chats[0];
-
-          if (!wanted) {
-            return;
-          }
-
-          const serverMessages = await loadMessages<Message>(pid, wanted.serverChatId);
-
-          if (!hasRestorableHistory(serverMessages)) {
-            return;
-          }
-
-          const transcript = markAsTranscript(serverMessages);
-          setInitialMessages(transcript);
-
-          const firstUserMessage = transcript.find((message) => message.role === 'user');
-          const title =
-            wanted.title ?? (firstUserMessage ? summarizeRequest([firstUserMessage])?.slice(0, 60) : undefined);
-
-          if (title) {
-            description.set(title);
-          }
-
-          /*
-           * Persist it as a local chat so a plain reload finds it — the pending-mount baton is
-           * one-shot (sessionStorage), so without this the history would come back once and vanish on
-           * F5. `navigateChat` uses replaceState: the URL becomes /chat/:id WITHOUT re-running this
-           * effect, which would otherwise take the mixedId branch and replay everything we just
-           * marked as not-for-replay.
-           *
-           * 🔴 REUSE the local chat this conversation already has, if there is one. This used to mint a
-           * fresh `getNextId` every time, so every open of the same project deposited ANOTHER local copy
-           * of the same conversation: four opens of "Kart Racer" left four identical chats, all carrying
-           * the same `serverChatId`. The server id is the conversation's identity (§4.5.6) — the local
-           * record is just this browser's cache of it, so there must be at most one per server id.
-           */
-          const existing = (await getAll(db)).find((chat) => chat.metadata?.serverChatId === wanted.serverChatId);
-          const localId = existing?.id ?? (await getNextId(db));
-          chatId.set(localId);
-
-          /*
-           * 🔴 A chat with no `urlId` is INVISIBLE: the sidebar renders only `urlId && description`, so
-           * this passing `undefined` meant every restored conversation vanished from the history list —
-           * present in IndexedDB, addressable by nobody. It was reported as "no chats at all show in the
-           * sidebar", and it is the reason `getUrlId` (which de-duplicates against existing slugs) is
-           * called here rather than a raw slug being trusted.
-           */
-          const urlSlug = existing?.urlId ?? (await getUrlId(db, slugForChat(title, pid)));
-
-          // Ref and state together, always — `storeMessageHistory` reads the ref (see `urlIdRef`).
-          urlIdRef.current = urlSlug;
-          setUrlId(urlSlug);
-
-          /*
-           * The chat keeps its SERVER id across the device switch — that is the whole point. Minting a
-           * new one here would upload this same conversation a second time under a second id, so the
-           * user would watch their chat list grow by one every time they opened the project elsewhere.
-           */
-          const metadata: IChatMetadata = { projectId: pid, serverChatId: wanted.serverChatId };
-          chatMetadata.set(metadata);
-          chatCreatedAt.current = wanted.createdAt;
-
-          await setMessages(db, localId, transcript, urlSlug, title, undefined, metadata);
-          navigateChat(urlSlug);
-
-          logger.info(`Restored ${transcript.length} message(s) for project ${pid} from the server.`);
-        } catch (error) {
-          // Never fatal, and never silent to US — the user still has their project.
-          logger.warn(`Could not restore the conversation for ${pid}: ${(error as Error).message}`);
-        }
-      };
 
       const pendingMount = takePendingProjectMount();
 
@@ -1031,6 +1075,50 @@ ${value.content}
     await workbenchStore.restoreFiles(validSnapshot.files);
   }, []);
 
+  /**
+   * The id this chat lives at in the URL — its SERVER id, not a title (§4.5.6).
+   *
+   * 🔴 A title slug cannot be a chat's address once there is more than one user.
+   *
+   * Upstream minted `/chat/<slug-of-the-title>` and de-duplicated it with `getUrlId`, which walks THIS
+   * BROWSER's IndexedDB and appends `-2`. That is coherent in bolt.diy: one user, one machine, the chat
+   * IS the project, and the slug never leaves the tab. It does not survive anything we have built on
+   * top. `/chat/start-dev-server` is not unique — every user who types "start dev server" gets it, and
+   * the de-duplication cannot see them because it only knows one browser. The moment the sidebar lists
+   * the ACCOUNT's chats rather than the browser's (§4.5.6), that slug has to resolve on the SERVER, and
+   * there it is ambiguous. It also puts the conversation's title into the URL bar, browser history, and
+   * every proxy log between here and us.
+   *
+   * So the URL is the `serverChatId`: a v4 UUID, globally unique, unguessable, the same on every device,
+   * and already the chat's identity everywhere else in the system (`messages/{projectId}/{id}.json`).
+   *
+   * Minting it here rather than at first save is free — it is `crypto.randomUUID()`, not a write — and
+   * it means the address bar is right from the first message instead of being a slug that later
+   * disagrees with what the sidebar links to. `ensureServerChatId` finds it on the atom and reuses it.
+   *
+   * The fallback is for a chat with no project (nothing to save it against): a local slug, which stays
+   * purely local and is exactly as valid as it always was.
+   */
+  const mintUrlId = useCallback(async (): Promise<string> => {
+    const existing = chatMetadata.get()?.serverChatId;
+
+    if (existing) {
+      return existing;
+    }
+
+    if (projectId.get()) {
+      const serverChatId = mintServerChatId();
+      chatMetadata.set({ ...chatMetadata.get(), serverChatId });
+
+      return serverChatId;
+    }
+
+    // `slugForChat` never returns empty and `getUrlId` de-duplicates against this browser's slugs.
+    return getUrlId(db!, slugForChat(description.get(), 'chat'));
+
+    // No deps: everything read here is an atom or a ref, deliberately — that is what makes it not stale.
+  }, []);
+
   return {
     ready: !mixedId || ready,
     initialMessages,
@@ -1086,14 +1174,10 @@ ${value.content}
       let _urlId = urlIdRef.current ?? urlId;
 
       if (!_urlId) {
-        // `slugForChat` never returns empty and `getUrlId` de-duplicates against existing slugs.
-        const base = firstArtifact?.id ?? slugForChat(description.get(), projectId.get() ?? 'chat');
-        const slug = await getUrlId(db, base);
-
-        _urlId = slug;
-        urlIdRef.current = slug;
-        navigateChat(slug);
-        setUrlId(slug);
+        _urlId = await mintUrlId();
+        urlIdRef.current = _urlId;
+        navigateChat(_urlId);
+        setUrlId(_urlId);
       }
 
       let chatSummary: string | undefined = undefined;

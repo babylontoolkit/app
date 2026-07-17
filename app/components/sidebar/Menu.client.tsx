@@ -6,8 +6,10 @@ import { ThemeSwitch } from '~/components/ui/ThemeSwitch';
 import { ControlPanel } from '~/components/@settings/core/ControlPanel';
 import { SettingsButton, HelpButton } from '~/components/ui/SettingsButton';
 import { Button } from '~/components/ui/Button';
-import { db, deleteById, getAll, getMessages, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
-import { deleteChat as deleteServerChat } from '~/lib/persistence/projects';
+import { db, deleteById, getAll, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
+import { deleteChat as deleteServerChat, listAllChats } from '~/lib/persistence/projects';
+import { mergeChatList, localChatList, type SidebarChat } from '~/lib/persistence/chat-list';
+import { createScopedLogger } from '~/utils/logger';
 import { cubicEasingFn } from '~/utils/easings';
 import { HistoryItem } from './HistoryItem';
 import { binDates } from './date-binning';
@@ -17,6 +19,8 @@ import { useStore } from '@nanostores/react';
 import { profileStore } from '~/lib/stores/profile';
 import { sidebarDockedStore } from '~/lib/stores/sidebar';
 import { brand } from '~/config/brand';
+
+const logger = createScopedLogger('sidebar');
 
 const menuVariants = {
   closed: {
@@ -39,10 +43,7 @@ const menuVariants = {
   },
 } satisfies Variants;
 
-type DialogContent =
-  | { type: 'delete'; item: ChatHistoryItem }
-  | { type: 'bulkDelete'; items: ChatHistoryItem[] }
-  | null;
+type DialogContent = { type: 'delete'; item: SidebarChat } | { type: 'bulkDelete'; items: SidebarChat[] } | null;
 
 function CurrentDateTime() {
   const [dateTime, setDateTime] = useState(new Date());
@@ -69,7 +70,7 @@ function CurrentDateTime() {
 export const Menu = () => {
   const { duplicateCurrentChat, exportChat } = useChatHistory();
   const menuRef = useRef<HTMLDivElement>(null);
-  const [list, setList] = useState<ChatHistoryItem[]>([]);
+  const [list, setList] = useState<SidebarChat[]>([]);
   const [open, setOpen] = useState(false);
   const [dialogContent, setDialogContent] = useState<DialogContent>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -86,13 +87,38 @@ export const Menu = () => {
     searchFields: ['description'],
   });
 
+  /**
+   * The sidebar's chats — from the SERVER, merged with this browser's (§4.5.6, §4.5.4b).
+   *
+   * This used to be `getAll(db)` filtered by `urlId && description`: a view of the BROWSER rather than
+   * of the account. A chat started on a laptop did not exist on a desktop and clearing site data
+   * destroyed the list, while the transcripts sat on the server the whole time with nothing listing
+   * them. The browser is a local staging area now; the platform holds the project record and the
+   * conversation; the user's CODE lives in their own repo.
+   *
+   * 🔴 A failed fetch falls back to the LOCAL list, never to an empty one. `mergeChatList` drops a local
+   * chat whose server chat has gone (that is how a delete on another device sticks here) — which is
+   * only safe while "the server said nothing" and "the server said none" stay distinguishable. Treating
+   * a network error as an authoritative empty list would blank the sidebar and, on the next merge, look
+   * exactly like every chat having been deleted.
+   */
   const loadEntries = useCallback(() => {
-    if (db) {
-      getAll(db)
-        .then((list) => list.filter((item) => item.urlId && item.description))
-        .then(setList)
-        .catch((error) => toast.error(error.message));
+    if (!db) {
+      return;
     }
+
+    const local = getAll(db).catch(() => [] as ChatHistoryItem[]);
+
+    listAllChats()
+      .then(async (server) => mergeChatList(server, await local))
+      .catch(async (error) => {
+        logger.warn(`Could not load chats from the server, showing this browser's: ${error.message}`);
+
+        // `localChatList`, NOT `mergeChatList([], …)` — the latter would drop every synced chat. See it.
+        return localChatList(await local);
+      })
+      .then(setList)
+      .catch((error) => toast.error(error.message));
   }, []);
 
   /**
@@ -109,21 +135,26 @@ export const Menu = () => {
    * The project is deliberately untouched. Under §4.5.6 a project holds many chats, so removing one is
    * removing one — the game, its files, and its other conversations all survive. Deleting the PROJECT
    * is the dashboard's job, and it sweeps every chat with it.
+   *
+   * 🔴 It takes the ITEM, not an id. The ids that address the server copy used to be read back out of
+   * IndexedDB (`getMessages(db, id).metadata`), which worked only while every listed chat was a local
+   * one. Now that the sidebar lists the ACCOUNT's chats (§4.5.6), a chat from another device has no
+   * local record — so the lookup would find no metadata, the server delete would be skipped silently,
+   * and the chat would reappear on the next load. The row already carries its own ids; use them.
    */
   const deleteChat = useCallback(
-    async (id: string): Promise<void> => {
+    async (item: SidebarChat): Promise<void> => {
       if (!db) {
         throw new Error('Database not available');
       }
 
-      const chat = await getMessages(db, id).catch(() => undefined);
-      const { projectId, serverChatId } = chat?.metadata ?? {};
+      const { projectId, serverChatId } = item.metadata ?? {};
 
       /*
-       * Server first, while the local record still holds the ids that address it. Delete locally first
-       * and a failure here strands the transcript with nothing left that can name it — the orphan shape
-       * §4.5.4b keeps producing. If the server delete throws, the whole action fails and the chat stays
-       * in the sidebar, which is honest: the user can see it, and can try again.
+       * Server first. Delete locally first and a failure here strands the transcript with nothing left
+       * that can name it — the orphan shape §4.5.4b keeps producing. If the server delete throws, the
+       * whole action fails and the chat stays in the sidebar, which is honest: the user can see it, and
+       * can try again.
        */
       if (projectId && serverChatId) {
         await deleteServerChat(projectId, serverChatId);
@@ -134,26 +165,30 @@ export const Menu = () => {
        * but old browsers still carry the keys, so keep reaping them.
        */
       try {
-        localStorage.removeItem(`snapshot:${id}`);
+        localStorage.removeItem(`snapshot:${item.id}`);
       } catch (snapshotError) {
-        console.error(`Error deleting snapshot for chat ${id}:`, snapshotError);
+        console.error(`Error deleting snapshot for chat ${item.id}:`, snapshotError);
       }
 
-      await deleteById(db, id);
-      console.log('Successfully deleted chat:', id);
+      // Absent-is-fine: a chat from another device has no local record to remove.
+      if (item.local) {
+        await deleteById(db, item.id);
+      }
+
+      console.log('Successfully deleted chat:', item.id);
     },
     [db],
   );
 
   const deleteItem = useCallback(
-    (event: React.UIEvent, item: ChatHistoryItem) => {
+    (event: React.UIEvent, item: SidebarChat) => {
       event.preventDefault();
       event.stopPropagation();
 
       // Log the delete operation to help debugging
       console.log('Attempting to delete chat:', { id: item.id, description: item.description });
 
-      deleteChat(item.id)
+      deleteChat(item)
         .then(() => {
           toast.success('Chat deleted successfully', {
             position: 'bottom-right',
@@ -184,13 +219,13 @@ export const Menu = () => {
   );
 
   const deleteSelectedItems = useCallback(
-    async (itemsToDeleteIds: string[]) => {
-      if (!db || itemsToDeleteIds.length === 0) {
+    async (itemsToDelete: SidebarChat[]) => {
+      if (!db || itemsToDelete.length === 0) {
         console.log('Bulk delete skipped: No DB or no items to delete.');
         return;
       }
 
-      console.log(`Starting bulk delete for ${itemsToDeleteIds.length} chats`, itemsToDeleteIds);
+      console.log(`Starting bulk delete for ${itemsToDelete.length} chats`);
 
       let deletedCount = 0;
       const errors: string[] = [];
@@ -198,17 +233,17 @@ export const Menu = () => {
       let shouldNavigate = false;
 
       // Process deletions sequentially using the shared deleteChat logic
-      for (const id of itemsToDeleteIds) {
+      for (const item of itemsToDelete) {
         try {
-          await deleteChat(id);
+          await deleteChat(item);
           deletedCount++;
 
-          if (id === currentChatId) {
+          if (item.id === currentChatId) {
             shouldNavigate = true;
           }
         } catch (error) {
-          console.error(`Error deleting chat ${id}:`, error);
-          errors.push(id);
+          console.error(`Error deleting chat ${item.id}:`, error);
+          errors.push(item.id);
         }
       }
 
@@ -216,7 +251,7 @@ export const Menu = () => {
       if (errors.length === 0) {
         toast.success(`${deletedCount} chat${deletedCount === 1 ? '' : 's'} deleted successfully`);
       } else {
-        toast.warning(`Deleted ${deletedCount} of ${itemsToDeleteIds.length} chats. ${errors.length} failed.`, {
+        toast.warning(`Deleted ${deletedCount} of ${itemsToDelete.length} chats. ${errors.length} failed.`, {
           autoClose: 5000,
         });
       }
@@ -593,7 +628,7 @@ export const Menu = () => {
                              * Pass the current selectedItems to the delete function.
                              * This captures the state at the moment the user confirms.
                              */
-                            const itemsToDeleteNow = [...selectedItems];
+                            const itemsToDeleteNow = list.filter((chat) => selectedItems.includes(chat.id));
                             console.log(
                               'Bulk delete confirmed for',
                               itemsToDeleteNow.length,

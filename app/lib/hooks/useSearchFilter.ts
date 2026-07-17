@@ -2,17 +2,23 @@ import { useState, useMemo, useCallback } from 'react';
 import { debounce } from '~/utils/debounce';
 import type { ChatHistoryItem } from '~/lib/persistence';
 
-interface UseSearchFilterOptions {
-  items: ChatHistoryItem[];
+interface UseSearchFilterOptions<T extends ChatHistoryItem> {
+  items: T[];
   searchFields?: (keyof ChatHistoryItem)[];
   debounceMs?: number;
 }
 
-export function useSearchFilter({
-  items = [],
+/**
+ * Generic over the item so a caller can pass a RICHER row and get the same row back.
+ *
+ * The sidebar's list is `SidebarChat` (a chat plus which game it belongs to, §4.5.6), and a hook
+ * hard-typed to `ChatHistoryItem` silently widened it back on the way out.
+ */
+export function useSearchFilter<T extends ChatHistoryItem>({
+  items = [] as unknown as T[],
   searchFields = ['description'],
   debounceMs = 300,
-}: UseSearchFilterOptions) {
+}: UseSearchFilterOptions<T>) {
   const [searchQuery, setSearchQuery] = useState('');
 
   const debouncedSetSearch = useCallback(debounce(setSearchQuery, debounceMs), []);

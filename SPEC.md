@@ -620,6 +620,43 @@ and the skills index. A new chat sees the whole game; it just does not see the t
   old key (`putChat`) — otherwise the same conversation lists twice, forever. `listChats` prefers the
   real object, so a failed migrating delete never becomes visible.
 
+#### The sidebar is the ACCOUNT's chats (2026-07-16)
+
+The chat list follows the user between devices, the way claude.ai's does. The browser is a **local
+staging area**: the platform holds the project record and the conversation, the user's code lives in
+their own repo (§4.5.4b), and the sidebar is a view of the account rather than of one profile.
+
+It was `getAll(indexedDb)` filtered by `urlId && description` — so a chat started on a laptop did not
+exist on a desktop, and clearing site data destroyed the list, *while the transcripts sat on the server
+the whole time with nothing listing them*. That was never a decision: upstream's chat WAS the project
+and lived in IndexedDB, and the server copy was added underneath without the list ever learning of it.
+
+- **`chats` (migration 0008) is a metadata INDEX; the objects remain the truth about existence.** A
+  global list cannot read every transcript body on the platform to render a row of titles, so titles
+  move into a queryable table — but an index that is authoritative about existence turns a failed row
+  write into a conversation that is silently gone. So: an object with no row is still listed and its row
+  is **backfilled** (the index heals by being used); a row with no object is not listed; `putChat`
+  writes the object first and a failed index write never fails the save. A ghost row is left rather than
+  pruned — a transient `list` failure must not delete a healthy account's sidebar.
+- **No `user_id` column.** Ownership is inherited from the project (the `snapshots` pattern from 0001),
+  and `/api/chats` resolves the caller's projects first, so the chat query can only ask about ids that
+  ownership has already cleared.
+- 🔴 **A chat's URL is its ID.** Upstream routed `/chat/<slug-of-the-title>`, de-duplicated against ONE
+  browser's IndexedDB (`getUrlId` appends `-2`). That cannot address a chat once there is more than one
+  user: `/chat/start-dev-server` is not unique, the de-duplication cannot see other accounts, and the
+  same conversation got a different URL on every device. It also leaks the conversation's title into the
+  URL bar and every proxy log. The URL is the `serverChatId` — a v4 UUID, minted in `mintUrlId` (free),
+  kept by `restoreTranscript`, and resolved by `openFromServer` when the browser has no record, so a
+  chat link works on a cold device. Someone else's id simply is not in their list, which is 404-not-403
+  (§4.5.3) applied to a URL.
+- 🔴 **`mergeChatList([], local)` is not the offline fallback.** It drops every synced chat — correct
+  when the server has genuinely spoken (a delete from another device must stick), catastrophic when it
+  merely failed to answer. `localChatList` is the fallback. Same distinction as `mount-source.ts`'s
+  `remoteHead: null` (branch empty) vs `undefined` (could not ask).
+- 🔴 **Sidebar delete takes the ITEM, not an id.** It read the addressing ids back out of IndexedDB,
+  which finds nothing for a chat from another device — so the server delete was skipped *silently* and
+  the chat returned on the next load.
+
 **Two more, found only by driving the real UI (2026-07-16). Both were reported by the owner, and the
 1,109 passing tests saw neither:**
 

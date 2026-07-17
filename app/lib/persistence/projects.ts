@@ -23,6 +23,7 @@
  */
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { Project } from '~/types/project';
+import type { ServerChat } from './chat-list';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('projects-client');
@@ -341,6 +342,7 @@ export async function readRemixSeed(projectId: string): Promise<{ files?: Serial
 /** A conversation as the server holds it, without its body (§4.5.6). */
 export interface ChatSummary {
   serverChatId: string;
+  projectId: string;
   title?: string;
   createdAt: string;
   updatedAt: string;
@@ -362,6 +364,18 @@ export function mintServerChatId(): string {
 /** Every conversation on a project, newest activity first. */
 export async function listChats(projectId: string): Promise<ChatSummary[]> {
   const { chats } = await api<{ chats: ChatSummary[] }>(`/api/projects/${projectId}/messages`);
+  return chats;
+}
+
+/**
+ * Every conversation the user has, across every project — the server-backed sidebar (§4.5.6).
+ *
+ * This is what makes chats follow the user between devices. The sidebar was `getAll(indexedDb)`, so it
+ * showed whatever THIS browser happened to know; the transcripts were on the server the whole time with
+ * nothing listing them.
+ */
+export async function listAllChats(): Promise<ServerChat[]> {
+  const { chats } = await api<{ chats: ServerChat[] }>('/api/chats');
   return chats;
 }
 

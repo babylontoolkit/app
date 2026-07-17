@@ -142,9 +142,56 @@ describe('the migrations', () => {
        where relnamespace = 'public'::regnamespace and relkind = 'r'`,
     );
 
-    for (const table of ['profiles', 'projects', 'generations', 'credit_ledger', 'entitlements']) {
+    for (const table of ['profiles', 'projects', 'generations', 'credit_ledger', 'entitlements', 'chats']) {
       expect(rows.find((r) => r.relname === table)?.relrowsecurity, `${table} must have RLS enabled`).toBe(true);
     }
+  });
+
+  /**
+   * The chat index (§4.5.6, migration 0008) — what makes the sidebar follow the user.
+   *
+   * Asserted against the REAL schema because every property here is one the TypeScript store cannot
+   * enforce: a foreign key, a cascade, and the ABSENCE of a column.
+   */
+  describe('the chat index', () => {
+    it('cascades chats away with their project — a chat cannot outlive its game', async () => {
+      const { rows } = await db.query<{ delete_rule: string; column_name: string }>(
+        `select rc.delete_rule, kcu.column_name
+           from information_schema.referential_constraints rc
+           join information_schema.key_column_usage kcu on kcu.constraint_name = rc.constraint_name
+          where kcu.table_name = 'chats' and kcu.column_name = 'project_id'`,
+      );
+
+      expect(rows[0]?.delete_rule).toBe('CASCADE');
+    });
+
+    it('has NO user_id — ownership is inherited from the project, never denormalised', async () => {
+      /*
+       * A second home for ownership would be the one the sidebar trusted, and it could disagree with
+       * the project's. `snapshots` set this precedent in 0001 and it is the right one.
+       */
+      const { rows } = await db.query<{ column_name: string }>(
+        `select column_name from information_schema.columns
+          where table_schema = 'public' and table_name = 'chats'`,
+      );
+
+      expect(rows.map((r) => r.column_name)).not.toContain('user_id');
+    });
+
+    it('has NO url_id — a title slug cannot address a chat once there is more than one user', async () => {
+      /*
+       * `/chat/start-dev-server` was upstream's title slug, de-duplicated against ONE browser's
+       * IndexedDB. Two users who both type "start dev server" collide, and the de-duplication cannot
+       * see across accounts. The URL is the chat's uuid; a column for the slug would be written and
+       * never read, which is exactly what `current_snapshot_id` was (0007).
+       */
+      const { rows } = await db.query<{ column_name: string }>(
+        `select column_name from information_schema.columns
+          where table_schema = 'public' and table_name = 'chats'`,
+      );
+
+      expect(rows.map((r) => r.column_name)).not.toContain('url_id');
+    });
   });
 
   /**

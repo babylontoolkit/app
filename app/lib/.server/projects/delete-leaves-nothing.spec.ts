@@ -20,6 +20,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsObjectStore } from '~/lib/.server/storage/store';
 import { setObjectStore } from '~/lib/.server/storage';
+import { FsChatIndex, setChatIndex } from './chat-index';
 import { FsProjectStore, setProjectStore } from './store';
 import { listChats, putChat } from './message-store';
 import { putRemixSeed, seedKey } from '~/lib/.server/share/seed-store';
@@ -45,6 +46,9 @@ beforeEach(async () => {
   projects = new FsProjectStore(path.join(tmp, 'projects'));
 
   setObjectStore(objects);
+
+  // Both stores, or this writes into the developer's real `.data/` — see `message-store.spec.ts`.
+  setChatIndex(new FsChatIndex(path.join(tmp, 'index')));
   setProjectStore(projects);
 
   mine = await projects.create({ userId: USER.id, name: 'Mine', templateId: 'racing' });
@@ -53,6 +57,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   setObjectStore(undefined);
+  setChatIndex(undefined);
   setProjectStore(undefined);
   await fs.rm(tmp, { recursive: true, force: true });
 });

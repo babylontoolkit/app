@@ -14,6 +14,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FsObjectStore } from '~/lib/.server/storage/store';
 import { setObjectStore } from '~/lib/.server/storage';
+import { FsChatIndex, setChatIndex } from './chat-index';
 import {
   countChats,
   deleteChat,
@@ -49,10 +50,22 @@ beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'message-store-'));
   objects = new FsObjectStore(path.join(tmp, 'objects'));
   setObjectStore(objects);
+
+  /*
+   * 🔴 Both stores, or the test writes into the DEVELOPER'S REAL DATA.
+   *
+   * `putChat` indexes as well as storing (§4.5.6), and `getChatIndex()` falls back to an `FsChatIndex`
+   * rooted at `platformDataDir()`. Stubbing only the object store left the index unstubbed, and one run
+   * of this file deposited ~200 rows in `.data/chats/` — real files, from fixtures, in the dev
+   * environment. Same shape as the `env()` trap in `oauth.spec.ts`: a test seam that LOOKS empty but
+   * silently resolves to the real thing.
+   */
+  setChatIndex(new FsChatIndex(path.join(tmp, 'index')));
 });
 
 afterEach(async () => {
   setObjectStore(undefined);
+  setChatIndex(undefined);
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
