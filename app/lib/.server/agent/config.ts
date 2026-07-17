@@ -23,8 +23,28 @@ export { NotConfiguredError };
 export const PLATFORM_PROVIDERS = ['Anthropic', 'KIE'] as const;
 export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
 
-/** Anthropic direct. Changing the default is a money decision — see `grantHeadroom()`. */
-export const DEFAULT_PLATFORM_PROVIDER: PlatformProviderName = 'Anthropic';
+/**
+ * KIE — the shipping default, with NO env file required (SPEC §4.2a).
+ *
+ * ⚠️ **Changing this is a money decision, not a preference.** Credits are cost-proportional, so the
+ * provider's rates set what a credit BUYS — which means this value and `SIGNUP_GRANT_CREDITS` are one
+ * decision in two files. `grantHeadroom()` + `billing.spec.ts` assert they agree; flip both or neither:
+ *
+ *   KIE       -> SIGNUP_GRANT_CREDITS 500   (a cold creation is ~192–248 credits; ~2.0–2.6x headroom)
+ *   Anthropic -> SIGNUP_GRANT_CREDITS 1000  (a cold creation is ~481–579; 500 would go NEGATIVE)
+ *
+ * MEASURED on two live creations (2026-07-17): 248 credits / $0.7412 and 211 / $0.6292 on KIE, against
+ * ~579 / ~$1.7314 and ~485 / ~$1.4515 for the same tokens on Anthropic — **~2.3x cheaper**. Verified
+ * against KIE's OWN billing: their response carries `credits_consumed`, and at their published rate
+ * (1 credit = $0.005) a real call billed 4.36 credits = $0.021800 while `rawCostUsd` computed
+ * $0.021800 exactly. The ledger is provably correct against their charges, not merely self-consistent.
+ *
+ * 🔴 **The accepted cost: `claude-opus-4-8` returns NO thinking text on KIE** (their adapter does not
+ * cover the one model they do not document — see `kie-wire.ts`). We pay full output rate for reasoning
+ * we cannot show: measured ~27% of output and ~55s of the 205s on a platformer creation. Chosen
+ * knowingly on 2026-07-17 as a `for now`.
+ */
+export const DEFAULT_PLATFORM_PROVIDER: PlatformProviderName = 'KIE';
 
 export interface PlatformConfig {
   /** Who the platform buys tokens from. Never a user choice (§4.2a) — an operator config. */

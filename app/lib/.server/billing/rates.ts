@@ -166,17 +166,19 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      * WRITES that nothing read back, because `selectOnDemandBlocks` re-routes per message and churns
      * the prefix. See CLAUDE.md "THE BIGGEST OPEN NUMBER". Budget ~466, not ~41.
      *
-     * ⚠️ **THIS NUMBER IS COUPLED TO THE PLATFORM PROVIDER.** Credits are cost-proportional, so the
-     * grant's real purchasing power moves with what we pay per token. `grantHeadroom()` is the guard,
-     * and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — do not tune one without re-running it:
-     *   - **Anthropic (today): 1,000** ≈ 2.1x a cold creation. 500 would be **0.97–1.04x** — the first
-     *     free prompt exhausts the grant and lands the user negative (the gate runs ONCE, before the
-     *     model, and settlement can never refuse, §4.2.1), which kills the exact moment the funnel is
-     *     built on.
-     *   - **KIE (0.4x rates): 500** ≈ 2.6x a cold creation — one prototype plus ~11 warm edits.
-     * The target is 500, and it becomes correct the moment `LLM_PROVIDER=KIE` — flip BOTH together.
+     * ⚠️ **THIS NUMBER IS COUPLED TO THE PLATFORM PROVIDER — they are one decision in two files.**
+     * Credits are cost-proportional, so the grant's real purchasing power moves with what we pay per
+     * token. A grant of 500 is generous on KIE and broken on Anthropic. `grantHeadroom()` is the guard
+     * and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — never tune one without re-running it:
+     *   - **KIE (the default, ~0.4x rates): 500** ≈ 2.0–2.6x a cold creation. MEASURED live: creations
+     *     cost 248 and 211 credits, so 500 buys the prototype plus real room to iterate — which is the
+     *     entire funnel: hook them on the first prompt, then convert to a subscription.
+     *   - **Anthropic: 1,000** ≈ 2.1x. 500 there is **0.86–1.04x** — MEASURED: a real creation cost 579
+     *     credits against a 500 grant, so the user's FIRST free prompt exhausts it and lands them
+     *     negative (the gate runs ONCE, before the model, and settlement can never refuse, §4.2.1),
+     *     with nothing left to iterate. That kills the exact moment the funnel is built on, silently.
      */
-    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 1000),
+    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 500),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
 
     stripeSecretKey: process.env.STRIPE_SECRET_KEY,

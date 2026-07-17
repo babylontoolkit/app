@@ -60,7 +60,16 @@ describe('buildHealthReport', () => {
     expect(report.dependencies.playOrigin).toBe('degraded');
   });
 
+  /*
+   * ⚠️ `LLM_PROVIDER` is set EXPLICITLY, never left to the default.
+   *
+   * This test used to set only `ANTHROPIC_API_KEY` and assume that WAS the platform key. That was true
+   * while Anthropic was the only provider, and it broke the moment the default became KIE — correctly,
+   * because the assumption had silently become false. A test that leans on the default is really
+   * testing the default; pin what you mean.
+   */
   it('flips a dependency to ok once its env is present', () => {
+    process.env.LLM_PROVIDER = 'Anthropic';
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
     process.env.PLAY_URL = 'https://play.example.com';
 
@@ -71,6 +80,17 @@ describe('buildHealthReport', () => {
 
     // Still not fully ready — Supabase/Stripe/monitoring remain unset.
     expect(report.ready).toBe(false);
+  });
+
+  /*
+   * The DEFAULT path, with no env file at all — the deploy shape the owner asked about ("if I was not
+   * using .env files"). The platform key must resolve to KIE's, not Anthropic's, or a correctly
+   * configured default deploy reports degraded forever and §9a's `ready` never goes green.
+   */
+  it('defaults to KIE, so KIE_API_KEY alone is a healthy platform key', () => {
+    process.env.KIE_API_KEY = 'kie-test';
+
+    expect(buildHealthReport(undefined).dependencies.platformKey).toBe('ok');
   });
 
   /*

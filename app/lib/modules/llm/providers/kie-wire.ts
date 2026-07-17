@@ -60,19 +60,38 @@ export function kieFetch(baseFetch: typeof fetch = fetch): typeof fetch {
 }
 
 /**
- * Only models KIE DOCUMENTS and that return thinking text with `thinkingFlag` (see the table above).
  * Same ids as Anthropic's: this is a passthrough, so the strings are Anthropic's own and carry no
  * date/`-latest` suffix (those 404).
  *
- * ⚠️ `claude-opus-4-8` is deliberately ABSENT even though it responds normally. It is the one model KIE
- * does not document, and their adapter returns EMPTY thinking text for it under every combination
- * measured — including `thinkingFlag`. Offering it would silently trade away the reasoning stream while
- * still billing for it (§4.2a). Add it the day KIE's adapter supports it, and not a day before.
+ * 🔴 **`claude-opus-4-8` IS OFFERED HERE ON A KNOWN, DELIBERATE TRADE — NOT BY OVERSIGHT.**
+ *
+ * It is the one model KIE does not document, and their adapter returns EMPTY thinking text for it under
+ * every combination measured, INCLUDING `thinkingFlag` (0/0/0 across three trials, while 4-6 returns
+ * 196/196/196). So on 4-8 the platform pays full output rate for reasoning it cannot show — the
+ * `display: 'omitted'` pathology §4.2a exists to kill, and the user sees dead air proportional to how
+ * hard the model thought (measured elsewhere at 5–57% of output, scaling with difficulty).
+ *
+ * The owner chose this knowingly on 2026-07-17 ("JUST ENABLE KIE-OPUS-4-8 ... for now"): 4-8 is the
+ * strongest coding model and this is a game-coding product, and ~2.34x cheaper generations plus a
+ * workable 500-credit signup grant were judged to outweigh a temporarily invisible reasoning stream.
+ *
+ * ⚠️ THIS IS A `for now`. Two exits, and the first is cheap:
+ *   1. KIE ships 4-8 in their adapter — it works on every model they document, so this is a gap, not a
+ *      limitation. Retest with `thinkingFlag` and this comment simply goes away.
+ *   2. Move `PLATFORM_MODEL` to `claude-opus-4-6`, which DOES return thinking text on KIE today.
+ *
+ * 🔴 Exit 2 is NOT a config change — 4-6 is deliberately absent from this list. `ratesFor` falls back to
+ * the PLATFORM model's rates for a model it does not know, so listing 4-6 without a `KIE_MODEL_RATES`
+ * row bills it at 4-8's prices. Measured once via KIE's own `credits_consumed`, 4-6 is CHEAPER than 4-8
+ * — so that fallback would over-charge every user of it, silently, and throw nothing. One sample is not
+ * a rate table: get 4-6's published prices, add the row, and only then list it here.
+ *
+ * Do not remove 4-8 without saying which exit was taken.
  */
 export const KIE_MODELS: ModelInfo[] = [
   {
-    name: 'claude-opus-4-6',
-    label: 'Claude Opus 4.6 (KIE)',
+    name: 'claude-opus-4-8',
+    label: 'Claude Opus 4.8 (KIE)',
     provider: 'KIE',
     maxTokenAllowed: 1_000_000,
     maxCompletionTokens: 128_000,

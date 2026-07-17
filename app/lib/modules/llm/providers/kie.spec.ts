@@ -138,16 +138,33 @@ describe('the KIE wire format', () => {
   });
 
   /*
-   * ⚠️ `claude-opus-4-8` must NOT be offered on KIE: their adapter returns EMPTY thinking text for it
-   * under every combination measured, including `thinkingFlag`, because it is the one model they do not
-   * document. Offering it silently trades the reasoning stream for nothing while still billing it.
-   * Remove this the day KIE's adapter supports it.
+   * 🔴 The 4-8 trade, pinned so it stays a DECISION and never decays into an accident.
+   *
+   * KIE returns no thinking text for `claude-opus-4-8` (0/0/0 measured, even with `thinkingFlag`, while
+   * 4-6 gives 196/196/196) — it is the one model they do not document. The owner accepted that on
+   * 2026-07-17 to get ~2.34x cheaper generations and a workable 500-credit grant.
+   *
+   * 4-6 — which DOES return thinking text on KIE — stays OUT until it has a rate row, because an
+   * unpriced model bills at the platform model's rates (see the next test).
    */
-  it('does not offer claude-opus-4-8, whose thinking text KIE cannot return', () => {
+  it('offers 4-8, whose missing thinking text is a known accepted trade', () => {
     const names = KIE_MODELS.map((m) => m.name);
 
-    expect(names).not.toContain('claude-opus-4-8');
-    expect(names).toContain('claude-opus-4-6');
+    expect(names).toContain('claude-opus-4-8');
+  });
+
+  /*
+   * ⚠️ `ratesFor` falls back to the PLATFORM model's rates for an unknown model, so every model offered
+   * here must be priced explicitly or it bills at 4-8's rates — measured: 4-6 and 4-5 are priced
+   * DIFFERENTLY. That would over-charge users and throw nothing. This is the `packMargin` shape of bug:
+   * two files, each internally sensible, disagreeing about what something costs.
+   */
+  it('prices every model it offers — an unpriced model silently bills at the platform model rate', async () => {
+    const { KIE_MODEL_RATES } = await import('~/lib/.server/billing/rates');
+
+    for (const model of KIE_MODELS) {
+      expect(KIE_MODEL_RATES[model.name], `${model.name} is offered on KIE but has no rate row`).toBeDefined();
+    }
   });
 });
 
