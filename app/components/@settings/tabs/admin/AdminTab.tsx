@@ -52,6 +52,12 @@ interface TemplateState {
   snapshots: Array<{ sha: string; size: number; storedAt?: string; active: boolean }>;
   storage: string;
 }
+interface PromptState {
+  summary: {
+    reference: { repo: string; commitSha: string; syncedAt: string } | null;
+    skills: { repo: string; count: number; commitSha: string | null };
+  };
+}
 
 export function AdminTab() {
   const [forbidden, setForbidden] = useState(false);
@@ -59,6 +65,7 @@ export function AdminTab() {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
   const [template, setTemplate] = useState<TemplateState | null>(null);
+  const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = () => {
@@ -87,6 +94,11 @@ export function AdminTab() {
     fetch('/api/admin/template')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => data && setTemplate(data as TemplateState))
+      .catch(() => undefined);
+
+    fetch('/api/admin/prompt')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && setPrompt(data as PromptState))
       .catch(() => undefined);
   };
 
@@ -117,6 +129,47 @@ export function AdminTab() {
         body.action === 'promote'
           ? `Promoted ${data.pin?.ref} → ${data.pin?.sha.slice(0, 8)}. New projects mount this.`
           : `Rolled back to ${data.pin?.sha.slice(0, 8)}.`,
+      );
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Sync the Agent Reference (docs) + skills repos and rebuild the system prompt (§4.3, §4.11). This
+   * is the supply chain to the MODEL — the docs/skills equivalent of promoting the starter template.
+   * A failed build leaves the previous version live (the route's guarantee), so a broken push can
+   * never take generation down; we report which commits are now live, or why nothing changed.
+   */
+  const refreshDocs = async () => {
+    setBusy(true);
+
+    try {
+      const r = await fetch('/api/admin/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'refresh' }),
+      });
+      const data = (await r.json()) as {
+        ok?: boolean;
+        status?: string;
+        agentCommitSha?: string;
+        skills?: { commitSha?: string };
+        message?: string;
+      };
+
+      if (!r.ok || !data.ok) {
+        toast.error(data.message ?? 'Refresh failed — the previous version stays live.');
+        return;
+      }
+
+      const docs = data.agentCommitSha?.slice(0, 8) ?? '?';
+      const skills = data.skills?.commitSha?.slice(0, 8) ?? '?';
+      toast.success(
+        data.status === 'unchanged'
+          ? `Already current — docs @ ${docs}, skills @ ${skills}.`
+          : `Live now — docs @ ${docs}, skills @ ${skills}.`,
       );
       load();
     } finally {
@@ -278,6 +331,54 @@ export function AdminTab() {
       </section>
 
       {/*
+       * Agent properties (§4.3, §4.11). The supply chain to the MODEL: whatever is live here is the
+       * knowledge every generation is built from. TWO labeled rows (docs vs skills, each keyed to the
+       * commit that is live), ONE Synchronize button — because doc-sync rebuilds both together, and a
+       * failed build leaves the current version live (the route's guarantee).
+       */}
+      <section>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Agent repository</h3>
+          <button
+            className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
+            disabled={busy || !prompt}
+            onClick={() => {
+              if (
+                confirm('Sync the Agent Reference + Skills from GitHub and rebuild the prompt? Goes live on success.')
+              ) {
+                void refreshDocs();
+              }
+            }}
+          >
+            {busy ? 'Synchronizing…' : 'Synchronize'}
+          </button>
+        </div>
+        {!prompt ? (
+          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+        ) : (
+          <div className="mt-2 flex flex-col gap-2">
+            <InfoRow
+              label="Agent Reference"
+              detail={
+                prompt.summary.reference
+                  ? `${prompt.summary.reference.repo} · commit ${prompt.summary.reference.commitSha.slice(0, 8)} · ` +
+                    `synced ${new Date(prompt.summary.reference.syncedAt).toLocaleString()}`
+                  : 'Not synced yet — click Synchronize.'
+              }
+            />
+            <InfoRow
+              label="Agent Skills"
+              detail={
+                `${prompt.summary.skills.repo} · ${prompt.summary.skills.count} skill` +
+                `${prompt.summary.skills.count === 1 ? '' : 's'}` +
+                `${prompt.summary.skills.commitSha ? ` · commit ${prompt.summary.skills.commitSha.slice(0, 8)}` : ''}`
+              }
+            />
+          </div>
+        )}
+      </section>
+
+      {/*
        * Template pin (§4.4). This is the supply chain: whatever is pinned here is the code every new
        * project starts from. Promotion is the ONLY way a push to the starter repo reaches users, and
        * rollback is the way back — so both the current pin and its provenance are shown, never implied.
@@ -325,7 +426,7 @@ export function AdminTab() {
                   }
                 }}
               >
-                Promote latest
+                Promote
               </button>
             </div>
 
@@ -368,6 +469,16 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="rounded-md border border-bolt-elements-borderColor px-3 py-2">
       <div className="text-xs text-bolt-elements-textTertiary">{label}</div>
       <div className="text-lg font-semibold text-bolt-elements-textPrimary">{value}</div>
+    </div>
+  );
+}
+
+/** A labeled one-line status row (docs / skills), styled like the Starter template pin line. */
+function InfoRow({ label, detail }: { label: string; detail: string }) {
+  return (
+    <div className="px-3 py-2 rounded-md border border-bolt-elements-borderColor">
+      <div className="text-sm text-bolt-elements-textPrimary">{label}</div>
+      <div className="text-xs text-bolt-elements-textTertiary truncate">{detail}</div>
     </div>
   );
 }

@@ -12,9 +12,11 @@
  */
 import { type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
+import { requireAdmin } from '~/lib/.server/supabase/auth';
 import { buildSystemPrompt } from '~/lib/.server/prompt/build';
 import { invalidateActivePrompt } from '~/lib/.server/prompt/active';
 import { getPromptStore } from '~/lib/.server/prompt/store';
+import { AGENT_REPO, SKILLS_REPO } from '~/lib/.server/prompt/sources';
 import { syncSkills } from '~/lib/.server/skills/sync';
 import { getSkillStore } from '~/lib/.server/skills/store';
 import { getPlatformConfig } from '~/lib/.server/agent/config';
@@ -23,11 +25,27 @@ import { getMonitor, ALERT_SIGNALS } from '~/lib/.server/monitoring';
 const logger = createScopedLogger('api.admin.prompt');
 
 /**
- * The admin endpoints mutate what every future generation is built from. Without an ADMIN_TOKEN set
- * they REFUSE to run — an unauthenticated prompt-rebuild endpoint would be a remote takeover of the
- * agent's instructions. "Not configured" here means closed, not open.
+ * The admin endpoints mutate what every future generation is built from — an unauthenticated
+ * prompt-rebuild endpoint would be a remote takeover of the agent's instructions. Two ways in, both
+ * closed by default:
+ *
+ *   1. A logged-in ADMIN SESSION (`requireAdmin`) — this is the Admin panel button (§4.10). Same
+ *      session `isAdmin` wall as every other `/api/admin/*` route; the browser sends its cookie, never
+ *      a server secret.
+ *   2. An `ADMIN_TOKEN` Bearer header — the headless path for CI, cron, and curl, kept because this
+ *      route existed before the dashboard did (§4.3.3) and a scheduled sync has no session.
+ *
+ * Session first so the common case (an admin clicking Refresh) never depends on ADMIN_TOKEN being set.
+ * "Not configured" for the token path still means closed, not open.
  */
-function authorize(request: Request, context: unknown): Response | null {
+async function authorize(request: Request, context: unknown): Promise<Response | null> {
+  try {
+    await requireAdmin(request, context);
+    return null;
+  } catch {
+    // Not an admin session — fall through to the token path (CI / cron / curl).
+  }
+
   const { adminToken } = getPlatformConfig(context);
 
   if (!adminToken) {
@@ -35,10 +53,10 @@ function authorize(request: Request, context: unknown): Response | null {
       {
         error: true,
         message:
-          'Admin endpoints are disabled: ADMIN_TOKEN is not set in the server environment. ' +
-          'Set it (e.g. in .env.local) to enable doc-sync refresh and rollback.',
+          'Admin access required: sign in as an admin, or set ADMIN_TOKEN in the server environment ' +
+          'for headless (CI/cron/curl) access.',
       },
-      503,
+      403,
     );
   }
 
@@ -59,19 +77,44 @@ function json(body: unknown, status = 200): Response {
 }
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
-  const denied = authorize(request, context);
+  const denied = await authorize(request, context);
 
   if (denied) {
     return denied;
   }
 
-  const [versions, skills] = await Promise.all([getPromptStore().list(), getSkillStore().listAll()]);
+  const [versions, skills, activeSkills] = await Promise.all([
+    getPromptStore().list(),
+    getSkillStore().listAll(),
+    getSkillStore().listActive(),
+  ]);
+  const active = versions.find((v) => v.isActive) ?? null;
 
-  return json({ versions, skills });
+  /*
+   * A human-readable summary for the Admin panel (§4.10): the two supply chains — the Agent Reference
+   * (docs) and the Skills — as ONE line each, keyed to the commit that is actually live. `versions` /
+   * `skills` stay for the curl contract (§4.3.3); the UI reads `summary` and never the raw list.
+   *
+   * Skills count is `listActive` (the current version of each DISTINCT skill), NOT `listAll` — the
+   * latter is every version ever synced, so it reports ~14x too many (126 records for 9 skills). Same
+   * reason its commit comes from an active skill: all active skills share the latest sync HEAD.
+   */
+  const summary = {
+    reference: active
+      ? { repo: AGENT_REPO, commitSha: active.lastSeenCommitSha, syncedAt: active.lastSeenAt ?? active.createdAt }
+      : null,
+    skills: {
+      repo: SKILLS_REPO,
+      count: activeSkills.length,
+      commitSha: activeSkills[0]?.sourceCommitSha ?? null,
+    },
+  };
+
+  return json({ versions, skills, summary });
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
-  const denied = authorize(request, context);
+  const denied = await authorize(request, context);
 
   if (denied) {
     return denied;

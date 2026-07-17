@@ -1,15 +1,18 @@
 /**
- * Writing template files into the WebContainer (SPEC §4.4, `spec/binary-files.md`).
+ * Mounting template files into the WebContainer (SPEC §4.4, §4.2.8, `spec/binary-files.md`).
  *
- * Binaries are written here, OUT OF BAND, and never routed through a `boltArtifact`: the artifact is
- * a TEXT protocol — the action runner UTF-8 encodes whatever it is handed, so a PNG round-tripped
- * through it arrives corrupted — and its contents reach the model, which principle 10 forbids.
+ * The whole starter lands in ONE atomic `container.mount(tree)` — never a `boltArtifact` (that is a
+ * TEXT protocol: the action runner UTF-8 encodes whatever it is handed, so a PNG round-tripped
+ * through it arrives corrupted, and its contents reach the model, which principle 10 forbids). The
+ * atomic mount also replaced 64 sequential awaited `fs.writeFile` calls that raced a cold WebContainer
+ * boot — see `mount-tree.ts` for that story. The tree building is pure and lives there; this module
+ * performs the mount and the post-mount visibility wait.
  */
 import type { TemplateFile } from '~/types/template';
-import { base64ToBytes } from '~/lib/binary/binary-files';
 import { webcontainer } from '~/lib/webcontainer';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { createScopedLogger } from '~/utils/logger';
+import { buildFileSystemTree, withFrameworkPublicAssets } from './mount-tree';
 
 const logger = createScopedLogger('TemplateMount');
 
@@ -78,108 +81,50 @@ export async function waitForMountVisible(paths: string[], timeoutMs = MOUNT_VIS
 }
 
 /**
- * Framework-required runtime assets (SPEC §4.4). The preloader ESM-imports the bundled copies under
- * `src/babylon/assets/`, and ALSO fetches these from `public/` at runtime — so they exist in two
- * places on purpose. The starter ships only the bundled copies; creation makes the `public/` ones.
+ * Mount the WHOLE starter into the container in one atomic operation (SPEC §4.4, §4.2.8).
  *
- * They are the canonical smoke test that the binary layer is honest: they were the observed
- * casualties of the upstream binary bug.
+ * 🔴 **This replaced 64 sequential awaited `fs.writeFile` calls, and the replacement is the bug fix,
+ * not a tidy-up.** Per-file writes raced a cold WebContainer boot: on the first project after a page
+ * load, the writes and the boot interleaved and `npm install` ran against an empty `/home/project` —
+ * ENOENT, silently, on the most expensive path in the product (measured live 2026-07-17). A single
+ * `container.mount(tree)` is atomic (it cannot half-apply), faster, and gated on a booted container by
+ * construction. The framework `public/` assets (§4.4) are folded into the tree, so their copy is part
+ * of the same atomic mount rather than a follow-up write with its own race.
+ *
+ * Mounted with NO `mountPoint`: `container.mount` resolves relative to the working directory
+ * (`/home/project`), the same base `container.fs` uses — so the workdir-relative template paths
+ * (`package.json`, `src/main.ts`) land exactly where the old per-file writes put them. Passing the
+ * ABSOLUTE workdir as a mountPoint doubles it to `/home/project/home/project` and throws ENOENT
+ * (found live 2026-07-17) — do not reintroduce a mountPoint here.
+ *
+ * VERIFIED after the fact: the original defect was `npm install` on an empty dir that nothing noticed.
+ * A mount that did not land must be LOUD (throw → the New Project path surfaces it) rather than a
+ * silently broken project. `package.json` at the root is the sentinel every starter has.
+ *
+ * The tree is NOT inlined into the creation artifact — the agent proxy already shows the model the
+ * whole project every turn from the file map, so inlining would send every file TWICE, forever
+ * (§4.2.8). The artifact carries only `npm install` and `npm run dev`.
  */
-const FRAMEWORK_PUBLIC_ASSETS = ['babylon.png', 'spinner.png'];
-
-/** Write binary template files into the container as real bytes. */
-export async function writeBinaryFiles(files: TemplateFile[]): Promise<void> {
-  const container = await webcontainer;
-
-  for (const file of files) {
-    const dir = file.path.split('/').slice(0, -1).join('/');
-
-    try {
-      if (dir) {
-        await container.fs.mkdir(dir, { recursive: true });
-      }
-
-      await container.fs.writeFile(file.path, base64ToBytes(file.content));
-    } catch (error) {
-      logger.error(`Failed to write binary file: ${file.path}`, error);
-      throw new Error(`Failed to mount template asset "${file.path}" — the project would be missing assets.`);
-    }
-  }
-
-  logger.info(`Mounted ${files.length} binary asset(s)`);
-}
-
-/**
- * Write the project's TEXT files into the container (SPEC §4.2.8).
- *
- * The artifact is a channel to the MODEL that happens to also write files; this is the plain
- * filesystem. Since the agent proxy already shows the model the whole project every turn — built
- * from the file map, which the watcher populates from exactly these writes — inlining the files into
- * the creation artifact as well sent every one of them TWICE, forever, in an assistant message that
- * never leaves the history. So nothing is inlined: the starter lands here, and the artifact carries
- * only `npm install` and `npm run dev`.
- *
- * Awaited BEFORE the artifact is returned, so every file is on disk by the time `npm install` runs.
- */
-export async function writeTextFiles(files: TemplateFile[]): Promise<void> {
+export async function mountTemplate(files: TemplateFile[]): Promise<void> {
   if (files.length === 0) {
     return;
   }
 
   const container = await webcontainer;
+  const tree = buildFileSystemTree(withFrameworkPublicAssets(files));
 
-  for (const file of files) {
-    const dir = file.path.split('/').slice(0, -1).join('/');
-
-    try {
-      if (dir) {
-        await container.fs.mkdir(dir, { recursive: true });
-      }
-
-      await container.fs.writeFile(file.path, file.content);
-    } catch (error) {
-      logger.error(`Failed to write file: ${file.path}`, error);
-      throw new Error(`Failed to mount "${file.path}" — the project would be incomplete.`);
-    }
+  try {
+    await container.mount(tree);
+  } catch (error) {
+    logger.error('Failed to mount the starter template', error);
+    throw new Error('Failed to mount the starter template — the project would be incomplete.');
   }
 
-  logger.info(`Mounted ${files.length} text file(s)`);
-}
+  const sentinel = await container.fs.readFile('package.json').catch(() => null);
 
-/**
- * Copy `src/babylon/assets/{babylon,spinner}.png` → `public/`, then VERIFY both landed.
- *
- * Verification is the point: a silent failure here produces a project whose preloader 404s, which is
- * exactly the class of bug the binary work exists to make impossible.
- */
-export async function ensureFrameworkPublicAssets(files: TemplateFile[]): Promise<void> {
-  const container = await webcontainer;
-
-  for (const name of FRAMEWORK_PUBLIC_ASSETS) {
-    const target = `public/${name}`;
-
-    if (files.some((file) => file.path === target)) {
-      continue;
-    }
-
-    const source =
-      files.find((file) => file.isBinary && file.path === `src/babylon/assets/${name}`) ??
-      files.find((file) => file.isBinary && file.path.endsWith(`/assets/${name}`));
-
-    if (!source) {
-      logger.warn(`Framework asset ${name} not found in template — skipping public/ copy`);
-      continue;
-    }
-
-    await container.fs.mkdir('public', { recursive: true });
-    await container.fs.writeFile(target, base64ToBytes(source.content));
-
-    const written = await container.fs.readFile(target).catch(() => null);
-
-    if (!written || written.byteLength === 0) {
-      throw new Error(`Framework asset ${target} did not survive the write — the preloader would 404.`);
-    }
-
-    logger.info(`Copied ${source.path} -> ${target} (${written.byteLength} bytes)`);
+  if (!sentinel || sentinel.byteLength === 0) {
+    throw new Error('The starter template did not mount — the project would be empty.');
   }
+
+  logger.info(`Mounted ${files.length} file(s) atomically`);
 }

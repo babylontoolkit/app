@@ -18,7 +18,7 @@ import type { TemplateFile } from '~/types/template';
 import { WORK_DIR } from '~/utils/constants';
 import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
-import { ensureFrameworkPublicAssets, writeBinaryFiles, writeTextFiles } from './mount';
+import { mountTemplate } from './mount';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import {
   CLASS_LIBRARY_DIR,
@@ -136,23 +136,19 @@ export async function createProjectFromRegistry(options: {
    * the prefix on each of its steps: the measured cost of one "make me a kart racer" was 997,775
    * uncached prompt tokens.
    *
-   * So the whole project — binary AND text — is written straight to the WebContainer, and the
-   * artifact carries only the two shell actions. The filesystem is the filesystem; the file map (which
-   * the watcher populates from these very writes) is the single representation the model ever sees.
-   * Awaited here, so every file is on disk before `npm install` runs.
+   * So the whole project — binary AND text — is mounted straight into the WebContainer in ONE atomic
+   * `container.mount(tree)` (`mountTemplate`), and the artifact carries only the two shell actions. The
+   * filesystem is the filesystem; the file map (which the watcher populates from this mount) is the
+   * single representation the model ever sees. Atomic and awaited here, so the whole project is on disk
+   * — verified — before `npm install` runs, with no per-file boot race (see `mount-tree.ts`).
    */
-  const binaries = projectFiles.filter((file) => file.isBinary);
-  const textFiles = projectFiles.filter((file) => !file.isBinary);
+  await mountTemplate(projectFiles);
 
-  if (binaries.length > 0) {
-    await writeBinaryFiles(binaries);
-  }
-
-  await writeTextFiles(textFiles);
-  await ensureFrameworkPublicAssets(binaries);
+  const binaryCount = projectFiles.filter((file) => file.isBinary).length;
 
   logger.info(
-    `Seeded "${title}" from ${entry.id} → ${className} (${textFiles.length} text, ${binaries.length} binary, 0 inlined)`,
+    `Seeded "${title}" from ${entry.id} → ${className} ` +
+      `(${projectFiles.length - binaryCount} text, ${binaryCount} binary, 0 inlined)`,
   );
 
   const assistantMessage = `Setting up your project from the ${entry.title} starter.
@@ -164,7 +160,7 @@ export async function createProjectFromRegistry(options: {
 
   return {
     assistantMessage,
-    userMessage: buildCreationBrief({ entry, title, className, prompt, images: listAvailableImages(binaries) }),
+    userMessage: buildCreationBrief({ entry, title, className, prompt, images: listAvailableImages(projectFiles) }),
     className,
 
     /*
