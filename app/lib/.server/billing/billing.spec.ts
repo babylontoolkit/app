@@ -152,11 +152,12 @@ describe('rate table', () => {
        * ⚠️ Each provider's OWN default, not one global `PLATFORM_MODEL`.
        *
        * This asserted `providerRates()[provider][PLATFORM_MODEL]` while the platform model was one
-       * constant shared by both. It no longer is: `DEFAULT_MODEL` is `claude-opus-4-7` because KIE
-       * cannot return 4.8's thinking text, which is a fact about KIE's adapter and says nothing about
-       * Anthropic — where we have no 4.7 rates at all. Demanding every provider price the OTHER
-       * provider's model is a question with no useful answer; what must hold is that whatever a
-       * provider will actually be asked to run, it can price.
+       * constant shared by both. That coupling is wrong in principle even when the two happen to agree
+       * (as they do today — both default to `claude-opus-4-8`): a provider's default is a fact about
+       * THAT provider's catalogue and pricing, and KIE lists rows Anthropic has never heard of
+       * (`claude-opus-4-7`, `claude-fable-5` — see `NO_ANTHROPIC_ROW` below). Demanding every provider
+       * price the OTHER provider's model is a question with no useful answer; what must hold is that
+       * whatever a provider will actually be asked to run, it can price.
        */
       const model = PLATFORM_MODEL_BY_PROVIDER[provider];
       expect(providerRates()[provider][model], `${provider} cannot price its own default ${model}`).toBeDefined();

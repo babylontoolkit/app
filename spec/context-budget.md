@@ -564,7 +564,26 @@ byte-identical starter file context — because the blocks sit ahead of the file
 > The general lesson is the one this session kept re-learning: **a conclusion drawn from one turn type is
 > not a conclusion about the system.**
 
-### 🔴 Edit turns — the biggest open number in the product
+### ✅ Edit turns — was the biggest open number; FIXED 2026-07-17
+
+> **RESOLVED.** The churn diagnosed below was real, and the fix is the one this section predicted:
+> **sticky, append-only, first-seen-ordered block routing per conversation** (`selectStickyBlocks` in
+> `prompt/sources.ts`, `stickySkillNames` in `agent/preload-skills.ts`). Verified live: four turns on one
+> project routed an **identical** block list, and the trivial edit that cost 160 credits came back at
+> **18**. A warm edit now measures **~11 credits** — a $50/6,000-credit pack is **~545 edits**, not 13.
+>
+> **The diagnosis below is kept as-is because it is why the fix exists** — but its numbers are PRE-FIX.
+> Do not quote 13-vs-92, or "6–12× the floor", as current behaviour.
+>
+> Two things the fix does NOT cover, both correct and neither churn:
+> - **The file-context block still writes when files change.** That is inherent — you cannot cache what
+>   changed — and it is why that block is placed LAST, so it only ever invalidates itself.
+> - **KIE warms its cache per backend**, so a NEW prefix misses ~4 times in its first ~13 requests and
+>   then holds at 0 (measured 2026-07-17: 4/29 cold, 0/14 warm, against an Anthropic control of 0/29).
+>   Our largest block — the base prompt — is byte-identical across every user and project, so it warms
+>   once and stays warm on real traffic. ⚠️ A SIX-request sample of this was misread as "KIE randomly
+>   drops ~⅓ of cache entries" and nearly bought a 2.5× provider switch; that sample sat entirely inside
+>   the warmup window. **A miss rate measured over a warmup is not a miss rate.**
 
 **An edit costs about what building the whole game costs.** Measured 2026-07-16 (see the edit table
 above): after a **513-credit** creation that produced a complete playable game, four edits billed
@@ -591,15 +610,36 @@ way**. A churning edit does not dent the P&L; it burns the USER's balance: **~13
 of ~92.** That makes it a retention/value problem, invisible to every revenue metric we have — aggregate
 usage would show healthy, on-margin revenue right up until users leave.
 
-**Candidate fix — measure, do not assume.** Reordering is the obvious move and may be wrong (it could
-help edits and hurt creations, where blocks ARE stable and files are new). The likelier fix is **sticky
-+ append-only + sorted block routing per conversation**, so the prefix only ever GROWS and a new block
-tacks onto a cached prefix instead of rewriting it. That is this file's own lesson — *"the skills index
-is sorted / prompt builds are hash-skipped because an unstable prefix busts the cache on every
-generation"* — never applied to on-demand blocks.
+**✅ THE FIX THAT SHIPPED (2026-07-17): sticky + append-only + first-seen-ordered block routing per
+conversation**, so the prefix only ever GROWS and a newly-needed block tacks onto a cached prefix instead
+of rewriting it. That is this file's own lesson — *"the skills index is sorted / prompt builds are
+hash-skipped because an unstable prefix busts the cache on every generation"* — finally applied to
+on-demand blocks. **Reordering was NOT done**, and the caution above is why: it could have helped edits
+and hurt creations, and sticky routing made the question moot by removing the churn rather than moving it.
 
-**Caveat: four turns, one session.** The mechanism is clear and edit 3 bounds the win; the magnitude
-needs more turns.
+Both routers are pure and pinned (`sticky-blocks.spec.ts`, `preload-skills.spec.ts`). The two properties
+that matter, and the second is the one that is easy to miss:
+
+- **The set only ever grows** — a block any earlier message needed stays.
+- **It grows at the END.** `selectOnDemandBlocks` filters a static table, so it returns DECLARATION
+  order — meaning a block matched for the first time on turn 2 that happens to be declared early would be
+  inserted at the FRONT, shifting every byte behind it. That is the same cache miss wearing a disguise.
+  Ordering is by FIRST SEEN, and the spec asserts the byte-prefix property directly: every turn's list
+  must be a prefix of the next turn's, not merely a subset.
+
+**Caveat: four turns, one session — still true of the MAGNITUDE.** The mechanism is proven and the fix is
+verified live, but the size of the win rests on a small sample. It firms up on its own as sessions
+accumulate; no action needed.
+
+**⚠️ While fixing this, the audit found a worse bug the churn was hiding: we were sending FIVE
+`cache_control` breakpoints, and the API's hard maximum is four.** Verified live — 4 → OK, 5 → `HTTP 400
+"A maximum of 4 blocks with cache_control may be provided. Found 5."` So every `/slash` turn that also
+routed a doc block was a **dead generation**: 0 in, 0 out, before a single token. It shipped because
+`CACHE_CONTROL`'s doc comment said *"we spend all four — there are none spare"*, which was TRUE WHEN
+WRITTEN; the pre-loaded-skills block was added later with its own breakpoint and nobody re-counted. The
+invoked skill and pre-loaded skills now share ONE block, so five is unreachable **by construction** rather
+than by arithmetic someone must redo. See `agent/cache-breakpoints.spec.ts`. **A sentence in a doc comment
+cannot fail. Budgets belong in a test.**
 
 **Bolt.diy has neither ingredient** (no on-demand blocks, no cache control anywhere in
 `app/lib/.server/llm/`), so it pays full uncached input every turn — ~$0.60 for a comparable project.

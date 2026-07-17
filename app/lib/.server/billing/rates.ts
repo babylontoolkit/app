@@ -100,10 +100,13 @@ export const MODEL_RATES: Record<string, ModelRates> = {
 /**
  * KIE.ai's rates for the same models (`providers/kie.ts`), USD per million tokens.
  *
- * A uniform **0.4x** of Anthropic list across all four token classes — input $2 vs $5, output $10 vs
- * $25 — and the cache multipliers are Anthropic's own (0.1x read, 2.0x the 1-hour write), applied to
- * the discounted base. That uniformity is why the switch has no mix effects; `billing.spec.ts` pins it
- * so a future vendor reprice that breaks it cannot pass silently.
+ * ⚠️ **EVERY ROW IS LOOKED UP, NEVER DERIVED FROM A RATIO.** `claude-opus-4-8` happens to be a uniform
+ * 0.4x of Anthropic list ($2 vs $5 in, $10 vs $25 out), and it is tempting to read that as "KIE is 0.4x".
+ * It is not a rule: 4.7 is ~0.285x and fable-5 is 2x Anthropic's Opus list — KIE resells many vendors at
+ * prices only their console shows. A ratio that holds for one row is a coincidence, and the moment it is
+ * treated as a formula the next model is mispriced silently. The cache multipliers ARE shared (0.1x read,
+ * 2.0x the 1-hour write, applied to each row's own discounted base) and that one IS measured — see the
+ * note below the table.
  *
  * ⚠️ **These are the rates we ACTUALLY PAY, and that is the entire contract of this file** — "the
  * honest number, before any margin". Credits are cost-proportional (`creditsForUsage`), so leaving the
@@ -111,20 +114,29 @@ export const MODEL_RATES: Record<string, ModelRates> = {
  * user ~2.5x the credits their generation actually cost us. That is a pricing decision, and it belongs
  * in `CREDIT_MARGIN` where it is visible and asserted — never smuggled in as a wrong cost.
  *
- * The operator's choice here was to PASS THE DISCOUNT THROUGH: margin stays 3.34, so profit per pack is
- * unchanged and the same $50 buys ~2.5x more work. That is not charity — `CREDIT_MARGIN x pack $/credit`
- * math (see `stripe.ts`) put a $50/6,000-credit plan at ~13 edits/month against measured edit turns,
- * which is not a viable product. At KIE rates the same pack is ~32 edits.
+ * The operator's choice was to PASS THE DISCOUNT THROUGH: margin stays 3.34, so profit per pack is
+ * unchanged and the same $50 buys ~2.5x more work.
+ *
+ * ⚠️ **Do not re-derive the edits-per-plan figure from this table alone — it is dominated by the CACHE,
+ * not by these rates.** An earlier version of this comment quoted "~13 edits/month at Anthropic, ~32 at
+ * KIE" and both numbers are dead: they were measured while per-message block routing churned the cached
+ * prefix, so every edit paid a ~110k cache WRITE at 2x. With sticky routing (`selectStickyBlocks`) a warm
+ * edit on this row measures ~11 credits — a $50/6,000-credit pack is **~545 edits**, not 32. A stale
+ * number here reads as "the plan is unviable" and invites a reprice that fixes nothing.
  */
 export const KIE_MODEL_RATES: Record<string, ModelRates> = {
   /**
-   * **The platform default** (`DEFAULT_MODEL`), and the only model on KIE that both codes at the top
-   * tier and returns THINKING TEXT (266 chars measured, against 4.8's 0 in every shape tried).
+   * NOT the platform default — priced and listed so `LLM_MODEL`/`KIE_DEFAULT_MODEL` can select it, and
+   * because an unpriced model bills at the provider's most expensive row (`ratesFor`).
    *
-   * Rates from the operator's KIE console, 2026-07-17: $1.425 in / $7.15 out. Cheaper than 4.8's
-   * $2/$10 — it is a release behind — so the visible reasoning costs nothing. Note this is ~0.285x of
-   * Anthropic's Opus list, NOT the uniform 0.4x that 4.8 carries: KIE discounts older models harder,
-   * which is exactly why a rate row is looked up and never derived from a ratio.
+   * Rates from the operator's KIE console, 2026-07-17: $1.425 in / $7.15 out — ~0.285x of Anthropic's
+   * Opus list, a harder discount than 4.8's 0.4x. It is a release behind, hence cheaper.
+   *
+   * It is the only Opus on KIE that returns THINKING TEXT (266 chars measured, against 4.8's 0 in every
+   * shape tried) — but that did not win it the default. KIE's accounting for this row is BROKEN: it
+   * reports `cache_creation_input_tokens: 0` while charging 2x for the write, so its usage numbers cannot
+   * be settled against. `claude-opus-4-8` is the only KIE row that accounts honestly (10,004 reported =
+   * 8.02 credits charged, exact), and being able to bill correctly outranks a visible reasoning panel.
    */
   'claude-opus-4-7': {
     inputPerMTok: 1.425,
@@ -133,6 +145,25 @@ export const KIE_MODEL_RATES: Record<string, ModelRates> = {
     cacheWritePerMTok: 2.85, // 2x — the 1h tier, matching `proxy.ts`
   },
 
+  /**
+   * **THE PLATFORM DEFAULT** (`DEFAULT_MODEL` in `app/utils/constants.ts`, with `LLM_PROVIDER=KIE`).
+   *
+   * It wins on ACCOUNTING, not on price — 4.7 is cheaper. This is the only KIE row whose usage numbers
+   * can be settled against: a probe reporting 10,004 write tokens was charged 8.02 credits, exact to the
+   * published $2/$10. Both other rows report `cache_creation_input_tokens: 0` while charging 2x for the
+   * write, which would make every generation on them bill from numbers we know to be wrong.
+   *
+   * Caching verified on this row against the live vendor, 2026-07-17 (30 byte-identical requests, then 15
+   * more): KIE warms per backend — misses cluster in the first ~13 requests to a NEW prefix (4/29, at
+   * 2/4/7/13) and then hold at 0/14 once warm, against an Anthropic control of 0/29. So the warmup is
+   * per distinct prefix, and our largest cached block (the base prompt) is byte-identical for every user
+   * and project — it warms once and stays warm on any real traffic. ⚠️ An earlier reading of a SIX-request
+   * sample called this "KIE randomly drops ~1/3 of cache entries" and nearly bought a 2.5x provider switch
+   * on it; that sample sat entirely inside the warmup window. Steady-state miss rate is ~0.
+   *
+   * KNOWN VENDOR BUG: returns 0 chars of thinking text on this row in every shape tried (4.7 gives 266,
+   * fable-5 ~224). It thinks — it just will not show it, so the `ThinkingPanel` stays empty on KIE.
+   */
   'claude-opus-4-8': {
     inputPerMTok: 2.0,
     outputPerMTok: 10.0,

@@ -36,9 +36,12 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * against 393/831/574 for cold ones (CLAUDE.md "THE BIGGEST OPEN NUMBER"), i.e. ~13 edits/month on a
  * $50 plan versus ~92. A model that cannot cache honestly cannot be the default at any quality.
  *
- * ⚠️ **4.8 does NOT by itself fix that number** — the misses are caused by `selectOnDemandBlocks`
- * churning the prefix per message, which is OUR bug and model-independent. 4.8 makes a warm prefix
- * possible; it does not make one happen.
+ * ✅ **The churn that caused those cold turns is FIXED** (`selectStickyBlocks` + `stickySkillNames`,
+ * 2026-07-17). It was OUR bug and model-independent — `selectOnDemandBlocks` re-routed per message, so
+ * the user's PHRASING re-ordered blocks sitting ahead of the ~110k file context and invalidated it. 4.8
+ * only made a warm prefix possible; sticky routing is what makes one happen. Post-fix, a warm edit on KIE
+ * measures ~11 credits (~545 per $50 pack). ⚠️ The 13-vs-92 figures above are the PRE-FIX measurement,
+ * kept because they are why this model was chosen — do not quote them as current.
  *
  * The accepted cost: on KIE we pay full output rate for reasoning we cannot show (§4.2a's
  * `display: 'omitted'` pathology). Revisit the day KIE's adapter covers 4-8 — everything else is built.

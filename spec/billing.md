@@ -141,6 +141,12 @@ against a cached prefix) and a weighting factor is a pricing decision we have no
   ~92. That makes it a **retention and value problem, not a solvency one**, and it means no pricing
   change can fix it and no ledger alarm will ever fire on it. The only fix is to stop the prefix churn.
 
+  **✅ FIXED 2026-07-17 — sticky block routing** (`selectStickyBlocks` / `stickySkillNames`; see
+  `spec/context-budget.md` §"Edit turns"). A warm edit now measures **~11 credits (~545 per $50 pack)**,
+  and four consecutive live turns routed an identical block list. **The 13-vs-92 figures above are PRE-FIX
+  and must not be quoted as current.** The margin claim is unchanged — it was never the problem, which is
+  exactly why nothing alarmed for as long as it did.
+
 - **A pathology can be invisible in aggregate revenue and lethal to the product.** This one bills a
   perfect margin on every single generation while making the plan worthless — which is precisely why
   §4.10 must diagnose spend (`steps`, cache read vs written) rather than chart it. Aggregate usage would
