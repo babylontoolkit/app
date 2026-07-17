@@ -105,7 +105,7 @@ export const PLATFORM_MODEL = DEFAULT_MODEL;
  */
 export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = {
   Anthropic: DEFAULT_MODEL,
-  KIE: 'claude-opus-4-8',
+  KIE: DEFAULT_MODEL,
 };
 
 /**

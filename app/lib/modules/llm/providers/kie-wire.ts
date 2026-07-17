@@ -89,6 +89,18 @@ export function kieFetch(baseFetch: typeof fetch = fetch): typeof fetch {
  * Do not remove 4-8 without saying which exit was taken.
  */
 export const KIE_MODELS: ModelInfo[] = [
+  /*
+   * The platform default (`DEFAULT_MODEL`). It MUST be listed here, not merely priced: `stream-text.ts`
+   * falls back to `modelsList[0]` for a model it cannot find, so an unlisted default would silently run
+   * a different model than the one settlement charges for. See `kieEnvModel` below.
+   */
+  {
+    name: 'claude-opus-4-7',
+    label: 'Claude Opus 4.7 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
   {
     name: 'claude-opus-4-8',
     label: 'Claude Opus 4.8 (KIE)',

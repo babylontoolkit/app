@@ -8,16 +8,43 @@ export const MODEL_REGEX = /^\[Model: (.*?)\]\n\n/;
 export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
 
 /*
- * The platform model (SPEC §4.2a). Credits-mode generations always use this — swapping the
- * platform model means editing this one constant. Deliberately NOT an env var: the value must
- * always match a `staticModels` entry, and a typo'd env value would 404 at the first generation.
+ * The platform's default model (SPEC §4.2a) — the value used when NO env var and NO SSM property is
+ * set. `LLM_MODEL` overrides it at runtime (validated against the rate tables — see
+ * `agent/config.ts`); this is what a bare `docker run` with an empty environment gets.
  *
- * This is a GAME-CODING product, so the default is the strongest coding model — Opus 4.8
- * (`claude-opus-4-8`). It costs ~1.67x Sonnet 5 per token (input $5 vs $3, output $25 vs $15),
- * but the billing path is fully model-aware: `ratesFor()` prices every generation at the
- * ACTUAL model's rates and `creditsForUsage()` applies the margin on top, so the profit-margin
- * percentage is preserved automatically at the higher unit cost — nothing else needs to change
- * to "burn enough credits" for Opus (see `app/lib/.server/billing/rates.ts`).
+ * ## Why Opus 4.8, despite it being the ONE model KIE cannot stream thinking text for
+ *
+ * This was 4.7 for exactly one turn (2026-07-17), because 4.7 is the only top-tier model whose
+ * thinking text KIE's adapter returns (266 chars measured, against 4.8's 0 in every shape tried). It
+ * was reverted the moment the money was measured, and the reason is worth keeping:
+ *
+ * 🔴 **On KIE, `claude-opus-4-8` is the ONLY model that accounts for cached tokens.** With a ~5k
+ * `system` block and `cache_control`, KIE reports:
+ *
+ * | model      | reported in | reported cache write | actually CHARGED |
+ * |------------|-------------|----------------------|------------------|
+ * | opus-4-8   | 14          | **10,004** ✅        | 8.02 cr — exact  |
+ * | opus-4-7   | 13          | **0** 🔴             | 3.4 cr (2x = a write) |
+ * | fable-5    | 13          | **0** 🔴             | 9.53 cr (2x = a write) |
+ *
+ * 4.7 and Fable are BILLED for the cache write and REPORT nothing. We settle from reported usage
+ * (§4.6), so we would charge the user for output only and silently eat ~$0.32 of input on every
+ * creation — a loss that grows with the prefix, throws nothing, and fails no test. A visible thinking
+ * window is not worth an invisible per-generation loss.
+ *
+ * Caching is not a nicety here, it is the product's unit economics: a warm edit measured **65 credits**
+ * against 393/831/574 for cold ones (CLAUDE.md "THE BIGGEST OPEN NUMBER"), i.e. ~13 edits/month on a
+ * $50 plan versus ~92. A model that cannot cache honestly cannot be the default at any quality.
+ *
+ * ⚠️ **4.8 does NOT by itself fix that number** — the misses are caused by `selectOnDemandBlocks`
+ * churning the prefix per message, which is OUR bug and model-independent. 4.8 makes a warm prefix
+ * possible; it does not make one happen.
+ *
+ * The accepted cost: on KIE we pay full output rate for reasoning we cannot show (§4.2a's
+ * `display: 'omitted'` pathology). Revisit the day KIE's adapter covers 4-8 — everything else is built.
+ *
+ * ⚠️ Changing this means adding the new model's rate row first (`billing/rates.ts`) — a price cannot be
+ * guessed, only looked up — and re-checking `grantHeadroom()`.
  */
 export const DEFAULT_MODEL = 'claude-opus-4-8';
 export const PROMPT_COOKIE_KEY = 'cachedPrompt';

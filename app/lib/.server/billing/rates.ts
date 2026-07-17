@@ -117,6 +117,22 @@ export const MODEL_RATES: Record<string, ModelRates> = {
  * which is not a viable product. At KIE rates the same pack is ~32 edits.
  */
 export const KIE_MODEL_RATES: Record<string, ModelRates> = {
+  /**
+   * **The platform default** (`DEFAULT_MODEL`), and the only model on KIE that both codes at the top
+   * tier and returns THINKING TEXT (266 chars measured, against 4.8's 0 in every shape tried).
+   *
+   * Rates from the operator's KIE console, 2026-07-17: $1.425 in / $7.15 out. Cheaper than 4.8's
+   * $2/$10 — it is a release behind — so the visible reasoning costs nothing. Note this is ~0.285x of
+   * Anthropic's Opus list, NOT the uniform 0.4x that 4.8 carries: KIE discounts older models harder,
+   * which is exactly why a rate row is looked up and never derived from a ratio.
+   */
+  'claude-opus-4-7': {
+    inputPerMTok: 1.425,
+    outputPerMTok: 7.15,
+    cacheReadPerMTok: 0.1425, // 0.1x — the multiplier is MEASURED on KIE, see the note below
+    cacheWritePerMTok: 2.85, // 2x — the 1h tier, matching `proxy.ts`
+  },
+
   'claude-opus-4-8': {
     inputPerMTok: 2.0,
     outputPerMTok: 10.0,

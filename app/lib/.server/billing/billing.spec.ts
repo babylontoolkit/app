@@ -147,7 +147,19 @@ describe('rate table', () => {
   it('has a rate table for every provider the platform can be switched to', () => {
     for (const provider of PLATFORM_PROVIDERS) {
       expect(providerRates()[provider], `${provider} can be selected but has no rates`).toBeDefined();
-      expect(providerRates()[provider][PLATFORM_MODEL], `${provider} cannot price the platform model`).toBeDefined();
+
+      /*
+       * ⚠️ Each provider's OWN default, not one global `PLATFORM_MODEL`.
+       *
+       * This asserted `providerRates()[provider][PLATFORM_MODEL]` while the platform model was one
+       * constant shared by both. It no longer is: `DEFAULT_MODEL` is `claude-opus-4-7` because KIE
+       * cannot return 4.8's thinking text, which is a fact about KIE's adapter and says nothing about
+       * Anthropic — where we have no 4.7 rates at all. Demanding every provider price the OTHER
+       * provider's model is a question with no useful answer; what must hold is that whatever a
+       * provider will actually be asked to run, it can price.
+       */
+      const model = PLATFORM_MODEL_BY_PROVIDER[provider];
+      expect(providerRates()[provider][model], `${provider} cannot price its own default ${model}`).toBeDefined();
     }
   });
 
@@ -195,7 +207,7 @@ describe('KIE rates', () => {
    * $10/$50 — that is a prediction, not a price, and a price cannot be guessed. If Anthropic's fable-5
    * rates ever get added, delete this exemption and let the ratio test judge it.
    */
-  const NO_ANTHROPIC_ROW = new Set(['claude-fable-5']);
+  const NO_ANTHROPIC_ROW = new Set(['claude-fable-5', 'claude-opus-4-7']);
 
   it('is a uniform 0.4x of Anthropic list across all four token classes', () => {
     for (const [model, kie] of Object.entries(KIE_MODEL_RATES)) {
@@ -230,9 +242,14 @@ describe('KIE rates', () => {
    * more work and the margin per pack is untouched. If someone later wants the discount as profit, the
    * lever is `CREDIT_MARGIN`, not this table — and this test is where they will find that out.
    */
+  /*
+   * Compares `claude-opus-4-8` — the one model BOTH providers price — rather than the platform model,
+   * which is now per-provider. Comparing a model Anthropic cannot price would silently exercise
+   * `ratesFor`'s most-expensive fallback and measure nothing.
+   */
   it('makes the same generation cost ~2.5x fewer credits than Anthropic', () => {
-    const onAnthropic = creditsForUsage(COLD_CREATION_USAGE, PLATFORM_MODEL, 'Anthropic', config);
-    const onKie = creditsForUsage(COLD_CREATION_USAGE, PLATFORM_MODEL, 'KIE', config);
+    const onAnthropic = creditsForUsage(COLD_CREATION_USAGE, 'claude-opus-4-8', 'Anthropic', config);
+    const onKie = creditsForUsage(COLD_CREATION_USAGE, 'claude-opus-4-8', 'KIE', config);
 
     expect(onAnthropic / onKie).toBeCloseTo(2.5, 1);
   });
