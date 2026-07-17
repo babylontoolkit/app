@@ -350,10 +350,19 @@ describe('grant integrity and payment idempotency (partial unique indexes, not a
 describe('ordering is monotonic, not wall-clock (migration 0003)', () => {
   /*
    * THE EXACT SEQUENCE THE PROXY RUNS ON A FAILED GENERATION, back-to-back inside one `finally`:
-   * settle the debit, then auto-refund it. These three rows reliably share a timestamp. Before the fix
-   * this produced 9750 — the refund read the GRANT row and computed a balance that skipped the debit.
+   * settle the debit, then auto-refund it. Before the fix this produced 9750 — the refund read the GRANT
+   * row and computed a balance that skipped the debit.
+   *
+   * ⚠️ This test does NOT prove the timestamps tie, and it never did. Its comment used to claim "these
+   * three rows reliably share a timestamp", which is not something the test establishes OR controls —
+   * `now()` ties only if the machine gets through three transactions inside one clock tick, and measured
+   * on this hardware it does NOT (three appends, three distinct timestamps). The claim was free to be
+   * wrong because the test passes either way: `balance_after` is computed by the WRITER under a lock and
+   * ordered by `seq`, so a tie is irrelevant to it. What this test actually pins is that the real
+   * proxy sequence chains to the right balance. The tie itself is proven deterministically below, by
+   * forcing it — see 'cannot identify the latest row by created_at'.
    */
-  it('derives the right balance for a debit and its auto-refund written in the same instant', async () => {
+  it('derives the right balance for a debit and its auto-refund', async () => {
     await append({ delta: 10_000, reason: 'grant' });
     await createGeneration('gen_fail');
     await append({ delta: -250, reason: 'generation', generationId: 'gen_fail' });
@@ -362,8 +371,12 @@ describe('ordering is monotonic, not wall-clock (migration 0003)', () => {
     expect(await balance()).toBe(10_000);
   });
 
-  /* Many appends inside one clock tick must still chain correctly, every time. */
-  it('chains balances correctly across a burst of appends that share a timestamp', async () => {
+  /*
+   * A burst of appends must chain correctly, every time — whether or not they land in the same clock
+   * tick. (This title used to say "that share a timestamp"; like the test above it neither forces nor
+   * checks that, and it passes either way. `seq` is what makes the chain right.)
+   */
+  it('chains balances correctly across a burst of rapid appends', async () => {
     for (let i = 0; i < 10; i++) {
       await append({ delta: 100, reason: 'promo' });
     }
@@ -378,22 +391,73 @@ describe('ordering is monotonic, not wall-clock (migration 0003)', () => {
     expect(rows.map((r) => r.balance_after)).toEqual([100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]);
   });
 
-  /* The premise of the bug: timestamps really do tie. If this ever stops being true, keep `seq` anyway. */
-  it('shows that created_at is NOT a usable ordering key — rows tie on it', async () => {
-    for (let i = 0; i < 5; i++) {
-      await append({ delta: 100, reason: 'promo' });
-    }
+  /**
+   * `created_at` is NOT a usable ordering key — and this proves the CONSEQUENCE, not the premise.
+   *
+   * ⚠️ THIS TEST USED TO BE FLAKY, AND THE REASON IS THE POINT. It appended five rows and asserted
+   * `count(distinct created_at) < 5` — i.e. it asserted that a RACE OCCURRED. `created_at` defaults to
+   * `now()` (the TRANSACTION timestamp), so whether two appends tie depends on whether the machine got
+   * through them inside one clock tick. Fast machine: they tie, green. Loaded machine (or a cold first
+   * run): the clock ticks between them, five distinct timestamps, RED. It failed roughly one run in
+   * three — on a MONEY path, which is the worst place to train someone that a red suite is normal.
+   *
+   * **A test that hopes for a race is not a test of the race.** So: force the tie instead of waiting for
+   * it. The rows below are REAL — written by the real `append_ledger_entry`, with real chained balances —
+   * and then their timestamps are collapsed to one value, simulating exactly what a fast machine produces
+   * on its own. Deterministic, and it asserts something strictly stronger than the old version did.
+   *
+   * The sequence is the one the proxy runs in a single `finally` on a failed generation: settle the
+   * debit, then auto-refund it. Balance chain: 10000 -> 9750 -> 10000.
+   */
+  it('cannot identify the latest row by created_at — the tie has two different balances', async () => {
+    await append({ delta: 10_000, reason: 'grant' });
+    await createGeneration('gen_fail');
+    await append({ delta: -250, reason: 'generation', generationId: 'gen_fail' });
+    await append({ delta: 250, reason: 'refund', generationId: 'gen_fail' });
 
-    const { rows } = await db.query<{ n: number }>(
-      `select count(distinct created_at)::int as n from public.credit_ledger where user_id = $1`,
+    /*
+     * Collapse the clock. The ledger is append-only (`forbid_ledger_update`), so the trigger comes off
+     * for exactly this write and goes straight back on — the same thing migration 0003 does to backfill.
+     * That the trigger has to be lifted at all is itself the append-only rule being real.
+     */
+    await db.exec(`
+      alter table public.credit_ledger disable trigger forbid_ledger_update;
+      update public.credit_ledger set created_at = timestamptz '2026-07-17 12:00:00+00';
+      alter table public.credit_ledger enable trigger forbid_ledger_update;
+    `);
+
+    const { rows: tied } = await db.query<{ n: number; distinct_balances: number }>(
+      `select count(*)::int as n, count(distinct balance_after)::int as distinct_balances
+         from public.credit_ledger
+        where user_id = $1
+          and created_at = (select max(created_at) from public.credit_ledger where user_id = $1)`,
       [USER],
     );
 
     /*
-     * Five rows, but far fewer distinct timestamps — which is exactly why `id` (a random uuid) was
-     * deciding "latest".
+     * 🔴 The kill shot. Three rows share the maximum timestamp, and they carry TWO DIFFERENT balances.
+     * So "the latest row by created_at" is not a wrong answer — it is not an answer at all. The tiebreak
+     * fell to `id`, a random uuid, which meant the balance read was a COIN FLIP between 10000 and 9750.
      */
-    expect(rows[0].n).toBeLessThan(5);
+    expect(tied[0].n, 'the rows must actually tie for this test to mean anything').toBe(3);
+    expect(tied[0].distinct_balances, 'ordering by created_at is ambiguous — multiple balances qualify').toBe(2);
+
+    /*
+     * And 9750 — the historical wrong balance, the debit applied and its refund silently skipped — is
+     * one of the answers that ordering by created_at can legitimately return.
+     */
+    const { rows: reachable } = await db.query<{ balance_after: number }>(
+      `select distinct balance_after from public.credit_ledger
+        where user_id = $1
+          and created_at = (select max(created_at) from public.credit_ledger where user_id = $1)
+        order by balance_after`,
+      [USER],
+    );
+
+    expect(reachable.map((r) => r.balance_after)).toEqual([9750, 10_000]);
+
+    /* `seq` has no tie to break. It is the only reason the balance is 10000 every time. */
+    expect(await balance()).toBe(10_000);
   });
 
   it('assigns seq in insert order', async () => {
