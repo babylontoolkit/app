@@ -105,16 +105,37 @@ export function getPlatformConfig(context?: unknown): PlatformConfig {
  * operator thought they were paying.
  */
 export function requirePlatformKey(config: PlatformConfig): string {
-  const key = config.provider === 'KIE' ? config.kieApiKey : config.anthropicApiKey;
+  const key = platformKeyFor(config);
 
   if (!key) {
-    const envVar = config.provider === 'KIE' ? 'KIE_API_KEY' : 'ANTHROPIC_API_KEY';
-
     throw new NotConfiguredError(
       `The platform LLM key for ${config.provider}`,
-      `Set ${envVar} in the server environment (.env.local for local development).`,
+      `Set ${PLATFORM_KEY_ENV[config.provider]} in the server environment (.env.local for local development).`,
     );
   }
 
   return key;
+}
+
+/** Which env var holds each provider's platform key. The single source for "which key do I need". */
+const PLATFORM_KEY_ENV: Record<PlatformProviderName, string> = {
+  Anthropic: 'ANTHROPIC_API_KEY',
+  KIE: 'KIE_API_KEY',
+};
+
+/** The configured provider's key, or undefined. Server-only — callers ACT on it, never emit it (§5). */
+function platformKeyFor(config: PlatformConfig): string | undefined {
+  return config.provider === 'KIE' ? config.kieApiKey : config.anthropicApiKey;
+}
+
+/**
+ * Is the configured provider's key present? The BOOLEAN form of `requirePlatformKey` — "is a key
+ * configured?" is a boolean, never the value (§5).
+ *
+ * It exists so the health report cannot keep its own copy of the which-key-does-this-provider-need
+ * rule. It had one, hardcoded to Anthropic, and it reported a KIE deploy with no KIE key as healthy
+ * AND ready — which is precisely the check §9a relies on to catch a missing credential.
+ */
+export function hasPlatformKey(config: PlatformConfig): boolean {
+  return Boolean(platformKeyFor(config));
 }

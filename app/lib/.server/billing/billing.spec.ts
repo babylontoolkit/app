@@ -180,8 +180,21 @@ describe('the signup grant buys the hook', () => {
    * It is also completely silent — the creation succeeds, and the product just quietly has no second
    * step. This test is the tripwire on tuning either number without the other.
    */
+  /*
+   * ⚠️ Reads the ACTUALLY CONFIGURED provider, not `DEFAULT_PLATFORM_PROVIDER`.
+   *
+   * `env()` falls back to `process.env` and vitest loads `.env.local`, so `getBillingConfig()` already
+   * sees the developer's real `SIGNUP_GRANT_CREDITS`. Pinning the provider to the code default while
+   * the grant comes from the environment compares two halves of DIFFERENT configurations — which is
+   * how this test failed at 1.04x on a machine that had correctly set `LLM_PROVIDER=KIE` and 500
+   * together. Both halves must come from the same place, or the guard reports on a config nobody runs.
+   *
+   * Reading both from the environment is what makes it honest in every world: CI has no `.env.local`
+   * (Anthropic + 1000 -> 2.1x), a KIE machine reads KIE + 500 -> 2.4x, and the one combination that
+   * must never ship — Anthropic + 500 -> 1.04x — is the one that fails.
+   */
   it('covers a cold creation with room to iterate, on the configured provider', () => {
-    const headroom = grantHeadroom(config, PLATFORM_MODEL, DEFAULT_PLATFORM_PROVIDER);
+    const headroom = grantHeadroom(config, PLATFORM_MODEL, getPlatformProvider());
 
     expect(headroom).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
   });

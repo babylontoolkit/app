@@ -16,7 +16,7 @@
  * call. It is safe to expose unauthenticated: it reveals which subsystems are configured, which is the
  * same thing the credits-vs-pro UI already reflects, and never a credential.
  */
-import { getPlatformConfig } from '~/lib/.server/agent/config';
+import { getPlatformConfig, hasPlatformKey } from '~/lib/.server/agent/config';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
 import { isStripeConfigured } from '~/lib/.server/billing/stripe';
 import { isMonitoringConfigured } from './index';
@@ -45,7 +45,19 @@ export function buildHealthReport(context: unknown): HealthReport {
   const platform = getPlatformConfig(context);
 
   const dependencies: Record<string, DependencyState> = {
-    platformKey: platform.anthropicApiKey ? 'ok' : 'degraded',
+    /*
+     * The key for the CONFIGURED provider — never `anthropicApiKey` outright.
+     *
+     * This asked about Anthropic's key regardless of who the platform actually buys tokens from, so
+     * `LLM_PROVIDER=KIE` with no `KIE_API_KEY` reported a healthy, READY deploy that 503s on every
+     * generation — and §9a keys on `ready` to confirm "all green in prod", so the one check meant to
+     * catch a missing credential would have waved it through. The mirror image is just as wrong: a
+     * KIE-only deploy that has correctly dropped its Anthropic key would report degraded forever.
+     *
+     * `requirePlatformKey` already encodes "which key does this provider need" — the health report
+     * must ask IT rather than keep a second, quietly diverging copy of that rule.
+     */
+    platformKey: hasPlatformKey(platform) ? 'ok' : 'degraded',
     supabase: isSupabaseConfigured(context) ? 'ok' : 'degraded',
     stripe: isStripeConfigured(context) ? 'ok' : 'degraded',
 
