@@ -64,14 +64,57 @@ export const MODEL_RATES: Record<string, ModelRates> = {
 };
 
 /**
- * Rates for a model, falling back to the platform model.
+ * KIE.ai's rates for the same models (`providers/kie.ts`), USD per million tokens.
  *
- * An unknown model must never bill as FREE. A missing rate entry silently zero-rating a generation is
- * exactly the kind of revenue leak this file exists to prevent, so we fall back to the platform
- * model's rates (and, in the worst case, to the most expensive tier we know of).
+ * A uniform **0.4x** of Anthropic list across all four token classes — input $2 vs $5, output $10 vs
+ * $25 — and the cache multipliers are Anthropic's own (0.1x read, 2.0x the 1-hour write), applied to
+ * the discounted base. That uniformity is why the switch has no mix effects; `billing.spec.ts` pins it
+ * so a future vendor reprice that breaks it cannot pass silently.
+ *
+ * ⚠️ **These are the rates we ACTUALLY PAY, and that is the entire contract of this file** — "the
+ * honest number, before any margin". Credits are cost-proportional (`creditsForUsage`), so leaving the
+ * Anthropic numbers here while spending at KIE's would not be a rounding error: it would charge every
+ * user ~2.5x the credits their generation actually cost us. That is a pricing decision, and it belongs
+ * in `CREDIT_MARGIN` where it is visible and asserted — never smuggled in as a wrong cost.
+ *
+ * The operator's choice here was to PASS THE DISCOUNT THROUGH: margin stays 3.34, so profit per pack is
+ * unchanged and the same $50 buys ~2.5x more work. That is not charity — `CREDIT_MARGIN x pack $/credit`
+ * math (see `stripe.ts`) put a $50/6,000-credit plan at ~13 edits/month against measured edit turns,
+ * which is not a viable product. At KIE rates the same pack is ~32 edits.
  */
-export function ratesFor(model: string): ModelRates {
-  return MODEL_RATES[model] ?? MODEL_RATES[PLATFORM_MODEL] ?? MODEL_RATES['claude-opus-4-8'];
+export const KIE_MODEL_RATES: Record<string, ModelRates> = {
+  'claude-opus-4-8': {
+    inputPerMTok: 2.0,
+    outputPerMTok: 10.0,
+    cacheReadPerMTok: 0.2, // 0.1x of the $2 base
+    cacheWritePerMTok: 4.0, // 2x of the $2 base — the 1h tier, matching `proxy.ts`
+  },
+};
+
+/** Every provider the PLATFORM can bill for. BYOK is charged zero, so it never reaches this table. */
+export const PROVIDER_RATES: Record<string, Record<string, ModelRates>> = {
+  Anthropic: MODEL_RATES,
+  KIE: KIE_MODEL_RATES,
+};
+
+/**
+ * Rates for a model on a given provider.
+ *
+ * ⚠️ **`provider` is REQUIRED, and deliberately has no default.** The same model id costs different
+ * money depending on who served it, so "which provider was this?" is a question every call site must
+ * answer — exactly as `restoreFiles` requires `protect`. A default of `'Anthropic'` would be the
+ * cheapest possible way to over-bill every user by 2.5x the day the platform starts spending at KIE:
+ * nothing would throw, no test would fail, and the invoices would just be wrong.
+ *
+ * An unknown model or provider must never bill as FREE. A missing entry silently zero-rating a
+ * generation is exactly the revenue leak this file exists to prevent, so we fall back to the platform
+ * model's rates on that provider, then to that provider's most expensive tier, and finally to
+ * Anthropic Opus — the most expensive thing we know of. Every fallback is in the safe direction.
+ */
+export function ratesFor(model: string, provider: string): ModelRates {
+  const table = PROVIDER_RATES[provider] ?? MODEL_RATES;
+
+  return table[model] ?? table[PLATFORM_MODEL] ?? MODEL_RATES[PLATFORM_MODEL] ?? MODEL_RATES['claude-opus-4-8'];
 }
 
 export interface BillingConfig {
@@ -111,21 +154,27 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      * env-tunable (`SIGNUP_GRANT_CREDITS`) so the giveaway can be dialled without a deploy.
      *
      * COST OF ONE CREATION ON OPUS 4.8 — measured, not scaled. The optimized creation ("make me a
-     * kart racer", `spec/context-budget.md`) is 12,862 output + 111,659 input tokens. On Opus rates
-     * (out $25, cache-read $0.5, cache-write $10 per MTok) the credit cost turns entirely on cache
-     * warmth:
+     * kart racer", `spec/context-budget.md`) is 12,862 output + 111,659 input tokens (the vector in
+     * `COLD_CREATION_USAGE`). On Opus rates the credit cost turns entirely on cache warmth:
      *   - WARM prefix (the normal production state — the base prompt is byte-identical across every
      *     user on our one key, 1h TTL, so traffic keeps it primed): ~$0.42 raw ≈ **~140 credits**.
      *   - COLD prefix (first creation in an hour — pays the cache WRITE, which the user's own later
-     *     edits then read back at 0.1x): ~$1.44 raw ≈ **~480 credits**.
-     * A vibe-code EDIT turn (warm prefix, ~2-4k output + thinking) is ~$0.10-0.15 ≈ 40-70 credits.
-     * (An earlier comment here claimed ~752 credits/creation; that was a PRE-optimization Sonnet cost
-     * scaled to Opus, and is wrong — the code has the optimization.)
+     *     edits then read back at 0.1x): ~$1.44 raw ≈ **~480 credits**; a live creation on a bigger
+     *     game measured **513**.
+     * ⚠️ An EDIT turn is **NOT** the "~41 credits" this comment used to claim. Live-measured edit
+     * turns: 393 / 831 / 65 / 574 — the 65 is the warm-prefix FLOOR, the rest paid ~110–160k of cache
+     * WRITES that nothing read back, because `selectOnDemandBlocks` re-routes per message and churns
+     * the prefix. See CLAUDE.md "THE BIGGEST OPEN NUMBER". Budget ~466, not ~41.
      *
-     * The default is sized for **1 creation + some room to iterate** even in the COLD worst case:
-     * ~480 (cold build) + ~500 (~10 edit turns) ≈ **1,000 credits ≈ $3.00 raw / user** (retail $10);
-     * in warm production that same grant buys several creations. Raise for more free iteration (e.g.
-     * 3,500 ≈ ~3 cold creations + edits) — every credit here is money out of the operator's pool.
+     * ⚠️ **THIS NUMBER IS COUPLED TO THE PLATFORM PROVIDER.** Credits are cost-proportional, so the
+     * grant's real purchasing power moves with what we pay per token. `grantHeadroom()` is the guard,
+     * and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — do not tune one without re-running it:
+     *   - **Anthropic (today): 1,000** ≈ 2.1x a cold creation. 500 would be **0.97–1.04x** — the first
+     *     free prompt exhausts the grant and lands the user negative (the gate runs ONCE, before the
+     *     model, and settlement can never refuse, §4.2.1), which kills the exact moment the funnel is
+     *     built on.
+     *   - **KIE (0.4x rates): 500** ≈ 2.6x a cold creation — one prototype plus ~11 warm edits.
+     * The target is 500, and it becomes correct the moment `LLM_PROVIDER=KIE` — flip BOTH together.
      */
     signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 1000),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
@@ -145,8 +194,8 @@ export interface TokenUsage {
 }
 
 /** Raw model cost of a generation, in USD. The honest number, before any margin. */
-export function rawCostUsd(usage: TokenUsage, model: string): number {
-  const rates = ratesFor(model);
+export function rawCostUsd(usage: TokenUsage, model: string, provider: string): number {
+  const rates = ratesFor(model, provider);
 
   return (
     (usage.promptTokens * rates.inputPerMTok +
@@ -164,8 +213,8 @@ export function rawCostUsd(usage: TokenUsage, model: string): number {
  * to zero would let a user with an empty balance keep generating forever, one cheap turn at a time.
  * A generation that produced nothing at all (an immediate abort) is genuinely free.
  */
-export function creditsForUsage(usage: TokenUsage, model: string, config: BillingConfig): number {
-  const cost = rawCostUsd(usage, model);
+export function creditsForUsage(usage: TokenUsage, model: string, provider: string, config: BillingConfig): number {
+  const cost = rawCostUsd(usage, model, provider);
 
   if (cost <= 0) {
     return 0;
@@ -173,3 +222,50 @@ export function creditsForUsage(usage: TokenUsage, model: string, config: Billin
 
   return Math.max(1, Math.ceil((cost / config.creditUnitCostUsd) * config.margin));
 }
+
+/**
+ * A COLD project creation, as a token vector — the single most important generation in the product.
+ *
+ * Expressed in TOKENS rather than dollars on purpose: a raw-USD constant would be an Anthropic number
+ * wearing no label, and would quietly become a lie the moment the platform bills a different provider.
+ * As tokens it re-prices itself correctly through `ratesFor` under any provider, forever.
+ *
+ * Measured (`spec/context-budget.md`, `rates.ts` grant sizing): the optimized creation is ~111,659
+ * input / ~12,862 output tokens, and COLD means the prefix is not yet primed, so the input is paid at
+ * the 1-hour cache WRITE rate — the expensive case, and the one a new user's very first prompt hits.
+ * On Anthropic Opus that prices to ~$1.44 / ~481 credits, which reproduces the figure this file has
+ * always quoted. Live creations have measured as high as 513 credits on a bigger game, so treat this
+ * as the LOW end of cold — which is exactly why the headroom floor below is not 1.0.
+ */
+export const COLD_CREATION_USAGE: TokenUsage = {
+  promptTokens: 0,
+  completionTokens: 12_862,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 111_659,
+};
+
+/**
+ * How many cold creations the free signup grant buys.
+ *
+ * ⚠️ **The grant size and the provider are ONE number split across two files** — the same shape of bug
+ * as `packMargin()` (a pack's price and `CREDIT_MARGIN` disagreeing, silently, at ~19% a generation).
+ * A grant is denominated in credits, credits are cost-proportional, and cost depends on the provider —
+ * so `SIGNUP_GRANT_CREDITS = 500` is comfortable on KIE (~192 credits a creation, ~2.6x headroom) and
+ * BROKEN on Anthropic (~481–513, i.e. 0.97–1.04x: the first free prompt exhausts the grant and lands
+ * the user negative, with nothing left to iterate).
+ *
+ * That failure would be silent and would land on the ONE moment the funnel depends on — a new user's
+ * first prototype. `billing.spec.ts` asserts this floor so the two numbers cannot drift apart.
+ */
+export function grantHeadroom(config: BillingConfig, model: string, provider: string): number {
+  return config.signupGrantCredits / creditsForUsage(COLD_CREATION_USAGE, model, provider, config);
+}
+
+/**
+ * The grant must buy the hook, plus room to iterate.
+ *
+ * Not 1.0: a grant that exactly covers a creation buys a prototype and then a dead end, and the point
+ * of the free grant is a user who likes what they made and edits it. 1.5x is one cold build plus a few
+ * warm edit turns — deliberately modest, because every credit here is pure operator cost (§4.6).
+ */
+export const MIN_GRANT_HEADROOM = 1.5;

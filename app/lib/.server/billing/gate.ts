@@ -79,6 +79,15 @@ export interface SettleInput {
   userId: string;
   generationId: string;
   model: string;
+
+  /**
+   * The provider that ACTUALLY served this generation — it decides the rates (`ratesFor`).
+   *
+   * Required, with no default, on purpose: the same model id costs 2.5x more on Anthropic than on KIE,
+   * so a defaulted provider here would over-bill every user the day the platform switches, silently.
+   */
+  provider: string;
+
   usage: TokenUsage;
 
   /** BYOK generations are RECORDED but charged zero (§4.5.4 point 6). */
@@ -107,14 +116,14 @@ export interface Settlement {
  */
 export async function settleGeneration(input: SettleInput): Promise<Settlement | null> {
   const config = getBillingConfig(input.context);
-  const cost = rawCostUsd(input.usage, input.model);
+  const cost = rawCostUsd(input.usage, input.model, input.provider);
 
   /*
    * BYOK: record zero. The generation still exists in the ledger's sibling `generations` record for
    * rate limits and analytics, but the user's own key paid the provider, so charging credits as well
    * would be double-billing.
    */
-  const credits = input.byok ? 0 : creditsForUsage(input.usage, input.model, config);
+  const credits = input.byok ? 0 : creditsForUsage(input.usage, input.model, input.provider, config);
 
   /*
    * ⚠️ THE FOREIGN-KEY ANCHOR. This MUST happen before the debit, and it lives here rather than in the

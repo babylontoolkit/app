@@ -28,7 +28,7 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, PLATFORM_PROVIDER, requirePlatformKey } from './config';
+import { getPlatformConfig, NotConfiguredError, PLATFORM_MODEL, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
@@ -280,7 +280,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     userId: user.id,
     email: user.email,
     isLocal: user.isLocal,
-    hasKey: Boolean(request.apiKeys?.[PLATFORM_PROVIDER]),
+    hasKey: Boolean(request.apiKeys?.[config.provider]),
     context: request.context,
   });
 
@@ -317,10 +317,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     requirePlatformKey(config);
   }
 
-  const provider = PROVIDER_LIST.find((p) => p.name === PLATFORM_PROVIDER);
+  const provider = PROVIDER_LIST.find((p) => p.name === config.provider);
 
   if (!provider) {
-    throw new NotConfiguredError(`The ${PLATFORM_PROVIDER} provider`, 'It is missing from the provider registry.');
+    throw new NotConfiguredError(`The ${config.provider} provider`, 'It is missing from the provider registry.');
   }
 
   // 4. The active prompt version — from OUR store. Zero GitHub dependency at generation time (§4.3.2).
@@ -863,6 +863,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         userId: user.id,
         generationId,
         model,
+
+        // The provider that ACTUALLY served this generation — it decides the rates (`ratesFor`).
+        provider: config.provider,
         usage: totals,
         byok: useByok,
         context: request.context,
@@ -907,7 +910,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         userId: user.id,
         projectId: request.projectId,
         model,
-        provider: PLATFORM_PROVIDER,
+        provider: config.provider,
         creditsCharged: failed ? 0 : (settlement?.creditsCharged ?? 0),
         rawCostUsd: settlement?.rawCostUsd ?? 0,
         promptVersionId: promptVersion.id,

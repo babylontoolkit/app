@@ -6,6 +6,7 @@ import FireworksProvider from './providers/fireworks';
 import GoogleProvider from './providers/google';
 import GroqProvider from './providers/groq';
 import HuggingFaceProvider from './providers/huggingface';
+import KieProvider from './providers/kie';
 import LMStudioProvider from './providers/lmstudio';
 import MistralProvider from './providers/mistral';
 import OllamaProvider from './providers/ollama';
@@ -31,6 +32,7 @@ export {
   GroqProvider,
   HuggingFaceProvider,
   HyperbolicProvider,
+  KieProvider,
   MistralProvider,
   MoonshotProvider,
   OllamaProvider,

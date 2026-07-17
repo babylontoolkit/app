@@ -24,7 +24,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, settleGeneration } from '~/lib/.server/billing/gate';
-import { PLATFORM_MODEL, PLATFORM_PROVIDER } from '~/lib/.server/agent/config';
+import { getPlatformProvider, PLATFORM_MODEL } from '~/lib/.server/agent/config';
 
 export async function action(args: ActionFunctionArgs) {
   return enhancerAction(args);
@@ -60,6 +60,9 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
     const apiKeys = getApiKeysFromCookie(cookieHeader);
     const providerSettings = getProviderSettingsFromCookie(cookieHeader);
 
+    // The platform's provider — an operator config, never the request's choice (see the model note below).
+    const platformProvider = getPlatformProvider(context);
+
     /*
      * 2. BYOK is decided by the SERVER, never by the request. Without a verified active Pro
      * entitlement the caller's key is ignored and the platform pays — which is exactly why the model
@@ -69,7 +72,7 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
       userId: user.id,
       email: user.email,
       isLocal: user.isLocal,
-      hasKey: Boolean(apiKeys?.[PLATFORM_PROVIDER]),
+      hasKey: Boolean(apiKeys?.[platformProvider]),
       context,
     });
 
@@ -91,7 +94,7 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
      * key simply pays for it.
      */
     const model = PLATFORM_MODEL;
-    const provider = PLATFORM_PROVIDER;
+    const provider = platformProvider;
 
     const generationId = `gen_enh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -155,6 +158,7 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
           userId: user.id,
           generationId,
           model,
+          provider,
           usage: {
             promptTokens: usage.promptTokens ?? 0,
             completionTokens: usage.completionTokens ?? 0,

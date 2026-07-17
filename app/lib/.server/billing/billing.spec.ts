@@ -9,7 +9,25 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { creditsForUsage, getBillingConfig, MODEL_RATES, rawCostUsd, ratesFor, type TokenUsage } from './rates';
+import {
+  COLD_CREATION_USAGE,
+  creditsForUsage,
+  getBillingConfig,
+  grantHeadroom,
+  KIE_MODEL_RATES,
+  MIN_GRANT_HEADROOM,
+  MODEL_RATES,
+  PROVIDER_RATES,
+  rawCostUsd,
+  ratesFor,
+  type TokenUsage,
+} from './rates';
+import {
+  DEFAULT_PLATFORM_PROVIDER,
+  getPlatformProvider,
+  PLATFORM_MODEL,
+  PLATFORM_PROVIDERS,
+} from '~/lib/.server/agent/config';
 import {
   DuplicateGrantError,
   DuplicatePaymentError,
@@ -45,16 +63,24 @@ describe('rate table', () => {
    * base input to write — not the 1.25x of the 5-minute default. If someone "corrects" this to 1.25x
    * to match the docs' headline number, every generation silently under-charges and the margin quietly
    * erodes. Nothing else in the system would notice.
+   *
+   * Both loops walk EVERY provider, not just Anthropic. A provider-specific table using the 1.25x
+   * five-minute rate is exactly the bug this pair exists to catch — and it would have walked straight
+   * past a table these loops did not visit.
    */
-  it('bills cache WRITES at 2x input — the 1h tier, not the 1.25x default', () => {
-    for (const [model, rates] of Object.entries(MODEL_RATES)) {
-      expect(rates.cacheWritePerMTok, model).toBeCloseTo(rates.inputPerMTok * 2, 5);
+  it('bills cache WRITES at 2x input on every provider — the 1h tier, not the 1.25x default', () => {
+    for (const [provider, table] of Object.entries(PROVIDER_RATES)) {
+      for (const [model, rates] of Object.entries(table)) {
+        expect(rates.cacheWritePerMTok, `${provider}/${model}`).toBeCloseTo(rates.inputPerMTok * 2, 5);
+      }
     }
   });
 
-  it('bills cache READS at 0.1x input — the margin lever', () => {
-    for (const [model, rates] of Object.entries(MODEL_RATES)) {
-      expect(rates.cacheReadPerMTok, model).toBeCloseTo(rates.inputPerMTok * 0.1, 5);
+  it('bills cache READS at 0.1x input on every provider — the margin lever', () => {
+    for (const [provider, table] of Object.entries(PROVIDER_RATES)) {
+      for (const [model, rates] of Object.entries(table)) {
+        expect(rates.cacheReadPerMTok, `${provider}/${model}`).toBeCloseTo(rates.inputPerMTok * 0.1, 5);
+      }
     }
   });
 
@@ -70,10 +96,128 @@ describe('rate table', () => {
 
   /* An unknown model must never bill as FREE — that is a revenue leak with a friendly face. */
   it('never zero-rates an unknown model', () => {
-    const rates = ratesFor('some-model-we-have-never-heard-of');
+    const rates = ratesFor('some-model-we-have-never-heard-of', 'Anthropic');
 
     expect(rates.inputPerMTok).toBeGreaterThan(0);
     expect(rates.outputPerMTok).toBeGreaterThan(0);
+  });
+
+  /* Same rule, second axis. An unknown PROVIDER is just as capable of billing zero as an unknown model. */
+  it('never zero-rates an unknown provider', () => {
+    const rates = ratesFor(PLATFORM_MODEL, 'SomeResellerWeHaveNeverHeardOf');
+
+    expect(rates.inputPerMTok).toBeGreaterThan(0);
+    expect(rates.outputPerMTok).toBeGreaterThan(0);
+  });
+
+  /*
+   * ⚠️ THE TABLE AND THE SWITCH ARE ONE DECISION IN TWO FILES — the `packMargin` shape of bug.
+   *
+   * `LLM_PROVIDER` accepts any name in `PLATFORM_PROVIDERS`. If one of those has no rate table, every
+   * generation on it falls back to Anthropic list prices: the platform spends at one price and bills
+   * the user at another. Nothing throws; the invoices are just wrong, in whichever direction the
+   * vendor happens to be cheaper. Adding a provider MUST mean adding its rates.
+   */
+  it('has a rate table for every provider the platform can be switched to', () => {
+    for (const provider of PLATFORM_PROVIDERS) {
+      expect(PROVIDER_RATES[provider], `${provider} can be selected but has no rates`).toBeDefined();
+      expect(PROVIDER_RATES[provider][PLATFORM_MODEL], `${provider} cannot price the platform model`).toBeDefined();
+    }
+  });
+});
+
+describe('KIE rates', () => {
+  /*
+   * The uniform 0.4x is what makes the switch analysable: no mix effects, so a creation, an edit and a
+   * repair all scale by the same factor. If a future KIE reprice breaks that uniformity, every credit
+   * projection built on it (grant sizing, pack sizing) silently stops being true — so it is pinned.
+   */
+  it('is a uniform 0.4x of Anthropic list across all four token classes', () => {
+    for (const [model, kie] of Object.entries(KIE_MODEL_RATES)) {
+      const direct = MODEL_RATES[model];
+      expect(direct, `KIE prices ${model} but Anthropic has no row to compare against`).toBeDefined();
+
+      expect(kie.inputPerMTok / direct.inputPerMTok, `${model} input`).toBeCloseTo(0.4, 5);
+      expect(kie.outputPerMTok / direct.outputPerMTok, `${model} output`).toBeCloseTo(0.4, 5);
+      expect(kie.cacheReadPerMTok / direct.cacheReadPerMTok, `${model} cache read`).toBeCloseTo(0.4, 5);
+      expect(kie.cacheWritePerMTok / direct.cacheWritePerMTok, `${model} cache write`).toBeCloseTo(0.4, 5);
+    }
+  });
+
+  /*
+   * The published numbers, asserted literally. The ratio test above would still pass if BOTH tables
+   * drifted together; this one is what catches a typo in the absolute price.
+   */
+  it('prices Opus 4.8 at the published $2 / $10', () => {
+    expect(KIE_MODEL_RATES['claude-opus-4-8'].inputPerMTok).toBe(2.0);
+    expect(KIE_MODEL_RATES['claude-opus-4-8'].outputPerMTok).toBe(10.0);
+  });
+
+  /*
+   * The operator's decision, made explicit: pass the discount through rather than bank it. Credits are
+   * cost-proportional, so cheaper rates mean FEWER credits per generation — the same $50 buys ~2.5x
+   * more work and the margin per pack is untouched. If someone later wants the discount as profit, the
+   * lever is `CREDIT_MARGIN`, not this table — and this test is where they will find that out.
+   */
+  it('makes the same generation cost ~2.5x fewer credits than Anthropic', () => {
+    const onAnthropic = creditsForUsage(COLD_CREATION_USAGE, PLATFORM_MODEL, 'Anthropic', config);
+    const onKie = creditsForUsage(COLD_CREATION_USAGE, PLATFORM_MODEL, 'KIE', config);
+
+    expect(onAnthropic / onKie).toBeCloseTo(2.5, 1);
+  });
+});
+
+describe('the signup grant buys the hook', () => {
+  /*
+   * ⚠️ THE GRANT SIZE AND THE PLATFORM PROVIDER ARE ONE NUMBER IN TWO FILES.
+   *
+   * A grant is denominated in credits; credits are cost-proportional; cost depends on the provider. So
+   * `SIGNUP_GRANT_CREDITS` has no fixed meaning on its own — 500 is ~2.6x a cold creation on KIE and
+   * ~1.0x on Anthropic, where the user's FIRST free prompt would exhaust the grant and land them
+   * negative (the gate runs once, before the model, and settlement can never refuse — §4.2.1).
+   *
+   * That failure lands on the single moment the whole funnel rests on: a new user's first prototype.
+   * It is also completely silent — the creation succeeds, and the product just quietly has no second
+   * step. This test is the tripwire on tuning either number without the other.
+   */
+  it('covers a cold creation with room to iterate, on the configured provider', () => {
+    const headroom = grantHeadroom(config, PLATFORM_MODEL, DEFAULT_PLATFORM_PROVIDER);
+
+    expect(headroom).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
+  });
+
+  /* The number the grant is being sized toward. Documents WHY 500 is not yet the default. */
+  it('shows 500 credits is right on KIE and not yet right on Anthropic', () => {
+    const target = { ...config, signupGrantCredits: 500 };
+
+    expect(grantHeadroom(target, PLATFORM_MODEL, 'KIE')).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
+    expect(grantHeadroom(target, PLATFORM_MODEL, 'Anthropic')).toBeLessThan(MIN_GRANT_HEADROOM);
+  });
+});
+
+describe('the platform provider switch', () => {
+  /*
+   * `env()` falls back to `process.env`, and vitest loads `.env.local` — so an "empty" context is not
+   * empty (the trap `oauth.spec.ts` documents). Every case here stubs the var explicitly.
+   */
+  it('defaults to Anthropic when unset', () => {
+    vi.stubEnv('LLM_PROVIDER', '');
+    expect(getPlatformProvider({})).toBe(DEFAULT_PLATFORM_PROVIDER);
+  });
+
+  it('accepts a supported provider, case-insensitively', () => {
+    vi.stubEnv('LLM_PROVIDER', 'kie');
+    expect(getPlatformProvider({})).toBe('KIE');
+  });
+
+  /*
+   * A typo must be LOUD. The dangerous alternative is not a crash — it is silently falling back to
+   * Anthropic, which spends the operator's Anthropic key at 2.5x the price they believed they had
+   * configured, and reports nothing (§1.3 principle 0: never a silent fallback to another provider).
+   */
+  it('refuses a provider it does not know rather than falling back', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Kei');
+    expect(() => getPlatformProvider({})).toThrow(/Kei/);
   });
 });
 
@@ -87,15 +231,15 @@ describe('charge formula', () => {
   };
 
   it('prices a real creation in the range we measured (~$1.12–1.60)', () => {
-    const cost = rawCostUsd(realCreation, 'claude-sonnet-5');
+    const cost = rawCostUsd(realCreation, 'claude-sonnet-5', 'Anthropic');
 
     expect(cost).toBeGreaterThan(1.1);
     expect(cost).toBeLessThan(1.6);
   });
 
   it('charges margin over raw cost', () => {
-    const credits = creditsForUsage(realCreation, 'claude-sonnet-5', config);
-    const cost = rawCostUsd(realCreation, 'claude-sonnet-5');
+    const credits = creditsForUsage(realCreation, 'claude-sonnet-5', 'Anthropic', config);
+    const cost = rawCostUsd(realCreation, 'claude-sonnet-5', 'Anthropic');
 
     // credits * unit cost should recover the raw cost with the margin applied.
     expect(credits * config.creditUnitCostUsd).toBeGreaterThan(cost * 2);
@@ -109,13 +253,13 @@ describe('charge formula', () => {
   it('never charges zero for a generation that consumed tokens', () => {
     const tiny: TokenUsage = { promptTokens: 1, completionTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
-    expect(creditsForUsage(tiny, 'claude-sonnet-5', config)).toBeGreaterThanOrEqual(1);
+    expect(creditsForUsage(tiny, 'claude-sonnet-5', 'Anthropic', config)).toBeGreaterThanOrEqual(1);
   });
 
   it('charges nothing for a generation that produced nothing', () => {
     const nothing: TokenUsage = { promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
-    expect(creditsForUsage(nothing, 'claude-sonnet-5', config)).toBe(0);
+    expect(creditsForUsage(nothing, 'claude-sonnet-5', 'Anthropic', config)).toBe(0);
   });
 
   /* Cached input must be dramatically cheaper than uncached, or the whole §4.2.8 effort bought nothing. */
@@ -123,10 +267,12 @@ describe('charge formula', () => {
     const uncached = rawCostUsd(
       { promptTokens: 100_000, completionTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
       'claude-sonnet-5',
+      'Anthropic',
     );
     const cached = rawCostUsd(
       { promptTokens: 0, completionTokens: 0, cacheReadTokens: 100_000, cacheCreationTokens: 0 },
       'claude-sonnet-5',
+      'Anthropic',
     );
 
     expect(cached).toBeCloseTo(uncached / 10, 5);
@@ -289,7 +435,13 @@ describe('settlement', () => {
   it('debits the ledger for a completed generation', async () => {
     await ledger.append({ userId: 'u1', delta: 10_000, reason: 'grant' });
 
-    const settlement = await settleGeneration({ userId: 'u1', generationId: 'g1', model: 'claude-sonnet-5', usage });
+    const settlement = await settleGeneration({
+      userId: 'u1',
+      generationId: 'g1',
+      model: 'claude-sonnet-5',
+      provider: 'Anthropic',
+      usage,
+    });
 
     expect(settlement!.creditsCharged).toBeGreaterThan(0);
     expect(await ledger.balance('u1')).toBe(10_000 - settlement!.creditsCharged);
@@ -306,6 +458,7 @@ describe('settlement', () => {
       userId: 'pro',
       generationId: 'g1',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage,
       byok: true,
     });
@@ -327,12 +480,14 @@ describe('settlement', () => {
       userId: 'u2',
       generationId: 'g-full',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage: { promptTokens: 50, completionTokens: 20_000, cacheReadTokens: 0, cacheCreationTokens: 0 },
     });
     const stopped = await settleGeneration({
       userId: 'u1',
       generationId: 'g-stop',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage: aborted,
     });
 
@@ -362,6 +517,7 @@ describe('auto-refund on failure', () => {
       userId: 'u1',
       generationId: 'g-fail',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage,
     });
 
@@ -383,6 +539,7 @@ describe('auto-refund on failure', () => {
       userId: 'u1',
       generationId: 'g-fail',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage,
     });
     await refundGeneration('u1', 'g-fail', settlement!.creditsCharged, 'Automatic refund');
@@ -471,6 +628,7 @@ describe('the generation row a debit points at', () => {
       userId: 'u1',
       generationId: 'g-fk',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage,
     });
 
@@ -483,7 +641,13 @@ describe('the generation row a debit points at', () => {
   /* The anchor carries the usage, so the row is honest even if the proxy never gets to enrich it. */
   it('anchors the row with the user, model and tokens the debit was computed from', async () => {
     await getLedger().append({ userId: 'u1', delta: 10_000, reason: 'grant' });
-    await settleGeneration({ userId: 'u1', generationId: 'g-fk', model: 'claude-sonnet-5', usage });
+    await settleGeneration({
+      userId: 'u1',
+      generationId: 'g-fk',
+      model: 'claude-sonnet-5',
+      provider: 'Anthropic',
+      usage,
+    });
 
     expect(rows.get('g-fk')).toMatchObject({
       id: 'g-fk',
@@ -500,6 +664,7 @@ describe('the generation row a debit points at', () => {
       userId: 'pro',
       generationId: 'g-byok',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage,
       byok: true,
     });
@@ -518,6 +683,7 @@ describe('the generation row a debit points at', () => {
       userId: 'u1',
       generationId: 'g-fail',
       model: 'claude-sonnet-5',
+      provider: 'Anthropic',
       usage,
     });
     await refundGeneration('u1', 'g-fail', settlement!.creditsCharged, 'Automatic refund');
@@ -586,10 +752,10 @@ describe('credit pack margins', () => {
       cacheCreationTokens: 111_659,
     };
 
-    const raw = rawCostUsd(coldCreation, 'claude-opus-4-8');
+    const raw = rawCostUsd(coldCreation, 'claude-opus-4-8', 'Anthropic');
     expect(raw).toBeCloseTo(1.44, 2);
 
-    const credits = creditsForUsage(coldCreation, 'claude-opus-4-8', { ...config } as never);
+    const credits = creditsForUsage(coldCreation, 'claude-opus-4-8', 'Anthropic', { ...config } as never);
 
     for (const pack of CREDIT_PACKS.filter((p) => p.isActive)) {
       const revenue = credits * (pack.priceCents / 100 / pack.credits);
