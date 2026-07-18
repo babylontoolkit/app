@@ -307,6 +307,18 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             />
           )}
         </ClientOnly>
+        {/*
+         * The keyboard hint lives on its OWN line ABOVE the toolbar, left-aligned. It used to be the
+         * middle child of the `justify-between` button row, so every button added there (the premium
+         * model pill) squeezed it — a dedicated line decouples it from the toolbar's crowding. Still
+         * only shown once the user is actually typing.
+         */}
+        {props.input.length > 3 ? (
+          <div className="px-4 pt-2 text-xs text-bolt-elements-textTertiary">
+            Use <kbd className="kdb px-1.5 py-0.5 rounded bg-bolt-elements-background-depth-2">Shift</kbd> +{' '}
+            <kbd className="kdb px-1.5 py-0.5 rounded bg-bolt-elements-background-depth-2">Return</kbd> for a new line
+          </div>
+        ) : null}
         <div className="flex justify-between items-center text-sm p-4 pt-2">
           <div className="flex gap-1 items-center">
             <ColorSchemeDialog designScheme={props.designScheme} setDesignScheme={props.setDesignScheme} />
@@ -386,20 +398,6 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
           <SupabaseConnection />
           <ExpoQrModal open={props.qrModalOpen} onClose={() => props.setQrModalOpen(false)} />
         </div>
-        {/*
-         * The keyboard hint lives on its OWN line below the toolbar, not inside it. It used to be the
-         * middle child of the `justify-between` button row, so every button added there (the premium
-         * model pill) squeezed it — right-aligning it on a dedicated line gives it the full width and
-         * decouples it from the toolbar's crowding. Still only shown once the user is actually typing.
-         */}
-        {props.input.length > 3 ? (
-          <div className="flex justify-end px-4 pb-2 -mt-1 text-xs text-bolt-elements-textTertiary">
-            <span>
-              Use <kbd className="kdb px-1.5 py-0.5 rounded bg-bolt-elements-background-depth-2">Shift</kbd> +{' '}
-              <kbd className="kdb px-1.5 py-0.5 rounded bg-bolt-elements-background-depth-2">Return</kbd> for a new line
-            </span>
-          </div>
-        ) : null}
       </div>
     </div>
   );
