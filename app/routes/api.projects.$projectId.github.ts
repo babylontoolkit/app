@@ -190,7 +190,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
      * SAVE (§4.5.4b) — the one click that makes a browser-only project permanent.
      *
      * It is its own op rather than "link, then push" because the two must not be separable: a link
-     * recorded without a successful push is a project that says "Saved to GitHub" and points at an
+     * recorded without a successful push is a project that says "Saved To GitHub" and points at an
      * empty repository. So the record is written only after the bytes land, and a failed Save leaves
      * the project honestly UNLINKED.
      *

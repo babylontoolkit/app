@@ -19,6 +19,14 @@ export type BaseActionState = BoltAction & {
   abort: () => void;
   executed: boolean;
   abortSignal: AbortSignal;
+
+  /**
+   * For `file` actions only: does this write CREATE a new file, or OVERWRITE an existing one?
+   * Captured once, before the first write, so the artifact list can label it "Create" vs "Edit"
+   * honestly — a full-file rewrite of an existing file (`type="file"`) is an edit, not a creation.
+   * `undefined` = not yet decided (or a historical/replayed action we never ran).
+   */
+  isNew?: boolean;
 };
 
 export type FailedActionState = BoltAction &
@@ -29,7 +37,7 @@ export type FailedActionState = BoltAction &
 
 export type ActionState = BaseActionState | FailedActionState;
 
-type BaseActionUpdate = Partial<Pick<BaseActionState, 'status' | 'abort' | 'executed'>>;
+type BaseActionUpdate = Partial<Pick<BaseActionState, 'status' | 'abort' | 'executed' | 'isNew'>>;
 
 export type ActionStateUpdate =
   | BaseActionUpdate
@@ -180,6 +188,7 @@ export class ActionRunner {
           break;
         }
         case 'file': {
+          await this.#recordFileNovelty(actionId, action);
           await this.#runFileAction(action);
           break;
         }
@@ -381,6 +390,43 @@ export class ActionRunner {
     }
 
     return resp;
+  }
+
+  /**
+   * Record, on first touch, whether a `file` action creates a new file or overwrites an existing one,
+   * so the artifact list labels it "Create" vs "Edit" honestly instead of calling every full-file write
+   * a "Create" (which reads as wrong the moment the model rewrites a file that already exists).
+   *
+   * MUST run before the first write. A streaming `file` action re-enters `#executeAction` once per delta,
+   * and after the first write the file exists — so the verdict is captured exactly once (guarded on
+   * `isNew !== undefined`) and never flipped. The WebContainer FS is the source of truth: `type="file"`
+   * carries no create-vs-overwrite signal of its own, and the FS also reflects a repo mount or a manual
+   * edit the model's copy of the file does not know about.
+   */
+  async #recordFileNovelty(actionId: string, action: ActionState) {
+    if (action.type !== 'file') {
+      return;
+    }
+
+    if (this.actions.get()[actionId]?.isNew !== undefined) {
+      return; // decided on the first delta; every later delta sees the file we just started writing
+    }
+
+    const webcontainer = await this.#webcontainer;
+    const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
+    const folder = nodePath.dirname(relativePath);
+
+    let existed = false;
+
+    try {
+      const entries = await webcontainer.fs.readdir(folder === '' || folder === '.' ? '.' : folder);
+      existed = entries.includes(nodePath.basename(relativePath));
+    } catch {
+      // The parent directory does not exist yet → this is unambiguously a new file.
+      existed = false;
+    }
+
+    this.#updateAction(actionId, { isNew: !existed });
   }
 
   async #runFileAction(action: ActionState) {

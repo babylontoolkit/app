@@ -218,7 +218,7 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
       const result = await call({ op: 'push', files });
 
       if (result.ok) {
-        toast.success('Saved to GitHub.');
+        toast.success('Saved To GitHub.');
         setDiverged(false);
       } else if (result.divergence) {
         setDiverged(true);

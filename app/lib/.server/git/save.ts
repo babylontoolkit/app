@@ -28,7 +28,7 @@
  *
  * **Nothing is recorded until the push lands.** The caller writes the link only on success, so a
  * failed Save leaves the project UNLINKED — honestly telling the user it is not saved, which it is
- * not. A link written first would show "Saved to GitHub" over an empty repository.
+ * not. A link written first would show "Saved To GitHub" over an empty repository.
  */
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { GitProviderError, parseRepo, type GitProvider, type GitProviderId } from './provider';

@@ -68,6 +68,73 @@ export function findLockfile(paths: string[]): string | undefined {
   return paths.find((path) => LOCKFILES.includes(basename(path)));
 }
 
+/** The root manifest path in a mounted file map, if the project has one. */
+export function findManifest(paths: string[]): string | undefined {
+  return paths.find((path) => basename(path) === MANIFEST && depth(path) <= rootDepth(paths));
+}
+
+/**
+ * The npm script that launches the dev server for a mounted project, or undefined if it has none.
+ *
+ * Creation gets its dev server started for free — its artifact carries a `start` action running
+ * `npm run dev`. A project mounted from a repo (a new device, a cleared browser, a pull) has no
+ * artifact to replay, so the mount path must start it explicitly, and it can only run a script the
+ * project actually declares. The shell allow-list (SPEC §4.2.5) permits `npm run <script>`, so the
+ * result is always used as `npm run <name>`.
+ *
+ * `dev` is the Vite/Toolkit-starter convention; `start` is the fallback for a mounted repo that used
+ * it instead. An unparseable or script-less manifest returns undefined rather than throwing — a mount
+ * must never fail because someone's `package.json` is malformed.
+ */
+export function devScriptFromManifest(manifest: string | undefined): string | undefined {
+  if (!manifest) {
+    return undefined;
+  }
+
+  try {
+    const scripts = (JSON.parse(manifest) as { scripts?: Record<string, unknown> })?.scripts ?? {};
+
+    if (typeof scripts.dev === 'string') {
+      return 'dev';
+    }
+
+    if (typeof scripts.start === 'string') {
+      return 'start';
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Should the mount path start a dev server?
+ *
+ * Pure because the wrong answer is a silent footgun. The WebContainer is a page-level singleton that
+ * survives SPA navigation, so its dev server keeps running when the user moves between projects
+ * (dashboard → builder → dashboard → another game) or opens a project right after creating one — where
+ * the creation artifact already started `npm run dev`. Firing a second `npm run dev` into a container
+ * that already has one bound to the port is a conflict the user never asked for and cannot see coming.
+ *
+ * `runningPreviews` is the universal signal: once ANY dev server's `server-ready` fires, a preview is
+ * registered, no matter who started it (an artifact or a previous mount). If one is already serving,
+ * the newly-mounted files reach the browser through it — no second server needed.
+ */
+export function shouldStartDevServer(facts: { script: string | undefined; runningPreviews: number }): boolean {
+  if (!facts.script) {
+    // Nothing to run — the project declares no dev/start script.
+    return false;
+  }
+
+  if (facts.runningPreviews > 0) {
+    // A dev server is already serving this container; a second one would just fight for the port.
+    return false;
+  }
+
+  return true;
+}
+
 export function hasManifest(paths: string[]): boolean {
   /*
    * The ROOT manifest only. A `package.json` inside `node_modules` — or in some vendored example

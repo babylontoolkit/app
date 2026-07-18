@@ -15,7 +15,7 @@ import { ProjectsDashboard } from '~/components/projects/ProjectsDashboard.clien
 import { brand } from '~/config/brand';
 
 export const meta: MetaFunction = () => [
-  { title: `Your Projects · ${brand.productFullName}` },
+  { title: `Your Projects · ${brand.productName}` },
   { name: 'description', content: 'Open, remix, and manage the games you have built.' },
 ];
 

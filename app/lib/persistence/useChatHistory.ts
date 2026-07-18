@@ -46,12 +46,20 @@ import {
 import { selectMountSource } from './mount-source';
 import { protectForRepoRestore, protectNothing } from './restore-plan';
 import { hasRestorableHistory, markAsTranscript } from './transcript';
-import { decideDependencyInstall, findLockfile, hasManifest } from './dependencies';
+import {
+  decideDependencyInstall,
+  devScriptFromManifest,
+  findLockfile,
+  findManifest,
+  hasManifest,
+  shouldStartDevServer,
+} from './dependencies';
 import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
 import { identityForMount } from './mount-identity';
 import { slugForChat } from './chat-slug';
 import { createScopedLogger } from '~/utils/logger';
+import { createSingleFlight } from '~/utils/single-flight';
 
 const logger = createScopedLogger('ChatHistory');
 
@@ -125,8 +133,36 @@ export const generationCount = atom<number>(0);
  *   - `diverged`  — mount LOCAL (it is the unsaved side) and raise the two-button choice. Mounting the
  *                   repo here would destroy the very work that caused the divergence.
  *   - `empty`     — nothing to mount. A brand-new project before its first generation.
+ *
+ * Single-flighted per project id: the mount effect can re-fire for the same project (StrictMode's
+ * double-invoke, a `searchParams`/`navigate` identity change), and two concurrent mounts would pull
+ * the repo twice and — the part that actually corrupts — run two `npm install`s into the one shared
+ * WebContainer. Concurrent callers share the running mount; a later call (a real re-open) runs afresh.
  */
-async function mountProjectFiles(pid: string): Promise<void> {
+const mountInFlight = createSingleFlight<string>();
+
+/**
+ * Options for a mount.
+ *
+ * `prepareToRun` — whether this mount should reinstall dependencies and start the dev server. Default
+ * true, because the common paths (a new device, a dashboard Open, a remix) have no other way to make
+ * the project runnable. The ONE caller that passes false is the `/chat/:id` reload path, which rebuilds
+ * an artifact carrying `npm install` + `npm run dev` (`createCommandActionsString`) and replays it — so
+ * preparing here as well would run a SECOND installer into the one shared `boltTerminal`, which races
+ * the first and surfaces a spurious "installing dependencies failed" toast over a project that is, in
+ * fact, installing and running fine.
+ */
+interface MountOptions {
+  prepareToRun?: boolean;
+}
+
+function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
+  return mountInFlight(pid, () => doMountProjectFiles(pid, opts));
+}
+
+async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
+  const prepareToRun = opts.prepareToRun ?? true;
+
   const [status, sync] = await Promise.all([
     getRepoStatus(pid),
     db ? getLocalSyncState(db, pid) : Promise.resolve({} as LocalSyncState),
@@ -164,6 +200,11 @@ async function mountProjectFiles(pid: string): Promise<void> {
        * overlay, and a file deleted before the checkpoint would come back from the template mount.
        */
       await workbenchStore.restoreFiles(local.files, { protect: protectNothing });
+
+      if (prepareToRun) {
+        // The container was torn down on reload; reinstall and start the dev server so the game runs.
+        await prepareMountedProject(local.files);
+      }
     }
 
     unsavedWork.set(decision.source === 'diverged' || decision.unsavedWork);
@@ -176,7 +217,7 @@ async function mountProjectFiles(pid: string): Promise<void> {
   }
 
   if (decision.source === 'repo') {
-    await mountFromRepo(pid);
+    await mountFromRepo(pid, prepareToRun);
     return;
   }
 
@@ -186,11 +227,11 @@ async function mountProjectFiles(pid: string): Promise<void> {
      * about, since `hasServerSeed` needs a round-trip we do not make on the common path. Trying the
      * seed here costs one request on a path that had nothing to show anyway.
      */
-    await mountFromSeed(pid);
+    await mountFromSeed(pid, prepareToRun);
     return;
   }
 
-  await mountFromSeed(pid);
+  await mountFromSeed(pid, prepareToRun);
 }
 
 /**
@@ -200,7 +241,7 @@ async function mountProjectFiles(pid: string): Promise<void> {
  * the repo, so they are by definition saved. Skipping the mark would make a freshly-opened project
  * claim unsaved work it does not have, and nag the user to save what they just downloaded.
  */
-async function mountFromRepo(pid: string): Promise<void> {
+async function mountFromRepo(pid: string, prepareToRun = true): Promise<void> {
   const { files, message } = await pullFromRepo(pid);
 
   if (!files) {
@@ -222,23 +263,66 @@ async function mountFromRepo(pid: string): Promise<void> {
   }
 
   unsavedWork.set(false);
-  await installDependencies(files);
+
+  if (prepareToRun) {
+    await prepareMountedProject(files);
+  }
 }
 
 /**
- * Reinstall dependencies for a project that just arrived from a repo.
+ * Make a freshly-mounted project runnable: reinstall dependencies, then start its dev server.
  *
- * `node_modules` is not in the repository (nor should it be), so a project mounted on a fresh device
- * has every file and cannot run. A resumed project used to get away without this because its chat
- * replayed an artifact carrying `npm install` as a shell action — a project mounted from a repo on a
- * new device has no chat to replay, so without this the user sees a complete, correct, entirely
- * non-running game, and it reads as a broken product rather than a missing install.
+ * Every mount path funnels through here, because the reason a project cannot run is the same wherever
+ * its files came from. The WebContainer is torn down on every page reload, and `node_modules` is in
+ * neither a checkpoint (the watcher ignores it) nor a repository (it is gitignored) — so a mounted
+ * project always has all of its source and none of its dependencies. Without this, the single most
+ * common user action, a page reload, mounts from the local checkpoint and leaves a complete, correct,
+ * entirely non-running game with an empty terminal and "No preview available" — the exact broken-
+ * looking state the repo-mount install was added to prevent, on the far more frequent path.
+ *
+ * Skipped when this container is already prepared (or being prepared). Two independent signals:
+ *
+ *   - `previews.length > 0` — a dev server is already serving, whoever started it (a project switched
+ *     to and back, or the mixedId reload path's command-replay). Reinstalling under a live Vite would
+ *     disrupt it and a second `npm run dev` would fight it for the port.
+ *   - `preparingContainer` — THIS module already began preparing this page's container. The mount
+ *     effect fires more than once per load (its deps include `searchParams`, whose reference changes on
+ *     hydration), and the runs are SEQUENTIAL, so `mountInFlight` (which only dedupes concurrent calls)
+ *     does not catch them. Without this flag the second run reinstalls and starts a SECOND dev server
+ *     in the window before the first registers its preview. Reset on failure so a real error can retry;
+ *     left set on success, and cleared for the whole page only by a reload (the module re-evaluates).
+ */
+let preparingContainer = false;
+
+async function prepareMountedProject(files: SerializedFileMap): Promise<void> {
+  if (workbenchStore.previews.get().length > 0 || preparingContainer) {
+    return;
+  }
+
+  preparingContainer = true;
+
+  const ready = await installDependencies(files);
+
+  if (ready) {
+    await startDevServer(files);
+  } else {
+    // Install failed — let a later mount try again rather than wedging this container as "prepared".
+    preparingContainer = false;
+  }
+}
+
+/**
+ * Reinstall a mounted project's dependencies (see `prepareMountedProject` for who calls this and why).
  *
  * `decideDependencyInstall` decides; this only runs it. Failure is reported, never swallowed: a
  * project that cannot install is one the user needs to know about, and the alternative is a blank
  * preview with no explanation.
+ *
+ * Returns whether the project is ready to run — install succeeded, or was unnecessary because
+ * `node_modules` is already present. The caller uses that to decide whether to start the dev server:
+ * starting it on a failed install just produces a second, more confusing error.
  */
-async function installDependencies(files: SerializedFileMap): Promise<void> {
+async function installDependencies(files: SerializedFileMap): Promise<boolean> {
   const paths = Object.keys(files);
 
   const decision = decideDependencyInstall({
@@ -254,7 +338,8 @@ async function installDependencies(files: SerializedFileMap): Promise<void> {
   });
 
   if (!decision.install) {
-    return;
+    // Nothing to install (already present, or no manifest) — the project is as ready as it will get.
+    return true;
   }
 
   const shell = workbenchStore.boltTerminal;
@@ -263,7 +348,21 @@ async function installDependencies(files: SerializedFileMap): Promise<void> {
   try {
     const result = await shell.executeCommand(`deps-${Date.now()}`, 'npm install');
 
-    if (result?.exitCode !== 0) {
+    /*
+     * `undefined` means the boltTerminal had not attached yet — `executeCommand` drops the command and
+     * returns nothing (it is not a non-zero exit). On a fresh page the mount effect can reach here
+     * before the terminal's process exists, and the effect re-fires (its deps include `searchParams`),
+     * so a later cycle runs the install once the terminal is up. Treat this as "not yet", NOT a
+     * failure: dismiss the toast quietly and return false so `prepareMountedProject` frees its guard and
+     * lets that later cycle retry. Deliberately NOT `await shell.ready()` — the terminal may never
+     * attach (the workbench can stay closed), and an unbounded wait there hangs the whole mount.
+     */
+    if (!result) {
+      toast.dismiss(toastId);
+      return false;
+    }
+
+    if (result.exitCode !== 0) {
       toast.update(toastId, {
         render: 'This project loaded, but installing its dependencies failed. Open the terminal to see why.',
         type: 'error',
@@ -271,10 +370,12 @@ async function installDependencies(files: SerializedFileMap): Promise<void> {
         autoClose: 8000,
       });
 
-      return;
+      return false;
     }
 
     toast.update(toastId, { render: 'Ready.', type: 'success', isLoading: false, autoClose: 2000 });
+
+    return true;
   } catch (error) {
     toast.update(toastId, {
       render: `Could not install this project's dependencies: ${(error as Error).message}`,
@@ -282,7 +383,47 @@ async function installDependencies(files: SerializedFileMap): Promise<void> {
       isLoading: false,
       autoClose: 8000,
     });
+
+    return false;
   }
+}
+
+/**
+ * Start the dev server for a freshly-mounted project so its preview comes up on its own (SPEC §4.5.4b).
+ *
+ * A created project gets this for free — its artifact carries a `start` action. A project mounted from
+ * a repo has no artifact to replay, so without this it installs cleanly and then sits at
+ * "No preview available" until the user discovers they must open a terminal and run `npm run dev` — a
+ * complete, correct, entirely non-running game, which reads as a broken product.
+ *
+ * Non-blocking by design: the dev server runs for the life of the session and never exits, so awaiting
+ * it would hang the mount forever. The preview populates itself from the WebContainer `server-ready`
+ * event once Vite is listening. A project that declares no dev/start script is a no-op — nothing to
+ * run, and inventing a command would trip the shell allow-list.
+ */
+async function startDevServer(files: SerializedFileMap): Promise<void> {
+  const manifestPath = findManifest(Object.keys(files));
+  const dirent = manifestPath ? files[manifestPath] : undefined;
+  const script = devScriptFromManifest(dirent?.type === 'file' ? dirent.content : undefined);
+
+  /*
+   * The container is a page-level singleton, so a dev server started for one project keeps running as
+   * the user moves between projects. `shouldStartDevServer` skips when one is already serving — a second
+   * `npm run dev` would only fight it for the port. See its doc for the full reasoning.
+   */
+  if (!script || !shouldStartDevServer({ script, runningPreviews: workbenchStore.previews.get().length })) {
+    return;
+  }
+
+  const shell = workbenchStore.boltTerminal;
+
+  /*
+   * Fire and forget — `npm run dev` stays alive for the whole session; the preview store takes it from here.
+   * Reached only after a successful install, which already proved the terminal is attached.
+   */
+  void shell.executeCommand(`dev-${Date.now()}`, `npm run ${script}`).catch((error) => {
+    logger.error('Dev server failed to start after mount', error);
+  });
 }
 
 /**
@@ -437,7 +578,7 @@ export function startGitConnect(provider: 'github' | 'gitlab' = 'github'): void 
 }
 
 /** Read the one-time remix seed, if there is one, and adopt it as this browser's first checkpoint. */
-async function mountFromSeed(pid: string): Promise<void> {
+async function mountFromSeed(pid: string, prepareToRun = true): Promise<void> {
   const { files } = await readRemixSeed(pid);
 
   if (!files) {
@@ -452,6 +593,10 @@ async function mountFromSeed(pid: string): Promise<void> {
   }
 
   unsavedWork.set(true);
+
+  if (prepareToRun) {
+    await prepareMountedProject(files);
+  }
 }
 
 export function useChatHistory() {
@@ -825,7 +970,14 @@ ${value.content}
 
             if (pid) {
               try {
-                await mountProjectFiles(pid);
+                /*
+                 * prepareToRun: false — the artifact spread into `filteredMessages` above carries this
+                 * project's `npm install` + `npm run dev` (createCommandActionsString) and the parser
+                 * replays them. Installing here as well would race that first installer on the shared
+                 * boltTerminal and flash a spurious "dependencies failed" toast over a project that is
+                 * installing and starting perfectly well.
+                 */
+                await mountProjectFiles(pid, { prepareToRun: false });
               } catch (error) {
                 logger.warn(`Could not restore project ${pid}: ${(error as Error).message}`);
               }

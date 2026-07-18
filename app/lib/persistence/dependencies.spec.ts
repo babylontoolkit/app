@@ -9,7 +9,14 @@
  *     product is broken rather than like a missing install.
  */
 import { describe, expect, it } from 'vitest';
-import { decideDependencyInstall, findLockfile, hasManifest } from './dependencies';
+import {
+  decideDependencyInstall,
+  devScriptFromManifest,
+  findLockfile,
+  findManifest,
+  hasManifest,
+  shouldStartDevServer,
+} from './dependencies';
 
 const LOCK = '{"lockfileVersion":3,"packages":{}}';
 
@@ -110,5 +117,86 @@ describe('hasManifest', () => {
 
   it('handles an empty project without throwing', () => {
     expect(hasManifest([])).toBe(false);
+  });
+});
+
+describe('findManifest', () => {
+  it('finds the root package.json', () => {
+    expect(findManifest(['/home/project/package.json', '/home/project/src/game.ts'])).toBe(
+      '/home/project/package.json',
+    );
+  });
+
+  /** Same rule as hasManifest: a dependency's manifest is not the project's. */
+  it('ignores a package.json nested inside node_modules', () => {
+    expect(
+      findManifest(['/home/project/src/game.ts', '/home/project/node_modules/three/package.json']),
+    ).toBeUndefined();
+  });
+
+  it('is undefined for a project with no manifest', () => {
+    expect(findManifest(['/home/project/README.md'])).toBeUndefined();
+  });
+});
+
+describe('devScriptFromManifest', () => {
+  /** The Toolkit-starter convention: every generated project has a `dev` script. */
+  it('returns "dev" when the manifest declares one', () => {
+    expect(devScriptFromManifest('{"scripts":{"dev":"vite","build":"vite build"}}')).toBe('dev');
+  });
+
+  /** A mounted repo that used `start` instead of `dev` still auto-starts. */
+  it('falls back to "start" when there is no "dev"', () => {
+    expect(devScriptFromManifest('{"scripts":{"start":"vite"}}')).toBe('start');
+  });
+
+  it('prefers "dev" over "start" when both exist', () => {
+    expect(devScriptFromManifest('{"scripts":{"start":"serve","dev":"vite"}}')).toBe('dev');
+  });
+
+  it('is undefined when there is no dev/start script — nothing to run', () => {
+    expect(devScriptFromManifest('{"scripts":{"build":"vite build"}}')).toBeUndefined();
+  });
+
+  it('is undefined when there are no scripts at all', () => {
+    expect(devScriptFromManifest('{"name":"game"}')).toBeUndefined();
+  });
+
+  /** A malformed manifest must never crash the mount — it degrades to "no dev server". */
+  it('does not throw on invalid JSON', () => {
+    expect(devScriptFromManifest('{ not json')).toBeUndefined();
+  });
+
+  it('is undefined for a missing manifest', () => {
+    expect(devScriptFromManifest(undefined)).toBeUndefined();
+  });
+
+  /** A non-string script value (a common typo) is ignored, not stringified into a command. */
+  it('ignores a non-string script value', () => {
+    expect(devScriptFromManifest('{"scripts":{"dev":true}}')).toBeUndefined();
+  });
+});
+
+describe('shouldStartDevServer', () => {
+  /** The cold-mount case: a new device, files just arrived, nothing is running yet. */
+  it('starts when there is a script and no server is running', () => {
+    expect(shouldStartDevServer({ script: 'dev', runningPreviews: 0 })).toBe(true);
+  });
+
+  /**
+   * The container is a page-level singleton, so a dev server from a previous project (or from the
+   * creation artifact) is still up when the user switches projects. A second `npm run dev` would only
+   * fight it for the port — the already-running server serves the newly-mounted files.
+   */
+  it('does NOT start a second server when one is already running', () => {
+    expect(shouldStartDevServer({ script: 'dev', runningPreviews: 1 })).toBe(false);
+  });
+
+  it('never starts when there is no dev/start script to run', () => {
+    expect(shouldStartDevServer({ script: undefined, runningPreviews: 0 })).toBe(false);
+  });
+
+  it('is guarded by the running check even with a script', () => {
+    expect(shouldStartDevServer({ script: 'start', runningPreviews: 2 })).toBe(false);
   });
 });

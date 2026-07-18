@@ -587,14 +587,77 @@ export const ChatImpl = memo(
      */
 
     useEffect(() => {
-      processSampledMessages({
-        messages,
-        initialMessages,
-        isLoading,
-        parseMessages,
-        storeMessageHistory,
-      });
+      /*
+       * Surface a parse/runtime failure instead of swallowing it. `parseMessages` drives the action
+       * runner and artifact rendering; if that throws (a bad artifact, a broken client module after a
+       * hot update), the stream keeps flowing but nothing renders — the user is left staring at the
+       * three-dot spinner with no signal. A caught throw becomes a visible error, which is the whole
+       * point of this being here rather than an uncaught effect error React logs to a console no user
+       * reads.
+       */
+      try {
+        processSampledMessages({
+          messages,
+          initialMessages,
+          isLoading,
+          parseMessages,
+          storeMessageHistory,
+        });
+      } catch (err) {
+        logger.error('Failed to render streaming response', err);
+        toast.error('Something went wrong displaying the response. Try again, or reload the page.');
+      }
     }, [messages, isLoading, parseMessages]);
+
+    /*
+     * Stall watchdog — never leave the user on the three-dot spinner (`isLoading || fakeLoading`) with
+     * no signal at all. A real generation streams SOMETHING — reasoning or text — within a couple of
+     * minutes even for the hardest request, so a long stretch of TOTAL silence while the spinner is up
+     * means the stream is dead, not slow. We reassure first (a long request is not an error), then, well
+     * beyond any generation we have ever measured, surface an error and clear the spinner so the UI is
+     * usable again. We NEVER auto-abort inside the warn window: killing a legitimately long generation
+     * would waste the user's credits (§4.2.1). The clock resets on every streamed byte.
+     */
+    const streamActivityRef = useRef({ at: 0, size: -1, warned: false });
+
+    useEffect(() => {
+      const streaming = isLoading || fakeLoading;
+
+      if (!streaming) {
+        streamActivityRef.current = { at: 0, size: -1, warned: false };
+        return undefined;
+      }
+
+      const STALL_WARN_MS = 120_000; // 2 min of silence → reassure, do not touch the generation
+      const STALL_FAIL_MS = 300_000; // 5 min of silence → the stream is dead; recover the UI
+
+      const streamedSize =
+        messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0) +
+        (Array.isArray(chatData) ? chatData.length : 0);
+
+      if (streamActivityRef.current.size !== streamedSize) {
+        // Fresh bytes (or the stream just began) — reset the silence clock.
+        streamActivityRef.current = { at: Date.now(), size: streamedSize, warned: false };
+      }
+
+      const timer = setInterval(() => {
+        const silentMs = Date.now() - streamActivityRef.current.at;
+
+        if (silentMs > STALL_FAIL_MS) {
+          clearInterval(timer);
+          toast.error('The generation stopped responding and was cancelled. Please try again.');
+          stop();
+          setFakeLoading(false);
+          chatStore.setKey('aborted', true);
+          workbenchStore.abortAllActions();
+        } else if (silentMs > STALL_WARN_MS && !streamActivityRef.current.warned) {
+          streamActivityRef.current.warned = true;
+          toast.info('Still working — a complex request can take a couple of minutes.');
+        }
+      }, 5_000);
+
+      return () => clearInterval(timer);
+    }, [isLoading, fakeLoading, messages, chatData, stop]);
 
     const scrollTextArea = () => {
       const textarea = textareaRef.current;

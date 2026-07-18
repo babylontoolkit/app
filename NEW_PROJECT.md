@@ -79,16 +79,39 @@ Every path ends here:
    → **`src/scripts/<ProjectClassName>.ts`**
    (Blank Canvas → `DefaultGameMode.ts`)
 3. **Rename** the class + its `RegisterClass` string to match
-   ("Shopping Cart Racer" → `ShoppingCartRacerMode`)
+   ("Shopping Cart Racer" → `ShoppingCartRacerMode`), and **fix the imports that shift with the move** —
+   the demo class imports `GameManager from '../globals'` (correct from `src/babylon/classes/`), which
+   in `src/scripts/` must become `'../babylon/globals'` or Vite fails with
+   `Failed to resolve import "../globals"`.
 4. Wire navigation to the new class (+ `sceneUrl` if the entry defines one)
 5. **Totally rewrite `src/pages/Home.tsx` + `Home.css`** as this game's landing page
    (nothing from the starter survives — no hero montage, no demo buttons,
    no Vite/React links, no footer, no Toolkit attribution)
-6. `npm install` → `npm run dev` → preview live
+6. **Redesign the game's chrome in `src/babylon/custom/**`** to the same design — all three
+   ship Babylon-branded and must not stay so (§2.3): the **preloader** (`loading.tsx`), the
+   **splash/loading screen** (`splash.tsx` + `splash.css`), and an **initial in-game overlay**
+   (`overlay.tsx` + `overlay.css`). Restyle freely but keep the wiring — `loading.tsx` re-exports
+   `babylonLogo`/`spinnerLogo` that `splash.tsx` imports; `splash.tsx` keeps its `OnLoadProgress`
+   EventBus subscription; the overlay keeps `pointer-events: none` on its container.
+7. `npm install` → `npm run dev` → preview live
 
 **READ-ONLY, always:** `src/babylon/classes/**` (demo source library — copy FROM, never edit),
 `src/babylon/system/**` (framework internals), `app.tsx` + `src/routing/**` (router shell).
-**WRITE ZONE:** `src/scripts/` (GameModes + Script Components), `src/pages/` + `src/components/` (frontend).
+**WRITE ZONE:** `src/scripts/` (GameModes + Script Components), `src/pages/` + `src/components/` (frontend),
+`src/babylon/custom/**` (the game's chrome — splash, preloader, overlay).
+
+### Layout law (every UI surface — landing page, chrome, menus, HUD)
+
+**Non-negotiable, enforced in the baked prompt (`20-hard-constraints.md` "Layout law"):**
+
+1. **Full-page-width by default.** Fill the viewport edge to edge — no centered fixed-width column
+   (`max-width:1200px; margin:0 auto`, `.container`, `width:960px`). Root/section containers are
+   `width:100%`; backgrounds/heroes/nav are full-bleed. Inner text may still cap its line length *inside*
+   a full-bleed section. **Build a fixed-width / boxed layout ONLY when the user explicitly asks for one.**
+2. **Always responsive.** Adapt from ≈320px phones to ≈2560px desktops, **no horizontal scroll at any
+   width**, nothing clipped or overlapping: fluid units (`%`/`vw`/`dvh`/`rem`/`clamp()`), flex/grid that
+   reflows (`flex-wrap`, `auto-fit`/`minmax`), `@media` breakpoints, `max-width:100%` on media/canvas,
+   keep the `<meta viewport>`. Responsive in the SAME generation — never a "later" pass.
 
 ---
 

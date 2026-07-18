@@ -232,7 +232,19 @@ const ActionList = memo(({ actions }: ActionListProps) => {
                 </div>
                 {type === 'file' || type === 'edit' ? (
                   <div>
-                    {type === 'edit' ? 'Edit' : 'Create'}{' '}
+                    {/*
+                     * Label honestly by what the write actually did, never by a guess:
+                     *   - `type="edit"` is always a diff against an existing file → "Edit".
+                     *   - `type="file"` with `isNew === true` made a new file → "Create".
+                     *   - `type="file"` with `isNew === false` overwrote an existing file → "Edit".
+                     *   - `isNew === undefined` means we could NOT tell (historical replay, or the
+                     *     split-second before the FS probe resolves) → the neutral "Write", never a
+                     *     coin-flip between Create and Edit that reads as wrong half the time.
+                     * The runner probes the WebContainer FS before the first write and records `isNew`
+                     * (`#recordFileNovelty`); the FS is the source of truth, so this also stays honest
+                     * across a repo mount or a manual edit the model's copy of the file does not know about.
+                     */}
+                    {type === 'edit' ? 'Edit' : action.isNew === undefined ? 'Write' : action.isNew ? 'Create' : 'Edit'}{' '}
                     <code
                       className="bg-bolt-elements-artifacts-inlineCode-background text-bolt-elements-artifacts-inlineCode-text px-1.5 py-1 rounded-md text-bolt-elements-item-contentAccent hover:underline cursor-pointer"
                       onClick={() => openArtifactInWorkbench(action.filePath)}
