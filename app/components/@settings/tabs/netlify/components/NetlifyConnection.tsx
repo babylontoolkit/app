@@ -919,12 +919,7 @@ export default function NetlifyConnection() {
                 <div className="i-ph:arrow-square-out w-4 h-4" />
               </a>
             </div>
-            {/* Debug info - remove this later */}
-            <div className="mt-2 text-xs text-gray-500">
-              <p>Debug: Token present: {connection.token ? '✅' : '❌'}</p>
-              <p>Debug: User present: {connection.user ? '✅' : '❌'}</p>
-              <p>Debug: Env token: {import.meta.env?.VITE_NETLIFY_ACCESS_TOKEN ? '✅' : '❌'}</p>
-            </div>
+            {/* Debug block removed — it exposed host VITE_* env-var status to the App Builder user. */}
             <div className="flex gap-2 mt-4">
               <button
                 onClick={handleConnect}

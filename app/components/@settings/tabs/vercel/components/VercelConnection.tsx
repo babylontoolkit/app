@@ -160,22 +160,8 @@ export default function VercelConnection() {
                   Get your token
                   <div className="i-ph:arrow-square-out w-4 h-4" />
                 </a>
-                <div className="mt-2 text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-1 p-2 rounded">
-                  <p className="flex items-center gap-1">
-                    <span className="i-ph:lightbulb w-3.5 h-3.5 text-bolt-elements-icon-success" />
-                    <span className="font-medium">Tip:</span> You can also set{' '}
-                    <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 rounded text-xs">
-                      VITE_VERCEL_ACCESS_TOKEN
-                    </code>{' '}
-                    in your .env.local for automatic connection.
-                  </p>
-                </div>
-                {/* Debug info - remove this later */}
-                <div className="mt-2 text-xs text-gray-500">
-                  <p>Debug: Token present: {connection.token ? '✅' : '❌'}</p>
-                  <p>Debug: User present: {connection.user ? '✅' : '❌'}</p>
-                  <p>Debug: Env token: {import.meta.env?.VITE_VERCEL_ACCESS_TOKEN ? '✅' : '❌'}</p>
-                </div>
+                {/* VITE_* host env-var tip removed — operator/self-host config, not for the App Builder user. */}
+                {/* Debug block removed — it exposed host VITE_* env-var status to the App Builder user. */}
               </div>
             </div>
 

@@ -20,7 +20,6 @@ interface ConnectionFormProps {
   tokenLabel?: string;
   tokenPlaceholder?: string;
   getTokenUrl: string;
-  environmentVariable?: string;
   tokenTypes?: TokenTypeOption[];
   selectedTokenType?: string;
   onTokenTypeChange?: (type: string) => void;
@@ -40,7 +39,6 @@ export function ConnectionForm({
   tokenLabel = 'Access Token',
   tokenPlaceholder,
   getTokenUrl,
-  environmentVariable,
   tokenTypes,
   selectedTokenType,
   onTokenTypeChange,
@@ -57,19 +55,7 @@ export function ConnectionForm({
       <div className="p-6 space-y-6">
         {!isConnected ? (
           <div className="space-y-4">
-            {environmentVariable && (
-              <div className="text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-1 dark:bg-bolt-elements-background-depth-1 p-3 rounded-lg mb-4">
-                <p className="flex items-center gap-1 mb-1">
-                  <span className="i-ph:lightbulb w-3.5 h-3.5 text-bolt-elements-icon-success dark:text-bolt-elements-icon-success" />
-                  <span className="font-medium">Tip:</span> You can also set the{' '}
-                  <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 dark:bg-bolt-elements-background-depth-2 rounded">
-                    {environmentVariable}
-                  </code>{' '}
-                  environment variable to connect automatically.
-                </p>
-              </div>
-            )}
-
+            {/* VITE_* host env-var tip removed — operator/self-host config, not for the App Builder user. */}
             <form onSubmit={onConnect} className="space-y-4">
               {tokenTypes && tokenTypes.length > 1 && onTokenTypeChange && (
                 <div>

@@ -75,23 +75,11 @@ export default function GitLabConnection({ connectionTest, onTestConnection }: G
           </div>
         </div>
 
-        {!isConnected && (
-          <div className="text-xs text-bolt-elements-textSecondary bg-bolt-elements-background-depth-1 p-3 rounded-lg mb-4">
-            <p className="flex items-center gap-1 mb-1">
-              <span className="i-ph:lightbulb w-3.5 h-3.5 text-bolt-elements-icon-success" />
-              <span className="font-medium">Tip:</span> You can also set the{' '}
-              <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 rounded">VITE_GITLAB_ACCESS_TOKEN</code>{' '}
-              environment variable to connect automatically.
-            </p>
-            <p>
-              For self-hosted GitLab instances, also set{' '}
-              <code className="px-1 py-0.5 bg-bolt-elements-background-depth-2 rounded">
-                VITE_GITLAB_URL=https://your-gitlab-instance.com
-              </code>
-            </p>
-          </div>
-        )}
-
+        {/*
+         * Upstream bolt.diy showed a "Tip: set VITE_GITLAB_ACCESS_TOKEN" hint here. Removed: those
+         * VITE_* vars are an operator/self-host concern (and a platform secret must never be VITE_-
+         * prefixed anyway), not something the App Builder's web-facing user should be told to set.
+         */}
         <form onSubmit={handleConnect}>
           <div className="grid grid-cols-1 gap-4">
             <div>

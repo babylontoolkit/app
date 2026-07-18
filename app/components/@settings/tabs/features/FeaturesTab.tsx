@@ -5,7 +5,6 @@ import { Switch } from '~/components/ui/Switch';
 import { useSettings } from '~/lib/hooks/useSettings';
 import { classNames } from '~/utils/classNames';
 import { toast } from 'react-toastify';
-import { PromptLibrary } from '~/lib/common/prompt-library';
 
 interface FeatureToggle {
   id: string;
@@ -217,9 +216,17 @@ export default function FeaturesTab() {
 
   return (
     <div className="flex flex-col gap-8">
+      {/*
+       * Only Event Logging is shown. Main Branch Updates, Auto Select Template, Context Optimization,
+       * and the Prompt Library (removed below) are inherited bolt.diy knobs that ONLY wire to the
+       * fail-closed upstream LLM path (`/api/chat` + `app/lib/.server/llm/*`) — they are inert on our
+       * `/api/agent` proxy, and misleading to a web-facing user (they imply this app tracks bolt.diy's
+       * main branch or can swap our system prompt, neither of which is true). Hidden, not deleted, to
+       * stay upstream-mergeable; their safe defaults are still applied in the effect above.
+       */}
       <FeatureSection
         title="Core Features"
-        features={features.stable}
+        features={features.stable.filter((feature) => feature.id === 'eventLogs')}
         icon="i-ph:check-circle"
         description="Essential features that are enabled by default for optimal performance"
         onToggleFeature={handleToggleFeature}
@@ -235,61 +242,13 @@ export default function FeaturesTab() {
         />
       )}
 
-      <motion.div
-        layout
-        className={classNames(
-          'bg-bolt-elements-background-depth-2',
-          'hover:bg-bolt-elements-background-depth-3',
-          'transition-all duration-200',
-          'rounded-lg p-4',
-          'group',
-        )}
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
-      >
-        <div className="flex items-center gap-4">
-          <div
-            className={classNames(
-              'p-2 rounded-lg text-xl',
-              'bg-bolt-elements-background-depth-3 group-hover:bg-bolt-elements-background-depth-4',
-              'transition-colors duration-200',
-              'text-purple-500',
-            )}
-          >
-            <div className="i-ph:book" />
-          </div>
-          <div className="flex-1">
-            <h4 className="text-sm font-medium text-bolt-elements-textPrimary group-hover:text-purple-500 transition-colors">
-              Prompt Library
-            </h4>
-            <p className="text-xs text-bolt-elements-textSecondary mt-0.5">
-              Choose a prompt from the library to use as the system prompt
-            </p>
-          </div>
-          <select
-            value={promptId}
-            onChange={(e) => {
-              setPromptId(e.target.value);
-              toast.success('Prompt template updated');
-            }}
-            className={classNames(
-              'p-2 rounded-lg text-sm min-w-[200px]',
-              'bg-bolt-elements-background-depth-3 border border-bolt-elements-borderColor',
-              'text-bolt-elements-textPrimary',
-              'focus:outline-none focus:ring-2 focus:ring-purple-500/30',
-              'group-hover:border-purple-500/30',
-              'transition-all duration-200',
-            )}
-          >
-            {PromptLibrary.getList().map((x) => (
-              <option key={x.id} value={x.id}>
-                {x.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </motion.div>
+      {/*
+       * The upstream "Prompt Library" system-prompt picker was removed: our system prompt is built from
+       * the synced Agent Reference docs + skills (§4.2/§4.3) in the `/api/agent` proxy, and the picker
+       * only fed the fail-closed `/api/chat` path. Exposing it to a web-facing user implies they can
+       * swap the platform prompt, which they cannot. The `promptId` default is still set above so the
+       * inherited setting keeps a sane value.
+       */}
     </div>
   );
 }

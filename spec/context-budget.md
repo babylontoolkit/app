@@ -807,6 +807,12 @@ cost control:
 | `MAX_RESPONSE_SEGMENTS = 2` + continuation on `finishReason: 'length'` | `llm/constants.ts` | only on the dead path |
 | `MAX_TOKENS = 128000` | `llm/constants.ts` | the proxy hardcodes 64k |
 | `maxLLMSteps` (MCP setting) | `Chat.client.tsx` → `api.chat.ts` | **still posted by the client on every turn, silently ignored by the proxy** |
+| `contextOptimization` toggle ("Optimize context for better responses") | Features tab → `api.chat.ts` / `llm/stream-text.ts` | only on the dead path; the proxy runs §4.2.8 unconditionally |
+| `promptId` / **Prompt Library** picker ("use as the system prompt") | Features tab → `llm/stream-text.ts` (`PromptLibrary.getPropmtFromLibrary`) | only on the dead path; our prompt is built from synced docs+skills (§4.3), NOT the library |
+| `autoSelectTemplate` ("Auto Select Template") | Features tab → `utils/selectStarterTemplate.ts` | **zero live callers**; creation uses the registry + §4.4 pin-and-cache |
+| `isLatestBranch` ("Main Branch Updates") | Features tab → `lib/api/updates.ts` / `api.update.ts` | version CHECK only — fetches `stackblitz-labs/bolt.diy` `package.json` (phones home, off-brand); `/api/update` REFUSES to auto-pull. Cannot revert the fork |
+
+⚠️ **These four were HIDDEN from the Features settings tab on 2026-07-18** (`FeaturesTab.tsx` renders only Event Logging; the Prompt Library picker was removed) — hide-don't-delete, since they are inert on `/api/agent` but their labels imply this app tracks bolt.diy's branch or can swap our system prompt (§2.3). Their underlying settings still receive safe defaults in the tab's mount effect. If the dead path is ever revived, do NOT un-hide them without re-checking they route to `/api/agent`.
 
 If upstream's agent rework is ever pulled in, `select-context` and `create-summary` are the natural
 starting points for the history window above — but they are starting points, not working code.
