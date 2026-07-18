@@ -363,10 +363,10 @@ export const Workbench = memo(
       try {
         const directoryHandle = await window.showDirectoryPicker();
         await workbenchStore.syncFiles(directoryHandle);
-        toast.success('Files synced successfully');
+        toast.success('Files copied successfully');
       } catch (error) {
-        console.error('Error syncing files:', error);
-        toast.error('Failed to sync files');
+        console.error('Error copying files:', error);
+        toast.error('Failed to copy files');
       } finally {
         setIsSyncing(false);
       }
@@ -441,7 +441,7 @@ export const Workbench = memo(
                             disabled={isSyncing || streaming}
                             className="rounded-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.7"
                           >
-                            {isSyncing ? 'Syncing...' : 'Sync'}
+                            {isSyncing ? 'Copying...' : 'Copy'}
                             <span className={classNames('i-ph:caret-down transition-transform')} />
                           </DropdownMenu.Trigger>
                           <DropdownMenu.Content
@@ -469,7 +469,7 @@ export const Workbench = memo(
                                 ) : (
                                   <div className="i-ph:cloud-arrow-down" />
                                 )}
-                                <span>{isSyncing ? 'Syncing...' : 'Sync Files'}</span>
+                                <span>{isSyncing ? 'Copying...' : 'Copy Files'}</span>
                               </div>
                             </DropdownMenu.Item>
                           </DropdownMenu.Content>
