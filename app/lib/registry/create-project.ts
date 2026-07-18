@@ -224,7 +224,8 @@ ${images.map((path) => `- ${path}`).join('\n')}
 
 **Your task now**
 1. Rewrite \`src/pages/Home.tsx\` and \`src/pages/Home.css\` COMPLETELY, as a landing page designed from scratch for *${title}*. Nothing from the starter page survives — no hero montage, no demo buttons, no Vite/React/Babylon links, no footer, no attribution of any kind. Reach gameplay through the play contract above.
-2. ${
+2. Reskin the game chrome in \`src/babylon/custom/**\` to match that same design — all THREE surfaces, not just the overlay: the preloader (\`loading.tsx\`), the splash / loading screen (\`splash.tsx\` + \`splash.css\`), and the initial overlay (\`overlay.tsx\` + \`overlay.css\`). Keep each one's wiring (the \`babylonLogo\`/\`spinnerLogo\` re-exports, the \`OnLoadProgress\` subscription, \`pointer-events: none\` on the overlay container) — see "Chrome rewrites" for the details. The splash and preloader ship the Babylon logo + spinner, so skipping them leaves BabylonJS branding in the user's game.
+3. ${
     prompt
       ? `Then build what the user asked for:\n\n> ${prompt}`
       : `That is all for now — the user has not asked for anything else yet.`
