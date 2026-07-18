@@ -6,16 +6,21 @@ import { canUsePremium, sessionStore } from '~/lib/stores/session';
 import { premiumModelStore, updatePremiumModel } from '~/lib/stores/settings';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
 
-/** `claude-fable-5` → `Fable 5`. A friendly label for the toggle; falls back to the raw id. */
-function premiumModelLabel(model: string): string {
-  const known: Record<string, string> = {
-    'claude-fable-5': 'Fable 5',
-    'claude-opus-4-8': 'Opus 4.8',
-    'claude-opus-4-7': 'Opus 4.7',
-    'claude-sonnet-5': 'Sonnet 5',
-  };
+/**
+ * `claude-fable-5` → `{ short: 'Fable', full: 'Fable 5' }`. The pill shows `short` (the family), the
+ * tooltip shows `full` (family + version). Parsed, not a lookup table, so a new model id names itself.
+ */
+function parseModel(model: string): { short: string; full: string } {
+  const match = model.match(/^claude-([a-z]+)-(.+)$/i);
 
-  return known[model] ?? model;
+  if (!match) {
+    return { short: model, full: model };
+  }
+
+  const short = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+  const version = match[2].replace(/-/g, '.'); // 4-8 → 4.8, 5 → 5
+
+  return { short, full: `${short} ${version}` };
 }
 
 /**
@@ -25,13 +30,13 @@ function premiumModelLabel(model: string): string {
  * (the operator default) vs the one configured premium model. It renders ONLY for credits users — BYOK
  * users pick a model directly, so it would be redundant for them.
  *
- * Three states, and the locked one is the point:
- *  - **Eligible + off** — a lightning affordance; click to opt in (with a "~2× credits" warning toast).
- *  - **Eligible + on** — an accented pill reading "Premium · ~2×", the persistent burn-rate warning the
- *    owner asked for (§4.6.1). Click to drop back to the standard model.
- *  - **Locked** — the user holds fewer than `PREMIUM_MINIMUM_CREDITS`. Dimmed, with a lock, and a click
- *    explains the threshold rather than toggling. This is what protects a fresh 500-credit grant from a
- *    2× model out the gate.
+ * The pill ALWAYS names the model actually in use — its family only (`Opus`, `Fable`); the version
+ * (`Opus 4.8`, `Fable 5`) and the burn-rate note live in the tooltip. Three states:
+ *  - **Eligible + off** — shows the standard model's name; click to switch to premium (warning toast).
+ *  - **Eligible + on** — accented, shows the premium model's name. Click to switch back to standard.
+ *  - **Locked** — the user holds fewer than `PREMIUM_MINIMUM_CREDITS`. Shows the standard model dimmed
+ *    with a lock; a click explains the threshold rather than toggling. This is what protects a fresh
+ *    500-credit grant from a 2× model out the gate.
  *
  * Authority still lives on the server: `decidePremium` re-checks the threshold on every generation, so
  * a tampered store only ever reveals a toggle the server will decline.
@@ -51,15 +56,19 @@ export function PremiumToggle() {
     return null;
   }
 
-  const { minimumCredits, model } = session.credits.premium;
-  const label = premiumModelLabel(model);
+  const { minimumCredits, model, standardModel } = session.credits.premium;
+  const premium = parseModel(model);
+  const standard = parseModel(standardModel);
   const eligible = canUsePremium(session);
   const active = enabled && eligible;
+
+  // The pill always names the model actually in use: premium when on, the standard model otherwise.
+  const current = active ? premium : standard;
 
   const onClick = () => {
     if (!eligible) {
       toast.info(
-        `The premium model (${label}) unlocks at ${minimumCredits.toLocaleString()} credits. Add credits to enable it.`,
+        `The premium model (${premium.full}) unlocks at ${minimumCredits.toLocaleString()} credits. Add credits to enable it.`,
       );
       return;
     }
@@ -68,15 +77,18 @@ export function PremiumToggle() {
     updatePremiumModel(next);
 
     if (next) {
-      toast.warning(`Premium model (${label}) on — builds now burn credits about 2× faster.`);
+      toast.warning(`Premium model (${premium.full}) on — builds now burn credits about 2× faster.`);
+    } else {
+      toast.info(`Switched to the standard model (${standard.full}).`);
     }
   };
 
+  // Version detail lives here (the pill shows only the family): "Fable 5", "Opus 4.8".
   const title = !eligible
-    ? `Premium model (${label}) unlocks at ${minimumCredits.toLocaleString()} credits`
+    ? `${standard.full} (standard). Premium (${premium.full}) unlocks at ${minimumCredits.toLocaleString()} credits.`
     : active
-      ? `Premium (${label}) is ON — burns credits ~2× faster. Click to use the standard model.`
-      : `Use the premium model (${label}) — burns credits ~2× faster`;
+      ? `Premium model: ${premium.full} — burns credits ~2× faster. Click to switch to ${standard.full}.`
+      : `Standard model: ${standard.full}. Click to switch to the premium model (${premium.full}) — burns credits ~2× faster.`;
 
   return (
     <IconButton
@@ -89,11 +101,8 @@ export function PremiumToggle() {
     >
       <>
         <div className="i-ph:lightning-fill text-lg" />
-        {active ? (
-          <span className="text-xs whitespace-nowrap">Premium · ~2×</span>
-        ) : !eligible ? (
-          <div className="i-ph:lock-simple text-sm" />
-        ) : null}
+        <span className="text-xs whitespace-nowrap">{current.short}</span>
+        {!eligible ? <div className="i-ph:lock-simple text-sm" /> : null}
       </>
     </IconButton>
   );

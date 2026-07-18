@@ -14,8 +14,9 @@
 import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { getUser } from '~/lib/.server/supabase/auth';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
-import { getPlatformConfig } from '~/lib/.server/agent/config';
+import { getPlatformConfig, getPlatformModel } from '~/lib/.server/agent/config';
 import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
+import { DEFAULT_MODEL } from '~/utils/constants';
 import { ensureSignupGrant, getLedger } from '~/lib/.server/billing/ledger';
 import { getEntitlement } from '~/lib/.server/licensing/entitlements';
 import { isStripeConfigured, CREDIT_PACKS, SUBSCRIPTION_PLANS } from '~/lib/.server/billing/stripe';
@@ -107,8 +108,22 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
         premium: (() => {
           const tier = getPremiumTier(context);
 
+          /*
+           * The STANDARD model, so the composer pill can name the model actually in use when premium is
+           * off (§4.6.1). Guarded: a misconfigured provider must not take `/api/me` down — it is a
+           * rendering hint, and the baked default is the honest fallback for what the model would be.
+           */
+          let standardModel: string;
+
+          try {
+            standardModel = getPlatformModel(context);
+          } catch {
+            standardModel = DEFAULT_MODEL;
+          }
+
           return {
             model: tier.model,
+            standardModel,
             minimumCredits: tier.minimumCredits,
             available: !billing.enforced || balance >= tier.minimumCredits,
           };
