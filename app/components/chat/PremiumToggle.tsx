@@ -30,8 +30,8 @@ function parseModel(model: string): { short: string; full: string } {
  * (the operator default) vs the one configured premium model. It renders ONLY for credits users — BYOK
  * users pick a model directly, so it would be redundant for them.
  *
- * The pill ALWAYS names the model actually in use — its family only (`Opus`, `Fable`); the version
- * (`Opus 4.8`, `Fable 5`) and the burn-rate note live in the tooltip. Three states:
+ * The pill ALWAYS names the model actually in use, with its version (`Opus 4.8`, `Fable 5`); the
+ * burn-rate note and the switch hint live in the tooltip. Three states:
  *  - **Eligible + off** — shows the standard model's name; click to switch to premium (warning toast).
  *  - **Eligible + on** — accented, shows the premium model's name. Click to switch back to standard.
  *  - **Locked** — the user holds fewer than `PREMIUM_MINIMUM_CREDITS`. Shows the standard model dimmed
@@ -101,7 +101,7 @@ export function PremiumToggle() {
     >
       <>
         <div className="i-ph:lightning-fill text-lg" />
-        <span className="text-xs whitespace-nowrap">{current.short}</span>
+        <span className="text-xs whitespace-nowrap">{current.full}</span>
         {!eligible ? <div className="i-ph:lock-simple text-sm" /> : null}
       </>
     </IconButton>
