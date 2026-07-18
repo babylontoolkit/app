@@ -436,7 +436,7 @@ export const Workbench = memo(
 
                       {/* Sync Button */}
                       <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden ml-1">
-                        <DropdownMenu.Root>
+                        <DropdownMenu.Root modal={false}>
                           <DropdownMenu.Trigger
                             disabled={isSyncing || streaming}
                             className="rounded-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.7"

@@ -119,6 +119,13 @@ export function ProjectsDashboard() {
     load();
   }, [load]);
 
+  /** Manual refresh — same load as mount; spins the icon while the server round-trip is in flight. */
+  const [refreshing, setRefreshing] = useState(false);
+  const refresh = useCallback(() => {
+    setRefreshing(true);
+    load().finally(() => setRefreshing(false));
+  }, [load]);
+
   const openProject = useCallback(
     (project: Project) => {
       const [mostRecent] = localChats.get(project.id) ?? [];
@@ -264,7 +271,18 @@ export function ProjectsDashboard() {
     <main className="flex-1 w-full max-w-6xl mx-auto px-6 py-10">
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-semibold text-bolt-elements-textPrimary">Your Projects</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-semibold text-bolt-elements-textPrimary">Your Projects</h1>
+            <button
+              onClick={refresh}
+              disabled={refreshing}
+              className="flex items-center rounded-md p-1.5 text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-2 transition-colors disabled:opacity-60"
+              title="Refresh the project list"
+              aria-label="Refresh the project list"
+            >
+              <span className={classNames('i-ph:arrows-clockwise h-4 w-4', { 'animate-spin': refreshing })} />
+            </button>
+          </div>
           <p className="text-bolt-elements-textSecondary mt-1">
             Every game you have built. Open one to keep working, or start something new.
           </p>

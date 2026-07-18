@@ -34,10 +34,21 @@ export interface PremiumDecisionInput {
 
   /** `PREMIUM_MINIMUM_CREDITS` — the credits a user must hold to unlock premium. */
   minimumCredits: number;
+
+  /**
+   * The turn carries the creation brief — the one turn premium must NEVER run (2026-07-18, observed
+   * live). KIE serves Fable 5 with a BUFFERED answer (the accepted trade of the provider decision):
+   * fine for an edit-sized reply, fatal for a creation — the ~25k-token artifact takes 4–7 minutes to
+   * decode, KIE's gateway cuts the connection at ~5, and the generation dies at `finish=error` after
+   * 7+ minutes of the user watching reasoning stream with no artifact ever arriving (measured: step 2
+   * = 307.8s, 17,635 chars reasoning, 0 text). Creations run the standard streaming model; the
+   * premium preference kicks in from the first edit turn.
+   */
+  isCreationTurn?: boolean;
 }
 
 export type PremiumDecision =
-  | { usePremium: false; reason: 'not_requested' | 'below_minimum' }
+  | { usePremium: false; reason: 'not_requested' | 'below_minimum' | 'creation_turn' }
   | { usePremium: true; reason: 'sufficient_credits' };
 
 /*
@@ -53,6 +64,10 @@ export type PremiumDecision =
 export function decidePremium(input: PremiumDecisionInput): PremiumDecision {
   if (!input.requested) {
     return { usePremium: false, reason: 'not_requested' };
+  }
+
+  if (input.isCreationTurn) {
+    return { usePremium: false, reason: 'creation_turn' };
   }
 
   return input.balance >= input.minimumCredits

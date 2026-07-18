@@ -34,6 +34,7 @@ import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/prem
 import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
 import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
+import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { createMediaTools, type MediaTaskEvent } from './media-tools';
 import { KieMediaProvider } from '~/lib/.server/media/kie-client';
@@ -418,10 +419,19 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   const useByok = byok.allowed;
   const premiumTier = getPremiumTier(request.context);
+
+  /*
+   * Computed here (from the raw request — a slash rewrite never carries the creation marker) because
+   * the PREMIUM decision needs it: a creation on KIE-buffered Fable 5 dies at the gateway timeout
+   * before its artifact can flush (see `premium.ts`). The tool policy below reuses the same value.
+   */
+  const isCreationTurn = lastUserText(request.messages).includes(CREATION_BRIEF_MARKER);
+
   const premium = decidePremium({
     requested: Boolean(request.premium) && !useByok,
     balance: gate.mode === 'byok' ? 0 : gate.balance,
     minimumCredits: premiumTier.minimumCredits,
+    isCreationTurn,
   });
 
   const model =
@@ -500,7 +510,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * and redrafted, six times, for 350s and 29,173 wasted output tokens. The system prompt forbids this
    * in words and the model did it anyway. So the tools are taken away rather than argued about.
    */
-  const isCreationTurn = lastUserText(messages).includes(CREATION_BRIEF_MARKER);
+  // `isCreationTurn` is computed above the premium decision (raw request messages) and reused here.
   const store = getPromptStore();
   const blocks: Array<{ id: string; title: string; body: string }> = [];
 
@@ -780,10 +790,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     offerLoadSkill: preloaded.length === 0 && !slash,
   };
 
+  /*
+   * `createRepairTool` rides in EVERY set that can run with `toolChoice: 'auto'` — it is the bounce
+   * target `repairUnavailableToolCall` reroutes unknown-tool calls to (observed live: the model calling
+   * `boltArtifact` as a tool killed a whole paid creation). See `tool-repair.ts`.
+   */
   const tools = (
     toolPolicy.toolset === 'media-only'
-      ? mediaTools
-      : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools }
+      ? { ...mediaTools, ...createRepairTool() }
+      : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools, ...createRepairTool() }
   ) as SkillTools;
 
   /*
@@ -947,6 +962,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * the user says stop — but the tokens already generated are still billed, in the `finally` below.
        */
       abortSignal: request.abortSignal,
+
+      /*
+       * An unknown-tool call becomes a corrective bounce instead of a dead generation — the model is
+       * told the tag is text, and the SAME generation continues to build the project (`tool-repair.ts`).
+       */
+      experimental_repairToolCall: repairUnavailableToolCall as never,
 
       /*
        * `toolChoice: 'none'` still passes the tool DEFINITIONS (Anthropic requires them whenever the

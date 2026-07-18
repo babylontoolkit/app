@@ -4,6 +4,7 @@ import { IconButton } from '~/components/ui/IconButton';
 import { classNames } from '~/utils/classNames';
 import { canUsePremium, sessionStore } from '~/lib/stores/session';
 import { premiumModelStore, updatePremiumModel } from '~/lib/stores/settings';
+import { creationTurnStore } from '~/lib/stores/chat';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
 
 /**
@@ -42,8 +43,14 @@ function parseModel(model: string): { short: string; full: string } {
  * a tampered store only ever reveals a toggle the server will decline.
  */
 export function PremiumToggle() {
+  /*
+   * ⚠️ EVERY hook runs before the early returns below — a hook after a conditional return crashed the
+   * whole chat ("Rendered more hooks than during the previous render") when `creationTurn` was first
+   * added mid-component. Rules of Hooks: unconditional, top of the component, always.
+   */
   const session = useStore(sessionStore);
   const enabled = useStore(premiumModelStore);
+  const creationTurn = useStore(creationTurnStore);
   const byokUnlocked = useByokUnlocked();
 
   // BYOK users choose a model directly; nothing to show until we know who the user is.
@@ -59,7 +66,14 @@ export function PremiumToggle() {
   const { minimumCredits, model, standardModel } = session.credits.premium;
   const premium = parseModel(model);
   const standard = parseModel(standardModel);
-  const eligible = canUsePremium(session);
+
+  /*
+   * Premium is EDIT-ONLY: locked during creation exactly like being under the credit threshold
+   * (`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a creation-sized
+   * artifact before the gateway timeout, §4.6.1). `creationTurn` covers the landing page (the next
+   * send creates a project) and a freshly created project until the user's first edit message.
+   */
+  const eligible = canUsePremium(session) && !creationTurn;
   const active = enabled && eligible;
 
   // The pill always names the model actually in use: premium when on, the standard model otherwise.
@@ -68,7 +82,9 @@ export function PremiumToggle() {
   const onClick = () => {
     if (!eligible) {
       toast.info(
-        `The premium model (${premium.full}) unlocks at ${minimumCredits.toLocaleString()} credits. Add credits to enable it.`,
+        creationTurn
+          ? `Project creation always runs ${standard.full}. The premium model (${premium.full}) unlocks once your project is created.`
+          : `The premium model (${premium.full}) unlocks at ${minimumCredits.toLocaleString()} credits. Add credits to enable it.`,
       );
       return;
     }
@@ -85,7 +101,9 @@ export function PremiumToggle() {
 
   // Version detail lives here (the pill shows only the family): "Fable 5", "Opus 4.8".
   const title = !eligible
-    ? `${standard.full} (standard). Premium (${premium.full}) unlocks at ${minimumCredits.toLocaleString()} credits.`
+    ? creationTurn
+      ? `${standard.full} (standard). Project creation always runs the standard model; premium (${premium.full}) unlocks after creation.`
+      : `${standard.full} (standard). Premium (${premium.full}) unlocks at ${minimumCredits.toLocaleString()} credits.`
     : active
       ? `Premium model: ${premium.full} — burns credits ~2× faster. Click to switch to ${standard.full}.`
       : `Standard model: ${standard.full}. Click to switch to the premium model (${premium.full}) — burns credits ~2× faster.`;

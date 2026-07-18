@@ -81,6 +81,24 @@ describe('decidePremium — the eligibility rule', () => {
   });
 
   /*
+   * A CREATION turn never runs premium, however rich the balance (2026-07-18, observed live): KIE
+   * serves Fable 5 with a buffered answer, and a creation-sized artifact cannot flush before KIE's
+   * gateway timeout — the generation died at finish=error after 449s with the artifact never arriving.
+   * Premium starts at the first edit turn.
+   */
+  it('declines premium on a creation turn regardless of balance', () => {
+    expect(decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isCreationTurn: true })).toEqual({
+      usePremium: false,
+      reason: 'creation_turn',
+    });
+
+    // The same balance on an ordinary turn: premium runs. The control that pins the distinction.
+    expect(
+      decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isCreationTurn: false }).usePremium,
+    ).toBe(true);
+  });
+
+  /*
    * The rule takes NO `enforced` input, on purpose (2026-07-18) — the retired "unmetered" bypass let a
    * 320-credit user run the 2x model because "nobody is charged when enforcement is off", which was
    * false: settlement debits the ledger regardless. The pin is structural — if an enforcement flag

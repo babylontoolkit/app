@@ -7,7 +7,8 @@ import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
 import { createProject, getRepoStatus } from '~/lib/persistence/projects';
-import { chatStore } from '~/lib/stores/chat';
+import { chatStore, creationTurnStore } from '~/lib/stores/chat';
+import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
 import { applySettlement, canUsePremium, sessionStore } from '~/lib/stores/session';
@@ -631,6 +632,26 @@ export const ChatImpl = memo(
         toast.error('Something went wrong displaying the response. Try again, or reload the page.');
       }
     }, [messages, isLoading, parseMessages]);
+
+    /*
+     * Is the current/next turn the CREATION? Premium is edit-only (§4.6.1, `decidePremium`
+     * `reason: 'creation_turn'`), so the pill locks while this is true. Derived, never a flag set on
+     * the send path, so restores and retries agree. TRUE in two states:
+     *  - the landing page / a chat with no project (the next send CREATES a project), and
+     *  - a conversation whose last user turn is still the hidden creation brief (creation streaming,
+     *    a failed creation awaiting retry, or a fresh project before the user's first edit).
+     * A new chat on an EXISTING project has `activeProjectId` and no brief — premium stays available,
+     * because its first message is an edit.
+     */
+    useEffect(() => {
+      if (!activeProjectId && messages.length === 0) {
+        creationTurnStore.set(true);
+        return;
+      }
+
+      const lastUser = [...messages].reverse().find((message) => message.role === 'user');
+      creationTurnStore.set(typeof lastUser?.content === 'string' && lastUser.content.includes(CREATION_BRIEF_MARKER));
+    }, [messages, activeProjectId]);
 
     /*
      * Stall watchdog — never leave the user on the three-dot spinner (`isLoading || fakeLoading`) with

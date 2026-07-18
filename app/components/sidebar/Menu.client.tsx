@@ -102,14 +102,14 @@ export const Menu = () => {
    * a network error as an authoritative empty list would blank the sidebar and, on the next merge, look
    * exactly like every chat having been deleted.
    */
-  const loadEntries = useCallback(() => {
+  const loadEntries = useCallback((): Promise<void> => {
     if (!db) {
-      return;
+      return Promise.resolve();
     }
 
     const local = getAll(db).catch(() => [] as ChatHistoryItem[]);
 
-    listAllChats()
+    return listAllChats()
       .then(async (server) => mergeChatList(server, await local))
       .catch(async (error) => {
         logger.warn(`Could not load chats from the server, showing this browser's: ${error.message}`);
@@ -118,8 +118,17 @@ export const Menu = () => {
         return localChatList(await local);
       })
       .then(setList)
-      .catch((error) => toast.error(error.message));
+      .catch((error) => {
+        toast.error(error.message);
+      });
   }, []);
+
+  /** Manual refresh of the chat list — spins the icon while the server round-trip is in flight. */
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshEntries = useCallback(() => {
+    setRefreshing(true);
+    loadEntries().finally(() => setRefreshing(false));
+  }, [loadEntries]);
 
   /**
    * Delete one conversation — locally AND on the server (§4.5.6).
@@ -514,7 +523,18 @@ export const Menu = () => {
               </div>
             </div>
             <div className="flex items-center justify-between text-sm px-4 py-2">
-              <div className="font-medium text-gray-600 dark:text-gray-400">Your Chats</div>
+              <div className="flex items-center gap-1.5">
+                <div className="font-medium text-gray-600 dark:text-gray-400">Your Chats</div>
+                <button
+                  onClick={refreshEntries}
+                  disabled={refreshing}
+                  className="flex items-center rounded-md p-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-60"
+                  title="Refresh the chat list"
+                  aria-label="Refresh the chat list"
+                >
+                  <span className={classNames('i-ph:arrows-clockwise h-3.5 w-3.5', { 'animate-spin': refreshing })} />
+                </button>
+              </div>
               {selectionMode && (
                 <div className="flex items-center gap-2">
                   <Button variant="ghost" size="sm" onClick={selectAll}>

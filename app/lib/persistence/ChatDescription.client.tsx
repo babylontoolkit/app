@@ -1,11 +1,14 @@
+import { useEffect, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { TooltipProvider } from '@radix-ui/react-tooltip';
 import WithTooltip from '~/components/ui/Tooltip';
 import { useEditChatDescription } from '~/lib/hooks';
-import { description as descriptionStore } from '~/lib/persistence';
+import { description as descriptionStore, projectId as projectIdStore } from '~/lib/persistence';
+import { getProject } from '~/lib/persistence/projects';
 
 export function ChatDescription() {
   const initialDescription = useStore(descriptionStore)!;
+  const activeProjectId = useStore(projectIdStore);
 
   const { editing, handleChange, handleBlur, handleSubmit, handleKeyDown, currentDescription, toggleEditMode } =
     useEditChatDescription({
@@ -13,9 +16,41 @@ export function ChatDescription() {
       syncWithGlobalStore: true,
     });
 
+  /*
+   * The PROJECT title, as a fallback: a fresh chat has no description until its first message names
+   * one (§4.5.6 — identity is built from scratch, never inherited), which left the title bar EMPTY on
+   * "New chat, same game" — the user is looking at a project with no visible name. One cheap read per
+   * project change; best-effort (an offline miss just keeps the bar empty as before).
+   */
+  const [projectTitle, setProjectTitle] = useState<string | undefined>();
+
+  useEffect(() => {
+    if (!activeProjectId) {
+      setProjectTitle(undefined);
+      return undefined;
+    }
+
+    let cancelled = false;
+    getProject(activeProjectId)
+      .then((project) => {
+        if (!cancelled) {
+          setProjectTitle(project.name);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId]);
+
   if (!initialDescription) {
-    // doing this to prevent showing edit button until chat description is set
-    return null;
+    /*
+     * No chat name yet — show the PROJECT's name (plain, no rename pencil: the pencil renames the
+     * CHAT, and there is no chat identity to rename yet). Nothing at all only when there is no
+     * project either (the landing page).
+     */
+    return projectTitle ? <div className="flex items-center justify-center">{projectTitle}</div> : null;
   }
 
   return (

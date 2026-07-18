@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { projectId as projectIdStore } from '~/lib/persistence';
 import { DeployButton } from '~/components/deploy/DeployButton';
 import { ShareButton } from '~/components/share/ShareButton';
 import { MediaButton } from '~/components/media/MediaButton';
@@ -16,6 +17,8 @@ interface HeaderActionButtonsProps {
 export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionButtonsProps) {
   const [activePreviewIndex] = useState(0);
   const previews = useStore(workbenchStore.previews);
+  const showWorkbench = useStore(workbenchStore.showWorkbench);
+  const activeProjectId = useStore(projectIdStore);
   const activePreview = previews[activePreviewIndex];
 
   const shouldShowButtons = activePreview;
@@ -39,6 +42,22 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
    */
   return (
     <div className="flex items-center gap-1">
+      {/*
+       * Show/hide the workbench. Gated on a PROJECT, not the preview: the chat-only view (workbench
+       * closed by its ✕) previously had NO way back — only a page reload or a generation that wrote
+       * files ever set `showWorkbench` again. This is the way back.
+       */}
+      {activeProjectId && (
+        <button
+          onClick={() => workbenchStore.showWorkbench.set(!showWorkbench)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500"
+          title={showWorkbench ? 'Hide the workbench' : 'Open the workbench (code, files, preview)'}
+        >
+          <div className="i-ph:code" />
+          <span>Workbench</span>
+        </button>
+      )}
+
       {/* Built-in image/video generation (§4.16). Gates itself on an active project, not the preview. */}
       <MediaButton />
 
