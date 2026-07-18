@@ -190,13 +190,9 @@ export function canGenerate(session: SessionState): { allowed: boolean; reason?:
 /**
  * May this user pick the PREMIUM model right now (§4.6.1)? Mirrors `decidePremium` on the server — but
  * never replaces it. Computed LIVE from the balance (not the server's cached `available` flag) so it
- * stays honest after a settlement drops the balance below the threshold mid-session. When enforcement
- * is off, nobody is charged, so premium is freely available.
+ * stays honest after a settlement drops the balance below the threshold mid-session. The threshold
+ * binds regardless of `enforced` — settlement debits the balance either way (see server `premium.ts`).
  */
 export function canUsePremium(session: SessionState): boolean {
-  if (!session.credits.enforced) {
-    return true;
-  }
-
   return session.credits.balance >= session.credits.premium.minimumCredits;
 }

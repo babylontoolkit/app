@@ -57,39 +57,39 @@ describe('decidePremium — the eligibility rule', () => {
   const min = 1000;
 
   it('does not use premium when the user did not ask', () => {
-    expect(decidePremium({ requested: false, balance: 999_999, minimumCredits: min, enforced: true })).toEqual({
+    expect(decidePremium({ requested: false, balance: 999_999, minimumCredits: min })).toEqual({
       usePremium: false,
       reason: 'not_requested',
     });
   });
 
-  it('allows premium freely when billing is not enforced (beta / local)', () => {
-    // Nobody is charged, so the threshold that protects a grant is moot.
-    expect(decidePremium({ requested: true, balance: 0, minimumCredits: min, enforced: false })).toEqual({
-      usePremium: true,
-      reason: 'unmetered',
-    });
-  });
-
   it('allows premium at or above the threshold', () => {
-    expect(decidePremium({ requested: true, balance: min, minimumCredits: min, enforced: true })).toEqual({
+    expect(decidePremium({ requested: true, balance: min, minimumCredits: min })).toEqual({
       usePremium: true,
       reason: 'sufficient_credits',
     });
-    expect(decidePremium({ requested: true, balance: min + 1, minimumCredits: min, enforced: true }).usePremium).toBe(
-      true,
-    );
+    expect(decidePremium({ requested: true, balance: min + 1, minimumCredits: min }).usePremium).toBe(true);
   });
 
   it('declines premium below the threshold — this is what protects the free grant', () => {
     // A fresh 500-credit signup grant sits below the 1000 default, so a new account cannot pick premium.
-    expect(decidePremium({ requested: true, balance: 500, minimumCredits: min, enforced: true })).toEqual({
+    expect(decidePremium({ requested: true, balance: 500, minimumCredits: min })).toEqual({
       usePremium: false,
       reason: 'below_minimum',
     });
-    expect(decidePremium({ requested: true, balance: min - 1, minimumCredits: min, enforced: true }).usePremium).toBe(
-      false,
-    );
+    expect(decidePremium({ requested: true, balance: min - 1, minimumCredits: min }).usePremium).toBe(false);
+  });
+
+  /*
+   * The rule takes NO `enforced` input, on purpose (2026-07-18) — the retired "unmetered" bypass let a
+   * 320-credit user run the 2x model because "nobody is charged when enforcement is off", which was
+   * false: settlement debits the ledger regardless. The pin is structural — if an enforcement flag
+   * ever grows back into this signature, this test is the tripwire that demands the debit question be
+   * re-answered first. Free-premium deploys say `PREMIUM_MINIMUM_CREDITS=0` explicitly instead.
+   */
+  it('binds on the balance with no enforcement bypass — a zero minimum is the only free door', () => {
+    expect(decidePremium({ requested: true, balance: 320, minimumCredits: min }).usePremium).toBe(false);
+    expect(decidePremium({ requested: true, balance: 0, minimumCredits: 0 }).usePremium).toBe(true);
   });
 
   it('names the threshold in the declined notice', () => {

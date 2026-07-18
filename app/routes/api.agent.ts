@@ -247,6 +247,23 @@ async function streamGeneration(
     });
   });
 
+  /*
+   * Media renders the model started (§4.16). Fire-and-forget, unlike the MCP relay: the debit is
+   * taken and the KIE task is running — the client's only job is to poll the task route and write
+   * the bytes into the WebContainer at `destPath` when the render lands.
+   */
+  generation.onMediaTask((event) => {
+    stream.writeData({
+      type: 'media-task',
+      taskId: event.taskId,
+      projectId: event.projectId,
+      destPath: event.destPath,
+      kind: event.kind,
+      model: event.model,
+      credits: event.credits,
+    });
+  });
+
   const shellFilter = new ShellActionStreamFilter();
 
   for await (const chunk of generation.textStream) {

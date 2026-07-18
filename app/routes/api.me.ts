@@ -105,9 +105,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
         /*
          * The PREMIUM model tier (§4.6.1). A hint for rendering the model toggle — the server re-derives
          * eligibility on every generation (`decidePremium`), so this can never grant premium by itself.
-         * `available` is whether THIS user may currently pick it: they hold the minimum, or enforcement
-         * is off (beta/local, where nobody is charged). Below the minimum the toggle renders locked with
-         * the threshold shown, which is the whole point — it protects a fresh grant from a 2x model.
+         * `available` is whether THIS user may currently pick it: they hold the minimum. The threshold
+         * binds regardless of `BILLING_ENFORCED` — settlement debits the balance either way, so the
+         * balance is always the eligibility fact (see `premium.ts`). Below the minimum the toggle
+         * renders locked with the threshold shown — that is what protects a fresh grant from a 2x model.
          */
         premium: (() => {
           const tier = getPremiumTier(context);
@@ -129,7 +130,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
             model: tier.model,
             standardModel,
             minimumCredits: tier.minimumCredits,
-            available: !billing.enforced || balance >= tier.minimumCredits,
+            available: balance >= tier.minimumCredits,
           };
         })(),
       },

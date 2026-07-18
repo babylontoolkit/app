@@ -499,6 +499,50 @@ describe('the negative-balance rule', () => {
 });
 
 /**
+ * The 'media' reason (migration 0009, §4.16): an UP-FRONT debit for image/video generation. It runs
+ * BEFORE any spend at KIE, so unlike 'generation' it must never overdraw — an insufficient balance
+ * refuses the render, it does not record an overshoot.
+ */
+describe("the 'media' ledger reason (migration 0009)", () => {
+  it('accepts a media debit anchored to a generations row, at a positive balance', async () => {
+    await append({ delta: 100, reason: 'grant' });
+    await createGeneration('med_ok');
+
+    const row = await append({ delta: -21, reason: 'media', generationId: 'med_ok' });
+
+    expect(row.balance_after).toBe(79);
+  });
+
+  it('REFUSES a media debit that would overdraw — the render must not start', async () => {
+    await append({ delta: 10, reason: 'grant' });
+    await createGeneration('med_poor');
+
+    await expect(append({ delta: -21, reason: 'media', generationId: 'med_poor' })).rejects.toThrow(
+      /insufficient credits/i,
+    );
+
+    expect(await balance()).toBe(10);
+  });
+
+  it('lets the refund for a failed render reference the same anchor row', async () => {
+    await append({ delta: 100, reason: 'grant' });
+    await createGeneration('med_fail');
+    await append({ delta: -21, reason: 'media', generationId: 'med_fail' });
+
+    const refunded = await append({ delta: 21, reason: 'refund', generationId: 'med_fail' });
+
+    expect(refunded.balance_after).toBe(100);
+  });
+
+  /* The FK holds for media exactly as for LLM generations — an unanchored debit is rejected. */
+  it('rejects a media debit whose generations row does not exist', async () => {
+    await append({ delta: 100, reason: 'grant' });
+
+    await expect(append({ delta: -21, reason: 'media', generationId: 'med_ghost' })).rejects.toThrow();
+  });
+});
+
+/**
  * APPEND-ONLY, enforced by the database rather than by convention.
  *
  * A ledger that can be edited cannot answer "where did my credits go", and a corrected row destroys the

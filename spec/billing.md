@@ -98,6 +98,15 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
 - **The kie.ai feed is for the operator's EYES only** (`market-feed.ts`, the panel's "Fetch kie.ai
   feed"): free-text display rows, never machine-applied — auto-applying a third party's feed to our
   billing table would hand KIE's webmaster write access to our margin.
+- **Media debits (§4.16, migration 0009) are the INVERSE of LLM settlement**: ledger reason `'media'`,
+  taken BEFORE any spend at KIE at the exact quoted price, **never allowed to go negative** (an
+  insufficient balance is a 402 refusal before the task exists — unlike `'generation'`, whose
+  overdraft allowance exists only because settlement runs after spend). Failures auto-refund exactly
+  once (`media/service.ts`: per-task serialisation + a `refunded` latch; a flaky status poll is
+  pending, never a failure). Every media task anchors a `generations` row (`med_…`), so the
+  `credit_ledger.generation_id` FK, the refund path, and the admin per-model cost breakdown all work
+  unchanged. Quote and debit share ONE code path (`quoteMediaRequest`), so the price on the Generate
+  button is the price in the ledger. Pinned by `media.spec.ts` + `ledger-sql.spec.ts`.
 - **`providerRates` premium injection is non-throwing**: a promoted list that unprices
   `PREMIUM_MODEL` refuses NEW premium requests loudly (`getPremiumModel`) but must not take
   settlement down — an in-flight premium generation settles via the most-expensive fallback.

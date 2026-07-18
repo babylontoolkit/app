@@ -28,6 +28,7 @@ import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registr
 import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
 import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
+import { trackMediaTask } from '~/lib/media/tasks';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import { logStore } from '~/lib/stores/logs';
 import { streamingState } from '~/lib/stores/streaming';
@@ -472,6 +473,28 @@ export const ChatImpl = memo(
           server?: string;
           args?: unknown;
         };
+
+        /*
+         * Media renders the model started (§4.16). The debit is already taken server-side; our job is
+         * to poll until the render lands and write the bytes into the WebContainer at destPath.
+         *
+         * This effect re-runs on EVERY stream chunk and replays the same `media-task` parts each time,
+         * so `trackMediaTask` must dedupe twice over: a `tracking` set while a poller is live, and a
+         * permanent `completed` latch once a task is terminal. The latch is the one that matters here —
+         * without it a delivered image was re-fetched and re-toasted once per chunk (~100 toasts for
+         * three images, observed live). Never pass `force` from this path.
+         */
+        const media = part as { type?: string; taskId?: string; projectId?: string; destPath?: string; kind?: string };
+
+        if (media.type === 'media-task' && media.taskId && media.projectId && media.destPath) {
+          void trackMediaTask({
+            projectId: media.projectId,
+            taskId: media.taskId,
+            destPath: media.destPath,
+            kind: media.kind === 'video' ? 'video' : 'image',
+          });
+          continue;
+        }
 
         if (call.type !== 'mcp-tool-call' || !call.toolCallId || !call.generationId || !call.toolName) {
           continue;

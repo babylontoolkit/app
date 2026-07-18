@@ -468,8 +468,15 @@ export function creditsForUsage(
   config: BillingConfig,
   context?: unknown,
 ): number {
-  const cost = rawCostUsd(usage, model, provider, context);
+  return creditsForRawCost(rawCostUsd(usage, model, provider, context), config);
+}
 
+/**
+ * The same retail formula on a flat USD cost — what §4.16 media debits use, where the raw cost is a
+ * known per-task price (`lookupMediaPrice`) rather than a token vector. ONE formula for both kinds
+ * of spend, so the margin lever moves them together.
+ */
+export function creditsForRawCost(cost: number, config: BillingConfig): number {
   if (cost <= 0) {
     return 0;
   }

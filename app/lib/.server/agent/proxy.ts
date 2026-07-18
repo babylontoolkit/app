@@ -28,12 +28,16 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
+import { getPremiumTier } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/premium';
 import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
-import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
+import { createSkillTools, type SkillToolContext } from './tools';
+import { toolPolicyForTurn } from './tool-policy';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
+import { createMediaTools, type MediaTaskEvent } from './media-tools';
+import { KieMediaProvider } from '~/lib/.server/media/kie-client';
+import { getObjectStore } from '~/lib/.server/storage';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
 import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
@@ -237,6 +241,13 @@ export interface AgentGeneration {
    * No-op when the project has no MCP servers. Subscribe BEFORE draining `textStream`.
    */
   onMcpToolCall(listener: (event: McpToolCallEvent) => void): void;
+
+  /**
+   * Subscribe to media renders the model STARTED during this generation (§4.16). Fire-and-forget,
+   * unlike the MCP relay: the tool already returned (the loop never parks on a render); the client's
+   * job is to poll the task and write the bytes into the project when they land.
+   */
+  onMediaTask(listener: (event: MediaTaskEvent) => void): void;
 }
 
 /** Re-exported so callers keep importing it from the proxy; the math lives in `step-usage`. */
@@ -402,16 +413,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    *   c. The platform default — a FIXED, operator-configured model, no choices to make (§4.2a).
    *
    * The premium threshold protects a new user's free grant: 500 granted < 1000 default minimum, so a
-   * fresh account cannot burn its grant on a 2x model before it has ever bought credits.
+   * fresh account cannot burn its grant on a 2x model before it has ever bought credits. It binds on
+   * the BALANCE regardless of `BILLING_ENFORCED` — settlement debits either way (see `premium.ts`).
    */
   const useByok = byok.allowed;
-  const billing = getBillingConfig(request.context);
   const premiumTier = getPremiumTier(request.context);
   const premium = decidePremium({
     requested: Boolean(request.premium) && !useByok,
     balance: gate.mode === 'byok' ? 0 : gate.balance,
     minimumCredits: premiumTier.minimumCredits,
-    enforced: billing.enforced,
   });
 
   const model =
@@ -629,12 +639,51 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const hasMcpTools = Object.keys(mcpRelayTools).length > 0;
 
   /*
+   * Built-in media generation tools (§4.16) — offered whenever the platform holds a KIE key and the
+   * turn belongs to a project (the debit needs a project for the bytes to land in). Async-enqueue:
+   * the tool debits, starts the render, EMITS a `media-task` data part and returns immediately — the
+   * loop never parks on a multi-minute render (§4.2.8). Media spend is credits-only regardless of
+   * BYOK: BYOK covers the user's LLM key, not renders on OUR media key.
+   */
+  const mediaListeners: Array<(event: MediaTaskEvent) => void> = [];
+  const mediaTools =
+    request.projectId && config.kieApiKey
+      ? createMediaTools({
+          userId: user.id,
+          projectId: request.projectId,
+          provider: new KieMediaProvider(config.kieApiKey),
+          objectStore: getObjectStore(request.context),
+          context: request.context,
+          emit: (event) => {
+            for (const listener of mediaListeners) {
+              listener(event);
+            }
+          },
+        })
+      : {};
+
+  /*
    * When the project has MCP tools, the tool loop MUST be on — otherwise the model cannot call them.
    * That re-enables the loop the skill-preload path deliberately disables (see the note above), which is
    * the correct trade: a project with running MCP servers wants those tools reachable, and MCP is a
    * minority of generations. Without MCP tools, `allowTools` is exactly what it always was.
+   *
+   * Media tools do NOT force the loop on for ordinary turns: they are a capability most turns never
+   * use, and re-enabling `maxSteps` on every skill-preload turn to keep them reachable would undo the
+   * §4.2.8 redrafting fix on ALL turns to serve a few. On the turns where the loop is on anyway, they
+   * are offered; the Media panel covers the rest. **The CREATION turn is the one exception** (§4.16):
+   * the brief invites the model to generate bespoke design art for the landing page/splash/chrome, so
+   * when media tools exist creation gets a MEDIA-ONLY loop with a small step cap — see `tool-policy.ts`
+   * for why that cannot re-open the six-round skill-loading pathology.
    */
-  const allowTools = !isCreationTurn && (hasMcpTools || (preloaded.length === 0 && !slash));
+  const toolPolicy = toolPolicyForTurn({
+    isCreationTurn,
+    hasMcpTools,
+    hasMediaTools: Object.keys(mediaTools).length > 0,
+    preloadedCount: preloaded.length,
+    isSlash: Boolean(slash),
+  });
+  const allowTools = toolPolicy.allowTools;
 
   /*
    * Volatile project-context notes (§4.9 assets, §4.14 MCP tools, §4.15 Game Backend).
@@ -731,7 +780,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     offerLoadSkill: preloaded.length === 0 && !slash,
   };
 
-  const tools = { ...createSkillTools(toolContext), ...mcpRelayTools } as SkillTools;
+  const tools = (
+    toolPolicy.toolset === 'media-only'
+      ? mediaTools
+      : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools }
+  ) as SkillTools;
 
   /*
    * How hard to think on THIS turn (§4.2a). Decided from turn KIND — never from reading the prompt;
@@ -757,7 +810,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     `Generation: model=${model} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
       `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION' : ''} ` +
-      `tools=${allowTools ? 'on' : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`} ` +
+      `tools=${allowTools ? (toolPolicy.toolset === 'media-only' ? 'media-only (creation)' : 'on') : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`} ` +
       `effort=${effort ?? 'default'}`,
   );
 
@@ -903,9 +956,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
       /*
        * +1 for the ANSWER step. `maxSteps` counts every LLM round trip, tool calls included, so
-       * handing it the raw tool cap leaves no step in which to actually reply.
+       * handing it the raw tool cap leaves no step in which to actually reply. The cap comes from the
+       * TURN policy (`tool-policy.ts`): a creation turn with media tools gets a small media-only loop,
+       * everything else the full `MAX_TOOL_ROUNDS + 1`. The forced continuation passes `allow: false`,
+       * which must always mean exactly one step.
        */
-      maxSteps: allowTools ? MAX_TOOL_ROUNDS + 1 : 1,
+      maxSteps: allowTools ? toolPolicy.maxSteps : 1,
     });
 
   /**
@@ -979,11 +1035,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   async function* run(): AsyncGenerator<AgentChunk> {
     try {
       /*
-       * A creation turn runs with NO tools: one call, one answer, no round trips (§4.4b).
-       *
-       * `toolChoice: 'none'` is not enough on its own to save the time — the model still gets the tool
-       * definitions and still drafts around them. Passing `allowTools: false` sets `maxSteps: 1`, so
-       * there is exactly one LLM call and the model has no way to abandon its draft and start over.
+       * A creation turn runs a MEDIA-ONLY loop when the platform can render (§4.16) — one small round
+       * of generate_* calls for the design art, then the answer — and with NO tools otherwise: one
+       * call, one answer, no round trips (§4.4b). `tool-policy.ts` decides; skill tools are never
+       * offered on creation, so the model cannot abandon its draft to go load skills.
        */
       const first = startStream([...system, ...coreMessages], allowTools);
       yield* drain(first);
@@ -1006,7 +1061,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        */
       if (shouldForceContinuation({ finishReason, lastStepToolCalls })) {
         forcedContinuation = true;
-        logger.warn(`Tool-round cap (${MAX_TOOL_ROUNDS}) reached — forcing a final answer with tools disabled`);
+        logger.warn(`Tool-round cap (${toolPolicy.maxSteps - 1}) reached — forcing a final answer with tools disabled`);
 
         const priorMessages = (await first.response).messages;
 
@@ -1191,5 +1246,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     settlement: settlementPromise,
     notice: byok.notice ?? premiumNotice,
     onMcpToolCall: (listener) => mcpListeners.push(listener),
+    onMediaTask: (listener) => mediaListeners.push(listener),
   };
 }

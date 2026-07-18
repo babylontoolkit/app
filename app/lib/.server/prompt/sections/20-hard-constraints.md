@@ -103,7 +103,7 @@ import.
 1. **FULL-PAGE-WIDTH BY DEFAULT.** The design fills the entire viewport width edge to edge. Do **not**
    wrap the page in a centered fixed-width column (`max-width: 1200px; margin: 0 auto`, a Bootstrap
    `.container`, `width: 960px`, etc.). Root/section containers use `width: 100%` (or `100vw`/`100dvw`)
-   and stretch to the edges; backgrounds, heroes, and nav bars are **full-bleed**. Inner *content* may
+   and stretch to the edges; backgrounds, heroes, and nav bars are **full-bleed**. Inner _content_ may
    still be constrained for readability (a text column with a `max-width` and auto margins **inside** a
    full-bleed section is fine and encouraged) — but the section, its background, and the overall page
    are edge-to-edge. **Only build a fixed-width / boxed layout when the user explicitly asks for one**
@@ -117,7 +117,7 @@ import.
      — never a page built out of fixed `px` widths. Fluid type via `clamp()` is preferred over a fixed
      `font-size`.
    - Lay out with **flexbox or CSS grid** that reflows (`flex-wrap`, `grid-template-columns:
-     repeat(auto-fit, minmax(...))`), not absolute positioning or fixed columns that assume one width.
+repeat(auto-fit, minmax(...))`), not absolute positioning or fixed columns that assume one width.
    - Add **`@media` breakpoints** wherever the layout needs to restack (multi-column → single column on
      mobile, larger tap targets, a collapsed/hamburger nav if the nav is wide).
    - Media/canvas: `img`/`video`/`canvas` get `max-width: 100%` and never a hard pixel width that can

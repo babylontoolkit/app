@@ -3,6 +3,7 @@ import { useStore } from '@nanostores/react';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { DeployButton } from '~/components/deploy/DeployButton';
 import { ShareButton } from '~/components/share/ShareButton';
+import { MediaButton } from '~/components/media/MediaButton';
 import { GitHubSyncButton } from '~/components/github/GitHubSyncButton';
 import { SaveStatus } from '~/components/persistence/SaveStatus.client';
 import { NewChatButton } from '~/components/chat/NewChatButton.client';
@@ -38,6 +39,9 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
    */
   return (
     <div className="flex items-center gap-1">
+      {/* Built-in image/video generation (§4.16). Gates itself on an active project, not the preview. */}
+      <MediaButton />
+
       {/* Share the game as a public /play build (§4.8) */}
       {shouldShowButtons && <ShareButton />}
 

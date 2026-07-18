@@ -28,7 +28,12 @@ import { createAdminClient, isSupabaseConfigured } from '~/lib/.server/supabase/
 
 const logger = createScopedLogger('ledger');
 
-export type LedgerReason = 'grant' | 'purchase' | 'generation' | 'refund' | 'promo' | 'adjustment';
+/**
+ * `media` (2026-07-18, migration 0009): an up-front debit for image/video generation (§4.16). Unlike
+ * `generation` it may NEVER go negative — the debit runs BEFORE any spend at KIE, so an insufficient
+ * balance refuses the render instead of overdrawing. Its refunds reuse `refund`.
+ */
+export type LedgerReason = 'grant' | 'purchase' | 'generation' | 'media' | 'refund' | 'promo' | 'adjustment';
 
 export interface LedgerEntry {
   id: string;

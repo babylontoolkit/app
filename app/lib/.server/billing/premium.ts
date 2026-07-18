@@ -34,26 +34,25 @@ export interface PremiumDecisionInput {
 
   /** `PREMIUM_MINIMUM_CREDITS` — the credits a user must hold to unlock premium. */
   minimumCredits: number;
-
-  /**
-   * `BILLING_ENFORCED`. When OFF (beta default / local dev) nobody is charged at all, so the threshold
-   * that exists to protect the grant is moot — premium is freely usable. The moment enforcement is on,
-   * the threshold binds.
-   */
-  enforced: boolean;
 }
 
 export type PremiumDecision =
   | { usePremium: false; reason: 'not_requested' | 'below_minimum' }
-  | { usePremium: true; reason: 'unmetered' | 'sufficient_credits' };
+  | { usePremium: true; reason: 'sufficient_credits' };
 
+/*
+ * ⚠️ The threshold binds REGARDLESS of `BILLING_ENFORCED` (changed 2026-07-18). The original rule
+ * bypassed it when enforcement was off, on the premise "nobody is charged at all" — which is FALSE:
+ * `settleGeneration` debits the ledger on every generation no matter what; enforcement only decides
+ * whether the GATE may refuse at zero. So the bypass let a 320-credit user switch on a 2x model and
+ * ride the balance negative with nothing ever objecting (observed live). The balance is always being
+ * debited, so the balance is always the eligibility fact. An operator who genuinely wants free
+ * premium (a demo box) says so explicitly with `PREMIUM_MINIMUM_CREDITS=0` — a stated choice, never
+ * an inference from a flag that means something else.
+ */
 export function decidePremium(input: PremiumDecisionInput): PremiumDecision {
   if (!input.requested) {
     return { usePremium: false, reason: 'not_requested' };
-  }
-
-  if (!input.enforced) {
-    return { usePremium: true, reason: 'unmetered' };
   }
 
   return input.balance >= input.minimumCredits
