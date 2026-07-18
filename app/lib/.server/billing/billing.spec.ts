@@ -14,7 +14,7 @@ import {
   creditsForUsage,
   getBillingConfig,
   grantHeadroom,
-  kieModelOverride,
+  kieDefaultModel,
   kieRates,
   KIE_MODEL_RATES,
   MIN_GRANT_HEADROOM,
@@ -25,6 +25,9 @@ import {
   ratesFromBase,
   type TokenUsage,
 } from './rates';
+import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
+import type { ObjectStore } from '~/lib/.server/storage';
+import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import {
   DEFAULT_PLATFORM_PROVIDER,
   getPlatformModel,
@@ -63,12 +66,20 @@ const KIE_ENV = [
   'KIE_OUTPUT_DOLLARS',
   'KIE_CACHED_INPUT',
   'KIE_CACHED_WRITES',
+  'PREMIUM_INPUT_DOLLARS',
+  'PREMIUM_OUTPUT_DOLLARS',
 ] as const;
 
 beforeEach(async () => {
   for (const key of KIE_ENV) {
     vi.stubEnv(key, undefined as unknown as string);
   }
+
+  /*
+   * The marketplace price cache is MODULE state — a list promoted by one test would silently price
+   * every later assertion in the file. Same species of bleed as a leftover env stub.
+   */
+  invalidateMarketPricesCache();
 
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'ledger-'));
   ledger = new FsLedger(tmp);
@@ -79,7 +90,34 @@ afterEach(async () => {
   setLedger(undefined);
   await fs.rm(tmp, { recursive: true, force: true });
   vi.unstubAllEnvs();
+  invalidateMarketPricesCache();
 });
+
+/** A Map-backed ObjectStore: promotions in these tests never touch disk or S3. */
+function memoryStore(): ObjectStore {
+  const objects = new Map<string, Uint8Array>();
+
+  return {
+    backend: 'filesystem',
+    put: async (key, bytes) => void objects.set(key, bytes),
+    get: async (key) => objects.get(key) ?? null,
+    delete: async (key) => void objects.delete(key),
+    list: async (prefix) =>
+      [...objects.entries()].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => ({ key: k, size: v.length })),
+  };
+}
+
+/** Promote the baked list plus extra/overridden LLM rows — the admin-panel path, in one line. */
+async function promoteLlmRows(rows: Record<string, { inputPerMTok: number; outputPerMTok: number }>) {
+  const result = await promoteMarketPrices(memoryStore(), {
+    ...BAKED_MARKET_PRICES,
+    llm: { ...BAKED_MARKET_PRICES.llm, ...rows },
+  });
+
+  if (!result.ok) {
+    throw new Error(`test list refused: ${result.errors.join('; ')}`);
+  }
+}
 
 const config = getBillingConfig();
 
@@ -193,48 +231,47 @@ describe('rate table', () => {
 
 describe('KIE rates', () => {
   /*
-   * The uniform 0.4x is what makes the switch analysable: no mix effects, so a creation, an edit and a
-   * repair all scale by the same factor. If a future KIE reprice breaks that uniformity, every credit
-   * projection built on it (grant sizing, pack sizing) silently stops being true — so it is pinned.
-   */
-  /*
-   * ⚠️ Models with NO Anthropic row cannot be cross-checked, so they are named here rather than
-   * skipped. A bare `if (!direct) continue` would let a future KIE model silently escape the ratio
-   * check — the "scan that matches nothing reports a clean bill of health forever" failure that
-   * `no-server-storage.spec.ts` needed a control to catch. Naming them makes the exemption a decision.
+   * ABSOLUTE prices, pinned row by row — this REPLACED a "uniform 0.4x of Anthropic list" invariant
+   * (2026-07-18). The ratio rule was already called out as a coincidence in rates.ts ("EVERY ROW IS
+   * LOOKED UP, NEVER DERIVED FROM A RATIO"): the feed's own rows disprove it (sonnet-5 is ~0.283x,
+   * haiku ~0.275x, fable-5 is 2x Opus list), so pinning 0.4x was pinning one row's accident as a law.
+   * What actually protects billing is that each number matches what KIE charges — verified against
+   * KIE's public pricing feed AND (for 4-8/4-7/fable-5) against KIE's own `credits_consumed`.
    *
-   * `claude-fable-5`: we bill it on KIE at a MEASURED $4/$20, but we have no Anthropic rates for it, so
-   * there is nothing to take a ratio against. Note the 0.4x rule would IMPLY an Anthropic list of
-   * $10/$50 — that is a prediction, not a price, and a price cannot be guessed. If Anthropic's fable-5
-   * rates ever get added, delete this exemption and let the ratio test judge it.
+   * These pin the BAKED table. The runtime table (`kieRates`) starts identical and diverges only by
+   * admin promotion — covered in the selector describe below.
    */
-  const NO_ANTHROPIC_ROW = new Set(['claude-fable-5', 'claude-opus-4-7']);
-
-  it('is a uniform 0.4x of Anthropic list across all four token classes', () => {
-    for (const [model, kie] of Object.entries(KIE_MODEL_RATES)) {
-      const direct = MODEL_RATES[model];
-
-      if (NO_ANTHROPIC_ROW.has(model)) {
-        expect(direct, `${model} is exempt from the ratio check but now HAS an Anthropic row`).toBeUndefined();
-        continue;
-      }
-
-      expect(direct, `KIE prices ${model} but Anthropic has no row to compare against`).toBeDefined();
-
-      expect(kie.inputPerMTok / direct.inputPerMTok, `${model} input`).toBeCloseTo(0.4, 5);
-      expect(kie.outputPerMTok / direct.outputPerMTok, `${model} output`).toBeCloseTo(0.4, 5);
-      expect(kie.cacheReadPerMTok / direct.cacheReadPerMTok, `${model} cache read`).toBeCloseTo(0.4, 5);
-      expect(kie.cacheWritePerMTok / direct.cacheWritePerMTok, `${model} cache write`).toBeCloseTo(0.4, 5);
-    }
+  it.each([
+    ['claude-opus-4-8', 2.0, 10.0],
+    ['claude-opus-4-7', 1.425, 7.15],
+    ['claude-opus-4-6', 1.425, 7.15],
+    ['claude-fable-5', 4.0, 20.0],
+    ['claude-sonnet-5', 0.85, 4.275],
+    ['claude-haiku-4-5', 0.275, 1.425],
+  ])('prices %s at $%s / $%s — the feed-confirmed numbers', (model, input, output) => {
+    expect(KIE_MODEL_RATES[model].inputPerMTok).toBe(input);
+    expect(KIE_MODEL_RATES[model].outputPerMTok).toBe(output);
   });
 
-  /*
-   * The published numbers, asserted literally. The ratio test above would still pass if BOTH tables
-   * drifted together; this one is what catches a typo in the absolute price.
-   */
-  it('prices Opus 4.8 at the published $2 / $10', () => {
-    expect(KIE_MODEL_RATES['claude-opus-4-8'].inputPerMTok).toBe(2.0);
-    expect(KIE_MODEL_RATES['claude-opus-4-8'].outputPerMTok).toBe(10.0);
+  /* No row beyond the pinned six can slip in unpinned — the "matches nothing" control. */
+  it('pins EVERY baked KIE row (a new row must come with its own pin)', () => {
+    expect(Object.keys(KIE_MODEL_RATES).sort()).toEqual([
+      'claude-fable-5',
+      'claude-haiku-4-5',
+      'claude-opus-4-6',
+      'claude-opus-4-7',
+      'claude-opus-4-8',
+      'claude-sonnet-5',
+    ]);
+  });
+
+  /* The baked table IS the baked market price list — one source, no second copy to drift. */
+  it('derives the baked table from BAKED_MARKET_PRICES.llm exactly', () => {
+    for (const [model, row] of Object.entries(BAKED_MARKET_PRICES.llm)) {
+      expect(KIE_MODEL_RATES[model]).toEqual(ratesFromBase(row.inputPerMTok, row.outputPerMTok));
+    }
+
+    expect(Object.keys(KIE_MODEL_RATES).sort()).toEqual(Object.keys(BAKED_MARKET_PRICES.llm).sort());
   });
 
   /*
@@ -257,23 +294,16 @@ describe('KIE rates', () => {
 });
 
 /**
- * `KIE_DEFAULT_MODEL` + its rates (2026-07-17).
+ * `KIE_DEFAULT_MODEL` + the marketplace price list (2026-07-18; supersedes the env-var price group).
  *
- * KIE resells many vendors' models at prices only the operator can see, so — unlike Anthropic, whose
- * list we can look up and bake — "which model" and "what it costs" are ONE fact held outside this
- * repo. Every test here guards a way of getting that wrong that would bill real money and throw
- * nothing.
+ * The model SELECTOR stays in env; the PRICE side moved to the admin-promoted marketplace price list
+ * (`market-price-store.ts`). Every test here guards a way of getting that wrong that would bill real
+ * money and throw nothing.
  */
-describe('the KIE model + rate override', () => {
-  const setKie = (vars: Record<string, string | undefined>) => {
-    for (const [key, value] of Object.entries(vars)) {
-      vi.stubEnv(key, value as string);
-    }
-  };
-
-  /* The baseline: nothing set, nothing changes. */
-  it('leaves the baked table alone when unset', () => {
-    expect(kieModelOverride()).toBeUndefined();
+describe('the KIE model selector + the marketplace price list', () => {
+  /* The baseline: nothing set, nothing promoted — the runtime table IS the baked table. */
+  it('serves the baked table when nothing is promoted', () => {
+    expect(kieDefaultModel()).toBeUndefined();
     expect(kieRates()).toEqual(KIE_MODEL_RATES);
   });
 
@@ -281,97 +311,68 @@ describe('the KIE model + rate override', () => {
    * 🔴 THE RULE THIS WHOLE FEATURE RESTS ON.
    *
    * `ratesFor` falls back to the provider's MOST EXPENSIVE row for a model it does not know — so
-   * naming a model without pricing it does not fail, it bills every generation at Opus 4.8's price,
-   * forever, silently, at whatever margin that happens to imply. "Is this model configured?" and "do
-   * we know what it costs?" are the same question, and this is the answer.
+   * naming a model without pricing it does not fail, it bills every generation at the priciest row,
+   * forever, silently. "Is this model configured?" and "do we know what it costs?" are the same
+   * question; the answer now lives in the price list, so an unpriced selector is refused with
+   * directions to the Admin panel.
    */
-  it('refuses a model it has no baked rates for unless BOTH prices are given', () => {
-    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol' });
-    expect(() => kieModelOverride()).toThrow(/KIE_INPUT_DOLLARS and KIE_OUTPUT_DOLLARS/);
+  it('refuses a KIE_DEFAULT_MODEL the active price list does not price', () => {
+    vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
+    expect(() => kieDefaultModel()).toThrow(/Marketplace price list/);
+  });
 
-    setKie({ KIE_INPUT_DOLLARS: '1.57' });
-    expect(() => kieModelOverride(), 'input alone is still unpriced output').toThrow(/KIE_OUTPUT_DOLLARS/);
+  /* The admin-panel path: promote a list with the row, and the selector is accepted at THAT price. */
+  it('accepts the selector once a promoted list prices it, with cache derived from ITS base', async () => {
+    await promoteLlmRows({ 'gpt-5-6-sol': { inputPerMTok: 1.4, outputPerMTok: 8.4 } });
+    vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
 
-    setKie({ KIE_OUTPUT_DOLLARS: '8.4' });
+    expect(kieDefaultModel()).toBe('gpt-5-6-sol');
 
-    const override = kieModelOverride();
-    expect(override?.model).toBe('gpt-5-6-sol');
-    expect(override?.rates.inputPerMTok).toBe(1.57);
-    expect(override?.rates.outputPerMTok).toBe(8.4);
-    expect(override?.rates.cacheReadPerMTok, 'derived 0.1x').toBeCloseTo(0.157, 5);
-    expect(override?.rates.cacheWritePerMTok, 'derived 2x — the 1h tier').toBeCloseTo(3.14, 5);
+    const rates = ratesFor('gpt-5-6-sol', 'KIE');
+    expect(rates.inputPerMTok).toBe(1.4);
+    expect(rates.outputPerMTok).toBe(8.4);
+    expect(rates.cacheReadPerMTok, 'derived 0.1x').toBeCloseTo(0.14, 9);
+    expect(rates.cacheWritePerMTok, 'derived 2x — the 1h tier').toBeCloseTo(2.8, 9);
   });
 
   /*
-   * The operator's own example. Explicit cache quotes override the derivation — a vendor whose cache
-   * multipliers differ from Anthropic's is the entire reason these two vars exist separately.
+   * 🔴 A promoted reprice must move the CACHE prices with it — the `packMargin` shape of bug. The
+   * list carries input/output only (validation REFUSES cache keys), so a half-repriced row cannot
+   * even be expressed.
    */
-  it('takes explicit cache prices over the derived ones', () => {
-    setKie({
-      KIE_DEFAULT_MODEL: 'gpt-5-6-sol',
-      KIE_INPUT_DOLLARS: '1.57',
-      KIE_OUTPUT_DOLLARS: '8.4',
-      KIE_CACHED_WRITES: '1.74',
-      KIE_CACHED_INPUT: '0.14',
-    });
-
-    expect(ratesFor('gpt-5-6-sol', 'KIE')).toEqual({
-      inputPerMTok: 1.57,
-      outputPerMTok: 8.4,
-      cacheReadPerMTok: 0.14,
-      cacheWritePerMTok: 1.74,
-    });
-  });
-
-  /*
-   * 🔴 A ROW MUST NOT BE HALF-BAKED AND HALF-CONFIGURED — the `packMargin` shape of bug.
-   *
-   * Overriding input while cache stays quoted against the OLD input rate is two numbers, each locally
-   * sensible, disagreeing about what one thing costs. Halving input must halve the cache prices with
-   * it, or the user is billed cache at a rate the operator never agreed to.
-   */
-  it('re-derives cache from the NEW input rate when a baked model is repriced', () => {
-    setKie({ KIE_DEFAULT_MODEL: 'claude-opus-4-8', KIE_INPUT_DOLLARS: '1' });
+  it('re-derives cache from the NEW input rate when a promotion reprices a baked model', async () => {
+    await promoteLlmRows({ 'claude-opus-4-8': { inputPerMTok: 1, outputPerMTok: 10 } });
 
     const rates = ratesFor('claude-opus-4-8', 'KIE');
     expect(rates.inputPerMTok).toBe(1);
-    expect(rates.outputPerMTok, 'output is not overridden, so the baked price stands').toBe(10);
     expect(rates.cacheReadPerMTok, 'NOT the baked 0.2').toBeCloseTo(0.1, 5);
     expect(rates.cacheWritePerMTok, 'NOT the baked 4.0').toBeCloseTo(2.0, 5);
   });
 
   /*
-   * The derivation is not a second opinion about a known price: naming the baked model and changing
-   * nothing must reproduce the baked row exactly. If this ever fails, the multipliers and the table
-   * have drifted and one of them is lying.
+   * 🔴 THE RETIRED ENV PRICE VARS MUST STOP THE SHOW, NEVER BE SILENTLY IGNORED. A deploy still
+   * carrying one believes it is stating a price that nothing reads — the exact "rates set but
+   * ignored" trap the old kieModelOverride refused, one level up.
    */
-  it('reproduces the baked row byte-for-byte when only the model is named', () => {
-    setKie({ KIE_DEFAULT_MODEL: 'claude-opus-4-8' });
-    expect(kieRates()['claude-opus-4-8']).toEqual(KIE_MODEL_RATES['claude-opus-4-8']);
-  });
-
-  /* Prices that name no model price NOTHING — they are a typo that reads as configured. */
-  it('refuses rates with no model rather than ignoring them', () => {
-    setKie({ KIE_INPUT_DOLLARS: '1.57', KIE_OUTPUT_DOLLARS: '8.4' });
-    expect(() => kieRates()).toThrow(/KIE_DEFAULT_MODEL/);
-  });
-
-  /*
-   * ⚠️ NOT `envNumber`. That returns its fallback for an unparseable value, which is right for a turn
-   * cap and catastrophic for a price: `$2` would silently bill at some other model's rate. A price the
-   * operator tried and failed to state is an error. `0` too — a free model does not exist, and it
-   * would zero-rate every generation on it.
-   */
-  it.each([['$2'], ['two'], ['0'], ['-1']])('refuses a price it cannot trust: %s', (bad) => {
-    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol', KIE_INPUT_DOLLARS: bad, KIE_OUTPUT_DOLLARS: '8.4' });
-    expect(() => kieModelOverride()).toThrow(/KIE_INPUT_DOLLARS/);
+  it.each([
+    ['KIE_INPUT_DOLLARS'],
+    ['KIE_OUTPUT_DOLLARS'],
+    ['KIE_CACHED_INPUT'],
+    ['KIE_CACHED_WRITES'],
+    ['PREMIUM_INPUT_DOLLARS'],
+    ['PREMIUM_OUTPUT_DOLLARS'],
+  ])('refuses the retired %s rather than ignoring it', (key) => {
+    vi.stubEnv(key, '2');
+    expect(() => kieRates()).toThrow(/retired/);
+    expect(() => kieRates()).toThrow(/Marketplace price list/);
   });
 
   /* The configured model becomes KIE's default — that is what "default" in the name means. */
-  it('becomes the platform model on KIE, priced by its own row', () => {
+  it('becomes the platform model on KIE, priced by its own row', async () => {
+    await promoteLlmRows({ 'gpt-5-6-sol': { inputPerMTok: 1.57, outputPerMTok: 8.4 } });
     vi.stubEnv('LLM_PROVIDER', 'KIE');
     vi.stubEnv('LLM_MODEL', undefined as unknown as string);
-    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol', KIE_INPUT_DOLLARS: '1.57', KIE_OUTPUT_DOLLARS: '8.4' });
+    vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
 
     expect(getPlatformModel({})).toBe('gpt-5-6-sol');
     expect(
@@ -390,16 +391,17 @@ describe('the KIE model + rate override', () => {
    * in its own right — otherwise `LLM_MODEL=x` with `KIE_DEFAULT_MODEL=y` would run `x` and bill it at
    * `y`'s rates, which is the precise failure this precedence chain could otherwise introduce.
    */
-  it('never prices LLM_MODEL at KIE_DEFAULT_MODEL rates', () => {
+  it('never prices LLM_MODEL at KIE_DEFAULT_MODEL rates', async () => {
+    await promoteLlmRows({ 'gpt-5-6-sol': { inputPerMTok: 1.57, outputPerMTok: 8.4 } });
     vi.stubEnv('LLM_PROVIDER', 'KIE');
-    setKie({ KIE_DEFAULT_MODEL: 'gpt-5-6-sol', KIE_INPUT_DOLLARS: '1.57', KIE_OUTPUT_DOLLARS: '8.4' });
+    vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
 
     // Priced in its own right: allowed, at ITS price, not gpt's.
     vi.stubEnv('LLM_MODEL', 'claude-opus-4-8');
     expect(getPlatformModel({})).toBe('claude-opus-4-8');
     expect(ratesFor('claude-opus-4-8', 'KIE').inputPerMTok).toBe(2.0);
 
-    // Unpriced: refused, rather than borrowing the override's rates.
+    // Unpriced: refused, rather than borrowing the selector's rates.
     vi.stubEnv('LLM_MODEL', 'some-third-model');
     expect(() => getPlatformModel({})).toThrow(/some-third-model/);
   });
@@ -538,15 +540,19 @@ describe('the platform model switch', () => {
     expect(() => getPlatformModel({})).toThrow(/opus-4-9/i);
   });
 
-  /* A model priced on one provider but not the other is refused on the one that cannot bill it. */
+  /*
+   * A model priced on one provider but not the other is refused on the one that cannot bill it.
+   * (Was sonnet-5-on-KIE until 2026-07-18 — the marketplace list now prices sonnet-5 on KIE, so the
+   * asymmetric model is opus-4-7: a KIE feed row with deliberately NO Anthropic MODEL_RATES entry.)
+   */
   it('validates against the CONFIGURED provider, not against models in general', () => {
-    vi.stubEnv('LLM_MODEL', 'claude-sonnet-5');
-
-    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
-    expect(getPlatformModel({})).toBe('claude-sonnet-5'); // priced in MODEL_RATES
+    vi.stubEnv('LLM_MODEL', 'claude-opus-4-7');
 
     vi.stubEnv('LLM_PROVIDER', 'KIE');
-    expect(() => getPlatformModel({})).toThrow(/sonnet/i); // not in KIE_MODEL_RATES
+    expect(getPlatformModel({})).toBe('claude-opus-4-7'); // priced in the marketplace list
+
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    expect(() => getPlatformModel({})).toThrow(/opus-4-7/i); // no Anthropic row
   });
 
   /* A typo is a describable config error, never a 404 at the first generation. */

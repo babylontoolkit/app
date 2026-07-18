@@ -1,0 +1,42 @@
+{
+  "name": "@babylonjs-toolkit/mcp",
+  "version": "1.0.1",
+  "description": "Babylon Toolkit MCP servers for kie.ai image + video generation (Nano Banana, Kling, Seedance, Grok, Veo 3.1).",
+  "author": "MackeyK24 <mackeyk24@gmail.com>",
+  "type": "module",
+  "bin": {
+    "kie-image-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build",
+    "deploy-all": "npm publish --access public"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "kie",
+    "nano-banana",
+    "kling",
+    "seedance",
+    "veo",
+    "image-generation",
+    "video-generation",
+    "claude",
+    "copilot",
+    "ai"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^20.0.0"
+  }
+}

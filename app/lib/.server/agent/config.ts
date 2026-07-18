@@ -7,7 +7,7 @@
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
-import { getPremiumTier, kieModelOverride, providerRates } from '~/lib/.server/billing/rates';
+import { getPremiumTier, kieDefaultModel, providerRates } from '~/lib/.server/billing/rates';
 
 /** Re-exported: this was the original home of the error, and several routes import it from here. */
 export { NotConfiguredError };
@@ -136,7 +136,7 @@ export function getPlatformModel(context?: unknown): string {
       `LLM_MODEL="${model}" on provider ${provider}`,
       `We have no rates for it, so we cannot bill it. ${
         provider === 'KIE'
-          ? 'Set KIE_DEFAULT_MODEL to it along with KIE_INPUT_DOLLARS and KIE_OUTPUT_DOLLARS, or add a row to KIE_MODEL_RATES in billing/rates.ts.'
+          ? 'Add its row to the Marketplace price list (Settings → Admin → Marketplace prices) and promote, then set KIE_DEFAULT_MODEL or LLM_MODEL to it.'
           : 'Add it to MODEL_RATES in billing/rates.ts first.'
       } Priced models: ${Object.keys(priced).join(', ') || '(none)'}.`,
     );
@@ -177,9 +177,10 @@ export function getPremiumModel(context?: unknown): string {
  * The provider's default model when `LLM_MODEL` is unset.
  *
  * ⚠️ **`LLM_MODEL` and `KIE_DEFAULT_MODEL` are not rivals, and the precedence is the point.**
- * `KIE_DEFAULT_MODEL` states what KIE serves AND what it costs (`kieModelOverride` — on KIE those are
- * one fact, since they resell at prices only the operator can see). `LLM_MODEL` picks a model across
- * whichever provider is configured. So: `LLM_MODEL` > `KIE_DEFAULT_MODEL` > baked default.
+ * `KIE_DEFAULT_MODEL` is a SELECTOR validated against the Marketplace price list (`kieDefaultModel` —
+ * since 2026-07-18 the price side lives in the admin-promoted list, not in env vars). `LLM_MODEL`
+ * picks a model across whichever provider is configured. So: `LLM_MODEL` > `KIE_DEFAULT_MODEL` >
+ * baked default.
  *
  * That ordering is safe ONLY because the check above prices whatever wins. Setting `LLM_MODEL=x` while
  * `KIE_DEFAULT_MODEL=y` does NOT price `x` at `y`'s rates — `x` needs its own row or it is refused,
@@ -188,10 +189,10 @@ export function getPremiumModel(context?: unknown): string {
  */
 function defaultModelFor(provider: PlatformProviderName, context?: unknown): string {
   if (provider === 'KIE') {
-    const override = kieModelOverride(context);
+    const selected = kieDefaultModel(context);
 
-    if (override) {
-      return override.model;
+    if (selected) {
+      return selected;
     }
   }
 

@@ -11,6 +11,7 @@
  */
 import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
+import { MarketPricesSection } from './MarketPricesSection';
 
 interface UsageReport {
   generations: number;
@@ -377,6 +378,12 @@ export function AdminTab() {
           </div>
         )}
       </section>
+
+      {/*
+       * Marketplace prices (§4.6). The platform's cost basis — what we believe KIE charges for LLM
+       * tokens and media generation. Versioned + promoted here; the env price vars are retired.
+       */}
+      <MarketPricesSection />
 
       {/*
        * Template pin (§4.4). This is the supply chain: whatever is pinned here is the code every new

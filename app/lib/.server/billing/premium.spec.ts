@@ -4,10 +4,12 @@
  * Two things are pinned here, both of which fail SILENTLY:
  *  - `decidePremium`, the pure eligibility rule that spends a user's credits at 2x WITHOUT a second
  *    confirmation. Like `auto-repair` and `restore-target`, a wrong `true` bills without asking.
- *  - the premium price + threshold config, where a `PREMIUM_INPUT_DOLLARS` typo must THROW (never
- *    default to another model's rate) and the fable-5 row must reach every provider's table.
+ *  - the premium price + threshold config: since 2026-07-18 the PRICE side lives in the marketplace
+ *    price list (`market-price-store.ts`), so what is pinned is that the tier prices from the ACTIVE
+ *    list, that a `PREMIUM_MODEL` the list does not price is REFUSED, and that the retired
+ *    `PREMIUM_*_DOLLARS` vars stop the show rather than being silently ignored.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { decidePremium, premiumDeclinedNotice } from './premium';
 import {
   DEFAULT_PREMIUM_MINIMUM_CREDITS,
@@ -16,6 +18,9 @@ import {
   providerRates,
   ratesFor,
 } from './rates';
+import { BAKED_MARKET_PRICES } from './baked-market-prices';
+import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
+import type { ObjectStore } from '~/lib/.server/storage';
 import { getPremiumModel } from '~/lib/.server/agent/config';
 
 /** Every PREMIUM_* var, so a case that means to test the DEFAULT is not reading `.env.local` (§oauth.spec). */
@@ -25,8 +30,27 @@ function stubPremium(vars: Partial<Record<string, string>> = {}) {
   }
 }
 
+/** A Map-backed ObjectStore — promotions here never touch disk (the module cache is what matters). */
+function memoryStore(): ObjectStore {
+  const objects = new Map<string, Uint8Array>();
+
+  return {
+    backend: 'filesystem',
+    put: async (key, bytes) => void objects.set(key, bytes),
+    get: async (key) => objects.get(key) ?? null,
+    delete: async (key) => void objects.delete(key),
+    list: async (prefix) =>
+      [...objects.entries()].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => ({ key: k, size: v.length })),
+  };
+}
+
+beforeEach(() => {
+  invalidateMarketPricesCache();
+});
+
 afterEach(() => {
   vi.unstubAllEnvs();
+  invalidateMarketPricesCache();
 });
 
 describe('decidePremium — the eligibility rule', () => {
@@ -91,29 +115,51 @@ describe('the premium tier config', () => {
     expect(tier.rates.cacheWritePerMTok).toBeCloseTo(8.0, 9);
   });
 
-  it('takes the operator overrides', () => {
-    stubPremium({
-      PREMIUM_MODEL: 'claude-sonnet-5',
-      PREMIUM_INPUT_DOLLARS: '3',
-      PREMIUM_OUTPUT_DOLLARS: '15',
-      PREMIUM_MINIMUM_CREDITS: '2500',
-    });
+  /* The selector may name any model the ACTIVE list prices — its price comes from the LIST, not env. */
+  it('takes a different PREMIUM_MODEL at the price the active list states for it', () => {
+    stubPremium({ PREMIUM_MODEL: 'claude-sonnet-5', PREMIUM_MINIMUM_CREDITS: '2500' });
 
     const tier = getPremiumTier({});
+    const baked = BAKED_MARKET_PRICES.llm['claude-sonnet-5'];
 
     expect(tier.model).toBe('claude-sonnet-5');
     expect(tier.minimumCredits).toBe(2500);
-    expect(tier.rates.inputPerMTok).toBe(3);
-    expect(tier.rates.outputPerMTok).toBe(15);
+    expect(tier.rates.inputPerMTok).toBe(baked.inputPerMTok);
+    expect(tier.rates.outputPerMTok).toBe(baked.outputPerMTok);
   });
 
   /*
-   * A PRICE is `envMoney`, not `envNumber`: a typo must THROW rather than silently bill at another
-   * model's rate (the same rule as `KIE_INPUT_DOLLARS`). Zero is refused — a free model does not exist.
+   * A `PREMIUM_MODEL` the active list does not price is REFUSED — the same "selector without a row"
+   * rule as `KIE_DEFAULT_MODEL`. An unpriced premium would otherwise bill at `ratesFor`'s
+   * most-expensive fallback: over-charging, silently, on the tier users deliberately pay MORE for.
    */
-  it.each([['$4'], ['four'], ['0'], ['-1']])('refuses a premium price it cannot trust: %s', (bad) => {
-    stubPremium({ PREMIUM_INPUT_DOLLARS: bad });
-    expect(() => getPremiumTier({})).toThrow(/PREMIUM_INPUT_DOLLARS/);
+  it('refuses a PREMIUM_MODEL the price list does not price', () => {
+    stubPremium({ PREMIUM_MODEL: 'some-unpriced-model' });
+    expect(() => getPremiumTier({})).toThrow(/Marketplace price list/);
+  });
+
+  /* A promoted list can reprice or add the premium row — the admin-panel path. */
+  it('prices the tier from a PROMOTED list when one is live', async () => {
+    stubPremium();
+
+    const result = await promoteMarketPrices(memoryStore(), {
+      ...BAKED_MARKET_PRICES,
+      llm: { ...BAKED_MARKET_PRICES.llm, 'claude-fable-5': { inputPerMTok: 5, outputPerMTok: 25 } },
+    });
+    expect(result.ok).toBe(true);
+
+    const tier = getPremiumTier({});
+    expect(tier.rates.inputPerMTok).toBe(5);
+    expect(tier.rates.cacheWritePerMTok, 'cache re-derives from the promoted base').toBeCloseTo(10, 9);
+  });
+
+  /*
+   * The RETIRED env price vars must stop the show, never be silently ignored (the same refusal as
+   * `kieRates` — pinned per-var in billing.spec; this pins the premium door specifically).
+   */
+  it.each([['PREMIUM_INPUT_DOLLARS'], ['PREMIUM_OUTPUT_DOLLARS']])('refuses the retired %s', (key) => {
+    stubPremium({ [key]: '4' });
+    expect(() => getPremiumTier({})).toThrow(/retired/);
   });
 
   /*

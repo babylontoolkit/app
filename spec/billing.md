@@ -63,6 +63,50 @@ Balance chip, per-message cost badge (shows 'BYOK' for Pro-key generations), bil
 
 `BILLING_ENFORCED` (gate on/off; recording always on), `SIGNUP_GRANT_CREDITS`, `DAILY_TOKEN_BUDGET` (platform breaker), per-user rate limits. Anthropic Console spend caps are the backstop of last resort.
 
+## The Marketplace price list (2026-07-18) — where every KIE price lives
+
+**One versioned document holds everything the platform believes KIE charges us**: the LLM token rates
+(`llm`: model → input/output USD per MTok) and the per-task media prices for §4.16 image/video
+generation (`media`: model → variants of options → USD, per_image / per_second / per_video). It is
+doc-sync rules applied to money, mirroring the §4.4 template pin:
+
+- **Baked fallback in code** (`billing/baked-market-prices.ts`) — captured from KIE's own public
+  pricing feed (`POST api.kie.ai/client/v1/model-pricing/page`, 372 rows, 2026-07-18), which
+  independently confirmed the measured LLM rates to the cent (4-8 $2/$10, 4-7 $1.425/$7.15, fable-5
+  $4/$20). Billing can never find "no prices".
+- **Admin-promoted active list** (`billing/market-price-store.ts`): immutable versions in the
+  ObjectStore (`pricing/kie-market/versions/mp_*.json`) + an `active.json` pointer. Promote validates
+  BEFORE writing (a refused list changes nothing, all errors reported at once); rollback only
+  re-points at stored bytes that still validate. The Admin tab's **Marketplace prices** section is
+  the only writer; ordinary price maintenance is fetch-feed → edit → promote, no deploy.
+- **Sync/async seam**: billing math is synchronous, storage is not — so the active list is an
+  in-process cache (`activeMarketPrices()`, 60s TTL) refreshed at async doorways
+  (`ensureMarketPrices` in the agent proxy entry, `/api/me`, the admin route). A load failure logs
+  and serves the last-loaded/baked list; it can never block a generation.
+- **The env price vars are RETIRED and REFUSED**: `KIE_INPUT_DOLLARS`, `KIE_OUTPUT_DOLLARS`,
+  `KIE_CACHED_INPUT`, `KIE_CACHED_WRITES`, `PREMIUM_INPUT_DOLLARS`, `PREMIUM_OUTPUT_DOLLARS`.
+  Setting any of them throws at config time with directions to the panel — a price var that nothing
+  reads is a mis-bill waiting to be believed. `KIE_DEFAULT_MODEL` and `PREMIUM_MODEL` survive as
+  SELECTORS, accepted only if the active list prices them (`kieDefaultModel`, `getPremiumTier`).
+- **Cache rates are never quoted in the list** — validation refuses the keys. They derive per row
+  (0.1× read / 2.0× 1-hour write, measured on KIE), so a promoted reprice moves the whole row and a
+  half-repriced row cannot be expressed.
+- **Media lookup has NO most-expensive fallback**, unlike `ratesFor`: LLM settlement runs AFTER
+  spend (over-charging ourselves is the safe direction); media debits run BEFORE spend (§4.16 debits
+  the known price up-front), where the safe direction is refusing to run. Unknown model, unmatched
+  options, or a per-second request without a duration → refuse (`lookupMediaPrice` returns null).
+- **The kie.ai feed is for the operator's EYES only** (`market-feed.ts`, the panel's "Fetch kie.ai
+  feed"): free-text display rows, never machine-applied — auto-applying a third party's feed to our
+  billing table would hand KIE's webmaster write access to our margin.
+- **`providerRates` premium injection is non-throwing**: a promoted list that unprices
+  `PREMIUM_MODEL` refuses NEW premium requests loudly (`getPremiumModel`) but must not take
+  settlement down — an in-flight premium generation settles via the most-expensive fallback.
+
+Pinned by `market-prices.spec.ts` (validation + lookup + the baked list validates + the 21-credit
+worked example), `market-price-store.spec.ts` (promote/rollback/pointer/cache), and the rewritten
+selector describes in `billing.spec.ts` / `premium.spec.ts` (absolute per-row price pins replaced
+the retired "uniform 0.4x" ratio rule — the feed's own rows disprove it).
+
 ---
 
 ## Divergences from the original design (recorded per SPEC §11)

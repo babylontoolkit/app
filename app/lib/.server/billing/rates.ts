@@ -16,6 +16,9 @@
  * | output         | 5x (model-specific)    | what the model writes                                  |
  */
 import { env, envFlag, envNumber, NotConfiguredError } from '~/lib/.server/env';
+import type { MarketPriceList } from './market-prices';
+import { BAKED_MARKET_PRICES } from './baked-market-prices';
+import { activeMarketPrices } from './market-price-store';
 
 /** USD per million tokens, per model. Verified against Anthropic's published pricing (2026-07). */
 export interface ModelRates {
@@ -98,98 +101,37 @@ export const MODEL_RATES: Record<string, ModelRates> = {
 };
 
 /**
- * KIE.ai's rates for the same models (`providers/kie.ts`), USD per million tokens.
+ * KIE.ai's rates (`providers/kie.ts`), USD per million tokens — DERIVED from the marketplace price
+ * list, never hand-written here (2026-07-18).
+ *
+ * The numbers live in ONE document: the baked `BAKED_MARKET_PRICES.llm` table
+ * (`baked-market-prices.ts`, where each row keeps its measurement history), overridden at runtime by
+ * whatever list the operator has PROMOTED from the Admin panel ("Marketplace prices"). This constant
+ * is the baked table only — the static fallback and the thing `billing.spec.ts` pins absolute prices
+ * against. Runtime billing goes through `kieRates()`, which reads the ACTIVE list.
  *
  * ⚠️ **EVERY ROW IS LOOKED UP, NEVER DERIVED FROM A RATIO.** `claude-opus-4-8` happens to be a uniform
- * 0.4x of Anthropic list ($2 vs $5 in, $10 vs $25 out), and it is tempting to read that as "KIE is 0.4x".
- * It is not a rule: 4.7 is ~0.285x and fable-5 is 2x Anthropic's Opus list — KIE resells many vendors at
- * prices only their console shows. A ratio that holds for one row is a coincidence, and the moment it is
- * treated as a formula the next model is mispriced silently. The cache multipliers ARE shared (0.1x read,
- * 2.0x the 1-hour write, applied to each row's own discounted base) and that one IS measured — see the
- * note below the table.
+ * 0.4x of Anthropic list; 4.7 is ~0.285x and fable-5 is 2x Anthropic's Opus list — KIE resells many
+ * vendors at its own prices. A ratio that holds for one row is a coincidence. The cache multipliers
+ * ARE shared (0.1x read, 2.0x the 1-hour write, applied to each row's own base) and that one IS
+ * measured — see the note below the table.
  *
  * ⚠️ **These are the rates we ACTUALLY PAY, and that is the entire contract of this file** — "the
- * honest number, before any margin". Credits are cost-proportional (`creditsForUsage`), so leaving the
- * Anthropic numbers here while spending at KIE's would not be a rounding error: it would charge every
- * user ~2.5x the credits their generation actually cost us. That is a pricing decision, and it belongs
- * in `CREDIT_MARGIN` where it is visible and asserted — never smuggled in as a wrong cost.
- *
- * The operator's choice was to PASS THE DISCOUNT THROUGH: margin stays 3.34, so profit per pack is
- * unchanged and the same $50 buys ~2.5x more work.
+ * honest number, before any margin". Credits are cost-proportional (`creditsForUsage`), so a wrong
+ * cost here mis-bills every user silently. The margin lever is `CREDIT_MARGIN`, never a fudged cost.
  *
  * ⚠️ **Do not re-derive the edits-per-plan figure from this table alone — it is dominated by the CACHE,
- * not by these rates.** An earlier version of this comment quoted "~13 edits/month at Anthropic, ~32 at
- * KIE" and both numbers are dead: they were measured while per-message block routing churned the cached
- * prefix, so every edit paid a ~110k cache WRITE at 2x. With sticky routing (`selectStickyBlocks`) a warm
- * edit on this row measures ~11 credits — a $50/6,000-credit pack is **~545 edits**, not 32. A stale
- * number here reads as "the plan is unviable" and invites a reprice that fixes nothing.
+ * not by these rates.** With sticky routing (`selectStickyBlocks`) a warm edit measures ~11 credits —
+ * a $50/6,000-credit pack is **~545 edits**. (The old "~13/~32 edits" figures predate the fix.)
  */
-export const KIE_MODEL_RATES: Record<string, ModelRates> = {
-  /**
-   * NOT the platform default — priced and listed so `LLM_MODEL`/`KIE_DEFAULT_MODEL` can select it, and
-   * because an unpriced model bills at the provider's most expensive row (`ratesFor`).
-   *
-   * Rates from the operator's KIE console, 2026-07-17: $1.425 in / $7.15 out — ~0.285x of Anthropic's
-   * Opus list, a harder discount than 4.8's 0.4x. It is a release behind, hence cheaper.
-   *
-   * It is the only Opus on KIE that returns THINKING TEXT (266 chars measured, against 4.8's 0 in every
-   * shape tried) — but that did not win it the default. KIE's accounting for this row is BROKEN: it
-   * reports `cache_creation_input_tokens: 0` while charging 2x for the write, so its usage numbers cannot
-   * be settled against. `claude-opus-4-8` is the only KIE row that accounts honestly (10,004 reported =
-   * 8.02 credits charged, exact), and being able to bill correctly outranks a visible reasoning panel.
-   */
-  'claude-opus-4-7': {
-    inputPerMTok: 1.425,
-    outputPerMTok: 7.15,
-    cacheReadPerMTok: 0.1425, // 0.1x — the multiplier is MEASURED on KIE, see the note below
-    cacheWritePerMTok: 2.85, // 2x — the 1h tier, matching `proxy.ts`
-  },
+export const KIE_MODEL_RATES: Record<string, ModelRates> = llmRatesFromList(BAKED_MARKET_PRICES);
 
-  /**
-   * **THE PLATFORM DEFAULT** (`DEFAULT_MODEL` in `app/utils/constants.ts`, with `LLM_PROVIDER=KIE`).
-   *
-   * It wins on ACCOUNTING, not on price — 4.7 is cheaper. This is the only KIE row whose usage numbers
-   * can be settled against: a probe reporting 10,004 write tokens was charged 8.02 credits, exact to the
-   * published $2/$10. Both other rows report `cache_creation_input_tokens: 0` while charging 2x for the
-   * write, which would make every generation on them bill from numbers we know to be wrong.
-   *
-   * Caching verified on this row against the live vendor, 2026-07-17 (30 byte-identical requests, then 15
-   * more): KIE warms per backend — misses cluster in the first ~13 requests to a NEW prefix (4/29, at
-   * 2/4/7/13) and then hold at 0/14 once warm, against an Anthropic control of 0/29. So the warmup is
-   * per distinct prefix, and our largest cached block (the base prompt) is byte-identical for every user
-   * and project — it warms once and stays warm on any real traffic. ⚠️ An earlier reading of a SIX-request
-   * sample called this "KIE randomly drops ~1/3 of cache entries" and nearly bought a 2.5x provider switch
-   * on it; that sample sat entirely inside the warmup window. Steady-state miss rate is ~0.
-   *
-   * KNOWN VENDOR BUG: returns 0 chars of thinking text on this row in every shape tried (4.7 gives 266,
-   * fable-5 ~224). It thinks — it just will not show it, so the `ThinkingPanel` stays empty on KIE.
-   */
-  'claude-opus-4-8': {
-    inputPerMTok: 2.0,
-    outputPerMTok: 10.0,
-    cacheReadPerMTok: 0.2, // 0.1x of the $2 base
-    cacheWritePerMTok: 4.0, // 2x of the $2 base — the 1h tier, matching `proxy.ts`
-  },
-
-  /**
-   * MEASURED against KIE's own `credits_consumed`, 2026-07-17 — not published, not guessed.
-   *
-   * A four-point input sweep (2,126 -> 25,227 tokens) converges $4.069 -> $4.011 -> **$4.006**, and an
-   * output-dominated probe returns **$19.99**. Both land on round numbers, and the same method with
-   * `claude-opus-4-8` as a CONTROL reproduces its published $2.00 / $10.00 exactly — which is the only
-   * reason these two numbers are in a rate table rather than in a comment.
-   *
-   * ⚠️ **Fable 5 is 2x Opus 4.8 on KIE, not cheaper.** It is here because it is the strongest model KIE
-   * serves whose thinking text their adapter actually returns (`kie-wire.ts`: 224/223 chars with
-   * `thinkingFlag`, against 4-8's 0/0/0). That is the trade — visible reasoning at double the price.
-   */
-  'claude-fable-5': {
-    inputPerMTok: 4.0,
-    outputPerMTok: 20.0,
-    cacheReadPerMTok: 0.4, // 0.1x — the multiplier is CONFIRMED on KIE, see below
-    cacheWritePerMTok: 8.0, // 2x of the $4 base — the 1h tier, matching `proxy.ts`
-  },
-};
+/** A full `ModelRates` table from a price list's llm rows — cache always derives from each row's base. */
+export function llmRatesFromList(list: MarketPriceList): Record<string, ModelRates> {
+  return Object.fromEntries(
+    Object.entries(list.llm).map(([model, rate]) => [model, ratesFromBase(rate.inputPerMTok, rate.outputPerMTok)]),
+  );
+}
 
 /*
  * 🔴 HOW THE CACHE MULTIPLIERS STOPPED BEING AN ASSUMPTION (2026-07-17).
@@ -209,107 +151,86 @@ export const KIE_MODEL_RATES: Record<string, ModelRates> = {
  */
 
 /**
- * A price, from the environment. **Not `envNumber` — a typo here is not survivable.**
+ * The RETIRED env price vars (2026-07-18) — set means STOP, never "quietly ignore".
  *
- * `envNumber` returns its fallback for an unparseable value, which is right for a turn cap and wrong
- * for money: `KIE_INPUT_DOLLARS=$2` would silently price every generation at some other model's rate
- * and throw nothing. A price the operator tried and failed to state is a config error, never a default.
- * Zero is refused for the same reason — a free model does not exist, so `=0` is a mistake, and it would
- * zero-rate every generation on it (the exact revenue leak `ratesFor`'s fallbacks exist to prevent).
+ * Prices moved out of the environment into the marketplace price list (baked +
+ * admin-promoted, `market-price-store.ts`). The env keeps only MODEL SELECTORS
+ * (`KIE_DEFAULT_MODEL`, `PREMIUM_MODEL`) and thresholds (`PREMIUM_MINIMUM_CREDITS`).
+ *
+ * A deploy still carrying one of these vars believes it is stating a price that nothing reads — the
+ * exact "rates set but silently ignored" trap the old `kieModelOverride` refused, now one level up.
+ * So they are refused loudly at config time, with directions to the panel that replaced them.
  */
-function envMoney(context: unknown, key: string): number | undefined {
-  const raw = env(context, key)?.trim();
+const RETIRED_PRICE_ENV = [
+  'KIE_INPUT_DOLLARS',
+  'KIE_OUTPUT_DOLLARS',
+  'KIE_CACHED_INPUT',
+  'KIE_CACHED_WRITES',
+  'PREMIUM_INPUT_DOLLARS',
+  'PREMIUM_OUTPUT_DOLLARS',
+] as const;
 
-  if (!raw) {
-    return undefined;
-  }
+function refuseRetiredPriceEnv(context?: unknown): void {
+  const set = RETIRED_PRICE_ENV.filter((key) => env(context, key)?.trim());
 
-  const parsed = Number(raw);
-
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new NotConfiguredError(`${key}="${raw}"`, 'It must be a positive number of US dollars per million tokens.');
-  }
-
-  return parsed;
-}
-
-/** The KIE rate vars, as one list — so a "you set rates but no model" check cannot miss one. */
-const KIE_RATE_ENV = ['KIE_INPUT_DOLLARS', 'KIE_OUTPUT_DOLLARS', 'KIE_CACHED_INPUT', 'KIE_CACHED_WRITES'] as const;
-
-/**
- * The operator's KIE model + its price, from the environment (2026-07-17).
- *
- * ## Why the model and its rates are ONE variable group, and not two
- *
- * KIE resells many vendors' models and reprices them independently of anyone's list. So unlike
- * Anthropic — whose prices we can look up and bake — "which KIE model" and "what does it cost" are a
- * single fact that only the operator holds, and splitting them across a config knob and a code table
- * is what guarantees they drift. `KIE_INPUT_DOLLARS` therefore prices exactly `KIE_DEFAULT_MODEL`:
- * they are one ROW, entered together, or neither is accepted.
- *
- * ## The rules, each of which exists because its absence is a SILENT mis-bill
- *
- *  - **Rates with no model are refused.** They would price nothing, so they are a typo — and a typo
- *    that reads as configured. The operator would see their numbers in `.env` and believe them.
- *  - **A model we have no baked row for REQUIRES input+output.** This is the whole point. `ratesFor`
- *    falls back to the provider's most expensive row for an unknown model, so `KIE_DEFAULT_MODEL=x`
- *    alone would bill every generation at Opus 4.8's price, forever, and throw nothing. "Is this model
- *    configured?" and "do we know what it costs?" are the same question (see `agent/config.ts`).
- *  - **Cache re-derives from the FINAL input rate** unless quoted — see `CACHE_READ_MULTIPLIER`. For
- *    `KIE_DEFAULT_MODEL=claude-opus-4-8` with nothing else set, the derivation reproduces the baked
- *    row byte-for-byte ($2 -> $0.2 read / $4 write), which is why this is a safe default rather than
- *    a second opinion about a known price.
- *  - **A baked row supplies input/output only, never cache.** Overriding input alone must not leave
- *    cache quoted against the old base.
- *
- * Returns `undefined` when nothing is set — the baked table stands, unchanged.
- */
-export interface KieModelOverride {
-  model: string;
-  rates: ModelRates;
-}
-
-export function kieModelOverride(context?: unknown): KieModelOverride | undefined {
-  const model = env(context, 'KIE_DEFAULT_MODEL')?.trim();
-
-  const input = envMoney(context, 'KIE_INPUT_DOLLARS');
-  const output = envMoney(context, 'KIE_OUTPUT_DOLLARS');
-  const cacheReadPerMTok = envMoney(context, 'KIE_CACHED_INPUT');
-  const cacheWritePerMTok = envMoney(context, 'KIE_CACHED_WRITES');
-
-  if (!model) {
-    const quoted = KIE_RATE_ENV.filter((key) => env(context, key)?.trim());
-
-    if (quoted.length) {
-      throw new NotConfiguredError(
-        `${quoted.join(', ')} (set) but KIE_DEFAULT_MODEL`,
-        'Those rates price KIE_DEFAULT_MODEL, so on their own they price nothing and are silently ignored. Set KIE_DEFAULT_MODEL, or remove them.',
-      );
-    }
-
-    return undefined;
-  }
-
-  const baked = KIE_MODEL_RATES[model];
-  const finalInput = input ?? baked?.inputPerMTok;
-  const finalOutput = output ?? baked?.outputPerMTok;
-
-  if (finalInput === undefined || finalOutput === undefined) {
+  if (set.length) {
     throw new NotConfiguredError(
-      `KIE_DEFAULT_MODEL="${model}"`,
-      'We have no rates baked in for it, so KIE_INPUT_DOLLARS and KIE_OUTPUT_DOLLARS are both required — a model we cannot price is a model we cannot bill, and an unpriced model does not bill as free, it bills at the most expensive model we know of. Get the numbers from the KIE console. ' +
-        `Models priced without them: ${Object.keys(KIE_MODEL_RATES).join(', ')}.`,
+      `${set.join(', ')} (set, but retired)`,
+      'Prices no longer live in the environment — they are rows in the Marketplace price list, updated from ' +
+        'the Admin panel (Settings → Admin → Marketplace prices) and versioned with rollback. Remove these ' +
+        'variables; if you were repricing a model, promote a price list with its row instead.',
     );
   }
 
-  return { model, rates: ratesFromBase(finalInput, finalOutput, { cacheReadPerMTok, cacheWritePerMTok }) };
+  return undefined;
 }
 
-/** KIE's rate table: the baked rows, with the operator's `KIE_DEFAULT_MODEL` row added or overriding. */
-export function kieRates(context?: unknown): Record<string, ModelRates> {
-  const override = kieModelOverride(context);
+/**
+ * The operator's `KIE_DEFAULT_MODEL`, validated against the ACTIVE price list (2026-07-18).
+ *
+ * The model and its price used to be one env-var group (`KIE_INPUT_DOLLARS` et al); now the price
+ * side lives in the marketplace price list, so this var is a pure SELECTOR — and it is only accepted
+ * if the active list prices it. `ratesFor` falls back to the provider's most expensive row for an
+ * unknown model, so an unpriced selection would not fail, it would bill at Opus 4.8's price forever.
+ * "Is this model configured?" and "do we know what it costs?" remain the same question; the answer
+ * just moved to the admin panel.
+ */
+export function kieDefaultModel(context?: unknown): string | undefined {
+  refuseRetiredPriceEnv(context);
 
-  return override ? { ...KIE_MODEL_RATES, [override.model]: override.rates } : KIE_MODEL_RATES;
+  const model = env(context, 'KIE_DEFAULT_MODEL')?.trim();
+
+  if (!model) {
+    return undefined;
+  }
+
+  const priced = activeMarketPrices().llm;
+
+  if (!priced[model]) {
+    throw new NotConfiguredError(
+      `KIE_DEFAULT_MODEL="${model}"`,
+      'The Marketplace price list has no row for it, so we cannot bill it — and an unpriced model does not ' +
+        'bill as free, it bills at the most expensive model we know of. Add its row (input + output USD per ' +
+        `million tokens) in Settings → Admin → Marketplace prices, then promote. Priced models: ${
+          Object.keys(priced).join(', ') || '(none)'
+        }.`,
+    );
+  }
+
+  return model;
+}
+
+/**
+ * KIE's rate table — the ACTIVE marketplace price list, as `ModelRates` (cache derived per row).
+ *
+ * Before any promotion this is exactly the baked table (`KIE_MODEL_RATES`); after one, it is whatever
+ * the operator promoted. Callers hold no fallback of their own — a list that failed to load already
+ * fell back to baked inside `activeMarketPrices()`.
+ */
+export function kieRates(context?: unknown): Record<string, ModelRates> {
+  refuseRetiredPriceEnv(context);
+
+  return llmRatesFromList(activeMarketPrices());
 }
 
 /**
@@ -324,33 +245,28 @@ export function kieRates(context?: unknown): Record<string, ModelRates> {
  * THIS model at THIS price. A client can never name an arbitrary (unpriced, expensive) model — the only
  * two reachable models are the platform default and this one.
  *
- * ## Model and price are ONE fact — the invariant this whole file rests on
+ * ## Model and price are ONE fact — and the price now lives in the marketplace list (2026-07-18)
  *
- * `PREMIUM_MODEL` names it; `PREMIUM_INPUT_DOLLARS`/`PREMIUM_OUTPUT_DOLLARS` price it (via `envMoney`, so
- * a typo throws rather than silently billing at another model's rate); cache re-derives from the final
- * input rate (`ratesFromBase`). The defaults bake **Fable 5 at $4/$20 — 2x Opus 4.8 on KIE** — so the
- * tier works with no env at all, and on the default provider (KIE) that price is EXACT (the baked
- * `KIE_MODEL_RATES['claude-fable-5']` is byte-identical, so injecting it changes nothing there).
+ * `PREMIUM_MODEL` names it; the ACTIVE price list prices it (`PREMIUM_*_DOLLARS` are RETIRED — setting
+ * them is refused with directions to the Admin panel). The baked list carries Fable 5 at the measured
+ * $4/$20, so the tier works with no env and no promotion at all. A `PREMIUM_MODEL` the active list does
+ * not price is refused — the same "selector without a row" rule as `kieDefaultModel`.
  *
- * ⚠️ **ONE premium price for whichever provider is active** — deliberately not a second per-provider env
- * group. The operator sets `PREMIUM_*_DOLLARS` to the premium model's real cost on the provider they run.
- * On Anthropic, `claude-fable-5` has no baked row at all (`MODEL_RATES` stays fable-5-free, so the "0.4x
- * uniform" and "no Anthropic row" invariants in `billing.spec.ts` are untouched) — this injection is the
- * ONLY thing that prices it there, at the operator-stated premium price.
+ * ⚠️ **ONE premium price for whichever provider is active** — the list row states what the premium model
+ * costs on the provider the platform runs. On Anthropic, `claude-fable-5` has no `MODEL_RATES` row at
+ * all — the `providerRates` injection is the ONLY thing that prices it there.
  *
- * ⚠️ `PREMIUM_MINIMUM_CREDITS` is `envNumber`, NOT `envMoney`: it is a credit THRESHOLD, not dollars per
- * million tokens, so a fallback is correct (unlike a price, where a fallback is catastrophic).
+ * ⚠️ `PREMIUM_MINIMUM_CREDITS` stays env (`envNumber`): it is a credit THRESHOLD, not a price, so a
+ * fallback is correct — unlike a price, where a fallback is catastrophic.
  */
 export const DEFAULT_PREMIUM_MODEL = 'claude-fable-5';
-export const DEFAULT_PREMIUM_INPUT_DOLLARS = 4;
-export const DEFAULT_PREMIUM_OUTPUT_DOLLARS = 20;
 export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1000;
 
 export interface PremiumTier {
   /** The model id, e.g. `claude-fable-5`. Reachable on any provider via the `providerRates` injection. */
   model: string;
 
-  /** Its full rate row, priced from `PREMIUM_*_DOLLARS` (cache derived). */
+  /** Its full rate row, from the active price list (cache derived). */
   rates: ModelRates;
 
   /** Credits a user must HOLD before premium unlocks — protects the free signup grant (§4.6.1). */
@@ -358,12 +274,22 @@ export interface PremiumTier {
 }
 
 export function getPremiumTier(context?: unknown): PremiumTier {
-  const model = env(context, 'PREMIUM_MODEL')?.trim() || DEFAULT_PREMIUM_MODEL;
-  const input = envMoney(context, 'PREMIUM_INPUT_DOLLARS') ?? DEFAULT_PREMIUM_INPUT_DOLLARS;
-  const output = envMoney(context, 'PREMIUM_OUTPUT_DOLLARS') ?? DEFAULT_PREMIUM_OUTPUT_DOLLARS;
-  const minimumCredits = envNumber(context, 'PREMIUM_MINIMUM_CREDITS', DEFAULT_PREMIUM_MINIMUM_CREDITS);
+  refuseRetiredPriceEnv(context);
 
-  return { model, rates: ratesFromBase(input, output), minimumCredits };
+  const model = env(context, 'PREMIUM_MODEL')?.trim() || DEFAULT_PREMIUM_MODEL;
+  const minimumCredits = envNumber(context, 'PREMIUM_MINIMUM_CREDITS', DEFAULT_PREMIUM_MINIMUM_CREDITS);
+  const row = activeMarketPrices().llm[model];
+
+  if (!row) {
+    throw new NotConfiguredError(
+      `PREMIUM_MODEL="${model}"`,
+      'The Marketplace price list has no row for it, so we cannot bill it. Add its row (input + output USD ' +
+        'per million tokens) in Settings → Admin → Marketplace prices, then promote — or unset PREMIUM_MODEL ' +
+        `to use the default (${DEFAULT_PREMIUM_MODEL}).`,
+    );
+  }
+
+  return { model, rates: ratesFromBase(row.inputPerMTok, row.outputPerMTok), minimumCredits };
 }
 
 /**
@@ -377,11 +303,24 @@ export function getPremiumTier(context?: unknown): PremiumTier {
  * it is idempotent on KIE, where the default premium price matches the baked row exactly.
  */
 export function providerRates(context?: unknown): Record<string, Record<string, ModelRates>> {
-  const premium = getPremiumTier(context);
-  const withPremium = (table: Record<string, ModelRates>): Record<string, ModelRates> => ({
-    ...table,
-    [premium.model]: premium.rates,
-  });
+  /*
+   * The premium injection must not be able to take SETTLEMENT down. `getPremiumTier` throws when the
+   * active list has no row for `PREMIUM_MODEL` — correct at the premium DECISION (a loud config error
+   * before any spend), and wrong here, where this table also prices in-flight settlement, which can
+   * never refuse (§4.6). An unpriceable premium tier therefore skips injection: a premium generation
+   * mid-flight settles through `ratesFor`'s most-expensive fallback — over-charging ourselves, the
+   * safe direction — while new premium requests are refused loudly by `getPremiumModel`.
+   */
+  let premium: PremiumTier | undefined;
+
+  try {
+    premium = getPremiumTier(context);
+  } catch {
+    premium = undefined;
+  }
+
+  const withPremium = (table: Record<string, ModelRates>): Record<string, ModelRates> =>
+    premium ? { ...table, [premium.model]: premium.rates } : table;
 
   return {
     Anthropic: withPremium(MODEL_RATES),

@@ -22,9 +22,13 @@ import { getEntitlement } from '~/lib/.server/licensing/entitlements';
 import { isStripeConfigured, CREDIT_PACKS, SUBSCRIPTION_PLANS } from '~/lib/.server/billing/stripe';
 import { errorResponse } from '~/lib/.server/http';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
+import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   try {
+    // The premium tier below prices from the marketplace list — refresh it at this async doorway.
+    await ensureMarketPrices(context);
+
     const user = await getUser(request, context);
     const platform = getPlatformConfig(context);
     const billing = getBillingConfig(context);

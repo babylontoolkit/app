@@ -29,6 +29,7 @@ import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
+import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/premium';
 import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
@@ -334,6 +335,14 @@ export function buildRepairMessage(errors: string[]): string {
 }
 
 export async function runAgentGeneration(request: AgentRequest): Promise<AgentGeneration> {
+  /*
+   * Refresh the marketplace price list BEFORE anything prices anything: the gate, the premium
+   * decision and settlement all read it synchronously (`activeMarketPrices`), and this is the async
+   * doorway they share. A failed refresh falls back to the last-loaded/baked list inside — it can
+   * never throw and never block a generation.
+   */
+  await ensureMarketPrices(request.context);
+
   const config = getPlatformConfig(request.context);
   const user = request.user;
   const monitor = getMonitor(request.context);
