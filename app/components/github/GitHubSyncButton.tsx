@@ -66,13 +66,20 @@ export function GitHubSyncButton() {
 
   return (
     <>
+      {/*
+       * Labelled "Sync", not "GitHub" (§4.5.4b): the header already has one git surface — the Save
+       * button next to it, which CREATES a repo and keeps it saved. This is the OTHER thing you do with
+       * a repo — pull external changes down, resolve divergence, or link an existing one — so it reads
+       * as its own verb rather than a second "GitHub" button competing with Save. The owner reported the
+       * two same-named buttons as confusing.
+       */}
       <button
         onClick={() => setOpen(true)}
         className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-2"
-        title="Sync with GitHub"
+        title="Sync a repository — pull changes, resolve divergence, or link an existing repo"
       >
         <div className="i-ph:git-branch" />
-        <span>GitHub</span>
+        <span>Sync</span>
       </button>
       {open && <GitHubSyncDialog projectId={activeProjectId} onClose={() => setOpen(false)} />}
     </>

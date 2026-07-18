@@ -148,6 +148,36 @@ describe('the badge — failure is loud', () => {
 
     expect(view.detail).toContain('still here');
   });
+
+  /**
+   * The owner reported this: on an UNLINKED project (so `repo.provider` is undefined) with GitLab
+   * picked in the header, the reconnect button still said "Reconnect GitHub". The provider must come
+   * from the user's choice until the project is linked.
+   */
+  it('names the chosen provider on a reconnect before the project is linked', () => {
+    const view = describeSaveStatus({
+      repo: unlinked,
+      unsavedWork: true,
+      saveState: { status: 'failed', message: 'auth', reconnect: true },
+      chosenProvider: 'gitlab',
+    });
+
+    expect(view.action).toBe('reconnect');
+    expect(view.actionLabel).toBe('Reconnect GitLab');
+    expect(view.actionLabel).not.toContain('GitHub');
+  });
+
+  /** A linked project's own provider always wins over a stale header pick. */
+  it('lets the linked provider override the header pick', () => {
+    const view = describeSaveStatus({
+      repo: { ...linked, provider: 'github' },
+      unsavedWork: true,
+      saveState: { status: 'failed', message: 'auth', reconnect: true },
+      chosenProvider: 'gitlab',
+    });
+
+    expect(view.actionLabel).toBe('Reconnect GitHub');
+  });
 });
 
 describe('plain language (§4.5.4b)', () => {

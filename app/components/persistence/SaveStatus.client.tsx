@@ -20,10 +20,27 @@
  * here rather than there means adding a string nothing tests.
  */
 import { useStore } from '@nanostores/react';
+import { useState } from 'react';
 import { classNames } from '~/utils/classNames';
 import { projectId as projectIdStore, repoStatus, unsavedWork, requestSave, startGitConnect } from '~/lib/persistence';
 import { saveState } from '~/lib/persistence/save-queue';
 import { describeSaveStatus, type SaveTone } from '~/lib/persistence/save-status';
+
+type GitProvider = 'github' | 'gitlab';
+
+const PROVIDER_LABEL: Record<GitProvider, string> = { github: 'GitHub', gitlab: 'GitLab' };
+
+/**
+ * The provider to preselect after an OAuth round-trip lands back on `?git=connected&provider=…`, so the
+ * chooser shows the account the user just connected rather than resetting to the default.
+ */
+function providerFromReturn(): GitProvider {
+  if (typeof window === 'undefined') {
+    return 'github';
+  }
+
+  return new URLSearchParams(window.location.search).get('provider') === 'gitlab' ? 'gitlab' : 'github';
+}
 
 const TONE_CLASSES: Record<SaveTone, string> = {
   danger: 'text-red-400 border-red-500/40 bg-red-500/10',
@@ -45,20 +62,40 @@ export function SaveStatus() {
   const unsaved = useStore(unsavedWork);
   const state = useStore(saveState);
 
+  const [chosenProvider, setChosenProvider] = useState<GitProvider>(providerFromReturn);
+
   if (!activeProjectId) {
     return null;
   }
 
-  const view = describeSaveStatus({ repo, unsavedWork: unsaved, saveState: state });
+  /*
+   * A brand-new project can be saved to more than one account when the deployment has both providers
+   * configured (§4.5.4b). Offer the choice ONLY while unlinked and only when there is a real choice to
+   * make — once linked, the project's own provider is authoritative and the picker disappears. Without
+   * this, `startGitConnect`/`requestSave` silently default to GitHub and GitLab is unreachable.
+   */
+  const configured = (repo?.configuredProviders ?? []) as GitProvider[];
+  const hasChoice = !repo?.linked && configured.length > 1;
+
+  /*
+   * The provider every label and action must agree on: the project's own once linked, otherwise the
+   * one the user picked (or the single configured one on a one-provider deployment). Computed BEFORE
+   * the view so the reconnect/save copy names the right account — it used to always say "GitHub".
+   */
+  const providerToUse: GitProvider = repo?.provider ?? (hasChoice ? chosenProvider : (configured[0] ?? 'github'));
+
+  const view = describeSaveStatus({ repo, unsavedWork: unsaved, saveState: state, chosenProvider: providerToUse });
+
+  const offerChoice = hasChoice && view.action !== 'none';
 
   const onAction = () => {
     if (view.action === 'reconnect') {
-      startGitConnect(repo?.provider ?? 'github');
+      startGitConnect(providerToUse);
       return;
     }
 
     // `save` and `retry` are the same call. The distinction is what the user is told, not what we do.
-    void requestSave(activeProjectId);
+    void requestSave(activeProjectId, providerToUse);
   };
 
   return (
@@ -79,6 +116,22 @@ export function SaveStatus() {
         <div className={classNames(TONE_ICONS[view.tone], 'shrink-0')} />
         <span>{view.label}</span>
       </a>
+
+      {offerChoice && (
+        <select
+          aria-label="Save to which account"
+          value={chosenProvider}
+          onChange={(e) => setChosenProvider(e.target.value as GitProvider)}
+          title="Choose where to create this project's repository"
+          className="px-2 py-1.5 text-xs rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary"
+        >
+          {configured.map((p) => (
+            <option key={p} value={p}>
+              {PROVIDER_LABEL[p]}
+            </option>
+          ))}
+        </select>
+      )}
 
       {view.action !== 'none' && (
         <button

@@ -33,6 +33,14 @@ export interface SaveStatusFacts {
 
   /** What the save queue is doing right now. */
   saveState: SaveState;
+
+  /**
+   * The account the user chose in the header picker, used ONLY to name the provider before the project
+   * is linked. Once linked, `repo.provider` is authoritative and wins. Without this, an unlinked
+   * project's reconnect/save copy always said "GitHub" even when the user had picked GitLab, because
+   * `repo.provider` is undefined until the first successful save.
+   */
+  chosenProvider?: 'github' | 'gitlab';
 }
 
 /**
@@ -67,10 +75,17 @@ function shortRepo(repo?: string): string | undefined {
 }
 
 export function describeSaveStatus(facts: SaveStatusFacts): SaveStatusView {
-  const { repo, unsavedWork, saveState } = facts;
+  const { repo, unsavedWork, saveState, chosenProvider } = facts;
   const linked = repo?.linked === true;
   const name = shortRepo(repo?.repo);
-  const where = repo?.provider === 'gitlab' ? 'GitLab' : 'GitHub';
+
+  /*
+   * A linked project's own provider is the truth. Before it is linked there is no provider yet, so we
+   * name the account the user picked in the header (`chosenProvider`); only if neither is known do we
+   * fall back to GitHub, the default when a deployment has just one provider configured.
+   */
+  const provider = repo?.provider ?? chosenProvider ?? 'github';
+  const where = provider === 'gitlab' ? 'GitLab' : 'GitHub';
 
   /*
    * A FAILED save outranks everything, including "not linked yet". It is the only state where the

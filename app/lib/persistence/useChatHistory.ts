@@ -451,7 +451,7 @@ function saveQueueFor(pid: string): SaveQueue {
      */
     push: async () => {
       const files = await workbenchStore.serializeFiles();
-      const outcome = await saveProjectToRepo(pid, { files, summary: lastSummary });
+      const outcome = await saveProjectToRepo(pid, { files, summary: lastSummary, provider: preferredProvider });
 
       if (outcome.ok && db) {
         /*
@@ -478,6 +478,13 @@ function saveQueueFor(pid: string): SaveQueue {
  * where the reply is an artifact full of code. `buildCommitMessage` bounds and prefixes it.
  */
 let lastSummary: string | undefined;
+
+/**
+ * The provider chosen for the FIRST save of an unlinked project (which account the repo is created in).
+ * Read by the queue's push callback. Only meaningful before a project is linked; once linked, the
+ * server uses the project's own provider and ignores this.
+ */
+let preferredProvider: 'github' | 'gitlab' | undefined;
 
 /** The last thing the user asked for, as plain text. */
 function summarizeRequest(messages: Message[]): string | undefined {
@@ -542,7 +549,17 @@ async function autoPush(pid: string): Promise<void> {
  *
  * Never throws. The outcome is reported through `saveState`, which the header badge reads.
  */
-export async function requestSave(pid: string): Promise<void> {
+export async function requestSave(pid: string, provider?: 'github' | 'gitlab'): Promise<void> {
+  /*
+   * The first save of an unlinked project may name a provider (which account to create the repo in).
+   * It is stored where the queue's push callback reads it — like `lastSummary` — because the push runs
+   * later (at flush time, after any retries) and must not capture a value from when Save was clicked.
+   * A linked project ignores it server-side, so leaving a stale choice set does no harm.
+   */
+  if (provider) {
+    preferredProvider = provider;
+  }
+
   const outcome = await saveQueueFor(pid).request();
 
   if (!outcome) {

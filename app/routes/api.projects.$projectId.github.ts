@@ -49,6 +49,7 @@ import { getProjectStore } from '~/lib/.server/projects/store';
 import { divergenceBranchName, isValidDivergenceChoice } from '~/lib/.server/git/sync-logic';
 import { GitProviderError, parseRepo, type GitProvider, type GitProviderId } from '~/lib/.server/git/provider';
 import { resolveProvider } from '~/lib/.server/git/resolve';
+import { configuredProviders } from '~/lib/.server/git/oauth';
 import { saveToNewRepo } from '~/lib/.server/git/save';
 import { errorResponse } from '~/lib/.server/http';
 import { createScopedLogger } from '~/utils/logger';
@@ -127,8 +128,15 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
     const user = await requireVerifiedUser(request, context);
     const project = await requireOwnedProject(user, params.projectId!, context);
 
+    /*
+     * Which providers this deployment can save to (§4.5.4b). The client needs this BEFORE the first
+     * save: an unlinked project with more than one configured provider must let the user choose where
+     * it lives, rather than silently defaulting to one of them.
+     */
+    const providers = configuredProviders(context);
+
     if (!project.linkedRepo || !project.linkedBranch) {
-      return json({ linked: false });
+      return json({ linked: false, configuredProviders: providers });
     }
 
     const base = {
@@ -138,6 +146,7 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
       branch: project.linkedBranch,
       lastSyncedCommitSha: project.lastSyncedCommitSha,
       autoPush: project.autoPush ?? true,
+      configuredProviders: providers,
     };
 
     try {

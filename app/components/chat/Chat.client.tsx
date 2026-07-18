@@ -5,8 +5,8 @@ import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
-import { chatMetadata, description, projectId, useChatHistory } from '~/lib/persistence';
-import { createProject } from '~/lib/persistence/projects';
+import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
+import { createProject, getRepoStatus } from '~/lib/persistence/projects';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
@@ -877,6 +877,15 @@ export const ChatImpl = memo(
           const project = await createProject({ name: title, templateId: entry.id });
           projectId.set(project.id);
           chatMetadata.set({ ...chatMetadata.get(), projectId: project.id });
+
+          /*
+           * A newly created project is UNLINKED. Reset the badge from any previous project's state and
+           * then fetch this one's — fire-and-forget so it never delays the generation below (the fetch
+           * also carries `configuredProviders`, which is what lets the Save badge offer a GitHub/GitLab
+           * choice on a deployment that has both; without it Save silently defaults to GitHub, §4.5.4b).
+           */
+          repoStatus.set({ linked: false });
+          void getRepoStatus(project.id).then((status) => repoStatus.set(status));
         } catch (error) {
           projectId.set(undefined);
           logger.error(`Could not register the project with the server: ${(error as Error).message}`);

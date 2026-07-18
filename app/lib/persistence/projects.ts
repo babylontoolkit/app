@@ -127,6 +127,13 @@ export interface RepoStatus {
 
   /** True when the provider could not be reached. `remoteHead` is then absent, not null. */
   unreachable?: boolean;
+
+  /**
+   * Which git providers this deployment has OAuth configured for. Drives the first-save provider
+   * choice: an unlinked project with more than one option must ask where it should live rather than
+   * defaulting silently to one. Absent/one entry → no choice to offer.
+   */
+  configuredProviders?: Array<'github' | 'gitlab'>;
 }
 
 /**
@@ -267,7 +274,7 @@ export interface SaveOutcome {
  */
 export async function saveProjectToRepo(
   projectId: string,
-  input: { files: SerializedFileMap; summary?: string },
+  input: { files: SerializedFileMap; summary?: string; provider?: 'github' | 'gitlab' },
 ): Promise<SaveOutcome> {
   let response: Response;
 
@@ -276,6 +283,12 @@ export async function saveProjectToRepo(
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
+
+      /*
+       * `provider` matters only on the FIRST save of an unlinked project — it names which account the
+       * repo is created in. Once linked, the server ignores it and uses the project's own provider
+       * (the link is authoritative, §4.5.4b), so sending it on every push is harmless.
+       */
       body: JSON.stringify({ op: 'save', ...input }),
     });
   } catch {
