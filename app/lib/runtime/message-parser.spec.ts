@@ -157,6 +157,80 @@ describe('StreamingMessageParser', () => {
       runTest(input, expected);
     });
   });
+
+  describe('action missing its closing </boltAction> (model dropped it before </boltArtifact>)', () => {
+    /*
+     * The exact shape that shipped a bug: the model writes two file actions but omits the SECOND
+     * action's </boltAction>, going straight to </boltArtifact>. The last file must still be written —
+     * before the fix it streamed forever (onActionClose never fired) and the file never reached disk,
+     * so a generated landing page rendered with the starter's CSS (unstyled).
+     */
+    const MALFORMED =
+      'Before <boltArtifact title="t" id="a1">' +
+      '<boltAction type="file" filePath="src/pages/Home.tsx">TSX_BODY</boltAction>' +
+      '<boltAction type="file" filePath="src/pages/Home.css">.pp-root{color:red}\n' +
+      '</boltArtifact>\n\nDone — trailing prose.';
+
+    const makeParser = () => {
+      const closed: { filePath: string; content: string }[] = [];
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn((d: any) => closed.push({ filePath: d.action.filePath, content: d.action.content })),
+      };
+
+      return { parser: new StreamingMessageParser({ artifactElement: () => '', callbacks }), callbacks, closed };
+    };
+
+    it('closes BOTH actions and writes the last file, in one parse', () => {
+      const { parser, callbacks, closed } = makeParser();
+      const output = parser.parse('m1', MALFORMED);
+
+      expect(callbacks.onActionOpen).toHaveBeenCalledTimes(2);
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(2); // was 1 before the fix — the bug
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+
+      const css = closed.find((c) => c.filePath === 'src/pages/Home.css');
+      expect(css).toBeDefined();
+
+      // The file body stops at </boltArtifact> — it must NOT swallow the artifact tag or the prose.
+      expect(css!.content).toContain('.pp-root{color:red}');
+      expect(css!.content).not.toContain('</boltArtifact>');
+      expect(css!.content).not.toContain('trailing prose');
+
+      // The artifact tag is stripped from user-facing output; the surrounding prose is preserved.
+      expect(output).toBe('Before \n\nDone — trailing prose.');
+    });
+
+    it('closes the last action when streamed character-by-character', () => {
+      const { parser, callbacks, closed } = makeParser();
+
+      let message = '';
+
+      for (const ch of MALFORMED) {
+        message += ch;
+        parser.parse('m2', message);
+      }
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(2);
+      expect(closed.find((c) => c.filePath === 'src/pages/Home.css')?.content).toContain('.pp-root{color:red}');
+    });
+
+    it('still requires the real </boltAction> when present (well-formed is unchanged)', () => {
+      const { parser, callbacks, closed } = makeParser();
+      parser.parse(
+        'm3',
+        'Before <boltArtifact title="t" id="a1">' +
+          '<boltAction type="file" filePath="a.css">A</boltAction>' +
+          '<boltAction type="file" filePath="b.css">B</boltAction>' +
+          '</boltArtifact> After',
+      );
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(2);
+      expect(closed.map((c) => c.content.trim())).toEqual(['A', 'B']);
+    });
+  });
 });
 
 describe('EnhancedStreamingMessageParser', () => {

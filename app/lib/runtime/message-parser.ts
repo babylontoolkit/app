@@ -148,11 +148,28 @@ export class StreamingMessageParser {
 
         if (state.insideAction) {
           const closeIndex = input.indexOf(ARTIFACT_ACTION_TAG_CLOSE, i);
+          const artifactCloseIndex = input.indexOf(ARTIFACT_TAG_CLOSE, i);
 
           const currentAction = state.currentAction;
 
-          if (closeIndex !== -1) {
-            currentAction.content += input.slice(i, closeIndex);
+          /*
+           * An action ends at its own </boltAction> — OR, when the model omits it (a recurring
+           * KIE/Opus formatting slip), at the enclosing </boltArtifact>, whichever comes first.
+           *
+           * Without the artifact-close fallback the LAST file in an artifact is streamed forever and
+           * NEVER written to disk: with no </boltAction> to find, the parser keeps appending
+           * </boltArtifact> and the trailing prose to the file body and waits for a close tag that will
+           * never arrive, so onActionClose (which is what runs the write) never fires. Confirmed live —
+           * a landing page whose Home.css ended with a complete rule and jumped straight to
+           * </boltArtifact>: Home.css never reached the sandbox, so vite served the starter CSS and the
+           * page rendered unstyled. The FIRST file in the same artifact was written fine, because its
+           * </boltAction> was followed by more text; only the last one is exposed.
+           */
+          const usesArtifactClose = artifactCloseIndex !== -1 && (closeIndex === -1 || artifactCloseIndex < closeIndex);
+          const actionEndIndex = usesArtifactClose ? artifactCloseIndex : closeIndex;
+
+          if (actionEndIndex !== -1) {
+            currentAction.content += input.slice(i, actionEndIndex);
 
             let content = currentAction.content.trim();
 
@@ -185,7 +202,11 @@ export class StreamingMessageParser {
             state.insideAction = false;
             state.currentAction = { content: '' };
 
-            i = closeIndex + ARTIFACT_ACTION_TAG_CLOSE.length;
+            /*
+             * Explicit close: consume the </boltAction>. Implicit (artifact) close: leave `i` AT the
+             * </boltArtifact> so the artifact-close branch fires next iteration and emits onArtifactClose.
+             */
+            i = usesArtifactClose ? actionEndIndex : actionEndIndex + ARTIFACT_ACTION_TAG_CLOSE.length;
           } else {
             if ('type' in currentAction && currentAction.type === 'file') {
               let content = input.slice(i);
