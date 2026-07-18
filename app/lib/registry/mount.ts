@@ -1,18 +1,24 @@
 /**
  * Mounting template files into the WebContainer (SPEC §4.4, §4.2.8, `spec/binary-files.md`).
  *
- * The whole starter lands in ONE atomic `container.mount(tree)` — never a `boltArtifact` (that is a
- * TEXT protocol: the action runner UTF-8 encodes whatever it is handed, so a PNG round-tripped
+ * The starter's TEXT files land in ONE atomic `container.mount(tree)` — never a `boltArtifact` (that
+ * is a TEXT protocol: the action runner UTF-8 encodes whatever it is handed, so a PNG round-tripped
  * through it arrives corrupted, and its contents reach the model, which principle 10 forbids). The
  * atomic mount also replaced 64 sequential awaited `fs.writeFile` calls that raced a cold WebContainer
- * boot — see `mount-tree.ts` for that story. The tree building is pure and lives there; this module
- * performs the mount and the post-mount visibility wait.
+ * boot — see `mount-tree.ts` for that story.
+ *
+ * 🔴 **Binaries do NOT ride the mount tree — they are written via `container.fs.writeFile` (byte-faithful).**
+ * `container.mount` JSON-serializes a `Uint8Array` body through a browser `TextDecoder('latin1')` =
+ * windows-1252, which silently corrupts every byte `0x80`–`0x9F` (dead images + a Havok/glslang/twgsl
+ * `WebAssembly.instantiate(): unknown type form` error). See `mount-tree.ts` for the full mechanism.
+ * The bulk atomic mount (the boot-race fix) is preserved: `package.json` and all source are text.
  */
 import type { TemplateFile } from '~/types/template';
+import { base64ToBytes } from '~/lib/binary/binary-files';
 import { webcontainer } from '~/lib/webcontainer';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { createScopedLogger } from '~/utils/logger';
-import { buildFileSystemTree, withFrameworkPublicAssets } from './mount-tree';
+import { buildFileSystemTree, partitionForMount, withFrameworkPublicAssets } from './mount-tree';
 
 const logger = createScopedLogger('TemplateMount');
 
@@ -111,10 +117,10 @@ export async function mountTemplate(files: TemplateFile[]): Promise<void> {
   }
 
   const container = await webcontainer;
-  const tree = buildFileSystemTree(withFrameworkPublicAssets(files));
+  const { textFiles, binaryFiles } = partitionForMount(withFrameworkPublicAssets(files));
 
   try {
-    await container.mount(tree);
+    await container.mount(buildFileSystemTree(textFiles));
   } catch (error) {
     logger.error('Failed to mount the starter template', error);
     throw new Error('Failed to mount the starter template — the project would be incomplete.');
@@ -126,5 +132,32 @@ export async function mountTemplate(files: TemplateFile[]): Promise<void> {
     throw new Error('The starter template did not mount — the project would be empty.');
   }
 
-  logger.info(`Mounted ${files.length} file(s) atomically`);
+  await writeBinaryFiles(container, binaryFiles);
+
+  logger.info(`Mounted ${textFiles.length} text file(s) atomically, wrote ${binaryFiles.length} binary file(s)`);
+}
+
+/**
+ * Write binary template files into the container as raw bytes (SPEC §4.4, `spec/binary-files.md`).
+ *
+ * `container.fs.writeFile(path, Uint8Array)` transfers the bytes intact — unlike the mount tree, which
+ * corrupts them (see the module header). Awaited before `mountTemplate` returns, so every asset is on
+ * disk before `npm install`/`npm run dev`. `mkdir -p` the parent because a binary-only directory (e.g.
+ * `public/scripts/`) may have no text sibling to have created it in the atomic mount.
+ */
+async function writeBinaryFiles(container: Awaited<typeof webcontainer>, binaryFiles: TemplateFile[]): Promise<void> {
+  for (const file of binaryFiles) {
+    const dir = file.path.split('/').slice(0, -1).join('/');
+
+    try {
+      if (dir) {
+        await container.fs.mkdir(dir, { recursive: true });
+      }
+
+      await container.fs.writeFile(file.path, base64ToBytes(file.content));
+    } catch (error) {
+      logger.error(`Failed to write binary file: ${file.path}`, error);
+      throw new Error(`Failed to mount template asset "${file.path}" — the project would be missing assets.`);
+    }
+  }
 }

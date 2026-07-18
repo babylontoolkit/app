@@ -8,14 +8,29 @@
  * against an empty `/home/project`, silently (measured live 2026-07-17). One `container.mount(tree)`
  * is atomic — it cannot half-apply, it is faster, and it is trivially gated on a booted container.
  *
+ * 🔴 **THE MOUNT TREE CARRIES TEXT ONLY — binaries CANNOT ride it, and the reason is invisible to a
+ * Node test (fixed 2026-07-17, `spec/binary-files.md`).** `container.mount(tree)` does not transfer a
+ * `Uint8Array` file body as bytes: for a `FileSystemTree` it runs `JSON.stringify(toInternalFileSystemTree(tree))`,
+ * and that internal transform decodes every binary body with **`new TextDecoder('latin1')`**. Per the
+ * WHATWG Encoding standard the label `latin1` is an alias for **windows-1252**, whose decoder remaps
+ * bytes `0x80`–`0x9F` to code points *above* `0xFF` (e.g. `0x89` → U+2030, the PNG magic byte; `0x80`
+ * → U+20AC). The worker rebuilds bytes with `charCodeAt & 0xFF`, so those remapped code points
+ * truncate to the WRONG byte — `0x89` lands as `0x30`. Every PNG/ICO/JPG and every `.wasm` in the
+ * starter is destroyed, silently, in the browser (dead images + `WebAssembly.instantiate(): unknown
+ * type form` from Havok/glslang/twgsl). It slipped past `mount-tree.spec.ts` because **Node's**
+ * `TextDecoder('latin1')` is true byte-identity ISO-8859-1 — the vitest env is the one place the bug
+ * does not reproduce, the same env-diverges-from-test trap as the `env()`/`oauth.spec.ts` fallback.
+ *
+ * So `buildFileSystemTree` REFUSES a binary (loud, not silent), and binaries are written separately via
+ * `container.fs.writeFile(path, Uint8Array)` — which IS byte-faithful — in `mount.ts`. That is NOT a
+ * return to 64 per-file writes: the ~52 text files (incl. `package.json`, the file the boot race was
+ * about) still land in ONE atomic mount; only the dozen binaries write after it, and they do not
+ * participate in the boot race (`npm install` needs none of them).
+ *
  * Everything here is a pure transform of the file list into the tree — no container, no I/O — so the
- * one invariant that MUST NOT regress, **binary byte-identity** (`spec/binary-files.md`), is unit
- * testable without a sandbox: binaries decode from base64 to a `Uint8Array` and are handed to the
- * mount as raw bytes, never a string (a string would be UTF-8 re-encoded and corrupt every non-ASCII
- * byte, the exact upstream defect the binary work exists to make impossible).
+ * text/binary partition is unit testable without a sandbox.
  */
 import type { DirectoryNode, FileNode, FileSystemTree } from '@webcontainer/api';
-import { base64ToBytes } from '~/lib/binary/binary-files';
 import type { TemplateFile } from '~/types/template';
 
 /**
@@ -58,17 +73,44 @@ export function withFrameworkPublicAssets(files: TemplateFile[]): TemplateFile[]
 }
 
 /**
- * Turn a flat `TemplateFile[]` into the nested `FileSystemTree` `container.mount` expects.
+ * Split a project's files into what the atomic mount tree may carry (text) and what must be written
+ * as raw bytes afterwards (binary). Pure, so `mount.ts` stays a thin I/O wrapper and the routing rule
+ * is tested here. The `isBinary` flag is the single source of truth — the same flag both the old
+ * two-list write path and this one keyed off, so nothing about classification changes.
+ */
+export function partitionForMount(files: TemplateFile[]): { textFiles: TemplateFile[]; binaryFiles: TemplateFile[] } {
+  const textFiles: TemplateFile[] = [];
+  const binaryFiles: TemplateFile[] = [];
+
+  for (const file of files) {
+    (file.isBinary ? binaryFiles : textFiles).push(file);
+  }
+
+  return { textFiles, binaryFiles };
+}
+
+/**
+ * Turn a flat `TemplateFile[]` of TEXT files into the nested `FileSystemTree` `container.mount` expects.
  *
- * Text files carry their string content; binaries decode to a `Uint8Array` so the mount transfers raw
- * bytes (§ byte-identity above). Intermediate directories are created as they are encountered, and a
- * directory that also appears as an explicit entry never overwrites the children already placed under
- * it (order-independent).
+ * Every file carries its string content. A binary file is REFUSED with a throw, never silently
+ * corrupted: `container.mount` JSON-serializes a `Uint8Array` body through a browser
+ * `TextDecoder('latin1')` = windows-1252, which mangles bytes `0x80`–`0x9F` (see the module header).
+ * Callers must `partitionForMount` first and write binaries via `fs.writeFile`. Intermediate
+ * directories are created as they are encountered, and a directory that also appears as an explicit
+ * entry never overwrites the children already placed under it (order-independent).
  */
 export function buildFileSystemTree(files: TemplateFile[]): FileSystemTree {
   const root: FileSystemTree = {};
 
   for (const file of files) {
+    if (file.isBinary) {
+      // A silent-corruption guard, not a theoretical one: this exact routing shipped once (2026-07-17).
+      throw new Error(
+        `buildFileSystemTree received a binary file (${file.path}). Binaries must be written via ` +
+          `fs.writeFile — container.mount corrupts binary bodies in the browser. Partition first.`,
+      );
+    }
+
     const segments = file.path.split('/').filter((segment) => segment.length > 0);
 
     if (segments.length === 0) {
@@ -91,8 +133,7 @@ export function buildFileSystemTree(files: TemplateFile[]): FileSystemTree {
     }
 
     const leaf = segments[segments.length - 1];
-    const contents = file.isBinary ? base64ToBytes(file.content) : file.content;
-    const fileNode: FileNode = { file: { contents } };
+    const fileNode: FileNode = { file: { contents: file.content } };
     node[leaf] = fileNode;
   }
 

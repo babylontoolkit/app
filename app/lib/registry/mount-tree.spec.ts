@@ -1,16 +1,20 @@
 /**
  * The atomic-mount tree builder (SPEC §4.4, §4.2.8, `spec/binary-files.md`).
  *
- * The one invariant that MUST NOT regress is binary byte-identity: a PNG/GLB mounted into the sandbox
- * must be the exact bytes it came from, never a UTF-8 re-encoding of its base64. That is the upstream
- * defect the binary work exists to make impossible, and it is why the tree building is a PURE function
- * — so this file can prove it with hostile bytes and no sandbox.
+ * The one invariant that MUST NOT regress is binary byte-identity: a PNG/GLB/WASM in the sandbox must
+ * be the exact bytes it came from. `container.mount` CANNOT carry those bytes — it JSON-serializes a
+ * `Uint8Array` body through a browser `TextDecoder('latin1')` (= windows-1252), which corrupts every
+ * byte `0x80`–`0x9F` (see the `mount-tree.ts` header). So the invariant here is STRUCTURAL, not a
+ * byte round-trip: binaries are partitioned OUT of the tree and `buildFileSystemTree` refuses them, so
+ * no binary can ever reach the corrupting path. A byte-identity round-trip test would be worse than
+ * useless — Node's `TextDecoder('latin1')` is byte-identity, so it would PASS while the browser
+ * corrupts, the exact reason the original bug shipped.
  */
 import { describe, expect, it } from 'vitest';
 import type { DirectoryNode, FileNode } from '@webcontainer/api';
 import { bytesToBase64 } from '~/lib/binary/binary-files';
 import type { TemplateFile } from '~/types/template';
-import { buildFileSystemTree, withFrameworkPublicAssets } from './mount-tree';
+import { buildFileSystemTree, partitionForMount, withFrameworkPublicAssets } from './mount-tree';
 
 const dir = (node: unknown): DirectoryNode['directory'] => (node as DirectoryNode).directory;
 const fileContents = (node: unknown): string | Uint8Array => (node as FileNode).file.contents;
@@ -35,17 +39,14 @@ describe('buildFileSystemTree', () => {
     expect(fileContents(buildFileSystemTree(files)['a.ts'])).toBe('const x = "héllo";');
   });
 
-  it('decodes a binary to the EXACT bytes — hostile values, byte-for-byte', () => {
-    // Every byte a naive UTF-8 round-trip corrupts: NUL, 0xFF, a lone high byte, 0x80.
+  it('REFUSES a binary file rather than routing it through the corrupting mount path', () => {
+    // container.mount would windows-1252-mangle these bytes in the browser; the throw is the guard.
     const original = new Uint8Array([0x00, 0xff, 0x89, 0x50, 0x4e, 0x47, 0x80, 0x0d, 0x0a, 0x1a, 0x0a]);
     const files: TemplateFile[] = [
       { name: 'logo.png', path: 'public/logo.png', content: bytesToBase64(original), isBinary: true },
     ];
 
-    const contents = fileContents(dir(buildFileSystemTree(files).public)['logo.png']);
-
-    expect(contents).toBeInstanceOf(Uint8Array);
-    expect(Array.from(contents as Uint8Array)).toEqual(Array.from(original));
+    expect(() => buildFileSystemTree(files)).toThrow(/binary/i);
   });
 
   it('places a directory-shaped entry without clobbering siblings, order-independent', () => {
@@ -63,6 +64,32 @@ describe('buildFileSystemTree', () => {
 
   it('ignores empty paths rather than producing a malformed node', () => {
     expect(buildFileSystemTree([{ name: '', path: '', content: 'x' }])).toEqual({});
+  });
+});
+
+describe('partitionForMount', () => {
+  it('routes binaries away from the text mount tree by the isBinary flag', () => {
+    const files: TemplateFile[] = [
+      { name: 'package.json', path: 'package.json', content: '{}' },
+      { name: 'main.ts', path: 'src/main.ts', content: 'export {}' },
+      { name: 'havok.wasm', path: 'public/scripts/havok.wasm', content: 'AAA=', isBinary: true },
+      { name: 'logo.png', path: 'public/logo.png', content: 'AAA=', isBinary: true },
+    ];
+
+    const { textFiles, binaryFiles } = partitionForMount(files);
+
+    expect(textFiles.map((f) => f.path)).toEqual(['package.json', 'src/main.ts']);
+    expect(binaryFiles.map((f) => f.path)).toEqual(['public/scripts/havok.wasm', 'public/logo.png']);
+  });
+
+  it('produces a tree that buildFileSystemTree accepts (the text half never throws)', () => {
+    const files: TemplateFile[] = [
+      { name: 'a.png', path: 'a.png', content: 'AAA=', isBinary: true },
+      { name: 'b.ts', path: 'b.ts', content: 'x' },
+    ];
+
+    const { textFiles } = partitionForMount(files);
+    expect(() => buildFileSystemTree(textFiles)).not.toThrow();
   });
 });
 
