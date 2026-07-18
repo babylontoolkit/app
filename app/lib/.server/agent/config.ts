@@ -7,7 +7,7 @@
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
-import { kieModelOverride, providerRates } from '~/lib/.server/billing/rates';
+import { getPremiumTier, kieModelOverride, providerRates } from '~/lib/.server/billing/rates';
 
 /** Re-exported: this was the original home of the error, and several routes import it from here. */
 export { NotConfiguredError };
@@ -139,6 +139,34 @@ export function getPlatformModel(context?: unknown): string {
           ? 'Set KIE_DEFAULT_MODEL to it along with KIE_INPUT_DOLLARS and KIE_OUTPUT_DOLLARS, or add a row to KIE_MODEL_RATES in billing/rates.ts.'
           : 'Add it to MODEL_RATES in billing/rates.ts first.'
       } Priced models: ${Object.keys(priced).join(', ') || '(none)'}.`,
+    );
+  }
+
+  return model;
+}
+
+/**
+ * The PREMIUM model on the active provider — the higher-cost tier a user may opt into (§4.6.1).
+ *
+ * Validated against `providerRates` exactly like `getPlatformModel`, for the same reason: a model we
+ * cannot price is a model we cannot bill. The premium row is injected into every provider's table by
+ * `providerRates` (from `PREMIUM_*_DOLLARS`), so this validation is normally satisfied by construction —
+ * it exists to catch the one real failure it cannot: a `PREMIUM_MODEL` the active provider cannot serve.
+ *
+ * The proxy calls this ONLY after `decidePremium` has authorized the choice; it is the model half of the
+ * decision, kept beside `getPlatformModel` so all model resolution lives in one file.
+ */
+export function getPremiumModel(context?: unknown): string {
+  const provider = getPlatformProvider(context);
+  const { model } = getPremiumTier(context);
+  const priced = providerRates(context)[provider] ?? {};
+
+  if (!priced[model]) {
+    throw new NotConfiguredError(
+      `PREMIUM_MODEL="${model}" on provider ${provider}`,
+      `We have no rates for it, so we cannot bill it. Set PREMIUM_INPUT_DOLLARS and PREMIUM_OUTPUT_DOLLARS. Priced models: ${
+        Object.keys(priced).join(', ') || '(none)'
+      }.`,
     );
   }
 

@@ -28,7 +28,9 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getPlatformConfig, getPlatformModel, NotConfiguredError, requirePlatformKey } from './config';
+import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
+import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/premium';
+import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
 import { createSkillTools, MAX_TOOL_ROUNDS, type SkillToolContext } from './tools';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
@@ -156,6 +158,13 @@ export interface AgentRequest {
   apiKeys?: Record<string, string>;
   providerSettings?: Record<string, IProviderSetting>;
   model?: string;
+
+  /**
+   * The user opted into the PREMIUM model tier for this generation (§4.6.1) — a persisted per-user
+   * preference the client sends. It is a REQUEST, never authorization: the server maps it to the one
+   * configured premium model and only honors it if `decidePremium` clears the credits threshold.
+   */
+  premium?: boolean;
 
   /**
    * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
@@ -375,12 +384,39 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   });
 
   /*
-   * 3. Model + key. Credits mode is the default: the platform key, a FIXED model, no choices to make.
-   * A client-supplied model is honored ONLY under a verified BYOK — otherwise it is ignored outright
-   * rather than trusted, because model choice is a config property, never a user input (§4.2a).
+   * 3. Model + key. Three ways the model is decided, in strict precedence:
+   *
+   *   a. BYOK (Pro) — the user's OWN key pays, so their explicit model choice is honored (§4.6.1).
+   *   b. Premium tier — a credits user who opted in AND holds `PREMIUM_MINIMUM_CREDITS` (§4.6.1). This
+   *      is the ONE user-facing model choice in credits mode: a boolean the server maps to the single
+   *      configured premium model, never a free-form model string. `decidePremium` is the authority.
+   *   c. The platform default — a FIXED, operator-configured model, no choices to make (§4.2a).
+   *
+   * The premium threshold protects a new user's free grant: 500 granted < 1000 default minimum, so a
+   * fresh account cannot burn its grant on a 2x model before it has ever bought credits.
    */
   const useByok = byok.allowed;
-  const model = useByok && request.model ? request.model : getPlatformModel(request.context);
+  const billing = getBillingConfig(request.context);
+  const premiumTier = getPremiumTier(request.context);
+  const premium = decidePremium({
+    requested: Boolean(request.premium) && !useByok,
+    balance: gate.mode === 'byok' ? 0 : gate.balance,
+    minimumCredits: premiumTier.minimumCredits,
+    enforced: billing.enforced,
+  });
+
+  const model =
+    useByok && request.model
+      ? request.model
+      : premium.usePremium
+        ? getPremiumModel(request.context)
+        : getPlatformModel(request.context);
+
+  // A user who asked for premium but was short of the threshold gets told, softly — never blocked (§4.6.1).
+  const premiumNotice =
+    Boolean(request.premium) && !useByok && premium.reason === 'below_minimum'
+      ? premiumDeclinedNotice(premiumTier.minimumCredits)
+      : undefined;
 
   if (!useByok) {
     requirePlatformKey(config);
@@ -1144,7 +1180,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     toolContext,
     usage: usagePromise,
     settlement: settlementPromise,
-    notice: byok.notice,
+    notice: byok.notice ?? premiumNotice,
     onMcpToolCall: (listener) => mcpListeners.push(listener),
   };
 }

@@ -60,6 +60,22 @@ export interface SessionState {
      * is subscribed, which needs a Stripe call and is fetched by the billing UI on demand.
      */
     plans: SubscriptionPlan[];
+
+    /**
+     * The PREMIUM model tier (§4.6.1) — a rendering hint for the model toggle, never an authority. The
+     * server re-derives eligibility on every generation (`decidePremium`), so `available` here only
+     * decides whether the toggle renders unlocked or locked-with-a-threshold.
+     */
+    premium: {
+      /** The premium model id, e.g. `claude-fable-5`. */
+      model: string;
+
+      /** Credits the user must hold to unlock premium — shown in the locked-state copy. */
+      minimumCredits: number;
+
+      /** Does this user currently qualify (holds the minimum, or enforcement is off)? */
+      available: boolean;
+    };
   };
 
   pro: {
@@ -79,7 +95,14 @@ export const EMPTY_SESSION: SessionState = {
   loading: true,
   authenticated: false,
   accountsEnabled: false,
-  credits: { balance: 0, enforced: false, purchasable: false, packs: [], plans: [] },
+  credits: {
+    balance: 0,
+    enforced: false,
+    purchasable: false,
+    packs: [],
+    plans: [],
+    premium: { model: 'claude-fable-5', minimumCredits: 1000, available: false },
+  },
   pro: { proFeaturesEnabled: false, byokUnlocked: false, tier: null, status: null, subscriberEmail: null },
 };
 
@@ -104,7 +127,9 @@ export async function refreshSession(): Promise<SessionState> {
       authenticated: Boolean(data.authenticated),
       accountsEnabled: Boolean(data.accountsEnabled),
       user: data.user,
-      credits: data.credits ?? EMPTY_SESSION.credits,
+
+      // Merge over defaults so a field the server omits (e.g. `premium` on an older deploy) is present.
+      credits: data.credits ? { ...EMPTY_SESSION.credits, ...data.credits } : EMPTY_SESSION.credits,
       pro: data.pro ?? EMPTY_SESSION.pro,
     };
 
@@ -157,4 +182,18 @@ export function canGenerate(session: SessionState): { allowed: boolean; reason?:
   }
 
   return { allowed: true };
+}
+
+/**
+ * May this user pick the PREMIUM model right now (§4.6.1)? Mirrors `decidePremium` on the server — but
+ * never replaces it. Computed LIVE from the balance (not the server's cached `available` flag) so it
+ * stays honest after a settlement drops the balance below the threshold mid-session. When enforcement
+ * is off, nobody is charged, so premium is freely available.
+ */
+export function canUsePremium(session: SessionState): boolean {
+  if (!session.credits.enforced) {
+    return true;
+  }
+
+  return session.credits.balance >= session.credits.premium.minimumCredits;
 }

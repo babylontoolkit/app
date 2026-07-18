@@ -15,7 +15,7 @@ import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { getUser } from '~/lib/.server/supabase/auth';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
 import { getPlatformConfig } from '~/lib/.server/agent/config';
-import { getBillingConfig } from '~/lib/.server/billing/rates';
+import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
 import { ensureSignupGrant, getLedger } from '~/lib/.server/billing/ledger';
 import { getEntitlement } from '~/lib/.server/licensing/entitlements';
 import { isStripeConfigured, CREDIT_PACKS, SUBSCRIPTION_PLANS } from '~/lib/.server/billing/stripe';
@@ -96,6 +96,23 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
          * page load. It is resolved lazily by `/api/credits` when someone actually opens billing.
          */
         plans: SUBSCRIPTION_PLANS.filter((p) => p.isActive),
+
+        /*
+         * The PREMIUM model tier (§4.6.1). A hint for rendering the model toggle — the server re-derives
+         * eligibility on every generation (`decidePremium`), so this can never grant premium by itself.
+         * `available` is whether THIS user may currently pick it: they hold the minimum, or enforcement
+         * is off (beta/local, where nobody is charged). Below the minimum the toggle renders locked with
+         * the threshold shown, which is the whole point — it protects a fresh grant from a 2x model.
+         */
+        premium: (() => {
+          const tier = getPremiumTier(context);
+
+          return {
+            model: tier.model,
+            minimumCredits: tier.minimumCredits,
+            available: !billing.enforced || balance >= tier.minimumCredits,
+          };
+        })(),
       },
 
       pro: {

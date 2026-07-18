@@ -527,8 +527,15 @@ describe('the platform model switch', () => {
    */
   it('refuses a model it cannot bill rather than mis-pricing every generation', () => {
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
-    vi.stubEnv('LLM_MODEL', 'claude-fable-5'); // a REAL model — we just have no rates for it
-    expect(() => getPlatformModel({})).toThrow(/fable/i);
+
+    /*
+     * A plausible model id we have no rates for. NOT `claude-fable-5` any more: the PREMIUM tier
+     * (§4.6.1) injects a fable-5 row into every provider's table (`providerRates`), so fable-5 IS now
+     * priceable on Anthropic. This assertion is about a model that is genuinely unknown to the billing
+     * tables, which is the property that keeps the `LLM_MODEL` knob safe.
+     */
+    vi.stubEnv('LLM_MODEL', 'claude-opus-4-9');
+    expect(() => getPlatformModel({})).toThrow(/opus-4-9/i);
   });
 
   /* A model priced on one provider but not the other is refused on the one that cannot bill it. */

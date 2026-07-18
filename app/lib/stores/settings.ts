@@ -258,6 +258,9 @@ const SETTINGS_KEYS = {
   EVENT_LOGS: 'isEventLogsEnabled',
   PROMPT_ID: 'promptId',
   DEVELOPER_MODE: 'isDeveloperMode',
+
+  /** The user's opt-in to the PREMIUM model tier (§4.6.1). Off by default — premium costs ~2x. */
+  PREMIUM_MODEL: 'premiumModelEnabled',
 } as const;
 
 // Initialize settings from localStorage or defaults
@@ -287,6 +290,9 @@ const getInitialSettings = () => {
     eventLogs: getStoredBoolean(SETTINGS_KEYS.EVENT_LOGS, true),
     promptId: isBrowser ? localStorage.getItem(SETTINGS_KEYS.PROMPT_ID) || 'default' : 'default',
     developerMode: getStoredBoolean(SETTINGS_KEYS.DEVELOPER_MODE, false),
+
+    // Default OFF: premium is opt-in and burns credits ~2x faster (§4.6.1).
+    premiumModel: getStoredBoolean(SETTINGS_KEYS.PREMIUM_MODEL, false),
   };
 };
 
@@ -298,6 +304,13 @@ export const autoSelectStarterTemplate = atom<boolean>(initialSettings.autoSelec
 export const enableContextOptimizationStore = atom<boolean>(initialSettings.contextOptimization);
 export const isEventLogsEnabled = atom<boolean>(initialSettings.eventLogs);
 export const promptStore = atom<string>(initialSettings.promptId);
+
+/**
+ * The user's opt-in to the PREMIUM model tier (§4.6.1). A rendering/request preference only — the
+ * server re-derives eligibility every generation (`decidePremium`), so a `true` here never grants
+ * premium to a user below the credits threshold.
+ */
+export const premiumModelStore = atom<boolean>(initialSettings.premiumModel);
 
 // Helper functions to update settings with persistence
 export const updateLatestBranch = (enabled: boolean) => {
@@ -318,6 +331,11 @@ export const updateContextOptimization = (enabled: boolean) => {
 export const updateEventLogs = (enabled: boolean) => {
   isEventLogsEnabled.set(enabled);
   localStorage.setItem(SETTINGS_KEYS.EVENT_LOGS, JSON.stringify(enabled));
+};
+
+export const updatePremiumModel = (enabled: boolean) => {
+  premiumModelStore.set(enabled);
+  localStorage.setItem(SETTINGS_KEYS.PREMIUM_MODEL, JSON.stringify(enabled));
 };
 
 export const updatePromptId = (id: string) => {

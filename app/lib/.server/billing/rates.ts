@@ -313,15 +313,79 @@ export function kieRates(context?: unknown): Record<string, ModelRates> {
 }
 
 /**
+ * The PREMIUM model tier (SPEC §4.6.1) — an opt-in, higher-cost model a user may choose ONCE they hold
+ * enough credits to afford it, gated so a fresh signup grant cannot be burned on it out the gate.
+ *
+ * ## How this is different from the platform model, and why it is allowed to be a user choice
+ *
+ * The platform model is an OPERATOR config, never a user choice (§4.2a) — and that rule stands. The
+ * premium tier does not break it: it is a choice between exactly TWO operator-configured, operator-priced
+ * models, not BYOK and not a free-form model string. The client sends a BOOLEAN; the server maps it to
+ * THIS model at THIS price. A client can never name an arbitrary (unpriced, expensive) model — the only
+ * two reachable models are the platform default and this one.
+ *
+ * ## Model and price are ONE fact — the invariant this whole file rests on
+ *
+ * `PREMIUM_MODEL` names it; `PREMIUM_INPUT_DOLLARS`/`PREMIUM_OUTPUT_DOLLARS` price it (via `envMoney`, so
+ * a typo throws rather than silently billing at another model's rate); cache re-derives from the final
+ * input rate (`ratesFromBase`). The defaults bake **Fable 5 at $4/$20 — 2x Opus 4.8 on KIE** — so the
+ * tier works with no env at all, and on the default provider (KIE) that price is EXACT (the baked
+ * `KIE_MODEL_RATES['claude-fable-5']` is byte-identical, so injecting it changes nothing there).
+ *
+ * ⚠️ **ONE premium price for whichever provider is active** — deliberately not a second per-provider env
+ * group. The operator sets `PREMIUM_*_DOLLARS` to the premium model's real cost on the provider they run.
+ * On Anthropic, `claude-fable-5` has no baked row at all (`MODEL_RATES` stays fable-5-free, so the "0.4x
+ * uniform" and "no Anthropic row" invariants in `billing.spec.ts` are untouched) — this injection is the
+ * ONLY thing that prices it there, at the operator-stated premium price.
+ *
+ * ⚠️ `PREMIUM_MINIMUM_CREDITS` is `envNumber`, NOT `envMoney`: it is a credit THRESHOLD, not dollars per
+ * million tokens, so a fallback is correct (unlike a price, where a fallback is catastrophic).
+ */
+export const DEFAULT_PREMIUM_MODEL = 'claude-fable-5';
+export const DEFAULT_PREMIUM_INPUT_DOLLARS = 4;
+export const DEFAULT_PREMIUM_OUTPUT_DOLLARS = 20;
+export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1000;
+
+export interface PremiumTier {
+  /** The model id, e.g. `claude-fable-5`. Reachable on any provider via the `providerRates` injection. */
+  model: string;
+
+  /** Its full rate row, priced from `PREMIUM_*_DOLLARS` (cache derived). */
+  rates: ModelRates;
+
+  /** Credits a user must HOLD before premium unlocks — protects the free signup grant (§4.6.1). */
+  minimumCredits: number;
+}
+
+export function getPremiumTier(context?: unknown): PremiumTier {
+  const model = env(context, 'PREMIUM_MODEL')?.trim() || DEFAULT_PREMIUM_MODEL;
+  const input = envMoney(context, 'PREMIUM_INPUT_DOLLARS') ?? DEFAULT_PREMIUM_INPUT_DOLLARS;
+  const output = envMoney(context, 'PREMIUM_OUTPUT_DOLLARS') ?? DEFAULT_PREMIUM_OUTPUT_DOLLARS;
+  const minimumCredits = envNumber(context, 'PREMIUM_MINIMUM_CREDITS', DEFAULT_PREMIUM_MINIMUM_CREDITS);
+
+  return { model, rates: ratesFromBase(input, output), minimumCredits };
+}
+
+/**
  * Every provider the PLATFORM can bill for. BYOK is charged zero, so it never reaches this table.
  *
  * A FUNCTION, not a constant, since 2026-07-17: KIE's row is the operator's to state (`kieRates`), and
  * a module-level constant would freeze whatever the environment held at import time.
+ *
+ * The premium model is injected into EVERY provider's table so it is priceable no matter who serves it
+ * (§4.6.1). This is what makes `claude-fable-5` billable on Anthropic, which bakes no row for it — and
+ * it is idempotent on KIE, where the default premium price matches the baked row exactly.
  */
 export function providerRates(context?: unknown): Record<string, Record<string, ModelRates>> {
+  const premium = getPremiumTier(context);
+  const withPremium = (table: Record<string, ModelRates>): Record<string, ModelRates> => ({
+    ...table,
+    [premium.model]: premium.rates,
+  });
+
   return {
-    Anthropic: MODEL_RATES,
-    KIE: kieRates(context),
+    Anthropic: withPremium(MODEL_RATES),
+    KIE: withPremium(kieRates(context)),
   };
 }
 

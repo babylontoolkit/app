@@ -10,7 +10,8 @@ import { createProject } from '~/lib/persistence/projects';
 import { chatStore } from '~/lib/stores/chat';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
-import { applySettlement } from '~/lib/stores/session';
+import { applySettlement, canUsePremium, sessionStore } from '~/lib/stores/session';
+import { premiumModelStore } from '~/lib/stores/settings';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
@@ -147,6 +148,15 @@ export const ChatImpl = memo(
     });
     const { showChat } = useStore(chatStore);
     const activeProjectId = useStore(projectId);
+
+    /*
+     * The PREMIUM tier (§4.6.1): the user's opt-in AND live eligibility. We send `premium: true` only
+     * when both hold, so an ineligible user never triggers the server's "declined" notice. The server
+     * re-derives eligibility regardless — this is a request, never authorization.
+     */
+    const premiumEnabled = useStore(premiumModelStore);
+    const session = useStore(sessionStore);
+    const premiumRequested = premiumEnabled && canUsePremium(session);
 
     /*
      * A mounted project means we are BUILDING, even with nothing said yet (§4.5.6).
@@ -327,6 +337,9 @@ export const ChatImpl = memo(
         /* Store-asset component references (§4.9), introspected client-side when an asset was added. */
         assetNotes,
         maxLLMSteps: mcpSettings.maxLLMSteps,
+
+        /* The premium-model opt-in (§4.6.1) — a boolean the server maps to the one configured premium model. */
+        premium: premiumRequested,
       },
       sendExtraMessageFields: true,
       onError: (e) => {

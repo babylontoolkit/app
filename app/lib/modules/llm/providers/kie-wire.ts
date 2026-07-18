@@ -108,6 +108,21 @@ export const KIE_MODELS: ModelInfo[] = [
     maxTokenAllowed: 1_000_000,
     maxCompletionTokens: 128_000,
   },
+
+  /*
+   * The PREMIUM tier (§4.6.1). Listed AND priced (`KIE_MODEL_RATES['claude-fable-5']`, and the
+   * `providerRates` premium injection): it is the strongest model KIE serves whose thinking text their
+   * adapter returns (224/223 chars, vs 4-8's 0), at 2x the price. The proxy hands it straight to
+   * `getModelInstance`, so it runs as itself; listing it here keeps the enhancer's `modelsList[0]`
+   * fallback from ever standing in for it, and lets the Pro model selector show it.
+   */
+  {
+    name: 'claude-fable-5',
+    label: 'Claude Fable 5 (KIE · Premium)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
 ];
 
 /**

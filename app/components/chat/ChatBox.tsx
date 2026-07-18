@@ -23,6 +23,7 @@ import { McpTools } from './MCPTools';
 import { WebSearch } from './WebSearch.client';
 import { SkillAutocompleteMenu, useSkillAutocomplete } from './SkillAutocomplete';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
+import { PremiumToggle } from './PremiumToggle';
 
 interface ChatBoxProps {
   isModelSettingsCollapsed: boolean;
@@ -353,6 +354,12 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
                 {props.chatMode === 'discuss' ? <span>Discuss</span> : <span />}
               </IconButton>
             )}
+            {/*
+             * The PREMIUM model toggle (§4.6.1) — a credits-mode control, deliberately NOT behind
+             * `byokUnlocked`. It self-gates: it renders only for credits users and only unlocks once the
+             * user holds `PREMIUM_MINIMUM_CREDITS`, so it never reveals a free-form model picker.
+             */}
+            <PremiumToggle />
             {/*
              * Also Pro-gated — and this one is easy to miss. When collapsed, this button RENDERS THE
              * MODEL NAME (`props.model`). Hiding the settings panel but leaving this toggle would put

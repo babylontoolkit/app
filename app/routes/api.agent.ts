@@ -53,6 +53,14 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     model?: string;
 
     /**
+     * The user opted into the PREMIUM model tier (§4.6.1). A boolean, not a model string: the server
+     * maps it to the single configured premium model and honors it only if the credits threshold is met.
+     * Sent by every client, ignored unless the user actually holds enough credits — it is a request,
+     * never authorization.
+     */
+    premium?: boolean;
+
+    /**
      * A connected Game Backend (§4.15). The client sends only the PUBLIC facts — connected? which
      * project ref? RLS confirmed? — never the management PAT (that stays in the browser). The proxy
      * turns this into an RLS-first system note; it is never used to reach the user's Supabase from here.
@@ -138,6 +146,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       repairOf: body.repairOf,
       repairAttempt: body.repairAttempt,
       model: body.model,
+      premium: body.premium,
 
       /*
        * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
