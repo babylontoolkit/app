@@ -65,6 +65,19 @@ So the buffering is **specific to `claude-fable-5`** on your adapter. Opus 4.8's
 
 ---
 
+## Cross-check: neither issue occurs on Anthropic-direct (same models, same client)
+
+We ran the identical client and prompts against Anthropic's API directly (not through KIE), same two models:
+
+| model | provider | thinking-text chars | answer-text streaming |
+|-------|----------|---------------------|-----------------------|
+| claude-opus-4-8 | KIE       | **0** ❌            | streams incrementally |
+| claude-opus-4-8 | Anthropic | **3,936** ✅        | 223 chunks, smooth (max 6.8s gap) |
+| claude-fable-5  | KIE       | 224 ✅             | **1 burst at end** ❌ (62.8s silence) |
+| claude-fable-5  | Anthropic | 3,541 ✅           | **224 chunks, smooth** ✅ (max 5.9s gap) |
+
+So both behaviors are specific to the KIE adapter: `claude-opus-4-8` returns thinking text on Anthropic but empty on KIE, and `claude-fable-5`'s answer text streams token-by-token on Anthropic but is buffered-until-end on KIE. The client and request builder are byte-identical across all four runs — only the provider (base URL + key) and the `model` field differ.
+
 ## What would help us verify a fix
 
 - A confirmation of whether these are adapter-side (per-model) issues.
