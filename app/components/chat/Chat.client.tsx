@@ -259,6 +259,15 @@ export const ChatImpl = memo(
      */
     const repairAttemptRef = useRef(0);
 
+    /**
+     * Set when a NEW project's first generation is about to run (creation), consumed once in
+     * `onFinish` to celebrate that the initial build is done. A ref, not `generationCount`, because
+     * that atom is bumped inside the un-awaited `checkpointProject` and is racy to read here — and
+     * because "creation" is a property of THIS turn (the one right after `startProject`), not a count.
+     * Cleared on fire so edits and repairs never trigger it.
+     */
+    const creationCompleteRef = useRef(false);
+
     const {
       messages,
       isLoading,
@@ -349,6 +358,17 @@ export const ChatImpl = memo(
       onFinish: (message, response) => {
         const usage = response.usage;
         setData(undefined);
+
+        /*
+         * Celebrate the initial build, exactly once, when a fresh project's creation generation lands
+         * (§4.4). Ref-gated so it never fires on an edit or a self-heal — those are not "your game is
+         * ready" moments. Distinct from the §4.5.4b save nudge (that is about persistence and fires
+         * once per BROWSER); this is about the build finishing and fires once per PROJECT.
+         */
+        if (creationCompleteRef.current) {
+          creationCompleteRef.current = false;
+          toast.success('🎮 Your game is ready — open Preview to play it.');
+        }
 
         /*
          * Arm the self-healing watch (§4.2.7). `generationId` comes from the server's `agentMeta`
@@ -854,6 +874,9 @@ export const ChatImpl = memo(
          * not inside `createProjectFromRegistry`, which returns before the project is registered.
          */
         await waitForMountVisible(mustBeVisible);
+
+        // This turn IS the creation build — onFinish celebrates it once (see creationCompleteRef).
+        creationCompleteRef.current = true;
 
         reload(reloadOptions);
 
