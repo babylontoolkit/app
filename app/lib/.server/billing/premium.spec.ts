@@ -72,7 +72,7 @@ describe('decidePremium — the eligibility rule', () => {
   });
 
   it('declines premium below the threshold — this is what protects the free grant', () => {
-    // A fresh 500-credit signup grant sits below the 1000 default, so a new account cannot pick premium.
+    // Same shape as production: a fresh 800-credit grant sits below the 1200 default, so a new account cannot pick premium.
     expect(decidePremium({ requested: true, balance: 500, minimumCredits: min })).toEqual({
       usePremium: false,
       reason: 'below_minimum',
@@ -116,7 +116,7 @@ describe('decidePremium — the eligibility rule', () => {
 });
 
 describe('the premium tier config', () => {
-  it('defaults to Fable 5 at $4/$20 with a 1000-credit minimum, from code — no env required', () => {
+  it('defaults to Fable 5 at $4/$20 with a 1200-credit minimum, from code — no env required', () => {
     stubPremium();
 
     const tier = getPremiumTier({});
@@ -124,7 +124,7 @@ describe('the premium tier config', () => {
     expect(tier.model).toBe(DEFAULT_PREMIUM_MODEL);
     expect(tier.model).toBe('claude-fable-5');
     expect(tier.minimumCredits).toBe(DEFAULT_PREMIUM_MINIMUM_CREDITS);
-    expect(tier.minimumCredits).toBe(1000);
+    expect(tier.minimumCredits).toBe(1200);
     expect(tier.rates.inputPerMTok).toBe(4);
     expect(tier.rates.outputPerMTok).toBe(20);
 
@@ -186,7 +186,7 @@ describe('the premium tier config', () => {
    */
   it('falls back to the default minimum on an unparseable threshold', () => {
     stubPremium({ PREMIUM_MINIMUM_CREDITS: 'lots' });
-    expect(getPremiumTier({}).minimumCredits).toBe(1000);
+    expect(getPremiumTier({}).minimumCredits).toBe(1200);
   });
 });
 

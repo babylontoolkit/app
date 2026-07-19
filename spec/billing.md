@@ -286,7 +286,7 @@ what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the lic
 
 ## Verified end-to-end (2026-07, local mode)
 
-- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **500** since the KIE move — ~2.6× a measured KIE creation, and deliberately below the 1000-credit premium minimum so a fresh grant cannot buy the 2× model).
+- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **800** since the KIE move + the 4.0 margin reprice (2026-07-18) — ~3.5× a measured KIE creation at margin 4.0, and deliberately below the 1000-credit premium minimum so a fresh grant cannot buy the 2× model).
 - A live generation settled against real usage: `generation −7 → 993` (raw cost $0.0184,
   `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
 - The `generations` record attributes the charge to a user, a model, and its four token classes.

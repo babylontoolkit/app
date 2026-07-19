@@ -44,13 +44,17 @@ const logger = createScopedLogger('stripe');
  * worse it got. Nothing threw: two files, each internally sensible, disagreeing about what a credit is
  * worth. `packMargin()` + `billing.spec.ts` now make that arithmetic assert itself.
  *
- * Sized against the MEASURED cost of real work (`rates.ts`): a creation is ~141 credits warm / ~481
- * cold, an edit turn ~41. So Creator ≈ 4 cold builds + ~40 edits; Studio ≈ 12 cold builds + change.
+ * Sized against the MEASURED cost of real work on KIE at margin 4.0 (`rates.ts`): a cold creation is
+ * ~231 credits (optimized reference; harder games have measured up to ~500), a warm creation ~170, an
+ * edit ~15–80. So Starter (3,000) ≈ one game + ~50 edits, or ~10 fresh builds; Pro (9,500) ≈ heavy
+ * multi-game iteration; Studio (25,000) ≈ ~40 cold builds.
  *
- * Benchmarked against the comparable market — a specialist 3D/game platform, NOT a website builder.
- * Seele.ai sells koins at $0.0100 (2,000/$20), $0.0083 (6,000/$50) and $0.0080 (25,000/$200); Lovable
- * is ~$0.25/message for CRUD apps it could not build a Babylon game with. Opus 4.8 on game-sized output
- * costs $0.42–1.44 a creation, so pricing this like a website builder is not a strategy, it is a loss.
+ * Benchmarked against the market as a PREMIUM specialty game platform, NOT a website builder. The base
+ * is $0.01/credit (Starter $30/3,000), with a shallow volume discount to $0.009 (Studio $225/25,000) —
+ * mirroring the market's own shape: Lovable charges a flat $0.25/message and discounts only 2–10% even
+ * at 5,000 credits; Seele.ai sells koins at $0.010/$0.0083/$0.0080. At margin 4.0 a single edit costs
+ * ~$0.41 vs Lovable's $0.25 — already premium per unit of (heavier) work, so we do not compete on
+ * price, we bank the KIE cost advantage as margin. `packMargin()` asserts every pack clears the floor.
  */
 export interface CreditPack {
   id: string;
@@ -61,9 +65,9 @@ export interface CreditPack {
 }
 
 export const CREDIT_PACKS: CreditPack[] = [
-  { id: 'starter', name: 'Starter', credits: 2000, priceCents: 2000, isActive: true },
-  { id: 'creator', name: 'Creator', credits: 6000, priceCents: 5000, isActive: true },
-  { id: 'studio', name: 'Studio', credits: 25000, priceCents: 20000, isActive: true },
+  { id: 'starter', name: 'Starter', credits: 3000, priceCents: 3000, isActive: true },
+  { id: 'pro', name: 'Pro', credits: 9500, priceCents: 9000, isActive: true },
+  { id: 'studio', name: 'Studio', credits: 25000, priceCents: 22500, isActive: true },
 ];
 
 /**
@@ -113,9 +117,9 @@ export interface SubscriptionPlan {
 }
 
 export const SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
-  { id: 'sub_starter', name: 'Starter', creditsPerMonth: 2000, priceCents: 2000, isActive: true },
-  { id: 'sub_creator', name: 'Creator', creditsPerMonth: 6000, priceCents: 5000, isActive: true },
-  { id: 'sub_studio', name: 'Studio', creditsPerMonth: 25000, priceCents: 20000, isActive: true },
+  { id: 'sub_starter', name: 'Starter', creditsPerMonth: 3000, priceCents: 3000, isActive: true },
+  { id: 'sub_pro', name: 'Pro', creditsPerMonth: 9500, priceCents: 9000, isActive: true },
+  { id: 'sub_studio', name: 'Studio', creditsPerMonth: 25000, priceCents: 22500, isActive: true },
 ];
 
 export function getSubscriptionPlan(id: string): SubscriptionPlan | undefined {

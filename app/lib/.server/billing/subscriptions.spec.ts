@@ -79,7 +79,7 @@ afterEach(async () => {
 
 /** A subscription carrying the metadata `createSubscriptionCheckout` sets. */
 function sub(id: string, over: Record<string, string> = {}) {
-  const s = { id, metadata: { userId: 'u1', planId: 'sub_creator', credits: '6000', ...over } };
+  const s = { id, metadata: { userId: 'u1', planId: 'sub_pro', credits: '9500', ...over } };
   subscriptions.set(id, s);
 
   return s;
@@ -96,7 +96,7 @@ describe('subscription checkout', () => {
     await createSubscriptionCheckout({
       userId: 'u1',
       userEmail: 'a@b.c',
-      planId: 'sub_creator',
+      planId: 'sub_pro',
       successUrl: 'https://app/ok',
       cancelUrl: 'https://app/no',
     });
@@ -108,7 +108,7 @@ describe('subscription checkout', () => {
      * The load-bearing assertion. A renewal invoice has no session, so subscription metadata is the ONLY
      * durable link back to our user. Put it on the session alone and month two credits nobody.
      */
-    expect(params.subscription_data.metadata).toEqual({ userId: 'u1', planId: 'sub_creator', credits: '6000' });
+    expect(params.subscription_data.metadata).toEqual({ userId: 'u1', planId: 'sub_pro', credits: '9500' });
     expect(params.line_items[0].price_data.recurring).toEqual({ interval: 'month' });
   });
 
@@ -132,7 +132,7 @@ describe('the monthly grant', () => {
     const result = await handleWebhook(invoicePaid('in_1', 'sub_1'), 'sig');
 
     expect(result.applied).toBe(true);
-    expect(await getLedger().balance('u1')).toBe(6000);
+    expect(await getLedger().balance('u1')).toBe(9500);
   });
 
   it('grants again next month — a different invoice is a different grant', async () => {
@@ -140,7 +140,7 @@ describe('the monthly grant', () => {
     await handleWebhook(invoicePaid('in_1', 'sub_1'), 'sig');
     await handleWebhook(invoicePaid('in_2', 'sub_1'), 'sig');
 
-    expect(await getLedger().balance('u1')).toBe(12_000);
+    expect(await getLedger().balance('u1')).toBe(19_000);
   });
 
   it('is idempotent on the invoice id — a Stripe retry cannot double-credit', async () => {
@@ -152,7 +152,7 @@ describe('the monthly grant', () => {
     // Not an error: a replay is Stripe working correctly. 2xx is what stops the retries.
     expect(replay.applied).toBe(false);
     expect(replay.reason).toMatch(/duplicate/i);
-    expect(await getLedger().balance('u1')).toBe(6000);
+    expect(await getLedger().balance('u1')).toBe(9500);
   });
 
   /**
@@ -168,7 +168,7 @@ describe('the monthly grant', () => {
           id: 'cs_1',
           mode: 'subscription',
           payment_status: 'paid',
-          metadata: { userId: 'u1', planId: 'sub_creator', kind: 'subscription', credits: '6000' },
+          metadata: { userId: 'u1', planId: 'sub_pro', kind: 'subscription', credits: '9500' },
         },
       },
     });
@@ -179,7 +179,7 @@ describe('the monthly grant', () => {
 
     // ...and the invoice for that same first month grants exactly once.
     await handleWebhook(invoicePaid('in_1', 'sub_1'), 'sig');
-    expect(await getLedger().balance('u1')).toBe(6000);
+    expect(await getLedger().balance('u1')).toBe(9500);
   });
 
   it('ignores an unpaid invoice', async () => {
@@ -215,7 +215,7 @@ describe('the monthly grant', () => {
     sub('sub_1', { userId: 'victim' });
     await handleWebhook(invoicePaid('in_1', 'sub_1'), 'sig');
 
-    expect(await getLedger().balance('victim')).toBe(6000);
+    expect(await getLedger().balance('victim')).toBe(9500);
     expect(await getLedger().balance('u1')).toBe(0);
   });
 });

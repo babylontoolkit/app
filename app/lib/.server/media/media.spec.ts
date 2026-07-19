@@ -128,10 +128,10 @@ function imageInput(overrides: Partial<Parameters<typeof startMediaTask>[0]> = {
 }
 
 describe('quoting', () => {
-  it('prices the default image at the worked example: $0.06 → 21 credits', () => {
+  it('prices the default image at the worked example: $0.06 → 24 credits', () => {
     const quote = quoteMediaRequest({ model: 'nano-banana-2', prompt: 'x', options: { resolution: '2K' } });
 
-    expect(quote).toMatchObject({ model: 'nano-banana-2', kind: 'image', usd: 0.06, credits: 21 });
+    expect(quote).toMatchObject({ model: 'nano-banana-2', kind: 'image', usd: 0.06, credits: 24 });
   });
 
   it('refuses an unknown model by name, listing what IS available', () => {
@@ -151,7 +151,7 @@ describe('quoting', () => {
     );
   });
 
-  it('prices a Kling clip per second: pro+audio 5s = $0.675 → 226 credits', () => {
+  it('prices a Kling clip per second: pro+audio 5s = $0.675 → 270 credits', () => {
     const quote = quoteMediaRequest({
       model: 'kling-3.0/video',
       prompt: 'x',
@@ -160,7 +160,7 @@ describe('quoting', () => {
     });
 
     expect(quote.usd).toBeCloseTo(0.675, 9);
-    expect(quote.credits).toBe(226);
+    expect(quote.credits).toBe(270);
   });
 });
 
@@ -174,13 +174,13 @@ describe('starting a render (billing enforced)', () => {
     const objectStore = memoryStore();
     const started = await startMediaTask(imageInput({ provider, objectStore }));
 
-    expect(started.credits).toBe(21);
-    expect(await ledger.balance(USER)).toBe(79);
+    expect(started.credits).toBe(24);
+    expect(await ledger.balance(USER)).toBe(76);
     expect(provider.created).toHaveLength(1);
 
     // The task record exists, pending, carrying what was actually debited.
     const record = await getMediaTask(objectStore, PROJECT, started.taskId);
-    expect(record).toMatchObject({ status: 'pending', credits: 21, kieTaskId: 'kie-1' });
+    expect(record).toMatchObject({ status: 'pending', credits: 24, kieTaskId: 'kie-1' });
   });
 
   it('REFUSES with 402 when the balance cannot cover it — and never calls the provider', async () => {
@@ -239,7 +239,7 @@ describe('starting a render (unmetered beta mode)', () => {
   it('still records the debit when the balance covers it — recording is always on', async () => {
     await grant(100);
     await startMediaTask(imageInput());
-    expect(await ledger.balance(USER)).toBe(79);
+    expect(await ledger.balance(USER)).toBe(76);
   });
 });
 
@@ -272,7 +272,7 @@ describe('polling', () => {
 
     expect(task).toMatchObject({ status: 'succeeded', resultUrl: 'https://cdn.kie.ai/x.png' });
     expect(upserts.at(-1)?.status).toBe('completed');
-    expect(await ledger.balance(USER), 'a successful render keeps its charge').toBe(79);
+    expect(await ledger.balance(USER), 'a successful render keeps its charge').toBe(76);
   });
 
   it('refunds a failed render EXACTLY once across repeated polls', async () => {
@@ -324,7 +324,7 @@ describe('polling', () => {
 
     const task = await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
     expect(task?.status, 'no refund, no failure — ask again later').toBe('pending');
-    expect(await ledger.balance(USER)).toBe(79);
+    expect(await ledger.balance(USER)).toBe(76);
   });
 
   it('404s cleanly for a task that does not exist', async () => {

@@ -190,10 +190,10 @@ describe('media price lookup — what the up-front debit is computed from', () =
     expect(lookupMediaPrice(list, { model: 'nano-banana-2', options: { resolution: '8K' } })).toBeNull();
   });
 
-  it('the worked example: a 2K nano-banana-2 image costs $0.06 → 21 credits at the default margin', () => {
+  it('the worked example: a 2K nano-banana-2 image costs $0.06 → 24 credits at the default margin', () => {
     const price = lookupMediaPrice(list, { model: 'nano-banana-2', options: { resolution: '2K' } });
 
-    // ceil(0.06 / 0.01 × 3.34) = ceil(20.04) = 21 — the number quoted to the owner (2026-07-18).
-    expect(Math.ceil((price!.usd / 0.01) * 3.34)).toBe(21);
+    // ceil(0.06 / 0.01 × 4.0) = ceil(24) = 24 credits at CREDIT_MARGIN=4.0 (raised from 3.34, 2026-07-18).
+    expect(Math.ceil((price!.usd / 0.01) * 4.0)).toBe(24);
   });
 });

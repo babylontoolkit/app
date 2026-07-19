@@ -121,15 +121,16 @@ Current baked rates (per MTok, KIE): Opus 4.8 (the default) **$2 / $10**; Fable 
 **$4 / $20**. Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
 §4.2.8; assuming the 1.25× headline number under-charges every generation and nothing throws).
 
-Measured on KIE (2026-07-16/17, `spec/context-budget.md` §MEASURED): a full playable-game creation
-ran **163–513 credits** depending on difficulty; a **warm edit is ~11–65 credits** (sticky block
-routing); a trivial edit measured **18**. **Media is billed separately per task** (§4.16): an image is
-~14–21 credits, a video clip runs from ~50 (veo3_lite) into the hundreds (kling-3.0 pro) — debited
-up-front at the exact price shown on the Generate button.
+Measured on KIE (2026-07-16/17, `spec/context-budget.md` §MEASURED) **at the old margin 3.34** — at the
+current `CREDIT_MARGIN = 4.0` every figure below is ~1.2× higher: a full playable-game creation ran
+**163–513 credits** (→ ~195–615 at 4.0) depending on difficulty; a **warm edit is ~11–65 credits** (→
+~13–78; sticky block routing); a trivial edit measured **18** (→ ~22). **Media is billed separately per
+task** (§4.16): a 2K image is ~24 credits at 4.0, a video clip runs from ~60 (veo3_lite) into the
+hundreds (kling-3.0 pro) — debited up-front at the exact price shown on the Generate button.
 
-The 500-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~2.6× a measured KIE creation, and
-deliberately BELOW the 1,000-credit premium minimum, so a fresh account cannot burn its grant on the
-2× model. Premium is also **edit-only**: creations always run the standard streaming model
+The 800-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~3.5× a measured KIE creation at
+margin 4.0 (guarantees one free game + iteration), and deliberately BELOW the 1,200-credit premium
+minimum, so a fresh account cannot burn its grant on the 2× model. Premium is also **edit-only**: creations always run the standard streaming model
 (`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a creation-sized
 artifact before the gateway timeout).
 
@@ -145,24 +146,29 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | Var | Default | What it does |
 |---|---|---|
 | `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone (premium threshold + media 402 still bind) |
-| `SIGNUP_GRANT_CREDITS` | `500` | Starter credits, once per user (~2.6× a KIE creation; below the premium minimum on purpose) |
+| `SIGNUP_GRANT_CREDITS` | `800` | Starter credits, once per user (~3.5× a KIE creation at margin 4.0; below the premium minimum on purpose) |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
-| `CREDIT_MARGIN` | `3.34` | Multiplier over raw cost |
-| `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-fable-5` / `1000` | The 2× premium tier: a selector + the balance a user must HOLD to unlock it (edit turns only) |
+| `CREDIT_MARGIN` | `4.0` | Multiplier over raw cost (~75% gross-margin target; realized ~72–75% at the pack prices) |
+| `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-fable-5` / `1200` | The 2× premium tier: a selector + the balance a user must HOLD to unlock it (edit turns only) |
 
 Model PRICES are not env anymore — they live in the Marketplace price list (admin-promoted, baked
 fallback). The retired `KIE_*_DOLLARS` / `PREMIUM_*_DOLLARS` vars are REFUSED if set.
 
 ## Credit packs & subscriptions (Stripe)
 
-| Pack | Credits | Price |
-|---|---|---|
-| Starter | 2,000 | $20 |
-| Creator | 6,000 | $50 |
-| Studio | 25,000 | $200 |
+| Pack | Credits | Price | $/credit | GM @4.0 |
+|---|---|---|---|---|
+| Starter | 3,000 | $30 | $0.0100 | 75% |
+| Pro | 9,500 | $90 | $0.0095 | 74% |
+| Studio | 25,000 | $225 | $0.0090 | 72% |
 
-Subscriptions mirror the packs monthly (Creator 6,000/mo at $50, Studio 25,000/mo at $200); credits
+Priced as a **premium specialty game platform** (2026-07-18): base $0.01/credit with a shallow volume
+discount to Studio, mirroring the market's shape (Lovable is a flat $0.25/message, discounting only
+2–10% at volume). At margin 4.0 a single edit costs ~$0.41 vs Lovable's $0.25 — already premium per
+unit of heavier work, so we bank the KIE cost advantage as margin rather than competing on price.
+
+Subscriptions mirror the packs monthly (Pro 9,500/mo at $90, Studio 25,000/mo at $225); credits
 never expire or reset — a plan accumulates. Defined in `app/lib/.server/billing/stripe.ts`, and
 **every pack/plan must clear `MIN_PACK_MARGIN`** (`packMargin()` — the floor that caught the shipped
 0.84× loss-making pack; never add or reprice without re-running it). Purchases are idempotent on the

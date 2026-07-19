@@ -10,7 +10,7 @@
  *
  *   A user may use premium only when they HOLD at least `minimumCredits`.
  *
- * The free signup grant (500) sits below the default minimum (1000), so a brand-new account CANNOT burn
+ * The free signup grant (800) sits below the default minimum (1200), so a brand-new account CANNOT burn
  * its grant on a 2x model out the gate — to cross the threshold they must buy a credit pack or subscribe,
  * which is the exact funnel the grant protects. There is deliberately NO separate subscription check:
  * holding the credits IS the proof of intent, and gating on a subscription would wrongly punish someone

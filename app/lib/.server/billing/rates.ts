@@ -121,8 +121,9 @@ export const MODEL_RATES: Record<string, ModelRates> = {
  * cost here mis-bills every user silently. The margin lever is `CREDIT_MARGIN`, never a fudged cost.
  *
  * ⚠️ **Do not re-derive the edits-per-plan figure from this table alone — it is dominated by the CACHE,
- * not by these rates.** With sticky routing (`selectStickyBlocks`) a warm edit measures ~11 credits —
- * a $50/6,000-credit pack is **~545 edits**. (The old "~13/~32 edits" figures predate the fix.)
+ * not by these rates.** With sticky routing (`selectStickyBlocks`) a warm edit measures ~11 credits at
+ * margin 3.34 (~13 at the current 4.0) — a $90/9,500-credit Pro pack is **~730 warm edits**. (The old
+ * "~13/~32 edits" figures predate the sticky-routing fix.)
  */
 export const KIE_MODEL_RATES: Record<string, ModelRates> = llmRatesFromList(BAKED_MARKET_PRICES);
 
@@ -260,7 +261,7 @@ export function kieRates(context?: unknown): Record<string, ModelRates> {
  * fallback is correct — unlike a price, where a fallback is catastrophic.
  */
 export const DEFAULT_PREMIUM_MODEL = 'claude-fable-5';
-export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1000;
+export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
 
 export interface PremiumTier {
   /** The model id, e.g. `claude-fable-5`. Reachable on any provider via the `providerRates` injection. */
@@ -374,7 +375,12 @@ export interface BillingConfig {
   /** USD of underlying model cost that one credit is worth. */
   creditUnitCostUsd: number;
 
-  /** Retail multiple over raw cost. 3.34 ≈ 70% gross margin, the §4.6 target. */
+  /**
+   * Retail multiple over raw cost. **4.0 ≈ 75% gross-margin target** (§4.6) — chosen for a specialty
+   * game-dev platform, where COGS-shock resilience matters (we resell a discount provider's tokens) and
+   * willingness-to-pay is Unity-anchored, not website-builder-anchored. Realized GM lands ~72–75% since
+   * packs sell at ~$0.009–0.01/credit (`packMargin()` = `margin × pack$/credit ÷ CREDIT_UNIT_COST_USD`).
+   */
   margin: number;
 
   /** The free signup grant, in credits. Gated on email verification (§4.5.4). */
@@ -392,7 +398,7 @@ export function getBillingConfig(context?: unknown): BillingConfig {
   return {
     enforced: envFlag(context, 'BILLING_ENFORCED'),
     creditUnitCostUsd: envNumber(context, 'CREDIT_UNIT_COST_USD', 0.01),
-    margin: envNumber(context, 'CREDIT_MARGIN', 3.34),
+    margin: envNumber(context, 'CREDIT_MARGIN', 4.0),
 
     /*
      * The free signup grant is PURE COST to the operator — it buys real model spend on our key with
@@ -414,17 +420,18 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      *
      * ⚠️ **THIS NUMBER IS COUPLED TO THE PLATFORM PROVIDER — they are one decision in two files.**
      * Credits are cost-proportional, so the grant's real purchasing power moves with what we pay per
-     * token. A grant of 500 is generous on KIE and broken on Anthropic. `grantHeadroom()` is the guard
-     * and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — never tune one without re-running it:
-     *   - **KIE (the default, ~0.4x rates): 500** ≈ 2.0–2.6x a cold creation. MEASURED live: creations
-     *     cost 248 and 211 credits, so 500 buys the prototype plus real room to iterate — which is the
-     *     entire funnel: hook them on the first prompt, then convert to a subscription.
-     *   - **Anthropic: 1,000** ≈ 2.1x. 500 there is **0.86–1.04x** — MEASURED: a real creation cost 579
-     *     credits against a 500 grant, so the user's FIRST free prompt exhausts it and lands them
-     *     negative (the gate runs ONCE, before the model, and settlement can never refuse, §4.2.1),
-     *     with nothing left to iterate. That kills the exact moment the funnel is built on, silently.
+     * token. The default is 800 at `CREDIT_MARGIN = 4.0`: generous on KIE, still broken on Anthropic.
+     * `grantHeadroom()` is the guard and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — never tune one
+     * without re-running it (margin, provider, AND grant are one decision in three places):
+     *   - **KIE (the default, ~0.4x rates): 800** ≈ 3.5x a cold creation at margin 4.0 (~231 credits;
+     *     live creations at margin 3.34 measured 211–248, ~1.2x more under 4.0). 800 buys the prototype
+     *     plus real room to iterate — the whole funnel: hook them on the first prompt, then convert.
+     *   - **Anthropic: would need ~1,200+.** A cold creation there is ~576 credits at margin 4.0, so an
+     *     800 grant is only ~1.4x — under the 1.5x floor: the first free prompt plus one edit exhausts
+     *     it and lands the user negative (the gate runs ONCE, before the model, settlement can never
+     *     refuse, §4.2.1), killing the exact moment the funnel is built on, silently.
      */
-    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 500),
+    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 800),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
 
     stripeSecretKey: process.env.STRIPE_SECRET_KEY,
@@ -511,9 +518,9 @@ export const COLD_CREATION_USAGE: TokenUsage = {
  * ⚠️ **The grant size and the provider are ONE number split across two files** — the same shape of bug
  * as `packMargin()` (a pack's price and `CREDIT_MARGIN` disagreeing, silently, at ~19% a generation).
  * A grant is denominated in credits, credits are cost-proportional, and cost depends on the provider —
- * so `SIGNUP_GRANT_CREDITS = 500` is comfortable on KIE (~192 credits a creation, ~2.6x headroom) and
- * BROKEN on Anthropic (~481–513, i.e. 0.97–1.04x: the first free prompt exhausts the grant and lands
- * the user negative, with nothing left to iterate).
+ * so `SIGNUP_GRANT_CREDITS = 800` at margin 4.0 is comfortable on KIE (~231 credits a creation, ~3.5x
+ * headroom) and BROKEN on Anthropic (~576, i.e. ~1.4x: below the 1.5x floor — the first prompt plus an
+ * edit exhausts the grant and lands the user negative, with nothing left to iterate).
  *
  * That failure would be silent and would land on the ONE moment the funnel depends on — a new user's
  * first prototype. `billing.spec.ts` asserts this floor so the two numbers cannot drift apart.

@@ -605,7 +605,8 @@ byte-identical starter file context — because the blocks sit ahead of the file
 > **sticky, append-only, first-seen-ordered block routing per conversation** (`selectStickyBlocks` in
 > `prompt/sources.ts`, `stickySkillNames` in `agent/preload-skills.ts`). Verified live: four turns on one
 > project routed an **identical** block list, and the trivial edit that cost 160 credits came back at
-> **18**. A warm edit now measures **~11 credits** — a $50/6,000-credit pack is **~545 edits**, not 13.
+> **18**. A warm edit now measures **~11 credits** at margin 3.34 (~13 at the current 4.0) — a
+> $90/9,500-credit Pro pack is **~730 warm edits**, not 13.
 >
 > **The diagnosis below is kept as-is because it is why the fix exists** — but its numbers are PRE-FIX.
 > Do not quote 13-vs-92, or "6–12× the floor", as current behaviour.
