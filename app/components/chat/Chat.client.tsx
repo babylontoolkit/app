@@ -218,6 +218,19 @@ export const ChatImpl = memo(
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [chatMode, setChatMode] = useState<'discuss' | 'build'>('build');
     const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
+
+    /*
+     * Plan mode needs a project (§4.2.9). "New project" is an SPA navigate that does NOT remount this
+     * component, so a `discuss` chosen on the previous project would otherwise persist onto the blank
+     * landing page — where the first message is always a creation (forced to Build server-side). Snap
+     * back to Build whenever there is no active project so the state can never lag the disabled toggle.
+     */
+    useEffect(() => {
+      if (!activeProjectId) {
+        setChatMode('build');
+      }
+    }, [activeProjectId]);
+
     const mcpSettings = useMCPStore((state) => state.settings);
 
     /*

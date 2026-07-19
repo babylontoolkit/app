@@ -54,7 +54,12 @@ export function ContextIndicator() {
         <div className="absolute bottom-full right-0 mb-2 w-80 z-50 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg p-4 text-sm text-bolt-elements-textPrimary">
           <div className="flex items-center justify-between mb-3">
             <span className="font-medium">Context</span>
-            <span className={classNames('inline-block w-2.5 h-2.5 rounded-full', DOT_COLORS[health])} />
+            <div className="flex items-center gap-2">
+              <span className={classNames('inline-block w-2.5 h-2.5 rounded-full', DOT_COLORS[health])} />
+              <IconButton title="Close" className="transition-all" onClick={() => contextPanelOpen.set(false)}>
+                <div className="i-ph:x text-base" />
+              </IconButton>
+            </div>
           </div>
           <div className="space-y-1.5 text-xs">
             <div className="flex justify-between">

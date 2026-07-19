@@ -25,6 +25,8 @@ import { WebSearch } from './WebSearch.client';
 import { SkillAutocompleteMenu, useSkillAutocomplete } from './SkillAutocomplete';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
 import { PremiumToggle } from './PremiumToggle';
+import { useStore } from '@nanostores/react';
+import { projectId as projectIdStore } from '~/lib/persistence';
 
 interface ChatBoxProps {
   isModelSettingsCollapsed: boolean;
@@ -76,6 +78,17 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
    * client env var — a `VITE_`-prefixed flag would be a value the user can edit.
    */
   const byokUnlocked = useByokUnlocked();
+
+  /*
+   * Plan mode is only meaningful once a PROJECT exists (§4.2.9). On the landing page there is no
+   * project yet, and the first message ALWAYS creates one — a creation turn, which the server forces
+   * to Build regardless of this toggle (`decidePremium`/discuss-note both ignore the creation turn).
+   * So with no project the toggle is locked to Build and disabled, mirroring how the premium pill and
+   * the model selector need a project before they mean anything. A click explains rather than toggles.
+   */
+  const activeProjectId = useStore(projectIdStore);
+  const planAvailable = Boolean(activeProjectId);
+  const effectiveChatMode = planAvailable ? props.chatMode : 'build';
 
   /*
    * Setting the input through a synthetic change event is the existing convention in this codebase
@@ -285,7 +298,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             maxHeight: props.TEXTAREA_MAX_HEIGHT,
           }}
           placeholder={
-            props.chatMode === 'discuss'
+            effectiveChatMode === 'discuss'
               ? 'Plan mode — discuss ideas and next steps; nothing in your project changes'
               : `How can ${brand.company} help you today?`
           }
@@ -361,22 +374,30 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
              */}
             <IconButton
               title={
-                props.chatMode === 'discuss'
-                  ? 'Plan mode — nothing in your project changes. Click to switch to Build.'
-                  : 'Build mode — the agent writes and edits your project files. Click to switch to Plan.'
+                !planAvailable
+                  ? 'Plan mode unlocks once your project is created — your first message builds it.'
+                  : effectiveChatMode === 'discuss'
+                    ? 'Plan mode — nothing in your project changes. Click to switch to Build.'
+                    : 'Build mode — the agent writes and edits your project files. Click to switch to Plan.'
               }
               className={classNames(
                 'transition-all flex items-center gap-1 px-1.5',
-                props.chatMode === 'discuss'
+                effectiveChatMode === 'discuss'
                   ? '!bg-bolt-elements-item-backgroundAccent !text-bolt-elements-item-contentAccent'
                   : 'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault',
+                !planAvailable ? 'opacity-50' : '',
               )}
               onClick={() => {
-                props.setChatMode?.(props.chatMode === 'discuss' ? 'build' : 'discuss');
+                if (!planAvailable) {
+                  toast.info('Plan mode unlocks once your project is created. Your first message builds it.');
+                  return;
+                }
+
+                props.setChatMode?.(effectiveChatMode === 'discuss' ? 'build' : 'discuss');
               }}
             >
-              <div className={props.chatMode === 'discuss' ? 'i-ph:chats text-xl' : 'i-ph:hammer text-xl'} />
-              <span>{props.chatMode === 'discuss' ? 'Plan' : 'Build'}</span>
+              <div className={effectiveChatMode === 'discuss' ? 'i-ph:chats text-xl' : 'i-ph:hammer text-xl'} />
+              <span>{effectiveChatMode === 'discuss' ? 'Plan' : 'Build'}</span>
             </IconButton>
             {props.chatStarted && <ContextIndicator />}
             {/*
