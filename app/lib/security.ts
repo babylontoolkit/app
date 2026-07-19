@@ -168,12 +168,18 @@ export function sanitizeErrorMessage(error: unknown, isDevelopment = false): str
 }
 
 /**
- * Security wrapper for API routes
+ * Security wrapper for API routes.
+ *
+ * ⚠️ This wrapper does METHOD-checking, per-IP RATE-LIMITING, and security HEADERS only. It does NOT
+ * authenticate — there is deliberately no `requireAuth` option, because one used to exist here,
+ * was never wired to anything, and made every route that passed it LOOK protected while remaining
+ * anonymous (SPEC §4.5.3, §5). Authentication is enforced INSIDE each handler via
+ * `requireVerifiedUser` / `denyUnlessVerified` (`~/lib/.server/http`), never by this wrapper. Do not
+ * re-add an auth flag here: a wall that lives in a boolean nobody reads is worse than no wall.
  */
 export function withSecurity<T extends (args: ActionFunctionArgs | LoaderFunctionArgs) => Promise<Response>>(
   handler: T,
   options: {
-    requireAuth?: boolean;
     rateLimit?: boolean;
     allowedMethods?: string[];
   } = {},

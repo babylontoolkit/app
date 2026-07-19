@@ -12,9 +12,10 @@
  */
 import { json } from '@remix-run/cloudflare';
 import type { ActionFunctionArgs } from '@remix-run/cloudflare';
-import { isAllowedUrl, isPrivateIpAddress } from '~/utils/url';
+import { isAllowedUrl } from '~/utils/url';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { errorResponse } from '~/lib/.server/http';
+import { assertPublicUrl, BlockedUrlError } from '~/lib/.server/net/ssrf';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('web-search');
@@ -30,11 +31,6 @@ const FETCH_HEADERS = {
   Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.5',
 };
-
-class BlockedUrlError extends Error {
-  readonly statusCode = 400;
-  readonly name = 'BlockedUrlError';
-}
 
 function extractTitle(html: string): string {
   const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
@@ -72,50 +68,12 @@ function extractTextContent(html: string): string {
     .trim();
 }
 
-/**
- * Best-effort DNS-rebinding guard: resolve the hostname and refuse if ANY address is private.
- *
- * `node:dns` is imported dynamically so this module stays loadable in a non-Node runtime; if it (or
- * resolution) is unavailable we do not block — the string-level `isAllowedUrl` check still stands, and
- * a genuine resolution failure is left for `fetch` to surface. A residual TOCTOU remains (the OS may
- * re-resolve at fetch time), which is why this is defense-in-depth, not the only wall.
- */
-async function assertResolvesPublic(urlStr: string): Promise<void> {
-  const hostname = new URL(urlStr).hostname.replace(/^\[|\]$/g, '');
-
-  let lookup: ((h: string, opts: { all: true }) => Promise<Array<{ address: string }>>) | undefined;
-
-  try {
-    ({ lookup } = (await import('node:dns/promises')) as unknown as { lookup: typeof lookup });
-  } catch {
-    return; // not a Node runtime — rely on the string-level checks
-  }
-
-  let results: Array<{ address: string }>;
-
-  try {
-    results = await lookup!(hostname, { all: true });
-  } catch {
-    return; // let fetch report an unresolvable host
-  }
-
-  for (const { address } of results) {
-    if (isPrivateIpAddress(address)) {
-      throw new BlockedUrlError('URL resolves to a private address.');
-    }
-  }
-}
-
 /** Follow redirects by hand so EVERY hop is re-validated against the SSRF rules, not just the first. */
 async function fetchGuarded(startUrl: string): Promise<Response> {
   let currentUrl = startUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    if (!isAllowedUrl(currentUrl)) {
-      throw new BlockedUrlError('URL is not allowed. Only public HTTP/HTTPS URLs are accepted.');
-    }
-
-    await assertResolvesPublic(currentUrl);
+    await assertPublicUrl(currentUrl);
 
     const response = await fetch(currentUrl, {
       headers: FETCH_HEADERS,

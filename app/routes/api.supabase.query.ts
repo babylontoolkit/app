@@ -1,11 +1,18 @@
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 const logger = createScopedLogger('api.supabase.query');
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
   if (request.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
+  }
+
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
   }
 
   const authHeader = request.headers.get('Authorization');

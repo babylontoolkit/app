@@ -1,9 +1,16 @@
 import { json, type ActionFunction } from '@remix-run/cloudflare';
 import type { SupabaseProject } from '~/types/supabase';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
-export const action: ActionFunction = async ({ request }) => {
+export const action: ActionFunction = async ({ request, context }) => {
   if (request.method !== 'POST') {
     return json({ error: 'Method not allowed' }, { status: 405 });
+  }
+
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
   }
 
   try {

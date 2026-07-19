@@ -1,5 +1,7 @@
 import { json } from '@remix-run/cloudflare';
 import { withSecurity } from '~/lib/security';
+import { denyUnlessVerified } from '~/lib/.server/http';
+import { isAllowedUrl } from '~/utils/url';
 
 interface GitLabBranch {
   name: string;
@@ -20,7 +22,13 @@ interface BranchInfo {
   canPush: boolean;
 }
 
-async function gitlabBranchesLoader({ request }: { request: Request }) {
+async function gitlabBranchesLoader({ request, context }: { request: Request; context: any }) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     const body: any = await request.json();
     const { token, gitlabUrl = 'https://gitlab.com', projectId } = body;
@@ -31,6 +39,11 @@ async function gitlabBranchesLoader({ request }: { request: Request }) {
 
     if (!projectId) {
       return json({ error: 'Project ID is required' }, { status: 400 });
+    }
+
+    // The base URL is caller-supplied — refuse anything but a public HTTP/HTTPS host (SSRF).
+    if (!isAllowedUrl(gitlabUrl)) {
+      return json({ error: 'Invalid GitLab URL' }, { status: 400 });
     }
 
     // Fetch branches from GitLab API

@@ -1,5 +1,23 @@
+/**
+ * CORS proxy for client-side git (isomorphic-git needs a same-origin proxy to reach a git host).
+ *
+ * Inherited from bolt.diy's cors-proxy, and it shipped as a fully UNAUTHENTICATED open forward-proxy:
+ * the target host came straight off the URL path (`/api/git-proxy/<any-host>/<path>`) with no auth,
+ * no SSRF guard, no re-validation across redirects. Anyone could stream arbitrary internet content
+ * through our server (bandwidth/egress + IP-reputation abuse on OUR bill) or aim it at cloud metadata
+ * and private services (SSRF). Closed to match `/api/web-search` (SPEC §4.5.4, §5):
+ *
+ *  - a VERIFIED session is required — an anonymous open proxy is abuse of our infrastructure;
+ *  - EVERY hop (including redirects) is re-validated as a public HTTP/HTTPS target with a DNS guard,
+ *    so an allowed host cannot 302 us onto `169.254.169.254` or `10.x`.
+ *
+ * Bodies still STREAM (never buffered), so a large legitimate clone is fine; auth + the per-hop SSRF
+ * check are what bound abuse.
+ */
 import { json } from '@remix-run/cloudflare';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { denyUnlessVerified } from '~/lib/.server/http';
+import { assertPublicUrl, BlockedUrlError } from '~/lib/.server/net/ssrf';
 
 // Allowed headers to forward to the target server
 const ALLOW_HEADERS = [
@@ -42,33 +60,44 @@ const EXPOSE_HEADERS = [
   'x-redirected-url',
 ];
 
-// Handle all HTTP methods
-export async function action({ request, params }: ActionFunctionArgs) {
-  return handleProxyRequest(request, params['*']);
+const MAX_REDIRECTS = 5;
+
+function corsHeaders(): Record<string, string> {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+    'Access-Control-Allow-Headers': ALLOW_HEADERS.join(', '),
+    'Access-Control-Expose-Headers': EXPOSE_HEADERS.join(', '),
+  };
 }
 
-export async function loader({ request, params }: LoaderFunctionArgs) {
-  return handleProxyRequest(request, params['*']);
+export async function action({ request, params, context }: ActionFunctionArgs) {
+  return handleProxyRequest(request, params['*'], context);
 }
 
-async function handleProxyRequest(request: Request, path: string | undefined) {
+export async function loader({ request, params, context }: LoaderFunctionArgs) {
+  return handleProxyRequest(request, params['*'], context);
+}
+
+async function handleProxyRequest(request: Request, path: string | undefined, context: unknown) {
+  // CORS preflight carries no credentials and does no work — answer it before the auth wall.
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 200,
+      headers: { ...corsHeaders(), 'Access-Control-Max-Age': '86400' },
+    });
+  }
+
+  // A verified session is the floor: this route reaches out on the platform's behalf.
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     if (!path) {
       return json({ error: 'Invalid proxy URL format' }, { status: 400 });
-    }
-
-    // Handle CORS preflight request
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        status: 200,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-          'Access-Control-Allow-Headers': ALLOW_HEADERS.join(', '),
-          'Access-Control-Expose-Headers': EXPOSE_HEADERS.join(', '),
-          'Access-Control-Max-Age': '86400',
-        },
-      });
     }
 
     // Extract domain and remaining path
@@ -83,63 +112,31 @@ async function handleProxyRequest(request: Request, path: string | undefined) {
 
     // Reconstruct the target URL with query parameters
     const url = new URL(request.url);
-    const targetURL = `https://${domain}/${remainingPath}${url.search}`;
+    const startUrl = `https://${domain}/${remainingPath}${url.search}`;
 
-    console.log('Target URL:', targetURL);
-
-    // Filter and prepare headers
+    // Filter and prepare request headers (only the allow-listed set the git client sent).
     const headers = new Headers();
 
-    // Only forward allowed headers
     for (const header of ALLOW_HEADERS) {
       if (request.headers.has(header)) {
         headers.set(header, request.headers.get(header)!);
       }
     }
 
-    // Set the host header
     headers.set('Host', domain);
 
-    // Set Git user agent if not already present
     if (!headers.has('user-agent') || !headers.get('user-agent')?.startsWith('git/')) {
       headers.set('User-Agent', 'git/@isomorphic-git/cors-proxy');
     }
 
-    console.log('Request headers:', Object.fromEntries(headers.entries()));
+    // Buffer the body once so it can be replayed across redirects (streams are single-use).
+    const body = ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer();
 
-    // Prepare fetch options
-    const fetchOptions: RequestInit = {
-      method: request.method,
-      headers,
-      redirect: 'follow',
-    };
+    const response = await fetchFollowingRedirects(startUrl, request.method, headers, body);
 
-    // Add body for non-GET/HEAD requests
-    if (!['GET', 'HEAD'].includes(request.method)) {
-      fetchOptions.body = request.body;
-      fetchOptions.duplex = 'half';
+    // Create response headers with CORS + the exposed subset of the target's headers.
+    const responseHeaders = new Headers(corsHeaders());
 
-      /*
-       * Note: duplex property is removed to ensure TypeScript compatibility
-       * across different environments and versions
-       */
-    }
-
-    // Forward the request to the target URL
-    const response = await fetch(targetURL, fetchOptions);
-
-    console.log('Response status:', response.status);
-
-    // Create response headers
-    const responseHeaders = new Headers();
-
-    // Add CORS headers
-    responseHeaders.set('Access-Control-Allow-Origin', '*');
-    responseHeaders.set('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    responseHeaders.set('Access-Control-Allow-Headers', ALLOW_HEADERS.join(', '));
-    responseHeaders.set('Access-Control-Expose-Headers', EXPOSE_HEADERS.join(', '));
-
-    // Copy exposed headers from the target response
     for (const header of EXPOSE_HEADERS) {
       // Skip content-length as we'll use the original response's content-length
       if (header === 'content-length') {
@@ -151,28 +148,69 @@ async function handleProxyRequest(request: Request, path: string | undefined) {
       }
     }
 
-    // If the response was redirected, add the x-redirected-url header
     if (response.redirected) {
       responseHeaders.set('x-redirected-url', response.url);
     }
 
-    console.log('Response headers:', Object.fromEntries(responseHeaders.entries()));
-
-    // Return the response with the target's body stream piped directly
+    // Stream the target's body straight through — never buffered into memory.
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
       headers: responseHeaders,
     });
   } catch (error) {
-    console.error('Proxy error:', error);
+    if (error instanceof BlockedUrlError) {
+      return json({ error: error.message }, { status: 400 });
+    }
+
     return json(
       {
         error: 'Proxy error',
         message: error instanceof Error ? error.message : 'Unknown error',
-        url: path ? `https://${path}` : 'Invalid URL',
       },
       { status: 500 },
     );
   }
+}
+
+/**
+ * Follow redirects BY HAND so every hop is re-validated as a public target (a `redirect: 'follow'`
+ * fetch would chase a 302 to a private IP without our SSRF check ever seeing it).
+ */
+async function fetchFollowingRedirects(
+  startUrl: string,
+  method: string,
+  headers: Headers,
+  body: ArrayBuffer | undefined,
+): Promise<Response> {
+  let currentUrl = startUrl;
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    await assertPublicUrl(currentUrl);
+
+    const hopHeaders = new Headers(headers);
+    hopHeaders.set('Host', new URL(currentUrl).host);
+
+    const response = await fetch(currentUrl, {
+      method,
+      headers: hopHeaders,
+      body: body ? body.slice(0) : undefined,
+      redirect: 'manual',
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+
+      if (!location) {
+        return response;
+      }
+
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+
+    return response;
+  }
+
+  throw new BlockedUrlError('Too many redirects.');
 }

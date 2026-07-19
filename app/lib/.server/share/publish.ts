@@ -68,6 +68,25 @@ export class UnsafeBuildPathError extends Error {
   }
 }
 
+/**
+ * Caps on the uploaded build (SPEC §5). The `dist/` map is client-supplied and written to a public
+ * bucket, so without a bound it is unbounded S3 storage + CDN egress on the platform's bill for any
+ * verified user, repeatable per re-publish. Generous for a real game build (wasm + textures + audio),
+ * bounded against abuse.
+ */
+export const MAX_BUILD_BYTES = 150 * 1024 * 1024;
+export const MAX_BUILD_FILES = 10_000;
+
+export class BuildTooLargeError extends Error {
+  readonly statusCode = 413;
+  readonly isRetryable = false;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'BuildTooLargeError';
+  }
+}
+
 /** Paths that must never be uploaded to a public bucket, whatever the checklist said. */
 const NEVER_PUBLISH = [/(^|\/)\.env$/, /(^|\/)\.env\.[^/]*local$/, /(^|\/)\.npmrc$/, /(^|\/)\.git\//];
 
@@ -148,6 +167,17 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
 
   if (entries.length === 0) {
     throw new UnsafeBuildPathError('the build produced no files');
+  }
+
+  // Cap BEFORE decoding/writing: reject an oversized build rather than stream it into the bucket.
+  if (entries.length > MAX_BUILD_FILES) {
+    throw new BuildTooLargeError(`That build has too many files (${entries.length} > ${MAX_BUILD_FILES}).`);
+  }
+
+  const approxBytes = entries.reduce((sum, [, dirent]) => sum + (dirent.content?.length ?? 0), 0);
+
+  if (approxBytes > MAX_BUILD_BYTES) {
+    throw new BuildTooLargeError('That build is too large to publish.');
   }
 
   // Derive every key BEFORE writing anything — one bad path fails the publish, it does not half-do it.

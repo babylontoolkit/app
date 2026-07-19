@@ -239,3 +239,21 @@ Not touched (deliberately): HTTP `User-Agent: 'bolt.diy-app'` identifiers (funct
 | File | Change |
 |---|---|
 | `uno.config.ts` | `presetIcons` collections: register `ph` + `svg-spinners` explicitly. Upstream relies on presetIcons' filesystem loader, which it installs only when `!process.env.VSCODE_CWD` (it assumes VS Code means the UnoCSS extension is the host). A dev server started from VS Code's integrated terminal inherits that var, so every `i-ph:*` / `i-svg-spinners:*` icon silently rendered blank. Loading the collections ourselves is launch-environment independent. Upstream-mergeable (additive keys). |
+
+## Upstream files touched — 2026-07-19 (outbound-route spend-hole hardening — SPEC §5, §2.1b, `spec/spend-holes.md`)
+
+All additive: a `denyUnlessVerified` guard at the top of each inherited outbound handler, a shared SSRF guard, and size caps. Auth is in the handler, NEVER in `withSecurity` (whose unenforced `requireAuth` option is removed). Pinned by net-new `outbound-auth.spec.ts` + `net/ssrf.spec.ts`.
+
+| File | Change |
+|---|---|
+| `app/routes/api.git-proxy.$.ts` | Was a fully anonymous open forward-proxy (any host off the URL path; SSRF; streamed unbounded; logged the caller's `authorization` header). Now: verified user; redirects followed BY HAND with per-hop `assertPublicUrl`; no secret logging. |
+| `app/routes/api.github-user.ts` | Verified-user guard on loader+action; `get_token` returns the caller's OWN cookie token only, never the platform `GITHUB_TOKEN` env fallback (export-api-keys-class exfil). |
+| `app/routes/api.github-stats.ts`, `api.github-branches.ts` | Verified-user guard (stops anonymous use of the platform GitHub token/quota). |
+| `app/routes/api.gitlab-branches.ts`, `api.gitlab-projects.ts` | Verified-user guard + `isAllowedUrl(gitlabUrl)` (the base URL was caller-supplied → SSRF). |
+| `app/routes/api.netlify-user.ts`, `api.vercel-user.ts`, `api.supabase-user.ts` | Verified-user guard (platform-token fallback made these anonymous spend). |
+| `app/routes/api.netlify-deploy.ts`, `api.vercel-deploy.ts` | Verified-user guard (anonymous 60× polling loops). |
+| `app/routes/api.supabase.query.ts`, `api.supabase.variables.ts`, `api.supabase.ts` | Verified-user guard (anonymous outbound passthroughs). |
+| `app/lib/security.ts` | Removed the unenforced `requireAuth` option from `withSecurity` (it made routes LOOK protected while anonymous). Now method-check + rate-limit + headers only, with a comment forbidding an auth flag here. |
+| `app/routes/api.web-search.ts` | Refactored to use the shared `net/ssrf.ts` (its inline `assertResolvesPublic` + `BlockedUrlError` moved there; behaviour unchanged). |
+
+Net-new (ours, not upstream): `app/lib/.server/net/ssrf.ts` (+ spec), `app/lib/.server/http.ts` `denyUnlessVerified` helper, size caps in `app/lib/.server/share/publish.ts` + `seed-store.ts`, `spec/spend-holes.md`.

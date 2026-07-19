@@ -1,8 +1,15 @@
 import { json } from '@remix-run/cloudflare';
 import { getApiKeysFromCookie } from '~/lib/api/cookies';
 import { withSecurity } from '~/lib/security';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 async function netlifyUserLoader({ request, context }: { request: Request; context: any }) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     // Get API keys from cookies (server-side only)
     const cookieHeader = request.headers.get('Cookie');
@@ -67,6 +74,12 @@ export const loader = withSecurity(netlifyUserLoader, {
 });
 
 async function netlifyUserAction({ request, context }: { request: Request; context: any }) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     const formData = await request.formData();
     const action = formData.get('action');

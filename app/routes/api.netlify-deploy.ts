@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import type { NetlifySiteInfo } from '~/types/netlify';
 import { deployFileToBytes, type DeployFile } from '~/lib/binary/binary-files';
 import { brand } from '~/config/brand';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 interface DeployRequestBody {
   siteId?: string;
@@ -29,7 +30,13 @@ async function readNetlifyError(response: Response) {
   }
 }
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     const { siteId, files, token, chatId } = (await request.json()) as DeployRequestBody & { token: string };
 

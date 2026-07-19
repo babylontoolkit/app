@@ -1,8 +1,15 @@
 import { json } from '@remix-run/cloudflare';
 import { getApiKeysFromCookie } from '~/lib/api/cookies';
 import { withSecurity } from '~/lib/security';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 async function githubUserLoader({ request, context }: { request: Request; context: any }) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     // Get API keys from cookies (server-side only)
     const cookieHeader = request.headers.get('Cookie');
@@ -71,6 +78,12 @@ export const loader = withSecurity(githubUserLoader, {
 });
 
 async function githubUserAction({ request, context }: { request: Request; context: any }) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     let action: string | null = null;
     let repoFullName: string | null = null;
@@ -196,10 +209,19 @@ async function githubUserAction({ request, context }: { request: Request; contex
     }
 
     if (action === 'get_token') {
-      // Return the GitHub token for git authentication
-      return json({
-        token: githubToken,
-      });
+      /*
+       * Return ONLY the caller's own cookie-supplied token — NEVER the platform env fallback.
+       * Emitting the server's `GITHUB_TOKEN` here was the same class of leak as the retired
+       * `/api/export-api-keys` (a token that works off-platform forever). The server env is not
+       * consulted, not even as a fallback (SPEC §5).
+       */
+      const cookieToken = apiKeys.GITHUB_API_KEY || apiKeys.VITE_GITHUB_ACCESS_TOKEN || null;
+
+      if (!cookieToken) {
+        return json({ error: 'No GitHub token on this session' }, { status: 404 });
+      }
+
+      return json({ token: cookieToken });
     }
 
     if (action === 'search_repos') {

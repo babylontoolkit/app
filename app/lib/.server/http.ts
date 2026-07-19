@@ -11,6 +11,7 @@
  */
 import { json } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
+import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 
 const logger = createScopedLogger('http');
 
@@ -29,6 +30,8 @@ const SAFE_ERRORS = new Set([
   'NotConfiguredError',
   'DuplicateGrantError',
   'DuplicatePaymentError',
+  'BuildTooLargeError',
+  'SeedTooLargeError',
 ]);
 
 export function errorResponse(error: unknown): Response {
@@ -56,6 +59,27 @@ export function errorResponse(error: unknown): Response {
 export async function handle<T>(fn: () => Promise<T>): Promise<T | Response> {
   try {
     return await fn();
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+/**
+ * Auth gate for inherited routes that reach OUT on the platform's behalf (git/GitHub/GitLab/Netlify/
+ * Vercel/Supabase passthroughs and deploys). Returns a 401/403 `Response` when the caller is not a
+ * verified user, or `null` to proceed.
+ *
+ * These routes were anonymous, and several fall back to a PLATFORM provider token when the caller
+ * sends none — so an anonymous request used our token, our quota, and our bandwidth with no way to
+ * attribute the spend (SPEC §4.5.4, §5). A verified session is the floor for any outbound call. Use:
+ *
+ *   const denied = await denyUnlessVerified(request, context);
+ *   if (denied) return denied;
+ */
+export async function denyUnlessVerified(request: Request, context: unknown): Promise<Response | null> {
+  try {
+    await requireVerifiedUser(request, context);
+    return null;
   } catch (error) {
     return errorResponse(error);
   }

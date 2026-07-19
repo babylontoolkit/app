@@ -56,9 +56,31 @@ export function seedKey(projectId: string): string {
   return `seeds/${projectId}.json`;
 }
 
+/**
+ * Cap on the serialized seed (SPEC §5). The seed is client-supplied bytes we write to object storage,
+ * so an uncapped one is unbounded S3 + egress on the platform's bill for any verified user. 75MB of
+ * serialized JSON comfortably fits a real game (source + assets, binaries base64'd) with headroom.
+ */
+export const MAX_SEED_BYTES = 75 * 1024 * 1024;
+
+export class SeedTooLargeError extends Error {
+  readonly statusCode = 413;
+  readonly isRetryable = false;
+
+  constructor() {
+    super('This project is too large to store as a remix seed.');
+    this.name = 'SeedTooLargeError';
+  }
+}
+
 /** Store the source a remix will be cloned from. Overwrites any previous seed for this project. */
 export async function putRemixSeed(projectId: string, files: SerializedFileMap, context?: unknown): Promise<void> {
   const bytes = new TextEncoder().encode(JSON.stringify(files));
+
+  if (bytes.byteLength > MAX_SEED_BYTES) {
+    throw new SeedTooLargeError();
+  }
+
   await getObjectStore(context).put(seedKey(projectId), bytes, 'application/json');
 }
 

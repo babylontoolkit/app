@@ -30,6 +30,13 @@ import type { SerializedFileMap } from '~/lib/binary/binary-files';
 const logger = createScopedLogger('share.publish.route');
 
 /**
+ * Ceiling on the whole publish body (dist + source). The two are capped individually downstream
+ * (`MAX_BUILD_BYTES`, `MAX_SEED_BYTES`); this is a cheap header-level reject so an obviously oversized
+ * request never gets parsed into memory. base64 inflates bytes ~1.33×, hence the generous headroom.
+ */
+const MAX_PUBLISH_BODY_BYTES = 400 * 1024 * 1024;
+
+/**
  * Store the source a remix will be cloned from (§4.8).
  *
  * Never throws: publishing succeeded before this ran, and the user is owed their share link whatever
@@ -88,6 +95,16 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
     if (request.method !== 'POST') {
       return json({ error: true, message: 'Method not allowed.' }, { status: 405 });
+    }
+
+    /*
+     * Cheap early reject: the body carries dist + source, each capped downstream (`publishBuild`,
+     * `putRemixSeed`). A declared length past their combined ceiling is refused before we parse it.
+     */
+    const declaredLength = Number(request.headers.get('content-length') || '0');
+
+    if (declaredLength > MAX_PUBLISH_BODY_BYTES) {
+      return json({ error: true, message: 'That build is too large to publish.' }, { status: 413 });
     }
 
     const body = await request.json<PublishBody>();

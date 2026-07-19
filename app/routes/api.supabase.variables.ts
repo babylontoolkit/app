@@ -1,6 +1,13 @@
 import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     // Add proper type assertion for the request body
     const body = (await request.json()) as { projectId?: string; token?: string };

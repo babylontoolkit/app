@@ -1,0 +1,108 @@
+/**
+ * Every route that reaches OUT on the platform's behalf must refuse an unauthenticated caller BEFORE
+ * it spends anything (SPEC §4.5.4, §5).
+ *
+ * These are inherited bolt.diy plumbing routes — the git CORS proxy, the GitHub/GitLab/Netlify/Vercel/
+ * Supabase passthroughs, and the deploy endpoints. They shipped anonymous, and several fall back to a
+ * PLATFORM provider token when the caller sends none, so an anonymous request used our token, our
+ * quota, and our bandwidth with no way to attribute the spend. The wall is a `denyUnlessVerified` guard
+ * at the top of each handler.
+ *
+ * The test forces the auth layer to "not signed in" and asserts each route answers 401 and NEVER calls
+ * `fetch`. If a guard regresses, nothing throws — the route quietly starts spending again — which is
+ * exactly the failure this pins. `fetch` is stubbed to throw so a reached outbound is a hard failure,
+ * not a silent network call in CI.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('~/lib/.server/supabase/auth', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    requireUser: async () => {
+      throw new (actual.UnauthorizedError as new () => Error)();
+    },
+    requireVerifiedUser: async () => {
+      throw new (actual.UnauthorizedError as new () => Error)();
+    },
+  };
+});
+
+import { action as gitProxyAction, loader as gitProxyLoader } from '~/routes/api.git-proxy.$';
+import { loader as githubUserLoader, action as githubUserAction } from '~/routes/api.github-user';
+import { loader as githubStatsLoader } from '~/routes/api.github-stats';
+import { loader as githubBranchesLoader, action as githubBranchesAction } from '~/routes/api.github-branches';
+import { action as gitlabBranchesAction } from '~/routes/api.gitlab-branches';
+import { action as gitlabProjectsAction } from '~/routes/api.gitlab-projects';
+import { loader as netlifyUserLoader, action as netlifyUserAction } from '~/routes/api.netlify-user';
+import { loader as vercelUserLoader, action as vercelUserAction } from '~/routes/api.vercel-user';
+import { loader as supabaseUserLoader, action as supabaseUserAction } from '~/routes/api.supabase-user';
+import { action as netlifyDeployAction } from '~/routes/api.netlify-deploy';
+import { loader as vercelDeployLoader, action as vercelDeployAction } from '~/routes/api.vercel-deploy';
+import { action as supabaseQueryAction } from '~/routes/api.supabase.query';
+import { action as supabaseVariablesAction } from '~/routes/api.supabase.variables';
+import { action as supabaseAction } from '~/routes/api.supabase';
+
+let fetchSpy: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  fetchSpy = vi.fn(() => {
+    throw new Error('fetch must not be reached for an unauthenticated caller');
+  });
+  vi.stubGlobal('fetch', fetchSpy);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+/** A minimal RouteArgs with a POST (default) or GET request and the given path params. */
+const args = (method: string, params: Record<string, string> = {}, url = 'http://localhost/api/x') =>
+  ({
+    request: new Request(url, {
+      method,
+      ...(method === 'POST' ? { body: '{}', headers: { 'Content-Type': 'application/json' } } : {}),
+    }),
+    context: {},
+    params,
+  }) as any;
+
+type Handler = (a: any) => Promise<Response>;
+
+const cases: Array<{ name: string; call: () => Promise<Response> }> = [
+  { name: 'git-proxy loader (GET)', call: () => (gitProxyLoader as Handler)(args('GET', { '*': 'example.com/info' })) },
+  {
+    name: 'git-proxy action (POST)',
+    call: () => (gitProxyAction as Handler)(args('POST', { '*': 'example.com/git' })),
+  },
+  { name: 'github-user loader', call: () => (githubUserLoader as Handler)(args('GET')) },
+  { name: 'github-user action', call: () => (githubUserAction as Handler)(args('POST')) },
+  { name: 'github-stats loader', call: () => (githubStatsLoader as Handler)(args('GET')) },
+  { name: 'github-branches loader', call: () => (githubBranchesLoader as Handler)(args('GET')) },
+  { name: 'github-branches action', call: () => (githubBranchesAction as Handler)(args('POST')) },
+  { name: 'gitlab-branches action', call: () => (gitlabBranchesAction as Handler)(args('POST')) },
+  { name: 'gitlab-projects action', call: () => (gitlabProjectsAction as Handler)(args('POST')) },
+  { name: 'netlify-user loader', call: () => (netlifyUserLoader as Handler)(args('GET')) },
+  { name: 'netlify-user action', call: () => (netlifyUserAction as Handler)(args('POST')) },
+  { name: 'vercel-user loader', call: () => (vercelUserLoader as Handler)(args('GET')) },
+  { name: 'vercel-user action', call: () => (vercelUserAction as Handler)(args('POST')) },
+  { name: 'supabase-user loader', call: () => (supabaseUserLoader as Handler)(args('GET')) },
+  { name: 'supabase-user action', call: () => (supabaseUserAction as Handler)(args('POST')) },
+  { name: 'netlify-deploy action', call: () => (netlifyDeployAction as Handler)(args('POST')) },
+  { name: 'vercel-deploy loader', call: () => (vercelDeployLoader as Handler)(args('GET')) },
+  { name: 'vercel-deploy action', call: () => (vercelDeployAction as Handler)(args('POST')) },
+  { name: 'supabase.query action', call: () => (supabaseQueryAction as Handler)(args('POST')) },
+  { name: 'supabase.variables action', call: () => (supabaseVariablesAction as Handler)(args('POST')) },
+  { name: 'supabase action', call: () => (supabaseAction as Handler)(args('POST')) },
+];
+
+describe('outbound routes refuse an unauthenticated caller before spending', () => {
+  for (const { name, call } of cases) {
+    it(`${name} → 401, no outbound fetch`, async () => {
+      const response = await call();
+
+      expect(response.status).toBe(401);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  }
+});

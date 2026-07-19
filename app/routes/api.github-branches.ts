@@ -1,6 +1,7 @@
 import { json } from '@remix-run/cloudflare';
 import { getApiKeysFromCookie } from '~/lib/api/cookies';
 import { withSecurity } from '~/lib/security';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 interface GitHubBranch {
   name: string;
@@ -19,6 +20,12 @@ interface BranchInfo {
 }
 
 async function githubBranchesLoader({ request, context }: { request: Request; context: any }) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   try {
     let owner: string;
     let repo: string;
