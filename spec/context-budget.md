@@ -369,6 +369,35 @@ Note the standing lesson from §"The same disease, on EDIT turns": **instruction
 prompt said "never load a skill on a project-creation turn" and the model ignored it four times. Where a
 rule can be enforced by removing the capability, enforce it there and keep the prose as explanation.
 
+### 9. Plan mode is a volatile-tail note, NEVER a prompt swap (§4.2.9, 2026-07-18)
+
+The chat's Build/Plan toggle (wire value: upstream's `chatMode: 'discuss'`) is honored as one small
+instruction (`agent/discuss-note.ts`, pure + tested) appended **after the LAST cache breakpoint** (the
+file context). Both halves of that placement are load-bearing:
+
+- **Never upstream's way** (a swapped system prompt): a different first block is a different prefix, so
+  every Build↔Plan toggle would re-WRITE the whole cached base prompt at 2×.
+- **Never one line earlier:** a breakpoint caches the prefix up to itself, so the note before the file
+  block would re-write the ~110k-token file entry on every toggle. Past the last breakpoint, toggling
+  invalidates NOTHING and costs a few dozen uncached tokens on plan turns only.
+
+The saving is on the OUTPUT side (5× input, serial decode): a plan answer is a few hundred prose tokens
+instead of an unwanted artifact rewrite. And per the "instructions are not a control" lesson above, the
+prose is backed by capability removal: the tool policy strips media (a debit) and MCP (sandbox
+mutation) on plan turns (`toolset: 'skills-only'`), and the route writes the `NO_REPLAY` message
+annotation BEFORE the text streams so the client's render-only parser handles the whole message — a
+disobedient `<boltAction>` displays and cannot execute. The creation turn ignores the toggle entirely.
+
+### 10. The context bill is USER-VISIBLE: `/context` + the health dot (§4.5.6, 2026-07-18)
+
+The proxy measures the re-sent history AS IT WENT ON THE WIRE (`historySize` in `llm/history.ts`,
+post-compaction) and annotates it onto every generation (`agentMeta.history`), alongside the existing
+`usage`/`credits` annotations. The client (`stores/context-stats.ts`) folds them into a green/amber/red
+dot + a `/context` breakdown panel. Red is keyed to `HISTORY_WINDOW_TURNS` — the point where the window
+silently drops the oldest turns, i.e. where `/clear` (client-intercepted, zero credits — "New chat,
+same game") costs nothing that was going to be kept. The client must NEVER estimate history from its
+own messages: it holds the un-compacted copy, which is exactly the number that does not matter.
+
 ---
 
 ## Wasted tokens and dead time — the taxonomy, and how to see it

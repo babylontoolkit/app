@@ -21,7 +21,10 @@ import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
 import { useSettings } from '~/lib/hooks/useSettings';
 import type { ProviderInfo } from '~/types/model';
-import { useSearchParams } from '@remix-run/react';
+import { useNavigate, useSearchParams } from '@remix-run/react';
+import { parseClientCommand } from '~/lib/chat/client-commands';
+import { contextPanelOpen, resetContextStats, updateContextStats } from '~/lib/stores/context-stats';
+import { setPendingOpenProject } from '~/lib/persistence/pending-remix';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
 import { waitForMountVisible } from '~/lib/registry/mount';
@@ -115,6 +118,7 @@ export const ChatImpl = memo(
     const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
     const [imageDataList, setImageDataList] = useState<string[]>([]);
     const [searchParams, setSearchParams] = useSearchParams();
+    const navigate = useNavigate();
     const [fakeLoading, setFakeLoading] = useState(false);
     const files = useStore(workbenchStore.files);
 
@@ -428,6 +432,12 @@ export const ChatImpl = memo(
           }
         }
 
+        /*
+         * Feed the `/context` report + health dot (§4.5.6) from this turn's annotations — the wire
+         * truth for history size and token counts, never a client-side estimate.
+         */
+        updateContextStats(message.annotations as unknown[] | undefined);
+
         if (usage) {
           console.log('Token usage:', usage);
           logStore.logProvider('Chat response completed', {
@@ -455,6 +465,25 @@ export const ChatImpl = memo(
      * servers run only in the user's sandbox — never on platform infrastructure (§5) — and their results
      * are untrusted input. `handledToolCalls` dedupes by tool-call id so a re-render never double-runs one.
      */
+    /*
+     * Seed the context health dot on load (§4.5.6): a reopened chat's last assistant message carries
+     * the same annotations a live turn streams, so the dot is honest before the first new generation.
+     * Reset FIRST — "New chat, same game" mounts with no messages, and stats inherited from the
+     * previous conversation would report the context the user just cleared.
+     */
+    useEffect(() => {
+      resetContextStats();
+
+      for (let i = initialMessages.length - 1; i >= 0; i--) {
+        const message = initialMessages[i];
+
+        if (message.role === 'assistant' && message.annotations?.length) {
+          updateContextStats(message.annotations as unknown[]);
+          break;
+        }
+      }
+    }, [initialMessages]);
+
     const handledToolCalls = useRef<Set<string>>(new Set());
     useEffect(() => {
       if (!chatData) {
@@ -1071,6 +1100,40 @@ export const ChatImpl = memo(
 
       if (isLoading) {
         abort();
+        return;
+      }
+
+      /*
+       * `/clear` — the Claude-Code-style spelling of "New chat, same game" (§4.5.6). Intercepted HERE,
+       * before anything is posted: it costs zero credits and reuses the exact mount-baton path the
+       * header's New chat button uses, so it cannot drift from the flow that is exercised constantly.
+       * With no project yet there is nothing to keep — that case is the sidebar's "Start new chat",
+       * a plain full-page load of `/` (an SPA navigate would inherit the old chat's identity).
+       */
+      const clientCommand = parseClientCommand(messageContent);
+
+      if (clientCommand?.kind === 'clear') {
+        setInput('');
+        resetContextStats();
+
+        if (activeProjectId) {
+          setPendingOpenProject(activeProjectId, 'fresh');
+          navigate('/');
+        } else {
+          window.location.href = '/';
+        }
+
+        return;
+      }
+
+      /*
+       * `/context` — the Claude-Code-style context report (§4.5.6). Pure client toggle: the panel
+       * renders the stats the server annotated onto the last generation. Nothing is posted.
+       */
+      if (clientCommand?.kind === 'context') {
+        setInput('');
+        contextPanelOpen.set(true);
+
         return;
       }
 

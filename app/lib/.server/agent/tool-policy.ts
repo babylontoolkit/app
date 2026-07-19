@@ -39,16 +39,25 @@ export interface ToolPolicyInput {
 
   /** An explicit `/slash` skill invocation — the skill is in the prefix, same as preloaded. */
   isSlash: boolean;
+
+  /**
+   * Discussion mode is active this turn (§4.2.9 — already creation-guarded by the caller: it is
+   * `discussModeNote(...) !== null`, so it can never be true on a creation turn). A discuss turn is
+   * READ-ONLY by guarantee, not just by instruction: media tools DEBIT credits, and MCP tools can
+   * mutate the sandbox (a `write_file` MCP tool is ordinary, not exotic) — neither may be offered.
+   */
+  isDiscussTurn?: boolean;
 }
 
 export interface ToolPolicy {
   allowTools: boolean;
 
   /**
-   * `media-only` strips skill + MCP tools from the offered set. Creation only: the brief's design
-   * phase may buy art, and nothing else may burn a round.
+   * `media-only` strips skill + MCP tools from the offered set (creation only: the brief's design
+   * phase may buy art, and nothing else may burn a round). `skills-only` strips media + MCP
+   * (discussion turns: skill loads are read-only grounding; nothing offered may spend or mutate).
    */
-  toolset: 'all' | 'media-only';
+  toolset: 'all' | 'media-only' | 'skills-only';
 
   /** Passed straight to `streamText` — counts EVERY round trip, so the answer step must fit inside. */
   maxSteps: number;
@@ -59,6 +68,18 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
     return input.hasMediaTools
       ? { allowTools: true, toolset: 'media-only', maxSteps: CREATION_MEDIA_STEPS }
       : { allowTools: false, toolset: 'all', maxSteps: 1 };
+  }
+
+  /*
+   * Discussion turns (§4.2.9): the loop opens only for skill loading, and MCP tools never force it on
+   * (they are not offered, so a forced-open loop would buy rounds nothing can use). The read-only
+   * guarantee lives in the TOOLSET — `maxSteps: 1` alone would still offer spending tools on the one
+   * step it has.
+   */
+  if (input.isDiscussTurn) {
+    return input.preloadedCount === 0 && !input.isSlash
+      ? { allowTools: true, toolset: 'skills-only', maxSteps: MAX_TOOL_ROUNDS + 1 }
+      : { allowTools: false, toolset: 'skills-only', maxSteps: 1 };
   }
 
   const allowTools = input.hasMcpTools || (input.preloadedCount === 0 && !input.isSlash);

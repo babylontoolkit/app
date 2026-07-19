@@ -74,3 +74,40 @@ describe('toolPolicyForTurn — ordinary turns (the pre-existing behaviour, now 
     expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMediaTools: true }).allowTools).toBe(false);
   });
 });
+
+describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET, never just by instruction)', () => {
+  it('offers skills only — media (a debit) and MCP (can mutate the sandbox) are never offered', () => {
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true })).toEqual({
+      allowTools: true,
+      toolset: 'skills-only',
+      maxSteps: MAX_TOOL_ROUNDS + 1,
+    });
+  });
+
+  it('closes the loop when skills are preloaded — the toolset stays skills-only regardless', () => {
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, preloadedCount: 2 })).toEqual({
+      allowTools: false,
+      toolset: 'skills-only',
+      maxSteps: 1,
+    });
+  });
+
+  it('MCP tools do NOT force the loop open on a discuss turn — they are not offered, so forced rounds would be unusable', () => {
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, preloadedCount: 2, hasMcpTools: true }).allowTools).toBe(
+      false,
+    );
+  });
+
+  it('media tools never change a discuss turn', () => {
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, hasMediaTools: true }).toolset).toBe('skills-only');
+  });
+
+  /*
+   * The caller guarantees isDiscussTurn is creation-guarded (`discussModeNote` returns null on a
+   * creation turn) — but if both flags ever arrive, creation MUST win: the user asked for a game.
+   */
+  it('creation outranks discuss if both flags are ever set', () => {
+    const policy = toolPolicyForTurn({ ...base, isCreationTurn: true, isDiscussTurn: true, hasMediaTools: true });
+    expect(policy.toolset).toBe('media-only');
+  });
+});

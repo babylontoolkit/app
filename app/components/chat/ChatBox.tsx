@@ -11,6 +11,7 @@ import { SendButton } from './SendButton.client';
 import { IconButton } from '~/components/ui/IconButton';
 import { toast } from 'react-toastify';
 import { SpeechRecognitionButton } from '~/components/chat/SpeechRecognition';
+import { ContextIndicator } from './ContextIndicator';
 import { SupabaseConnection } from './SupabaseConnection';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import styles from './BaseChat.module.scss';
@@ -284,7 +285,9 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             maxHeight: props.TEXTAREA_MAX_HEIGHT,
           }}
           placeholder={
-            props.chatMode === 'build' ? `How can ${brand.company} help you today?` : 'What would you like to discuss?'
+            props.chatMode === 'discuss'
+              ? 'Plan mode — discuss ideas and next steps; nothing in your project changes'
+              : `How can ${brand.company} help you today?`
           }
           translate="no"
         />
@@ -349,23 +352,33 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
               onStop={props.stopListening}
               disabled={props.isStreaming}
             />
-            {props.chatStarted && (
-              <IconButton
-                title="Discuss"
-                className={classNames(
-                  'transition-all flex items-center gap-1 px-1.5',
-                  props.chatMode === 'discuss'
-                    ? '!bg-bolt-elements-item-backgroundAccent !text-bolt-elements-item-contentAccent'
-                    : 'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault',
-                )}
-                onClick={() => {
-                  props.setChatMode?.(props.chatMode === 'discuss' ? 'build' : 'discuss');
-                }}
-              >
-                <div className={`i-ph:chats text-xl`} />
-                {props.chatMode === 'discuss' ? <span>Discuss</span> : <span />}
-              </IconButton>
-            )}
+            {/*
+             * Build / Plan mode toggle (§4.2.9 — internally `chatMode: 'build' | 'discuss'`; the wire
+             * value stays `discuss` so the server contract never moved, only the label). ONE always-
+             * visible, always-labeled button showing the CURRENT mode; click to switch. The inherited
+             * version was an unlabeled icon that only appeared mid-chat and only grew its label once
+             * active — nobody found it.
+             */}
+            <IconButton
+              title={
+                props.chatMode === 'discuss'
+                  ? 'Plan mode — nothing in your project changes. Click to switch to Build.'
+                  : 'Build mode — the agent writes and edits your project files. Click to switch to Plan.'
+              }
+              className={classNames(
+                'transition-all flex items-center gap-1 px-1.5',
+                props.chatMode === 'discuss'
+                  ? '!bg-bolt-elements-item-backgroundAccent !text-bolt-elements-item-contentAccent'
+                  : 'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault',
+              )}
+              onClick={() => {
+                props.setChatMode?.(props.chatMode === 'discuss' ? 'build' : 'discuss');
+              }}
+            >
+              <div className={props.chatMode === 'discuss' ? 'i-ph:chats text-xl' : 'i-ph:hammer text-xl'} />
+              <span>{props.chatMode === 'discuss' ? 'Plan' : 'Build'}</span>
+            </IconButton>
+            {props.chatStarted && <ContextIndicator />}
             {/*
              * The PREMIUM model toggle (§4.6.1) — a credits-mode control, deliberately NOT behind
              * `byokUnlocked`. It self-gates: it renders only for credits users and only unlocks once the

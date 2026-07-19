@@ -121,8 +121,13 @@ const extractTextContent = (message: Message) =>
  * An annotation rather than a field because `Message` is the AI SDK's type and annotations are its
  * sanctioned extension point; it also survives the IndexedDB round-trip with the message, so a reload
  * cannot lose the "do not replay this" and start writing stale files.
+ *
+ * The constant lives in `~/types/message-marks` (re-exported here for existing importers) because the
+ * SERVER also writes it now — a Discussion-mode generation (§4.2.9) is annotated before its text
+ * streams — and a server route must not import this module (it drags the client stores with it).
  */
-export const NO_REPLAY = 'no-replay';
+export { NO_REPLAY } from '~/types/message-marks';
+import { NO_REPLAY } from '~/types/message-marks';
 
 export function isTranscriptMessage(message: Message): boolean {
   return Array.isArray(message.annotations) && message.annotations.includes(NO_REPLAY);

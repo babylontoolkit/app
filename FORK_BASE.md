@@ -223,6 +223,17 @@ Not touched (deliberately): HTTP `User-Agent: 'bolt.diy-app'` identifiers (funct
 | `app/components/@settings/tabs/features/FeaturesTab.tsx`, connection panels (`GitHubConnection`, `GitLabConnection`, `VercelTab`+`Connection`, `NetlifyTab`+`Connection`, `SupabaseTab`, shared `ConnectionForm`) | §2.3 dead-knob hiding (2026-07-18): `VITE_*` token hints + dev token-debug blocks removed from the web UX; Features tab reduced to Event Logging (Main-Branch-Updates / Auto-Template / Context-Optimization / Prompt-Library toggles hidden — they only fed the fail-closed `/api/chat` path). Hide-don't-delete; env auto-connect fallbacks kept. |
 | `app/lib/modules/llm/providers/{kie,kie-wire}.ts` | `kieEnvModel` — the env-selected model is injected into the provider's model LIST via upstream's own `getDynamicModels` seam, so a priced-but-unlisted `KIE_DEFAULT_MODEL` cannot make upstream's `stream-text.ts` silently fall back to `modelsList[0]` (run one model, bill another). Two readers on purpose: `kie-wire.ts` is client-importable and must not touch `.server/env`. |
 
+## Upstream files touched — 2026-07-18 (night: `/clear`, `/context`, Plan mode — SPEC §4.2.9, §4.5.6)
+
+| File | Change |
+|---|---|
+| `app/components/chat/Chat.client.tsx` | Additive: client-command intercept in `sendMessage` (`/clear` → the New-chat mount-baton path, `/context` → the report panel; net-new `lib/chat/client-commands.ts` decides, EXACT-match only); feeds `updateContextStats` from the finished message's annotations; seeds/resets context stats from `initialMessages` on load. |
+| `app/components/chat/ChatBox.tsx` | Upstream's Discuss `IconButton` (mid-chat-only, unlabeled until active) → ONE always-visible, always-labeled **Build/Plan** toggle showing the current mode; Plan-mode placeholder copy; renders net-new `<ContextIndicator />` (health dot + `/context` panel — reads `stores/context-stats.ts` directly, no prop threading through `BaseChat`). |
+| `app/routes/api.agent.ts` | Additive: accepts `chatMode` from the body (was sent by upstream's client, dropped by us); on a Plan generation writes the `NO_REPLAY` message annotation BEFORE streaming text (the render-only hard wall); emits `agentMeta.history` (the post-compaction re-sent history, from `historySize`). |
+| `app/lib/.server/llm/history.ts` | Additive: `historySize()` export — the wire-truth history measurement behind `/context`. |
+| `app/lib/hooks/useMessageParser.ts` | `NO_REPLAY` constant relocated to net-new `~/types/message-marks.ts` (re-exported here for existing importers) — the server route must write the mark and cannot import this module (it drags the client stores into the server bundle). |
+| `app/lib/.server/agent/proxy.ts` | Additive (listed hotspot): `chatMode` on `AgentRequest`; `discussModeNote` (net-new `discuss-note.ts`) appended AFTER the last cache breakpoint (never a prompt swap — see `spec/context-budget.md` lever 9); `isDiscussTurn` → `toolset: 'skills-only'` in `tool-policy.ts`; `historyStats` + `discussMode` on the generation handle. |
+
 ## Other upstream files touched
 
 | File | Change |

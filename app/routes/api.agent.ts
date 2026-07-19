@@ -17,6 +17,7 @@ import { validateAttachments } from '~/lib/.server/agent/attachments';
 import { claimProject } from '~/lib/.server/agent/inflight';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
+import { NO_REPLAY } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
@@ -59,6 +60,12 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
      * never authorization.
      */
     premium?: boolean;
+
+    /**
+     * The chat's Discuss toggle (§4.2.9): `'discuss'` asks for a prose-only planning turn — no
+     * artifacts, no file writes. Honored via a volatile-tail note, ignored on the creation turn.
+     */
+    chatMode?: 'discuss' | 'build';
 
     /**
      * A connected Game Backend (§4.15). The client sends only the PUBLIC facts — connected? which
@@ -147,6 +154,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       repairAttempt: body.repairAttempt,
       model: body.model,
       premium: body.premium,
+      chatMode: body.chatMode,
 
       /*
        * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
@@ -264,6 +272,17 @@ async function streamGeneration(
     });
   });
 
+  /*
+   * Discussion mode's HARD WALL (§4.2.9): mark the message render-only BEFORE any text streams. The
+   * client routes NO_REPLAY messages to the transcript parser (renders artifacts, never executes
+   * them), so even a disobedient `<boltAction type="file">` displays as a proposal and cannot touch
+   * the project. Ordering is the wall — annotate after the text and the parser has already run the
+   * actions. The mark rides into IndexedDB with the message, so a reload cannot replay it either.
+   */
+  if (generation.discussMode) {
+    stream.writeMessageAnnotation(NO_REPLAY);
+  }
+
   const shellFilter = new ShellActionStreamFilter();
 
   for await (const chunk of generation.textStream) {
@@ -322,6 +341,12 @@ async function streamGeneration(
       model: generation.model,
       skillsLoaded: [...generation.toolContext.loaded],
       blocksLoaded: generation.blocksLoaded,
+
+      /*
+       * The re-sent history as it went on the wire (post-compaction) — the client's `/context`
+       * report and health dot read this, never a client-side estimate (§4.5.6).
+       */
+      history: generation.historyStats,
     },
   });
 

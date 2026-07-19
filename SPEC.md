@@ -268,6 +268,55 @@ This is a **money path**, in the same sense the ledger is. A regression here thr
 
 **Standing rule for every future ingest path** (folder import, git import, remix, asset add, restore): new files must be classified before they can reach the model. If a path adds files to a project, it is responsible for deciding whether they are opaque — the default for anything generated, vendored, or minified is **opaque**.
 
+### 4.2.9 Plan Mode — the Build/Plan toggle, honored the cache-safe way (BUILT 2026-07-18)
+
+> **Naming:** the UI is ONE permanent, always-labeled toggle button in the chat box showing the
+> CURRENT mode — **Build** (hammer) or **Plan** (chats, accent-highlighted) — click to switch (the
+> inherited version was an unlabeled icon that only appeared mid-chat and only grew its label once
+> active, and nobody found it). The WIRE value stays upstream's
+> `chatMode: 'discuss'` and internal identifiers say "discuss" — the server contract never moved,
+> only the label. "Discussion mode" below ≡ Plan mode.
+
+The chat's inherited Discuss toggle was INERT on our path (it only fed the fail-closed `/api/chat` +
+`stream-text.ts`, where upstream implements it as a full system-prompt swap). It is now honored by the
+agent proxy — but never the upstream way: **a swapped system prompt is a different cached prefix**, so
+each Discuss↔Build toggle would re-WRITE the whole base-prompt cache entry at 2× (§4.2.8). Instead
+`chatMode: 'discuss'` appends one small instruction (`agent/discuss-note.ts`, pure + tested) to the
+**uncached volatile tail, AFTER the file-context breakpoint** — a breakpoint caches the prefix up to
+itself, so a note one line earlier would re-write the ~110k-token file entry on every toggle; past the
+last breakpoint it invalidates nothing and costs a few dozen uncached input tokens on discuss turns
+only.
+
+What it buys: prose-only answers — no `<boltArtifact>`/`<boltAction>`, no file writes, no shell, no
+media — and therefore the real saving: OUTPUT (5× input, serial decode, all of the wall clock) is a
+few hundred prose tokens instead of an unwanted artifact rewrite. The model keeps the full file
+context (a planning answer about code it cannot see is the §4.2.8 blind-model failure), and the note
+tells it to end with proposed steps + "switch back to Build when ready". **Ignored on the creation
+turn** (`isCreationTurn`), like the premium toggle — the user asked for a game; a discuss note there
+would buy an essay while the full creation context was assembled and billed. Billing is otherwise
+identical to Build (same gate, same settlement).
+
+**Discuss is read-only by GUARANTEE, not just by instruction (the hard wall, same session):**
+
+- **A discuss generation's message is marked `NO_REPLAY` by the SERVER, before its text streams**
+  (`api.agent.ts`; the constant moved to `~/types/message-marks` so both sides import one string —
+  the route must not import `useMessageParser`, which drags the client stores into the server
+  bundle). The client's existing §4.5.4b transcript parser then renders any artifact as a proposal
+  and never calls `runAction` — a disobedient `<boltAction type="file">` displays but cannot touch
+  the filesystem. **The ordering IS the wall:** annotate after the text and the parser has already
+  run the actions. The mark rides into IndexedDB with the message, so a reload cannot replay a
+  discuss turn either.
+- **The tool policy strips everything that spends or mutates** (`toolPolicyForTurn` gained
+  `isDiscussTurn` → `toolset: 'skills-only'`, tested): media tools DEBIT credits and MCP tools can
+  mutate the sandbox (a `write_file` MCP tool is ordinary, not exotic), so neither is offered; skill
+  loads (read-only grounding) remain. MCP tools do NOT force the loop open on a discuss turn — they
+  are not offered, so forced rounds would be unusable. The read-only property lives in the TOOLSET,
+  never in `maxSteps` — one step can still spend if spending tools are offered. Creation outranks
+  discuss if both flags ever arrive (pinned).
+- The proxy exposes `discussMode` on the generation handle (decided ONCE — the note, the tool
+  policy, and the route's annotation all derive from the same `discussModeNote` call, which owns the
+  creation-turn guard).
+
 ### 4.2a Anthropic Model Configuration & Provider Hardening
 
 **Model is a single constant, never UI.** Credits-mode generations always use upstream's **`DEFAULT_MODEL`** in `app/utils/constants.ts` — currently **`claude-opus-4-8`**, the strongest coding model, chosen because this is a game-coding product (it superseded `claude-sonnet-5`; upstream's original value, `claude-3-5-sonnet-latest`, was retired AND matched no `staticModels` entry). Swapping the platform model = editing that one constant. Deliberately NOT an env var: the model must always be a valid `staticModels` entry, and a typo'd env value would 404 at first generation.
@@ -604,6 +653,28 @@ showing through, where the chat *was* the project and 1:1 was a tautology. Two t
 **Nothing is lost, because the conversation was never the grounding.** Every turn the agent is sent the
 project's files fresh from the WebContainer FS, the project's `CLAUDE.md` as its own instructions block,
 and the skills index. A new chat sees the whole game; it just does not see the talking.
+
+**`/clear` is this feature's chat-command spelling (2026-07-18, `app/lib/chat/client-commands.ts`).**
+Typing `/clear` (aliases `/new`, `/newchat`) in the chat box runs the same mount-baton path as the
+header's New chat button — intercepted in the BROWSER before anything is posted, so it costs zero
+credits and never reaches the model. The parser is pure + tested and matches the bare command ONLY
+(exact after trim, case-insensitive): `/clear the obstacles` is a message for the agent, and a prefix
+match would silently swallow it. With no project yet it falls back to a full-page load of `/` (the
+sidebar's "Start new chat"), because an SPA navigate without the baton inherits the old chat's identity.
+
+**`/context` (alias `/usage`) + the context health dot (2026-07-18)** answer "when should I clear?".
+The proxy measures the re-sent conversation AS IT WENT ON THE WIRE — post-compaction, post-window
+(`historySize` in `llm/history.ts`, threaded through the generation handle into the `agentMeta`
+annotation) — and the client (`app/lib/stores/context-stats.ts`, pure `contextHealth` + tested) folds
+it with the `usage`/`credits` annotations into a green/amber/red dot on the chat box
+(`ContextIndicator.tsx`); `/context` or clicking the dot opens the breakdown (history msgs/tokens vs
+window, cached-read 0.1x, uncached input, cache writes 2x, output, last-turn credits, model). The
+client NEVER estimates history from its own messages — it holds the un-compacted copy, which is
+exactly the number that does not matter. Amber = half the `HISTORY_WINDOW_TURNS` window; red = the
+window is about to start silently dropping the oldest turns, i.e. `/clear` now costs nothing that was
+going to be kept anyway. Stats are seeded on reload from the last assistant message's persisted
+annotations, and RESET before seeding — "New chat, same game" mounts with no messages, and inherited
+stats would report the context the user just cleared.
 
 **Never regress these — each fails silently:**
 

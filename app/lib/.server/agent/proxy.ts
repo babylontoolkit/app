@@ -43,10 +43,11 @@ import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-inst
 import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
-import { compactHistory, historySavings, HISTORY_WINDOW_TURNS } from '~/lib/.server/llm/history';
+import { compactHistory, historySavings, historySize, HISTORY_WINDOW_TURNS } from '~/lib/.server/llm/history';
 import { envNumber } from '~/lib/.server/env';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
 import { buildProjectNotes, type GameBackendState } from './project-notes';
+import { discussModeNote } from './discuss-note';
 import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
 import { sharedFailureRate } from '~/lib/.server/monitoring/failure-rate';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
@@ -173,6 +174,13 @@ export interface AgentRequest {
   premium?: boolean;
 
   /**
+   * The chat's Discuss toggle (§4.2.9). `'discuss'` appends a prose-only instruction to the UNCACHED
+   * volatile tail — never a prompt swap, which would re-write the cached prefix on every toggle.
+   * Ignored on the creation turn (`discussModeNote`).
+   */
+  chatMode?: 'discuss' | 'build';
+
+  /**
    * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
    * RLS-first. Never a credential: only the public project ref and whether RLS is confirmed.
    */
@@ -223,6 +231,21 @@ export interface AgentGeneration {
   promptVersionId: string;
   model: string;
   blocksLoaded: string[];
+
+  /**
+   * The re-sent conversation as it actually went on the wire this turn — post-compaction, post-window
+   * (`llm/history.ts`). Feeds the client's `/context` report and health dot (§4.5.6): the history is
+   * the one UNCACHED, ever-growing input component, so this is the number "should I /clear?" is about.
+   */
+  historyStats: { messages: number; chars: number; maxTurns: number };
+
+  /**
+   * This generation ran in Discussion mode (§4.2.9). The route writes the NO_REPLAY message
+   * annotation BEFORE streaming the text — that ordering is the hard wall: the client parser routes
+   * the message to the render-only transcript parser from the first chunk, so a disobedient
+   * `<boltAction>` can never write a file.
+   */
+  discussMode: boolean;
 
   /** Skills loaded during this generation — mutated by the tool loop as it runs. */
   toolContext: SkillToolContext;
@@ -686,12 +709,19 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * when media tools exist creation gets a MEDIA-ONLY loop with a small step cap — see `tool-policy.ts`
    * for why that cannot re-open the six-round skill-loading pathology.
    */
+  /*
+   * Discussion mode (§4.2.9), decided ONCE — the note, the tool policy, and the route's NO_REPLAY
+   * annotation must all agree, and `discussModeNote` owns the rule (including the creation-turn guard).
+   */
+  const discussNote = discussModeNote({ chatMode: request.chatMode, isCreationTurn });
+
   const toolPolicy = toolPolicyForTurn({
     isCreationTurn,
     hasMcpTools,
     hasMediaTools: Object.keys(mediaTools).length > 0,
     preloadedCount: preloaded.length,
     isSlash: Boolean(slash),
+    isDiscussTurn: discussNote !== null,
   });
   const allowTools = toolPolicy.allowTools;
 
@@ -753,6 +783,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
+   * Discussion mode (§4.2.9) — MUST come after the file-context breakpoint above. A cache breakpoint
+   * covers the whole prefix up to itself, so this note one line earlier would re-write the ~110k-token
+   * file entry at 2x on every Discuss<->Build toggle. Here, past the last breakpoint, toggling it
+   * invalidates nothing. (Decided once, up by the tool policy — this is only the placement.)
+   */
+  if (discussNote) {
+    system.push({ role: 'system', content: discussNote });
+  }
+
+  /*
    * The breakpoint budget, enforced where it is spent rather than asserted in a comment.
    *
    * A fifth breakpoint is HTTP 400 and a dead generation — so dropping the extra is strictly better
@@ -798,7 +838,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const tools = (
     toolPolicy.toolset === 'media-only'
       ? { ...mediaTools, ...createRepairTool() }
-      : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools, ...createRepairTool() }
+      : toolPolicy.toolset === 'skills-only'
+        ? { ...createSkillTools(toolContext), ...createRepairTool() }
+        : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools, ...createRepairTool() }
   ) as SkillTools;
 
   /*
@@ -824,8 +866,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   logger.info(
     `Generation: model=${model} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
-      `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION' : ''} ` +
-      `tools=${allowTools ? (toolPolicy.toolset === 'media-only' ? 'media-only (creation)' : 'on') : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`} ` +
+      `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION' : ''}${discussNote ? ' DISCUSS' : ''} ` +
+      `tools=${allowTools ? (toolPolicy.toolset === 'all' ? 'on' : toolPolicy.toolset) : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`} ` +
       `effort=${effort ?? 'default'}`,
   );
 
@@ -851,6 +893,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const maxTurns = envNumber(request.context, 'HISTORY_WINDOW_TURNS', HISTORY_WINDOW_TURNS);
   const compacted = compactHistory(messages, { maxTurns });
   const saved = historySavings(messages, compacted);
+  const historyStats = { ...historySize(compacted), maxTurns };
 
   if (saved > 0) {
     logger.info(
@@ -1262,6 +1305,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     promptVersionId: promptVersion.id,
     model,
     blocksLoaded: blocks.map((b) => b.id),
+    historyStats,
+    discussMode: discussNote !== null,
     toolContext,
     usage: usagePromise,
     settlement: settlementPromise,

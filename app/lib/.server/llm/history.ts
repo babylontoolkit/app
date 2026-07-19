@@ -215,6 +215,19 @@ function windowHistory(messages: Message[], maxTurns: number): Message[] {
   return [first, ...rest];
 }
 
+/**
+ * What actually went on the wire this turn — the numbers behind the client's `/context` report
+ * (SPEC §4.5.6). Measured AFTER compaction+windowing, so it is the re-sent history exactly, not the
+ * stored conversation. The client must never estimate this from its own messages: it would be
+ * measuring the un-compacted copy, which is precisely the number that does not matter.
+ */
+export function historySize(messages: Message[]): { messages: number; chars: number } {
+  return {
+    messages: messages.length,
+    chars: messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0),
+  };
+}
+
 /** Characters removed. Used to log what compaction actually bought on a given turn. */
 export function historySavings(before: Message[], after: Message[]): number {
   const size = (list: Message[]) =>
