@@ -84,7 +84,7 @@ describe('the instructions block', () => {
    * user". Obeyed here, the agent stalls on turn one — there is no network at generation time.
    */
   it('tells the model to disregard directives aimed at other hosts', () => {
-    expect(built.block).toMatch(/no network access/i);
+    expect(built.block).toMatch(/different tool or host/i);
     expect(built.block).toMatch(/already scaffolded/i);
     expect(built.block).toMatch(/host-setup/i);
   });
