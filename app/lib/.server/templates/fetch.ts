@@ -226,8 +226,10 @@ async function fetchRepoContentsZip(repo: string, sha: string, githubToken?: str
    *
    * A GitHub zipball NEVER contains submodule content — it records only a gitlink. Our
    * starter keeps the Babylon Toolkit React Framework at `src/babylon` this way, so the
-   * mounted project was missing the entire framework and Vite failed with
-   * "Could not resolve ./babylon/custom/loading". WebContainers cannot run `git submodule`,
+   * mounted project was missing the entire framework and Vite failed with an unresolvable
+   * `./babylon/…` import (historically "./babylon/custom/loading"; the chrome now lives at
+   * `src/custom` outside the framework, but every `../babylon/globals` import fails the same
+   * way without the vendored contents). WebContainers cannot run `git submodule`,
    * so the server resolves and inlines the contents here, at the pinned commit.
    */
   const submoduleFiles = await fetchSubmoduleFiles(repo, sha, githubToken);

@@ -86,7 +86,7 @@
 
 ## Project file zones (never-violate)
 
-`src/babylon/classes/**` = read-only demo/source library (copy FROM, never edit). `src/babylon/system/**` = framework internals, read-only. **All project game code — GameModes and Script Components — is authored in `src/scripts/`.** New Project copies the registry entry's `source_class` from `classes/` into `src/scripts/<ProjectClassName>.ts`, renames the class + its RegisterClass string to match (PascalCase project title + `Mode`), and wires navigation to it (SPEC §4.4b).
+`src/babylon/classes/**` = read-only demo/source library (copy FROM, never edit). `src/babylon/system/**` = framework internals, read-only. `src/custom/**` = the game's chrome (splash, preloader, overlay) — a WRITE zone, deliberately moved OUT of `src/babylon` (2026-07-18) so projects can edit it freely; its framework imports go through `'../babylon/…'` (e.g. `import GameManager from '../babylon/globals'`). **All project game code — GameModes and Script Components — is authored in `src/scripts/`** — and any class copied there from `src/babylon/classes/` must have its relative imports rebased (`'../globals'` → `'../babylon/globals'`): the scaffolder does this deterministically for the creation copy, the hard-constraints prompt section instructs the model for copies it makes later. New Project copies the registry entry's `source_class` from `classes/` into `src/scripts/<ProjectClassName>.ts`, renames the class + its RegisterClass string to match (PascalCase project title + `Mode`), and wires navigation to it (SPEC §4.4b).
 
 ## Landing page rewrites (never-violate)
 

@@ -87,7 +87,10 @@ Every path ends here:
 5. **Totally rewrite `src/pages/Home.tsx` + `Home.css`** as this game's landing page
    (nothing from the starter survives — no hero montage, no demo buttons,
    no Vite/React links, no footer, no Toolkit attribution)
-6. **Redesign the game's chrome in `src/babylon/custom/**`** to the same design — all three
+6. **Redesign the game's chrome in `src/custom/**`** (its own top-level folder since 2026-07-18 —
+   deliberately OUTSIDE the read-only `src/babylon`, so the project can edit and maintain it freely;
+   its framework imports go through `'../babylon/…'`, e.g. `import GameManager from '../babylon/globals'`)
+   to the same design — all three
    ship Babylon-branded and must not stay so (§2.3): the **preloader** (`loading.tsx`), the
    **splash/loading screen** (`splash.tsx` + `splash.css`), and an **initial in-game overlay**
    (`overlay.tsx` + `overlay.css`). Restyle freely but keep the wiring — `loading.tsx` re-exports
@@ -98,7 +101,7 @@ Every path ends here:
 **READ-ONLY, always:** `src/babylon/classes/**` (demo source library — copy FROM, never edit),
 `src/babylon/system/**` (framework internals), `app.tsx` + `src/routing/**` (router shell).
 **WRITE ZONE:** `src/scripts/` (GameModes + Script Components), `src/pages/` + `src/components/` (frontend),
-`src/babylon/custom/**` (the game's chrome — splash, preloader, overlay).
+`src/custom/**` (the game's chrome — splash, preloader, overlay).
 
 ### Layout law (every UI surface — landing page, chrome, menus, HUD)
 
