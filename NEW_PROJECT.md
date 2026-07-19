@@ -86,7 +86,10 @@ Every path ends here:
 4. Wire navigation to the new class (+ `sceneUrl` if the entry defines one)
 5. **Totally rewrite `src/pages/Home.tsx` + `Home.css`** as this game's landing page
    (nothing from the starter survives — no hero montage, no demo buttons,
-   no Vite/React links, no footer, no Toolkit attribution)
+   no Vite/React links, no footer, no Toolkit attribution).
+   **Steps 5–6 are the `bt-landing` skill's procedure** — the creation brief delegates to it,
+   and the user can re-run `/bt-landing <new brief>` any time to redesign the whole frontend
+   shell (landing + splash + preloader + overlay) until they like it.
 6. **Redesign the game's chrome in `src/custom/**`** (its own top-level folder since 2026-07-18 —
    deliberately OUTSIDE the read-only `src/babylon`, so the project can edit and maintain it freely;
    its framework imports go through `'../babylon/…'`, e.g. `import GameManager from '../babylon/globals'`)

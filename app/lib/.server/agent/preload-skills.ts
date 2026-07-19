@@ -59,6 +59,7 @@ const SKILL_KEYWORDS: Record<string, string[]> = {
     'build me',
     'create',
   ],
+  'bt-landing': ['landing', 'splash', 'preloader', 'overlay', 'redesign', 'home page', 'frontend'],
   'bt-prototype': ['prototype', 'scaffold', 'starter', 'boilerplate'],
   'bt-spec': ['spec', 'specification', 'requirements', 'plan'],
   'bt-atlas': ['atlas', 'texture', 'skin', 'uv', 'material'],
@@ -133,16 +134,19 @@ export async function preloadSkills(
   isCreation = false,
 ): Promise<PreloadedSkill[]> {
   /*
-   * A creation turn gets exactly ONE skill: the design skill.
+   * A creation turn gets a FIXED skill list, never keyword routing.
    *
-   * Two reasons. The routing text on a creation turn is the BRIEF, not the user's words — it is full of
-   * incidental vocabulary ("created", "starter", "scaffold") that keyword-matches skills the model has
-   * no use for; we watched it drag in `bt-prototype` for a project that was already scaffolded. And a
-   * creation turn writes a landing page from scratch (§4.4c), which is the one part of the job where
-   * the design skill genuinely changes the output. Everything else it needs is in the brief.
+   * The routing text on a creation turn is the BRIEF, not the user's words — it is full of incidental
+   * vocabulary ("created", "starter", "scaffold") that keyword-matches skills the model has no use
+   * for; we watched it drag in `bt-prototype` for a project that was already scaffolded. What creation
+   * actually needs is exactly two skills: `bt-landing` (the landing-page + chrome redesign PROCEDURE
+   * the brief now delegates to — 2026-07-18) and `bt-design` (the aesthetics standards that procedure
+   * builds on). Until `bt-landing` reaches the synced skills repo, the missing-skill path below skips
+   * it with a warning and the brief's fallback sentence routes the model to the baked hard-constraints
+   * sections instead — creation never fails on its absence.
    */
   const candidates = isCreation
-    ? ['bt-design'].filter((name) => name !== slashSkill)
+    ? ['bt-landing', 'bt-design'].filter((name) => name !== slashSkill)
     : stickySkillNames(routingTexts, slashSkill);
 
   const wanted = candidates.slice(0, MAX_PRELOADED);

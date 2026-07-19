@@ -90,6 +90,8 @@
 
 ## Landing page rewrites (never-violate)
 
+**The full redesign PROCEDURE lives in the `bt-landing` skill (2026-07-18)** — landing page + chrome (splash/preloader/overlay) as one themed design, re-runnable via `/bt-landing <brief>` until the user likes it. The creation brief delegates to it (with a fallback to the baked "Layout law"/"Chrome rewrites" sections while the skill is absent from the synced repo); creation preloads `bt-landing` + `bt-design` (`preload-skills.ts`). The invariants below still bind every run:
+
 `src/pages/Home.tsx` + `Home.css` are OVERWRITTEN per project with a landing page designed from scratch for that game. NOTHING from the starter page survives — no hero, no demo buttons, no Vite/React/Babylon links, no footer, **no Toolkit/BabylonJS attribution or branding at all**. Carry forward only the navigation PATTERN (`useUnifiedNavigation` → play contract), never markup/copy/links. Use whichever starter images the new design calls for and don't import the rest — but **NEVER delete image files from disk** (unused assets stay; `public/babylon.png` + `public/spinner.png` are framework-required). Zero unresolved imports after any rewrite (SPEC §4.4c).
 
 ## Persistence model — repo-primary (SPEC §4.5.4b) — **BUILT 2026-07-16**
