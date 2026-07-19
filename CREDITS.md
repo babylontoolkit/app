@@ -31,6 +31,12 @@ Turning enforcement on is a single flag:
 BILLING_ENFORCED=true    # .env.local
 ```
 
+**Two things enforcement does NOT change (2026-07-18):** the **premium model threshold** binds on the
+balance either way (settlement debits regardless, so a 320-credit balance cannot switch on the 2×
+model even unmetered — a deploy that wants free premium sets `PREMIUM_MINIMUM_CREDITS=0` explicitly),
+and **media generation debits** (§4.16) are taken up-front either way and refuse at 402 rather than
+overdraw — the `media` ledger reason may never go negative.
+
 ### 2. The balance is DERIVED, not stored
 
 There is no `balance` column and no counter anywhere. The balance is the `balance_after` of the most
@@ -58,9 +64,10 @@ credits), a trigger **refuses UPDATE and DELETE** outright, and `balance_after` 
 file-edit trick has no production equivalent, deliberately. `scripts/credits.mjs` refuses to run when
 `NODE_ENV=production`.
 
-**Production top-ups need `POST /api/admin/credits`** — gated on the `is_admin` flag read from
-`profiles` (never from `user_metadata`, which the user can write). Not built yet; it belongs to §4.10
-(admin), Stage 4.
+**Production top-ups go through `POST /api/admin/credits`** (`app/routes/api.admin.credits.ts` —
+BUILT, §4.10) — `requireAdmin`-gated, takes `{ userId, delta, note }`, and writes through the SAME
+append-only ledger as everything else (`reason: 'adjustment'`), so the top-up is auditable forever.
+The Admin settings tab exposes it as the credit-adjustment control.
 
 ---
 
@@ -83,7 +90,8 @@ deleting — that is what keeps the history able to explain the balance.
 | `grant` | Signup credits. **Once per user, ever** — enforced by a partial unique index, not an app check. | no |
 | `purchase` | Stripe pack. Idempotent on the session/payment id via a partial unique index. | no |
 | `generation` | An LLM build, charged against real token usage. | **yes** |
-| `refund` | Compensating row for a hard-failed generation (auto). | no |
+| `media` | An image/video render (§4.16), debited UP-FRONT at the exact quoted price. Refuses at 402 instead of overdrawing (migration 0009); auto-refunds exactly once on a failed render. | no |
+| `refund` | Compensating row for a hard-failed generation or render (auto). | no |
 | `promo` | Marketing credits. | no |
 | `adjustment` | **An operator reached in and moved the number.** This is the one `pnpm credits` writes. | **yes** |
 
@@ -100,28 +108,30 @@ once-per-user grant story) or a `purchase` (which would put money in your books 
 
 ## What a build costs
 
-Credits are priced from real token usage:
+Credits are priced from real token usage, at the rates in the **Marketplace price list** (Settings →
+Admin → Marketplace prices — a versioned, admin-promoted document with a baked fallback in
+`billing/baked-market-prices.ts`; the old `*_DOLLARS` env vars are RETIRED and refused, 2026-07-18):
 
 ```
-raw_cost = in·$3/MTok + cache_read·$0.30/MTok + cache_write·$6/MTok + out·$15/MTok
+raw_cost = in·inputRate + cache_read·(0.1×inputRate) + cache_write·(2×inputRate) + out·outputRate
 credits  = ceil(raw_cost / CREDIT_UNIT_COST_USD × CREDIT_MARGIN)
 ```
 
-**Four token classes, not three.** Cache *writes* bill at **2×** base input, because we use the 1-hour
-cache tier (§4.2.8). Assuming the 1.25× headline number under-charges every single generation and
-nothing anywhere throws.
+Current baked rates (per MTok, KIE): Opus 4.8 (the default) **$2 / $10**; Fable 5 (the premium tier)
+**$4 / $20**. Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
+§4.2.8; assuming the 1.25× headline number under-charges every generation and nothing throws).
 
-Measured, real "make me a kart racer" builds:
+Measured on KIE (2026-07-16/17, `spec/context-budget.md` §MEASURED): a full playable-game creation
+ran **163–513 credits** depending on difficulty; a **warm edit is ~11–65 credits** (sticky block
+routing); a trivial edit measured **18**. **Media is billed separately per task** (§4.16): an image is
+~14–21 credits, a video clip runs from ~50 (veo3_lite) into the hundreds (kling-3.0 pro) — debited
+up-front at the exact price shown on the Generate button.
 
-| | Before the tool-batching fix | After |
-|---|---|---|
-| Output tokens | 44,308 | 33,777 |
-| Tool rounds | 6 (hit the cap) | 0 |
-| Raw cost | $2.14 | $0.86 |
-| **Credits** | **716** | **289** |
-
-The 1,000-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is roughly **1 Opus project creation plus iteration room** — Opus 4.8 is the platform default and a creation runs materially higher than the old Sonnet estimate. Edit
-turns are much cheaper.
+The 500-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~2.6× a measured KIE creation, and
+deliberately BELOW the 1,000-credit premium minimum, so a fresh account cannot burn its grant on the
+2× model. Premium is also **edit-only**: creations always run the standard streaming model
+(`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a creation-sized
+artifact before the gateway timeout).
 
 > **A deploy costs money.** Tool schemas and the base prompt live *inside* the cached prefix. Change
 > either and every user's cache entry is invalidated, so the next generation pays a full cache write at
@@ -134,30 +144,41 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 
 | Var | Default | What it does |
 |---|---|---|
-| `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone |
-| `SIGNUP_GRANT_CREDITS` | `1000` | Starter credits, once per user (≈1 Opus creation + iteration) |
+| `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone (premium threshold + media 402 still bind) |
+| `SIGNUP_GRANT_CREDITS` | `500` | Starter credits, once per user (~2.6× a KIE creation; below the premium minimum on purpose) |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
 | `CREDIT_MARGIN` | `3.34` | Multiplier over raw cost |
+| `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-fable-5` / `1000` | The 2× premium tier: a selector + the balance a user must HOLD to unlock it (edit turns only) |
 
-## Credit packs (Stripe)
+Model PRICES are not env anymore — they live in the Marketplace price list (admin-promoted, baked
+fallback). The retired `KIE_*_DOLLARS` / `PREMIUM_*_DOLLARS` vars are REFUSED if set.
+
+## Credit packs & subscriptions (Stripe)
 
 | Pack | Credits | Price |
 |---|---|---|
-| Hobby | 5,000 | $15 |
-| Pro | 15,000 | $40 |
-| Studio | 40,000 | $100 |
+| Starter | 2,000 | $20 |
+| Creator | 6,000 | $50 |
+| Studio | 25,000 | $200 |
 
-Defined in `app/lib/.server/billing/stripe.ts`. Purchases are idempotent on the Stripe session id, so
-a webhook retry or a double-clicked tab cannot double-credit an account.
+Subscriptions mirror the packs monthly (Creator 6,000/mo at $50, Studio 25,000/mo at $200); credits
+never expire or reset — a plan accumulates. Defined in `app/lib/.server/billing/stripe.ts`, and
+**every pack/plan must clear `MIN_PACK_MARGIN`** (`packMargin()` — the floor that caught the shipped
+0.84× loss-making pack; never add or reprice without re-running it). Purchases are idempotent on the
+Stripe session id; subscription grants fire ONLY on `invoice.paid`.
 
 ## Where the code lives
 
 | Thing | File |
 |---|---|
-| Rate table, config | `app/lib/.server/billing/rates.ts` |
+| Rate table, config, premium tier | `app/lib/.server/billing/rates.ts` |
+| Marketplace price list (baked + versioned store) | `app/lib/.server/billing/{baked-market-prices,market-prices,market-price-store}.ts` |
+| Premium eligibility (`decidePremium`) | `app/lib/.server/billing/premium.ts` |
 | Ledger (FS + Supabase) | `app/lib/.server/billing/ledger.ts` |
 | Gate, settlement, auto-refund | `app/lib/.server/billing/gate.ts` |
+| Media debit/refund (§4.16) | `app/lib/.server/media/service.ts` |
 | Stripe checkout + webhook | `app/lib/.server/billing/stripe.ts` |
-| Schema, RLS, `append_ledger_entry` | `supabase/migrations/0001_stage3_*.sql` |
+| Schema, RLS, `append_ledger_entry` | `supabase/migrations/0001_stage3_*.sql` (+ `0009` media reason) |
+| Admin top-up route | `app/routes/api.admin.credits.ts` |
 | Local top-up script | `scripts/credits.mjs` |

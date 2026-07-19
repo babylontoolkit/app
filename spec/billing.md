@@ -110,6 +110,20 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
 - **`providerRates` premium injection is non-throwing**: a promoted list that unprices
   `PREMIUM_MODEL` refuses NEW premium requests loudly (`getPremiumModel`) but must not take
   settlement down — an in-flight premium generation settles via the most-expensive fallback.
+- **The premium threshold binds on the BALANCE, regardless of `BILLING_ENFORCED` (2026-07-18)**:
+  `decidePremium` no longer takes an enforcement flag. The retired "unmetered → premium freely
+  usable" bypass rested on a false premise — settlement debits the ledger whether or not the gate
+  may refuse, so a 320-credit user could switch on the 2× model and ride the balance negative with
+  nothing objecting (observed live). A deploy that wants free premium says `PREMIUM_MINIMUM_CREDITS=0`
+  explicitly. Pinned by a structural tripwire in `premium.spec.ts` (no enforcement input exists to
+  bypass with).
+- **A CREATION turn never runs premium (2026-07-18)**: `decidePremium({ isCreationTurn: true })` →
+  `reason: 'creation_turn'`, whatever the balance. KIE serves Fable 5 with a BUFFERED answer
+  (accepted for edit-sized replies); a creation-sized artifact (~25k out tokens, 4–7 min decode)
+  cannot flush before KIE's ~5-min gateway timeout — measured live: 307.8s of streamed reasoning,
+  0 text, `finish=error` at 449s. Creations run the standard streaming model; the premium preference
+  applies from the first edit turn. The composer pill mirrors this as a locked state
+  (`creationTurnStore`), same look as the under-threshold lock.
 
 Pinned by `market-prices.spec.ts` (validation + lookup + the baked list validates + the 21-credit
 worked example), `market-price-store.spec.ts` (promote/rollback/pointer/cache), and the rewritten
@@ -272,7 +286,7 @@ what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the lic
 
 ## Verified end-to-end (2026-07, local mode)
 
-- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default — 1 Opus creation + iteration room).
+- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **500** since the KIE move — ~2.6× a measured KIE creation, and deliberately below the 1000-credit premium minimum so a fresh grant cannot buy the 2× model).
 - A live generation settled against real usage: `generation −7 → 993` (raw cost $0.0184,
   `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
 - The `generations` record attributes the charge to a user, a model, and its four token classes.

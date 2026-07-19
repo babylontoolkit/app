@@ -207,6 +207,22 @@ Not touched (deliberately): HTTP `User-Agent: 'bolt.diy-app'` identifiers (funct
 | `app/lib/runtime/action-runner.ts` | `#runStartAction` now passes through the shell allow-list. It executes on the same shell as `#runShellAction`, so gating only `type="shell"` left the §4.2.5 allow-list bypassable by relabelling the action. |
 | `app/types/template.ts` | Added the shared `TemplateFile` type (was duplicated in two modules). |
 
+## Upstream files touched — 2026-07-18/19 (§4.16 media, premium UX, §2.3 dead knobs, layout fixes)
+
+| File | Change |
+|---|---|
+| `app/lib/.server/agent/proxy.ts` | Additive (already a listed hotspot): §4.16 media tools wired in; per-turn tool policy extracted to net-new `tool-policy.ts` (creation = media-only loop); `experimental_repairToolCall` (net-new `tool-repair.ts` — an unknown-tool call, e.g. the model calling `boltArtifact` as a TOOL, bounces to a corrective result instead of killing the paid generation); `ensureMarketPrices` at entry. |
+| `app/routes/api.agent.ts` | Additive: writes `media-task` data parts to the stream (§4.16 async-enqueue). |
+| `app/components/chat/Chat.client.tsx` | Additive: `media-task` handler (client poller, latched — one delivery/toast per task), `creationTurnStore` derivation effect (premium is edit-only), `CREATION_BRIEF_MARKER` import. |
+| `app/components/chat/ChatBox.tsx` | Additive: renders `<PremiumToggle />` (net-new; locked during creation and under the threshold). |
+| `app/components/deploy/DeployButton.tsx` | `DropdownMenu.Root modal={false}` + `DropdownMenu.Portal` around Content — the modal scroll-lock's scrollbar-compensation padding shifted the in-flow chat column under the fixed workbench (chat shoved off-screen on open). |
+| `app/components/workbench/Workbench.client.tsx`, `app/components/chat/chatExportAndImport/ExportChatButton.tsx` | Same fix, `modal={false}` (the only other un-portaled Radix dropdowns). |
+| `app/lib/persistence/ChatDescription.client.tsx` | Title bar falls back to the PROJECT name (one `getProject` read) when the chat has no description yet — a fresh "New chat, same game" otherwise showed no name at all. |
+| `app/components/sidebar/Menu.client.tsx` | Additive: manual refresh button on "Your Chats" (re-runs the server+local merge; `loadEntries` now returns its promise). |
+| `app/components/header/HeaderActionButtons.client.tsx` | Additive: `<MediaButton />` (§4.16) and a **Workbench toggle** (gated on a project, not the preview — the chat-only view previously had NO way to reopen a closed workbench). |
+| `app/components/@settings/tabs/features/FeaturesTab.tsx`, connection panels (`GitHubConnection`, `GitLabConnection`, `VercelTab`+`Connection`, `NetlifyTab`+`Connection`, `SupabaseTab`, shared `ConnectionForm`) | §2.3 dead-knob hiding (2026-07-18): `VITE_*` token hints + dev token-debug blocks removed from the web UX; Features tab reduced to Event Logging (Main-Branch-Updates / Auto-Template / Context-Optimization / Prompt-Library toggles hidden — they only fed the fail-closed `/api/chat` path). Hide-don't-delete; env auto-connect fallbacks kept. |
+| `app/lib/modules/llm/providers/{kie,kie-wire}.ts` | `kieEnvModel` — the env-selected model is injected into the provider's model LIST via upstream's own `getDynamicModels` seam, so a priced-but-unlisted `KIE_DEFAULT_MODEL` cannot make upstream's `stream-text.ts` silently fall back to `modelsList[0]` (run one model, bill another). Two readers on purpose: `kie-wire.ts` is client-importable and must not touch `.server/env`. |
+
 ## Other upstream files touched
 
 | File | Change |

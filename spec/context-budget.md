@@ -24,10 +24,14 @@
 > 1. **Pre-load the skills a request obviously needs** into the CACHED prefix (`preload-skills.ts`).
 >    Cache reads bill at 0.1x, so the context is nearly free — and there are no round trips to redraft
 >    around.
-> 2. **A creation turn runs with NO tools at all** (`CREATION_BRIEF_MARKER` → `allowTools: false`). The
->    brief IS the workflow; there is nothing to look up. The system prompt already said "never load a
->    skill on a project-creation turn" **and the model ignored it four times** — so the capability is
->    removed rather than discouraged. Instructions are not a control.
+> 2. **A creation turn runs with NO skill/MCP tools at all** (`CREATION_BRIEF_MARKER` → media-only or
+>    nothing, `agent/tool-policy.ts`). The brief IS the workflow; there is nothing to look up. The
+>    system prompt already said "never load a skill on a project-creation turn" **and the model ignored
+>    it four times** — so the capability is removed rather than discouraged. Instructions are not a
+>    control. **The one exception (2026-07-18, §4.16): when media tools exist, creation runs a
+>    MEDIA-ONLY loop** (`CREATION_MEDIA_STEPS = 3`: one parallel round of `generate_*` calls for the
+>    design art + the answer + slack) — skill tools are still never offered, so the six-round pathology
+>    stays dead; extra rounds re-read the cached prefix at 0.1×.
 >
 > | "make me a kart racer" | Before | After |
 > |---|---|---|
@@ -451,8 +455,10 @@ five months to notice because the dashboard read a confident, wrong **zero**.
 That was correct when it was written, against the generation in pathology 1: six tool rounds, 29,173
 output tokens, one skill loaded.
 
-Then we fixed pathology 1. Pre-loading skills sets `allowTools: false` → `maxSteps: 1`. So a creation now
-runs as **exactly one step** — and the metric's `if (steps.length <= 1) return 0` guard fired. The admin
+Then we fixed pathology 1. Pre-loading skills sets `allowTools: false` → `maxSteps: 1`. So a creation then
+ran as **exactly one step** (since 2026-07-18 a media-enabled creation may run up to 3 media-only steps —
+the metric below is step-shape-independent, which is the point) — and the metric's
+`if (steps.length <= 1) return 0` guard fired. The admin
 dashboard reported **zero wasted output on every creation**: the most expensive generation in the product
 (~44k output tokens ≈ $1.11, ~70% of its own bill). All the money moved inside a single step, where the
 metric could not see, and the number that would have told us went quiet instead of loud.
