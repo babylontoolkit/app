@@ -380,12 +380,6 @@ export function AdminTab() {
       </section>
 
       {/*
-       * Marketplace prices (§4.6). The platform's cost basis — what we believe KIE charges for LLM
-       * tokens and media generation. Versioned + promoted here; the env price vars are retired.
-       */}
-      <MarketPricesSection />
-
-      {/*
        * Template pin (§4.4). This is the supply chain: whatever is pinned here is the code every new
        * project starts from. Promotion is the ONLY way a push to the starter repo reaches users, and
        * rollback is the way back — so both the current pin and its provenance are shown, never implied.
@@ -467,6 +461,12 @@ export function AdminTab() {
           </div>
         )}
       </section>
+
+      {/*
+       * Marketplace prices (§4.6). The platform's cost basis — what we believe KIE charges for LLM
+       * tokens and media generation. Versioned + promoted here; the env price vars are retired.
+       */}
+      <MarketPricesSection />
     </div>
   );
 }
