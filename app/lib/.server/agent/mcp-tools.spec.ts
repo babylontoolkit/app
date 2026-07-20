@@ -1,6 +1,31 @@
-import { describe, expect, it } from 'vitest';
-import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
-import { deliverClientToolResult } from './mcp-relay';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMcpRelayTools, UNITY_RELAY_TIMEOUT_MS, type McpToolCallEvent } from './mcp-tools';
+import { deliverClientToolResult, type AwaitToolResultInput } from './mcp-relay';
+import { UNITY_SERVER_NAME } from '~/lib/mcp/webcontainer-bridge';
+
+/*
+ * The relay stays REAL — every test below (and the six above) depends on `execute` actually blocking on
+ * the registry and resolving when a result is delivered. We only wrap `awaitClientToolResult` so its
+ * input is observable: `timeoutMs` is decided in `mcp-tools.ts` but consumed in `mcp-relay.ts`, so the
+ * hand-off between them is the only place the per-server window can be pinned.
+ */
+const relayCalls = vi.hoisted(() => [] as AwaitToolResultInput[]);
+
+vi.mock('./mcp-relay', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./mcp-relay')>();
+
+  return {
+    ...actual,
+    awaitClientToolResult: (input: AwaitToolResultInput) => {
+      relayCalls.push(input);
+      return actual.awaitClientToolResult(input);
+    },
+  };
+});
+
+beforeEach(() => {
+  relayCalls.length = 0;
+});
 
 /**
  * These tests drive an MCP relay tool the way `streamText` would: call its `execute`, observe that it
@@ -115,5 +140,80 @@ describe('createMcpRelayTools', () => {
 
     // A third-party server must not be able to spend our context budget without limit (§4.2.8, §4.14).
     expect((tools.huge as any).description.length).toBeLessThan(2000);
+  });
+
+  /*
+   * The Unity bridge gets a longer relay window than every other MCP server (§4.17): a script edit
+   * triggers a domain reload, an asset import chews through a model, and both routinely outlast the 60s
+   * default. Timing out early does not just cost time — the model is handed a failure tool_result for an
+   * operation that succeeds moments later, and reports it to the user as broken.
+   */
+  describe('relay timeout window', () => {
+    async function runOnce(tools: Record<string, unknown>, key: string, generationId: string, toolCallId: string) {
+      const execPromise = (tools[key] as any).execute({}, { toolCallId, messages: [] });
+      await Promise.resolve();
+
+      // Settle it — an unresolved 180s timer would outlive the test.
+      deliverClientToolResult({ generationId, toolCallId, userId: 'u1', result: 'ok' });
+      await execPromise;
+    }
+
+    it('gives a unity tool the extended window', async () => {
+      const tools = createMcpRelayTools([{ name: 'refresh_assets', server: UNITY_SERVER_NAME }], {
+        generationId: 'gen-unity',
+        userId: 'u1',
+        emit: () => undefined,
+      });
+
+      await runOnce(tools, 'refresh_assets', 'gen-unity', 'call-u1');
+
+      expect(relayCalls).toHaveLength(1);
+      expect(relayCalls[0].timeoutMs).toBe(180_000);
+
+      // The constant and the behaviour must not drift apart.
+      expect(relayCalls[0].timeoutMs).toBe(UNITY_RELAY_TIMEOUT_MS);
+    });
+
+    it('leaves every other server on the relay default', async () => {
+      const tools = createMcpRelayTools([{ name: 'read_file', server: 'docs' }], {
+        generationId: 'gen-docs',
+        userId: 'u1',
+        emit: () => undefined,
+      });
+
+      await runOnce(tools, 'read_file', 'gen-docs', 'call-d1');
+
+      expect(relayCalls).toHaveLength(1);
+
+      /*
+       * `undefined`, not a copy of `MCP_RELAY_TIMEOUT_MS`: the default lives in `mcp-relay.ts` and
+       * re-stating it here would be a second writer of the same number.
+       */
+      expect(relayCalls[0].timeoutMs).toBeUndefined();
+      expect(relayCalls[0].timeoutMs).not.toBe(180_000);
+    });
+
+    /*
+     * The decision is PER TOOL. Hoisting it out of the loop (one window for the whole tool set) still
+     * passes both tests above — each builds a single-server set — so the mixed set is the pin that
+     * catches it: it would give the docs tool Unity's window, or Unity the 60s default.
+     */
+    it('routes the right window to each tool in a mixed set', async () => {
+      const tools = createMcpRelayTools(
+        [
+          { name: 'refresh_assets', server: UNITY_SERVER_NAME },
+          { name: 'read_file', server: 'docs' },
+        ],
+        { generationId: 'gen-mixed', userId: 'u1', emit: () => undefined },
+      );
+
+      await runOnce(tools, 'refresh_assets', 'gen-mixed', 'call-m1');
+      await runOnce(tools, 'read_file', 'gen-mixed', 'call-m2');
+
+      expect(relayCalls.map((c) => [c.toolCallId, c.timeoutMs])).toEqual([
+        ['call-m1', UNITY_RELAY_TIMEOUT_MS],
+        ['call-m2', undefined],
+      ]);
+    });
   });
 });

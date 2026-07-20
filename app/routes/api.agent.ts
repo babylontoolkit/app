@@ -17,7 +17,7 @@ import { validateAttachments } from '~/lib/.server/agent/attachments';
 import { claimProject } from '~/lib/.server/agent/inflight';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
-import { NO_REPLAY } from '~/types/message-marks';
+import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
@@ -281,6 +281,13 @@ async function streamGeneration(
    */
   if (generation.discussMode) {
     stream.writeMessageAnnotation(NO_REPLAY);
+
+    /*
+     * Also tag it as a plan-mode message (§4.2.9) — distinct from the restore path that ALSO writes
+     * NO_REPLAY — so the client can offer "Build & Apply" on a plan turn that proposed a write, and
+     * only there. See `PLAN_MODE` in `~/types/message-marks`.
+     */
+    stream.writeMessageAnnotation(PLAN_MODE);
   }
 
   const shellFilter = new ShellActionStreamFilter();

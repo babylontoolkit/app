@@ -302,4 +302,12 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
       ],
     },
   },
+
+  /*
+   * Web search (§4.2): a FLAT 10 credits per billable `web_search` call. A paid search runs ~$0.01–0.015
+   * on SerpApi/Brave; at CREDIT_UNIT_COST_USD $0.01 / CREDIT_MARGIN 4.0 the cost-recovery figure is ~6
+   * credits, so 10 is a round, margin-positive flat toll. Admin-adjustable in Settings → Admin →
+   * Marketplace prices. Free providers (DuckDuckGo/SearXNG) never bill regardless of this number.
+   */
+  search: { creditsPerSearch: 10 },
 };

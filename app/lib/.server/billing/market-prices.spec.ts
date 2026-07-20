@@ -7,7 +7,13 @@
  * variant.
  */
 import { describe, expect, it } from 'vitest';
-import { findMediaModel, lookupMediaPrice, validateMarketPriceList, type MarketPriceList } from './market-prices';
+import {
+  findMediaModel,
+  lookupMediaPrice,
+  searchCreditsFor,
+  validateMarketPriceList,
+  type MarketPriceList,
+} from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 
 /** A minimal valid list to mutate per test. */
@@ -121,6 +127,33 @@ describe('validation — the promotion wall', () => {
     list.llm['claude-opus-4-8'] = { inputPerMTok: 0, outputPerMTok: 0 };
     list.media['nano-banana-2'].variants[0].usd = -1;
     expect(errorsOf(list).length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('search rate — the flat web_search toll (§4.2)', () => {
+  it('is optional — a list promoted before search billing (no search field) is valid', () => {
+    expect(validateMarketPriceList(validList()).ok).toBe(true); // validList() has no `search`
+  });
+
+  it('accepts a well-formed search rate, including 0 (do-not-bill)', () => {
+    expect(validateMarketPriceList({ ...validList(), search: { creditsPerSearch: 10 } }).ok).toBe(true);
+    expect(validateMarketPriceList({ ...validList(), search: { creditsPerSearch: 0 } }).ok).toBe(true);
+  });
+
+  it('rejects a non-integer, negative, or non-object search rate, and extra keys', () => {
+    expect(errorsOf({ ...validList(), search: { creditsPerSearch: 1.5 } }).join()).toMatch(/creditsPerSearch/);
+    expect(errorsOf({ ...validList(), search: { creditsPerSearch: -5 } }).join()).toMatch(/creditsPerSearch/);
+    expect(errorsOf({ ...validList(), search: 10 }).join()).toMatch(/search must be an object/);
+    expect(errorsOf({ ...validList(), search: { creditsPerSearch: 10, usd: 1 } }).join()).toMatch(/unsupported keys/);
+  });
+
+  it('baked list carries a search rate', () => {
+    expect(BAKED_MARKET_PRICES.search?.creditsPerSearch).toBeGreaterThan(0);
+  });
+
+  it('searchCreditsFor uses the list rate, or falls back to baked when absent', () => {
+    expect(searchCreditsFor({ ...validList(), search: { creditsPerSearch: 25 } }, { creditsPerSearch: 10 })).toBe(25);
+    expect(searchCreditsFor(validList(), { creditsPerSearch: 10 })).toBe(10); // no search field → fallback
   });
 });
 

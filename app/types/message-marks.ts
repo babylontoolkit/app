@@ -16,3 +16,16 @@
  * sanctioned extension point; it survives the IndexedDB round-trip, so a reload cannot lose the mark.
  */
 export const NO_REPLAY = 'no-replay';
+
+/**
+ * `PLAN_MODE` marks an assistant message that was produced on a Plan-mode (Discussion, §4.2.9) turn.
+ * Written by the SERVER alongside `NO_REPLAY` when `discussMode` is set.
+ *
+ * It exists to DISTINGUISH a plan-mode message from the OTHER writer of `NO_REPLAY` — a restored
+ * historical message (a build turn gets `NO_REPLAY` on restore too, §4.5.4b). Only a plan turn ever
+ * carries `PLAN_MODE`, so the client can safely offer a "Build & Apply" affordance on a plan turn that
+ * proposed writes without ever showing it on a restored build message whose files are already applied.
+ *
+ * Like `NO_REPLAY`, an annotation (not a field) so it survives the IndexedDB round-trip.
+ */
+export const PLAN_MODE = 'plan-mode';

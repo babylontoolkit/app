@@ -16,6 +16,7 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { awaitClientToolResult } from './mcp-relay';
+import { UNITY_SERVER_NAME } from '~/lib/mcp/webcontainer-bridge';
 
 export interface McpLiveTool {
   name: string;
@@ -45,6 +46,17 @@ export interface McpToolCallEvent {
  * one, and this text rides in the tool definitions of every generation for that project (§4.2.8). Cap it.
  */
 const MAX_SCHEMA_CHARS = 1500;
+
+/**
+ * The Unity Editor bridge gets a longer relay window than the 60s default (§4.17).
+ *
+ * Unity work is not a sandbox file read: a script edit triggers a domain reload and recompile, an
+ * asset import can chew through a model, and either routinely passes a minute. At 60s the model gets
+ * a timeout tool_result while the editor is still working — it then reports failure for an operation
+ * that SUCCEEDS moments later, which is worse than waiting. Parking costs no tokens (the generation
+ * is idle, not decoding), so the only price is wall clock.
+ */
+export const UNITY_RELAY_TIMEOUT_MS = 180_000;
 
 export interface McpRelayContext {
   generationId: string;
@@ -131,6 +143,9 @@ export function createMcpRelayTools(
           toolCallId,
           userId: ctx.userId,
           abortSignal: abortSignal ?? ctx.abortSignal,
+
+          // Local Unity editor work outlives the default window; every other server keeps it.
+          timeoutMs: t.server === UNITY_SERVER_NAME ? UNITY_RELAY_TIMEOUT_MS : undefined,
         });
 
         if (outcome.error) {

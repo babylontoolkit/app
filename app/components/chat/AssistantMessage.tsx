@@ -18,6 +18,7 @@ import type {
 import { ToolInvocations } from './ToolInvocations';
 import { ThinkingPanel } from './ThinkingPanel';
 import type { ToolCallAnnotation } from '~/types/context';
+import { shouldOfferBuildAndApply } from '~/lib/chat/plan-proposal';
 
 interface AssistantMessageProps {
   content: string;
@@ -33,6 +34,12 @@ interface AssistantMessageProps {
   /** Re-run this turn from the checkpoint that preceded it (§4.12). */
   onRetry?: (messageId: string) => void;
   append?: (message: Message) => void;
+
+  /**
+   * Plan mode (§4.2.9): flip the toggle to Build and re-run to APPLY the change this plan turn
+   * proposed. Offered only on a plan turn that proposed a write — see `shouldOfferBuildAndApply`.
+   */
+  onBuildAndApply?: (messageId: string) => void;
   chatMode?: 'discuss' | 'build';
   setChatMode?: (mode: 'discuss' | 'build') => void;
   model?: string;
@@ -77,6 +84,7 @@ export const AssistantMessage = memo(
     onRestore,
     onRetry,
     append,
+    onBuildAndApply,
     chatMode,
     setChatMode,
     model,
@@ -84,6 +92,7 @@ export const AssistantMessage = memo(
     parts,
     addToolResult,
   }: AssistantMessageProps) => {
+    const offerBuildAndApply = Boolean(onBuildAndApply && messageId && shouldOfferBuildAndApply(annotations, content));
     const filteredAnnotations = (annotations?.filter(
       (annotation: JSONValue) =>
         annotation && typeof annotation === 'object' && Object.keys(annotation).includes('type'),
@@ -245,6 +254,20 @@ export const AssistantMessage = memo(
         <Markdown append={append} chatMode={chatMode} setChatMode={setChatMode} model={model} provider={provider} html>
           {content}
         </Markdown>
+        {offerBuildAndApply && (
+          <div className="mt-3">
+            <button
+              onClick={() => onBuildAndApply!(messageId!)}
+              className="inline-flex items-center gap-2 px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover transition-colors"
+            >
+              <div className="i-ph:hammer" />
+              Build &amp; Apply
+            </button>
+            <p className="mt-1.5 text-xs text-bolt-elements-textTertiary">
+              This was a plan — no files were changed. Switch to Build and apply it.
+            </p>
+          </div>
+        )}
         {toolInvocations && toolInvocations.length > 0 && (
           <ToolInvocations
             toolInvocations={toolInvocations}

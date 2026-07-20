@@ -1,4 +1,17 @@
+/**
+ * Provider/model discovery (SPEC §5, `spec/spend-holes.md`).
+ *
+ * ⚠️ **Verified callers only.** This fans out to every configured provider's model endpoint, and two of
+ * those calls are the caller's to shape: `providerSettings` comes from the caller's own COOKIE and
+ * carries a `baseUrl`, so an anonymous request could point the server at an arbitrary host (Ollama and
+ * LMStudio need no key at all — SSRF), and the provider cache is keyed off that same cookie, so varying
+ * it evicted the cache and re-hit the keyed providers on OUR quota every request.
+ *
+ * The `baseUrl` remains caller-shaped BY DESIGN — a BYOK/Pro user pointing at their own local Ollama is
+ * the feature (§4.6.1). Requiring a session is what stops it being a free anonymous proxy.
+ */
 import { json } from '@remix-run/cloudflare';
+import { denyUnlessVerified } from '~/lib/.server/http';
 import { LLMManager } from '~/lib/modules/llm/manager';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { ProviderInfo } from '~/types/model';
@@ -51,6 +64,12 @@ export async function loader({
     };
   };
 }): Promise<Response> {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   const llmManager = LLMManager.getInstance(context.cloudflare?.env);
 
   // Get client side maintained API keys and provider settings from cookies

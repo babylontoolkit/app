@@ -65,11 +65,22 @@ describe('parsing .mcp.json', () => {
     expect(abs.rejected[0].name).toBe('evil');
   });
 
-  it('accepts an sse/streamable-http server with a url', () => {
-    const config = JSON.stringify({ mcpServers: { remote: { type: 'sse', url: 'https://mcp.example.com' } } });
-    const { servers } = parseMcpConfig(config);
+  it('accepts an sse/streamable-http server ONLY with a loopback http url (§4.17)', () => {
+    // A non-loopback url is third-party content pointing the browser at an arbitrary host — refused.
+    const remote = JSON.stringify({ mcpServers: { remote: { type: 'sse', url: 'https://mcp.example.com' } } });
+    const { servers: remoteServers, rejected } = parseMcpConfig(remote);
 
-    expect(servers[0]).toMatchObject({ name: 'remote', transport: 'sse', url: 'https://mcp.example.com' });
+    expect(remoteServers).toHaveLength(0);
+    expect(rejected[0].name).toBe('remote');
+    expect(rejected[0].reason).toMatch(/loopback/);
+
+    // The Unity Editor bridge companion on the user's own machine still parses.
+    const local = JSON.stringify({
+      mcpServers: { unity: { type: 'streamable-http', url: 'http://127.0.0.1:8080/mcp' } },
+    });
+    const { servers } = parseMcpConfig(local);
+
+    expect(servers[0]).toMatchObject({ name: 'unity', transport: 'streamable-http', url: 'http://127.0.0.1:8080/mcp' });
   });
 
   it('is tolerant of a missing, empty, or malformed file', () => {

@@ -75,6 +75,57 @@ describe('toolPolicyForTurn — ordinary turns (the pre-existing behaviour, now 
   });
 });
 
+/*
+ * Unity Editor bridge tools (§4.17) reach the policy as ORDINARY MCP tools — they arrive on the same
+ * `hasMcpTools` flag, and the policy has no notion of where an MCP tool came from. These cases exist to
+ * pin that ABSENCE: a Unity tool drives the user's local Editor (slow, mutating, off-machine), which is
+ * exactly the kind of thing someone later special-cases "just this once". The inherited rules are the
+ * right ones, and each is load-bearing for Unity specifically.
+ */
+describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (§4.17)', () => {
+  /*
+   * Creation is the one-shot that writes the whole game (§4.2.8). Offering editor tools there re-opens
+   * the six-round pathology AND points the model at a Unity project it was not asked to touch.
+   */
+  it('never offers Unity/MCP tools on a creation turn', () => {
+    /*
+     * Two shapes express "not offered", and the property is the CONJUNCTION — `toolset` is meaningless
+     * when `allowTools` is false, so asserting the field alone would pass on a policy that offered them.
+     */
+    const noMedia = toolPolicyForTurn({ ...base, isCreationTurn: true, hasMcpTools: true });
+    expect(noMedia.allowTools).toBe(false);
+    expect(noMedia.maxSteps).toBe(1);
+
+    expect(toolPolicyForTurn({ ...base, isCreationTurn: true, hasMcpTools: true, hasMediaTools: true })).toEqual({
+      allowTools: true,
+      toolset: 'media-only',
+      maxSteps: CREATION_MEDIA_STEPS,
+    });
+  });
+
+  /*
+   * Discuss mode is read-only BY GUARANTEE (§4.2.9), and a Unity tool mutates the user's Editor — the
+   * strongest case for the toolset wall rather than an instruction not to use them.
+   */
+  it('never offers Unity/MCP tools on a discuss turn — the Editor is mutable state', () => {
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, hasMcpTools: true }).toolset).toBe('skills-only');
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, hasMcpTools: true, preloadedCount: 2 })).toEqual({
+      allowTools: false,
+      toolset: 'skills-only',
+      maxSteps: 1,
+    });
+  });
+
+  /* On an ordinary turn the loop must OPEN, or the model is told it has Editor tools it cannot call. */
+  it('opens the full loop on an ordinary turn, with the +1 answer step', () => {
+    expect(toolPolicyForTurn({ ...base, hasMcpTools: true })).toEqual({
+      allowTools: true,
+      toolset: 'all',
+      maxSteps: MAX_TOOL_ROUNDS + 1,
+    });
+  });
+});
+
 describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET, never just by instruction)', () => {
   it('offers skills only — media (a debit) and MCP (can mutate the sandbox) are never offered', () => {
     expect(toolPolicyForTurn({ ...base, isDiscussTurn: true })).toEqual({

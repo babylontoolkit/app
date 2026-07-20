@@ -9,6 +9,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { classNames } from '~/utils/classNames';
 import { getSlashAutocomplete, type SkillSummary } from '~/lib/skills/slash';
+import { CLIENT_COMMAND_SUMMARIES, isClientCommandName } from '~/lib/chat/client-commands';
 
 /** Fetched once per session — the skill set only changes on an admin resync. */
 function useSyncedSkills(): SkillSummary[] {
@@ -56,7 +57,10 @@ export function useSkillAutocomplete(input: string, setInput: (value: string) =>
   const [activeIndex, setActiveIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
 
-  const suggestion = useMemo(() => getSlashAutocomplete(input, skills), [input, skills]);
+  // Built-in client commands (/clear, /context) share the menu with synced skills — the sort floats them first.
+  const entries = useMemo(() => [...CLIENT_COMMAND_SUMMARIES, ...skills], [skills]);
+
+  const suggestion = useMemo(() => getSlashAutocomplete(input, entries), [input, entries]);
   const matches = suggestion?.matches ?? [];
   const isOpen = !dismissed && matches.length > 0;
 
@@ -73,8 +77,11 @@ export function useSkillAutocomplete(input: string, setInput: (value: string) =>
 
   const accept = useCallback(
     (skill: SkillSummary) => {
-      // Trailing space: the user's next keystroke is the task, which is the whole point.
-      setInput(`/${skill.name} `);
+      /*
+       * A zero-arg client command completes exactly (a trailing space + text turns it back into a message);
+       * a skill completes with a trailing space, because the user's next keystroke is the task.
+       */
+      setInput(isClientCommandName(skill.name) ? `/${skill.name}` : `/${skill.name} `);
       setDismissed(true);
     },
     [setInput],
@@ -124,7 +131,7 @@ export function SkillAutocompleteMenu({ autocomplete }: { autocomplete: SkillAut
           )}
         >
           <div className="px-3 py-2 text-xs text-bolt-elements-textTertiary border-b border-bolt-elements-borderColor">
-            Skills — <kbd>↑</kbd> <kbd>↓</kbd> to navigate, <kbd>Enter</kbd> to select
+            Commands &amp; skills — <kbd>↑</kbd> <kbd>↓</kbd> to navigate, <kbd>Enter</kbd> to select
           </div>
           {matches.map((skill, index) => (
             <button

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ProviderInfo } from '~/types/model';
+import { refreshSession } from '~/lib/stores/session';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('usePromptEnhancement');
@@ -74,6 +75,16 @@ export function usePromptEnhancer() {
 
         setEnhancingPrompt(false);
         setPromptEnhanced(true);
+
+        /*
+         * Enhancement is a real, settled charge on the platform key (§4.6, `api.enhancer.ts`) — but it
+         * returns a bare text stream, so unlike a generation there is no `credits` annotation and
+         * `applySettlement` never fires. Without this the displayed balance silently drifts below the
+         * ledger for the rest of the session: money correctly spent, and a number on screen that says
+         * otherwise. Re-read the server's balance rather than subtracting locally — the ledger is the
+         * only thing that knows what the tokens actually cost.
+         */
+        void refreshSession();
 
         setTimeout(() => {
           setInput(_input);

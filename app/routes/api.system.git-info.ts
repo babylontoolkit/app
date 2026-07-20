@@ -1,4 +1,18 @@
+/**
+ * Build/git info, plus an inherited GitHub passthrough (SPEC §5, `spec/spend-holes.md`).
+ *
+ * The static build-info branch at the bottom reports compile-time constants and reaches nothing — it
+ * stays open. The `action=` branch is a different animal: it calls api.github.com, and it shipped
+ * ANONYMOUS while preferring the PLATFORM `GITHUB_ACCESS_TOKEN` over the caller's own. A `curl` with no
+ * session listed the platform account's private repos, gists, and orgs. That is the same class of leak
+ * as the retired `/api/export-api-keys`, and strictly worse than the `api.github-user` fallback that was
+ * closed on 2026-07-19 — there the platform token was a fallback; here it had PRECEDENCE.
+ *
+ * Two walls, matching that fix: a verified session before any outbound call, and the caller's OWN token
+ * only — the server env is not consulted, not even as a fallback.
+ */
 import { json, type LoaderFunction, type LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 interface GitInfo {
   local: {
@@ -23,11 +37,12 @@ interface GitInfo {
   timestamp?: string;
 }
 
-// Define context type
+/*
+ * Deliberately carries no `GITHUB_ACCESS_TOKEN` field: this route must not read a platform token, and a
+ * type that still advertises one is an invitation to wire the fallback back in.
+ */
 interface AppContext {
-  env?: {
-    GITHUB_ACCESS_TOKEN?: string;
-  };
+  env?: Record<string, never>;
 }
 
 interface GitHubRepo {
@@ -81,8 +96,13 @@ export const loader: LoaderFunction = async ({ request, context }: LoaderFunctio
   console.log('Git info action:', action);
 
   if (action === 'getUser' || action === 'getRepos' || action === 'getOrgs' || action === 'getActivity') {
-    // Use server-side token instead of client-side token
-    const serverGithubToken = process.env.GITHUB_ACCESS_TOKEN || context.env?.GITHUB_ACCESS_TOKEN;
+    // Wall one: no outbound GitHub call for an anonymous caller.
+    const denied = await denyUnlessVerified(request, context);
+
+    if (denied) {
+      return denied;
+    }
+
     const cookieToken = request.headers
       .get('Cookie')
       ?.split(';')
@@ -93,12 +113,13 @@ export const loader: LoaderFunction = async ({ request, context }: LoaderFunctio
     const authHeader = request.headers.get('Authorization');
     const headerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
 
-    const token = serverGithubToken || headerToken || cookieToken;
+    /*
+     * Wall two: the CALLER's token, never the platform's. See the module note — the env fallback here
+     * handed an anonymous request the platform account's private repos.
+     */
+    const token = headerToken || cookieToken;
 
-    console.log(
-      'Using GitHub token from:',
-      serverGithubToken ? 'server env' : headerToken ? 'auth header' : cookieToken ? 'cookie' : 'none',
-    );
+    console.log('Using GitHub token from:', headerToken ? 'auth header' : cookieToken ? 'cookie' : 'none');
 
     if (!token) {
       console.error('No GitHub token available');

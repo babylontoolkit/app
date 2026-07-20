@@ -1,6 +1,15 @@
+/**
+ * User bug reports → a GitHub issue on the platform's own token (SPEC §5, `spec/spend-holes.md`).
+ *
+ * ⚠️ **Verified callers only.** This creates real issues in the operator's repository using
+ * `GITHUB_BUG_REPORT_TOKEN`, and it shipped anonymous behind nothing but a per-IP counter held in
+ * process memory — which resets on every restart or deploy, and is per-instance rather than global. An
+ * account is the floor for writing to the owner's repo under the owner's identity.
+ */
 import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { Octokit } from '@octokit/rest';
 import { z } from 'zod';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 // Rate limiting store (in production, use Redis or similar)
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
@@ -145,6 +154,12 @@ export async function action({ request, context }: ActionFunctionArgs) {
   // Only allow POST requests
   if (request.method !== 'POST') {
     return json({ error: 'Method not allowed' }, { status: 405 });
+  }
+
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
   }
 
   try {

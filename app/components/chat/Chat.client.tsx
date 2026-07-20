@@ -42,7 +42,8 @@ import { defaultDesignScheme, type DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import type { TextUIPart, FileUIPart, Attachment } from '@ai-sdk/ui-utils';
 import { useMCPStore } from '~/lib/stores/mcp';
-import { mcpToolsAtom, syncMcpBridge, callMcpTool } from '~/lib/stores/mcpBridge';
+import { syncMcpBridge, callMcpTool } from '~/lib/stores/mcpBridge';
+import { combinedMcpToolsAtom } from '~/lib/stores/unityBridge';
 import { assetNotesAtom } from '~/lib/stores/assetNotes';
 import type { LlmErrorAlertType } from '~/types/actions';
 import {
@@ -239,7 +240,8 @@ export const ChatImpl = memo(
      * a real config change. The discovered tools ride in the agent body so the server knows what is
      * available. (Servers run in the user's sandbox — never on platform infrastructure, §5.)
      */
-    const mcpTools = useStore(mcpToolsAtom);
+    // WebContainer servers + the Unity Editor bridge (§4.17) — one merged list rides to the agent.
+    const mcpTools = useStore(combinedMcpToolsAtom);
     useEffect(() => {
       syncMcpBridge().catch(() => undefined);
     }, [activeProjectId]);

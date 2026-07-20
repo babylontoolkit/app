@@ -15,6 +15,7 @@ import {
 import { selectRestoreTarget } from '~/lib/persistence/restore-target';
 import { protectNothing } from '~/lib/persistence/restore-plan';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { BUILD_AND_APPLY_MESSAGE } from '~/lib/chat/plan-proposal';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { forwardRef } from 'react';
@@ -26,7 +27,13 @@ interface MessagesProps {
   className?: string;
   isStreaming?: boolean;
   messages?: Message[];
-  append?: (message: Message) => void;
+
+  /**
+   * The AI SDK's `append`. The optional `options.body` overrides the request body for THIS call — used
+   * by "Build & Apply" to force `chatMode: 'build'` without waiting for the toggle's state to commit
+   * (the request body is otherwise read from a ref refreshed in a `useEffect`, i.e. committed renders).
+   */
+  append?: (message: Message, options?: { body?: Record<string, unknown> }) => void;
 
   /** Used to write the "restored to checkpoint" note into the chat WITHOUT starting a generation. */
   setMessages?: (messages: Message[]) => void;
@@ -224,6 +231,27 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
       });
     };
 
+    /**
+     * "Build & Apply" (§4.2.9): the user approved a change proposed on a Plan-mode turn. Flip the
+     * toggle to Build and re-run so the model actually writes the files this time.
+     *
+     * The `body: { chatMode: 'build' }` override is load-bearing: `setChatMode('build')` only takes
+     * effect on the NEXT committed render, but `append` fires now and would otherwise send the stale
+     * `chatMode: 'discuss'` — running ANOTHER read-only plan turn and reproducing the exact dead-end
+     * this button exists to fix. We set the toggle too, so the mode stays Build for later turns.
+     */
+    const handleBuildAndApply = (_messageId: string) => {
+      if (!props.append) {
+        return;
+      }
+
+      props.setChatMode?.('build');
+      props.append(
+        { id: `apply-${Date.now()}`, role: 'user', content: BUILD_AND_APPLY_MESSAGE },
+        { body: { chatMode: 'build' } },
+      );
+    };
+
     return (
       <div id={id} className={props.className} ref={ref}>
         {messages.length > 0
@@ -256,6 +284,7 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
                         onFork={handleFork}
                         onRestore={canRestore ? handleRestore : undefined}
                         onRetry={props.append ? handleRetry : undefined}
+                        onBuildAndApply={props.append ? handleBuildAndApply : undefined}
                         append={props.append}
                         chatMode={props.chatMode}
                         setChatMode={props.setChatMode}

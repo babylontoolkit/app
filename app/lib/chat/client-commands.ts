@@ -14,6 +14,8 @@
  * Pure and separately tested, per the repo rule for anything that decides whether a user's message is
  * sent or not — both failure modes are silent (a swallowed message, or a "/clear" that generates).
  */
+import type { SkillSummary } from '~/lib/skills/slash';
+
 export type ClientCommand = { kind: 'clear' } | { kind: 'context' };
 
 /** Spellings that all mean "clear my context": the Claude Code verb plus the product's own noun. */
@@ -21,6 +23,33 @@ const CLEAR_ALIASES = ['/clear', '/new', '/newchat'];
 
 /** `/context` — show what this conversation is costing and how close the history window is (§4.5.6). */
 const CONTEXT_ALIASES = ['/context', '/usage'];
+
+/**
+ * The built-in commands surfaced in the `/` autocomplete menu, alongside synced skills.
+ *
+ * Only the canonical spelling is listed (not every alias) — the menu is discovery, not a thesaurus.
+ * `builtin: true` floats them to the top of the menu; `takesArgs: false` tells `accept` to complete
+ * them with NO trailing space, because any text after the command turns it back into a plain message.
+ */
+export const CLIENT_COMMAND_SUMMARIES: (SkillSummary & { takesArgs: false })[] = [
+  {
+    name: 'clear',
+    description: 'New chat, same game — clear the conversation context, keep the project. Free, no server call.',
+    builtin: true,
+    takesArgs: false,
+  },
+  {
+    name: 'context',
+    description: 'Show what this conversation is costing and how full the history window is.',
+    builtin: true,
+    takesArgs: false,
+  },
+];
+
+/** True when a completed `/name` is a zero-arg client command — used by autocomplete to skip the trailing space. */
+export function isClientCommandName(name: string): boolean {
+  return CLIENT_COMMAND_SUMMARIES.some((command) => command.name === name);
+}
 
 export function parseClientCommand(message: string): ClientCommand | null {
   const normalized = message.trim().toLowerCase();

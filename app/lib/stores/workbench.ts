@@ -114,6 +114,11 @@ export class WorkbenchStore {
     return this.#filesStore.readBinaryFile(filePath);
   }
 
+  /** Force a full re-scan of the WebContainer FS, rebuilding the file map from disk truth. */
+  refreshFiles(): Promise<void> {
+    return this.#filesStore.refreshFiles();
+  }
+
   get currentDocument(): ReadableAtom<EditorDocument | undefined> {
     return this.#editorStore.currentDocument;
   }

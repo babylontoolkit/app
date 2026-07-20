@@ -62,6 +62,17 @@ export interface MediaModelPricing {
   variants: MediaPriceVariant[];
 }
 
+/**
+ * Web search (§4.2) — a FLAT credit charge per billable `web_search` call, not a USD rate. Unlike LLM
+ * and media (priced in USD, credits derived via the margin), search is a fixed credit toll the admin
+ * sets directly. `0` means "do not bill search" (a legit config, e.g. when only the free DuckDuckGo
+ * scrape is in use), which is why it is the one place a zero is allowed.
+ */
+export interface SearchMarketRate {
+  /** Flat credits charged per billable search (SerpApi/Brave). Free providers never bill regardless. */
+  creditsPerSearch: number;
+}
+
 export interface MarketPriceList {
   schemaVersion: 1;
 
@@ -73,6 +84,12 @@ export interface MarketPriceList {
 
   llm: Record<string, LlmMarketRate>;
   media: Record<string, MediaModelPricing>;
+
+  /**
+   * OPTIONAL for backward-compatibility: a list promoted before search billing existed has no `search`
+   * field and stays valid. Readers fall back to the baked rate via `searchCreditsFor`.
+   */
+  search?: SearchMarketRate;
 }
 
 export const MARKET_PRICE_SCHEMA_VERSION = 1;
@@ -189,7 +206,35 @@ export function validateMarketPriceList(value: unknown): ValidationResult {
     }
   }
 
+  /*
+   * `search` is optional (a pre-search-billing list omits it). When present it must be well-formed;
+   * unlike prices, a creditsPerSearch of 0 is allowed — it means "do not bill search".
+   */
+  if (value.search !== undefined) {
+    if (!isPlainObject(value.search)) {
+      errors.push('search must be an object of { creditsPerSearch }.');
+    } else if (!isNonNegativeInteger(value.search.creditsPerSearch)) {
+      errors.push('search.creditsPerSearch must be a whole number of credits ≥ 0 (0 = do not bill search).');
+    } else if (Object.keys(value.search).length > 1) {
+      const extras = Object.keys(value.search).filter((k) => k !== 'creditsPerSearch');
+      errors.push(`search has unsupported keys [${extras.join(', ')}] — only creditsPerSearch.`);
+    }
+  }
+
   return errors.length ? { ok: false, errors } : { ok: true, list: value as unknown as MarketPriceList };
+}
+
+/** A whole, non-negative number of credits (search's flat toll — 0 allowed, unlike a USD price). */
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * The flat credits a billable `web_search` costs, from the active list — falling back to the baked rate
+ * for a list promoted before search billing existed. The one door billing and the Admin display share.
+ */
+export function searchCreditsFor(list: MarketPriceList, bakedFallback: SearchMarketRate): number {
+  return list.search?.creditsPerSearch ?? bakedFallback.creditsPerSearch;
 }
 
 function validateMediaModel(model: string, pricing: unknown, errors: string[]): void {

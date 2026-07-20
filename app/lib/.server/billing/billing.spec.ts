@@ -701,6 +701,18 @@ describe('ledger', () => {
     expect(row.balanceAfter).toBe(-490);
   });
 
+  /*
+   * A `search` debit MAY overdraw too (migration 0010): it is charged mid-generation, AFTER the paid
+   * vendor already ran, so refusing it would only lose the audit trail — same rule as `generation`.
+   */
+  it('allows a search debit to overdraw the balance', async () => {
+    await ledger.append({ userId: 'u1', delta: 4, reason: 'grant' });
+
+    const row = await ledger.append({ userId: 'u1', delta: -10, reason: 'search' });
+
+    expect(row.balanceAfter).toBe(-6);
+  });
+
   /* But nothing else may. A purchase or refund that computes negative is a BUG, not a business case. */
   it('refuses a non-generation entry that would go negative', async () => {
     await expect(ledger.append({ userId: 'u1', delta: -5, reason: 'refund' })).rejects.toThrow(/negative/i);

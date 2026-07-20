@@ -12,8 +12,14 @@
  * once, stored under its commit SHA, and served from storage until an admin deliberately promotes a
  * newer one. Creation therefore has no runtime GitHub dependency, and a bad push to `main` cannot reach
  * users without someone choosing it.
+ *
+ * ⚠️ **Verified callers only** (SPEC §5, `spec/spend-holes.md`). `repo` is caller-chosen and the live
+ * path spends on the PLATFORM GitHub token and writes up to three objects to our storage per request —
+ * so anonymously it was an unbounded zipball-download + S3-write loop on the owner's bill. Its one
+ * caller is project creation, which already requires an account.
  */
 import { json } from '@remix-run/cloudflare';
+import { denyUnlessVerified } from '~/lib/.server/http';
 import { getObjectStore } from '~/lib/.server/storage';
 import { getPlatformConfig } from '~/lib/.server/agent/config';
 import { isTemplatePinningEnabled } from '~/lib/.server/templates/config';
@@ -22,6 +28,12 @@ import { loadLastKnownGood, saveLastKnownGood, validateTemplateFiles } from '~/l
 import { decideTemplateSource, loadSnapshot, readPin, saveSnapshot, writePin } from '~/lib/.server/templates/pin';
 
 export async function loader({ request, context }: { request: Request; context: any }) {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   const url = new URL(request.url);
   const repo = url.searchParams.get('repo');
 

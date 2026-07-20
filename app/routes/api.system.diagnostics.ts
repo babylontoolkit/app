@@ -1,8 +1,12 @@
-import { json, type LoaderFunction, type LoaderFunctionArgs } from '@remix-run/cloudflare';
-
 /**
- * Diagnostic API for troubleshooting connection issues
+ * Diagnostic API for troubleshooting connection issues (SPEC §5, `spec/spend-holes.md`).
+ *
+ * ⚠️ **Verified callers only.** An operator tool, not a public one: it pings GitHub and Netlify from our
+ * box (anonymous egress on our IP) and reports which platform tokens are configured. Nobody without an
+ * account has a reason to ask, and requiring a session costs the operator nothing.
  */
+import { json, type LoaderFunction, type LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { denyUnlessVerified } from '~/lib/.server/http';
 
 interface AppContext {
   env?: {
@@ -12,6 +16,12 @@ interface AppContext {
 }
 
 export const loader: LoaderFunction = async ({ request, context }: LoaderFunctionArgs & { context: AppContext }) => {
+  const denied = await denyUnlessVerified(request, context);
+
+  if (denied) {
+    return denied;
+  }
+
   // Get environment variables
   const envVars = {
     hasGithubToken: Boolean(process.env.GITHUB_ACCESS_TOKEN || context.env?.GITHUB_ACCESS_TOKEN),

@@ -372,6 +372,23 @@ export const Workbench = memo(
       }
     }, []);
 
+    const [isRefreshing, setIsRefreshing] = useState(false);
+
+    const handleRefreshWorkspace = useCallback(async () => {
+      setIsRefreshing(true);
+
+      try {
+        // Re-scan the WebContainer FS and rebuild the file map from disk truth.
+        await workbenchStore.refreshFiles();
+        toast.success('Workspace refreshed');
+      } catch (error) {
+        console.error('Error refreshing workspace:', error);
+        toast.error('Failed to refresh workspace');
+      } finally {
+        setIsRefreshing(false);
+      }
+    }, []);
+
     /*
      * 🔴 `lg:shrink-0` on the spacer below IS LOAD-BEARING — without it the chat column lays out
      * UNDERNEATH the workbench panel, and how far under depends on what the user has been TALKING about.
@@ -431,6 +448,19 @@ export const Workbench = memo(
                   <div className="ml-auto" />
                   {selectedView === 'code' && (
                     <div className="flex overflow-y-auto">
+                      {/* Refresh Workspace Button */}
+                      <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden mr-1">
+                        <button
+                          onClick={handleRefreshWorkspace}
+                          disabled={isRefreshing}
+                          title="Re-scan the workspace files from disk"
+                          className="rounded-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.7"
+                        >
+                          <div className={classNames('i-ph:arrows-clockwise', { 'animate-spin': isRefreshing })} />
+                          {isRefreshing ? 'Refreshing...' : 'Refresh'}
+                        </button>
+                      </div>
+
                       {/* Export Chat Button */}
                       <ExportChatButton exportChat={exportChat} />
 

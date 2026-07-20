@@ -147,7 +147,19 @@ export const KIE_MODELS: ModelInfo[] = [
  * made, so a model listed here without rates is unreachable rather than mis-billed.
  */
 export function kieEnvModel(serverEnv?: Record<string, string>): ModelInfo | undefined {
-  const name = (serverEnv?.KIE_DEFAULT_MODEL || process?.env?.KIE_DEFAULT_MODEL)?.trim();
+  /*
+   * ⚠️ The SAME precedence as `getPlatformModel`: `LLM_MODEL` > `KIE_DEFAULT_MODEL`. This read used to
+   * consult only `KIE_DEFAULT_MODEL`, so a platform model set via `LLM_MODEL` never reached the list —
+   * reopening the exact hole the doc comment above describes, one variable to the left. `stream-text.ts`
+   * would fall back to `modelsList[0]` and the enhancer would RUN Opus 4.8 while settlement charged the
+   * configured model's rates. If the two readers disagree about which var wins, the mis-bill is back.
+   */
+  const name = (
+    serverEnv?.LLM_MODEL ||
+    process?.env?.LLM_MODEL ||
+    serverEnv?.KIE_DEFAULT_MODEL ||
+    process?.env?.KIE_DEFAULT_MODEL
+  )?.trim();
 
   if (!name || KIE_MODELS.some((m) => m.name === name)) {
     return undefined;

@@ -41,7 +41,7 @@ export interface CreatedProject {
   /** The hidden user turn that briefs the model on what it must now build. */
   userMessage: string;
 
-  /** The project's own GameMode class (§4.4b) — the only name the play contract may reference. */
+  /** The project's starting GameMode class (§4.4b) — the seed, not a limit: any registered mode is launchable. */
   className: string;
 
   /**
@@ -216,7 +216,7 @@ function buildCreationBrief(options: {
 **This project**
 - Title: ${title}
 - Seeded from: ${entry.title} (${entry.genre})
-- Its GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. It is the ONLY mode this project may launch.
+- Its starting GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. Launch it first — and freely add more GameModes in \`src/scripts/\` later; any registered GameMode class may be launched through the play contract.
 - Launch it with: \`${play}\`
 ${entry.scene_url ? '' : '- This genre has no preload scene; the GameMode builds its own content.\n'}
 **Images on disk** (import from these or none — never invent an asset path):

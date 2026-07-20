@@ -15,6 +15,8 @@
  * refused rather than launched. The blast radius stays the user's own sandbox and its own npm deps.
  */
 
+import { isLoopbackHttpUrl } from './loopback';
+
 export interface McpServerSpec {
   name: string;
   command: string;
@@ -134,12 +136,22 @@ export function parseMcpConfig(jsonText: string | undefined | null): McpConfigRe
     } else {
       /*
        * sse / streamable-http — network transports. No process spawn, but they still travel with the
-       * project; a URL is required, and it is the user's own key/endpoint by design.
+       * project, so the URL is third-party content and gets the same treatment as a stdio command:
+       * an allow-rule. Only a loopback http URL (the Unity Editor bridge companion on the user's own
+       * machine) is accepted — anything else would point the user's browser at an arbitrary host.
        */
       const url = typeof raw.url === 'string' ? raw.url : '';
 
       if (!url) {
         rejected.push({ name, reason: `${transport} server has no url` });
+        continue;
+      }
+
+      if (!isLoopbackHttpUrl(url)) {
+        rejected.push({
+          name,
+          reason: `url "${url}" must be a loopback http URL (http://127.0.0.1 / localhost / [::1])`,
+        });
         continue;
       }
 

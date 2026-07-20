@@ -33,7 +33,13 @@ const logger = createScopedLogger('ledger');
  * `generation` it may NEVER go negative — the debit runs BEFORE any spend at KIE, so an insufficient
  * balance refuses the render instead of overdrawing. Its refunds reuse `refund`.
  */
-export type LedgerReason = 'grant' | 'purchase' | 'generation' | 'media' | 'refund' | 'promo' | 'adjustment';
+/**
+ * `search` (migration 0010): a flat per-call debit for the agent's `web_search` research tool (§4.2).
+ * Debited AFTER a paid vendor (SerpApi/Brave) returns, INSIDE an LLM generation the user already passed
+ * the gate for — so like `generation` it may go negative (refusing it mid-generation only loses the
+ * audit trail; the vendor was already paid). Not anchored to a generations row (generation_id null).
+ */
+export type LedgerReason = 'grant' | 'purchase' | 'generation' | 'media' | 'search' | 'refund' | 'promo' | 'adjustment';
 
 export interface LedgerEntry {
   id: string;
@@ -106,7 +112,11 @@ function newId(): string {
  * truth, let the balance go negative, and let the gate refuse the NEXT one.
  */
 function mayGoNegative(reason: LedgerReason): boolean {
-  return reason === 'generation' || reason === 'adjustment';
+  /*
+   * 'search' joins them: it is debited mid-generation after the vendor was already paid, so it cannot
+   * be refused without eating the cost AND losing the audit trail (migration 0010).
+   */
+  return reason === 'generation' || reason === 'adjustment' || reason === 'search';
 }
 
 /*

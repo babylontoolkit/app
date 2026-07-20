@@ -87,10 +87,11 @@ export const BASE_DOCS: DocSource[] = [
  * cached prefix stable (and therefore cheap) while still giving the model deep system docs when a
  * request actually needs them.
  *
- * EVERY doc a baked reference points at must be reachable from here, or the pointer is a lie: there
- * is no network at generation time, so a doc that is neither baked nor routed simply does not exist
- * for the model — which is told the routing step is already complete and never to report a failed
- * fetch. The result is silent improvisation in the exact area the doc was meant to cover.
+ * EVERY doc a baked reference points at must be reachable from here, or the pointer is a lie: the
+ * Agent Reference docs are NOT pulled live at generation time (the `web_fetch` tool is for arbitrary
+ * user-referenced URLs, never the pinned routed docs), so a doc that is neither baked nor routed simply
+ * does not exist for the model — which is told the routing step is already complete and never to report
+ * a failed fetch. The result is silent improvisation in the exact area the doc was meant to cover.
  *
  * `references/skills-repository.md` is the one deliberate exception: it instructs an agent to copy
  * skill folders into the project (`.claude/skills`, plugin marketplaces), which is a DIFFERENT host's
@@ -304,7 +305,7 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
       'model context protocol',
       'kie.ai',
       'kie_key',
-      '@babylonjs-toolkit/mcp',
+      '@babylonjs-toolkit/kie',
       'kie-image-mcp',
       'image generation',
       'video generation',

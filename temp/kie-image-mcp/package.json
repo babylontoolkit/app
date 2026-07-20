@@ -1,5 +1,5 @@
 {
-  "name": "@babylonjs-toolkit/mcp",
+  "name": "@babylonjs-toolkit/kie",
   "version": "1.0.1",
   "description": "Babylon Toolkit MCP servers for kie.ai image + video generation (Nano Banana, Kling, Seedance, Grok, Veo 3.1).",
   "author": "MackeyK24 <mackeyk24@gmail.com>",

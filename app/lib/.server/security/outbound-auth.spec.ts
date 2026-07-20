@@ -43,6 +43,19 @@ import { action as supabaseQueryAction } from '~/routes/api.supabase.query';
 import { action as supabaseVariablesAction } from '~/routes/api.supabase.variables';
 import { action as supabaseAction } from '~/routes/api.supabase';
 
+/*
+ * The five added 2026-07-20. The original sweep looked for routes named after VENDORS and these are
+ * named after SUBSYSTEMS, so every one shipped anonymous — `api.system.git-info` most seriously, since
+ * it preferred the PLATFORM GitHub token over the caller's own and would list the operator's private
+ * repos to a `curl`. `outbound-enumerate.spec.ts` now derives this list from disk so the next one
+ * cannot hide the same way.
+ */
+import { loader as systemGitInfoLoader } from '~/routes/api.system.git-info';
+import { loader as systemDiagnosticsLoader } from '~/routes/api.system.diagnostics';
+import { loader as githubTemplateLoader } from '~/routes/api.github-template';
+import { loader as modelsLoader } from '~/routes/api.models';
+import { action as bugReportAction } from '~/routes/api.bug-report';
+
 let fetchSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -94,6 +107,24 @@ const cases: Array<{ name: string; call: () => Promise<Response> }> = [
   { name: 'supabase.query action', call: () => (supabaseQueryAction as Handler)(args('POST')) },
   { name: 'supabase.variables action', call: () => (supabaseVariablesAction as Handler)(args('POST')) },
   { name: 'supabase action', call: () => (supabaseAction as Handler)(args('POST')) },
+
+  /*
+   * `system.git-info` only reaches GitHub on an `action=` query — the bare route returns compile-time
+   * build constants and stays open — so the URL here is the one that actually spends.
+   */
+  {
+    name: 'system.git-info loader (action=getRepos)',
+    call: () =>
+      (systemGitInfoLoader as Handler)(args('GET', {}, 'http://localhost/api/system/git-info?action=getRepos')),
+  },
+  { name: 'system.diagnostics loader', call: () => (systemDiagnosticsLoader as Handler)(args('GET')) },
+  {
+    name: 'github-template loader',
+    call: () =>
+      (githubTemplateLoader as Handler)(args('GET', {}, 'http://localhost/api/github-template?repo=owner/repo')),
+  },
+  { name: 'models loader', call: () => (modelsLoader as Handler)({ ...args('GET'), params: {} }) },
+  { name: 'bug-report action', call: () => (bugReportAction as Handler)(args('POST')) },
 ];
 
 describe('outbound routes refuse an unauthenticated caller before spending', () => {

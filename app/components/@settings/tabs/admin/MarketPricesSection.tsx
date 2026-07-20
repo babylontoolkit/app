@@ -33,6 +33,7 @@ interface PriceList {
   source: string;
   llm: Record<string, LlmRow>;
   media: Record<string, MediaRow>;
+  search?: { creditsPerSearch: number };
 }
 interface MarketPricesState {
   active: { versionId: string | null; list: PriceList };
@@ -262,6 +263,36 @@ export function MarketPricesSection() {
           </table>
         </div>
       )}
+
+      {/* Web search billing — the flat credit toll for the agent's web_search research tool (§4.2). */}
+      <div className="mt-2 rounded-md border border-bolt-elements-borderColor overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-bolt-elements-textTertiary">
+              <th className="px-3 py-1.5 font-medium">Web search (web_search)</th>
+              <th className="px-3 py-1.5 font-medium text-right">Credits / search</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-t border-bolt-elements-borderColor">
+              <td className="px-3 py-1.5 text-bolt-elements-textPrimary">
+                Flat toll per billable search
+                <span className="text-bolt-elements-textTertiary"> · paid backends (SerpApi / Brave) only</span>
+              </td>
+              <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">
+                {active.list.search?.creditsPerSearch ?? state.baked.search?.creditsPerSearch ?? 0}
+                {active.list.search === undefined && (
+                  <span className="text-bolt-elements-textTertiary"> (baked default)</span>
+                )}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="px-3 py-1.5 text-[11px] text-bolt-elements-textTertiary border-t border-bolt-elements-borderColor">
+          Free backends (DuckDuckGo / SearXNG) never bill. Set <code>search.creditsPerSearch</code> to 0 to stop billing
+          search entirely. web_fetch is always free.
+        </div>
+      </div>
 
       {editing && (
         <div className="mt-2 flex flex-col gap-2">

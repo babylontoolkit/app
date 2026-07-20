@@ -78,8 +78,9 @@ function fence(source: DocSource, body: string): string {
  *
  * Order is load-bearing. The platform identity section comes FIRST because it must override the
  * Agent Reference's router index, which instructs the reader to go fetch sub-documents over the
- * network — an instruction that is both impossible (no network at generation time) and already
- * satisfied (the sub-docs are inlined right below it).
+ * network — an instruction that is both wrong here (the sub-docs are pinned + pre-baked, never fetched
+ * live, even though a `web_fetch` tool exists for arbitrary user URLs) and already satisfied (the
+ * sub-docs are inlined right below it).
  */
 export function assemblePrompt(docs: Array<{ source: DocSource; body: string }>, skillsIndex: string): string {
   return [

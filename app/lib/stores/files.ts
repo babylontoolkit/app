@@ -717,6 +717,87 @@ export class FilesStore {
     }
   }
 
+  /**
+   * Force a full re-scan of the WebContainer filesystem and rebuild the file map from disk truth.
+   *
+   * The incremental watcher (`watchPaths`, `#init`) is the normal path and is reliable, but it is
+   * asynchronous and event-driven: a coalesced/missed event or an out-of-band write can leave the map
+   * a step behind what is actually on disk, which is exactly what a user means by "the file list is
+   * stale". This walks the tree from `WORK_DIR` and rebuilds the map from the filesystem itself, so the
+   * Code view reflects precisely what exists.
+   *
+   * Invariants preserved: the same `node_modules`/`.git` exclusions the watcher uses; lock state
+   * carried forward per file; user-deleted paths honored (a refresh must never resurrect a file the
+   * user removed). Binaries keep `content: ''` — their bytes stay on disk (`readBinaryFile`).
+   */
+  async refreshFiles(): Promise<void> {
+    const webcontainer = await this.#webcontainer;
+
+    const nextFiles: FileMap = {};
+    let size = 0;
+
+    const walk = async (relDir: string): Promise<void> => {
+      const dirents = await webcontainer.fs.readdir(relDir || '.', { withFileTypes: true });
+
+      for (const dirent of dirents) {
+        // Match the watcher's exclusions — these never belong in the map.
+        if (dirent.name === 'node_modules' || dirent.name === '.git') {
+          continue;
+        }
+
+        const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
+        const absPath = `${WORK_DIR}/${relPath}`;
+
+        // Honor user deletions — a refresh must not resurrect what was removed.
+        if (this.#deletedPaths.has(absPath)) {
+          continue;
+        }
+
+        if (dirent.isDirectory()) {
+          nextFiles[absPath] = { type: 'folder' };
+          await walk(relPath);
+          continue;
+        }
+
+        if (!dirent.isFile()) {
+          continue;
+        }
+
+        const existing = this.files.get()[absPath];
+        const isLocked = existing?.type === 'file' ? existing.isLocked : undefined;
+
+        try {
+          const buffer = await webcontainer.fs.readFile(relPath);
+          nextFiles[absPath] = { ...fileEntryFromBuffer(buffer), isLocked };
+        } catch (error) {
+          /*
+           * A file we cannot read (races a delete, permissions) keeps its prior entry rather than
+           * vanishing from the tree — a refresh must not lose a file it merely failed to re-read.
+           */
+          logger.error(`Failed to read ${absPath} during workspace refresh`, error);
+
+          if (existing) {
+            nextFiles[absPath] = existing;
+          } else {
+            continue;
+          }
+        }
+
+        size++;
+      }
+    };
+
+    await walk('');
+
+    this.#size = size;
+    this.files.set(nextFiles);
+
+    // Re-apply locks against the freshly rebuilt map.
+    this.#loadLockedFiles();
+
+    logger.info(`Workspace refreshed: ${size} files re-scanned from disk`);
+  }
+
   #processEventBuffer(events: Array<[events: PathWatcherEvent[]]>) {
     const watchEvents = events.flat(2);
 

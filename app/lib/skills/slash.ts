@@ -8,6 +8,12 @@
 export interface SkillSummary {
   name: string;
   description: string;
+
+  /**
+   * True for built-in client commands (`/clear`, `/context`) that are merged into the same menu as
+   * synced skills. Purely a sort hint — built-ins float to the top so they are always discoverable.
+   */
+  builtin?: boolean;
 }
 
 export interface SlashInvocation {
@@ -56,7 +62,14 @@ export function getSlashAutocomplete(
   const matches = skills
     .filter((skill) => skill.name.toLowerCase().includes(query))
     .sort((a, b) => {
-      // Prefix matches first — typing "bt-s" should put bt-spec above anything merely containing it.
+      // Built-in commands (/clear, /context) always lead — they are the shortest path and easy to miss.
+      const builtin = Number(Boolean(b.builtin)) - Number(Boolean(a.builtin));
+
+      if (builtin !== 0) {
+        return builtin;
+      }
+
+      // Prefix matches next — typing "bt-s" should put bt-spec above anything merely containing it.
       const aPrefix = a.name.toLowerCase().startsWith(query) ? 0 : 1;
       const bPrefix = b.name.toLowerCase().startsWith(query) ? 0 : 1;
 

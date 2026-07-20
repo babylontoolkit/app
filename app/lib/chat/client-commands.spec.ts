@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseClientCommand } from './client-commands';
+import { CLIENT_COMMAND_SUMMARIES, isClientCommandName, parseClientCommand } from './client-commands';
+import { getSlashAutocomplete } from '~/lib/skills/slash';
 
 describe('parseClientCommand', () => {
   it.each(['/clear', '/new', '/newchat'])('recognises %s', (cmd) => {
@@ -38,5 +39,35 @@ describe('parseClientCommand', () => {
   it('does not match empty input', () => {
     expect(parseClientCommand('')).toBeNull();
     expect(parseClientCommand('   ')).toBeNull();
+  });
+});
+
+describe('built-in command autocomplete', () => {
+  it('every advertised command actually parses as a command — the menu cannot list a dead entry', () => {
+    for (const command of CLIENT_COMMAND_SUMMARIES) {
+      expect(command.builtin).toBe(true);
+      expect(command.takesArgs).toBe(false);
+      expect(parseClientCommand(`/${command.name}`)).not.toBeNull();
+      expect(isClientCommandName(command.name)).toBe(true);
+    }
+  });
+
+  it('is not fooled by a skill name', () => {
+    expect(isClientCommandName('bt-landing')).toBe(false);
+  });
+
+  it('surfaces built-in commands in the `/` menu and floats them above skills', () => {
+    const skills = [{ name: 'bt-landing', description: 'landing' }];
+    const result = getSlashAutocomplete('/c', [...CLIENT_COMMAND_SUMMARIES, ...skills]);
+
+    // Both built-ins match "/c"; they must come before any skill regardless of alphabetical order.
+    expect(result?.matches[0].name).toBe('clear');
+    expect(result?.matches[1].name).toBe('context');
+    expect(result?.matches.every((m, i) => (m.builtin ? true : result.matches.slice(0, i).every((p) => p.builtin))));
+  });
+
+  it('shows every built-in when the input is a bare slash', () => {
+    const result = getSlashAutocomplete('/', CLIENT_COMMAND_SUMMARIES);
+    expect(result?.matches.map((m) => m.name)).toEqual(['clear', 'context']);
   });
 });

@@ -35,6 +35,8 @@ import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredErro
 import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
 import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
+import { createWebFetchTool } from './web-fetch-tool';
+import { createWebSearchTool } from './web-search-tool';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { createMediaTools, type MediaTaskEvent } from './media-tools';
 import { KieMediaProvider } from '~/lib/.server/media/kie-client';
@@ -835,12 +837,26 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * target `repairUnavailableToolCall` reroutes unknown-tool calls to (observed live: the model calling
    * `boltArtifact` as a tool killed a whole paid creation). See `tool-repair.ts`.
    */
+  /*
+   * `web_fetch` + `web_search` (§4.2) — the research pair — ride in every set EXCEPT the creation
+   * media-only loop: searching/reading a public URL is read-only grounding (no spend beyond context, no
+   * mutation), so they belong on ordinary turns AND on discussion/plan turns (`skills-only`). They are
+   * deliberately kept OFF the creation turn, whose loop is held to media-only to keep the six-round
+   * skill-thrash pathology dead. They are only ever REACHABLE when the loop is already on (`allowTools`)
+   * — their presence never forces the loop, since they are universal and forcing it would reopen
+   * tool-round cost on turns that never research.
+   */
+  const researchTools = {
+    ...createWebSearchTool({ userId: user.id, context: request.context }),
+    ...createWebFetchTool(),
+  };
+
   const tools = (
     toolPolicy.toolset === 'media-only'
       ? { ...mediaTools, ...createRepairTool() }
       : toolPolicy.toolset === 'skills-only'
-        ? { ...createSkillTools(toolContext), ...createRepairTool() }
-        : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools, ...createRepairTool() }
+        ? { ...createSkillTools(toolContext), ...researchTools, ...createRepairTool() }
+        : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools, ...researchTools, ...createRepairTool() }
   ) as SkillTools;
 
   /*

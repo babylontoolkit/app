@@ -67,7 +67,8 @@ async function append(entry: {
       null,
       entry.paymentRef ?? null,
       null,
-      entry.allowNegative ?? (entry.reason === 'generation' || entry.reason === 'adjustment'),
+      entry.allowNegative ??
+        (entry.reason === 'generation' || entry.reason === 'adjustment' || entry.reason === 'search'),
     ],
   );
 
@@ -298,6 +299,24 @@ describe('credit_ledger.generation_id → generations(id)', () => {
     await append({ delta: 250, reason: 'refund', generationId: 'gen_fail' });
 
     expect(await balance()).toBe(10_000);
+  });
+
+  /*
+   * The 'search' reason (migration 0010): accepted by the CHECK constraint, needs NO generations anchor
+   * (generation_id null, like 'grant'), and MAY overdraw — it is charged mid-generation after the vendor
+   * already ran. All three are real-Postgres facts the TS mirror cannot prove.
+   */
+  it('accepts a search debit with no generation anchor, and lets it overdraw', async () => {
+    await append({ delta: 4, reason: 'grant' });
+
+    // No createGeneration() call: a search debit carries no generation_id, so the FK cannot bite.
+    const row = await append({ delta: -10, reason: 'search' });
+
+    expect(row.balance_after).toBe(-6);
+  });
+
+  it('rejects an unknown ledger reason at the CHECK constraint', async () => {
+    await expect(append({ delta: -1, reason: 'bogus', allowNegative: true })).rejects.toThrow(/check|constraint/i);
   });
 });
 

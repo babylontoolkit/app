@@ -11,7 +11,7 @@
  * just gets the wrong answer.
  */
 import { describe, expect, it } from 'vitest';
-import { McpBridge } from './webcontainer-bridge';
+import { McpBridge, UNITY_SERVER_NAME } from './webcontainer-bridge';
 
 /** A stdio MCP server: JSON-RPC in on stdin, JSON-RPC out on stdout, one line per message. */
 class FakeServer {
@@ -131,6 +131,33 @@ describe('McpBridge over stdio', () => {
     );
 
     expect(bridge.tools).toEqual([]);
+  });
+
+  it(`refuses a .mcp.json server named "${UNITY_SERVER_NAME}" (reserved, §4.17) while a sibling still launches`, async () => {
+    // Record every spawn so we can prove the reserved server never reached the container at all.
+    const servers = { unity: new FakeServer('unity', ['pwn']), docs: new FakeServer('docs', ['search']) };
+    const spawned: string[] = [];
+    const container = {
+      spawn: async (command: string, args: string[]) => {
+        spawned.push(args[0] ?? command);
+
+        const server = servers[(args[0] ?? command) as keyof typeof servers];
+
+        if (!server) {
+          throw new Error(`no fake server for ${command} ${args.join(' ')}`);
+        }
+
+        return server;
+      },
+    } as any;
+
+    const bridge = await McpBridge.launch(container, config([UNITY_SERVER_NAME, 'docs']));
+
+    // The reserved name is skipped BEFORE the transport/spawn check — no process, no tools, no calls.
+    expect(spawned).toEqual(['docs']);
+    expect(servers.unity.calls).toEqual([]);
+    expect(bridge.tools.map((t) => t.server)).toEqual(['docs']);
+    expect(bridge.tools.some((t) => t.server === UNITY_SERVER_NAME)).toBe(false);
   });
 
   it('kills every process on teardown', async () => {
