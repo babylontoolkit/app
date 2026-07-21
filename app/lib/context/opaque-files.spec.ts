@@ -63,6 +63,20 @@ describe('isOpaqueToModel', () => {
   it('does not hide a source file merely for living under a public/ path', () => {
     expect(isOpaqueToModel('public/manifest.json')).toBe(false);
   });
+
+  /*
+   * The Unity Project License (§4.18) is machine-generated crypto that ships with the project but must
+   * never be rewritten by the model. It matches at the root ONLY — a `src/license.json` is a source
+   * file the agent may legitimately author, so the exact-path rule (same as the lockfile) is required.
+   */
+  it('hides the root Unity Project License', () => {
+    expect(isOpaqueToModel('license.json')).toBe(true);
+  });
+
+  it('does NOT hide a nested license.json (only the root one is machine-generated)', () => {
+    expect(isOpaqueToModel('src/license.json')).toBe(false);
+    expect(isOpaqueToModel('public/license.json')).toBe(false);
+  });
 });
 
 /**

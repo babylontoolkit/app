@@ -5,31 +5,28 @@
  * share, gallery, MCP, game backends — every other feature is available to every user. A user's
  * project is never held hostage.
  *
- * Two rules do the load-bearing work here:
+ * **This module performs NO network validation.** The external license service (`licenser.asmx`) was
+ * retired (§4.18); the business is credits-based and Pro/BYOK is disabled by default and
+ * manual/testing-only from here. `getEntitlement` simply reads the stored row — an entitlement is
+ * seeded out-of-band (admin/testing) and never revalidated against a remote authority, so there is no
+ * outage that could lapse anyone and no grace window to hold.
  *
- * 1. **BYOK is honored only with a server-verified active entitlement.** A client can send an API key
- *    and a `byok: true` flag all it likes; `resolveByok()` is what decides, and it reads the
- *    entitlement from our own store. A lapsed subscriber silently falls back to credits with a
- *    friendly notice — never an error, never a blocked build.
- *
- * 2. **Our outage must never punish a subscriber.** If the license service is unreachable we do NOT
- *    lapse anyone for 72 hours. The failure mode of a validation call is "no change", not "revoke".
+ * The one load-bearing rule that remains: **BYOK is honored only with an active, server-verified
+ * entitlement.** A client can send an API key and a `byok: true` flag all it likes; `resolveByok()` is
+ * what decides, and it reads the entitlement from our own store. Without one (the shipping default),
+ * the build quietly uses platform credits — never an error, never a blocked build.
  */
-import { createScopedLogger } from '~/utils/logger';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { platformDataDir } from '~/lib/.server/prompt/store';
 import { getPlatformConfig } from '~/lib/.server/agent/config';
 import { createAdminClient, isSupabaseConfigured } from '~/lib/.server/supabase/client';
-import { validateSubscription, type EntitlementTier } from './licenser';
 
-const logger = createScopedLogger('entitlements');
-
-/** Revalidate an active entitlement at most this often (§4.6.1: the service never sees per-generation traffic). */
-const REVALIDATE_AFTER_MS = 24 * 60 * 60 * 1000;
-
-/** How long a validation-service outage may last before it can lapse anyone. Our outage, our problem. */
-const UNREACHABLE_GRACE_MS = 72 * 60 * 60 * 1000;
+/**
+ * The Pro tier an entitlement grants. Formerly sourced from the license-service client; now a plain
+ * local type since that client is retired (§4.18).
+ */
+export type EntitlementTier = 'indie' | 'small_business' | 'enterprise';
 
 export interface Entitlement {
   userId: string;
@@ -37,7 +34,7 @@ export interface Entitlement {
   tier?: EntitlementTier;
   status: 'active' | 'lapsed';
 
-  /** The email the license service knows them by — often NOT their platform email (§4.6.1). */
+  /** The email the entitlement was recorded against — often NOT their platform email (§4.6.1). */
   subscriberEmail: string;
 
   lastValidatedAt: string;
@@ -126,115 +123,12 @@ export function setEntitlementStore(store: EntitlementStore | undefined) {
 }
 
 /**
- * Validate against the license service and upsert the entitlement.
- *
- * Called on sign-in and at most every 24h thereafter — never per generation.
+ * The stored entitlement, or null. **No revalidation** — the license service is retired (§4.18), so
+ * this is a plain store read. Whatever was recorded (manually / by an admin / in testing) is what the
+ * user has.
  */
-export async function refreshEntitlement(
-  userId: string,
-  email: string,
-  context?: unknown,
-): Promise<Entitlement | null> {
-  const store = getEntitlementStore(context);
-  const existing = await store.get(userId);
-  const subscriberEmail = existing?.subscriberEmail || email;
-
-  const result = await validateSubscription(subscriberEmail, context);
-
-  /*
-   * THE GRACE WINDOW. The service is down — we learned nothing, so we change nothing. Lapsing a
-   * subscriber here would mean a blip in OUR infrastructure revokes a benefit they paid for. Only
-   * after 72 hours of continuous unreachability do we accept that the silence might be real.
-   */
-  if (result.unreachable) {
-    if (!existing) {
-      return null;
-    }
-
-    const age = Date.now() - new Date(existing.lastValidatedAt).getTime();
-
-    if (age < UNREACHABLE_GRACE_MS) {
-      logger.warn(`License service unreachable; holding ${userId}'s entitlement (${Math.round(age / 3600_000)}h old)`);
-      return existing;
-    }
-
-    logger.warn(`License service unreachable beyond the ${UNREACHABLE_GRACE_MS / 3600_000}h grace — lapsing ${userId}`);
-
-    const lapsed: Entitlement = { ...existing, status: 'lapsed' };
-    await store.put(lapsed);
-
-    return lapsed;
-  }
-
-  const entitlement: Entitlement = {
-    userId,
-    source: 'protools_subscription',
-    tier: result.tier,
-    status: result.active ? 'active' : 'lapsed',
-    subscriberEmail,
-    lastValidatedAt: new Date().toISOString(),
-    expiresAt: result.expiresAt,
-  };
-
-  await store.put(entitlement);
-
-  return entitlement;
-}
-
-/** The cached entitlement, revalidated if stale. */
-export async function getEntitlement(userId: string, email: string, context?: unknown): Promise<Entitlement | null> {
-  const existing = await getEntitlementStore(context).get(userId);
-
-  if (!existing) {
-    return refreshEntitlement(userId, email, context);
-  }
-
-  const age = Date.now() - new Date(existing.lastValidatedAt).getTime();
-
-  if (age > REVALIDATE_AFTER_MS) {
-    return refreshEntitlement(userId, email, context);
-  }
-
-  return existing;
-}
-
-/**
- * Link a subscription whose email differs from the platform email (§4.6.1).
- *
- * This WILL be a support path — the email someone subscribed with is very often not the one they
- * signed up here with. It is self-serve on purpose: the proof is that the license service itself
- * confirms the supplied address is an active subscriber. We are not deciding who is a subscriber; we
- * are asking the authority and recording its answer.
- */
-export async function linkSubscriberEmail(
-  userId: string,
-  subscriberEmail: string,
-  context?: unknown,
-): Promise<{ linked: boolean; message: string; entitlement?: Entitlement }> {
-  const result = await validateSubscription(subscriberEmail, context);
-
-  if (result.unreachable) {
-    return { linked: false, message: 'The license service is temporarily unavailable. Please try again shortly.' };
-  }
-
-  if (!result.active) {
-    return { linked: false, message: 'No active Pro Tools subscription was found for that email address.' };
-  }
-
-  const entitlement: Entitlement = {
-    userId,
-    source: 'protools_subscription',
-    tier: result.tier,
-    status: 'active',
-    subscriberEmail,
-    lastValidatedAt: new Date().toISOString(),
-    expiresAt: result.expiresAt,
-  };
-
-  await getEntitlementStore(context).put(entitlement);
-  logger.info(`Linked Pro entitlement for ${userId} via ${subscriberEmail} (${result.tier})`);
-
-  return { linked: true, message: 'Pro Tools subscription linked. BYOK is now unlocked.', entitlement };
+export async function getEntitlement(userId: string, context?: unknown): Promise<Entitlement | null> {
+  return getEntitlementStore(context).get(userId);
 }
 
 export interface ByokDecision {
@@ -254,7 +148,8 @@ export interface ByokDecision {
  *
  * 1. `PRO_FEATURES_ENABLED` — the master switch. Off (the shipping default) means no BYOK for anyone,
  *    and the UI contains no provider machinery at all.
- * 2. An active, server-verified entitlement — or local dev, where there is no license service to ask.
+ * 2. An active, server-verified entitlement — or local dev, where every caller is treated as the
+ *    verified local developer.
  * 3. The user actually supplied a key.
  */
 export async function resolveByok(input: {
@@ -270,12 +165,12 @@ export async function resolveByok(input: {
     return { allowed: false };
   }
 
-  // Local development bypasses the license call (§4.6.1) — there is no subscriber to validate.
+  // Local development has no entitlement to read (§4.6.1) — the local developer is treated as Pro.
   if (input.isLocal) {
     return { allowed: true, tier: 'enterprise' };
   }
 
-  const entitlement = await getEntitlement(input.userId, input.email, input.context);
+  const entitlement = await getEntitlement(input.userId, input.context);
 
   if (entitlement?.status === 'active') {
     return { allowed: true, tier: entitlement.tier };

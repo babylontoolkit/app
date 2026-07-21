@@ -32,8 +32,21 @@ const OPAQUE_DIRS = ['public/scripts/'];
 /** Image assets that happen to be text. Their PNG/JPG siblings are already opaque by being binary. */
 const OPAQUE_EXTENSIONS = ['.svg'];
 
-/** Generated dependency graphs — see `hygiene.ts`. Never authored, never edited, always huge. */
-const OPAQUE_FILES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml']);
+/**
+ * Exact root-relative paths that are in the project but never in the conversation:
+ *   - Generated dependency graphs (see `hygiene.ts`): never authored, never edited, always huge.
+ *   - `license.json` (§4.18): the Unity Project License. It is machine-generated crypto (a
+ *     deterministic `secret`/`key` pair, §4.18), ships with the project on every egress path (ZIP,
+ *     GitHub push, share build), and no correct edit to it exists — the model must never rewrite it.
+ *     Deliberately NOT an `isSecretPath` (it must travel with the user's repo, unlike `.env`).
+ */
+const OPAQUE_FILES = new Set([
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'license.json',
+]);
 
 /**
  * Is this file part of the project, but not part of the conversation?

@@ -31,7 +31,7 @@ export type FunnelEvent = (typeof FUNNEL_EVENTS)[keyof typeof FUNNEL_EVENTS];
  * Operational alert signals (§5A). These are the "wake someone up" conditions — distinct from funnel
  * events, which are just history. Each maps to a threshold or a failure the operator needs to know
  * about before a user reports it: a spike in failed generations, a webhook we could not verify, a
- * doc/skill sync that could not build, the license service being unreachable.
+ * doc/skill sync that could not build.
  */
 export const ALERT_SIGNALS = {
   GENERATION_FAILURE_RATE: 'generation_failure_rate',
@@ -39,7 +39,6 @@ export const ALERT_SIGNALS = {
   WEBHOOK_FAILURE: 'webhook_failure',
   DOCSYNC_BUILD_FAILURE: 'docsync_build_failure',
   SKILLSSYNC_BUILD_FAILURE: 'skillssync_build_failure',
-  LICENSE_SERVICE_UNREACHABLE: 'license_service_unreachable',
 } as const;
 
 export type AlertSignal = (typeof ALERT_SIGNALS)[keyof typeof ALERT_SIGNALS];

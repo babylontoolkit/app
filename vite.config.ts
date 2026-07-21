@@ -1,4 +1,5 @@
 import { cloudflareDevProxyVitePlugin as remixCloudflareDevProxy, vitePlugin as remixVitePlugin } from '@remix-run/dev';
+import react from '@vitejs/plugin-react';
 import UnoCSS from 'unocss/vite';
 import { defineConfig, type ViteDevServer } from 'vite';
 import { nodePolyfills } from 'vite-plugin-node-polyfills';
@@ -44,14 +45,18 @@ export default defineConfig((config) => {
         },
       },
       config.mode !== 'test' && remixCloudflareDevProxy(),
-      remixVitePlugin({
-        future: {
-          v3_fetcherPersist: true,
-          v3_relativeSplatPath: true,
-          v3_throwAbortReason: true,
-          v3_lazyRouteDiscovery: true,
-        },
-      }),
+      // The Remix plugin injects a React-refresh preamble that throws in the vitest runtime; under test
+      // we transform JSX with @vitejs/plugin-react instead (dev/prod builds are untouched).
+      config.mode !== 'test' &&
+        remixVitePlugin({
+          future: {
+            v3_fetcherPersist: true,
+            v3_relativeSplatPath: true,
+            v3_throwAbortReason: true,
+            v3_lazyRouteDiscovery: true,
+          },
+        }),
+      config.mode === 'test' && react(),
       UnoCSS(),
       tsconfigPaths(),
       chrome129IssuePlugin(),

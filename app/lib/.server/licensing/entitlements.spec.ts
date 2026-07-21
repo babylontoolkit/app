@@ -6,12 +6,15 @@
  *
  * - Leak BYOK to a non-entitled user, and we hand over the provider/model machinery we promised
  *   nobody would see — and, worse, honor a key we never verified an entitlement for.
- * - Refuse BYOK to a real subscriber (say, because the license service blipped), and we silently
- *   revoke a benefit somebody is paying for.
+ * - Refuse BYOK to a real subscriber, and we silently revoke a benefit somebody is paying for.
+ *
+ * The external license service was retired (§4.18): entitlements now perform NO network validation.
+ * `getEntitlement`/`resolveByok` read the stored row and nothing else — there is no fetch to stub, and
+ * a test that observes one is a regression.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  refreshEntitlement,
+  getEntitlement,
   resolveByok,
   setEntitlementStore,
   type Entitlement,
@@ -53,15 +56,14 @@ beforeEach(() => {
   setEntitlementStore(store);
 
   /*
-   * Never let a test touch the real license service. Without this stub, the "no entitlement" case
-   * reaches out to babylontoolkit.com — which makes the suite slow, flaky, and dependent on a vendor
-   * being up. It also means CI would exercise a DIFFERENT code path than the one we think we're
-   * testing (unreachable, not "not a subscriber"). Deny by default; the tests that care about the
-   * service's answer seed the store directly.
+   * Nothing here should ever reach the network — the license service is retired. Stub fetch to THROW
+   * so any accidental reintroduction of a validation call fails loudly rather than passing silently.
    */
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => new Response('<active>false</active>', { status: 200 })),
+    vi.fn(async () => {
+      throw new Error('no network call is permitted from entitlements (§4.18)');
+    }),
   );
 });
 
@@ -69,6 +71,32 @@ afterEach(() => {
   setEntitlementStore(undefined);
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe('getEntitlement — no network validation (§4.18)', () => {
+  it('returns the stored row without revalidating', async () => {
+    store.seed(entitlement({ status: 'active', tier: 'small_business' }));
+
+    const result = await getEntitlement('u1');
+
+    expect(result?.status).toBe('active');
+    expect(result?.tier).toBe('small_business');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('returns null for an unknown user and still never calls out', async () => {
+    const result = await getEntitlement('nobody');
+
+    expect(result).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('returns a stored lapsed row verbatim — it does not try to "refresh" it', async () => {
+    store.seed(entitlement({ status: 'lapsed' }));
+
+    expect((await getEntitlement('u1'))?.status).toBe('lapsed');
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
 
 describe('resolveByok', () => {
@@ -128,7 +156,7 @@ describe('resolveByok', () => {
     expect(decision.allowed).toBe(false);
   });
 
-  /* Local dev has no license service to ask — but still obeys the master switch. */
+  /* Local dev has no entitlement to read — but still obeys the master switch. */
   it('allows BYOK for the local developer when PRO is on', async () => {
     vi.stubEnv('PRO_FEATURES_ENABLED', 'true');
 
@@ -144,71 +172,21 @@ describe('resolveByok', () => {
 
     expect(decision.allowed).toBe(false);
   });
-});
 
-/**
- * THE GRACE WINDOW (§4.6.1) — the subtlest rule in the entitlement system, and the one with the
- * worst failure mode.
- *
- * "The license service said nothing" and "the license service said no" are NOT the same fact. If we
- * conflate them, every blip in OUR infrastructure silently revokes BYOK from every paying Pro
- * subscriber on the platform — and it looks exactly like a normal lapse, so nobody would even know
- * to investigate. Our outage must never punish a subscriber.
- */
-describe('the 72h grace window', () => {
-  const unreachable = () =>
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        throw new Error('ECONNREFUSED');
-      }),
-    );
+  /*
+   * The local-dev short-circuit runs BEFORE the store is ever read. If a refactor moved the store read
+   * ahead of the isLocal check, a stale lapsed row keyed to the local user id would silently downgrade
+   * the local developer to credits (and hand back a "subscription lapsed" notice that makes no sense
+   * locally). Seed a lapsed row and assert isLocal still wins outright — no notice, no downgrade.
+   */
+  it('treats the local developer as Pro even when a lapsed row is stored under the same id', async () => {
+    vi.stubEnv('PRO_FEATURES_ENABLED', 'true');
+    store.seed(entitlement({ userId: 'local', status: 'lapsed' }));
 
-  it('HOLDS an active entitlement when the license service is unreachable', async () => {
-    store.seed(entitlement({ status: 'active', lastValidatedAt: new Date().toISOString() }));
-    unreachable();
+    const decision = await resolveByok({ userId: 'local', email: 'local@localhost', isLocal: true, hasKey: true });
 
-    const result = await refreshEntitlement('u1', 'u1@example.com');
-
-    expect(result?.status).toBe('active');
-  });
-
-  it('still holds it most of the way through the window (48h)', async () => {
-    const fortyEightHoursAgo = new Date(Date.now() - 48 * 3600_000).toISOString();
-    store.seed(entitlement({ status: 'active', lastValidatedAt: fortyEightHoursAgo }));
-    unreachable();
-
-    expect((await refreshEntitlement('u1', 'u1@example.com'))?.status).toBe('active');
-  });
-
-  it('finally lapses only after the window has fully elapsed (73h)', async () => {
-    const seventyThreeHoursAgo = new Date(Date.now() - 73 * 3600_000).toISOString();
-    store.seed(entitlement({ status: 'active', lastValidatedAt: seventyThreeHoursAgo }));
-    unreachable();
-
-    expect((await refreshEntitlement('u1', 'u1@example.com'))?.status).toBe('lapsed');
-  });
-
-  /* A definitive "not a subscriber" is different — that we believe immediately. */
-  it('lapses immediately when the service answers that they are not a subscriber', async () => {
-    store.seed(entitlement({ status: 'active' }));
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response('<active>false</active>', { status: 200 })),
-    );
-
-    expect((await refreshEntitlement('u1', 'u1@example.com'))?.status).toBe('lapsed');
-  });
-
-  it('activates when the service confirms an active subscription', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response('<active>true</active><tier>enterprise</tier>', { status: 200 })),
-    );
-
-    const result = await refreshEntitlement('u1', 'u1@example.com');
-
-    expect(result?.status).toBe('active');
-    expect(result?.tier).toBe('enterprise');
+    expect(decision.allowed).toBe(true);
+    expect(decision.tier).toBe('enterprise');
+    expect(decision.notice).toBeUndefined();
   });
 });

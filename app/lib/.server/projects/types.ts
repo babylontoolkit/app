@@ -87,6 +87,14 @@ export interface Project {
    */
   gameBackendRef?: string;
 
+  /**
+   * Unity Project Licenser (§4.18) — the linked Unity project's `productGUID` (32 hex chars). A plain
+   * pointer that follows `gameBackendRef`; NEVER a credential. It is the value the generated
+   * `license.json` is locked to (the license `key` is a hash over `plan-<guid>`), so a license only
+   * validates in the Unity project it was linked for. `undefined` = no Unity project linked.
+   */
+  linkedUnityProjectId?: string;
+
   createdAt: string;
   updatedAt: string;
 }

@@ -63,7 +63,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
     const [balance, entitlement] = await Promise.all([
       getLedger(context).balance(user.id),
-      platform.proFeaturesEnabled ? getEntitlement(user.id, user.email, context) : Promise.resolve(null),
+      platform.proFeaturesEnabled ? getEntitlement(user.id, context) : Promise.resolve(null),
     ]);
 
     /*

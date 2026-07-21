@@ -48,9 +48,11 @@ session → verified? → active Pro entitlement + BYOK enabled? use user's key,
 - Assets store one-time purchases share the same webhook plumbing with their own reason/config (Phase 4 detail).
 - Test mode throughout Phase 2; live keys are a Phase 3 gate.
 
-## Entitlements (Pro Tools via license service)
+## Entitlements (Pro Tools) — RETIRED 2026-07-20
 
-- `ValidateSubscription(email) → {active, tier: indie|small_business|enterprise, expiry}`; server-to-server (shared secret min., mTLS preferred); timeout 5s; response cached 24h per user.
+> **RETIRED.** The external ASMX license service (`licenser.asmx`) and its `ValidateSubscription` operation are no longer called: the SOAP client is deleted, `refreshEntitlement`/`linkSubscriberEmail` and the `/api/entitlement` route are removed, and `getEntitlement` returns the stored row without revalidating. BYOK/Pro is disabled by default (`PRO_FEATURES_ENABLED=false`) and is a **manual, testing-only** knob; the `entitlements` table and `resolveByok` remain but are inert. The only subscription signal the platform reads is the live **Stripe** plan, consumed solely by the Unity Project Licenser (SPEC §4.18) to pick a license tier. See SPEC §4.6.1. The historical design below is kept for context only.
+
+- ~~`ValidateSubscription(email) → {active, tier: indie|small_business|enterprise, expiry}`~~ (retired); server-to-server (shared secret min., mTLS preferred); timeout 5s; response cached 24h per user.
 - Lifecycle: check on sign-in + daily job for active entitlements + freshness check when honoring BYOK. Fail-open grace: service unreachable ≤72h → status unchanged. Explicit `active:false` → `status='lapsed'` → BYOK no longer honored; fall back to credits with notice.
 - The entitlement's platform effect is a single boolean capability: BYOK honored. Tier recorded for display/analytics; all tiers identical at launch.
 - Email-mismatch link flow: user submits license key / subscription id / payer email → verified against license service → `entitlements.subscriber_email` set. Self-serve UI; log for support.
@@ -107,6 +109,16 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   `credit_ledger.generation_id` FK, the refund path, and the admin per-model cost breakdown all work
   unchanged. Quote and debit share ONE code path (`quoteMediaRequest`), so the price on the Generate
   button is the price in the ledger. Pinned by `media.spec.ts` + `ledger-sql.spec.ts`.
+- **Unity license debits (§4.18, migration 0012) are a FLAT charge, like `'media'` and unlike `'generation'`**:
+  ledger reason `'license'`, taken BEFORE the license is issued at a fixed per-tier credit price (the
+  ladder in `unity-license-pricing.ts`), **never allowed to go negative** (enforced+insufficient → 402,
+  no license). NOT anchored to a `generations` row (generation_id null, like `'grant'`/`'search'`). Charged
+  **once per (user, Unity project id, tier)** — recorded in `unity_license_entitlements` (unique index on
+  the triple) — so re-generation/re-download is free and a re-linked GUID cannot mint free licenses. The
+  concurrent-generate TOCTOU is closed by honouring `grant()`'s `{granted}` return: the racer whose insert
+  the unique index rejects gets its redundant debit refunded (`unity-license-service.ts`). The credit
+  balance IS the Pro Tools entitlement (the credits-based replacement for the retired PayPal subscription).
+  Pinned by `unity-license-service.spec.ts` + `ledger-sql.spec.ts`.
 - **`providerRates` premium injection is non-throwing**: a promoted list that unprices
   `PREMIUM_MODEL` refuses NEW premium requests loudly (`getPremiumModel`) but must not take
   settlement down — an in-flight premium generation settles via the most-expensive fallback.

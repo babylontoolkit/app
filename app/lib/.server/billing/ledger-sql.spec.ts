@@ -224,6 +224,47 @@ describe('the migrations', () => {
     expect(columns).toContain('remix_seed_at');
   });
 
+  /* Migration 0011: the Unity Project Licenser link (§4.18) — a plain pointer, never a credential. */
+  it('adds linked_unity_project_id to projects (§4.18)', async () => {
+    const { rows } = await db.query<{ column_name: string }>(
+      `select column_name from information_schema.columns
+       where table_schema = 'public' and table_name = 'projects'`,
+    );
+
+    expect(rows.map((r) => r.column_name)).toContain('linked_unity_project_id');
+  });
+
+  /*
+   * Migration 0012: the Unity license unlock records (§4.18). "Once per project+tier, re-download free"
+   * is a UNIQUE index on (user, unity project, tier) — the real idempotency guard, not an app check —
+   * and the table is RLS-protected (owner read only; writes are service-role, like the credit ledger).
+   */
+  it('adds unity_license_entitlements with a unique (user, unity project, tier) index and RLS', async () => {
+    const { rows: tables } = await db.query<{ relname: string; relrowsecurity: boolean }>(
+      `select relname, relrowsecurity from pg_class
+       where relnamespace = 'public'::regnamespace and relkind = 'r'`,
+    );
+    const table = tables.find((r) => r.relname === 'unity_license_entitlements');
+
+    expect(table, 'the table must exist').toBeTruthy();
+    expect(table?.relrowsecurity, 'RLS must be enabled').toBe(true);
+
+    const { rows: indexes } = await db.query<{ indexdef: string }>(
+      `select indexdef from pg_indexes where schemaname = 'public' and tablename = 'unity_license_entitlements'`,
+    );
+
+    expect(
+      indexes.some(
+        (r) =>
+          /unique/i.test(r.indexdef) &&
+          /user_id/.test(r.indexdef) &&
+          /unity_project_id/.test(r.indexdef) &&
+          /\btier\b/.test(r.indexdef),
+      ),
+      'a unique index over (user_id, unity_project_id, tier) enforces one unlock per pair',
+    ).toBe(true);
+  });
+
   /* Migration 0002: without these, production can see THAT a generation cost money, never WHY. */
   it('adds the diagnostics columns the admin dashboards are built from', async () => {
     const { rows } = await db.query<{ column_name: string }>(
@@ -558,6 +599,41 @@ describe("the 'media' ledger reason (migration 0009)", () => {
     await append({ delta: 100, reason: 'grant' });
 
     await expect(append({ delta: -21, reason: 'media', generationId: 'med_ghost' })).rejects.toThrow();
+  });
+});
+
+/**
+ * The 'license' reason (migration 0012, §4.18): a FLAT up-front debit for a Unity Project License. Like
+ * 'media' it runs BEFORE the license is issued, so it must never overdraw — an insufficient balance
+ * refuses the generation. Unlike 'generation'/'media' it carries NO generations anchor (generation_id
+ * null, like 'grant'/'search') — the charge stands on the reason + note alone. All three are real-Postgres
+ * facts the CHECK constraint / allow_negative flag / nullable FK make, and the TS mirror cannot prove.
+ */
+describe("the 'license' ledger reason (migration 0012)", () => {
+  it('accepts a license debit with no generation anchor, at a positive balance', async () => {
+    await append({ delta: 2000, reason: 'grant' });
+
+    // No createGeneration() call: a license debit carries no generation_id, so the FK cannot bite.
+    const row = await append({ delta: -500, reason: 'license' });
+
+    expect(row.balance_after).toBe(1500);
+  });
+
+  it('REFUSES a license debit that would overdraw — the license must not issue', async () => {
+    await append({ delta: 100, reason: 'grant' });
+
+    await expect(append({ delta: -500, reason: 'license' })).rejects.toThrow(/insufficient credits/i);
+
+    expect(await balance()).toBe(100);
+  });
+
+  it('lets a refund compensate a license charge that could not be recorded', async () => {
+    await append({ delta: 2000, reason: 'grant' });
+    await append({ delta: -500, reason: 'license' });
+
+    const refunded = await append({ delta: 500, reason: 'refund' });
+
+    expect(refunded.balance_after).toBe(2000);
   });
 });
 

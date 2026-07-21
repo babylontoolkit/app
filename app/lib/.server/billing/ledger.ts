@@ -39,7 +39,16 @@ const logger = createScopedLogger('ledger');
  * the gate for — so like `generation` it may go negative (refusing it mid-generation only loses the
  * audit trail; the vendor was already paid). Not anchored to a generations row (generation_id null).
  */
-export type LedgerReason = 'grant' | 'purchase' | 'generation' | 'media' | 'search' | 'refund' | 'promo' | 'adjustment';
+export type LedgerReason =
+  | 'grant'
+  | 'purchase'
+  | 'generation'
+  | 'media'
+  | 'search'
+  | 'license'
+  | 'refund'
+  | 'promo'
+  | 'adjustment';
 
 export interface LedgerEntry {
   id: string;
