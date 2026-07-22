@@ -25,19 +25,26 @@ import { useNavigate } from '@remix-run/react';
 import { projectId } from '~/lib/persistence/useChatHistory';
 import { setPendingOpenProject } from '~/lib/persistence/pending-remix';
 
-export function NewChatButton() {
+/**
+ * Start a fresh conversation on the current game.
+ *
+ * A HOOK rather than a button (2026-07-22): this moved out of the header row and into the ⋯ main menu,
+ * and the action is worth having independently of whatever renders it — the header button, the menu
+ * item, and the `/clear` slash command (§4.2.9) must all take the SAME path, or "new chat" means three
+ * subtly different things depending on how you asked for it.
+ *
+ * Returns a no-op when there is no project: "new chat, same game" has no game to be the same as, and
+ * the sidebar's "Start new chat" is already that action.
+ */
+export function useStartNewChat(): () => void {
   const navigate = useNavigate();
   const pid = useStore(projectId);
 
-  /*
-   * No project, no button. On a chat that has not created one yet, "new chat, same game" has no game to
-   * be the same as — the sidebar's "Start new chat" is that action, and it already exists.
-   */
-  if (!pid) {
-    return null;
-  }
+  return () => {
+    if (!pid) {
+      return;
+    }
 
-  const startNewChat = () => {
     /*
      * Through the mount baton rather than by resetting state in place. The builder's mount path already
      * knows how to put a project's files in front of an empty chat — it is what a dashboard Open does —
@@ -46,15 +53,4 @@ export function NewChatButton() {
     setPendingOpenProject(pid, 'fresh');
     navigate('/');
   };
-
-  return (
-    <button
-      onClick={startNewChat}
-      className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3 transition-colors"
-      title="Start a fresh conversation on this same game — your files are untouched"
-    >
-      <div className="i-ph:chat-teardrop-dots" />
-      <span>New chat</span>
-    </button>
-  );
 }

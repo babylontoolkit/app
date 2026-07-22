@@ -1,14 +1,60 @@
+/**
+ * The header toolbar (SPEC §4.4c, §4.8, §4.13, §4.16).
+ *
+ * ## The shape, and why it is this shape
+ *
+ * This row grew one button per feature over about a dozen changes, each individually reasonable, and
+ * arrived at ELEVEN controls — six of them identical accent-filled pills — with two adjacent buttons
+ * both labelled "Sync". Two failures, and the second is the interesting one:
+ *
+ *   - **No hierarchy.** Workbench, Media, Share, Report Bug, Debug Log and Deploy were all the same
+ *     filled purple. A toolbar where everything is primary has no primary, so the eye has to read every
+ *     label every time. Diagnostics looked exactly as important as shipping your game.
+ *   - **No grouping.** The four git controls (badge, provider picker, push button, repo dialog) were
+ *     four siblings answering ONE question — "where does my game live?" — so nothing showed they were
+ *     related, and the two verbs both ended up called "Sync" because each was named against its
+ *     neighbour rather than against the row. **A name collision between siblings is usually a missing
+ *     parent.** See `GitStatusChip`.
+ *
+ * So: **every action in this row looks identical** — one shared style in `toolbar-button.ts`, imported,
+ * never re-typed. Tiering the buttons by importance was tried first (filled primary / bordered
+ * secondary / bare tertiary) and rejected by the owner: a row wearing four different looks reads as
+ * mess before it reads as hierarchy, and the labels already say what each one does.
+ *
+ * **The git chip is the single deliberate exception**, because it carries STATE rather than an action:
+ * §4.5.4b requires the unsynced state to be loud (amber) and the synced state to be quiet, an asymmetry
+ * that cannot survive a uniform style and is the entire point of the badge.
+ *
+ * General options live in the ⋯ **main menu** (New chat, Export ZIP, bug report, debug log), which is
+ * also where new ones go by default. The row is the exception, not the destination.
+ *
+ * ## 🔴 THE ROW MUST NOT RESIZE WHEN THE PREVIEW BOOTS
+ *
+ * This group is right-aligned, so it grows LEFTWARD: anything appearing to the RIGHT of a button shoves
+ * that button left. Share and Deploy need a running preview (you cannot share a game that has not
+ * built) and the preview takes seconds, so they used to POP IN — measured: `New chat` sat 16px from the
+ * right edge at t=0 and 486px at t=4s. Reported as "the New chat button is very inconsistent".
+ *
+ * The old fix was ordering — conditional buttons first, always-present ones last — which worked but
+ * made the order load-bearing and fragile (any new conditional button placed wrong re-broke it). The
+ * fix now is that **preview-gated controls render DISABLED rather than absent**: they hold their space
+ * from the first paint, and the tooltip says why they are not ready yet. Nothing moves, the order is
+ * free to be semantic, and the user can SEE that sharing exists before it is available — which is
+ * better than discovering it appear.
+ *
+ * If you add a control here: decide its tier, and if it needs the preview, disable it — never hide it.
+ */
 import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { projectId as projectIdStore } from '~/lib/persistence';
+import { classNames } from '~/utils/classNames';
 import { DeployButton } from '~/components/deploy/DeployButton';
 import { ShareButton } from '~/components/share/ShareButton';
 import { MediaButton } from '~/components/media/MediaButton';
-import { GitHubSyncButton } from '~/components/github/GitHubSyncButton';
-import { SaveStatus } from '~/components/persistence/SaveStatus.client';
-import { NewChatButton } from '~/components/chat/NewChatButton.client';
-import { brand } from '~/config/brand';
+import { GitStatusChip } from './GitStatusChip.client';
+import { OverflowMenu } from './OverflowMenu.client';
+import { TOOLBAR_BUTTON_ACTIVE, TOOLBAR_ICON_BUTTON } from './toolbar-button';
 
 interface HeaderActionButtonsProps {
   chatStarted: boolean;
@@ -21,106 +67,53 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
   const activeProjectId = useStore(projectIdStore);
   const activePreview = previews[activePreviewIndex];
 
-  const shouldShowButtons = activePreview;
+  if (!activeProjectId) {
+    return null;
+  }
 
-  /*
-   * 🔴 ORDER IS LOAD-BEARING: CONDITIONAL BUTTONS FIRST, ALWAYS-PRESENT ONES LAST.
-   *
-   * This row is right-aligned (the header gives the chat title `flex-1` and pins this group against the
-   * account menu), so it grows LEFTWARD. Anything that appears to the RIGHT of a button shoves that
-   * button left.
-   *
-   * `Save` and `New chat` are the only two here that do not need a running preview, and the preview
-   * takes seconds to boot. With them listed first, `New chat` rendered in the top-right corner on load
-   * and then jumped 470px left the moment vite came up and Share/GitHub/Deploy/Debug appeared beside it
-   * — measured: 16px from the right edge at t=0, 486px at t=4s. Reported as "the New chat button is very
-   * inconsistent, sometimes it's in the top right corner and sometimes it's not".
-   *
-   * Listing the preview-gated group first means it expands leftward into empty space, and the two
-   * always-present controls stay pinned to the right edge for the whole session. The general rule: in a
-   * right-aligned toolbar, a conditional item placed right of an unconditional one MOVES it.
-   */
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-1.5">
       {/*
-       * Show/hide the workbench. Gated on a PROJECT, not the preview: the chat-only view (workbench
-       * closed by its ✕) previously had NO way back — only a page reload or a generation that wrote
-       * files ever set `showWorkbench` again. This is the way back.
+       * Workbench toggle — tertiary, icon-only, with a pressed state.
+       *
+       * Gated on a PROJECT, not the preview: the chat-only view (workbench closed by its ✕) previously
+       * had NO way back — only a reload or a generation that wrote files ever set `showWorkbench` again.
        */}
-      {activeProjectId && (
-        <button
-          onClick={() => workbenchStore.showWorkbench.set(!showWorkbench)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500"
-          title={showWorkbench ? 'Hide the workbench' : 'Open the workbench (code, files, preview)'}
-        >
-          <div className="i-ph:code" />
-          <span>Workbench</span>
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={() => workbenchStore.showWorkbench.set(!showWorkbench)}
+        title={showWorkbench ? 'Hide the workbench' : 'Open the workbench (code, files, preview)'}
+        aria-label="Toggle the workbench"
+        aria-pressed={showWorkbench}
+        className={classNames(TOOLBAR_ICON_BUTTON, showWorkbench && TOOLBAR_BUTTON_ACTIVE)}
+      >
+        <div className="i-ph:code-bold text-sm" />
+      </button>
 
-      {/* Built-in image/video generation (§4.16). Gates itself on an active project, not the preview. */}
+      {/* Built-in image/video generation (§4.16) — secondary. */}
       <MediaButton />
 
-      {/* Share the game as a public /play build (§4.8) */}
-      {shouldShowButtons && <ShareButton />}
+      {/* Publish to a public /play build (§4.8) — the primary action, the only filled button here. */}
+      <ShareButton disabled={!activePreview} />
 
-      {/* GitHub Sync — link/push/pull, available to ALL users (§4.13) */}
-      {shouldShowButtons && <GitHubSyncButton />}
-
-      {/* Deploy Button */}
-      {shouldShowButtons && <DeployButton />}
-
-      {/* Debug Tools */}
-      {shouldShowButtons && (
-        <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden text-sm">
-          <button
-            onClick={() => window.open(`mailto:${brand.support.email}?subject=Bug%20report`, '_blank')}
-            className="rounded-l-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.5"
-            title="Report Bug"
-          >
-            <div className="i-ph:bug" />
-            <span>Report Bug</span>
-          </button>
-          <div className="w-px bg-bolt-elements-borderColor" />
-          <button
-            onClick={async () => {
-              try {
-                const { downloadDebugLog } = await import('~/utils/debugLogger');
-                await downloadDebugLog();
-              } catch (error) {
-                console.error('Failed to download debug log:', error);
-              }
-            }}
-            className="rounded-r-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.5"
-            title="Download Debug Log"
-          >
-            <div className="i-ph:download" />
-            <span>Debug Log</span>
-          </button>
-        </div>
-      )}
+      {/* Deploy to Netlify/Vercel/etc — secondary. Disables itself without a preview. */}
+      <DeployButton />
 
       {/*
-       * Save + the saved/not-saved indicator (§4.5.4b).
+       * The ONE git control (§4.5.4b, §4.5.4c, §4.13): state + every action you can take about it.
+       * Replaces the badge, the provider picker, the push button and the repo dialog.
        *
-       * 🔴 Deliberately NOT behind `shouldShowButtons`. Everything above needs a running preview — you
-       * cannot share or deploy a game that has not built. Saving is the opposite: a project that failed
-       * to build is precisely the one whose code the user cannot afford to lose, and under repo-primary
-       * persistence this button is the only thing standing between them and a closed tab. `SaveStatus`
-       * renders nothing until there is a project, which is the correct gate.
+       * Deliberately NOT preview-gated. Everything above needs a build; this is the opposite — a project
+       * that failed to build is precisely the one whose code the user cannot afford to lose.
        */}
-      <SaveStatus />
+      <GitStatusChip />
 
       {/*
-       * New chat, same game (§4.5.6).
-       *
-       * Also NOT behind `shouldShowButtons`, and for a related reason: a project whose preview is broken
-       * is one of the likeliest times to want a clean context to debug from. It gates itself on there
-       * being a project, which is the only precondition it actually has.
-       *
-       * Last, so it is pinned to the right edge — see the order note at the top of this component.
+       * The MAIN MENU (last, so it reads as "everything else"): New chat, Export ZIP, bug report, debug
+       * log — and where future general options go. Needs no preview; a broken build is one of the
+       * likeliest times to want a clean context to debug from.
        */}
-      <NewChatButton />
+      <OverflowMenu />
     </div>
   );
 }

@@ -7,9 +7,19 @@
 import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { description as descriptionStore, projectId as projectIdStore } from '~/lib/persistence';
+import { TOOLBAR_BUTTON } from '~/components/header/toolbar-button';
 import { ShareDialog } from './ShareDialog';
 
-export function ShareButton() {
+interface ShareButtonProps {
+  /**
+   * Set while the preview is still booting. The button RENDERS anyway — see the toolbar note in
+   * `HeaderActionButtons`: a right-aligned row whose members pop in shoves everything left, and a user
+   * is better served seeing that sharing exists (and why it is not ready) than watching it appear.
+   */
+  disabled?: boolean;
+}
+
+export function ShareButton({ disabled }: ShareButtonProps = {}) {
   const [open, setOpen] = useState(false);
   const activeProjectId = useStore(projectIdStore);
   const projectName = useStore(descriptionStore);
@@ -21,10 +31,17 @@ export function ShareButton() {
 
   return (
     <>
+      {/*
+       * The same style as every other toolbar action (`header/toolbar-button.ts`). It was accent-filled
+       * as the row's "primary"; the owner's call is that a row of buttons wearing four different looks
+       * reads as mess before it reads as hierarchy. The only element allowed to differ is the git chip,
+       * because it carries STATE rather than an action.
+       */}
       <button
         onClick={() => setOpen(true)}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500"
-        title="Share your game"
+        disabled={disabled}
+        className={TOOLBAR_BUTTON}
+        title={disabled ? 'Available once your game has built' : 'Publish your game to a public link'}
       >
         <div className="i-ph:share-network" />
         <span>Share</span>

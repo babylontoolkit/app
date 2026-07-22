@@ -56,6 +56,18 @@ function startConnect(provider: 'github' | 'gitlab' = 'github') {
   window.location.href = `/api/git/connect/${provider}?returnTo=${encodeURIComponent(returnTo)}`;
 }
 
+/**
+ * ⚠️ **No longer in the header — the dialog is now opened from `GitStatusChip`.**
+ *
+ * This button was labelled "Sync" to stop it competing with the button then called "Save"; §4.5.4c
+ * renamed Save to Sync and handed it that exact word, so the header showed two adjacent buttons with
+ * one label and two different verbs. The fix was not a third name — it was noticing that the badge, the
+ * provider picker, the push button and this dialog are four controls for ONE question ("where does my
+ * game live?"), and giving them one parent. See `GitStatusChip`.
+ *
+ * Kept exported (hide-don't-delete) so nothing that still imports it breaks; it renders correctly if
+ * mounted. Prefer the chip.
+ */
 export function GitHubSyncButton() {
   const [open, setOpen] = useState(false);
   const activeProjectId = useStore(projectIdStore);
@@ -66,27 +78,20 @@ export function GitHubSyncButton() {
 
   return (
     <>
-      {/*
-       * Labelled "Sync", not "GitHub" (§4.5.4b): the header already has one git surface — the Save
-       * button next to it, which CREATES a repo and keeps it saved. This is the OTHER thing you do with
-       * a repo — pull external changes down, resolve divergence, or link an existing one — so it reads
-       * as its own verb rather than a second "GitHub" button competing with Save. The owner reported the
-       * two same-named buttons as confusing.
-       */}
       <button
         onClick={() => setOpen(true)}
         className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md border border-bolt-elements-borderColor text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-2"
         title="Sync a repository — pull changes, resolve divergence, or link an existing repo"
       >
         <div className="i-ph:git-branch" />
-        <span>Sync</span>
+        <span>Repository</span>
       </button>
       {open && <GitHubSyncDialog projectId={activeProjectId} onClose={() => setOpen(false)} />}
     </>
   );
 }
 
-function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');

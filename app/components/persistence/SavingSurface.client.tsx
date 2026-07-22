@@ -1,7 +1,8 @@
 /**
  * Everything the platform says about saving, in one place (SPEC §4.5.4b).
  *
- * The header carries the badge and the button; this carries the three things that interrupt: the
+ * The header's `GitStatusChip` carries the state and every action on it; this carries the three things
+ * that interrupt: the
  * one-time toast after a first creation, the recurring banner, and the browser's own unload warning.
  * Plus the divergence dialog, which is the only one of the four the user did not implicitly ask for.
  *

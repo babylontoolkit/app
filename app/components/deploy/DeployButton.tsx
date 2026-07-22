@@ -13,6 +13,7 @@ import { useVercelDeploy } from '~/components/deploy/VercelDeploy.client';
 import { useNetlifyDeploy } from '~/components/deploy/NetlifyDeploy.client';
 import { useGitHubDeploy } from '~/components/deploy/GitHubDeploy.client';
 import { useGitLabDeploy } from '~/components/deploy/GitLabDeploy.client';
+import { TOOLBAR_BUTTON } from '~/components/header/toolbar-button';
 import { GitHubDeploymentDialog } from '~/components/deploy/GitHubDeploymentDialog';
 import { GitLabDeploymentDialog } from '~/components/deploy/GitLabDeploymentDialog';
 import type { DeployFile } from '~/lib/binary/binary-files';
@@ -128,7 +129,12 @@ export const DeployButton = ({
 
   return (
     <>
-      <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden text-sm">
+      {/*
+       * SECONDARY tier in the header (2026-07-22) — bordered, not accent-filled. Share is the only
+       * filled button up there; see the tier note in `HeaderActionButtons`. Style only: the menu, the
+       * gating and every handler below are upstream's and untouched (FORK_BASE.md).
+       */}
+      <div className="flex text-sm">
         {/*
          * `modal={false}` + Portal, both load-bearing (2026-07-18): the modal default scroll-locks the
          * body with scrollbar-compensation padding, which shifts the IN-FLOW chat column while the
@@ -139,9 +145,10 @@ export const DeployButton = ({
         <DropdownMenu.Root modal={false}>
           <DropdownMenu.Trigger
             disabled={isDeploying || !activePreview || isStreaming}
-            className="rounded-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.7"
+            className={TOOLBAR_BUTTON}
+            title={!activePreview ? 'Available once your game has built' : 'Deploy your game to a hosting provider'}
           >
-            {isDeploying ? `Deploying to ${deployingTo}...` : 'Deploy'}
+            {isDeploying ? `Deploying to ${deployingTo}…` : 'Deploy'}
             <span className={classNames('i-ph:caret-down transition-transform')} />
           </DropdownMenu.Trigger>
           <DropdownMenu.Portal>

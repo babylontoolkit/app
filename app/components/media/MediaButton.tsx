@@ -8,6 +8,7 @@
 import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { projectId as projectIdStore } from '~/lib/persistence';
+import { TOOLBAR_BUTTON } from '~/components/header/toolbar-button';
 import { MediaPanel } from './MediaPanel';
 
 export function MediaButton() {
@@ -20,11 +21,8 @@ export function MediaButton() {
 
   return (
     <>
-      <button
-        onClick={() => setOpen(true)}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500"
-        title="Generate images & video"
-      >
+      {/* One shared toolbar style — see `header/toolbar-button.ts` for why it is not inlined here. */}
+      <button onClick={() => setOpen(true)} className={TOOLBAR_BUTTON} title="Generate images & video">
         <div className="i-ph:image" />
         <span>Media</span>
       </button>
