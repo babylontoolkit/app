@@ -562,7 +562,38 @@ Credits are meaningless without identity — the ledger is keyed on `user_id`, a
 > 8. **The chat is restored from the server on a new device — as a TRANSCRIPT, marked never-replay.** `saveMessages` was uploading every conversation and `loadMessages` had zero call sites, so a project opened elsewhere came back with its files and no history. The fix is not `setInitialMessages(serverMessages)`: parsing an assistant message RUNS its actions (that is how upstream rebuilds a project with no snapshot), so a replayed history writes stale file bodies over the ones just fetched from the user's repo. Restored messages are marked `NO_REPLAY` and routed to a second parser that renders them and executes nothing.
 > 9. **Self-remix (Duplicate) sends its files from the browser.** There is no server copy of an unshared project to clone. The caller owns both sides (`requireOwnedProject`), so their own bytes are authoritative. `body.files` is IGNORED on the `shareId` path: a visitor's files are not the owner's game.
 
-**The model (settled):** the user's game code is permanently stored in **their own GitHub or GitLab repository** — never on our servers. Our servers hold only the lightweight **project record** (name, thumbnail, chat/messages, registry seed, `provider`, `linked_repo`, `linked_branch`, `last_synced_commit_sha`, `auto_push`). The working copy lives **in the browser** (WebContainer + inherited IndexedDB), exactly as today.
+**The model (settled):** the user's game code is permanently **owned** by them and lives in **their own GitHub or GitLab repository**. Our servers hold the lightweight **project record** (name, thumbnail, chat/messages, registry seed, `provider`, `linked_repo`, `linked_branch`, `last_synced_commit_sha`, `auto_push`), plus — as of §4.5.4c — **one working copy per project, purely for crash recovery**. The live working copy still lives **in the browser** (WebContainer + inherited IndexedDB).
+
+#### 4.5.4c Durability — the server WORKING COPY (DECIDED 2026-07-22, owner decision)
+
+> **Status: DECIDED, NOT YET BUILT.** This amends §4.5.4b. Repo-primary stays the **ownership** model; it stops being the **durability** model.
+
+**The failure that forced this, measured live (2026-07-22).** A `/bt-landing` redesign ran to completion on an unlinked project — `finish=stop`, 20,364 output tokens, 8 files rewritten, four generated images — and settled at **427 credits**. The browser tab then died. Re-opening the project showed the state from *before* the run: no redesign, no assets, and no mention in the conversation that it had ever happened. The server log knew it succeeded and the ledger knew it had been paid for; everything else was gone.
+
+That is not repo-primary working as intended. Repo-primary says the user's code is *theirs* and belongs in *their* repo. It never said a completed, paid-for generation should be one tab-crash from oblivion — and §4.12 explicitly sells checkpoints and undo as **"the single most important safety net for non-developers"**, i.e. for exactly the users who do not have a git remote to fall back on. That net currently lives in IndexedDB and dies with the browser profile.
+
+**The decision.** The platform keeps **one working copy per project** — a *recovery buffer*, not a backup product and not a version history.
+
+**Invariants — each one is the line that keeps this from becoming the thing migration 0007 deleted:**
+
+1. 🔴 **EXACTLY ONE OBJECT PER PROJECT, overwritten in place.** `working/{projectId}.json`. **Never a history** — no per-generation retention, no "keep the last few", no rows. Retention is what made the old `snapshots` table unbounded and expensive; "just keep N" is precisely how it grows back, so the count is one and the spec says so.
+2. 🔴 **The key is DERIVED from the project id, never caller-supplied.** Same shape as the remix seed (§4.5.4b deviation 6, `share/seed-store.ts`). This is a security property, not tidiness: the deleted snapshot route took a caller-supplied id, which is exactly why it needed `assertSnapshotBelongsTo` to stop project A's owner reading project B's files. With a derived key there is no id to supply, so `requireOwnedProject` alone is sufficient — **and that stays true only while the key remains a pure function of the project id.**
+3. **Two walls, as ever** (§4.5.3): verified session **and** project ownership, 404-not-403.
+4. **Written on the same trigger as a local checkpoint.** One concept, one moment. A second, independent "when do we save" rule is how two writers end up disagreeing.
+5. **Present whether or not the project is linked.** ⚠️ **`linked` ≠ `pushed`** — deleting the copy when a repo is linked re-opens the whole hole for anyone who links early and pushes late, which is the common case. This is why "store it until GitHub sync, then clean up" was **considered and rejected**: it makes existence conditional, and the failure mode of getting that condition wrong is deleting somebody's only copy.
+6. **Deleted with the project**, by the same prefix sweep that already reaps chats (§4.5.6) — bytes must never outlive the record that named them.
+7. **Binary byte-identity applies**, as on every other file path (`spec/binary-files.md`).
+
+**What this does NOT change:** ownership (the user's code is theirs and belongs in their repo); the push/pull/divergence rules (§4.13); `.env` exclusion (`isSecretPath`); the remix seed; and the absence of a **snapshot history**. `POST /api/projects/:id/snapshots` stays non-existent.
+
+**Save becomes SYNC.** The button is renamed because the current label conflates *durability* with *publishing to GitHub* — and that conflation is the reason a non-developer loses work: "Not saved — browser only" reads as a nag rather than as "the only copy of this is one tab-crash from gone". After this change durability is automatic and **Sync to repo** means what it says.
+
+**Costs accepted, explicitly:**
+
+- **Storage scales per project.** The Arcade Racing project measured **~30 MB** of generated PNGs, or ~3 MB once §4.16's `output_format: "jpg"` guidance lands. That guidance stops being cosmetic and becomes load-bearing for this decision.
+- **The platform now holds user code.** The claim "we store no project files" ends; privacy copy must change with it.
+- **A route that writes whole projects returns.** It ships with the two walls and the derived key from day one, never "added later".
+- **`no-server-storage.spec.ts` stays exactly as it is, and it did NOT need changing** — a first draft of this section claimed it "pins the opposite" and would have to be rewritten. That was wrong, and checking it produced a more useful finding. It pins the absence of the **snapshot HISTORY specifically**: snapshot routes, `SnapshotStore`, `currentSnapshotId`, and any client module referencing a snapshots URL. §4.5.4c reintroduces none of those, so the whole suite went green with a working-copy store added — **which means that guard would never have caught this coming back under a different name.** A second guard is therefore required, asserting the NEW rule (`one-working-copy.spec.ts`): exactly one object per project, no retention, a key derived from the project id, and no caller-supplied storage id anywhere on the path. Two guards, two distinct rules — the old one keeps history dead, the new one keeps the buffer bounded.
 
 **Lifecycle:**
 - **UNLINKED (browser-only):** every new project starts here — newbies run a prompt or two and see a working game with ZERO friction (no repo, no OAuth). Honest consequence, stated in the UI: clear browser data / switch devices before linking = the code is gone (the chat record survives; the files do not).

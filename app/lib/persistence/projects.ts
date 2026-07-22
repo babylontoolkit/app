@@ -407,6 +407,44 @@ export async function saveMessages(
   });
 }
 
+/**
+ * Push the project's files to the server WORKING COPY (SPEC §4.5.4c).
+ *
+ * One object per project, overwritten — a crash-recovery buffer, never a history. `seq` is the LOCAL
+ * checkpoint's seq, deliberately: resume has to order this copy against the browser's checkpoints, and
+ * sharing one monotonic counter is what makes that comparison meaningful. Never a timestamp.
+ *
+ * ⚠️ **Best-effort by design — never let this fail the checkpoint.** The local checkpoint is written
+ * first and is the copy the user is about to rely on; a failed upload must degrade to "no recovery
+ * copy", never to "no checkpoint". Callers swallow the error and say so in the log.
+ */
+export async function saveWorkingCopy(projectId: string, seq: number, files: SerializedFileMap): Promise<void> {
+  await api<{ ok: true; seq: number }>(`/api/projects/${projectId}/working`, {
+    method: 'PUT',
+    body: JSON.stringify({ seq, files }),
+  });
+}
+
+/**
+ * The server's recovery copy, or `null` when there is none.
+ *
+ * `null` means "this project has no copy" — an ordinary state for a project that has never
+ * checkpointed, and also what the server returns for bytes it could not parse or order. It is never a
+ * reason to fail a mount: the caller falls back to its other sources (`mount-source.ts`).
+ */
+export async function loadWorkingCopy(
+  projectId: string,
+): Promise<{ seq: number; updatedAt: string; files: SerializedFileMap } | null> {
+  try {
+    const { copy } = await api<{ copy: { seq: number; updatedAt: string; files: SerializedFileMap } }>(
+      `/api/projects/${projectId}/working`,
+    );
+    return copy;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadMessages<T = unknown>(projectId: string, serverChatId: string): Promise<T[]> {
   const { chat } = await api<{ chat: { messages: T[] } }>(`/api/projects/${projectId}/messages/${serverChatId}`);
   return chat.messages;

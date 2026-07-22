@@ -24,6 +24,7 @@ import { FsChatIndex, setChatIndex } from './chat-index';
 import { FsProjectStore, setProjectStore } from './store';
 import { listChats, putChat } from './message-store';
 import { putRemixSeed, seedKey } from '~/lib/.server/share/seed-store';
+import { putWorkingCopy, workingCopyKey } from './working-copy';
 import type { Project } from './types';
 
 const USER = { id: 'user-1', email: 'a@example.com', emailVerified: true } as const;
@@ -116,6 +117,24 @@ describe('deleting a project leaves nothing behind', () => {
     await deleteProject(mine.id);
 
     expect(await objects.get(seedKey(mine.id))).toBeNull();
+  });
+
+  /*
+   * The working copy (§4.5.4c) holds the project's ENTIRE file tree, so an orphaned one is the worst
+   * version of the bug this file exists for: the user deleted their game and the platform kept all of
+   * it. Unconditional, like the seed — a hint that disagrees with storage leaves the bytes behind.
+   */
+  it('deletes the working copy', async () => {
+    await putWorkingCopy(mine.id, {
+      projectId: mine.id,
+      seq: 1,
+      updatedAt: 'now',
+      files: { 'a.ts': { type: 'file', content: 'x', isBinary: false } },
+    });
+
+    await deleteProject(mine.id);
+
+    expect(await objects.get(workingCopyKey(mine.id))).toBeNull();
   });
 
   it('deletes the project row', async () => {

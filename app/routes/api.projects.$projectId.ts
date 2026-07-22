@@ -10,6 +10,7 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { deleteMessages } from '~/lib/.server/projects/message-store';
 import { deleteRemixSeed } from '~/lib/.server/share/seed-store';
+import { deleteWorkingCopy } from '~/lib/.server/projects/working-copy';
 import { errorResponse } from '~/lib/.server/http';
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
@@ -49,6 +50,13 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
        */
       await deleteRemixSeed(project.id, context);
       await deleteMessages(project.id, context);
+
+      /*
+       * The working copy (§4.5.4c) — the platform's recovery buffer for this project's files. Same
+       * unconditional rule as the two above: bytes must never outlive the record that named them, and
+       * it holds the user's whole game, so leaving it behind is the worst version of that orphan.
+       */
+      await deleteWorkingCopy(project.id, context);
       await store.delete(project.id);
 
       return json({ ok: true });

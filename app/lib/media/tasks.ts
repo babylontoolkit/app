@@ -15,6 +15,7 @@
  */
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { refreshWorkingCopySoon } from '~/lib/persistence/refresh-working-copy';
 import { WORK_DIR } from '~/utils/constants';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -166,6 +167,19 @@ async function deliverBytes(handle: MediaTaskHandle): Promise<void> {
      * The remount is cheap and it is the ONLY compensating action the async-enqueue design needs.
      */
     workbenchStore.refreshPreviews();
+
+    /*
+     * And the same correction for the RECOVERY copy (§4.5.4c).
+     *
+     * The generation checkpointed ~25s ago, before this render existed, so the server working copy
+     * holds the code that references this asset and not the asset. Recovering from it would rebuild a
+     * project whose landing page points at four images that were never stored — the broken-image
+     * failure directly above, one layer down and invisible until someone actually needed the recovery.
+     *
+     * Coalesced, and it reuses the last checkpoint's seq: a late asset completes that checkpoint, it
+     * does not create a new state.
+     */
+    refreshWorkingCopySoon(`media ${handle.taskId}`);
 
     toast.success(`Generated ${handle.kind} saved to ${handle.destPath}`);
     logger.info(`Media task ${handle.taskId} delivered ${bytes.byteLength} bytes → ${handle.destPath}`);

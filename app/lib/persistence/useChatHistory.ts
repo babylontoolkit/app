@@ -34,6 +34,7 @@ import {
   readRemixSeed,
   saveMessages,
   saveProjectToRepo,
+  saveWorkingCopy,
   type RepoStatus,
 } from './projects';
 import {
@@ -1211,17 +1212,40 @@ ${value.content}
       const files = await workbenchStore.serializeFiles();
 
       /*
-       * 🔴 The FILES stay in this browser (§4.5.4b). This used to `createSnapshot(pid, …)` — uploading
-       * the entire project to our object storage after every generation. Under repo-primary
-       * persistence the platform does not hold the user's code: it lives here until they save, and in
-       * their own repo afterwards. A server-side copy of every unlinked project is not a backup, it is
-       * the old model under a new name.
+       * ⚠️ **AMENDED (§4.5.4c).** This comment used to say the files stay in this browser, full stop —
+       * that a server-side copy "is not a backup, it is the old model under a new name". That was true
+       * of what it replaced (`createSnapshot` per generation: an unbounded, caller-addressed HISTORY),
+       * and it is why none of what follows reintroduces one.
        *
-       * The CONVERSATION still goes up, and that is not an inconsistency — §4.5.4b keeps the project
-       * record and the chat on the platform. Without it a build cannot be resumed on another machine
-       * and a remixed project arrives with no history of how it was made (§4.5).
+       * What it missed is that the browser was then the ONLY copy. Measured: a `/bt-landing` run
+       * finished, settled 427 credits, the tab died, and the work — plus every trace that it had
+       * happened — was gone. §4.12 sells checkpoints as the safety net for non-developers, i.e. the
+       * users least likely to have a git remote, and that net lived only in IndexedDB.
+       *
+       * So there are now THREE writes here, and the ORDER is load-bearing:
+       *
+       *   1. the LOCAL checkpoint — the copy the user is about to rely on for undo, written first;
+       *   2. the CONVERSATION — §4.5.4b has always kept this (resume on another machine, §4.5);
+       *   3. the server WORKING COPY — ONE object per project, overwritten, keyed on the project id.
+       *
+       * The working copy is deliberately NOT in the `Promise.all`: a failed upload must degrade to "no
+       * recovery copy", never to "no checkpoint".
        */
-      await Promise.all([createLocalSnapshot(db, { projectId: pid, files, messageId }), saveCurrentChat(pid)]);
+      const [snapshot] = await Promise.all([
+        createLocalSnapshot(db, { projectId: pid, files, messageId }),
+        saveCurrentChat(pid),
+      ]);
+
+      /*
+       * Best-effort, and it shares the local checkpoint's `seq` rather than minting its own — resume
+       * compares the two, and one monotonic counter is what makes that comparison mean anything. A
+       * second counter, or a timestamp, is migration 0003's ledger bug in a third place.
+       */
+      try {
+        await saveWorkingCopy(pid, snapshot.seq, files);
+      } catch (error) {
+        logger.warn(`Working copy not saved for ${pid} (local checkpoint is intact): ${(error as Error)?.message}`);
+      }
 
       /*
        * A generation just produced work that exists in this browser and nowhere else. Everything that
