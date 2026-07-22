@@ -14,7 +14,7 @@ vi.mock('react-toastify', () => ({
 }));
 
 vi.mock('~/lib/stores/workbench', () => ({
-  workbenchStore: { createFile: vi.fn(async () => true) },
+  workbenchStore: { createFile: vi.fn(async () => true), refreshPreviews: vi.fn() },
 }));
 
 import { toast } from 'react-toastify';
@@ -63,6 +63,16 @@ describe('trackMediaTask — the terminal latch', () => {
     expect(files.count).toBe(1);
     expect(workbenchStore.createFile).toHaveBeenCalledTimes(1);
     expect(toast.success).toHaveBeenCalledTimes(1);
+
+    /*
+     * The render is INVISIBLE without this. The model writes `<img src="/assets/generated/…">` in the
+     * same turn it commissions the art, so the preview already 404'd that URL ~30s before these bytes
+     * existed — and nothing re-requests a failed `<img>`, because writing into `public/` invalidates
+     * no module and therefore fires no HMR. Verified live: a fresh tab rendered every generated image
+     * while the workbench preview beside it showed broken icons. Latched with the delivery, so it
+     * runs exactly once per task rather than once per replayed stream chunk.
+     */
+    expect(workbenchStore.refreshPreviews).toHaveBeenCalledTimes(1);
   });
 
   it('latches failures too — one refund toast, not one per stream chunk', async () => {
@@ -74,6 +84,9 @@ describe('trackMediaTask — the terminal latch', () => {
     await trackMediaTask(task);
 
     expect(toast.error).toHaveBeenCalledTimes(1);
+
+    /* A control: nothing landed in the project, so there is nothing for the preview to re-request. */
+    expect(workbenchStore.refreshPreviews).not.toHaveBeenCalled();
   });
 
   it('force re-delivers past the latch — the Media panel Re-save button', async () => {

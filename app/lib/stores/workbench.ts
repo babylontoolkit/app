@@ -92,6 +92,37 @@ export class WorkbenchStore {
     return this.#previewsStore.previews;
   }
 
+  /**
+   * Re-render every running preview (§4.16).
+   *
+   * Exists for ASSETS that appear WITHOUT a module graph change. Vite's HMR is driven by module
+   * invalidation, so writing a new file into `public/` invalidates nothing and reloads nothing — and
+   * an `<img>` whose request already 404'd is never retried by the browser. That is the exact shape
+   * of a media render (§4.16 async-enqueue): the model writes `<img src="/assets/generated/x.png">`
+   * in the same turn it commissions the art, so the page renders and 404s the image ~30 seconds
+   * BEFORE the bytes exist. Nothing then asks for it again, so the finished render is invisible until
+   * the user manually reloads the preview — which reads as "image generation is broken".
+   */
+  refreshPreviews() {
+    /*
+     * ⚠️ `refreshAllPreviews()` alone does NOT refresh THIS tab — it only posts to the
+     * BroadcastChannel, and a BroadcastChannel never delivers to the context that posted it. So the
+     * local remount (`refreshPreview`, which flips `ready` off and back on) has to be driven here,
+     * and the broadcast is what carries it to any other tab the user has open.
+     */
+    const previews = this.#previewsStore.previews.get();
+
+    for (const preview of previews) {
+      const previewId = this.#previewsStore.getPreviewId(preview.baseUrl);
+
+      if (previewId) {
+        this.#previewsStore.refreshPreview(previewId);
+      }
+    }
+
+    this.#previewsStore.refreshAllPreviews();
+  }
+
   get files() {
     return this.#filesStore.files;
   }

@@ -33,6 +33,7 @@ import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~
 import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
 import { trackMediaTask } from '~/lib/media/tasks';
+import { streamActivitySize } from '~/lib/chat/stream-activity';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import { logStore } from '~/lib/stores/logs';
 import { streamingState } from '~/lib/stores/streaming';
@@ -155,6 +156,18 @@ export const ChatImpl = memo(
     });
     const { showChat } = useStore(chatStore);
     const activeProjectId = useStore(projectId);
+
+    /*
+     * Which CONVERSATION this generation belongs to (§4.5.6, §4.10).
+     *
+     * `useStore`, not `chatMetadata.get()` — the AI SDK refreshes its request body from committed
+     * RENDER state, so a value merely read at send time never reaches the wire. That is the same trap
+     * that shipped `projectId: undefined` on every creation.
+     *
+     * `undefined` on the first turn of a new chat, because the id is minted at first SAVE. The server
+     * treats that as "not recoverable" rather than minting one, which would duplicate the chat.
+     */
+    const activeServerChatId = useStore(chatMetadata)?.serverChatId;
 
     /*
      * The PREMIUM tier (§4.6.1): the user's opt-in AND live eligibility. We send `premium: true` only
@@ -322,6 +335,14 @@ export const ChatImpl = memo(
          * present on the very first turn after `startProject` creates the project.
          */
         projectId: activeProjectId,
+
+        /*
+         * Which chat this generation belongs to. Was NEVER SENT: the route read `body.chatId` and the
+         * client never supplied it, so every `generations` row recorded `chatId: null` — a 427-credit
+         * generation the audit trail could not attribute to a conversation — and the server had no key
+         * to write a recovery transcript against (`transcript-recovery.ts`).
+         */
+        chatId: activeServerChatId,
 
         promptId,
         contextOptimization: contextOptimizationEnabled,
@@ -719,9 +740,12 @@ export const ChatImpl = memo(
       const STALL_WARN_MS = 120_000; // 2 min of silence → reassure, do not touch the generation
       const STALL_FAIL_MS = 300_000; // 5 min of silence → the stream is dead; recover the UI
 
-      const streamedSize =
-        messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0) +
-        (Array.isArray(chatData) ? chatData.length : 0);
+      /*
+       * ⚠️ Activity is EVERY channel, not just `content` — see `stream-activity.ts`. This summed
+       * `content` alone, and reasoning rides `parts` (§4.2a), so a model thinking hard read as a dead
+       * stream and got CANCELLED at 300s while the user watched its thinking panel fill up.
+       */
+      const streamedSize = streamActivitySize(messages, Array.isArray(chatData) ? chatData.length : 0);
 
       if (streamActivityRef.current.size !== streamedSize) {
         // Fresh bytes (or the stream just began) — reset the silence clock.

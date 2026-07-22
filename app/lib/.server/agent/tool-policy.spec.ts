@@ -7,7 +7,7 @@
  * actually occurs.
  */
 import { describe, expect, it } from 'vitest';
-import { CREATION_MEDIA_STEPS, toolPolicyForTurn } from './tool-policy';
+import { CREATION_MEDIA_STEPS, MEDIA_TURN_STEPS, toolPolicyForTurn } from './tool-policy';
 import { MAX_TOOL_ROUNDS } from './tools';
 
 const base = { isCreationTurn: false, hasMcpTools: false, hasMediaTools: false, preloadedCount: 0, isSlash: false };
@@ -70,8 +70,46 @@ describe('toolPolicyForTurn — ordinary turns (the pre-existing behaviour, now 
     });
   });
 
-  it('media tools alone do NOT force the loop open on ordinary turns — the panel covers those', () => {
-    expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMediaTools: true }).allowTools).toBe(false);
+  /*
+   * The regression this replaces: media tools were unreachable on any turn that routed a skill, and the
+   * skill router fires on `design`/`landing`/`art`/`theme` — i.e. on exactly the prompts that ask for
+   * art. Creation worked (media-only loop), every later turn was toolless, and the model narrated the
+   * absence and drew the art in CSS. Generation must be reachable from the chat on EVERY turn (§4.16).
+   */
+  it('opens a bounded media-only loop when media is the only reason to open it', () => {
+    expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMediaTools: true })).toEqual({
+      allowTools: true,
+      toolset: 'media-only',
+      maxSteps: MEDIA_TURN_STEPS,
+    });
+    expect(toolPolicyForTurn({ ...base, isSlash: true, hasMediaTools: true })).toEqual({
+      allowTools: true,
+      toolset: 'media-only',
+      maxSteps: MEDIA_TURN_STEPS,
+    });
+  });
+
+  /*
+   * The bound is the point — a media-only turn must never be a door back to the §4.2.8 skill-thrash
+   * pathology (six rounds, 29k redrafted output tokens, to load ONE skill).
+   */
+  it('the media-only loop offers no skill tools and is capped well under MAX_TOOL_ROUNDS', () => {
+    expect(MEDIA_TURN_STEPS).toBeLessThan(MAX_TOOL_ROUNDS + 1);
+  });
+
+  /* When something else already opened the full loop, media rides along in `all` — no separate branch. */
+  it('keeps the full toolset when MCP already opened the loop', () => {
+    expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMcpTools: true, hasMediaTools: true }).toolset).toBe(
+      'all',
+    );
+  });
+
+  it('stays closed when there are no media tools to reach', () => {
+    expect(toolPolicyForTurn({ ...base, preloadedCount: 2 })).toEqual({
+      allowTools: false,
+      toolset: 'all',
+      maxSteps: 1,
+    });
   });
 });
 

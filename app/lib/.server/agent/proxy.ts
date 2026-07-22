@@ -34,6 +34,8 @@ import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/prem
 import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
 import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
+import { mediaProtocolNote } from './media-note';
+import { shouldRetryGeneration } from './retry-policy';
 import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
 import { createWebFetchTool } from './web-fetch-tool';
 import { createWebSearchTool } from './web-search-tool';
@@ -681,6 +683,18 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * BYOK: BYOK covers the user's LLM key, not renders on OUR media key.
    */
   const mediaListeners: Array<(event: MediaTaskEvent) => void> = [];
+
+  /**
+   * Renders this generation has ALREADY paid for and started.
+   *
+   * Load-bearing for the retry below: those debits are taken and those KIE tasks are running, so a
+   * retry that re-offered the media tools would commission the whole set a second time and charge for
+   * it. The retry runs tool-free and is handed this list instead — the art still lands (the client is
+   * already polling for it), and the model gets the paths it needs to reference.
+   */
+  const startedMedia: MediaTaskEvent[] = [];
+  mediaListeners.push((event) => startedMedia.push(event));
+
   const mediaTools =
     request.projectId && config.kieApiKey
       ? createMediaTools({
@@ -703,13 +717,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * the correct trade: a project with running MCP servers wants those tools reachable, and MCP is a
    * minority of generations. Without MCP tools, `allowTools` is exactly what it always was.
    *
-   * Media tools do NOT force the loop on for ordinary turns: they are a capability most turns never
-   * use, and re-enabling `maxSteps` on every skill-preload turn to keep them reachable would undo the
-   * §4.2.8 redrafting fix on ALL turns to serve a few. On the turns where the loop is on anyway, they
-   * are offered; the Media panel covers the rest. **The CREATION turn is the one exception** (§4.16):
-   * the brief invites the model to generate bespoke design art for the landing page/splash/chrome, so
-   * when media tools exist creation gets a MEDIA-ONLY loop with a small step cap — see `tool-policy.ts`
-   * for why that cannot re-open the six-round skill-loading pathology.
+   * Media tools open the loop too, on EVERY turn (§4.16) — creation via a media-only loop, and an
+   * ordinary turn that nothing else opened via the same bounded media-only loop. The earlier rule
+   * ("media never forces the loop; the Media panel covers the rest") made an advertised capability
+   * unreachable on exactly the prompts that want it, because the skill router fires on `design` /
+   * `landing` / `art`, so those turns had a preloaded skill and therefore no tools at all. It is
+   * bounded, not a full loop: skill tools are not offered and the cap is 3 — see `tool-policy.ts` for
+   * why that cannot re-open the six-round skill-loading pathology.
    */
   /*
    * Discussion mode (§4.2.9), decided ONCE — the note, the tool policy, and the route's NO_REPLAY
@@ -792,6 +806,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   if (discussNote) {
     system.push({ role: 'system', content: discussNote });
+  }
+
+  /*
+   * The media protocol (§4.16) — same placement rule as `discussNote` above, and for the same reason:
+   * it varies per turn (a project without a KIE key gets no media tools), so anywhere earlier would
+   * re-write the ~110k-token file-context entry at 2x whenever it appeared or vanished.
+   *
+   * Creation is excluded because its brief already carries a richer copy — see `media-note.ts`.
+   */
+  const mediaNote = mediaProtocolNote({
+    hasMediaTools: toolPolicy.toolset !== 'skills-only' && Object.keys(mediaTools).length > 0,
+    isCreationTurn,
+  });
+
+  if (mediaNote && allowTools) {
+    system.push({ role: 'system', content: mediaNote });
   }
 
   /*
@@ -944,6 +974,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /** Did a forced continuation actually run? Recorded, because `finishReason` gets overwritten below. */
   let forcedContinuation = false;
 
+  /**
+   * Did we re-run this generation after a provider failure?
+   *
+   * Recorded in `finish_reason` for the same reason `forcedContinuation` is: the second `drain`
+   * OVERWRITES `finishReason`, so a retried generation would otherwise record the retry's clean
+   * `stop` and leave no trace that the first attempt died. That is precisely how the spurious
+   * forced-continuation hid for a day (§4.10) — a metric that cannot see the failure it was added
+   * for reports success. If retries start being common, this column is how anyone finds out.
+   */
+  let retried = false;
+
   /*
    * Where the wall-clock actually goes (§4.2).
    *
@@ -1054,13 +1095,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   async function* drain(result: StreamTextResult<SkillTools, never>): AsyncGenerator<AgentChunk> {
     for await (const part of result.fullStream) {
+      /* Liveness ticks on ANY part — a stream emitting tool events is alive even with no text yet. */
+      lastChunkAt = Date.now();
+      chunkCount += 1;
+
       if (part.type === 'text-delta') {
         if (part.textDelta.length > 0) {
           producedText = true;
         }
 
+        streamedChars += part.textDelta.length;
+
+        if (assistantText.length < MAX_RECOVERED_CHARS) {
+          assistantText += part.textDelta;
+        }
+
         yield { type: 'text', value: part.textDelta };
       } else if (part.type === 'reasoning') {
+        streamedChars += part.textDelta.length;
+
         /*
          * The model's summarized reasoning (`display: 'summarized'`, set in `thinkingFetch`).
          *
@@ -1112,6 +1165,82 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /** Did the model actually SAY anything? Zero text is a failure, whatever `finishReason` claims. */
   let producedText = false;
 
+  /*
+   * STREAM LIVENESS — the one number that tells a starved stream apart from a reset socket.
+   *
+   * A creation died with `TypeError: terminated` after 180.7s, having commissioned three images and
+   * streamed a design paragraph. Two explanations fit that equally well and call for OPPOSITE fixes:
+   *
+   *  - The provider went QUIET and a gateway idle-timeout eventually cut the connection. KIE
+   *    soft-throttles by QUEUEING rather than rejecting (measured: p95 349ms -> 7,474ms under load,
+   *    zero 429s, no headers — see `providers/kie.ts`), and a media turn hits the SAME ACCOUNT with a
+   *    burst of task polls while the stream runs. That would make "slow the media traffic down" right.
+   *  - The socket was reset mid-flow, with bytes arriving normally until the moment it died. That is
+   *    provider infrastructure and media load has nothing to do with it.
+   *
+   * `msSinceLastChunk` at the moment of the throw separates them, and NOTHING recorded it — which is
+   * why the first two failures produced theories instead of a diagnosis. Kept permanently: aggregate
+   * usage cannot answer "where did the stream go", the same reason §4.10's step diagnostics exist.
+   */
+  let lastChunkAt = 0;
+  let chunkCount = 0;
+  let streamedChars = 0;
+
+  /*
+   * The assistant text, kept so a settled generation can leave a record even if the browser never
+   * gets to save one (`transcript-recovery.ts`). TEXT ONLY — reasoning is not part of the transcript
+   * and is not replayed to the model (`llm/history.ts`).
+   *
+   * Bounded: a runaway generation must not grow server memory without limit. A creation artifact runs
+   * ~35k chars, so this is ~4x the largest real output and only ever truncates a pathological one.
+   */
+  const MAX_RECOVERED_CHARS = 150_000;
+  let assistantText = '';
+
+  /**
+   * Write the plain transcript IF the client has not (`transcript-recovery.ts` decides).
+   *
+   * Everything risky lives in that pure function; this is only the IO around it. Swallows its own
+   * errors for the same reason the monitoring transport does: a generation the user has already been
+   * charged for must not fail because a best-effort write did.
+   */
+  async function recoverTranscript(): Promise<void> {
+    if (!request.chatId || !request.projectId) {
+      return;
+    }
+
+    try {
+      const { planTranscriptRecovery } = await import('./transcript-recovery');
+      const { getChat, putChat } = await import('~/lib/.server/projects/message-store');
+
+      const existing = await getChat(request.projectId, request.chatId, request.context);
+
+      const plan = planTranscriptRecovery({
+        serverChatId: request.chatId,
+        existing,
+        requestMessages: request.messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: String(m.content ?? ''),
+        })),
+        assistantText,
+        now: new Date().toISOString(),
+      });
+
+      if (!plan) {
+        return;
+      }
+
+      await putChat(request.projectId, plan, request.context);
+      logger.warn(
+        `Generation ${generationId}: the client did not save this turn — recovered ${plan.messages.length} ` +
+          `messages to chat ${request.chatId} server-side.`,
+      );
+    } catch (error) {
+      logger.error(`Transcript recovery failed for ${generationId}: ${(error as Error)?.message}`);
+    }
+  }
+
   async function* run(): AsyncGenerator<AgentChunk> {
     try {
       /*
@@ -1121,7 +1250,56 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * offered on creation, so the model cannot abandon its draft to go load skills.
        */
       const first = startStream([...system, ...coreMessages], allowTools);
-      yield* drain(first);
+
+      try {
+        yield* drain(first);
+      } catch (error) {
+        /*
+         * ONE retry, and only when the provider broke before producing anything (`retry-policy.ts`).
+         *
+         * Measured: `/bt-landing` spent 99s commissioning four images, thought for 47s, and then the
+         * provider answered `Internal error, please try again later` — 146 seconds of spinner, then a
+         * failure, with `0 in / 0 out` recorded. `drain` accumulates usage only after its loop
+         * finishes, so a mid-stream throw records nothing: the ledger has nothing to reverse, which is
+         * what makes a second attempt honest rather than a double charge.
+         */
+        if (
+          !shouldRetryGeneration({
+            error,
+            outTokens: totals.completionTokens,
+            aborted: Boolean(request.abortSignal?.aborted),
+            attempts: retried ? 1 : 0,
+          })
+        ) {
+          throw error;
+        }
+
+        retried = true;
+        logger.warn(`Generation ${generationId} retrying once after a provider failure: ${(error as Error)?.message}`);
+
+        /*
+         * 🔴 TOOL-FREE, ALWAYS. The media tools already DEBITED and started their renders — re-offering
+         * them would buy the whole set twice and bill for it. The art is unaffected: those tasks are
+         * running and the client is already polling them, so the only thing the model is missing is
+         * the paths. Hand it those explicitly, since inventing an asset path is otherwise forbidden.
+         */
+        const alreadyStarted = startedMedia.length
+          ? [
+              {
+                role: 'system' as const,
+                content:
+                  '# Media already generated for this request\n\n' +
+                  'These renders were ALREADY commissioned and paid for on a previous attempt and are ' +
+                  'being saved into the project right now. Reference them exactly as listed and do NOT ' +
+                  'ask for them again:\n' +
+                  startedMedia.map((m) => `- ${m.destPath.replace(/^public\//, '/')} (${m.kind})`).join('\n'),
+              },
+            ]
+          : [];
+
+        const second = startStream([...system, ...alreadyStarted, ...coreMessages], false);
+        yield* drain(second);
+      }
 
       /*
        * "On cap, proceed with what's loaded" (spec/skills.md) — the half that is easy to forget.
@@ -1182,6 +1360,24 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         );
       }
     } catch (error) {
+      /*
+       * Say what broke, out loud. Without this the only trace of a broken stream was an `agent-usage`
+       * line reading `0 in / 0 out, finish=unknown` — which is indistinguishable from a dozen other
+       * causes and, because `failed` is false for a user abort, was even reported to monitoring as
+       * `generation_completed`. A generation that produced nothing must never look like a quiet success.
+       *
+       * The liveness half: a LONG silence means the provider stopped sending and something eventually
+       * cut the connection (starvation / gateway idle-timeout); a SHORT one means bytes were arriving
+       * normally and the socket was reset mid-flow. Those two have opposite fixes.
+       */
+      const silentFor = lastChunkAt ? `${Date.now() - lastChunkAt}ms ago` : 'never arrived';
+
+      logger.error(
+        `Generation ${generationId} broke after ${Date.now() - startedAt}ms: ` +
+          `${(error as Error)?.name}: ${(error as Error)?.message} (aborted=${request.abortSignal?.aborted})` +
+          ` — last chunk ${silentFor}, ${chunkCount} chunks / ${streamedChars} chars streamed`,
+      );
+
       /*
        * A HARD FAILURE — the provider errored, or the stream broke. Distinct from a Stop, which is a
        * user decision. Flag it, then rethrow: the client still needs to see the error.
@@ -1278,9 +1474,28 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          * (`toolRounds` is no help either — it counts steps BEYOND the first, and both drains ran one
          * step, so it summed to 0 while the warning was firing.)
          */
-        finishReason: failed ? 'error' : forcedContinuation ? `${finishReason}+forced-continuation` : finishReason,
+        finishReason:
+          (failed ? 'error' : forcedContinuation ? `${finishReason}+forced-continuation` : finishReason) +
+          (retried ? '+provider-retry' : ''),
         status: failed ? 'failed' : 'completed',
       });
+
+      /*
+       * A PAID generation must leave a record even if the browser never saves one (§4.5.6).
+       *
+       * The client owns persistence and runs it AFTER the stream; settlement is server-side and runs
+       * the moment the stream ends. A tab that dies in between takes the whole turn with it — measured:
+       * `/bt-landing` finished, settled 427 credits, and the conversation re-opened with no trace it had
+       * ever run. This writes the plain version so that window is no longer silent.
+       *
+       * ⚠️ RECORD, NEVER FILES. The platform stores no project files (§4.5.4b, `no-server-storage.spec`)
+       * — do not extend this to stash the artifact's bytes anywhere.
+       *
+       * Non-throwing and last: recovery failing must never fail a generation the user already paid for.
+       */
+      if (!failed) {
+        await recoverTranscript();
+      }
 
       /*
        * Ops + funnel (§5A). A HARD FAILURE is recorded to the rolling failure-rate window; a stop is

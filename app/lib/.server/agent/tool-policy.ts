@@ -24,6 +24,24 @@ import { MAX_TOOL_ROUNDS } from './tools';
 /** 1 round of parallel generate_* calls + the ANSWER step + 1 round of slack (the +1 rule, §4.2.8). */
 export const CREATION_MEDIA_STEPS = 3;
 
+/**
+ * The same budget for an ORDINARY turn whose only reason to open the loop is media (§4.16).
+ *
+ * This exists because the original rule — "media tools never force the loop on for ordinary turns; the
+ * Media panel covers the rest" — made an ADVERTISED capability unreachable on exactly the turns that
+ * ask for it. The skill router fires on words like `design`, `landing`, `art`, `theme`, so "redesign
+ * the landing page with new hero art" pre-loads a skill, `preloadedCount > 0` closed the loop, and the
+ * model was left with no `generate_image` at all — it then narrated the absence ("Since I don't have
+ * access to generation tools this turn…") and drew the art in CSS. Creation worked, every later turn
+ * did not, which is precisely how it was reported.
+ *
+ * The §4.2.8 redrafting pathology cannot come back through this door: the toolset is MEDIA-ONLY, so
+ * there is no `load_skill` to thrash on (the routed skills are already in the cached prefix), and the
+ * cap is 3, not `MAX_TOOL_ROUNDS`. Media tools are async-enqueue — a round returns in seconds and never
+ * parks on a render — and each extra round re-reads the cached prefix at a tenth.
+ */
+export const MEDIA_TURN_STEPS = CREATION_MEDIA_STEPS;
+
 export interface ToolPolicyInput {
   /** The turn carries `CREATION_BRIEF_MARKER` — the expensive one-shot that writes the whole game. */
   isCreationTurn: boolean;
@@ -84,7 +102,18 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
 
   const allowTools = input.hasMcpTools || (input.preloadedCount === 0 && !input.isSlash);
 
-  return allowTools
-    ? { allowTools: true, toolset: 'all', maxSteps: MAX_TOOL_ROUNDS + 1 }
-    : { allowTools: false, toolset: 'all', maxSteps: 1 };
+  if (allowTools) {
+    return { allowTools: true, toolset: 'all', maxSteps: MAX_TOOL_ROUNDS + 1 };
+  }
+
+  /*
+   * Nothing above wants a full loop — but media generation must stay reachable from the CHAT on every
+   * turn, not only on creation and not only on the turns that happen to route no skill (§4.16). A
+   * media-only loop with a small cap is the bounded way to do that: see `MEDIA_TURN_STEPS`.
+   */
+  if (input.hasMediaTools) {
+    return { allowTools: true, toolset: 'media-only', maxSteps: MEDIA_TURN_STEPS };
+  }
+
+  return { allowTools: false, toolset: 'all', maxSteps: 1 };
 }

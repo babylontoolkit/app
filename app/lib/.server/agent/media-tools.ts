@@ -108,9 +108,17 @@ export function createMediaTools(ctx: MediaToolContext) {
       parameters: z.object({
         prompt: z.string().optional().describe('What to generate. Detailed and style-specific works best.'),
         model: z.string().optional().describe('Image model. Default nano-banana-2.'),
-        resolution: z.string().optional().describe('1K, 2K or 4K. Default 2K.'),
+        resolution: z.string().optional().describe('1K, 2K or 4K. Default 2K. 1K is cheaper; 4K costs more.'),
         aspect_ratio: z.string().optional().describe('e.g. 16:9, 1:1, 9:16, 4:3. Default 16:9.'),
-        output_format: z.string().optional().describe('png or jpg. Default png (use png when alpha matters).'),
+        output_format: z
+          .string()
+          .optional()
+          .describe(
+            'png or jpg. PREFER "jpg" — these files ship in the played game, and a 2K photographic ' +
+              'PNG is ~10MB where the same image as jpg is under 1MB, for no visible difference and ' +
+              'the same price. Use "png" ONLY when the image needs transparency (logos, emblems, ' +
+              'sprites, cut-out characters). Default is png so alpha is never lost by accident.',
+          ),
         file_name: z.string().optional().describe('Preferred file name (without extension).'),
       }),
       execute: async (args: CommonArgs & { resolution?: string; output_format?: string }) => {

@@ -148,6 +148,25 @@ async function deliverBytes(handle: MediaTaskHandle): Promise<void> {
       throw new Error('the file could not be written into the project');
     }
 
+    /*
+     * 🔴 THE RENDER IS INVISIBLE UNTIL THE PREVIEW IS TOLD TO ASK AGAIN (§4.16).
+     *
+     * Async-enqueue means the model gets the destination PATH immediately and writes
+     * `<img src="/assets/generated/x.png">` in the same turn it commissions the art. Vite applies
+     * that edit over HMR within a second, the browser requests the image — and 404s, because the
+     * render has another ~30 seconds to run. When the bytes finally land here, NOTHING re-requests
+     * them: writing into `public/` invalidates no module, so HMR does not fire, and a browser never
+     * retries an `<img>` that already failed. A CSS `background-image` behaves the same way.
+     *
+     * So the render succeeded, the code was correct, the bytes were on disk — and the preview showed
+     * broken-image icons until the user manually hit Refresh. Which reads, entirely reasonably, as
+     * "image generation is broken". Verified live: opening the same URL in a fresh tab rendered every
+     * generated image perfectly while the workbench preview beside it showed three broken icons.
+     *
+     * The remount is cheap and it is the ONLY compensating action the async-enqueue design needs.
+     */
+    workbenchStore.refreshPreviews();
+
     toast.success(`Generated ${handle.kind} saved to ${handle.destPath}`);
     logger.info(`Media task ${handle.taskId} delivered ${bytes.byteLength} bytes → ${handle.destPath}`);
   } catch (error) {
