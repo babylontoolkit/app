@@ -41,6 +41,8 @@
  * reinterprets it, which is the only reason a PNG survives the round trip.
  */
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
+import { envNumber } from '~/lib/.server/env';
+import { DEFAULT_PROJECT_SOURCE_MAX_MB } from '~/lib/.server/storage/limits';
 import { getObjectStore } from '~/lib/.server/storage';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -57,18 +59,35 @@ export function seedKey(projectId: string): string {
 }
 
 /**
- * Cap on the serialized seed (SPEC §5). The seed is client-supplied bytes we write to object storage,
- * so an uncapped one is unbounded S3 + egress on the platform's bill for any verified user. 75MB of
- * serialized JSON comfortably fits a real game (source + assets, binaries base64'd) with headroom.
+ * Cap on the serialized seed (SPEC §5) — **configurable**, `REMIX_SEED_MAX_MB`.
+ *
+ * The seed is client-supplied bytes written to object storage, so an uncapped one is unbounded S3 +
+ * egress on the platform's bill for any verified user.
+ *
+ * The default is SHARED with the working copy (`storage/limits.ts`), and that is the fix for a real
+ * defect: it used to be 75MB against the working copy's 256MB, two numbers chosen independently. A
+ * project between them could be held for crash recovery and published successfully, and then fail to
+ * seed — leaving a public, playable, **permanently un-remixable** game whose owner was told nothing,
+ * because `depositRemixSeed` may not fail a publish. Same content, same reason to bound it, one number.
+ *
+ * ⚠️ It shares a request with the build, so both sit under `PUBLISH_BODY_MAX_MB` — see `.env.example`.
  */
-export const MAX_SEED_BYTES = 75 * 1024 * 1024;
+export const DEFAULT_REMIX_SEED_MAX_MB = DEFAULT_PROJECT_SOURCE_MAX_MB;
+
+export function maxSeedBytes(context?: unknown): number {
+  const mb = envNumber(context, 'REMIX_SEED_MAX_MB', DEFAULT_REMIX_SEED_MAX_MB);
+  return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_REMIX_SEED_MAX_MB) * 1024 * 1024;
+}
 
 export class SeedTooLargeError extends Error {
   readonly statusCode = 413;
   readonly isRetryable = false;
 
-  constructor() {
-    super('This project is too large to store as a remix seed.');
+  constructor(bytes: number, limit: number) {
+    super(
+      `This project is ${(bytes / 1048576).toFixed(1)}MB, over the ${Math.round(limit / 1048576)}MB remix-seed ` +
+        'limit, so it cannot be published for remixing. Raise REMIX_SEED_MAX_MB to allow it.',
+    );
     this.name = 'SeedTooLargeError';
   }
 }
@@ -77,8 +96,10 @@ export class SeedTooLargeError extends Error {
 export async function putRemixSeed(projectId: string, files: SerializedFileMap, context?: unknown): Promise<void> {
   const bytes = new TextEncoder().encode(JSON.stringify(files));
 
-  if (bytes.byteLength > MAX_SEED_BYTES) {
-    throw new SeedTooLargeError();
+  const limit = maxSeedBytes(context);
+
+  if (bytes.byteLength > limit) {
+    throw new SeedTooLargeError(bytes.byteLength, limit);
   }
 
   await getObjectStore(context).put(seedKey(projectId), bytes, 'application/json');

@@ -187,3 +187,78 @@ describe('seq boundaries', () => {
     });
   });
 });
+
+describe('the server working copy (§4.5.4c)', () => {
+  /*
+   * 🔴 The measured loss this whole mechanism exists for. An UNLINKED project with nothing in this
+   * browser used to be `empty` — which is how a completed, paid-for generation came back as a blank
+   * project after a tab crash, and how clearing site data destroyed a game outright.
+   */
+  it('mounts the recovery copy for an unlinked project this browser has lost', () => {
+    expect(selectMountSource({ linked: false, hasWorkingCopy: true })).toEqual({ source: 'working' });
+  });
+
+  it('is still empty when there is no recovery copy either', () => {
+    expect(selectMountSource({ linked: false })).toEqual({ source: 'empty' });
+  });
+
+  /* The seed is the state the project was BORN in; the working copy is where it actually got to. */
+  it('prefers the recovery copy over a remix seed', () => {
+    expect(selectMountSource({ linked: false, hasWorkingCopy: true, hasServerSeed: true })).toEqual({
+      source: 'working',
+    });
+  });
+
+  /*
+   * 🔴 THE TRAP. `seq` comes from `nextSeq` in the BROWSER's IndexedDB, so it is per-browser and two
+   * devices both start at 0. Ranking a working copy against local checkpoints compares two unrelated
+   * counters and picks an arbitrary winner while looking like a decision. Local always wins when it
+   * exists — there is nothing to compare, so nothing is compared.
+   */
+  it('never lets the recovery copy override this browser’s own checkpoints', () => {
+    expect(selectMountSource({ linked: false, localSeq: 0, hasWorkingCopy: true })).toMatchObject({
+      source: 'local',
+    });
+    expect(selectMountSource({ ...inSync, localSeq: 3, syncedSeq: 3, hasWorkingCopy: true })).toMatchObject({
+      source: 'local',
+    });
+  });
+
+  /* Offline with nothing local: the recovery copy is all we can reach, and it beats a blank editor. */
+  it('mounts the recovery copy when linked but the provider is unreachable', () => {
+    expect(selectMountSource({ linked: true, remoteHead: undefined, hasWorkingCopy: true })).toEqual({
+      source: 'working',
+    });
+  });
+
+  it('mounts the recovery copy when the linked branch has no commits', () => {
+    expect(selectMountSource({ linked: true, remoteHead: null, hasWorkingCopy: true })).toEqual({
+      source: 'working',
+    });
+  });
+
+  /*
+   * ⚠️ Deliberately NOT preferred over a reachable repo. There is no ordering spanning a commit sha
+   * and a per-browser seq, so choosing would mean guessing — and guessing wrong mounts a stale project
+   * over newer commits. A linked project also already has durable storage.
+   */
+  it('never outranks a reachable repo', () => {
+    expect(
+      selectMountSource({ linked: true, remoteHead: 'abc123', lastSyncedCommitSha: 'abc123', hasWorkingCopy: true }),
+    ).toEqual({ source: 'repo', reason: 'no-local-copy' });
+  });
+
+  /* Divergence is still divergence — the recovery copy must not quietly resolve it. */
+  it('does not suppress a divergence', () => {
+    expect(
+      selectMountSource({
+        linked: true,
+        remoteHead: 'newsha',
+        lastSyncedCommitSha: 'oldsha',
+        localSeq: 5,
+        syncedSeq: 2,
+        hasWorkingCopy: true,
+      }),
+    ).toMatchObject({ source: 'diverged' });
+  });
+});

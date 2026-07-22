@@ -16,9 +16,24 @@
  * ## Language
  *
  * §4.5.4b's plain-language rule applies to every string returned from here. No "commit", no "push", no
- * "remote", no "repository HEAD" — the user asked for a game, not a git tutorial. "Save" and "Saved to
- * GitHub" are the whole vocabulary. The repo name is shown because it is *theirs* and they may want to
- * find it, not because they need to understand it.
+ * "remote", no "repository HEAD" — the user asked for a game, not a git tutorial. The repo name is
+ * shown because it is *theirs* and they may want to find it, not because they need to understand it.
+ *
+ * ## "Save" became "Sync" (§4.5.4c, 2026-07-22)
+ *
+ * The old vocabulary was "Save" / "Saved to GitHub", and the unlinked copy said the project "only
+ * exists in this browser". That was true when written and is now FALSE: the platform keeps a recovery
+ * copy of every project, so durability no longer depends on the user pressing anything.
+ *
+ * Leaving it would have been the worse kind of stale copy — it conflates two different things under
+ * one word, and the conflation is what loses people's work: "Save" sounds like the thing that makes
+ * your work safe, so a user who has not pressed it believes they are in danger, and one who HAS
+ * pressed it believes they are done. Neither is what the button does. It puts the project in the
+ * user's OWN repository, which is about ownership, not safety.
+ *
+ * So the verb is "Sync", and the unlinked state no longer claims the work is about to be lost — it
+ * says where the code lives and offers to move it somewhere the user owns. The tone stays amber
+ * because that is still worth doing, not because anything is on fire.
  */
 
 import type { SaveState } from './save-queue';
@@ -96,15 +111,15 @@ export function describeSaveStatus(facts: SaveStatusFacts): SaveStatusView {
     return saveState.reconnect
       ? {
           tone: 'danger',
-          label: 'Not saved',
-          detail: `Your ${where} connection expired. Reconnect to save your work.`,
+          label: 'Not synced',
+          detail: `Your ${where} connection expired. Reconnect to sync your work.`,
           action: 'reconnect',
           actionLabel: `Reconnect ${where}`,
         }
       : {
           tone: 'danger',
-          label: 'Not saved',
-          detail: saveState.message || 'Your last save did not work. Your work is still here — try again.',
+          label: 'Not synced',
+          detail: saveState.message || 'Your last sync did not work. Your work is still here — try again.',
           action: 'retry',
           actionLabel: 'Try again',
         };
@@ -113,8 +128,8 @@ export function describeSaveStatus(facts: SaveStatusFacts): SaveStatusView {
   if (saveState.status === 'saving') {
     return {
       tone: 'busy',
-      label: 'Saving…',
-      detail: linked && name ? `Saving to ${name}.` : `Setting up your ${where} repository.`,
+      label: 'Syncing…',
+      detail: linked && name ? `Syncing to ${name}.` : `Setting up your ${where} repository.`,
       action: 'none',
       actionLabel: '',
     };
@@ -129,7 +144,7 @@ export function describeSaveStatus(facts: SaveStatusFacts): SaveStatusView {
     return {
       tone: 'warning',
       label: 'Trying again…',
-      detail: saveState.message || 'That save did not work. Trying again.',
+      detail: saveState.message || 'That sync did not work. Trying again.',
       action: 'none',
       actionLabel: '',
     };
@@ -139,34 +154,36 @@ export function describeSaveStatus(facts: SaveStatusFacts): SaveStatusView {
   if (!linked) {
     return {
       tone: 'warning',
-      label: 'Not saved — browser only',
-      detail: 'This project only exists in this browser. Save it to your own GitHub account to keep it.',
+      label: 'Not synced to GitHub',
+      detail:
+        'We keep a recovery copy of this project. Sync it to your own GitHub account to own the code ' +
+        'and keep its history.',
       action: 'save',
-      actionLabel: 'Save',
+      actionLabel: 'Sync',
     };
   }
 
   if (unsavedWork) {
     return {
       tone: 'warning',
-      label: 'Not saved yet',
-      detail: name ? `You have changes that are not in ${name} yet.` : 'You have changes that are not saved yet.',
+      label: 'Changes not synced',
+      detail: name ? `You have changes that are not in ${name} yet.` : 'You have changes that are not synced yet.',
       action: 'save',
-      actionLabel: 'Save',
+      actionLabel: 'Sync',
     };
   }
 
   /*
-   * Saved. Quiet on purpose — and the button stays available rather than disabled: a user who wants to
-   * press Save on an already-saved project is reassuring themselves, and a disabled button answers
-   * that with nothing. Saving again is a no-op push, which is cheap and honest.
+   * Synced. Quiet on purpose — and the button stays available rather than disabled: a user who wants
+   * to press Sync on an already-synced project is reassuring themselves, and a disabled button answers
+   * that with nothing. Syncing again is a no-op push, which is cheap and honest.
    */
   return {
     tone: 'neutral',
-    label: `Saved to ${where}`,
-    detail: name ? `Saved in your repository, ${name}.` : `Saved to your ${where} account.`,
+    label: `Synced to ${where}`,
+    detail: name ? `In your repository, ${name}.` : `In your ${where} account.`,
     action: 'save',
-    actionLabel: 'Save',
+    actionLabel: 'Sync',
   };
 }
 
@@ -197,8 +214,8 @@ export function describeProjectSaveBadge(project: {
   if (!project.linkedRepo) {
     return {
       tone: 'warning',
-      label: 'Not saved — browser only',
-      detail: 'This project only exists in the browser it was made in. Open it and press Save to keep it.',
+      label: 'Not synced to a repository',
+      detail: 'This project has a recovery copy but no repository of your own. Open it and press Sync.',
     };
   }
 
@@ -207,7 +224,7 @@ export function describeProjectSaveBadge(project: {
   return {
     tone: 'neutral',
     label: project.linkedRepo,
-    detail: `Saved in your ${where} account.`,
+    detail: `In your ${where} account.`,
   };
 }
 
@@ -289,11 +306,26 @@ export function decideNudge(facts: NudgeFacts): Nudge {
 /**
  * The beforeunload guard (§4.5.4b).
  *
- * Only when work would actually be LOST — an unsaved, unlinked-or-behind project. A browser shows this
- * as a generic "changes you made may not be saved" box the user cannot restyle or read around, so
- * firing it on a saved project trains them to click through it, which disarms it for the one time it
- * mattered.
+ * Only when work would actually be LOST. A browser shows this as a generic "changes you made may not
+ * be saved" box the user cannot restyle or read around, so firing it needlessly trains them to click
+ * through it, which disarms it for the one time it mattered.
+ *
+ * ⚠️ **`unsavedWork` STOPPED MEANING "would be lost" (§4.5.4c).** It means "not in the user's own
+ * repository", which was the same thing only while the browser held the only copy. Now the platform
+ * keeps a recovery copy, so the common state — an unlinked project mid-build — is work that is safe
+ * and merely not owned yet. Left alone, this dialog would fire on every such project and cry wolf by
+ * design, which is precisely what the paragraph above warns against.
+ *
+ * So it asks the narrower question it always meant: is there work that no durable copy has? That is
+ * true when the recovery copy could not be written (the upload is best-effort and may have failed
+ * offline), and false otherwise.
  */
-export function shouldWarnBeforeUnload(facts: { unsavedWork: boolean; generationCount: number }): boolean {
-  return facts.unsavedWork && facts.generationCount > 0;
+export function shouldWarnBeforeUnload(facts: {
+  unsavedWork: boolean;
+  generationCount: number;
+
+  /** Did the latest checkpoint reach the server's recovery copy? (§4.5.4c) */
+  recoverable: boolean;
+}): boolean {
+  return facts.unsavedWork && facts.generationCount > 0 && !facts.recoverable;
 }

@@ -42,6 +42,9 @@
  * here and decoded once here; base64 stays a wire format and nothing on this path reinterprets it,
  * which is the only reason a `havok.wasm` survives the round trip.
  */
+import { envNumber } from '~/lib/.server/env';
+import { DEFAULT_PROJECT_SOURCE_MAX_MB } from '~/lib/.server/storage/limits';
+import { isSecretPath } from '~/lib/git/paths';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { getObjectStore } from '~/lib/.server/storage';
 import { createScopedLogger } from '~/utils/logger';
@@ -59,21 +62,49 @@ export function workingCopyKey(projectId: string): string {
 }
 
 /**
- * Cap on the serialized copy (SPEC §5).
+ * Cap on the serialized copy — **configurable**, `WORKING_COPY_MAX_MB`, default 256MB.
  *
- * Client-supplied bytes written to object storage are unbounded S3 + egress on the platform's bill for
- * any verified user, and unlike a publish this one is written on EVERY checkpoint. Sized to match
- * `MAX_SEED_BYTES`: a real game with source and assets fits comfortably. A measured project carrying
- * 2K PNGs ran ~30MB; the same project under §4.16's `output_format: "jpg"` guidance runs ~3MB.
+ * There IS a cap because §5 requires one: client-supplied bytes written to object storage are
+ * unbounded S3 + egress on the platform's bill for any verified user, and unlike a publish or a remix
+ * seed this write fires on EVERY checkpoint — the most repeatable upload in the product. That rule
+ * exists because it already shipped broken twice (the publish build and the remix seed).
+ *
+ * It is 256MB and env-tunable because the FIRST version was neither: it was hard-coded at 75MB, copied
+ * from `MAX_SEED_BYTES` without asking whether a seed and a live recovery buffer want the same number.
+ * They do not — a seed is deposited once, deliberately, for a game the user chose to publish, while
+ * this holds whatever the project happens to weigh today. A measured project carrying four 2K PNGs ran
+ * 46MB serialized, i.e. already ⅔ of the way through the old ceiling, and the operator had no way to
+ * move it without a code change and a deploy.
+ *
+ * Set `WORKING_COPY_MAX_MB` in the environment (SSM → container env, see DEPLOY.md) to change it.
+ *
+ * The default is SHARED with the remix seed (`storage/limits.ts`) — a project the platform is willing to
+ * hold for recovery is one it is willing to hold for remix, and two independently-chosen numbers is how
+ * a game became publishable but un-remixable with nothing reporting it.
  */
-export const MAX_WORKING_COPY_BYTES = 75 * 1024 * 1024;
+export const DEFAULT_WORKING_COPY_MAX_MB = DEFAULT_PROJECT_SOURCE_MAX_MB;
+
+export function maxWorkingCopyBytes(context?: unknown): number {
+  const mb = envNumber(context, 'WORKING_COPY_MAX_MB', DEFAULT_WORKING_COPY_MAX_MB);
+
+  /*
+   * A nonsensical override must not disable the cap or make every checkpoint fail — the same
+   * "ignore a bad override rather than obey it" rule the Unity licence price ladder uses.
+   */
+  return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_WORKING_COPY_MAX_MB) * 1024 * 1024;
+}
 
 export class WorkingCopyTooLargeError extends Error {
   readonly statusCode = 413;
   readonly isRetryable = false;
 
-  constructor() {
-    super('This project is too large to keep a recovery copy of.');
+  /** Says the SIZE and the LIMIT — "too large" alone gives the operator nothing to act on. */
+  constructor(bytes: number, limit: number) {
+    super(
+      `This project is ${(bytes / 1048576).toFixed(1)}MB, over the ${Math.round(limit / 1048576)}MB ` +
+        'recovery-copy limit, so it is NOT protected against losing this browser. Reduce the project ' +
+        'size (large generated PNGs are the usual cause) or raise WORKING_COPY_MAX_MB.',
+    );
     this.name = 'WorkingCopyTooLargeError';
   }
 }
@@ -98,12 +129,32 @@ export interface WorkingCopy {
   files: SerializedFileMap;
 }
 
-/** Store the latest state. Overwrites the previous copy — there is only ever one. */
+/**
+ * Store the latest state. Overwrites the previous copy — there is only ever one.
+ *
+ * 🔴 **Secrets are stripped HERE, not only in the client.** `saveWorkingCopy` already filters before
+ * upload, and that was the whole defence until a live test drove this route directly and watched
+ * `.env` and `.env.production` land in the store. Every other secret boundary in this codebase is
+ * defence-in-depth — the shell allow-list is enforced client-side AND stripped server-side (§4.2.5,
+ * §5) — and this one was a single client-side filter guarding the user's API keys on OUR
+ * infrastructure. One caller that forgets, or one client bug, and the keys are ours to lose.
+ *
+ * Same `isSecretPath` as the push and the remix seed: one rule, one place, applied at every door.
+ */
 export async function putWorkingCopy(projectId: string, copy: WorkingCopy, context?: unknown): Promise<void> {
-  const bytes = new TextEncoder().encode(JSON.stringify(copy));
+  const files: SerializedFileMap = {};
 
-  if (bytes.byteLength > MAX_WORKING_COPY_BYTES) {
-    throw new WorkingCopyTooLargeError();
+  for (const [path, entry] of Object.entries(copy.files)) {
+    if (!isSecretPath(path)) {
+      files[path] = entry;
+    }
+  }
+
+  const bytes = new TextEncoder().encode(JSON.stringify({ ...copy, files }));
+  const limit = maxWorkingCopyBytes(context);
+
+  if (bytes.byteLength > limit) {
+    throw new WorkingCopyTooLargeError(bytes.byteLength, limit);
   }
 
   await getObjectStore(context).put(workingCopyKey(projectId), bytes, 'application/json');

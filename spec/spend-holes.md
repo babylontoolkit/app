@@ -21,7 +21,7 @@ Additional walls by shape:
 - **Any caller-influenced fetch URL** → the shared SSRF guard `app/lib/.server/net/ssrf.ts` (`assertPublicUrl`: string allow-list via `~/utils/url` + a DNS-rebinding resolve check), re-run on **every redirect hop**, never just the first. Used by `/api/web-search` and `/api/git-proxy`.
 - **A caller-supplied base URL** (e.g. GitLab `gitlabUrl`) → `isAllowedUrl` before it is fetched.
 - **A platform secret** (provider token) → a route may **act** on it, never **emit** it. `get_token`-style endpoints return only the caller's OWN cookie token, never the server-env fallback (the export-api-keys rule, SPEC §5).
-- **Client-supplied byte uploads** → a size cap before the write (`MAX_BUILD_BYTES`/`MAX_BUILD_FILES` in `share/publish.ts`, `MAX_SEED_BYTES` in `share/seed-store.ts`).
+- **Client-supplied byte uploads** → a size cap before the write (`BUILD_MAX_MB`/`BUILD_MAX_FILES` in `share/publish.ts`, `REMIX_SEED_MAX_MB` in `share/seed-store.ts`, `WORKING_COPY_MAX_MB` in `projects/working-copy.ts`). All env-configurable; every refusal names the size, the limit and the variable. ⚠️ Caps that hold the SAME content must share a default (`storage/limits.ts`) or they drift apart silently — see CLAUDE.md.
 
 ## Auth is in the handler — NEVER in `withSecurity`
 
@@ -40,8 +40,8 @@ All inherited, all originally unauthenticated, all now guarded + pinned by `outb
 | `api.netlify-user`, `api.vercel-user`, `api.supabase-user` | anonymous; platform-token fallback | verified user |
 | `api.netlify-deploy`, `api.vercel-deploy` | anonymous; unbounded 60× poll loops | verified user |
 | `api.supabase.query`, `api.supabase.variables`, `api.supabase` | anonymous passthroughs | verified user |
-| `api.projects.$id.publish` (build) | uncapped S3 write | `MAX_BUILD_BYTES`/`MAX_BUILD_FILES` + header pre-reject |
-| remix seed / self-remix (`putRemixSeed`) | uncapped S3 write | `MAX_SEED_BYTES` |
+| `api.projects.$id.publish` (build) | uncapped S3 write | `BUILD_MAX_MB`/`BUILD_MAX_FILES` + derived header pre-reject |
+| remix seed / self-remix (`putRemixSeed`) | uncapped S3 write | `REMIX_SEED_MAX_MB` (shares its default with the working copy) |
 
 ## The set that sweep MISSED (2026-07-20)
 

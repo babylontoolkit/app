@@ -18,13 +18,20 @@ const unlinked: RepoStatus = { linked: false };
 const linked: RepoStatus = { linked: true, provider: 'github', repo: 'jane/space-racer', branch: 'main' };
 
 describe('the badge — unlinked', () => {
-  it('says browser-only in words a non-developer can act on', () => {
+  /*
+   * The copy changed with §4.5.4c and the CLAIM is the point. It used to say the project "only exists
+   * in this browser" — true when written, false once the platform kept a recovery copy. It must now
+   * describe what syncing is actually for (owning the code) without pretending the work is in danger.
+   */
+  it('offers to sync, without claiming the work exists nowhere else', () => {
     const view = describeSaveStatus({ repo: unlinked, unsavedWork: true, saveState: idle });
 
     expect(view.tone).toBe('warning');
-    expect(view.label).toBe('Not saved — browser only');
+    expect(view.label).toBe('Not synced to GitHub');
     expect(view.action).toBe('save');
-    expect(view.actionLabel).toBe('Save');
+    expect(view.actionLabel).toBe('Sync');
+    expect(view.detail).not.toMatch(/only exists in this browser/i);
+    expect(view.detail).toMatch(/recovery copy/i);
   });
 
   /** Before the first status fetch lands. The safe default is "not saved", never a hopeful blank. */
@@ -42,11 +49,11 @@ describe('the badge — unlinked', () => {
 });
 
 describe('the badge — linked', () => {
-  it('is quiet when everything is saved', () => {
+  it('is quiet when everything is synced', () => {
     const view = describeSaveStatus({ repo: linked, unsavedWork: false, saveState: idle });
 
     expect(view.tone).toBe('neutral');
-    expect(view.label).toBe('Saved to GitHub');
+    expect(view.label).toBe('Synced to GitHub');
     expect(view.detail).toContain('space-racer');
   });
 
@@ -57,22 +64,22 @@ describe('the badge — linked', () => {
       saveState: idle,
     });
 
-    expect(view.label).toBe('Saved to GitLab');
+    expect(view.label).toBe('Synced to GitLab');
   });
 
   it('warns when there is work the repo does not have yet', () => {
     const view = describeSaveStatus({ repo: linked, unsavedWork: true, saveState: idle });
 
     expect(view.tone).toBe('warning');
-    expect(view.label).toBe('Not saved yet');
+    expect(view.label).toBe('Changes not synced');
     expect(view.action).toBe('save');
   });
 
   /**
-   * Pressing Save on a saved project is someone reassuring themselves. A disabled button answers that
-   * with nothing at all; a no-op push answers it with "Saved".
+   * Pressing Sync on a synced project is someone reassuring themselves. A disabled button answers that
+   * with nothing at all; a no-op push answers it with "Synced".
    */
-  it('leaves Save pressable on an already-saved project', () => {
+  it('leaves Sync pressable on an already-synced project', () => {
     expect(describeSaveStatus({ repo: linked, unsavedWork: false, saveState: idle }).action).toBe('save');
   });
 
@@ -127,7 +134,7 @@ describe('the badge — failure is loud', () => {
     });
 
     expect(view.tone).toBe('danger');
-    expect(view.label).toBe('Not saved');
+    expect(view.label).toBe('Not synced');
     expect(view.action).toBe('retry');
   });
 
@@ -276,7 +283,7 @@ describe('the dashboard card badge', () => {
     const badge = describeProjectSaveBadge({});
 
     expect(badge.tone).toBe('warning');
-    expect(badge.label).toBe('Not saved — browser only');
+    expect(badge.label).toBe('Not synced to a repository');
   });
 
   it('names the repo on a saved project, quietly', () => {
@@ -365,7 +372,17 @@ describe('nudges are milestone-based', () => {
 
 describe('the beforeunload warning', () => {
   it('fires when closing the tab would actually lose work', () => {
-    expect(shouldWarnBeforeUnload({ unsavedWork: true, generationCount: 3 })).toBe(true);
+    expect(shouldWarnBeforeUnload({ unsavedWork: true, generationCount: 3, recoverable: false })).toBe(true);
+  });
+
+  /*
+   * 🔴 §4.5.4c. `unsavedWork` stopped meaning "would be lost" — it means "not in your own repository",
+   * which is the ordinary state of every project mid-build now that the platform keeps a recovery
+   * copy. Warning there would fire the unstyleable browser dialog on almost every close, which is the
+   * cry-wolf failure the test below exists to prevent, arrived at from the other direction.
+   */
+  it('does NOT fire when the work reached the recovery copy', () => {
+    expect(shouldWarnBeforeUnload({ unsavedWork: true, generationCount: 3, recoverable: true })).toBe(false);
   });
 
   /**
@@ -373,10 +390,10 @@ describe('the beforeunload warning', () => {
    * trains the user to click straight through it — which disarms it for the one time it mattered.
    */
   it('does NOT fire on a saved project', () => {
-    expect(shouldWarnBeforeUnload({ unsavedWork: false, generationCount: 3 })).toBe(false);
+    expect(shouldWarnBeforeUnload({ unsavedWork: false, generationCount: 3, recoverable: false })).toBe(false);
   });
 
   it('does not fire on an empty project the user just opened and closed', () => {
-    expect(shouldWarnBeforeUnload({ unsavedWork: true, generationCount: 0 })).toBe(false);
+    expect(shouldWarnBeforeUnload({ unsavedWork: true, generationCount: 0, recoverable: false })).toBe(false);
   });
 });

@@ -22,8 +22,10 @@ import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { generationCount, projectId as projectIdStore, repoStatus, requestSave, unsavedWork } from '~/lib/persistence';
 import { decideNudge, shouldWarnBeforeUnload } from '~/lib/persistence/save-status';
+import { workingCopySafe } from '~/lib/persistence/useChatHistory';
 import { saving } from '~/config/saving';
 import { SaveDivergenceDialog } from './SaveDivergenceDialog.client';
+import { UnappliedTurnDialog } from './UnappliedTurnDialog.client';
 
 /** The one-time toast is per USER, not per project — it teaches a fact about the product, once. */
 const FIRST_TOAST_KEY = 'bt_saving_intro_shown';
@@ -41,6 +43,7 @@ export function SavingSurface() {
   return (
     <>
       <SaveDivergenceDialog />
+      <UnappliedTurnDialog />
       <SaveNudges />
       <UnloadWarning />
     </>
@@ -150,8 +153,14 @@ function UnloadWarning() {
   const unsaved = useStore(unsavedWork);
   const count = useStore(generationCount);
 
+  /*
+   * §4.5.4c: "unsaved" now means "not in your own repository", which is safe and common. Only work the
+   * recovery copy never received would actually be lost — see `shouldWarnBeforeUnload`.
+   */
+  const recoverySafe = useStore(workingCopySafe);
+
   useEffect(() => {
-    if (!shouldWarnBeforeUnload({ unsavedWork: unsaved, generationCount: count })) {
+    if (!shouldWarnBeforeUnload({ unsavedWork: unsaved, generationCount: count, recoverable: recoverySafe })) {
       return undefined;
     }
 

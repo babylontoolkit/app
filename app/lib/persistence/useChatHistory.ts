@@ -29,6 +29,7 @@ import {
   listAllChats,
   listChats,
   loadMessages,
+  loadWorkingCopy,
   mintServerChatId,
   pullFromRepo,
   readRemixSeed,
@@ -44,7 +45,9 @@ import {
   readCurrentLocalSnapshot,
   type LocalSyncState,
 } from './local-snapshots';
-import { selectMountSource } from './mount-source';
+import { selectMountSource, type MountSource } from './mount-source';
+import { detectUnappliedTurn } from './unapplied-turn';
+import { applyTranscriptArtifact } from './apply-artifact';
 import { protectForRepoRestore, protectNothing } from './restore-plan';
 import { hasRestorableHistory, markAsTranscript } from './transcript';
 import {
@@ -107,6 +110,89 @@ export const repoStatus = atom<RepoStatus | undefined>(undefined);
 export const mountDivergence = atom<{ projectId: string; remoteHead: string } | undefined>(undefined);
 
 /**
+ * A PAID generation whose files never reached this project (§4.5.4c, §4.6).
+ *
+ * Set when the mounted copy is older than the last assistant turn — which means the user was charged
+ * for work they cannot see. The artifact still holds the file bodies, so this is an offer to apply
+ * them, never an automatic write: an older copy can also be one the user deliberately restored
+ * (§4.12), and the two are indistinguishable (`unapplied-turn.ts`).
+ */
+export const unappliedTurn = atom<{ projectId: string; message: Message } | undefined>(undefined);
+
+/**
+ * Did the latest checkpoint reach the server's recovery copy? (§4.5.4c)
+ *
+ * Drives the beforeunload warning, which must fire only when work would genuinely be LOST. The upload
+ * is best-effort — offline, or the project past the size cap — so this is the difference between "not
+ * in your repository yet" (safe, common, must not nag) and "this browser has the only copy".
+ *
+ * Starts `false`: before the first successful upload nothing is recoverable, and the safe default for
+ * a question about data loss is the pessimistic one.
+ */
+export const workingCopySafe = atom<boolean>(false);
+
+/** One "you are not protected" warning per project per session — see `checkpointProject`. */
+const warnedNoRecoveryCopy = new Set<string>();
+
+/**
+ * What the last mount produced, for `checkUnappliedTurn` to read.
+ *
+ * Module-level rather than returned, because the mount and the transcript restore run concurrently and
+ * the check needs both. Written synchronously at the end of the mount, read immediately after both
+ * settle — never across a user interaction.
+ */
+let lastMount: { source: MountSource['source']; messageId?: string } | undefined;
+
+/** The conversation the last `restoreTranscript` put on screen, for the same reason as `lastMount`. */
+let restoredTranscript: Message[] | undefined;
+
+/** Does this assistant turn actually write files? A prose answer has nothing to apply. */
+function turnWritesFiles(message: Message): boolean {
+  return typeof message.content === 'string' && message.content.includes('<boltAction type="file"');
+}
+
+/**
+ * Did the last paid turn ever land? If not, raise the offer (§4.5.4c).
+ *
+ * Deliberately non-throwing: this is a remedy for a failure that already happened, and it must never
+ * become a second reason a project fails to open.
+ */
+async function checkUnappliedTurn(pid: string): Promise<void> {
+  try {
+    const lastAssistant = [...(restoredTranscript ?? [])].reverse().find((message) => message.role === 'assistant');
+
+    const decision = detectUnappliedTurn({
+      source: lastMount?.source ?? 'empty',
+      lastAssistantMessageId: lastAssistant?.id,
+      hasFileActions: lastAssistant ? turnWritesFiles(lastAssistant) : false,
+      mountedMessageId: lastMount?.messageId,
+    });
+
+    if (decision.action === 'none') {
+      return;
+    }
+
+    if (decision.action === 'apply') {
+      /*
+       * Nothing exists from any source, so there is nothing to overwrite and no earlier state the user
+       * could have chosen — the one case where writing without asking is safe.
+       */
+      await applyTranscriptArtifact(lastAssistant!);
+      return;
+    }
+
+    /*
+     * The MESSAGE travels, not its id. The dialog would otherwise have to find it again, and the only
+     * place to look is the rendered conversation — a second source that can disagree with this one
+     * about which turn "the last" is.
+     */
+    unappliedTurn.set({ projectId: pid, message: lastAssistant! });
+  } catch (error) {
+    logger.warn(`Could not check for an unapplied turn on ${pid}: ${(error as Error)?.message}`);
+  }
+}
+
+/**
  * How many things the user has made in this project — the nudge MILESTONE counter (§4.5.4b).
  *
  * §4.5.4b forbids a timed nudge, so this is the only clock the nudges get: the user's own progress. It
@@ -164,6 +250,17 @@ function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> 
 async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
   const prepareToRun = opts.prepareToRun ?? true;
 
+  /*
+   * 🔴 RESET, never inherit. These two module-level values are how `checkUnappliedTurn` sees both
+   * halves of a mount, and a navigate between projects does not unload the module — so without this
+   * they arrive still holding the PREVIOUS project's mount and transcript, and the check would offer
+   * to apply one project's artifact onto another. Same class as the §4.5.6 chat-identity bug, where
+   * state surviving an SPA navigation was the whole defect. Cleared synchronously at entry, before
+   * anything can await, so the concurrent `restoreTranscript` cannot lose its own write to it.
+   */
+  lastMount = undefined;
+  restoredTranscript = undefined;
+
   const [status, sync] = await Promise.all([
     getRepoStatus(pid),
     db ? getLocalSyncState(db, pid) : Promise.resolve({} as LocalSyncState),
@@ -178,6 +275,16 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
    */
   generationCount.set(sync.localSeq === undefined ? 0 : sync.localSeq + 1);
 
+  /*
+   * The recovery copy (§4.5.4c), fetched ONLY when this browser has nothing of its own.
+   *
+   * Two reasons for the condition. It is the only case the decision can use it in (a local checkpoint
+   * always wins — the seqs are per-browser and not comparable), and the copy is the whole project, so
+   * fetching it to answer "does one exist?" on every mount would download megabytes to discard them.
+   * Fetched as the object rather than a probe, so the mount below needs no second request.
+   */
+  const working = sync.localSeq === undefined ? await loadWorkingCopy(pid) : null;
+
   const decision = selectMountSource({
     linked: status.linked,
     lastSyncedCommitSha: status.lastSyncedCommitSha,
@@ -187,6 +294,7 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
     localSeq: sync.localSeq,
     syncedSeq: sync.syncedSeq,
     hasServerSeed: undefined,
+    hasWorkingCopy: Boolean(working),
   });
 
   logger.info(`Mounting project ${pid} from: ${decision.source}`);
@@ -208,6 +316,7 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
       }
     }
 
+    lastMount = { source: decision.source, messageId: local?.messageId };
     unsavedWork.set(decision.source === 'diverged' || decision.unsavedWork);
 
     if (decision.source === 'diverged') {
@@ -217,8 +326,44 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
     return;
   }
 
+  if (decision.source === 'working') {
+    /*
+     * Recovering work that exists NOWHERE else (§4.5.4c) — a tab crash, cleared site data, or a new
+     * device on an unlinked project. Without this the user got an empty editor for a project they had
+     * built and, in the measured case, already paid 427 credits for.
+     *
+     * `protectForRepoRestore`, NOT `protectNothing`: `saveWorkingCopy` strips the `.env` family before
+     * upload, so this map's silence about those files means "never sent", not "deleted". Treating it as
+     * the whole truth would wipe the user's API keys — the one thing here with no other copy, and the
+     * exact bug §4.5.4b deviation 7 records for the repo path.
+     */
+    await workbenchStore.restoreFiles(working!.files, { protect: protectForRepoRestore });
+
+    if (db) {
+      /* Make it this browser's checkpoint too, so undo works and the next mount reads locally. */
+      await createLocalSnapshot(db, { projectId: pid, files: working!.files, label: 'Recovered' });
+    }
+
+    /*
+     * Honest: recovered work has NOT been pushed anywhere the user controls. Saying otherwise would
+     * silence the very nudges that exist to stop this happening again.
+     */
+    unsavedWork.set(true);
+
+    if (prepareToRun) {
+      await prepareMountedProject(working!.files);
+    }
+
+    lastMount = { source: 'working', messageId: undefined };
+    toast.success('Recovered your project from the last checkpoint.');
+
+    return;
+  }
+
   if (decision.source === 'repo') {
+    lastMount = { source: 'repo' };
     await mountFromRepo(pid, prepareToRun);
+
     return;
   }
 
@@ -228,10 +373,13 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
      * about, since `hasServerSeed` needs a round-trip we do not make on the common path. Trying the
      * seed here costs one request on a path that had nothing to show anyway.
      */
+    lastMount = { source: 'empty' };
     await mountFromSeed(pid, prepareToRun);
+
     return;
   }
 
+  lastMount = { source: 'empty' };
   await mountFromSeed(pid, prepareToRun);
 }
 
@@ -709,6 +857,7 @@ export function useChatHistory() {
 
         const transcript = markAsTranscript(serverMessages);
         setInitialMessages(transcript);
+        restoredTranscript = transcript;
 
         const firstUserMessage = transcript.find((message) => message.role === 'user');
         const title =
@@ -801,6 +950,12 @@ export function useChatHistory() {
         chatMetadata.set({ projectId: chat.projectId, serverChatId: chat.serverChatId });
 
         await Promise.all([mountProjectFiles(chat.projectId), restoreTranscript(chat.projectId, chat.serverChatId)]);
+
+        /*
+         * AFTER both — the check compares what was mounted against what the transcript says was paid
+         * for, and either half alone answers nothing (§4.5.4c).
+         */
+        await checkUnappliedTurn(chat.projectId);
 
         return true;
       } catch (error) {
@@ -1083,6 +1238,12 @@ ${value.content}
           mountProjectFiles(mountProjectId),
           freshChat ? Promise.resolve() : restoreTranscript(mountProjectId, serverChatId),
         ])
+          /*
+           * AFTER both, and only for a chat that actually came back: the check compares what was
+           * mounted against what the transcript says was paid for, so a fresh chat (no transcript)
+           * has nothing to compare and must not raise an offer (§4.5.4c).
+           */
+          .then(() => (freshChat ? undefined : checkUnappliedTurn(mountProjectId)))
           .catch((error) => logger.warn(`Could not load project ${mountProjectId}: ${error.message}`))
           .finally(() => setReady(true));
       } else {
@@ -1243,8 +1404,32 @@ ${value.content}
        */
       try {
         await saveWorkingCopy(pid, snapshot.seq, files);
+        workingCopySafe.set(true);
       } catch (error) {
+        /*
+         * The local checkpoint is intact, but this browser now holds the only copy — which is exactly
+         * the state the beforeunload warning exists for.
+         */
+        workingCopySafe.set(false);
         logger.warn(`Working copy not saved for ${pid} (local checkpoint is intact): ${(error as Error)?.message}`);
+
+        /*
+         * LOUD (§4.5.4b: failed saves are never silent).
+         *
+         * This used to be a console warn only, which is the worst possible shape: the user believes
+         * the platform is protecting them and it is not. The most likely cause is a project past
+         * `WORKING_COPY_MAX_MB` — large generated PNGs — and that is actionable, so say it.
+         *
+         * Once per project per session: the checkpoint fires on every generation, and a toast on each
+         * one would be nagging that gets dismissed unread.
+         */
+        if (!warnedNoRecoveryCopy.has(pid)) {
+          warnedNoRecoveryCopy.add(pid);
+          toast.warn(
+            'This project is not being backed up for crash recovery — sync it to a repository to keep it safe.',
+            { autoClose: 8000 },
+          );
+        }
       }
 
       /*

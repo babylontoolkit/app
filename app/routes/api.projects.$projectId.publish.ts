@@ -18,10 +18,10 @@ import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { errorResponse } from '~/lib/.server/http';
 import { runPublishingChecklist } from '~/lib/.server/share/checklist';
-import { publishBuild, unpublish } from '~/lib/.server/share/publish';
+import { maxPublishBodyBytes, publishBodyFloorBytes, publishBuild, unpublish } from '~/lib/.server/share/publish';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import { buildRemixSeed } from '~/lib/.server/share/remix-seed';
-import { putRemixSeed } from '~/lib/.server/share/seed-store';
+import { SeedTooLargeError, putRemixSeed } from '~/lib/.server/share/seed-store';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { createScopedLogger } from '~/utils/logger';
 import type { AppLoadContext } from '@remix-run/cloudflare';
@@ -30,20 +30,26 @@ import type { SerializedFileMap } from '~/lib/binary/binary-files';
 const logger = createScopedLogger('share.publish.route');
 
 /**
- * Ceiling on the whole publish body (dist + source). The two are capped individually downstream
- * (`MAX_BUILD_BYTES`, `MAX_SEED_BYTES`); this is a cheap header-level reject so an obviously oversized
- * request never gets parsed into memory. base64 inflates bytes ~1.33×, hence the generous headroom.
+ * Whether the published game can be remixed, and if not, why (§4.8).
+ *
+ * Surfaced to the client deliberately. Depositing the seed is best-effort by design — the user is owed
+ * their share link whatever happens here — but "best-effort" had been implemented as a `catch` that
+ * logged to a server file, so an oversized project produced a green success, a working share link, and
+ * a game that could never be remixed. Nobody found out until a stranger clicked Remix and got an empty
+ * editor. A publish may still succeed without a seed; it may not do so QUIETLY.
  */
-const MAX_PUBLISH_BODY_BYTES = 400 * 1024 * 1024;
+export type RemixSeedOutcome = { remixable: true } | { remixable: false; remixBlockedReason: string };
 
 /**
  * Store the source a remix will be cloned from (§4.8).
  *
- * Never throws: publishing succeeded before this ran, and the user is owed their share link whatever
- * happens here. A failure is logged rather than surfaced — the visible consequence (a remix arrives
- * empty) is the same as it has always been for an unseeded project.
+ * Never throws: publishing succeeded before this ran. It REPORTS instead — see `RemixSeedOutcome`.
  */
-async function depositRemixSeed(projectId: string, source: SerializedFileMap, context: AppLoadContext) {
+async function depositRemixSeed(
+  projectId: string,
+  source: SerializedFileMap,
+  context: AppLoadContext,
+): Promise<RemixSeedOutcome> {
   try {
     const { files, excludedSecrets } = buildRemixSeed(source);
 
@@ -59,8 +65,23 @@ async function depositRemixSeed(projectId: string, source: SerializedFileMap, co
      */
     await putRemixSeed(projectId, files, context);
     await getProjectStore(context).update(projectId, { remixSeedAt: new Date().toISOString() });
+
+    return { remixable: true };
   } catch (error) {
-    logger.error(`Could not store the remix seed for ${projectId}: ${(error as Error).message}`);
+    const message = (error as Error).message;
+    logger.error(`Could not store the remix seed for ${projectId}: ${message}`);
+
+    /*
+     * `SeedTooLargeError` already says the size, the limit and the variable — it is written for whoever
+     * has to act on it, so pass it through rather than flattening every cause into one vague sentence.
+     */
+    return {
+      remixable: false,
+      remixBlockedReason:
+        error instanceof SeedTooLargeError
+          ? message
+          : 'The source could not be stored, so this game cannot be remixed.',
+    };
   }
 }
 
@@ -102,8 +123,23 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
      * `putRemixSeed`). A declared length past their combined ceiling is refused before we parse it.
      */
     const declaredLength = Number(request.headers.get('content-length') || '0');
+    const bodyLimit = maxPublishBodyBytes(context);
 
-    if (declaredLength > MAX_PUBLISH_BODY_BYTES) {
+    if (declaredLength > bodyLimit) {
+      /*
+       * An operator can set this below build + seed, in which case it — not the caps they tuned — is
+       * what actually refused the publish. Say that here, where it bites: the alternative is a 413
+       * naming a limit nobody changed, and an operator hunting the wrong variable.
+       */
+      const floor = publishBodyFloorBytes(context);
+
+      if (bodyLimit < floor) {
+        logger.warn(
+          `PUBLISH_BODY_MAX_MB (${Math.round(bodyLimit / 1048576)}MB) is below BUILD_MAX_MB + ` +
+            `REMIX_SEED_MAX_MB (${Math.round(floor / 1048576)}MB), so it is the real publish limit.`,
+        );
+      }
+
       return json({ error: true, message: 'That build is too large to publish.' }, { status: 413 });
     }
 
@@ -152,9 +188,12 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
      * The seed is the ONLY reason the platform holds source at all under repo-primary persistence, and
      * it exists only for projects the owner deliberately made public. `unpublish` deletes it again.
      */
-    if (body.source) {
-      await depositRemixSeed(project.id, body.source, context);
-    }
+    const remix: RemixSeedOutcome = body.source
+      ? await depositRemixSeed(project.id, body.source, context)
+      : {
+          remixable: false,
+          remixBlockedReason: 'This game was published without its source, so it cannot be remixed.',
+        };
 
     /*
      * Funnel (§5A). SHARE_PUBLISHED fires on every publish; FIRST_PLAYABLE only when this project had
@@ -173,7 +212,8 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       gallery: Boolean(body.submitToGallery),
     });
 
-    return json(result, { status: 201 });
+    // `remix` rides along: the publish succeeded either way, but the user must SEE it if it cannot be remixed.
+    return json({ ...result, ...remix }, { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

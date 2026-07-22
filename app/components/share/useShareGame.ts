@@ -36,8 +36,15 @@ export interface PublishOptions {
   acknowledgeWarnings?: boolean;
 }
 
+/**
+ * On `published`, `remixBlockedReason` is set when the game published fine but its source could not be
+ * stored — too large, or absent (§4.8). The publish deliberately still succeeds; what changed is that
+ * the user is TOLD. It used to be a line in a server log, so a public, playable, permanently
+ * un-remixable game looked identical to a healthy one until a stranger clicked Remix and got an empty
+ * editor.
+ */
 export type ShareOutcome =
-  | { status: 'published'; shareId: string }
+  | { status: 'published'; shareId: string; remixBlockedReason?: string }
   | { status: 'blocked'; findings: ChecklistFinding[] }
   | { status: 'needs-acknowledgement'; findings: ChecklistFinding[] }
   | { status: 'error'; message: string };
@@ -150,13 +157,15 @@ export function useShareGame() {
 
       const data = (await response.json()) as {
         shareId?: string;
+        remixable?: boolean;
+        remixBlockedReason?: string;
         findings?: ChecklistFinding[];
         needsAcknowledgement?: boolean;
         message?: string;
       };
 
       if (response.status === 201 && data.shareId) {
-        return { status: 'published', shareId: data.shareId };
+        return { status: 'published', shareId: data.shareId, remixBlockedReason: data.remixBlockedReason };
       }
 
       // A secret — a refusal, not a warning (§4.8).

@@ -50,11 +50,22 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
   const [findings, setFindings] = useState<ChecklistFinding[]>([]);
   const [awaitingAck, setAwaitingAck] = useState(false);
 
+  /**
+   * Set when the game published but its source could not be stored, so nobody can remix it (§4.8).
+   *
+   * Only ever known from a publish we just performed — the server does not report it on an already-live
+   * game, so re-opening the dialog shows nothing rather than a stale or invented claim.
+   */
+  const [remixBlockedReason, setRemixBlockedReason] = useState<string | undefined>();
+
   const handleOutcome = (outcome: ShareOutcome) => {
     if (outcome.status === 'published') {
       setShareId(outcome.shareId);
       setFindings([]);
       setAwaitingAck(false);
+      setRemixBlockedReason(outcome.remixBlockedReason);
+
+      // The publish DID succeed — celebrating it is right. The remix caveat is shown in the dialog below.
       toast.success('Your game is live! 🎉');
     } else if (outcome.status === 'blocked') {
       setFindings(outcome.findings);
@@ -74,6 +85,7 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
   const doUnpublish = async () => {
     if (await unpublish()) {
       setShareId(undefined);
+      setRemixBlockedReason(undefined);
       toast.success('Your game is no longer shared.');
     } else {
       toast.error('Could not unpublish. Please try again.');
@@ -97,7 +109,9 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
             <DialogTitle>{shareId ? 'Your game is shared' : 'Share your game'}</DialogTitle>
             <DialogDescription>
               {shareId
-                ? 'Anyone with the link can play it. Sharing it lets others remix it too.'
+                ? remixBlockedReason
+                  ? 'Anyone with the link can play it.'
+                  : 'Anyone with the link can play it. Sharing it lets others remix it too.'
                 : 'We build your game and host it at a public link. Nobody can see your project — only the finished game.'}
             </DialogDescription>
           </div>
@@ -119,6 +133,15 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
                   title="Open"
                 />
               </div>
+              {remixBlockedReason && (
+                <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-3 flex flex-col gap-1">
+                  <span className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
+                    This game can't be remixed
+                  </span>
+                  <span className="text-xs text-bolt-elements-textSecondary">{remixBlockedReason}</span>
+                </div>
+              )}
+
               <div className="flex justify-between items-center">
                 <DialogButton type="danger" onClick={doUnpublish} disabled={isPublishing}>
                   Unpublish

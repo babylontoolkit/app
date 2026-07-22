@@ -50,6 +50,22 @@ export interface MountFacts {
 
   /** A one-time server copy left by `api.remix` — only ever present on a freshly remixed project. */
   hasServerSeed?: boolean;
+
+  /**
+   * The platform holds a recovery WORKING COPY for this project (§4.5.4c).
+   *
+   * 🔴 **A BOOLEAN, DELIBERATELY — never its `seq`.** The obvious rule ("mount whichever copy has the
+   * higher seq") is WRONG and would fail silently: `seq` is allocated from `nextSeq` in the BROWSER's
+   * IndexedDB (`local-snapshots.ts`), so it is per-browser, not global. Two devices both start at 0,
+   * and comparing device A's working copy against device B's local checkpoints compares two unrelated
+   * counters — which reads as a confident decision and picks an arbitrary winner. The shared counter
+   * is meaningful only WITHIN one browser, which is exactly where the working copy is never needed.
+   *
+   * So this decision never ranks the working copy against a local copy: it is consulted only when this
+   * browser has NOTHING, where there is nothing to compare it to and it is strictly better than the
+   * `empty` it replaces.
+   */
+  hasWorkingCopy?: boolean;
 }
 
 /**
@@ -67,6 +83,7 @@ export type MountSource =
   | { source: 'local'; unsavedWork: boolean }
   | { source: 'repo'; reason: 'no-local-copy' | 'remote-ahead' }
   | { source: 'seed' }
+  | { source: 'working' }
   | { source: 'empty' }
   | { source: 'diverged'; remoteHead: string };
 
@@ -83,6 +100,17 @@ export function selectMountSource(facts: MountFacts): MountSource {
       return { source: 'local', unsavedWork: true };
     }
 
+    /*
+     * 🔴 The case §4.5.4c exists for. An UNLINKED project with nothing in this browser used to be
+     * `empty` — which is how a completed, paid-for generation came back as a blank project after a tab
+     * crash, and how clearing site data destroyed a game outright. The recovery copy is the only
+     * remaining copy here, so it wins over `empty` and over a remix seed (the seed is the state the
+     * project was BORN in; the working copy is where it actually got to).
+     */
+    if (facts.hasWorkingCopy) {
+      return { source: 'working' };
+    }
+
     return facts.hasServerSeed ? { source: 'seed' } : { source: 'empty' };
   }
 
@@ -95,15 +123,37 @@ export function selectMountSource(facts: MountFacts): MountSource {
    * through to a repo comparison here would compare against `undefined` and read as "remote is empty".
    */
   if (facts.remoteHead === undefined) {
-    return hasLocal ? { source: 'local', unsavedWork } : { source: 'empty' };
+    if (hasLocal) {
+      return { source: 'local', unsavedWork };
+    }
+
+    /* Offline with nothing local: the recovery copy is all we can reach, and it beats a blank editor. */
+    return facts.hasWorkingCopy ? { source: 'working' } : { source: 'empty' };
   }
 
   // Linked to a branch with no commits yet — a save that created the repo and failed to push.
   if (facts.remoteHead === null) {
-    return hasLocal ? { source: 'local', unsavedWork: true } : { source: 'empty' };
+    if (hasLocal) {
+      return { source: 'local', unsavedWork: true };
+    }
+
+    /* The repo genuinely holds nothing, so it cannot be the source — the recovery copy can. */
+    return facts.hasWorkingCopy ? { source: 'working' } : { source: 'empty' };
   }
 
-  // Nothing here: another device saved this project. The repo is the only copy we can see.
+  /*
+   * Nothing here: another device saved this project. The repo is the only copy we can TRUST.
+   *
+   * ⚠️ The working copy is deliberately NOT preferred over the repo, even though it may hold work that
+   * was never pushed. Deciding between them needs to know which is newer, and there is no ordering
+   * that spans them: the repo is ordered by commit sha, the working copy by a per-BROWSER `seq`, and
+   * this browser (having no local copy) has no `syncedSeq` to anchor either. Guessing would silently
+   * mount a stale project over newer commits — §4.13's cardinal sin, and the platform never merges.
+   *
+   * A linked project also already has durable storage, which is the whole point of linking; §4.5.4c's
+   * job is the UNLINKED project that has nowhere else to live. Extending this branch requires a
+   * cross-device ordering we do not have, not a preference we have not chosen.
+   */
   if (!hasLocal) {
     return { source: 'repo', reason: 'no-local-copy' };
   }

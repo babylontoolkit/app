@@ -230,7 +230,7 @@ function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: 
       } else if (result.divergence) {
         setDiverged(true);
       } else {
-        reportFailure(result, 'Could not save to GitHub.');
+        reportFailure(result, 'Could not sync to GitHub.');
       }
     } finally {
       setBusy(false);

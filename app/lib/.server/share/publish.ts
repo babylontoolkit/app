@@ -22,9 +22,10 @@
 import { randomInt } from 'node:crypto';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { base64ToBytes } from '~/lib/binary/binary-files';
+import { envNumber } from '~/lib/.server/env';
 import { getObjectStore } from '~/lib/.server/storage';
 import { getProjectStore } from '~/lib/.server/projects/store';
-import { deleteRemixSeed } from './seed-store';
+import { deleteRemixSeed, maxSeedBytes } from './seed-store';
 import type { Project } from '~/lib/.server/projects/types';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -69,13 +70,60 @@ export class UnsafeBuildPathError extends Error {
 }
 
 /**
- * Caps on the uploaded build (SPEC §5). The `dist/` map is client-supplied and written to a public
- * bucket, so without a bound it is unbounded S3 storage + CDN egress on the platform's bill for any
- * verified user, repeatable per re-publish. Generous for a real game build (wasm + textures + audio),
- * bounded against abuse.
+ * Caps on the uploaded build (SPEC §5) — **configurable**: `BUILD_MAX_MB`, `BUILD_MAX_FILES`.
+ *
+ * The `dist/` map is client-supplied and written to a PUBLIC bucket, so without a bound it is
+ * unbounded S3 storage + CDN egress on the platform's bill for any verified user, repeatable on every
+ * re-publish. Generous for a real game build (wasm + textures + audio), bounded against abuse.
+ *
+ * ⚠️ **A publish is bounded THREE times and they must stay in step** — this build, the remix seed
+ * (`REMIX_SEED_MAX_MB`), and the whole request body (`PUBLISH_BODY_MAX_MB`, a cheap `Content-Length`
+ * reject before anything is decoded). See `maxPublishBodyBytes` below and `.env.example`.
  */
-export const MAX_BUILD_BYTES = 150 * 1024 * 1024;
-export const MAX_BUILD_FILES = 10_000;
+export const DEFAULT_BUILD_MAX_MB = 150;
+export const DEFAULT_BUILD_MAX_FILES = 10_000;
+
+export function maxBuildBytes(context?: unknown): number {
+  const mb = envNumber(context, 'BUILD_MAX_MB', DEFAULT_BUILD_MAX_MB);
+  return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_BUILD_MAX_MB) * 1024 * 1024;
+}
+
+export function maxBuildFiles(context?: unknown): number {
+  const n = envNumber(context, 'BUILD_MAX_FILES', DEFAULT_BUILD_MAX_FILES);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_BUILD_MAX_FILES;
+}
+
+/** Headroom over build + seed, for the JSON envelope wrapping the two maps. */
+const PUBLISH_BODY_HEADROOM = 1.1;
+
+/**
+ * Ceiling on the whole publish request body (dist + source) — **configurable**, `PUBLISH_BODY_MAX_MB`.
+ *
+ * A cheap header-level reject so an obviously oversized request is never parsed into memory. It lives
+ * here, beside the caps it has to clear, rather than in the route: it is not a third independent number
+ * but a FUNCTION of the other two, and the whole reason this exists is that independently-chosen limits
+ * drift out of step and the drift is invisible.
+ *
+ * So the DEFAULT is derived — raise `BUILD_MAX_MB` or `REMIX_SEED_MAX_MB` and this follows. An explicit
+ * override still wins (silently recomputing a number an operator typed is its own kind of mystery), but
+ * an override BELOW build + seed is the effective cap, and the caller is expected to say so loudly at
+ * the moment it bites rather than leave a 413 naming a limit nobody changed.
+ */
+export function maxPublishBodyBytes(context?: unknown): number {
+  // 0 means "unset" — a real override is always positive, and a nonsense one is ignored like the rest.
+  const mb = envNumber(context, 'PUBLISH_BODY_MAX_MB', 0);
+
+  if (!Number.isFinite(mb) || mb <= 0) {
+    return Math.ceil(publishBodyFloorBytes(context) * PUBLISH_BODY_HEADROOM);
+  }
+
+  return mb * 1024 * 1024;
+}
+
+/** What a publish body must be able to carry: a full build plus a full seed. */
+export function publishBodyFloorBytes(context?: unknown): number {
+  return maxBuildBytes(context) + maxSeedBytes(context);
+}
 
 export class BuildTooLargeError extends Error {
   readonly statusCode = 413;
@@ -170,14 +218,23 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
   }
 
   // Cap BEFORE decoding/writing: reject an oversized build rather than stream it into the bucket.
-  if (entries.length > MAX_BUILD_FILES) {
-    throw new BuildTooLargeError(`That build has too many files (${entries.length} > ${MAX_BUILD_FILES}).`);
+  const fileLimit = maxBuildFiles(context);
+
+  if (entries.length > fileLimit) {
+    throw new BuildTooLargeError(
+      `That build has too many files (${entries.length} > ${fileLimit}). Raise BUILD_MAX_FILES to publish it.`,
+    );
   }
 
   const approxBytes = entries.reduce((sum, [, dirent]) => sum + (dirent.content?.length ?? 0), 0);
+  const byteLimit = maxBuildBytes(context);
 
-  if (approxBytes > MAX_BUILD_BYTES) {
-    throw new BuildTooLargeError('That build is too large to publish.');
+  if (approxBytes > byteLimit) {
+    /* Say the size and the limit — "too large" alone leaves the operator nothing to act on. */
+    throw new BuildTooLargeError(
+      `That build is ${(approxBytes / 1048576).toFixed(1)}MB, over the ${Math.round(byteLimit / 1048576)}MB ` +
+        'publish limit. Raise BUILD_MAX_MB to publish it.',
+    );
   }
 
   // Derive every key BEFORE writing anything — one bad path fails the publish, it does not half-do it.

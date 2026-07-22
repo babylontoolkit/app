@@ -6,7 +6,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
-import { createProject, getRepoStatus } from '~/lib/persistence/projects';
+import { createProject, getRepoStatus, mintServerChatId } from '~/lib/persistence/projects';
 import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { workbenchStore } from '~/lib/stores/workbench';
@@ -988,7 +988,31 @@ export const ChatImpl = memo(
         try {
           const project = await createProject({ name: title, templateId: entry.id });
           projectId.set(project.id);
-          chatMetadata.set({ ...chatMetadata.get(), projectId: project.id });
+
+          /*
+           * 🔴 MINT THE SERVER CHAT ID HERE — before the generation, not at first save (§4.5.4c, §4.6).
+           *
+           * It used to be minted by `mintUrlId`, called from `storeMessageHistory` — which runs AFTER
+           * the request has already gone out. The AI SDK refreshes its body from committed render
+           * state, so a creation sent `chatId: undefined`, and that is the id everything downstream
+           * keys on: the `generations` row recorded no chat (a 427-credit generation the audit trail
+           * could not attribute), and `recoverTranscript` returned early because it had no key to
+           * write against.
+           *
+           * That left the CREATION turn — the most expensive in the product, measured at 646 credits —
+           * as the least protected: no chat id, and no checkpoint yet either, so a crash meant charged,
+           * no record, no files. Minting alongside `projectId` puts it in the same committed render
+           * state, which is the one we know reaches the wire.
+           *
+           * Free (a `crypto.randomUUID()`, not a write) and idempotent downstream: both
+           * `ensureServerChatId` and `mintUrlId` return an id the atom already has, so this cannot
+           * produce a second chat.
+           */
+          chatMetadata.set({
+            ...chatMetadata.get(),
+            projectId: project.id,
+            serverChatId: chatMetadata.get()?.serverChatId ?? mintServerChatId(),
+          });
 
           /*
            * A newly created project is UNLINKED. Reset the badge from any previous project's state and

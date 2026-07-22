@@ -74,14 +74,25 @@ const IMAGE_MODELS: ModelSpec[] = [
     fields: [
       resolution(['1K', '2K', '4K'], '2K'),
       aspect(),
+
+      /*
+       * JPG by default (§4.16). These files ship in the played game, and a 2K photographic PNG is
+       * ~10MB where the same image as JPG is under 1MB — same price, no visible difference. A live
+       * creation shipped four 2K PNGs totalling ~30MB into one project before this was noticed.
+       *
+       * PNG stays one click away and says WHY you would pick it: it is the only format KIE offers
+       * that carries alpha (they accept `png` and `jpg` only — webp is an input format for them, not
+       * an output), so it is the right answer for logos, emblems and cut-out characters and the wrong
+       * one for everything else.
+       */
       {
         key: 'outputFormat',
         label: 'Format',
         choices: [
-          { value: 'png', label: 'PNG' },
-          { value: 'jpg', label: 'JPG' },
+          { value: 'jpg', label: 'JPG — smaller' },
+          { value: 'png', label: 'PNG — transparency' },
         ],
-        default: 'png',
+        default: 'jpg',
       },
     ],
   },

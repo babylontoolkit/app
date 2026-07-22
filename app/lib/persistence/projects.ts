@@ -21,6 +21,7 @@
  * File payloads are `SerializedFileMap`: the same codec the WebContainer serializes to, so binary
  * bytes survive the round trip base64-encoded as a WIRE format (never as live store state).
  */
+import { isSecretPath } from '~/lib/git/paths';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { Project } from '~/types/project';
 import type { ServerChat } from './chat-list';
@@ -419,9 +420,29 @@ export async function saveMessages(
  * copy", never to "no checkpoint". Callers swallow the error and say so in the log.
  */
 export async function saveWorkingCopy(projectId: string, seq: number, files: SerializedFileMap): Promise<void> {
+  /*
+   * 🔴 SECRETS NEVER LEAVE THE BROWSER, and this uses the SAME rule as every other path that sends a
+   * user's files anywhere (`isSecretPath`, one rule in one place, already shared by the push and the
+   * remix seed). The working copy is on OUR infrastructure, so shipping `.env` here would put every
+   * user's API keys in our object storage — a bigger exposure than the push it is modelled on, since
+   * that at least goes to a repo the user owns.
+   *
+   * The cost is honest and matches a repo restore: recovering onto a fresh browser does not bring the
+   * keys back, and the user re-enters them. Recovering onto a browser that still has them keeps them,
+   * because the restore protects exactly these paths (`protectForRepoRestore`) rather than treating
+   * this map as the whole truth.
+   */
+  const safe: SerializedFileMap = {};
+
+  for (const [path, entry] of Object.entries(files)) {
+    if (!isSecretPath(path)) {
+      safe[path] = entry;
+    }
+  }
+
   await api<{ ok: true; seq: number }>(`/api/projects/${projectId}/working`, {
     method: 'PUT',
-    body: JSON.stringify({ seq, files }),
+    body: JSON.stringify({ seq, files: safe }),
   });
 }
 

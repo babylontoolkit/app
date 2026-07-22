@@ -12,12 +12,13 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bytesToBase64 } from '~/lib/binary/binary-files';
 import { FsObjectStore } from '~/lib/.server/storage/store';
 import { setObjectStore } from '~/lib/.server/storage';
 import {
-  MAX_WORKING_COPY_BYTES,
+  DEFAULT_WORKING_COPY_MAX_MB,
+  maxWorkingCopyBytes,
   WorkingCopyTooLargeError,
   deleteWorkingCopy,
   getWorkingCopy,
@@ -128,7 +129,7 @@ describe('bounds and cleanup', () => {
   /* SPEC §5: client-supplied bytes, written on EVERY checkpoint — uncapped is unbounded spend. */
   it('refuses a copy past the cap', async () => {
     const huge: SerializedFileMap = {
-      'big.bin': { type: 'file', content: 'x'.repeat(MAX_WORKING_COPY_BYTES + 1), isBinary: false },
+      'big.bin': { type: 'file', content: 'x'.repeat(maxWorkingCopyBytes() + 1), isBinary: false },
     };
     await expect(putWorkingCopy('prj_1', { projectId: 'prj_1', seq: 1, updatedAt: 'n', files: huge })).rejects.toThrow(
       WorkingCopyTooLargeError,
@@ -142,5 +143,70 @@ describe('bounds and cleanup', () => {
 
     expect(await getWorkingCopy('prj_1')).toBeNull();
     expect(await objects.list('working/')).toHaveLength(0);
+  });
+});
+
+describe('secrets never reach the store (defence in depth)', () => {
+  /*
+   * 🔴 FOUND BY DRIVING THE REAL ROUTE, not by a test. `saveWorkingCopy` strips the `.env` family
+   * client-side, and that was the entire defence — so a direct PUT stored the user's API keys in our
+   * object storage. Every other secret boundary here is enforced at both ends (the shell allow-list is
+   * client-side AND server-side, §4.2.5); this one was not.
+   */
+  it('drops the .env family even when the caller sends it', async () => {
+    await putWorkingCopy('prj_1', {
+      projectId: 'prj_1',
+      seq: 1,
+      updatedAt: 'now',
+      files: {
+        'src/main.ts': { type: 'file', content: 'ok', isBinary: false },
+        '.env': { type: 'file', content: 'KIE_API_KEY=supersecret', isBinary: false },
+        '.env.production': { type: 'file', content: 'PROD=secret', isBinary: false },
+        '.npmrc': { type: 'file', content: '//registry:_authToken=nope', isBinary: false },
+      },
+    });
+
+    const back = await getWorkingCopy('prj_1');
+    expect(Object.keys(back!.files)).toEqual(['src/main.ts']);
+    expect(JSON.stringify(back)).not.toContain('supersecret');
+    expect(JSON.stringify(back)).not.toContain('_authToken');
+  });
+});
+
+describe('the cap is configurable (WORKING_COPY_MAX_MB)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('defaults to 256MB', () => {
+    vi.stubEnv('WORKING_COPY_MAX_MB', undefined as unknown as string);
+    expect(maxWorkingCopyBytes()).toBe(DEFAULT_WORKING_COPY_MAX_MB * 1024 * 1024);
+  });
+
+  it('honours an operator override', () => {
+    vi.stubEnv('WORKING_COPY_MAX_MB', '512');
+    expect(maxWorkingCopyBytes()).toBe(512 * 1024 * 1024);
+  });
+
+  /*
+   * A nonsensical override must neither disable the cap (§5 requires one) nor make every checkpoint
+   * fail. Ignore it and keep the default — the same rule the Unity licence price ladder uses.
+   */
+  it.each(['0', '-1', 'lots', ''])('ignores a nonsense override (%s)', (raw) => {
+    vi.stubEnv('WORKING_COPY_MAX_MB', raw);
+    expect(maxWorkingCopyBytes()).toBe(DEFAULT_WORKING_COPY_MAX_MB * 1024 * 1024);
+  });
+
+  /* The operator needs the SIZE and the LIMIT to act — "too large" alone is unactionable. */
+  it('names the size, the limit, and the env var when it refuses', async () => {
+    vi.stubEnv('WORKING_COPY_MAX_MB', '1');
+
+    const huge: SerializedFileMap = {
+      'big.bin': { type: 'file', content: 'x'.repeat(2 * 1024 * 1024), isBinary: false },
+    };
+
+    await expect(putWorkingCopy('prj_1', { projectId: 'prj_1', seq: 1, updatedAt: 'n', files: huge })).rejects.toThrow(
+      /2\.0MB.*1MB.*WORKING_COPY_MAX_MB/s,
+    );
   });
 });
