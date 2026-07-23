@@ -11,6 +11,22 @@
  *
  *   **The model** does everything that must be GOOD: the landing page designed for this game, and the
  *   user's actual request. It gets a mounted, registered, running project to start from.
+ *
+ * 🔴 **CREATE IS UNCONDITIONAL (owner rule, 2026-07-22). The project gets created FIRST AND FOREMOST,
+ * and nothing decorative may take it down with it.**
+ *
+ * Exactly TWO things in this function are allowed to fail a creation, because without either there is
+ * no project at all: fetching the starter, and mounting it (verified on disk by `mountTemplate`'s
+ * sentinel). Everything else — hygiene, the §4.4b copy-rename-register — is a HEAD START, not the
+ * project. Each is a pure transform over an in-memory file list; if one throws we mount the template
+ * without it and say so in the brief, because a mounted project with an unseeded GameMode is one
+ * prompt away from correct, while a refused creation is not recoverable at all.
+ *
+ * The rule that makes the degraded path safe is that **the brief must describe what is actually on
+ * disk**. A scaffold that failed while the brief still says "your GameMode is already copied and
+ * registered" is worse than the failure: the model builds against a class that does not exist and the
+ * project dead-ends at a blank `/play` — the exact silent failure §4.4b exists to prevent. So the
+ * degraded brief tells the model to author and register the mode itself.
  */
 import registryData from '~/config/game-registry.json';
 import type { GameRegistryEntry } from '~/types/game-registry';
@@ -20,6 +36,13 @@ import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
 import { mountTemplate } from './mount';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
+import {
+  CreationError,
+  describeMountFailure,
+  describeStarterFetchFailure,
+  describeStarterPayloadFailure,
+  describeStarterTransportFailure,
+} from './creation-errors';
 import {
   CLASS_LIBRARY_DIR,
   GLOBALS_PATH,
@@ -53,14 +76,45 @@ export interface CreatedProject {
   mustBeVisible: string[];
 }
 
+/**
+ * Get the starter's bytes into the browser — the first of the two steps that may fail a creation.
+ *
+ * ⚠️ **Despite the route's inherited name, this does NOT call GitHub.** Since §4.4 pin-and-cache the
+ * starter is a SHA-addressed snapshot in object storage that an admin promotes; this is a request to
+ * our OWN server, and only an un-pinned repo with no last-known-good snapshot falls through to GitHub.
+ * So its failures are overwhelmingly session/server failures, and each is reported as itself rather
+ * than as a generic "template" problem (`creation-errors.ts`).
+ */
 async function fetchStarterFiles(): Promise<TemplateFile[]> {
-  const response = await fetch(`/api/github-template?repo=${encodeURIComponent(STARTER_REPO)}`);
+  let response: Response;
 
-  if (!response.ok) {
-    throw new Error(`Could not fetch the starter template (${response.status}).`);
+  try {
+    response = await fetch(`/api/github-template?repo=${encodeURIComponent(STARTER_REPO)}`);
+  } catch (error) {
+    // The request never completed — offline, server restarted, proxy cut it. Not a template problem.
+    throw new CreationError(describeStarterTransportFailure(error));
   }
 
-  return (await response.json()) as TemplateFile[];
+  if (!response.ok) {
+    /*
+     * Read the body for the server's own reason before classifying. It may not be JSON at all (an HTML
+     * error page from a proxy, or nothing mid-deploy), which is not itself an error worth surfacing —
+     * the STATUS is still specific enough to act on.
+     */
+    const body = await response.json().catch(() => undefined);
+
+    throw new CreationError(
+      describeStarterFetchFailure({ status: response.status, statusText: response.statusText, body }),
+    );
+  }
+
+  const files = await response.json().catch(() => undefined);
+
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new CreationError(describeStarterPayloadFailure(files));
+  }
+
+  return files as TemplateFile[];
 }
 
 /**
@@ -93,38 +147,78 @@ export async function createProjectFromRegistry(options: {
 }): Promise<CreatedProject> {
   const { entry, title, prompt } = options;
 
-  const files = applyProjectHygiene(await fetchStarterFiles(), { projectTitle: title });
+  /*
+   * The starter itself — the ONE fetch a creation cannot survive without. A throw here is correct and
+   * fatal: there is nothing to mount.
+   */
+  const starter = await fetchStarterFiles();
+
+  /*
+   * Hygiene is a polish pass over an in-memory list (junk removal, dependency pinning, package name).
+   * Losing it costs a tidier `package.json`; it does not cost the project, so it never fails one.
+   */
+  let files: TemplateFile[];
+
+  try {
+    files = applyProjectHygiene(starter, { projectTitle: title });
+  } catch (error) {
+    logger.error('Project hygiene failed — mounting the starter unmodified', error);
+    files = starter;
+  }
 
   const className = deriveClassName(title, RESERVED_CLASS_NAMES);
 
   // ---- §4.4b: copy the demo out of the read-only library, rename it, register it ----
 
   const sourcePath = `${CLASS_LIBRARY_DIR}/${entry.source_class}`;
-  const source = files.find((file) => file.path === sourcePath);
 
-  if (!source) {
-    throw new Error(`Registry entry "${entry.id}" names ${sourcePath}, which is not in the starter template.`);
+  /*
+   * Degradable by design (see the header). `scaffolded` is null when the registry entry and the
+   * template disagree, or globals.ts has moved — a real defect worth fixing, but never a reason to
+   * refuse someone a project. The brief reads this and changes what it asks the model to do.
+   */
+  let scaffolded: { path: string; content: string } | null = null;
+
+  try {
+    const source = files.find((file) => file.path === sourcePath);
+
+    if (!source) {
+      throw new Error(`Registry entry "${entry.id}" names ${sourcePath}, which is not in the starter template.`);
+    }
+
+    const globals = files.find((file) => file.path === GLOBALS_PATH);
+
+    if (!globals) {
+      throw new Error(`The starter template is missing ${GLOBALS_PATH} — the GameMode could never register.`);
+    }
+
+    const gameMode = scaffoldGameMode({
+      sourceClassFile: entry.source_class,
+      sourceContent: source.content,
+      className,
+    });
+
+    /*
+     * Registration is edited LAST: `registerGameModeInGlobals` mutates a file that is already in the
+     * list, so doing it before the copy could leave globals.ts importing a module that was never
+     * written if the copy then threw.
+     */
+    globals.content = registerGameModeInGlobals(globals.content, className);
+    scaffolded = gameMode;
+  } catch (error) {
+    logger.error(
+      `GameMode scaffolding failed for "${entry.id}" — creating the project anyway; the model will author it`,
+      error,
+    );
   }
-
-  const gameMode = scaffoldGameMode({
-    sourceClassFile: entry.source_class,
-    sourceContent: source.content,
-    className,
-  });
-
-  const globals = files.find((file) => file.path === GLOBALS_PATH);
-
-  if (!globals) {
-    throw new Error(`The starter template is missing ${GLOBALS_PATH} — the GameMode could never register.`);
-  }
-
-  globals.content = registerGameModeInGlobals(globals.content, className);
 
   /*
    * The library file itself is NEVER touched — it stays pristine as a clean source for every future
    * copy, and as read-only reference material for the model (§4.4b step 5).
    */
-  const projectFiles = [...files, { name: `${className}.ts`, path: gameMode.path, content: gameMode.content }];
+  const projectFiles = scaffolded
+    ? [...files, { name: `${className}.ts`, path: scaffolded.path, content: scaffolded.content }]
+    : files;
 
   /*
    * ---- the artifact carries NO file bodies (SPEC §4.2.8) ----
@@ -142,7 +236,16 @@ export async function createProjectFromRegistry(options: {
    * single representation the model ever sees. Atomic and awaited here, so the whole project is on disk
    * — verified — before `npm install` runs, with no per-file boot race (see `mount-tree.ts`).
    */
-  await mountTemplate(projectFiles);
+  try {
+    await mountTemplate(projectFiles);
+  } catch (error) {
+    /*
+     * Fatal and LOUD, but attributed correctly: the bytes arrived and the WRITE failed, which is a
+     * different problem with a different fix than a template that never downloaded. `mountTemplate`'s
+     * own messages are specific (which file, or that the sentinel was missing) and are preserved.
+     */
+    throw new CreationError(describeMountFailure(error));
+  }
 
   const binaryCount = projectFiles.filter((file) => file.isBinary).length;
 
@@ -160,7 +263,14 @@ export async function createProjectFromRegistry(options: {
 
   return {
     assistantMessage,
-    userMessage: buildCreationBrief({ entry, title, className, prompt, images: listAvailableImages(projectFiles) }),
+    userMessage: buildCreationBrief({
+      entry,
+      title,
+      className,
+      prompt,
+      images: listAvailableImages(projectFiles),
+      scaffolded: scaffolded !== null,
+    }),
     className,
 
     /*
@@ -180,8 +290,14 @@ export async function createProjectFromRegistry(options: {
      * Sentinels rather than a count: a count is a guess about a number that moves when the template
      * does, while these are exactly what §4.4b just produced or edited — and the one whose absence the
      * owner reported ("the ai does not see KartRacerMode").
+     *
+     * Only ever files we KNOW we wrote: waiting on the scaffolded mode when scaffolding failed would
+     * burn the full 15s timeout on every degraded creation and then log a false alarm about a partial
+     * context, so a degraded creation waits on `globals.ts` alone.
      */
-    mustBeVisible: [`${WORK_DIR}/${gameMode.path}`, `${WORK_DIR}/${GLOBALS_PATH}`, `${WORK_DIR}/${sourcePath}`],
+    mustBeVisible: scaffolded
+      ? [`${WORK_DIR}/${scaffolded.path}`, `${WORK_DIR}/${GLOBALS_PATH}`, `${WORK_DIR}/${sourcePath}`]
+      : [`${WORK_DIR}/${GLOBALS_PATH}`],
   };
 }
 
@@ -199,12 +315,24 @@ function buildCreationBrief(options: {
   className: string;
   prompt?: string;
   images: string[];
+
+  /** Did §4.4b's copy-rename-register actually run? When false the model must author the mode. */
+  scaffolded: boolean;
 }): string {
-  const { entry, title, className, prompt, images } = options;
+  const { entry, title, className, prompt, images, scaffolded } = options;
 
   const play = entry.scene_url
     ? `navigate('/play', { gameMode: '${className}', sceneUrl: '${entry.scene_url}' })`
     : `navigate('/play', { gameMode: '${className}' })`;
+
+  /*
+   * The brief must describe the DISK, not the intent. Telling the model its GameMode is already
+   * copied and registered when the scaffold failed produces a project that compiles and dead-ends at
+   * a blank `/play` — see the module header.
+   */
+  const gameModeFacts = scaffolded
+    ? `- Its starting GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. Launch it first — and freely add more GameModes in \`src/scripts/\` later; any registered GameMode class may be launched through the play contract.`
+    : `- ⚠️ Its starting GameMode has NOT been scaffolded — you must create it yourself before anything can be played. Copy \`${CLASS_LIBRARY_DIR}/${entry.source_class}\` into \`src/scripts/${className}.ts\` (never edit the library original), rename the class AND its \`RegisterClass\` string to \`${className}\`, re-base its relative imports for the new directory (\`'../globals'\` → \`'../babylon/globals'\`), and add \`await import("../scripts/${className}");\` to the registration block in \`${GLOBALS_PATH}\` — without that last step the class never registers and \`/play\` dead-ends. Then freely add more GameModes in \`src/scripts/\` later.`;
 
   /*
    * The opening sentence is a CONTRACT, not prose: the agent proxy matches `CREATION_BRIEF_MARKER` to
@@ -216,7 +344,7 @@ function buildCreationBrief(options: {
 **This project**
 - Title: ${title}
 - Seeded from: ${entry.title} (${entry.genre})
-- Its starting GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. Launch it first — and freely add more GameModes in \`src/scripts/\` later; any registered GameMode class may be launched through the play contract.
+${gameModeFacts}
 - Launch it with: \`${play}\`
 ${entry.scene_url ? '' : '- This genre has no preload scene; the GameMode builds its own content.\n'}
 **Images on disk** (import from these or none — never invent an asset path):

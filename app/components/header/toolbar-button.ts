@@ -23,26 +23,54 @@
  * other control here is an action and looks identical.
  */
 
+/**
+ * The row's shared SHAPE — geometry, border, transition, disabled state. No colour, no hover.
+ *
+ * Split out so a filled control can be built from the same shape WITHOUT inheriting the quiet hover
+ * it has to override. That is not a style preference, it is a correctness requirement: when two
+ * classes set the same property, the winner is decided by **rule order in the generated stylesheet**,
+ * not by the order of the class string. Measured here — UnoCSS emits
+ * `.hover\:bg-bolt-elements-button-primary-backgroundHover:hover` BEFORE `.hover\:bg-white\/10:hover`,
+ * so composing `TOOLBAR_ICON_BUTTON + <accent hover>` lets the quiet hover win and the filled ⋯ button
+ * loses its fill the moment you point at it. Composition is fine for properties the base never sets;
+ * for the ones it does, the variant must not include the base at all.
+ */
+const TOOLBAR_SHAPE =
+  'flex items-center justify-center h-7 rounded-md border border-white/15 ' +
+  'transition-colors outline-none disabled:opacity-50 disabled:cursor-not-allowed';
+
 /** A labelled button: icon + text. The default for anything in the toolbar. */
 export const TOOLBAR_BUTTON =
-  'flex items-center justify-center gap-1.5 h-7 px-2.5 text-xs font-medium rounded-md ' +
-  'border border-white/15 text-bolt-elements-textPrimary hover:bg-white/10 ' +
-  'transition-colors outline-none disabled:opacity-50 disabled:cursor-not-allowed';
-
-/** A square icon-only button. Same height, same border, same hover — only the width differs. */
-export const TOOLBAR_ICON_BUTTON =
-  'flex items-center justify-center h-7 w-7 rounded-md ' +
-  'border border-white/15 text-bolt-elements-textPrimary hover:bg-white/10 ' +
-  'transition-colors outline-none disabled:opacity-50 disabled:cursor-not-allowed';
+  `${TOOLBAR_SHAPE} gap-1.5 px-2.5 text-xs font-medium ` + 'text-bolt-elements-textPrimary hover:bg-white/10';
 
 /**
- * The FILLED look, reserved for the two controls that should stand out (owner decision, SPEC §4.1a):
- * the git chip (when it has something to say) and the ⋯ main menu. Everything else in the row is
- * bordered-only, even when "active" — the workbench toggle deliberately does NOT use this, so fill is a
- * reliable signal that means "the two controls worth noticing" rather than "some button happens to be
- * on". A fill, never a different border or shape: a filled control still reads as the same button.
+ * An icon-only button. Same height, same border, same hover as the labelled ones — only width differs.
+ *
+ * `w-9` is a FIXED width, wider than the icon it holds, and both halves of that matter. Fixed, because
+ * a shrink-to-fit control changes size with its glyph and the row stops looking like a set. Wider,
+ * because a 28×28 square next to `px-2.5` labelled buttons reads as a different, smaller kind of
+ * control rather than the same button without a word in it.
  */
-export const TOOLBAR_BUTTON_ACTIVE = 'bg-white/15 text-bolt-elements-textPrimary';
+export const TOOLBAR_ICON_BUTTON = `${TOOLBAR_SHAPE} shrink-0 w-9 text-bolt-elements-textPrimary hover:bg-white/10`;
+
+/**
+ * The FILLED icon button, reserved for the ⋯ main menu (owner decision, SPEC §4.1a).
+ *
+ * Fill is reserved for exactly two controls — the git chip when it has something to say, and this —
+ * so it reliably means "the control worth noticing" rather than "some button happens to be on". The
+ * workbench toggle deliberately does NOT use it. Same shape, same size, same border as every other
+ * control: a filled button still reads as the same button.
+ *
+ * The colour is the **accent**, which is what the Share button wore before the toolbar rebuild
+ * (`bg-accent-500` + `hover:bg-…button-primary-backgroundHover`, owner request 2026-07-22) — the
+ * previous `bg-white/15` read as a grey smudge rather than a deliberate highlight.
+ *
+ * ⚠️ Built from `TOOLBAR_SHAPE`, NOT composed onto `TOOLBAR_ICON_BUTTON` — see the note there. The
+ * base's `hover:bg-white/10` is emitted LATER in the stylesheet and would beat this hover, stripping
+ * the fill on hover. Do not "simplify" this into `classNames(TOOLBAR_ICON_BUTTON, …)`.
+ */
+export const TOOLBAR_ICON_BUTTON_FILLED =
+  `${TOOLBAR_SHAPE} shrink-0 w-9 ` + 'bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover';
 
 /** Shared menu-item style, so the ⋯ menu and the git chip's menu cannot drift apart either. */
 export const TOOLBAR_MENU_ITEM =

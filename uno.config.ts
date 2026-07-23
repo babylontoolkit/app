@@ -108,6 +108,35 @@ const COLOR_PRIMITIVES = {
 };
 
 export default defineConfig({
+  /**
+   * 🔴 **Scan plain `.ts` too — UnoCSS does NOT by default, and the failure is silent (2026-07-22).**
+   *
+   * The default `pipeline.include` is `/\.(vue|svelte|[jt]sx|mdx?|astro|elm|php|phtml|html)($|\?)/` —
+   * note `[jt]sx`, which covers `.tsx` but NOT `.ts`. So a class string that lives in a plain `.ts`
+   * module is never extracted, and the utilities it names are simply never generated. Nothing throws,
+   * no build step fails, and the element renders — just without those rules.
+   *
+   * It bit the header toolbar. SPEC §4.1a's "ONE shared button style, imported, never re-typed" put
+   * the row's classes in `app/components/header/toolbar-button.ts`, which was exactly the right call
+   * and silently deleted half of them. What made it so hard to see is that the file's classes did not
+   * ALL disappear: `h-7`, `px-2.5` and `border-white/15` survived because other `.tsx` files happen to
+   * use them, while `w-7`, `hover:bg-white/10`, `bg-white/15` and `z-[1000]` — unique to this file —
+   * vanished. So the buttons kept their height, border and hover-less look and lost only their WIDTH
+   * (the ⋯ and workbench toggle collapsed to their icon), and every toolbar menu lost its z-index and
+   * fell behind the workbench panel (`.z-workbench` is 3; the menus dropped to `auto`).
+   *
+   * A partial style is far worse than no style: it reads as a design regression, so you go looking in
+   * the component that "changed", and the component is correct.
+   *
+   * Fixed here rather than by renaming the file to `.tsx`, because the extension is not the point —
+   * any `.ts` module holding class names has this problem, and the next one will not announce itself
+   * either. Pinned by `uno-config.spec.ts`.
+   */
+  content: {
+    pipeline: {
+      include: [/\.(vue|svelte|[jt]sx|mdx?|astro|elm|php|phtml|html)($|\?)/, /\.ts($|\?)/],
+    },
+  },
   safelist: [...Object.keys(customIconCollection[collectionName] || {}).map((x) => `i-bolt:${x}`)],
   shortcuts: {
     'bolt-ease-cubic-bezier': 'ease-[cubic-bezier(0.4,0,0.2,1)]',

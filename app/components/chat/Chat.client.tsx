@@ -27,6 +27,7 @@ import { contextPanelOpen, resetContextStats, updateContextStats } from '~/lib/s
 import { setPendingOpenProject } from '~/lib/persistence/pending-remix';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
+import { asCreationFailure } from '~/lib/registry/creation-errors';
 import { waitForMountVisible } from '~/lib/registry/mount';
 import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registry/match';
 import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
@@ -849,11 +850,24 @@ export const ChatImpl = memo(
           provider: provider.name,
         });
 
+        /*
+         * A failed CREATION turn is a failed post-create, never a failed creation (§4.4, owner rule
+         * 2026-07-22). By the time any generation can error, phase 1 has already mounted and verified
+         * the starter and registered the project — so the project exists, whatever the model did.
+         *
+         * Say so. The raw provider message ("Server Error", a 402, a dead render) is accurate about
+         * the generation and completely wrong about the user's project, and reading it as "my game was
+         * never created" is the reasonable interpretation when nothing says otherwise.
+         */
+        const description = creationTurnStore.get()
+          ? `${errorInfo.message}\n\nYour project was still created from the starter template and is ready in the editor — only the build step failed. Ask me to build it and I will pick up from here.`
+          : errorInfo.message;
+
         // Create API error alert
         setLlmErrorAlert({
           type: 'error',
           title,
-          description: errorInfo.message,
+          description,
           provider: provider.name,
           errorType,
         });
@@ -948,11 +962,31 @@ export const ChatImpl = memo(
     };
 
     /**
-     * Create the project and start the first generation (SPEC §4.4 / §4.4b / §4.4c).
+     * Create the project, then start the first generation (SPEC §4.4 / §4.4b / §4.4c).
      *
-     * Every New Project path lands here — typed prompt (A), card (B), wizard (C). The deterministic
-     * work (mount, hygiene, copy-rename-register the GameMode) happens in `createProjectFromRegistry`;
-     * what reaches the model is a mounted, registered, running project plus a brief.
+     * Every New Project path lands here — typed prompt (A), card (B), wizard (C).
+     *
+     * 🔴 **TWO PHASES, AND THE SECOND MAY NEVER TAKE DOWN THE FIRST (owner rule, 2026-07-22).**
+     *
+     *   **Phase 1 — CREATE. Mechanical, AI-free, and it either produces a project or it produces an
+     *   error.** Clone the AppTemplate, mount it, verify it on disk, register it with the platform.
+     *   No model is contacted, so nothing a model does can influence whether the user ends up with a
+     *   project. When this phase returns, the project EXISTS and that fact is settled.
+     *
+     *   **Phase 2 — POST-CREATE. The AI carries out the brief:** the landing page and chrome, any
+     *   generated art, and the user's actual request. Every failure here is a bad STATE of a project
+     *   that exists — a dead image render, a generation that errors mid-stream, a model that writes
+     *   nonsense — and every one of them is one prompt away from fixed. So phase 2 is wrapped in its
+     *   own boundary and **still reports success**: the project is real, it is mounted, it is
+     *   installing and running, and the user can keep working on it.
+     *
+     * This is why the "🎮 Your game is ready" toast is NOT fired here. It belongs to FINAL COMPLETE —
+     * `onFinish`, once the brief has actually been carried out (see `creationCompleteRef`). Phase 1 is
+     * a guarantee, not a milestone worth announcing.
+     *
+     * The failure the split exists to kill: one `catch` around both phases told a user whose project
+     * had mounted perfectly that we "could not create the project from the starter template", because
+     * an image render 500'd. Wrong message, and it makes a recoverable situation read as a total loss.
      *
      * When there is no prompt (a card click), the chat is empty: the model builds the landing page and
      * stops. `visiblePrompt` is what the user actually typed — the wizard's compiled text is hidden
@@ -967,13 +1001,51 @@ export const ChatImpl = memo(
       const { entry, prompt, visiblePrompt, matched } = options;
       const title = prompt ? deriveProjectTitle(prompt, entry.title) : entry.title;
 
-      try {
-        const { assistantMessage, userMessage, className, mustBeVisible } = await createProjectFromRegistry({
-          entry,
-          title,
-          prompt,
-        });
+      // ================= PHASE 1 — CREATE THE PROJECT. Nothing below may be skipped or deferred. ====
 
+      let created: Awaited<ReturnType<typeof createProjectFromRegistry>>;
+
+      try {
+        created = await createProjectFromRegistry({ entry, title, prompt });
+      } catch (error) {
+        /*
+         * The only genuinely fatal outcome: the starter never arrived, or it did not land on disk.
+         * There is no project, so there is nothing to salvage and nothing to prompt against.
+         *
+         * Say WHICH of those it was and what to do about it (`creation-errors.ts`). The message this
+         * replaced — "Could not fetch the starter template (401)" — named the template for what is
+         * almost always an expired session, sending the user to retry a button that cannot work until
+         * they sign in.
+         *
+         * Surfaced TWICE on purpose: a toast to notice, and the error panel to still be readable
+         * afterwards. A toast that has already faded is indistinguishable from a New Project button
+         * that silently did nothing, which is exactly how this reads when it happens.
+         */
+        const failure = asCreationFailure(error);
+
+        logger.error(`Project creation failed — ${failure.message} (${failure.detail})`, error);
+        toast.error(failure.message);
+        setLlmErrorAlert({
+          type: 'error',
+          title: 'No project was created',
+          description: failure.isRetryable
+            ? `${failure.message}\n\nDetails: ${failure.detail}`
+            : `${failure.message}\n\nDetails: ${failure.detail}\n\nTrying again will not help until this is resolved.`,
+          errorType: failure.isRetryable ? 'network' : 'authentication',
+        });
+        setFakeLoading(false);
+
+        return false;
+      }
+
+      const { assistantMessage, userMessage, className, mustBeVisible } = created;
+
+      /*
+       * From here on the project EXISTS in the WebContainer. Everything that follows is best-effort by
+       * construction: the catch at the bottom returns `true`, because "did the user get a project?" is
+       * already answered yes and no later failure may change that answer.
+       */
+      try {
         setProjectSeed({ entry, className, title, prompt, matched });
 
         /*
@@ -1099,11 +1171,19 @@ export const ChatImpl = memo(
 
         return true;
       } catch (error) {
-        logger.error('Project creation failed', error);
-        toast.error(error instanceof Error ? error.message : 'Could not create the project from the starter template.');
+        /*
+         * 🔴 POST-CREATE FAILED, THE PROJECT DID NOT. Returns `true` deliberately — the starter is
+         * mounted and verified, so the honest answer to "was a project created?" is yes, and a `false`
+         * here would send the caller down a path that tells the user otherwise.
+         *
+         * Recoverable by prompting, which is exactly what we say. The spinner is cleared so the chat
+         * box is usable immediately; nothing is unwound.
+         */
+        logger.error('Post-create failed — the project exists and is usable', error);
+        toast.warn('Your project was created, but the design pass did not run. Ask me to build it and I will retry.');
         setFakeLoading(false);
 
-        return false;
+        return true;
       }
     };
 

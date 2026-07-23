@@ -42,7 +42,7 @@ import { projectId as projectIdStore } from '~/lib/persistence';
 import { useStartNewChat } from '~/components/chat/NewChatButton.client';
 import { classNames } from '~/utils/classNames';
 import { brand } from '~/config/brand';
-import { TOOLBAR_BUTTON_ACTIVE, TOOLBAR_ICON_BUTTON, TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
+import { TOOLBAR_ICON_BUTTON_FILLED, TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
 
 /** One definition, so the group boundaries stay identical as groups are added. */
 const SEPARATOR = 'h-px bg-bolt-elements-borderColor my-1';
@@ -77,17 +77,12 @@ export function OverflowMenu() {
     <DropdownMenu.Root modal={false}>
       <DropdownMenu.Trigger asChild>
         {/*
-         * Filled to match the workbench toggle (`TOOLBAR_BUTTON_ACTIVE`), by owner request — the main
-         * menu reads as a persistent affordance rather than a bare icon. Same border/background as the
-         * `</>` button in its active state; the shared `TOOLBAR_ICON_BUTTON` already made the borders
-         * identical, this adds the fill.
+         * Filled in the ACCENT, by owner request — the main menu reads as a persistent affordance
+         * rather than a bare icon, and fill is reserved for it and the git chip alone (§4.1a). One
+         * complete constant, never `classNames(TOOLBAR_ICON_BUTTON, …)`: the base style's quiet hover
+         * is emitted later in the stylesheet and would strip the fill on hover.
          */}
-        <button
-          type="button"
-          title="Menu"
-          aria-label="Menu"
-          className={classNames(TOOLBAR_ICON_BUTTON, TOOLBAR_BUTTON_ACTIVE)}
-        >
+        <button type="button" title="Menu" aria-label="Menu" className={TOOLBAR_ICON_BUTTON_FILLED}>
           <div className="i-ph:dots-three-bold text-sm" />
         </button>
       </DropdownMenu.Trigger>

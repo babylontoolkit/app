@@ -197,10 +197,18 @@ export default function FeaturesTab() {
       {
         id: 'contextOptimization',
         title: 'Context Optimization',
-        description: 'Optimize context for better responses',
+
+        /*
+         * Copy deliberately says "always on" rather than upstream's "Optimize context for better
+         * responses" (§4.2.8). The platform applies context optimization on EVERY generation — the
+         * agent proxy never reads this setting, only the fail-closed upstream `/api/chat` path does —
+         * so a user who switched it off and was told nothing would reasonably believe they had changed
+         * how their generations are built, and be wrong. Shown for balance; described honestly.
+         */
+        description: 'Always on — every generation is built with an optimized context',
         icon: 'i-ph:brain',
         enabled: contextOptimizationEnabled,
-        tooltip: 'Enabled by default for improved AI responses',
+        tooltip: 'This platform always optimizes the context it sends to the model',
       },
       {
         id: 'eventLogs',
@@ -217,16 +225,24 @@ export default function FeaturesTab() {
   return (
     <div className="flex flex-col gap-8">
       {/*
-       * Only Event Logging is shown. Main Branch Updates, Auto Select Template, Context Optimization,
-       * and the Prompt Library (removed below) are inherited bolt.diy knobs that ONLY wire to the
-       * fail-closed upstream LLM path (`/api/chat` + `app/lib/.server/llm/*`) — they are inert on our
-       * `/api/agent` proxy, and misleading to a web-facing user (they imply this app tracks bolt.diy's
-       * main branch or can swap our system prompt, neither of which is true). Hidden, not deleted, to
-       * stay upstream-mergeable; their safe defaults are still applied in the effect above.
+       * Main Branch Updates, Auto Select Template and the Prompt Library (removed below) are inherited
+       * bolt.diy knobs that ONLY wire to the fail-closed upstream LLM path (`/api/chat` +
+       * `app/lib/.server/llm/*`). They are inert on our `/api/agent` proxy AND misleading — they imply
+       * this app tracks bolt.diy's main branch or that a user can swap our system prompt, neither of
+       * which is true. Hidden, not deleted, to stay upstream-mergeable; their safe defaults are still
+       * applied in the effect above.
+       *
+       * Context Optimization is shown (owner decision, 2026-07-22): a section holding a single row
+       * looks broken rather than minimal, and two rows read as a deliberate list. It is equally inert,
+       * so the ONLY thing that makes showing it acceptable is that its copy no longer claims to govern
+       * anything — see the entry above. An inert control with honest copy is a statement of fact; an
+       * inert control with upstream's copy is a lie the user can click.
        */}
       <FeatureSection
         title="Core Features"
-        features={features.stable.filter((feature) => feature.id === 'eventLogs')}
+        features={features.stable.filter(
+          (feature) => feature.id === 'eventLogs' || feature.id === 'contextOptimization',
+        )}
         icon="i-ph:check-circle"
         description="Essential features that are enabled by default for optimal performance"
         onToggleFeature={handleToggleFeature}

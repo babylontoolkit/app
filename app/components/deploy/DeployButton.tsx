@@ -253,20 +253,29 @@ export const DeployButton = ({
                 </span>
               </DropdownMenu.Item>
 
-              <DropdownMenu.Item
-                disabled
-                className="flex items-center w-full rounded-md px-4 py-2 text-sm text-bolt-elements-textTertiary gap-2 opacity-60 cursor-not-allowed"
-              >
-                <img
-                  className="w-5 h-5"
-                  height="24"
-                  width="24"
-                  crossOrigin="anonymous"
-                  src="https://cdn.simpleicons.org/cloudflare"
-                  alt="cloudflare"
-                />
-                <span className="mx-auto">Deploy to Cloudflare (Coming Soon)</span>
-              </DropdownMenu.Item>
+              {/*
+               * The inherited "Deploy to Cloudflare (Coming Soon)" row is HIDDEN (owner, 2026-07-22).
+               * It was permanently `disabled` with no implementation behind it, so it advertised a
+               * capability that has never existed and cannot be reached — a dead row in a menu the
+               * user opens to get something done. Hide-don't-delete (§2.1a): the markup stays for
+               * upstream mergeability, so restoring it is deleting this wrapper, not rewriting it.
+               */}
+              {false && (
+                <DropdownMenu.Item
+                  disabled
+                  className="flex items-center w-full rounded-md px-4 py-2 text-sm text-bolt-elements-textTertiary gap-2 opacity-60 cursor-not-allowed"
+                >
+                  <img
+                    className="w-5 h-5"
+                    height="24"
+                    width="24"
+                    crossOrigin="anonymous"
+                    src="https://cdn.simpleicons.org/cloudflare"
+                    alt="cloudflare"
+                  />
+                  <span className="mx-auto">Deploy to Cloudflare (Coming Soon)</span>
+                </DropdownMenu.Item>
+              )}
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
