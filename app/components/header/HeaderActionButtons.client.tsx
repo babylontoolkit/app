@@ -48,13 +48,12 @@ import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { projectId as projectIdStore } from '~/lib/persistence';
-import { classNames } from '~/utils/classNames';
 import { DeployButton } from '~/components/deploy/DeployButton';
 import { ShareButton } from '~/components/share/ShareButton';
 import { MediaButton } from '~/components/media/MediaButton';
 import { GitStatusChip } from './GitStatusChip.client';
 import { OverflowMenu } from './OverflowMenu.client';
-import { TOOLBAR_BUTTON_ACTIVE, TOOLBAR_ICON_BUTTON } from './toolbar-button';
+import { TOOLBAR_ICON_BUTTON } from './toolbar-button';
 
 interface HeaderActionButtonsProps {
   chatStarted: boolean;
@@ -74,7 +73,12 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
   return (
     <div className="flex items-center gap-1.5">
       {/*
-       * Workbench toggle — tertiary, icon-only, with a pressed state.
+       * Workbench toggle — a split-panel icon (code | preview), which is what the workbench IS.
+       *
+       * No FILL, by owner request: the fill is reserved for the two controls that should stand out — the
+       * git chip and the ⋯ main menu. This is a plain bordered button like Media/Share/Deploy even when
+       * the workbench is open; `aria-pressed` still carries the on/off state for assistive tech, it just
+       * is not shouted visually.
        *
        * Gated on a PROJECT, not the preview: the chat-only view (workbench closed by its ✕) previously
        * had NO way back — only a reload or a generation that wrote files ever set `showWorkbench` again.
@@ -85,9 +89,9 @@ export function HeaderActionButtons({ chatStarted: _chatStarted }: HeaderActionB
         title={showWorkbench ? 'Hide the workbench' : 'Open the workbench (code, files, preview)'}
         aria-label="Toggle the workbench"
         aria-pressed={showWorkbench}
-        className={classNames(TOOLBAR_ICON_BUTTON, showWorkbench && TOOLBAR_BUTTON_ACTIVE)}
+        className={TOOLBAR_ICON_BUTTON}
       >
-        <div className="i-ph:code-bold text-sm" />
+        <div className="i-ph:square-split-horizontal-bold text-sm" />
       </button>
 
       {/* Built-in image/video generation (§4.16) — secondary. */}

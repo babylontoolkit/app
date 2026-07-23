@@ -36,9 +36,11 @@ export const TOOLBAR_ICON_BUTTON =
   'transition-colors outline-none disabled:opacity-50 disabled:cursor-not-allowed';
 
 /**
- * The pressed state for a TOGGLE (the workbench button).
- *
- * A fill, never a different border or shape: the control must still read as the same button, just on.
+ * The FILLED look, reserved for the two controls that should stand out (owner decision, SPEC §4.1a):
+ * the git chip (when it has something to say) and the ⋯ main menu. Everything else in the row is
+ * bordered-only, even when "active" — the workbench toggle deliberately does NOT use this, so fill is a
+ * reliable signal that means "the two controls worth noticing" rather than "some button happens to be
+ * on". A fill, never a different border or shape: a filled control still reads as the same button.
  */
 export const TOOLBAR_BUTTON_ACTIVE = 'bg-white/15 text-bolt-elements-textPrimary';
 
