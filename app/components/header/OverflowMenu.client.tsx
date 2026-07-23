@@ -42,7 +42,7 @@ import { projectId as projectIdStore } from '~/lib/persistence';
 import { useStartNewChat } from '~/components/chat/NewChatButton.client';
 import { classNames } from '~/utils/classNames';
 import { brand } from '~/config/brand';
-import { TOOLBAR_ICON_BUTTON, TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
+import { TOOLBAR_BUTTON_ACTIVE, TOOLBAR_ICON_BUTTON, TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
 
 /** One definition, so the group boundaries stay identical as groups are added. */
 const SEPARATOR = 'h-px bg-bolt-elements-borderColor my-1';
@@ -76,7 +76,18 @@ export function OverflowMenu() {
   return (
     <DropdownMenu.Root modal={false}>
       <DropdownMenu.Trigger asChild>
-        <button type="button" title="Menu" aria-label="Menu" className={TOOLBAR_ICON_BUTTON}>
+        {/*
+         * Filled to match the workbench toggle (`TOOLBAR_BUTTON_ACTIVE`), by owner request — the main
+         * menu reads as a persistent affordance rather than a bare icon. Same border/background as the
+         * `</>` button in its active state; the shared `TOOLBAR_ICON_BUTTON` already made the borders
+         * identical, this adds the fill.
+         */}
+        <button
+          type="button"
+          title="Menu"
+          aria-label="Menu"
+          className={classNames(TOOLBAR_ICON_BUTTON, TOOLBAR_BUTTON_ACTIVE)}
+        >
           <div className="i-ph:dots-three-bold text-sm" />
         </button>
       </DropdownMenu.Trigger>
