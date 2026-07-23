@@ -68,7 +68,7 @@ function CurrentDateTime() {
 }
 
 export const Menu = () => {
-  const { duplicateCurrentChat, exportChat } = useChatHistory();
+  const { exportChat } = useChatHistory();
   const menuRef = useRef<HTMLDivElement>(null);
   const [list, setList] = useState<SidebarChat[]>([]);
   const [open, setOpen] = useState(false);
@@ -401,11 +401,6 @@ export const Menu = () => {
     };
   }, [isSettingsOpen, docked]);
 
-  const handleDuplicate = async (id: string) => {
-    await duplicateCurrentChat(id);
-    loadEntries(); // Reload the list after duplication
-  };
-
   const handleSettingsClick = () => {
     setIsSettingsOpen(true);
     setOpen(false);
@@ -575,7 +570,6 @@ export const Menu = () => {
                             console.log('Delete triggered for item:', item);
                             setDialogContentWithLogging({ type: 'delete', item });
                           }}
-                          onDuplicate={() => handleDuplicate(item.id)}
                           selectionMode={selectionMode}
                           isSelected={selectedItems.includes(item.id)}
                           onToggleSelection={toggleItemSelection}

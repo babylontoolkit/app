@@ -19,16 +19,17 @@
  * scanning the menu can skip two-thirds of it:
  *
  *   1. **Session** — what am I doing with this conversation? (`New chat`)
- *   2. **Take it with you** — how do I get my game out of the platform? (`Export as ZIP`)
+ *   2. **Take it with you** — how do I get a copy of my game out of this session? (`Export as ZIP`,
+ *      `Remix project` — a ZIP on disk, or a new owned clone).
  *   3. **Help & diagnostics** — something is wrong, or I want to tell you about it.
  *
  * A menu that grows by appending becomes an undifferentiated list of a dozen items, which is the same
  * failure the toolbar itself just came back from: enough individually-reasonable additions and the
  * whole reads as noise. **A new item joins the group it belongs to**; if it belongs to none, that is
- * the signal to add a fourth group with its own separator — not to drop it at the end.
+ * the signal to add a new group with its own separator — not to drop it at the end.
  *
  * Likely future groups, so the shape is obvious rather than guessed: **Project** (settings, rename,
- * duplicate, delete), **Connections** (Unity bridge, game backend, MCP), **View** (theme, layout).
+ * delete), **Connections** (Unity bridge, game backend, MCP), **View** (theme, layout).
  *
  * Export ZIP is in group 2 because it had no header home at all despite being, under repo-primary
  * persistence, one of the few ways to get your game out of the browser — and it is available to ALL
@@ -40,6 +41,7 @@ import { useStore } from '@nanostores/react';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { useStartNewChat } from '~/components/chat/NewChatButton.client';
+import { useRemixProject } from '~/components/chat/RemixProjectButton.client';
 import { classNames } from '~/utils/classNames';
 import { brand } from '~/config/brand';
 import { TOOLBAR_ICON_BUTTON_FILLED, TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
@@ -50,6 +52,7 @@ const SEPARATOR = 'h-px bg-bolt-elements-borderColor my-1';
 export function OverflowMenu() {
   const activeProjectId = useStore(projectIdStore);
   const startNewChat = useStartNewChat();
+  const { remix: remixProject, busy: remixing } = useRemixProject();
 
   if (!activeProjectId) {
     return null;
@@ -99,11 +102,25 @@ export function OverflowMenu() {
 
           <DropdownMenu.Separator className={SEPARATOR} />
 
-          {/* ── 2. Take it with you ────────────────────────────────────────────────── */}
+          {/*
+           * ── 2. Take it with you ──────────────────────────────────────────────────
+           *
+           * Both items are ways to get a copy of your game out of this session. Remix Project is the
+           * self-remix (§4.8): clone this game into a new owned copy — it moved here from the sidebar
+           * chat list (owner, 2026-07-23) because remixing belongs to the PROJECT, not to a row in the
+           * conversation list, and it sits AFTER Export as ZIP by owner request. The menu closes on
+           * select (like every item here); the double-invoke guard lives in `useRemixProject` (`busy`),
+           * so a re-open + re-select cannot mint two clones.
+           */}
           <DropdownMenu.Group>
             <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} onSelect={() => void exportZip()}>
               <div className="i-ph:file-zip" />
               <span>Export as ZIP</span>
+            </DropdownMenu.Item>
+
+            <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} disabled={remixing} onSelect={() => void remixProject()}>
+              <div className="i-ph:copy" />
+              <span>Remix project</span>
             </DropdownMenu.Item>
           </DropdownMenu.Group>
 

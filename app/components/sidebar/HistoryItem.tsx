@@ -9,7 +9,6 @@ import { Checkbox } from '~/components/ui/Checkbox';
 interface HistoryItemProps {
   item: ChatHistoryItem;
   onDelete?: (event: React.UIEvent) => void;
-  onDuplicate?: (id: string) => void;
   exportChat: (id?: string) => void;
   selectionMode?: boolean;
   isSelected?: boolean;
@@ -19,7 +18,6 @@ interface HistoryItemProps {
 export function HistoryItem({
   item,
   onDelete,
-  onDuplicate,
   exportChat,
   selectionMode = false,
   isSelected = false,
@@ -125,16 +123,11 @@ export function HistoryItem({
                   exportChat(item.id);
                 }}
               />
-              {onDuplicate && (
-                <ChatActionButton
-                  toolTipContent="Remix"
-                  icon="i-ph:copy h-4 w-4"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    onDuplicate?.(item.id);
-                  }}
-                />
-              )}
+              {/*
+               * Remix removed from the chat list (owner, 2026-07-23): remixing belongs to the PROJECT,
+               * not to a row in the conversation list. The self-remix now lives in the header ⋯ menu
+               * ("Remix Project", `useRemixProject`). Do not re-add a per-chat Remix here.
+               */}
               <ChatActionButton
                 toolTipContent="Rename"
                 icon="i-ph:pencil-fill h-4 w-4"

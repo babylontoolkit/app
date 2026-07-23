@@ -77,6 +77,20 @@ function takeKey(key: string): string | null {
   return id;
 }
 
+/**
+ * Park a just-cloned remix for the builder to mount on its next load.
+ *
+ * The one writer of `PENDING_REMIX_KEY`, so the raw sessionStorage write is not copied at each call
+ * site — self-remix from the ⋯ menu and a shared-game remix both land here.
+ */
+export function setPendingRemix(projectId: string): void {
+  if (typeof sessionStorage === 'undefined') {
+    return;
+  }
+
+  sessionStorage.setItem(PENDING_REMIX_KEY, projectId);
+}
+
 export function takePendingRemix(): string | null {
   return takeKey(PENDING_REMIX_KEY);
 }
