@@ -224,6 +224,8 @@ The header accumulated one button per feature across roughly a dozen changes and
 
 `New chat` moved out of the row into group 1, and `NewChatButton` became the hook **`useStartNewChat()`** so the menu item and the `/clear` command (§4.2.9) take the same path — three call sites drifting into three meanings of "new chat" is the same failure as the two Syncs.
 
+🔴 **Every header dropdown MUST set `modal={false}`** (the git chip, ⋯, and Deploy all do). Radix's modal default scroll-locks the body and adds scrollbar-compensation padding; the chat column is IN FLOW, so that padding shifts it left while the workbench (position: fixed, placed by `--workbench-left`) stays put — opening the menu shoved the whole chat off-screen. This is not chip-specific: it bites any in-header menu, and it already caught Deploy once (2026-07-18) and the git chip once (2026-07-22). A new header menu inherits the bug unless it opts out.
+
 **Known, deliberate:** the credits pill is `h-24` and borderless while the row is `h-28` and bordered. It is an *indicator*, like the chip, not an action — flagged rather than silently changed.
 
 ### 4.2 Agent & Generation Loop

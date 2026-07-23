@@ -135,6 +135,7 @@ S3 keeps play builds + skill resources + template pins + the remix seeds. **The 
 - **⋯ is the MAIN MENU and it is GROUPS, not a list.** General options go here BY DEFAULT (the row is the exception). Groups: Session (`New chat`) · Take it with you (`Export as ZIP`) · Help & diagnostics. **A new item joins the group it belongs to; if it belongs to none, add a fourth group — never append to the bottom.** A menu that grows by appending becomes an undifferentiated list, i.e. the toolbar's own failure one level down.
 - **An action that more than one surface can trigger is a HOOK, not a button.** `NewChatButton` → `useStartNewChat()`, shared by the menu item and `/clear` (§4.2.9). Three call sites drifting into three meanings of "new chat" is the two-Syncs bug wearing different clothes.
 - ⚠️ **`.click()` does not open a Radix menu** (they open on `pointerdown`), so a scripted click that "does nothing" in a browser check is a test artefact, not a bug. Drive real pointer events.
+- 🔴 **Every header dropdown MUST set `modal={false}`.** Radix's modal default scroll-locks the body and pads it to compensate for the scrollbar; the chat column is IN FLOW so that padding shifts it left, while the fixed workbench stays put — opening the menu shoves the whole chat off-screen. Bit Deploy once (2026-07-18) and the git chip once (2026-07-22); a new in-header menu inherits it unless it opts out. Verify with the menu OPEN: `getComputedStyle(document.body).paddingRight` must stay `0px`.
 
 ## Pro vs. credits feature split (never-violate)
 

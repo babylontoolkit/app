@@ -126,7 +126,14 @@ export function GitStatusChip() {
 
   return (
     <>
-      <DropdownMenu.Root>
+      {/*
+       * 🔴 `modal={false}` is load-bearing, same reason as DeployButton (§4.1a). Radix's modal default
+       * scroll-locks the body and pads it to compensate for the scrollbar; the chat column is IN FLOW so
+       * that padding SHIFTS it, while the workbench (position: fixed, placed by --workbench-left) stays
+       * put — opening this menu shoved the whole chat off-screen left. Non-modal keeps the menu out of
+       * the layout's business, matching every other dropdown in the header.
+       */}
+      <DropdownMenu.Root modal={false}>
         <DropdownMenu.Trigger asChild>
           <button
             type="button"
