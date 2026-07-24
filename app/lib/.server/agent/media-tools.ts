@@ -114,10 +114,10 @@ export function createMediaTools(ctx: MediaToolContext) {
           .string()
           .optional()
           .describe(
-            'png or jpg. PREFER "jpg" — these files ship in the played game, and a 2K photographic ' +
-              'PNG is ~10MB where the same image as jpg is under 1MB, for no visible difference and ' +
-              'the same price. Use "png" ONLY when the image needs transparency (logos, emblems, ' +
-              'sprites, cut-out characters). Default is png so alpha is never lost by accident.',
+            'png or jpg. Leave unset for photographic art (hero backgrounds, textures, scenery, panels) ' +
+              '— it defaults to "jpg", which is ~10× smaller than png for no visible difference and the ' +
+              'same price. Pass "png" when the image needs transparency (logos, emblems, sprites, ' +
+              'cut-out characters); a big photographic PNG is what bloats the project.',
           ),
         file_name: z.string().optional().describe('Preferred file name (without extension).'),
       }),
@@ -132,7 +132,12 @@ export function createMediaTools(ctx: MediaToolContext) {
           options: {
             resolution: args.resolution || '2K',
             aspectRatio: args.aspect_ratio || '16:9',
-            outputFormat: args.output_format || 'png',
+
+            /*
+             * Included ONLY when the model set it; left unset, the service picks jpg for photographic
+             * art and png for transparency-needing art (`resolveImageOutputFormat`). Explicit wins.
+             */
+            ...(args.output_format ? { outputFormat: args.output_format } : {}),
           },
           fileName: args.file_name,
         });

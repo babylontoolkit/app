@@ -29,11 +29,11 @@
  * the same project for one logical change, competing with the preview the user is watching. The
  * trailing debounce means a batch of deliveries produces a single write carrying all of them.
  */
-import { workbenchStore } from '~/lib/stores/workbench';
+import { streamingState } from '~/lib/stores/streaming';
 import { projectId as projectIdStore } from '~/lib/persistence/useChatHistory';
 import { db } from '~/lib/persistence/useChatHistory';
 import { readCurrentLocalSnapshot } from '~/lib/persistence/local-snapshots';
-import { saveWorkingCopy } from '~/lib/persistence/projects';
+import { writeWorkingCopyFromStore } from '~/lib/persistence/working-copy-writer';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('working-copy-refresh');
@@ -55,6 +55,18 @@ async function push(reason: string): Promise<void> {
     return;
   }
 
+  /*
+   * 🔴 NEVER serialize mid-generation. Serializing the project (base64 every binary + assemble the
+   * envelope) competes with the live stream for the main thread and memory — and it was firing 4s after
+   * the FIRST media render landed, i.e. squarely mid-stream, while more renders were still arriving.
+   * That contention, on top of several large PNGs, is what froze the tab (§4.16 media crash). Defer:
+   * reschedule until the stream ends, at which point a burst of deliveries collapses into ONE save.
+   */
+  if (streamingState.get()) {
+    refreshWorkingCopySoon(reason);
+    return;
+  }
+
   try {
     const current = await readCurrentLocalSnapshot(db, pid);
 
@@ -66,14 +78,19 @@ async function push(reason: string): Promise<void> {
       return;
     }
 
-    const files = await workbenchStore.serializeFiles();
+    /*
+     * Reads bytes async, encodes + uploads off the main thread (a worker), and size-gates a project too
+     * large to be worth an off-thread copy. Never throws; returns why it did or did not save.
+     */
+    const result = await writeWorkingCopyFromStore(pid, current.seq);
 
-    if (Object.keys(files).length === 0) {
-      return;
+    if (result === 'saved') {
+      logger.info(`Working copy refreshed for ${pid} at seq ${current.seq} (${reason})`);
+    } else if (result === 'skipped-too-large') {
+      logger.warn(`Working copy top-up skipped for ${pid}: project exceeds the client budget (${reason})`);
+    } else if (result === 'failed') {
+      logger.warn(`Working copy top-up failed for ${pid} (${reason})`);
     }
-
-    await saveWorkingCopy(pid, current.seq, files);
-    logger.info(`Working copy refreshed for ${pid} at seq ${current.seq} (${reason})`);
   } catch (error) {
     /* The local checkpoint is intact either way — a failed top-up must never surface to the user. */
     logger.warn(`Working copy refresh failed for ${pid} (${reason}): ${(error as Error)?.message}`);

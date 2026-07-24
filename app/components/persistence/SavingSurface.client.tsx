@@ -2,9 +2,9 @@
  * Everything the platform says about saving, in one place (SPEC §4.5.4b).
  *
  * The header's `GitStatusChip` carries the state and every action on it; this carries the three things
- * that interrupt: the
- * one-time toast after a first creation, the recurring banner, and the browser's own unload warning.
- * Plus the divergence dialog, which is the only one of the four the user did not implicitly ask for.
+ * that interrupt: the save-reminder toast after EACH project's first creation, the recurring banner, and
+ * the browser's own unload warning. Plus the divergence dialog, which is the only one of the four the
+ * user did not implicitly ask for.
  *
  * ## The rule this file exists to keep
  *
@@ -28,8 +28,16 @@ import { saving } from '~/config/saving';
 import { SaveDivergenceDialog } from './SaveDivergenceDialog.client';
 import { UnappliedTurnDialog } from './UnappliedTurnDialog.client';
 
-/** The one-time toast is per USER, not per project — it teaches a fact about the product, once. */
-const FIRST_TOAST_KEY = 'bt_saving_intro_shown';
+/**
+ * The intro toast is per PROJECT, not per user (§4.5.4b). Its whole job is to remind the user to save
+ * THE GAME THEY JUST CREATED — so a returning user making their tenth project must get it for that
+ * project too. It was previously a single per-user flag (`bt_saving_intro_shown`, no project), which
+ * silenced the reminder on every project after the very first one a user ever made — the reported bug.
+ *
+ * Persisted per project so reloading the SAME game does not re-nag, while a NEW game (new id → new key)
+ * always gets its own toast.
+ */
+const introShownKey = (projectId: string) => `bt_saving_intro_shown:${projectId}`;
 
 const dismissKey = (projectId: string) => `bt_saving_banner_dismissed:${projectId}`;
 
@@ -56,7 +64,9 @@ function SaveNudges() {
   const repo = useStore(repoStatus);
   const count = useStore(generationCount);
   const [dismissedAt, setDismissedAt] = useState<number | undefined>();
-  const toastShown = useRef(false);
+
+  /** Projects whose intro toast fired THIS session — the StrictMode double-fire guard, per project. */
+  const shownProjects = useRef<Set<string>>(new Set());
 
   const linked = repo?.linked === true;
 
@@ -69,7 +79,8 @@ function SaveNudges() {
     ? decideNudge({
         linked,
         generationCount: count,
-        firstToastShown: toastShown.current || localStorage.getItem(FIRST_TOAST_KEY) === '1',
+        firstToastShown:
+          shownProjects.current.has(activeProjectId) || localStorage.getItem(introShownKey(activeProjectId)) === '1',
         bannerDismissedAtCount: dismissedAt,
         bannerEvery: saving.bannerEveryNGenerations,
       })
@@ -83,20 +94,22 @@ function SaveNudges() {
     /*
      * The ref guards the double-fire that `localStorage` alone cannot: React can render twice before
      * the effect commits (StrictMode does exactly this in dev), and two identical toasts about losing
-     * your work is a worse introduction to the idea than one.
+     * your work is a worse introduction to the idea than one. Both checks are per PROJECT, so a NEW
+     * game still fires even after an earlier one already did.
      */
-    if (toastShown.current) {
+    if (shownProjects.current.has(activeProjectId) || localStorage.getItem(introShownKey(activeProjectId)) === '1') {
       return;
     }
 
-    toastShown.current = true;
-    localStorage.setItem(FIRST_TOAST_KEY, '1');
+    shownProjects.current.add(activeProjectId);
+    localStorage.setItem(introShownKey(activeProjectId), '1');
 
-    toast.info(
+    toast.warn(
       <div className="flex flex-col gap-2">
         <div>
-          <strong>Nice — that is your game.</strong> Right now it only exists in this browser tab. Save it to your own
-          GitHub account and you can open it from any device.
+          <strong>⚠️ Save your work — this game is not saved yet.</strong> It exists ONLY in this browser tab. If you
+          clear your browsing data or switch devices, it is gone. Save it to your own GitHub account to keep it safe on
+          any device.
         </div>
         <button
           onClick={() => void requestSave(activeProjectId)}
@@ -105,7 +118,12 @@ function SaveNudges() {
           Save it now
         </button>
       </div>,
-      { autoClose: 12_000, closeOnClick: false },
+
+      /*
+       * Long and loud by design (§4.5.4b): this is the one moment the only copy of the user's work is
+       * in a tab they might close. `saving.introToastAutoCloseMs` (or `false` to require a dismissal).
+       */
+      { autoClose: saving.introToastAutoCloseMs, closeOnClick: false },
     );
   }, [nudge, activeProjectId]);
 

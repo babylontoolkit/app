@@ -38,6 +38,7 @@ import {
   saveWorkingCopy,
   type RepoStatus,
 } from './projects';
+import { withinWorkingCopyBudget } from './working-copy-size';
 import {
   createLocalSnapshot,
   getLocalSyncState,
@@ -1403,6 +1404,16 @@ ${value.content}
        * second counter, or a timestamp, is migration 0003's ledger bug in a third place.
        */
       try {
+        /*
+         * Size gate (§4.16): above the client budget, do not stringify + upload the whole base64 map —
+         * that synchronous pass is what froze the tab on media-heavy projects. The LOCAL checkpoint
+         * above is the durable copy; the server copy is best-effort and simply absent until the project
+         * shrinks. Treated exactly like a failed upload (the warning below explains it and is actionable).
+         */
+        if (!withinWorkingCopyBudget(workbenchStore.files.get())) {
+          throw new Error('project exceeds the client working-copy budget');
+        }
+
         await saveWorkingCopy(pid, snapshot.seq, files);
         workingCopySafe.set(true);
       } catch (error) {

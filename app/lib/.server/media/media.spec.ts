@@ -358,14 +358,31 @@ describe('wire shapes', () => {
     expect(payload).toMatchObject({ mode: '4K', sound: true, duration: '10', multi_shots: false });
   });
 
-  it('builds the image input with png default', () => {
+  it('builds the image input, defaulting photographic art to jpg (§4.16 — the size win)', () => {
     const payload = buildProviderPayload('nano-banana-2', {
       model: 'nano-banana-2',
       prompt: 'a fox',
       options: { resolution: '2K', aspectRatio: '1:1' },
     });
 
-    expect(payload).toMatchObject({ resolution: '2K', aspect_ratio: '1:1', output_format: 'png' });
+    // Unspecified + no transparency signal → jpg (a big photographic png is what froze the tab).
+    expect(payload).toMatchObject({ resolution: '2K', aspect_ratio: '1:1', output_format: 'jpg' });
+  });
+
+  it('keeps png for transparency-needing art and honours an explicit choice', () => {
+    // A logo prompt with no explicit format falls back to png (alpha safety).
+    expect(
+      buildProviderPayload('nano-banana-2', { model: 'nano-banana-2', prompt: 'a team logo', options: {} }),
+    ).toMatchObject({ output_format: 'png' });
+
+    // An explicit choice always wins, even for photographic art.
+    expect(
+      buildProviderPayload('nano-banana-2', {
+        model: 'nano-banana-2',
+        prompt: 'a photographic sunset',
+        options: { outputFormat: 'png' },
+      }),
+    ).toMatchObject({ output_format: 'png' });
   });
 
   /* A misread "failed" would refund a render that succeeded — KIE's shapes are all covered. */
@@ -388,22 +405,35 @@ describe('wire shapes', () => {
 });
 
 describe('destination paths', () => {
-  it('derives a slugged path under public/assets/generated with a task-id suffix', () => {
+  it('derives a slugged path under public/assets/generated with a task-id suffix (photographic → jpg)', () => {
     const dest = deriveDestPath('image', { model: 'm', prompt: 'A Neon City!! At Night', options: {} }, 'med_abc123_x');
 
-    expect(dest).toMatch(/^public\/assets\/generated\/a-neon-city-at-night-[a-z0-9_]+\.png$/);
+    /*
+     * The extension MUST match the format the job was built with (`resolveImageOutputFormat`), or the
+     * file is written as one type and referenced as another. Photographic prompt, unspecified → jpg.
+     */
+    expect(dest).toMatch(/^public\/assets\/generated\/a-neon-city-at-night-[a-z0-9_]+\.jpg$/);
   });
 
-  it('honours jpg and video extensions', () => {
+  it('honours jpg and video extensions, and png for transparency art', () => {
     expect(
       deriveDestPath('image', { model: 'm', prompt: 'sky', options: { outputFormat: 'jpg' } }, 'med_abc123_x'),
     ).toMatch(/\.jpg$/);
     expect(deriveDestPath('video', { model: 'm', prompt: 'sky', options: {} }, 'med_abc123_x')).toMatch(/\.mp4$/);
+
+    // A logo needs alpha, so an unspecified format resolves to png and the path agrees.
+    expect(deriveDestPath('image', { model: 'm', prompt: 'a brand logo', options: {} }, 'med_abc123_x')).toMatch(
+      /\.png$/,
+    );
   });
 
-  it('prefers a caller file name over the prompt slug', () => {
+  it('prefers a caller file name over the prompt slug (extension still follows the resolved format)', () => {
+    /*
+     * The file name drives the SLUG; the extension follows the format. "hero-bg" is photographic with no
+     * explicit format, so it lands as jpg regardless of the .png the caller happened to type.
+     */
     expect(
       deriveDestPath('image', { model: 'm', prompt: 'whatever', options: {}, fileName: 'hero-bg.png' }, 'med_abc123_x'),
-    ).toMatch(/^public\/assets\/generated\/hero-bg-[a-z0-9_]+\.png$/);
+    ).toMatch(/^public\/assets\/generated\/hero-bg-[a-z0-9_]+\.jpg$/);
   });
 });

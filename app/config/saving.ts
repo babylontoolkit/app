@@ -20,10 +20,19 @@ export const saving = {
   bannerEveryNGenerations: 5,
 
   /**
-   * The one-time toast after a user's FIRST successful creation.
+   * The toast after EACH PROJECT's first successful creation (§4.5.4b) — per project, not per user.
    *
-   * This is the moment the product has proven itself and the user has something they would miss — and
-   * it is also the moment they have no idea it lives only in this browser tab.
+   * Every new game is one cleared-cache or device-switch away from being lost until it is saved to a
+   * repo, so this fires for every project the user creates, not once in their lifetime. It is the moment
+   * they have something they would miss and no idea it lives only in this browser tab.
    */
   toastAfterFirstCreation: true,
+
+  /**
+   * How long that toast stays up, in ms — or `false` to keep it until the user acts or dismisses it.
+   *
+   * Deliberately LONG and loud: this is the one moment the only copy of the user's work sits in a tab
+   * they might close. A 5-second toast they can miss is worse than useless here.
+   */
+  introToastAutoCloseMs: 60_000 as number | false,
 } as const;

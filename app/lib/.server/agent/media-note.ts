@@ -69,9 +69,9 @@ export function mediaProtocolNote(input: MediaNoteInput): string | null {
       'exactly as returned (as `/assets/generated/…` URLs) and the files will appear there.',
     '- Design every surface to look finished while a render is still landing — a styled background ' +
       'colour or gradient behind each generated image, never a blank box.',
-    '- These files SHIP IN THE GAME, so mind their weight: pass `output_format: "jpg"` for anything ' +
-      'photographic (backgrounds, textures, panels, scenery). Reserve `png` for images that genuinely ' +
-      'need transparency — logos, emblems, sprites, cut-out characters. A 2K photographic png is ' +
-      '~10MB against under 1MB as jpg, at the same price.',
+    '- These files SHIP IN THE GAME, so mind their weight. Photographic art (backgrounds, textures, ' +
+      'panels, scenery) defaults to jpg — leave `output_format` unset for it. Pass `output_format: ' +
+      '"png"` ONLY for images that genuinely need transparency: logos, emblems, sprites, cut-out ' +
+      'characters. A 2K photographic png is ~10MB against under 1MB as jpg, at the same price.',
   ].join('\n');
 }

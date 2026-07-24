@@ -25,6 +25,7 @@ import { lookupMediaPrice, findMediaModel, type MarketPriceList } from '~/lib/.s
 import type { ObjectStore } from '~/lib/.server/storage';
 import type { MediaProvider, MediaEndpoint } from './kie-client';
 import { putMediaTask, getMediaTask, type MediaTaskRecord } from './store';
+import { resolveImageOutputFormat } from '~/lib/media/output-format';
 
 const logger = createScopedLogger('media-service');
 
@@ -425,7 +426,10 @@ export function buildProviderPayload(model: string, request: MediaRequest): Reco
     image_input: [],
     aspect_ratio: str(o.aspectRatio, '16:9'),
     resolution: str(o.resolution, '2K'),
-    output_format: str(o.outputFormat, 'png'),
+    output_format: resolveImageOutputFormat(o.outputFormat as string | undefined, {
+      fileName: (request as { fileName?: string }).fileName,
+      prompt: request.prompt,
+    }),
   };
 }
 
@@ -438,7 +442,13 @@ export function deriveDestPath(
   request: MediaRequest & { fileName?: string },
   taskId: string,
 ): string {
-  const ext = kind === 'video' ? 'mp4' : str(request.options.outputFormat, 'png') === 'jpg' ? 'jpg' : 'png';
+  const ext =
+    kind === 'video'
+      ? 'mp4'
+      : resolveImageOutputFormat(request.options.outputFormat as string | undefined, {
+          fileName: request.fileName,
+          prompt: request.prompt,
+        });
   const preferred = request.fileName?.replace(/\.[a-zA-Z0-9]+$/, '');
   const slug = (preferred || request.prompt)
     .toLowerCase()

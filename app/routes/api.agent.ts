@@ -17,6 +17,7 @@ import { validateAttachments } from '~/lib/.server/agent/attachments';
 import { claimProject } from '~/lib/.server/agent/inflight';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
+import { ProtocolTagStreamFilter } from '~/lib/.server/agent/protocol-strip';
 import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
 import type { FileMap } from '~/lib/.server/llm/constants';
@@ -292,22 +293,45 @@ async function streamGeneration(
 
   const shellFilter = new ShellActionStreamFilter();
 
+  /*
+   * Chained AFTER the shell filter, on its pass-through output (§4.2, §5): the shell filter forwards
+   * file-action bodies verbatim, and a stray tool-call tag (`</parameter>`) leaks INTO those bodies, so
+   * it must be scrubbed from what the shell filter emits — including the file text — before it reaches
+   * the client's artifact parser and lands in a source file as a syntax error.
+   */
+  const protocolFilter = new ProtocolTagStreamFilter();
+
+  const forwardText = (text: string) => {
+    const safe = protocolFilter.push(text);
+
+    if (safe.length > 0) {
+      stream.write(formatDataStreamPart('text', safe));
+    }
+  };
+
   for await (const chunk of generation.textStream) {
     if (chunk.type === 'text') {
-      const safe = shellFilter.push(chunk.value);
-
-      if (safe.length > 0) {
-        stream.write(formatDataStreamPart('text', safe));
-      }
+      forwardText(shellFilter.push(chunk.value));
     } else {
       stream.write(formatDataStreamPart(chunk.type, chunk.value));
     }
   }
 
-  const tail = shellFilter.flush();
+  // Flush in order: the shell filter's tail is text that still has to pass the protocol scrub.
+  forwardText(shellFilter.flush());
 
-  if (tail.length > 0) {
-    stream.write(formatDataStreamPart('text', tail));
+  const protocolTail = protocolFilter.flush();
+
+  if (protocolTail.length > 0) {
+    stream.write(formatDataStreamPart('text', protocolTail));
+  }
+
+  // Surface leaked tool-call tags — invisible otherwise, and a signal the model/provider is misbehaving.
+  if (protocolFilter.strippedCount > 0) {
+    getMonitor(context).captureMessage(
+      `Stripped ${protocolFilter.strippedCount} stray tool-call tag(s) from the output stream`,
+      { scope: 'protocol-strip', level: 'warning' },
+    );
   }
 
   // Surface any disallowed command the model tried — the client already refuses it; this makes it visible.
