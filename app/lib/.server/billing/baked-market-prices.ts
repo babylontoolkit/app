@@ -163,6 +163,27 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
       ],
     },
 
+    /**
+     * THE CUT-OUT PASS (§4.16) — the second stage of a transparent image, never a model a user picks.
+     *
+     * No image model on KIE emits an alpha channel (measured across every render 2026-07-19 →
+     * 2026-07-23: not one transparent pixel, `output_format: "png"` or not — see
+     * `lib/media/output-format.ts`). This is the ONE transparency capability in KIE's entire catalog:
+     * a search of their pricing feed for background / remove / matting / cutout / sticker / transparent
+     * returns exactly this row. So a request for transparent art is priced as generate + cut out, and
+     * without this row that request is REFUSED rather than silently delivered opaque.
+     *
+     * $0.005/image on KIE's feed (2026-07-23), flat — no resolution variants, hence the catch-all
+     * `{}` options. ~2 credits at the current margin.
+     */
+    'recraft/remove-background': {
+      kind: 'image',
+      label: 'Recraft Remove Background (cut-out pass)',
+      vendor: 'Recraft',
+      unit: 'per_image',
+      variants: [{ options: {}, usd: 0.005 }],
+    },
+
     /* ---- video (jobs endpoint) ---- */
 
     /**

@@ -20,6 +20,11 @@ import { errorResponse } from '~/lib/.server/http';
 import { getObjectStore } from '~/lib/.server/storage';
 import { getMediaTask } from '~/lib/.server/media/store';
 import { downloadResult } from '~/lib/.server/media/kie-client';
+import { contentTypeForBytes, extensionMismatch } from '~/lib/media/sniff';
+import { getMonitor } from '~/lib/.server/monitoring';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('media-file');
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
   try {
@@ -38,15 +43,76 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
 
     const upstream = await downloadResult(task.resultUrl);
 
-    return new Response(upstream.body, {
+    /*
+     * 🔴 THE PROVIDER'S WORD IS NOT EVIDENCE (§4.16).
+     *
+     * KIE's `/ggc/…` backend serves JPEG bytes from a `.png` URL with a `.png` content-type, whatever
+     * `output_format` asked for — measured on every render this platform produced between 2026-07-19
+     * and 2026-07-23. So the type is taken from the BYTES, and a file whose extension disagrees with
+     * its content is reported rather than quietly written into the user's project.
+     *
+     * Streaming is preserved: only the first chunk is held (long enough to read a magic number), then
+     * re-emitted ahead of the rest. A multi-hundred-MB video is never buffered.
+     */
+    const { head, body } = await peekStream(upstream.body!);
+    const sniffed = head.byteLength ? contentTypeForBytes(head) : null;
+    const mismatch = head.byteLength ? extensionMismatch(task.destPath, head) : null;
+
+    if (mismatch) {
+      const detail = `media task ${task.id}: ${task.destPath} is actually ${mismatch.actual} bytes (${task.model})`;
+      logger.warn(detail);
+      getMonitor(context).captureMessage(detail, { scope: 'media-format-mismatch' });
+    }
+
+    return new Response(body, {
       status: 200,
       headers: {
         'Content-Type':
-          upstream.headers.get('content-type') || (task.kind === 'video' ? 'video/mp4' : 'application/octet-stream'),
+          sniffed ||
+          upstream.headers.get('content-type') ||
+          (task.kind === 'video' ? 'video/mp4' : 'application/octet-stream'),
         'Cache-Control': 'no-store',
       },
     });
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+/**
+ * Read the first chunk of a stream, then hand back a stream that still starts with it.
+ *
+ * The alternative — `await response.arrayBuffer()` — would buffer an entire Kling video in server
+ * memory to look at 8 bytes.
+ */
+async function peekStream(stream: ReadableStream<Uint8Array>): Promise<{ head: Uint8Array; body: ReadableStream }> {
+  const reader = stream.getReader();
+  const first = await reader.read();
+  const head = first.value ?? new Uint8Array();
+
+  const body = new ReadableStream({
+    start(controller) {
+      if (first.done) {
+        controller.close();
+        return;
+      }
+
+      controller.enqueue(head);
+    },
+    async pull(controller) {
+      const next = await reader.read();
+
+      if (next.done) {
+        controller.close();
+        return;
+      }
+
+      controller.enqueue(next.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+
+  return { head, body };
 }

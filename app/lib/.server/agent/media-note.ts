@@ -69,9 +69,14 @@ export function mediaProtocolNote(input: MediaNoteInput): string | null {
       'exactly as returned (as `/assets/generated/…` URLs) and the files will appear there.',
     '- Design every surface to look finished while a render is still landing — a styled background ' +
       'colour or gradient behind each generated image, never a blank box.',
-    '- These files SHIP IN THE GAME, so mind their weight. Photographic art (backgrounds, textures, ' +
-      'panels, scenery) defaults to jpg — leave `output_format` unset for it. Pass `output_format: ' +
-      '"png"` ONLY for images that genuinely need transparency: logos, emblems, sprites, cut-out ' +
-      'characters. A 2K photographic png is ~10MB against under 1MB as jpg, at the same price.',
+    '- These files SHIP IN THE GAME, so mind their weight. Ordinary art (backgrounds, textures, ' +
+      'panels, scenery) defaults to jpg — leave `output_format` unset for it. A 2K photographic png ' +
+      'is ~10MB against under 1MB as jpg, at the same price.',
+    '- For art that must sit OVER something — a logo or wordmark on the hero, an emblem, a sprite, a ' +
+      'cut-out character — pass `transparent: true`. It renders and then cuts the art out into a real ' +
+      'RGBA PNG for a couple of extra credits. **Never write "transparent background" (or "no ' +
+      'background", or "PNG with alpha") into the PROMPT**: the generator has no alpha channel, so it ' +
+      'paints a fake grey-and-white checkerboard into the artwork instead, permanently. `transparent: ' +
+      'true` is the only thing that produces actual transparency.',
   ].join('\n');
 }

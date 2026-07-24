@@ -151,6 +151,53 @@ describe('quoting', () => {
     );
   });
 
+  it('prices a transparent image as render + cut-out, in ONE number', () => {
+    /*
+     * $0.06 render + $0.005 cut-out = $0.065 → 26 credits. The user asked for one asset and gets one
+     * debit; the button, the debit and the ledger note all come from this quote.
+     */
+    const quote = quoteMediaRequest({
+      model: 'nano-banana-2',
+      prompt: 'a wordmark',
+      options: { resolution: '2K', transparent: true },
+    });
+
+    expect(quote.usd).toBeCloseTo(0.065, 9);
+    expect(quote.credits).toBe(26);
+    expect(quote.delivery).toMatchObject({ cutout: true, renderFormat: 'jpg', finalFormat: 'png' });
+    expect(quote.cutoutUsd).toBe(0.005);
+  });
+
+  it('charges nothing extra for an opaque image', () => {
+    const quote = quoteMediaRequest({
+      model: 'nano-banana-2',
+      prompt: 'a hero background',
+      options: { resolution: '2K', transparent: false },
+    });
+
+    expect(quote.credits).toBe(24);
+    expect(quote.delivery).toMatchObject({ cutout: false });
+    expect(quote.cutoutUsd).toBeUndefined();
+  });
+
+  it('refuses 4K + transparent up front — the cut-out pass caps at 4096px a side', () => {
+    /*
+     * Refused in the QUOTE, so the panel says so before any spend. Discovering it at stage 2 would
+     * mean paying for a render whose cut-out then fails and refunds — correct, but a wasted round
+     * trip and a confusing one.
+     */
+    expect(() =>
+      quoteMediaRequest({ model: 'nano-banana-2', prompt: 'a logo', options: { resolution: '4K', transparent: true } }),
+    ).toThrow(/4K is too large for the cut-out pass/);
+  });
+
+  it('refuses the cut-out model as a primary model instead of wasting a debit on it', () => {
+    // It takes an image, not a prompt — naming it is always a mistake, and it is caught before the debit.
+    expect(() => quoteMediaRequest({ model: 'recraft/remove-background', prompt: 'a logo', options: {} })).toThrow(
+      /not a model you generate with/,
+    );
+  });
+
   it('prices a Kling clip per second: pro+audio 5s = $0.675 → 270 credits', () => {
     const quote = quoteMediaRequest({
       model: 'kling-3.0/video',
@@ -335,6 +382,138 @@ describe('polling', () => {
   });
 });
 
+/**
+ * The cut-out pass (§4.16) — the second stage that turns a flat RGB render into real alpha.
+ *
+ * It exists because `output_format: "png"` never produced a transparent pixel: measured across every
+ * render 2026-07-19 → 2026-07-23, KIE returned either JPEG bytes behind a `.png` URL or an RGBA
+ * container with alpha pinned at 255. Two stages, ONE task, ONE debit — and the failure direction is
+ * always "say so and refund", never "hand over the opaque one".
+ */
+describe('the cut-out pass', () => {
+  beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+  const RENDER_URL = 'https://cdn.kie.ai/render.jpg';
+  const CUTOUT_URL = 'https://cdn.kie.ai/cutout.png';
+
+  async function startTransparent(provider: FakeProvider, objectStore: ObjectStore) {
+    await grant(100);
+
+    return startMediaTask(
+      imageInput({ provider, objectStore, prompt: 'a wordmark', options: { resolution: '2K', transparent: true } }),
+    );
+  }
+
+  it('debits both stages once, up front, and lands the file as .png', async () => {
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+    const started = await startTransparent(provider, objectStore);
+
+    expect(started.credits).toBe(26);
+    expect(started.destPath).toMatch(/\.png$/);
+    expect(await ledger.balance(USER)).toBe(74);
+
+    // One debit, not two: the user asked for one asset.
+    expect((await ledger.list(USER)).filter((e) => e.reason === 'media')).toHaveLength(1);
+
+    const record = await getMediaTask(objectStore, PROJECT, started.taskId);
+    expect(record).toMatchObject({ status: 'pending', cutout: true, stage: 'render', credits: 26 });
+  });
+
+  it('chains the cut-out when the render lands, and stays pending until it finishes', async () => {
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+    const started = await startTransparent(provider, objectStore);
+
+    provider.state = { state: 'succeeded', resultUrl: RENDER_URL };
+
+    const mid = await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+
+    /*
+     * 🔴 The render is OPAQUE. Reporting success here would deliver exactly what the user paid extra
+     * NOT to get — and would report it as a transparent asset.
+     */
+    expect(mid).toMatchObject({ status: 'pending', stage: 'cutout', renderUrl: RENDER_URL, kieTaskId: 'kie-2' });
+    expect(mid?.resultUrl, 'the opaque render is never the deliverable').toBeUndefined();
+
+    expect(provider.created[1]).toMatchObject({
+      endpoint: 'jobs',
+      model: 'recraft/remove-background',
+      payload: { image: RENDER_URL },
+    });
+
+    // Stage 2 finishes: THAT is the result the project gets.
+    provider.state = { state: 'succeeded', resultUrl: CUTOUT_URL };
+
+    const done = await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+
+    expect(done).toMatchObject({ status: 'succeeded', resultUrl: CUTOUT_URL, renderUrl: RENDER_URL });
+    expect(await ledger.balance(USER), 'a delivered cut-out keeps its charge').toBe(74);
+  });
+
+  it('fails LOUDLY and refunds in full when the cut-out cannot start', async () => {
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+    const started = await startTransparent(provider, objectStore);
+
+    provider.state = { state: 'succeeded', resultUrl: RENDER_URL };
+    provider.createError = new Error('recraft is down');
+
+    const task = await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+
+    expect(task).toMatchObject({ status: 'failed', refunded: true });
+    expect(task?.error).toMatch(/cut-out pass could not start/);
+    expect(task?.resultUrl, 'the opaque render is NOT quietly substituted').toBeUndefined();
+    expect(await ledger.balance(USER), 'both stages refunded').toBe(100);
+    expect(upserts.at(-1)?.status).toBe('failed');
+  });
+
+  it('refunds BOTH stages when the render itself fails', async () => {
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+    const started = await startTransparent(provider, objectStore);
+
+    provider.state = { state: 'failed', error: 'moderated' };
+
+    await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+
+    // 26, not 24 — the refund is what was debited, and the cut-out never ran.
+    expect(await ledger.balance(USER)).toBe(100);
+  });
+
+  it('refunds a failed cut-out exactly once across repeated polls', async () => {
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+    const started = await startTransparent(provider, objectStore);
+
+    provider.state = { state: 'succeeded', resultUrl: RENDER_URL };
+    await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+
+    provider.state = { state: 'failed', error: 'cut-out exploded' };
+
+    await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+    await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+
+    expect(await ledger.balance(USER), 'refunded ONCE').toBe(100);
+  });
+
+  it('leaves an ordinary opaque image single-stage', async () => {
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+
+    await grant(100);
+
+    const started = await startMediaTask(imageInput({ provider, objectStore }));
+
+    provider.state = { state: 'succeeded', resultUrl: 'https://cdn.kie.ai/hero.jpg' };
+
+    const task = await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, provider, objectStore });
+
+    expect(task).toMatchObject({ status: 'succeeded', resultUrl: 'https://cdn.kie.ai/hero.jpg' });
+    expect(provider.created, 'no second KIE call for art that needs no alpha').toHaveLength(1);
+  });
+});
+
 describe('wire shapes', () => {
   it('builds the Veo flat payload', () => {
     const payload = buildProviderPayload('veo3_fast', {
@@ -369,20 +548,36 @@ describe('wire shapes', () => {
     expect(payload).toMatchObject({ resolution: '2K', aspect_ratio: '1:1', output_format: 'jpg' });
   });
 
-  it('keeps png for transparency-needing art and honours an explicit choice', () => {
-    // A logo prompt with no explicit format falls back to png (alpha safety).
-    expect(
-      buildProviderPayload('nano-banana-2', { model: 'nano-banana-2', prompt: 'a team logo', options: {} }),
-    ).toMatchObject({ output_format: 'png' });
+  it('RENDERS a cut-out as jpg — the alpha comes from stage 2, and Recraft caps its input at 5MB', () => {
+    /*
+     * The instinct is to render transparency-needing art as png. That buys nothing (no image model on
+     * KIE emits alpha) and actively breaks the pass that does: a 2K PNG measured 4-6MB against
+     * Recraft's 5MB input limit, where the same image as jpg is ~2MB.
+     */
+    const payload = buildProviderPayload('nano-banana-2', {
+      model: 'nano-banana-2',
+      prompt: 'a team logo',
+      options: {},
+    });
 
-    // An explicit choice always wins, even for photographic art.
-    expect(
-      buildProviderPayload('nano-banana-2', {
-        model: 'nano-banana-2',
-        prompt: 'a photographic sunset',
-        options: { outputFormat: 'png' },
-      }),
-    ).toMatchObject({ output_format: 'png' });
+    expect(payload).toMatchObject({ output_format: 'jpg' });
+  });
+
+  it('appends the flat-backdrop directive to a cut-out prompt, and only to a cut-out prompt', () => {
+    const cut = buildProviderPayload('nano-banana-2', {
+      model: 'nano-banana-2',
+      prompt: 'a team logo',
+      options: { transparent: true },
+    });
+    const plain = buildProviderPayload('nano-banana-2', {
+      model: 'nano-banana-2',
+      prompt: 'a photographic sunset',
+      options: {},
+    });
+
+    expect(String(cut.prompt)).toContain('a team logo');
+    expect(String(cut.prompt).toLowerCase()).toContain('checkerboard');
+    expect(plain.prompt).toBe('a photographic sunset');
   });
 
   /* A misread "failed" would refund a render that succeeded — KIE's shapes are all covered. */
@@ -415,16 +610,23 @@ describe('destination paths', () => {
     expect(dest).toMatch(/^public\/assets\/generated\/a-neon-city-at-night-[a-z0-9_]+\.jpg$/);
   });
 
-  it('honours jpg and video extensions, and png for transparency art', () => {
+  it('honours jpg and video extensions, and lands a cut-out as png', () => {
     expect(
       deriveDestPath('image', { model: 'm', prompt: 'sky', options: { outputFormat: 'jpg' } }, 'med_abc123_x'),
     ).toMatch(/\.jpg$/);
     expect(deriveDestPath('video', { model: 'm', prompt: 'sky', options: {} }, 'med_abc123_x')).toMatch(/\.mp4$/);
 
-    // A logo needs alpha, so an unspecified format resolves to png and the path agrees.
+    /*
+     * The path follows `finalFormat`, never what KIE rendered: a cut-out is rendered as jpg and
+     * delivered as an RGBA png. Getting this backwards writes the file as one type and references it
+     * as another.
+     */
     expect(deriveDestPath('image', { model: 'm', prompt: 'a brand logo', options: {} }, 'med_abc123_x')).toMatch(
       /\.png$/,
     );
+    expect(
+      deriveDestPath('image', { model: 'm', prompt: 'sky', options: { transparent: true } }, 'med_abc123_x'),
+    ).toMatch(/\.png$/);
   });
 
   it('prefers a caller file name over the prompt slug (extension still follows the resolved format)', () => {

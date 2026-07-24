@@ -38,9 +38,28 @@ export interface MediaTaskRecord {
   credits: number;
 
   status: MediaTaskStatus;
+
+  /**
+   * The KIE task being polled RIGHT NOW — stage 1's render task, then stage 2's cut-out task. One
+   * field, because the poll path only ever asks about the current stage; `renderUrl` keeps stage 1's
+   * output so the chaining is auditable after the fact.
+   */
   kieTaskId: string;
   resultUrl?: string;
   error?: string;
+
+  /**
+   * This image was PAID FOR as transparent, so it owes a `recraft/remove-background` pass (§4.16).
+   * Stored, never re-derived: the delivery decision reads the price list and the prompt, and a task
+   * that was billed for two stages must run two stages even if either changes mid-render.
+   */
+  cutout?: boolean;
+
+  /** Which stage `kieTaskId` refers to. Absent on an ordinary single-stage task. */
+  stage?: 'render' | 'cutout';
+
+  /** Stage 1's (opaque) render — the input the cut-out pass was given. Never delivered to the project. */
+  renderUrl?: string;
 
   /** Set when the failure refund has been appended — the poll path's idempotency latch. */
   refunded?: boolean;

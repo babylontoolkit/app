@@ -51,20 +51,28 @@ export default function SavingProjects() {
           <header className="flex flex-col gap-2">
             <h1 className="text-2xl font-bold text-bolt-elements-textPrimary">Saving your projects</h1>
             <p className="text-bolt-elements-textSecondary">
-              The short version: until you press <strong>Save</strong>, your game only exists in this browser. Saving
-              puts it in your own GitHub account, where it is yours and it stays.
+              The short version: we keep a recovery copy of your project so you cannot lose it by accident, and{' '}
+              <strong>Commit changes</strong> puts your game in your own GitHub account, where it is yours and it stays.
+              Nothing is ever written to your account unless you ask for it.
             </p>
           </header>
 
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
-            If you see <strong>“Not saved — browser only”</strong> at the top of a project, that project would be gone
-            if you cleared your browsing data today. One click on Save fixes it for good.
+            If you see <strong>“Changes not synced”</strong> at the top of a project, the work you have just done is not
+            in your GitHub account yet. One click on <strong>Commit changes</strong> puts it there.
           </div>
 
-          <Question q="Why isn’t it just saved automatically?">
+          <Question q="Why isn’t it just saved to GitHub automatically?">
             <p>
-              It is, once you have saved it the first time — after that we keep your repository up to date as you work,
-              and you do not have to think about it again.
+              Because it is <em>your</em> account. Writing to it is the one thing we do that leaves this website and
+              lands somewhere with your name on it, where anyone you have shared it with can see it — so it happens when
+              you decide it should, and not a moment before. Press <strong>Commit changes</strong> whenever the game is
+              at a point you would want to come back to.
+            </p>
+            <p>
+              You are not risking anything by waiting. We keep a recovery copy of your project, so closing the tab does
+              not lose your work — the copy in your GitHub account is about <em>owning</em> your game, not about
+              rescuing it.
             </p>
             <p>
               The first save is the one we cannot do for you, because it has to go somewhere that belongs to{' '}
@@ -79,13 +87,14 @@ export default function SavingProjects() {
             </p>
           </Question>
 
-          <Question q="What happens when I press Save?">
+          <Question q="What happens when I press Commit changes?">
             <p>
               The first time, we ask GitHub for permission, make a new <strong>private</strong> repository in your
               account named after your project, and put your game in it. Private means nobody can see it but you.
             </p>
             <p>
-              After that, Save just keeps it up to date — and it happens on its own each time you make something new.
+              After that, each press adds whatever you have changed since the last one. The badge at the top tells you
+              when there is something waiting — it turns amber and says <strong>Changes not synced</strong>.
             </p>
           </Question>
 
@@ -102,8 +111,9 @@ export default function SavingProjects() {
 
           <Question q="Can I open my game on another computer?">
             <p>
-              Yes, once it is saved. Sign in anywhere, open the project, and it comes back from your account — on your
-              laptop, at work, on a friend’s machine. Before it is saved, it is only in the one browser you made it in.
+              Yes. Sign in anywhere and open the project. If you have committed it to GitHub, it comes back from your
+              account, right up to your last commit — on your laptop, at work, on a friend’s machine. Anything you have
+              made since then is still in the browser you made it in, so commit before you move.
             </p>
           </Question>
 
@@ -125,10 +135,10 @@ export default function SavingProjects() {
             </p>
           </Question>
 
-          <Question q="A save failed. Is my work gone?">
+          <Question q="It failed. Is my work gone?">
             <p>
-              No. A save that does not work changes nothing — your game is still right here, exactly as it was, and you
-              can press <strong>Try again</strong>. We tell you when a save fails, every time. If we are quiet, it
+              No. A commit that does not work changes nothing — your game is still right here, exactly as it was, and
+              you can press <strong>Try again</strong>. We tell you when one fails, every time. If we are quiet, it
               worked.
             </p>
             <p>If it says your connection expired, GitHub has simply forgotten us; press Reconnect and carry on.</p>

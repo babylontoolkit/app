@@ -25,12 +25,28 @@ import { lookupMediaPrice, findMediaModel, type MarketPriceList } from '~/lib/.s
 import type { ObjectStore } from '~/lib/.server/storage';
 import type { MediaProvider, MediaEndpoint } from './kie-client';
 import { putMediaTask, getMediaTask, type MediaTaskRecord } from './store';
-import { resolveImageOutputFormat } from '~/lib/media/output-format';
+import { cutoutRenderPrompt, resolveImageDelivery, type ImageDelivery } from '~/lib/media/output-format';
 
 const logger = createScopedLogger('media-service');
 
 /** Veo model ids use the dedicated endpoint; everything else is a jobs model. */
 const VEO_MODELS = new Set(['veo3', 'veo3_fast', 'veo3_lite']);
+
+/**
+ * The cut-out model — stage 2 of a transparent image (§4.16). Not a model anyone selects: it takes an
+ * image URL, not a prompt, so naming it as a primary model is always a mistake and is refused below
+ * BEFORE the debit rather than after a wasted render.
+ */
+export const CUTOUT_MODEL = 'recraft/remove-background';
+
+/**
+ * Recraft's input limits (their docs): ≤5MB, ≤16MP, ≤4096px on a side, ≥256px.
+ *
+ * Only the dimension cap can be violated by a request we would otherwise accept — a 4K nano-banana
+ * render is 5504×3072. Refused UP FRONT in the quote so the panel says so before spending, instead of
+ * paying for a render whose cut-out then fails and refunds.
+ */
+const CUTOUT_MAX_RESOLUTION_NOTE = '4K is too large for the cut-out pass (it caps at 4096px a side) — use 2K or 1K.';
 
 export class MediaRefusedError extends Error {
   readonly statusCode: number;
@@ -55,16 +71,37 @@ export interface MediaQuote {
   /** Canonical priced model id (aliases resolved). */
   model: string;
   kind: 'image' | 'video';
+
+  /** The TOTAL raw cost — render plus the cut-out pass when there is one. What credits derive from. */
   usd: number;
   credits: number;
+
+  /** How this image is delivered (cut-out pass, rendered format, final format). Images only. */
+  delivery?: ImageDelivery;
+
+  /** The cut-out pass's own raw cost, for the admin/step log. Present only when `delivery.cutout`. */
+  cutoutUsd?: number;
 }
 
 /**
  * Price a request against the ACTIVE list, or refuse. The one pricing door — start uses exactly this,
  * so the number the UI showed on the button is the number the ledger debits.
+ *
+ * A transparent image is priced as ONE task with TWO stages: the render plus the cut-out. Both are
+ * quoted here and debited together, because the user asked for one asset and a half-delivered
+ * transparent image (an opaque render, cut-out skipped) is the silent failure this whole pipeline
+ * exists to remove.
  */
 export function quoteMediaRequest(request: MediaRequest, context?: unknown): MediaQuote {
   const list = activeMarketPrices();
+
+  if (request.model === CUTOUT_MODEL) {
+    throw new MediaRefusedError(
+      `"${CUTOUT_MODEL}" is the automatic cut-out pass, not a model you generate with — it takes an ` +
+        'image, not a prompt. Ask for transparency instead (transparent: true) and it runs by itself.',
+    );
+  }
+
   const price = lookupMediaPrice(list, {
     model: request.model,
     options: lookupOptions(request),
@@ -76,13 +113,57 @@ export function quoteMediaRequest(request: MediaRequest, context?: unknown): Med
   }
 
   const config = getBillingConfig(context);
+  const kind = findMediaModel(list, price.model)!.pricing.kind;
+
+  if (kind !== 'image') {
+    return { model: price.model, kind, usd: price.usd, credits: creditsForRawCost(price.usd, config) };
+  }
+
+  const delivery = deliveryFor(request);
+
+  if (!delivery.cutout) {
+    return { model: price.model, kind, usd: price.usd, credits: creditsForRawCost(price.usd, config), delivery };
+  }
+
+  if (String(request.options.resolution ?? '').toUpperCase() === '4K') {
+    throw new MediaRefusedError(CUTOUT_MAX_RESOLUTION_NOTE);
+  }
+
+  const cutoutPrice = lookupMediaPrice(list, { model: CUTOUT_MODEL, options: {} });
+
+  /*
+   * Refuse, never silently degrade. Dropping the cut-out would deliver an OPAQUE image against a
+   * request for a transparent one — which is precisely the failure that shipped a logo with a
+   * checkerboard baked into it, and it would report success while doing so.
+   */
+  if (!cutoutPrice) {
+    throw new MediaRefusedError(
+      `Transparent images need the cut-out pass ("${CUTOUT_MODEL}"), which is not in the active ` +
+        'Marketplace price list, so it cannot be billed. Add that row in Settings → Admin → ' +
+        'Marketplace prices, or generate this image opaque (transparent: false).',
+    );
+  }
+
+  const usd = price.usd + cutoutPrice.usd;
 
   return {
     model: price.model,
-    kind: findMediaModel(list, price.model)!.pricing.kind,
-    usd: price.usd,
-    credits: creditsForRawCost(price.usd, config),
+    kind,
+    usd,
+    credits: creditsForRawCost(usd, config),
+    delivery,
+    cutoutUsd: cutoutPrice.usd,
   };
+}
+
+/** The delivery decision for an image request — one place, so quote/payload/path cannot disagree. */
+function deliveryFor(request: MediaRequest): ImageDelivery {
+  return resolveImageDelivery({
+    explicitFormat: request.options.outputFormat as string | undefined,
+    transparent: request.options.transparent as boolean | string | undefined,
+    fileName: (request as { fileName?: string }).fileName,
+    prompt: request.prompt,
+  });
 }
 
 /** Duration participates in variant matching too (kling-2.6 prices per 5s/10s video). */
@@ -142,7 +223,7 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
   const config = getBillingConfig(input.context);
   const ledger = getLedger(input.context);
   const id = `med_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const destPath = deriveDestPath(quote.kind, input, id);
+  const destPath = deriveDestPath(quote.kind, input, id, quote.delivery);
 
   /*
    * The FK anchor, before the debit — `credit_ledger.generation_id` references `generations(id)`
@@ -194,7 +275,7 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
     kieTaskId = await input.provider.create({
       endpoint: endpointFor(quote.model),
       model: quote.model,
-      payload: buildProviderPayload(quote.model, input),
+      payload: buildProviderPayload(quote.model, input, quote.delivery),
     });
   } catch (error) {
     // The task never started, so the money comes straight back and the anchor says failed.
@@ -228,12 +309,22 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
     credits: debited,
     status: 'pending',
     kieTaskId,
+
+    /*
+     * A cut-out task is born in stage 'render'. The poll path chains stage 2 when this is set — and
+     * it is stored rather than re-derived, so a price-list change mid-render can never make a task
+     * that was PAID for as transparent finish as an opaque one.
+     */
+    ...(quote.delivery?.cutout ? { cutout: true as const, stage: 'render' as const } : {}),
     createdAt: now,
     updatedAt: now,
   };
   await putMediaTask(input.objectStore, record);
 
-  logger.info(`Media task ${id} started: ${quote.model} → ${destPath} (${debited} credits, $${quote.usd})`);
+  logger.info(
+    `Media task ${id} started: ${quote.model}${quote.delivery?.cutout ? ' + cut-out' : ''} → ${destPath} ` +
+      `(${debited} credits, $${quote.usd})`,
+  );
 
   return { taskId: id, destPath, credits: debited, usd: quote.usd, model: quote.model, kind: quote.kind };
 }
@@ -296,6 +387,55 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
     const updated: MediaTaskRecord = { ...record, updatedAt: new Date().toISOString() };
 
     if (state.state === 'succeeded') {
+      /*
+       * STAGE 1 DONE, CUT-OUT STILL OWED. The render is opaque — handing it over now would deliver
+       * exactly the thing the user paid extra NOT to get, and would report success while doing it.
+       * So chain stage 2 and stay `pending`: the client is already polling, the credits are already
+       * debited, and nothing else in the pipeline needs to know there were two calls.
+       */
+      if (record.cutout && record.stage === 'render') {
+        try {
+          const cutoutTaskId = await input.provider.create({
+            endpoint: 'jobs',
+            model: CUTOUT_MODEL,
+            payload: { image: state.resultUrl },
+          });
+
+          updated.stage = 'cutout';
+          updated.renderUrl = state.resultUrl;
+          updated.kieTaskId = cutoutTaskId;
+          await putMediaTask(input.objectStore, updated);
+
+          logger.info(`Media task ${record.id}: render done, cut-out task ${cutoutTaskId} started`);
+
+          return updated;
+        } catch (error) {
+          /*
+           * The cut-out could not start. The render exists and cost us real money, but the USER
+           * asked for a transparent asset and is not getting one — that is a failed task, refunded
+           * in full, said out loud. Quietly delivering the opaque render instead is the silent
+           * degradation this pipeline was built to end.
+           */
+          const message = `the cut-out pass could not start: ${(error as Error).message}`;
+          logger.error(`Media task ${record.id} ${message}`);
+
+          updated.status = 'failed';
+          updated.error = message;
+
+          if (!record.refunded && record.credits > 0) {
+            await refundMediaTask(record.userId, record.id, record.credits, message, input.context);
+            updated.refunded = true;
+          }
+
+          await getGenerationStore(input.context)
+            .upsert({ id: record.id, userId: record.userId, model: record.model, status: 'failed' })
+            .catch(() => undefined);
+          await putMediaTask(input.objectStore, updated);
+
+          return updated;
+        }
+      }
+
       updated.status = 'succeeded';
       updated.resultUrl = state.resultUrl;
       await getGenerationStore(input.context)
@@ -367,7 +507,11 @@ function str(value: unknown, fallback: string): string {
  *
  * v1 is prompt-only (no reference-image uploads); the fields are additive when that lands.
  */
-export function buildProviderPayload(model: string, request: MediaRequest): Record<string, unknown> {
+export function buildProviderPayload(
+  model: string,
+  request: MediaRequest,
+  delivery?: ImageDelivery,
+): Record<string, unknown> {
   const o = request.options;
 
   if (VEO_MODELS.has(model)) {
@@ -421,15 +565,24 @@ export function buildProviderPayload(model: string, request: MediaRequest): Reco
   }
 
   // Image models (nano-banana-2 et al) — the jobs image shape.
+  const image = delivery ?? deliveryFor(request);
+
   return {
-    prompt: request.prompt,
+    /*
+     * A cut-out render gets a flat-backdrop directive appended. Without it the model paints its own
+     * idea of transparency — a checkerboard — into the artwork, which a background remover then has
+     * to guess about (this logo genuinely contains a checkered-flag ribbon).
+     */
+    prompt: image.cutout ? cutoutRenderPrompt(request.prompt) : request.prompt,
     image_input: [],
     aspect_ratio: str(o.aspectRatio, '16:9'),
     resolution: str(o.resolution, '2K'),
-    output_format: resolveImageOutputFormat(o.outputFormat as string | undefined, {
-      fileName: (request as { fileName?: string }).fileName,
-      prompt: request.prompt,
-    }),
+
+    /*
+     * `renderFormat`, NOT the final format: a cut-out renders as jpg (Recraft caps its input at 5MB,
+     * which a 2K PNG blows) and becomes a PNG in stage 2.
+     */
+    output_format: image.renderFormat,
   };
 }
 
@@ -441,14 +594,10 @@ export function deriveDestPath(
   kind: 'image' | 'video',
   request: MediaRequest & { fileName?: string },
   taskId: string,
+  delivery?: ImageDelivery,
 ): string {
-  const ext =
-    kind === 'video'
-      ? 'mp4'
-      : resolveImageOutputFormat(request.options.outputFormat as string | undefined, {
-          fileName: request.fileName,
-          prompt: request.prompt,
-        });
+  // `finalFormat` — what actually lands on disk after any cut-out pass, never what KIE rendered.
+  const ext = kind === 'video' ? 'mp4' : (delivery ?? deliveryFor(request)).finalFormat;
   const preferred = request.fileName?.replace(/\.[a-zA-Z0-9]+$/, '');
   const slug = (preferred || request.prompt)
     .toLowerCase()

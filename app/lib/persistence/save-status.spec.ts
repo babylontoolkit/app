@@ -27,9 +27,9 @@ describe('the badge — unlinked', () => {
     const view = describeSaveStatus({ repo: unlinked, unsavedWork: true, saveState: idle });
 
     expect(view.tone).toBe('warning');
-    expect(view.label).toBe('Not synced to GitHub');
+    expect(view.label).toBe('Not linked to GitHub');
     expect(view.action).toBe('save');
-    expect(view.actionLabel).toBe('Sync');
+    expect(view.actionLabel).toBe('Link to GitHub');
     expect(view.detail).not.toMatch(/only exists in this browser/i);
     expect(view.detail).toMatch(/recovery copy/i);
   });
@@ -53,7 +53,7 @@ describe('the badge — linked', () => {
     const view = describeSaveStatus({ repo: linked, unsavedWork: false, saveState: idle });
 
     expect(view.tone).toBe('neutral');
-    expect(view.label).toBe('Synced to GitHub');
+    expect(view.label).toBe('Linked to GitHub');
     expect(view.detail).toContain('space-racer');
   });
 
@@ -64,7 +64,7 @@ describe('the badge — linked', () => {
       saveState: idle,
     });
 
-    expect(view.label).toBe('Synced to GitLab');
+    expect(view.label).toBe('Linked to GitLab');
   });
 
   it('warns when there is work the repo does not have yet', () => {
@@ -189,10 +189,17 @@ describe('the badge — failure is loud', () => {
 
 describe('plain language (§4.5.4b)', () => {
   /**
-   * The rule is "Save" and "Saved to GitHub" — not a git tutorial. Someone who wanted to make a game
-   * should never have to learn what a commit is to find out whether their game still exists.
+   * Not a git tutorial. Someone who wanted to make a game should never have to learn what a
+   * fast-forward is to find out whether their game still exists.
+   *
+   * ⚠️ **`commit` is the ONE sanctioned exception, and only in `actionLabel`** (owner decision,
+   * 2026-07-23). It arrived with the removal of auto-push: the button is now the only thing that
+   * writes to the user's repository, and every gentler word for that — "Sync", "Save" — is what made
+   * people believe it was happening by itself. The exception is scoped to the button's text on
+   * purpose; the STATE the user reads (label, detail) stays in plain language, which is what the
+   * split below enforces. Widening this to `label`/`detail` needs the owner, not a passing test edit.
    */
-  const jargon = ['commit', 'push', 'pull', 'remote', 'HEAD', 'fast-forward', 'ref', 'origin', 'SHA'];
+  const jargon = ['push', 'pull', 'remote', 'HEAD', 'fast-forward', 'ref', 'origin', 'SHA'];
 
   const everyView = () => {
     const views = [];
@@ -219,6 +226,18 @@ describe('plain language (§4.5.4b)', () => {
       for (const word of jargon) {
         expect(`${view.label} ${view.detail} ${view.actionLabel}`.toLowerCase()).not.toContain(word.toLowerCase());
       }
+    }
+  });
+
+  it('keeps "commit" out of the STATE, however the button is labelled', () => {
+    /*
+     * The scoped half of the exception above. "Commit changes" is an instruction the user chose to
+     * follow; "you have 3 uncommitted commits" is a git tutorial nobody asked for. If a label or a
+     * detail sentence ever starts saying commit, this fails — which is the conversation to have with
+     * the owner, not a line to delete.
+     */
+    for (const view of everyView()) {
+      expect(`${view.label} ${view.detail}`.toLowerCase()).not.toContain('commit');
     }
   });
 
@@ -283,7 +302,7 @@ describe('the dashboard card badge', () => {
     const badge = describeProjectSaveBadge({});
 
     expect(badge.tone).toBe('warning');
-    expect(badge.label).toBe('Not synced to a repository');
+    expect(badge.label).toBe('Not linked to a repository');
   });
 
   it('names the repo on a saved project, quietly', () => {

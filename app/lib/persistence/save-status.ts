@@ -34,6 +34,27 @@
  * So the verb is "Sync", and the unlinked state no longer claims the work is about to be lost — it
  * says where the code lives and offers to move it somewhere the user owns. The tone stays amber
  * because that is still worth doing, not because anything is on fire.
+ *
+ * ## LINKED ≠ SYNCED (owner decision, 2026-07-23)
+ *
+ * Auto-push on checkpoint is GONE (`useChatHistory.ts`). Nothing writes to the user's repository
+ * unless they ask for it, so the vocabulary has to separate the two facts it used to merge:
+ *
+ *   - **Linked** — this project has a repository of yours. A permanent fact about the project.
+ *   - **Synced** — the code in that repository matches what is in front of you. A fact about *now*,
+ *     and one that only the user's own action can make true.
+ *
+ * The old copy said "Synced to GitHub" the moment a project was linked, which was true only because
+ * every checkpoint pushed behind the user's back. With that gone, the same string would be a claim
+ * about the repository's contents that nobody had checked — the exact "say saved when it is not"
+ * failure this file opens by warning about.
+ *
+ * ⚠️ The action is deliberately called **"Commit changes"** (owner decision), which is the one piece
+ * of git vocabulary allowed to reach the user. It buys precision the plain-language rule cannot: the
+ * button writes a specific set of changes to the repository at a moment of the user's choosing, and
+ * every softer word for that ("Sync", "Save") is what made people believe it happened by itself. The
+ * plain-language rule still binds every other string, and the jargon test still enforces it — see
+ * `save-status.spec.ts`, where the exception is scoped to `actionLabel` and nothing else.
  */
 
 import type { SaveState } from './save-queue';
@@ -154,12 +175,12 @@ export function describeSaveStatus(facts: SaveStatusFacts): SaveStatusView {
   if (!linked) {
     return {
       tone: 'warning',
-      label: 'Not synced to GitHub',
+      label: `Not linked to ${where}`,
       detail:
-        'We keep a recovery copy of this project. Sync it to your own GitHub account to own the code ' +
-        'and keep its history.',
+        `We keep a recovery copy of this project. Link it to your own ${where} account to own the ` +
+        'code and keep its history.',
       action: 'save',
-      actionLabel: 'Sync',
+      actionLabel: `Link to ${where}`,
     };
   }
 
@@ -169,21 +190,25 @@ export function describeSaveStatus(facts: SaveStatusFacts): SaveStatusView {
       label: 'Changes not synced',
       detail: name ? `You have changes that are not in ${name} yet.` : 'You have changes that are not synced yet.',
       action: 'save',
-      actionLabel: 'Sync',
+      actionLabel: 'Commit changes',
     };
   }
 
   /*
-   * Synced. Quiet on purpose — and the button stays available rather than disabled: a user who wants
-   * to press Sync on an already-synced project is reassuring themselves, and a disabled button answers
-   * that with nothing. Syncing again is a no-op push, which is cheap and honest.
+   * Linked, with nothing known to be outstanding. Quiet on purpose — and the button stays available
+   * rather than disabled: a user who wants to commit on an already-synced project is reassuring
+   * themselves, and a disabled button answers that with nothing. Committing again is a no-op push.
+   *
+   * ⚠️ It says LINKED, not "Synced". Nothing pushes automatically any more, so "synced" would be a
+   * claim about the repository's current contents that nothing verified — this state only means we
+   * have no *local* changes since the last commit.
    */
   return {
     tone: 'neutral',
-    label: `Synced to ${where}`,
+    label: `Linked to ${where}`,
     detail: name ? `In your repository, ${name}.` : `In your ${where} account.`,
     action: 'save',
-    actionLabel: 'Sync',
+    actionLabel: 'Commit changes',
   };
 }
 
@@ -214,8 +239,8 @@ export function describeProjectSaveBadge(project: {
   if (!project.linkedRepo) {
     return {
       tone: 'warning',
-      label: 'Not synced to a repository',
-      detail: 'This project has a recovery copy but no repository of your own. Open it and press Sync.',
+      label: 'Not linked to a repository',
+      detail: 'This project has a recovery copy but no repository of your own. Open it and link one.',
     };
   }
 

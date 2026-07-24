@@ -110,18 +110,29 @@ export function createMediaTools(ctx: MediaToolContext) {
         model: z.string().optional().describe('Image model. Default nano-banana-2.'),
         resolution: z.string().optional().describe('1K, 2K or 4K. Default 2K. 1K is cheaper; 4K costs more.'),
         aspect_ratio: z.string().optional().describe('e.g. 16:9, 1:1, 9:16, 4:3. Default 16:9.'),
+        transparent: z
+          .boolean()
+          .optional()
+          .describe(
+            'Set true when the art must sit OVER other content with nothing behind it — a logo or ' +
+              'wordmark over a hero, an emblem, a sprite, a cut-out character, a UI icon. The image is ' +
+              'then rendered and automatically cut out into a real RGBA PNG, which costs a couple of ' +
+              'extra credits. Leave unset/false for anything with its own background (heroes, ' +
+              'backdrops, textures, scenery, panels). NEVER ask for a transparent background in the ' +
+              'prompt text — the generator cannot make one and will paint a fake checkerboard instead; ' +
+              'this flag is the only thing that produces real transparency.',
+          ),
         output_format: z
           .string()
           .optional()
           .describe(
-            'png or jpg. Leave unset for photographic art (hero backgrounds, textures, scenery, panels) ' +
-              '— it defaults to "jpg", which is ~10× smaller than png for no visible difference and the ' +
-              'same price. Pass "png" when the image needs transparency (logos, emblems, sprites, ' +
-              'cut-out characters); a big photographic PNG is what bloats the project.',
+            'png or jpg. Normally leave unset — opaque art defaults to "jpg" (~10× smaller than png ' +
+              'for no visible difference at the same price) and transparent art is always delivered as ' +
+              'png. Use `transparent` to ask for transparency; this field only picks a container.',
           ),
         file_name: z.string().optional().describe('Preferred file name (without extension).'),
       }),
-      execute: async (args: CommonArgs & { resolution?: string; output_format?: string }) => {
+      execute: async (args: CommonArgs & { resolution?: string; output_format?: string; transparent?: boolean }) => {
         if (!args.prompt?.trim()) {
           return 'generate_image needs a "prompt" describing the image.';
         }
@@ -134,10 +145,13 @@ export function createMediaTools(ctx: MediaToolContext) {
             aspectRatio: args.aspect_ratio || '16:9',
 
             /*
-             * Included ONLY when the model set it; left unset, the service picks jpg for photographic
-             * art and png for transparency-needing art (`resolveImageOutputFormat`). Explicit wins.
+             * Both included ONLY when the model set them; left unset, `resolveImageDelivery` decides
+             * (jpg for ordinary art, render-then-cut-out for art whose name or prompt reads as a logo
+             * or sprite). A STATED `transparent: false` is honoured over those hints — that is why it
+             * is forwarded even when false.
              */
             ...(args.output_format ? { outputFormat: args.output_format } : {}),
+            ...(args.transparent !== undefined ? { transparent: args.transparent } : {}),
           },
           fileName: args.file_name,
         });

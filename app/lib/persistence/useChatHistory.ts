@@ -661,41 +661,35 @@ function summarizeRequest(messages: Message[]): string | undefined {
 }
 
 /**
- * Push this project to its repo, if it is linked and set to save itself (§4.5.4b).
+ * Refresh what we know about the project's repository after a checkpoint.
  *
- * Called after every checkpoint. Does nothing for an UNLINKED project — there is nowhere to push, and
- * that is not a failure, it is the normal state of a project the user has not saved yet. The nudges
- * are what address that; an error here would be nagging with an error dialog.
+ * 🔴 **THIS USED TO PUSH (removed by owner decision, 2026-07-23).** §4.5.4b's "auto-push on checkpoint
+ * defaults ON once linked" is RETIRED: a checkpoint fires after every generation, so a linked project
+ * was writing to the user's own repository on its own initiative, and the header said "Synced to
+ * GitHub" because it had just done it. Writing to somebody's repository is not a background chore —
+ * it is the one action in this product that leaves the platform and lands somewhere they own, under
+ * their name, visible to anyone they have shared it with. It needs a person to press a button.
+ *
+ * What is left is the READ: the link state still refreshes here, so the chip can go amber ("Changes
+ * not synced") the moment a generation produces work the repository does not have. That is the whole
+ * replacement for the automatic push — say it plainly and let the user decide.
+ *
+ * ⚠️ Do not "restore" this as an opt-in preference without the owner asking. `autoPush` survives as a
+ * stored field (§4.5.4b, migration 0006) and nothing reads it any more; a toggle that silently pushes
+ * is the same decision wearing a checkbox.
  */
-async function autoPush(pid: string): Promise<void> {
-  const status = repoStatus.get() ?? (await getRepoStatus(pid));
-  repoStatus.set(status);
-
-  if (!status.linked || status.autoPush === false) {
-    return;
-  }
-
-  const outcome = await saveQueueFor(pid).request();
-
-  if (outcome?.divergence) {
-    /*
-     * Someone committed to the repo from elsewhere. Never merge (§4.13) — raise the choice and let the
-     * user decide. The work is still safe in this browser meanwhile.
-     */
-    mountDivergence.set({ projectId: pid, remoteHead: '' });
-  }
+async function refreshRepoStatus(pid: string): Promise<void> {
+  repoStatus.set(repoStatus.get() ?? (await getRepoStatus(pid)));
 }
 
 /**
- * Save, because the user pressed Save (§4.5.4b).
+ * Sync, because the user pressed Commit changes (§4.5.4b).
  *
- * The same queue and the same route as auto-push — deliberately. A manual Save that took its own path
- * could race the automatic one and produce the spurious divergence the queue exists to prevent, and it
- * would need its own copy of the "did it land?" logic, which is the half that must never be wrong.
+ * The ONLY path that writes to the user's repository. It goes through the save queue, which
+ * coalesces concurrent requests and owns the "did it land?" logic — the half that must never be wrong.
  *
- * The difference from `autoPush` is only in what it does about being UNLINKED: auto-push does nothing
- * (that is the normal state of a project nobody has saved yet), whereas pressing Save is the user
- * asking for exactly the thing that makes it linked, so the route creates the repository.
+ * It handles being UNLINKED too: pressing the button on an unlinked project is the user asking for
+ * exactly the thing that makes it linked, so the route creates the repository.
  *
  * Never throws. The outcome is reported through `saveState`, which the header badge reads.
  */
@@ -1455,14 +1449,11 @@ ${value.content}
       logger.info(`Checkpointed project ${pid} at message ${messageId}`);
 
       /*
-       * Auto-push (§4.5.4b), AFTER the local checkpoint is safely written and outside its try/catch.
-       *
-       * The ordering is deliberate: the local checkpoint is the only copy of this work, so it is
-       * written first and a push failure can never cost it. `autoPush` reports its own failures
-       * through `saveState` — loudly, per §4.5.4b — so it is not wrapped in the checkpoint's quiet
-       * error handling, which would swallow exactly the message the user needs.
+       * Refresh the link state so the chip can say "Changes not synced" (§4.5.4b). This used to PUSH;
+       * it does not any more (owner decision — see `refreshRepoStatus`). Nothing reaches the user's
+       * repository without them pressing Commit changes.
        */
-      void autoPush(pid);
+      void refreshRepoStatus(pid);
     } catch (error) {
       /*
        * Reset the guard so the next turn retries.

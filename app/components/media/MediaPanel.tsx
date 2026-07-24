@@ -24,7 +24,7 @@ interface FieldChoice {
 }
 
 interface FieldSpec {
-  key: 'resolution' | 'mode' | 'sound' | 'duration' | 'aspectRatio' | 'outputFormat';
+  key: 'resolution' | 'mode' | 'sound' | 'duration' | 'aspectRatio' | 'outputFormat' | 'transparent';
   label: string;
   choices: FieldChoice[];
   default: string;
@@ -76,23 +76,23 @@ const IMAGE_MODELS: ModelSpec[] = [
       aspect(),
 
       /*
-       * JPG by default (§4.16). These files ship in the played game, and a 2K photographic PNG is
-       * ~10MB where the same image as JPG is under 1MB — same price, no visible difference. A live
-       * creation shipped four 2K PNGs totalling ~30MB into one project before this was noticed.
+       * BACKGROUND, not FORMAT (§4.16). The dropdown this replaced offered "PNG — transparency",
+       * which was a promise the pipeline could not keep: no image model on KIE emits an alpha
+       * channel, so picking PNG bought a bigger file containing exactly the same opaque picture (and
+       * often a checkerboard the model painted to depict the transparency it could not produce).
        *
-       * PNG stays one click away and says WHY you would pick it: it is the only format KIE offers
-       * that carries alpha (they accept `png` and `jpg` only — webp is an input format for them, not
-       * an output), so it is the right answer for logos, emblems and cut-out characters and the wrong
-       * one for everything else.
+       * Transparency is a second stage now (`recraft/remove-background`), so the question the user is
+       * actually asked is the one that decides the pipeline: does this art sit over other content?
+       * The quote below prices both stages, so the extra credits are on the button before Generate.
        */
       {
-        key: 'outputFormat',
-        label: 'Format',
+        key: 'transparent',
+        label: 'Background',
         choices: [
-          { value: 'jpg', label: 'JPG — smaller' },
-          { value: 'png', label: 'PNG — transparency' },
+          { value: 'false', label: 'Opaque — JPG' },
+          { value: 'true', label: 'Transparent — PNG' },
         ],
-        default: 'jpg',
+        default: 'false',
       },
     ],
   },
@@ -182,8 +182,9 @@ function buildRequest(kind: 'image' | 'video', model: ModelSpec, values: Record<
 
     if (field.key === 'duration') {
       durationSeconds = Number(value);
-    } else if (field.key === 'sound') {
-      options.sound = value === 'true';
+    } else if (field.key === 'sound' || field.key === 'transparent') {
+      // Booleans on the wire, never the string a <select> hands back (the service reads both, the price lookup does not).
+      options[field.key] = value === 'true';
     } else {
       options[field.key] = value;
     }

@@ -115,7 +115,7 @@ function SaveNudges() {
           onClick={() => void requestSave(activeProjectId)}
           className="self-start px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white"
         >
-          Save it now
+          Link it to GitHub now
         </button>
       </div>,
 
@@ -148,7 +148,7 @@ function SaveNudges() {
           onClick={() => void requestSave(activeProjectId)}
           className="px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white shrink-0"
         >
-          Save
+          Link to GitHub
         </button>
         <button
           onClick={dismiss}
