@@ -13,6 +13,9 @@ interface HistoryItemProps {
   selectionMode?: boolean;
   isSelected?: boolean;
   onToggleSelection?: (id: string) => void;
+
+  /** Re-fetch the sidebar list after a rename, so the row shows the saved title, not stale state. */
+  onRenamed?: () => void;
 }
 
 export function HistoryItem({
@@ -22,15 +25,28 @@ export function HistoryItem({
   selectionMode = false,
   isSelected = false,
   onToggleSelection,
+  onRenamed,
 }: HistoryItemProps) {
   const { id: urlId } = useParams();
   const isActiveChat = urlId === item.urlId;
+
+  /*
+   * The rename target rides on the ITEM, exactly like delete (§4.5.6): reading it back out of
+   * IndexedDB finds nothing for a chat listed from another device, and the rename would silently
+   * stay local — the "renames don't save" bug.
+   */
+  const serverTarget =
+    item.metadata?.projectId && item.metadata?.serverChatId
+      ? { projectId: item.metadata.projectId, serverChatId: item.metadata.serverChatId }
+      : undefined;
 
   const { editing, handleChange, handleBlur, handleSubmit, handleKeyDown, currentDescription, toggleEditMode } =
     useEditChatDescription({
       initialDescription: item.description,
       customChatId: item.id,
       syncWithGlobalStore: isActiveChat,
+      serverTarget,
+      onRenamed,
     });
 
   const handleItemClick = useCallback(

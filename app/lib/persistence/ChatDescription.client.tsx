@@ -3,17 +3,28 @@ import { useStore } from '@nanostores/react';
 import { TooltipProvider } from '@radix-ui/react-tooltip';
 import WithTooltip from '~/components/ui/Tooltip';
 import { useEditChatDescription } from '~/lib/hooks';
-import { description as descriptionStore, projectId as projectIdStore } from '~/lib/persistence';
+import { chatMetadata, description as descriptionStore, projectId as projectIdStore } from '~/lib/persistence';
 import { getProject } from '~/lib/persistence/projects';
 
 export function ChatDescription() {
   const initialDescription = useStore(descriptionStore)!;
   const activeProjectId = useStore(projectIdStore);
 
+  /*
+   * The active chat's server home (§4.5.6) — the rename must land there, or the sidebar (which
+   * renders the SERVER's list) reverts it on the next refresh and other devices never see it.
+   */
+  const metadata = useStore(chatMetadata);
+  const serverTarget =
+    metadata?.projectId && metadata?.serverChatId
+      ? { projectId: metadata.projectId, serverChatId: metadata.serverChatId }
+      : undefined;
+
   const { editing, handleChange, handleBlur, handleSubmit, handleKeyDown, currentDescription, toggleEditMode } =
     useEditChatDescription({
       initialDescription,
       syncWithGlobalStore: true,
+      serverTarget,
     });
 
   /*

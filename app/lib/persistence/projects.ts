@@ -480,3 +480,17 @@ export async function loadMessages<T = unknown>(projectId: string, serverChatId:
 export async function deleteChat(projectId: string, serverChatId: string): Promise<void> {
   await api<{ ok: true }>(`/api/projects/${projectId}/messages/${serverChatId}`, { method: 'DELETE' });
 }
+
+/**
+ * Rename one conversation ON THE SERVER (§4.5.6).
+ *
+ * The sidebar is the server's chat list, so this is the write that makes a rename real: a rename that
+ * only touched IndexedDB was overwritten on the next list refresh (the server title wins in
+ * `mergeChatList`) and never existed on any other device — which read as "renames don't save".
+ */
+export async function renameServerChat(projectId: string, serverChatId: string, title: string): Promise<void> {
+  await api<{ ok: true }>(`/api/projects/${projectId}/messages/${serverChatId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
+  });
+}

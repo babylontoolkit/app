@@ -1180,8 +1180,7 @@ export const ChatImpl = memo(
 
         reload(reloadOptions);
 
-        setInput('');
-        Cookies.remove(PROMPT_COOKIE_KEY);
+        clearDraftPrompt();
         setUploadedFiles([]);
         setImageDataList([]);
         setVaguePrompt(null);
@@ -1254,6 +1253,31 @@ export const ChatImpl = memo(
       await startProject({ entry, prompt: seed?.prompt });
     };
 
+    /**
+     * Debounced function to cache the prompt in cookies.
+     * Caches the trimmed value of the textarea input after a delay to optimize performance.
+     */
+    const debouncedCachePrompt = useCallback(
+      debounce((event: React.ChangeEvent<HTMLTextAreaElement>) => {
+        const trimmedValue = event.target.value.trim();
+        Cookies.set(PROMPT_COOKIE_KEY, trimmedValue, { expires: 30 });
+      }, 1000),
+      [],
+    );
+
+    /**
+     * Forget the draft prompt EVERYWHERE it lives: the pending debounced write (which would
+     * otherwise fire up to 1s AFTER this and resurrect the text), the cookie that seeds
+     * `initialInput` on the next mount, and the controlled input itself. Observed live: `/clear`
+     * left "/clear" sitting in the chat box with the slash menu open on the freshly cleared chat —
+     * the SPA remount read the cookie straight back.
+     */
+    const clearDraftPrompt = () => {
+      debouncedCachePrompt.cancel();
+      Cookies.remove(PROMPT_COOKIE_KEY);
+      setInput('');
+    };
+
     const sendMessage = async (_event: React.UIEvent, messageInput?: string) => {
       const messageContent = messageInput || input;
 
@@ -1276,7 +1300,7 @@ export const ChatImpl = memo(
       const clientCommand = parseClientCommand(messageContent);
 
       if (clientCommand?.kind === 'clear') {
-        setInput('');
+        clearDraftPrompt();
         resetContextStats();
 
         if (activeProjectId) {
@@ -1294,7 +1318,7 @@ export const ChatImpl = memo(
        * renders the stats the server annotated onto the last generation. Nothing is posted.
        */
       if (clientCommand?.kind === 'context') {
-        setInput('');
+        clearDraftPrompt();
         contextPanelOpen.set(true);
 
         return;
@@ -1374,8 +1398,7 @@ export const ChatImpl = memo(
         ]);
         reload(attachments ? { experimental_attachments: attachments } : undefined);
         setFakeLoading(false);
-        setInput('');
-        Cookies.remove(PROMPT_COOKIE_KEY);
+        clearDraftPrompt();
 
         setUploadedFiles([]);
         setImageDataList([]);
@@ -1428,8 +1451,7 @@ export const ChatImpl = memo(
         );
       }
 
-      setInput('');
-      Cookies.remove(PROMPT_COOKIE_KEY);
+      clearDraftPrompt();
 
       setUploadedFiles([]);
       setImageDataList([]);
@@ -1446,18 +1468,6 @@ export const ChatImpl = memo(
     const onTextareaChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
       handleInputChange(event);
     };
-
-    /**
-     * Debounced function to cache the prompt in cookies.
-     * Caches the trimmed value of the textarea input after a delay to optimize performance.
-     */
-    const debouncedCachePrompt = useCallback(
-      debounce((event: React.ChangeEvent<HTMLTextAreaElement>) => {
-        const trimmedValue = event.target.value.trim();
-        Cookies.set(PROMPT_COOKIE_KEY, trimmedValue, { expires: 30 });
-      }, 1000),
-      [],
-    );
 
     useEffect(() => {
       const storedApiKeys = Cookies.get('apiKeys');

@@ -77,6 +77,37 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       return json({ ok: true });
     }
 
+    /*
+     * PATCH — rename only (§4.5.6). This exists because the sidebar is the SERVER's chat list: a
+     * rename written only to IndexedDB is overwritten the moment the list refreshes (the server
+     * row's title wins in `mergeChatList`), and it never existed on any other device. `putChat`
+     * writes the object first and the index second, so the title stays one fact with one home.
+     */
+    if (request.method === 'PATCH') {
+      const body = await request.json<{ title?: string }>();
+      const title = typeof body.title === 'string' ? body.title.trim().slice(0, 120) : '';
+
+      if (!title) {
+        return badRequest('Expected a title.', 400);
+      }
+
+      const chat = await getChatOrLegacy(project.id, chatId, context);
+
+      if (!chat) {
+        return badRequest('This conversation does not exist.', 404);
+      }
+
+      await putChat(
+        project.id,
+
+        // `serverChatId: chatId` also adopts a legacy chat under its real id, exactly like a save.
+        { ...chat, serverChatId: chatId, title, updatedAt: new Date().toISOString() },
+        context,
+      );
+
+      return json({ ok: true });
+    }
+
     const body = await request.json<{ messages?: unknown[]; title?: string; createdAt?: string }>();
 
     if (!Array.isArray(body.messages)) {

@@ -8,11 +8,23 @@ import {
   getMessages,
   updateChatDescription,
 } from '~/lib/persistence';
+import { renameServerChat } from '~/lib/persistence/projects';
 
 interface EditChatDescriptionOptions {
   initialDescription?: string;
   customChatId?: string;
   syncWithGlobalStore?: boolean;
+
+  /**
+   * Where this chat lives on the SERVER (§4.5.6). When present, a rename is written there FIRST —
+   * the sidebar is the server's chat list, so a rename that only touched IndexedDB was overwritten
+   * on the next refresh (the server title wins in `mergeChatList`) and never reached other devices.
+   * Absent for a local-only chat (never saved), where IndexedDB really is the whole truth.
+   */
+  serverTarget?: { projectId: string; serverChatId: string };
+
+  /** Called after a successful rename — the sidebar uses it to re-fetch the list it renders. */
+  onRenamed?: () => void;
 }
 
 type EditChatDescriptionHook = {
@@ -43,6 +55,8 @@ export function useEditChatDescription({
   initialDescription = descriptionStore.get()!,
   customChatId,
   syncWithGlobalStore,
+  serverTarget,
+  onRenamed,
 }: EditChatDescriptionOptions): EditChatDescriptionHook {
   const chatIdFromStore = useStore(chatIdStore);
   const [editing, setEditing] = useState(false);
@@ -118,30 +132,56 @@ export function useEditChatDescription({
       }
 
       try {
-        if (!db) {
-          toast.error('Chat persistence is not available');
-          return;
+        /*
+         * A chat with no server home is local-only, and the old requirements stand: without
+         * IndexedDB there is nowhere at all to write the rename.
+         */
+        if (!serverTarget) {
+          if (!db) {
+            toast.error('Chat persistence is not available');
+            return;
+          }
+
+          if (!chatId) {
+            toast.error('Chat Id is not available');
+            return;
+          }
         }
 
-        if (!chatId) {
-          toast.error('Chat Id is not available');
-          return;
+        const title = currentDescription.trim();
+
+        // The server FIRST — it is the copy the sidebar renders and every other device sees.
+        if (serverTarget) {
+          await renameServerChat(serverTarget.projectId, serverTarget.serverChatId, title);
         }
 
-        await updateChatDescription(db, chatId, currentDescription);
+        /*
+         * The local mirror, best-effort once the server has the truth: a chat from another device
+         * has no IndexedDB record here, and that must not fail a rename the server accepted.
+         */
+        if (db && chatId) {
+          try {
+            await updateChatDescription(db, chatId, title);
+          } catch (error) {
+            if (!serverTarget) {
+              throw error;
+            }
+          }
+        }
 
         if (syncWithGlobalStore) {
-          descriptionStore.set(currentDescription);
+          descriptionStore.set(title);
         }
 
-        toast.success('Chat description updated successfully');
+        toast.success('Chat renamed');
+        onRenamed?.();
       } catch (error) {
-        toast.error('Failed to update chat description: ' + (error as Error).message);
+        toast.error('Failed to rename chat: ' + (error as Error).message);
       }
 
       toggleEditMode();
     },
-    [currentDescription, db, chatId, initialDescription, customChatId],
+    [currentDescription, db, chatId, initialDescription, customChatId, serverTarget, onRenamed, syncWithGlobalStore],
   );
 
   const handleKeyDown = useCallback(

@@ -244,3 +244,52 @@ describe('deleting one chat', () => {
     expect((await writeRoute(mine.id, CHAT_A, {}, 'DELETE')).status).toBe(200);
   });
 });
+
+/**
+ * Rename (PATCH) — §4.5.6. The sidebar renders the SERVER's chat list, so this write is what makes a
+ * rename real: without it the rename lived only in one browser's IndexedDB and was overwritten on
+ * the next list refresh, which the owner reported as "chat renames are not sticking".
+ */
+describe('renaming one chat', () => {
+  it('renames it in the object AND the listing, and leaves the messages alone', async () => {
+    await seed(mine.id, CHAT_A);
+
+    const response = await writeRoute(mine.id, CHAT_A, { title: 'Nitro sprint ideas' }, 'PATCH');
+    expect(response.status).toBe(200);
+
+    // The object (the truth) carries the new title, with the conversation untouched.
+    const chat = await getChat(mine.id, CHAT_A);
+    expect(chat?.title).toBe('Nitro sprint ideas');
+    expect(chat?.messages).toEqual([{ role: 'user', content: 'hi' }]);
+
+    // The LISTING shows it too — the index row is what the sidebar actually renders.
+    const listed = await listChats(mine.id);
+    expect(listed.find((row) => row.serverChatId === CHAT_A)?.title).toBe('Nitro sprint ideas');
+  });
+
+  it('404s for a chat that does not exist', async () => {
+    expect((await writeRoute(mine.id, CHAT_A, { title: 'Ghost' }, 'PATCH')).status).toBe(404);
+  });
+
+  it('404s for someone else’s project and renames nothing', async () => {
+    await seed(theirs.id, CHAT_A);
+
+    expect((await writeRoute(theirs.id, CHAT_A, { title: 'Hijacked' }, 'PATCH')).status).toBe(404);
+    expect((await getChat(theirs.id, CHAT_A))?.title).toBe('A chat');
+  });
+
+  it('refuses an empty or missing title', async () => {
+    await seed(mine.id, CHAT_A);
+
+    expect((await writeRoute(mine.id, CHAT_A, { title: '   ' }, 'PATCH')).status).toBe(400);
+    expect((await writeRoute(mine.id, CHAT_A, {}, 'PATCH')).status).toBe(400);
+    expect((await getChat(mine.id, CHAT_A))?.title).toBe('A chat');
+  });
+
+  it('caps a runaway title at 120 characters', async () => {
+    await seed(mine.id, CHAT_A);
+
+    expect((await writeRoute(mine.id, CHAT_A, { title: 'x'.repeat(500) }, 'PATCH')).status).toBe(200);
+    expect((await getChat(mine.id, CHAT_A))?.title).toHaveLength(120);
+  });
+});

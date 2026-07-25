@@ -573,6 +573,7 @@ export const Menu = () => {
                           selectionMode={selectionMode}
                           isSelected={selectedItems.includes(item.id)}
                           onToggleSelection={toggleItemSelection}
+                          onRenamed={loadEntries}
                         />
                       ))}
                     </div>
