@@ -18,6 +18,7 @@ import { claimProject } from '~/lib/.server/agent/inflight';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
 import { ProtocolTagStreamFilter } from '~/lib/.server/agent/protocol-strip';
+import { withGenerationHeartbeat } from '~/lib/.server/agent/heartbeat';
 import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
 import type { FileMap } from '~/lib/.server/llm/constants';
@@ -281,14 +282,21 @@ async function streamGeneration(
    * actions. The mark rides into IndexedDB with the message, so a reload cannot replay it either.
    */
   if (generation.discussMode) {
-    stream.writeMessageAnnotation(NO_REPLAY);
-
     /*
-     * Also tag it as a plan-mode message (§4.2.9) — distinct from the restore path that ALSO writes
-     * NO_REPLAY — so the client can offer "Build & Apply" on a plan turn that proposed a write, and
-     * only there. See `PLAN_MODE` in `~/types/message-marks`.
+     * Tag it as a plan-mode message (§4.2.9) — distinct from the restore path that ALSO writes
+     * NO_REPLAY — so the client can offer "Build & Apply" on a plan turn that proposed a write (and
+     * route the turn to the plan parser, whose `_specs/` door is what lets bt-spec/bt-plan write
+     * their artifacts). See `PLAN_MODE` in `~/types/message-marks`.
+     *
+     * 🔴 PLAN_MODE is written BEFORE NO_REPLAY, deliberately. They are separate stream parts, and a
+     * client render can commit between them — a frame carrying NO_REPLAY without PLAN_MODE is
+     * indistinguishable from a restored build message, and the client's sticky parser routing froze
+     * a live plan turn onto the transcript parser off exactly that frame (observed 2026-07-24: the
+     * artifact said "Spec written" while the file 404'd). In this order the ambiguous state cannot
+     * exist on the wire; the client additionally refuses to freeze a route until text arrives.
      */
     stream.writeMessageAnnotation(PLAN_MODE);
+    stream.writeMessageAnnotation(NO_REPLAY);
   }
 
   const shellFilter = new ShellActionStreamFilter();
@@ -309,7 +317,21 @@ async function streamGeneration(
     }
   };
 
-  for await (const chunk of generation.textStream) {
+  /*
+   * Liveness heartbeat (§4.2a). A thinking model's stream is legitimately silent for MINUTES —
+   * KIE buffers the whole reasoning window and (measured 2026-07-24) currently returns EVERY
+   * model's thinking text empty, so during a long think there is no event to render at all. While
+   * the drain is quiet, `withGenerationHeartbeat` writes `agent-status` data parts on a timer:
+   * elapsed time + phase, proving the pipe alive end to end. Data channel only — never `text`
+   * (artifact parser), never `reasoning` (`g:`), never the model's context. The moment real
+   * content streams (including real thinking text, when KIE fixes their adapter), the quiet clock
+   * resets and the heartbeat goes silent on its own.
+   */
+  const heartbeatSource = withGenerationHeartbeat(generation.textStream, generation.generationId, (status) =>
+    stream.writeData(status),
+  );
+
+  for await (const chunk of heartbeatSource) {
     if (chunk.type === 'text') {
       forwardText(shellFilter.push(chunk.value));
     } else {

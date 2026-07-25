@@ -43,6 +43,7 @@ vi.mock('~/lib/stores/workbench', () => ({
 }));
 
 const { useMessageParser, NO_REPLAY } = await import('./useMessageParser');
+const { PLAN_MODE } = await import('~/types/message-marks');
 
 /** A real assistant turn: one artifact, one file write. The shape every generation produces. */
 const artifactMessage = (id: string, annotations?: Message['annotations']): Message =>
@@ -137,6 +138,109 @@ describe('a restored transcript writes nothing', () => {
 
     expect(runAction).not.toHaveBeenCalled();
     expect(addCompletedAction).toHaveBeenCalled();
+  });
+});
+
+describe('plan mode writes ONLY its planning artifacts (§4.2.9)', () => {
+  /**
+   * A realistic bt-spec turn: the spec file (sanctioned), a source file (a disobedient write the
+   * wall must still catch), and a shell command (never run in plan mode).
+   */
+  const planTurn = (id: string, annotations: Message['annotations']): Message =>
+    ({
+      id,
+      role: 'assistant',
+      annotations,
+      content: [
+        `<boltArtifact id="spec" title="Racing Spec">`,
+        `<boltAction type="file" filePath="_specs/racing_spec.md"># Racing Spec</boltAction>`,
+        `<boltAction type="file" filePath="src/scripts/RacerMode.ts">export class Hacked {}</boltAction>`,
+        `<boltAction type="shell">npm install something</boltAction>`,
+        `</boltArtifact>`,
+      ].join('\n'),
+    }) as Message;
+
+  const ranFilePaths = () => runAction.mock.calls.map((call) => call[0]?.action?.filePath).filter(Boolean);
+
+  it('a LIVE plan turn writes the _specs artifact — the bt-spec/bt-plan bypass', () => {
+    const { result } = renderHook(() => useMessageParser());
+    act(() => result.current.parseMessages([planTurn('plan-live-1', [NO_REPLAY, PLAN_MODE])], true));
+
+    expect(ranFilePaths()).toContain('_specs/racing_spec.md');
+  });
+
+  it('the SAME live plan turn still cannot touch a project file or run a shell command', () => {
+    const { result } = renderHook(() => useMessageParser());
+    act(() => result.current.parseMessages([planTurn('plan-live-2', [NO_REPLAY, PLAN_MODE])], true));
+
+    expect(ranFilePaths()).not.toContain('src/scripts/RacerMode.ts');
+
+    // The shell action registered as display-only, never executed.
+    const ranTypes = runAction.mock.calls.map((call) => call[0]?.action?.type);
+    expect(ranTypes).not.toContain('shell');
+    expect(addCompletedAction).toHaveBeenCalled();
+  });
+
+  /**
+   * 🔴 The critical control: a RESTORED plan turn writes NOTHING — not even its _specs file. The
+   * user may have hand-edited the spec since; replaying the historical body over it is the
+   * §4.5.4b stale-replay bug wearing plan clothes.
+   */
+  it('a restored plan turn never writes, _specs included', () => {
+    parse([planTurn('plan-restored-1', [NO_REPLAY, PLAN_MODE])]);
+
+    expect(runAction).not.toHaveBeenCalled();
+    expect(addCompletedAction).toHaveBeenCalled();
+  });
+
+  it('a plan message that is not the streaming message stays inert even while loading', () => {
+    // An old plan turn on screen while a NEW build generation streams below it.
+    const { result } = renderHook(() => useMessageParser());
+    act(() =>
+      result.current.parseMessages(
+        [planTurn('plan-old-1', [NO_REPLAY, PLAN_MODE]), artifactMessage('build-new-1')],
+        true,
+      ),
+    );
+
+    expect(ranFilePaths()).not.toContain('_specs/racing_spec.md');
+    expect(ranFilePaths()).toContain('src/scripts/RacerMode.ts'); // the live build message still applies
+  });
+
+  /**
+   * 🔴 The live failure of 2026-07-24, reproduced: the marks arrive as SEPARATE stream parts before
+   * any text, and the 50ms parse sampler can catch the frame where the message carries `NO_REPLAY`
+   * but not yet `PLAN_MODE`. Freezing the route off that frame recorded the live plan turn as a
+   * restored transcript — the artifact bubble said "Spec written" while the file 404'd on the real
+   * filesystem. A route may only freeze once text exists.
+   */
+  it('does not freeze the route on a marks-only frame — the streaming annotation race', () => {
+    const { result } = renderHook(() => useMessageParser());
+
+    // Frame 1: the sampler catches the message annotated but before PLAN_MODE and before any text.
+    const early = { ...planTurn('plan-race-1', [NO_REPLAY]), content: '' } as Message;
+    act(() => result.current.parseMessages([early], true));
+
+    // Frame 2: all marks and the artifact text have arrived.
+    act(() => result.current.parseMessages([planTurn('plan-race-1', [NO_REPLAY, PLAN_MODE])], true));
+
+    expect(ranFilePaths()).toContain('_specs/racing_spec.md');
+    expect(ranFilePaths()).not.toContain('src/scripts/RacerMode.ts');
+  });
+
+  it('routing is sticky: the finished plan turn does not re-run its write on the next parse pass', () => {
+    const message = planTurn('plan-sticky-1', [NO_REPLAY, PLAN_MODE]);
+    const { result } = renderHook(() => useMessageParser());
+
+    act(() => result.current.parseMessages([message], true));
+
+    const runsAfterLive = runAction.mock.calls.length;
+    expect(ranFilePaths()).toContain('_specs/racing_spec.md');
+
+    // The generation ends; the same message is parsed again with isLoading false.
+    act(() => result.current.parseMessages([message], false));
+
+    expect(runAction.mock.calls.length).toBe(runsAfterLive);
   });
 });
 

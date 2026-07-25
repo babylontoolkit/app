@@ -21,6 +21,8 @@
  * full creation context was assembled and billed), and never emitting it leaves the toggle inert,
  * quietly billing artifact-sized output for planning questions.
  */
+import { PLAN_ARTIFACTS_DIR } from '~/lib/chat/plan-artifacts';
+
 export interface DiscussNoteInput {
   chatMode?: 'discuss' | 'build';
 
@@ -41,6 +43,12 @@ export function discussModeNote(input: DiscussNoteInput): string | null {
     '',
     '- Respond in plain prose (markdown is fine). Do NOT emit `<boltArtifact>` or `<boltAction>` tags,',
     '  do NOT write or edit any files, and do NOT run shell commands or start media generations.',
+    `- ONE exception — planning artifacts: files inside the \`${PLAN_ARTIFACTS_DIR}/\` folder (e.g.`,
+    `  \`${PLAN_ARTIFACTS_DIR}/<feature>_spec.md\`, \`${PLAN_ARTIFACTS_DIR}/<feature>_plan.md\`) MAY be`,
+    '  written with normal `<boltArtifact>`/`<boltAction type="file">` markup, and those writes ARE',
+    '  applied. Use this when a skill (bt-spec, bt-plan) or the user asks you to record a spec or plan',
+    '  as a file. Writes to any other path will render as an unapplied proposal — never claim a file',
+    `  outside \`${PLAN_ARTIFACTS_DIR}/\` was changed on a plan turn.`,
     '- You may reference project files freely and quote short excerpts to ground the discussion.',
     '- If concrete changes come out of the discussion, END with a short numbered summary of the',
     '  proposed steps and tell the user to switch back to Build mode (or just ask you to build it)',

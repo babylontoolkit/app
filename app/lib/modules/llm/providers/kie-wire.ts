@@ -37,6 +37,31 @@ export const KIE_DEFAULT_BASE_URL = 'https://api.kie.ai/claude/v1';
  * | claude-sonnet-4-5 | 211, 215, 230 ✅   | 0, 0, 0   |
  * | claude-fable-5    | 224, 223, err ⚠️   | 0, 0, 0   |
  * | claude-opus-4-8   | 0, 0, 0 ❌         | 0, 0, 0   |
+ *
+ * 🔴 RE-MEASURED 2026-07-24 — KIE HAS REGRESSED ADAPTER-WIDE. The table above is HISTORY, not the
+ * current state. With the exact request shape this file sends (`thinking: adaptive/summarized` +
+ * `thinkingFlag: true`), thinking-text chars today:
+ *
+ * | model (via KIE)   | thinking tokens billed | thinking text |
+ * |-------------------|------------------------|---------------|
+ * | claude-opus-4-8   | 103 / 254              | 0 ❌          |
+ * | claude-opus-4-7   | 80                     | 0 ❌          |
+ * | claude-fable-5    | 56, then 2,980 forced  | 0 ❌ (was 224/223 on 07-17) |
+ * | claude-opus-4-8 via api.anthropic.com (CONTROL) | 121 | 209 ✅ streamed live during the think |
+ *
+ * The control run pins the fault on KIE's adapter, not our request shape: the same body against
+ * Anthropic directly streams summarized thinking DURING the think. KIE also still BILLS the
+ * thinking tokens (`output_tokens_details.thinking_tokens` accrues) while returning the text
+ * empty — the exact billed-but-invisible pathology `thinkingFlag` exists to prevent. On the wire,
+ * KIE's silence is total: `message_start` at ~2s, then nothing but a single ping until the (empty)
+ * thinking block and the first text arrive TOGETHER at the end of the think — so a creation-sized
+ * think is minutes of dead air. Two consequences already acted on:
+ *   1. The UX no longer depends on thinking text existing — the §4.2a liveness heartbeat
+ *      (`agent/heartbeat.ts`) covers any silent stream, and stands down by itself when real
+ *      reasoning returns.
+ *   2. Reported to KIE — see `KIE_BUG_REPORT.md` (repo root) for the send-ready report. When they
+ *      fix it, thinking text flows through the existing reasoning pipe with NO code change here;
+ *      re-run the trials and update this table.
  */
 export function kieFetch(baseFetch: typeof fetch = fetch): typeof fetch {
   return async (input, init) => {
@@ -79,6 +104,12 @@ export function kieFetch(baseFetch: typeof fetch = fetch): typeof fetch {
  *   1. KIE ships 4-8 in their adapter — it works on every model they document, so this is a gap, not a
  *      limitation. Retest with `thinkingFlag` and this comment simply goes away.
  *   2. Move `PLATFORM_MODEL` to `claude-opus-4-6`, which DOES return thinking text on KIE today.
+ *
+ * 🔴 AS OF 2026-07-24 EXIT 2 IS DEAD AND THE TRADE IS MOOT: KIE's adapter regressed to returning
+ * EMPTY thinking text for EVERY model measured (fable-5 went 224 → 0; 4-7 is 0; see the re-measure
+ * table on `kieFetch` above, with an api.anthropic.com control proving our request shape correct).
+ * Switching models within KIE currently buys nothing — the visible-thinking UX is carried by the
+ * §4.2a liveness heartbeat (`agent/heartbeat.ts`) until KIE fixes their side (`KIE_BUG_REPORT.md`).
  *
  * 🔴 Exit 2 is NOT a config change — 4-6 is deliberately absent from this list. `ratesFor` falls back to
  * the PLATFORM model's rates for a model it does not know, so listing 4-6 without a `KIE_MODEL_RATES`

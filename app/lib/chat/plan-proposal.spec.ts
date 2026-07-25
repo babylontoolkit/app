@@ -48,6 +48,25 @@ describe('messageProposesWrite', () => {
   it('does not match a mention of boltAction in prose', () => {
     expect(messageProposesWrite('I would emit a boltAction of type file, but I am planning.')).toBe(false);
   });
+
+  /*
+   * §4.2.9's writable folder: a `_specs/` write on a plan turn actually APPLIED (the bt-spec/bt-plan
+   * bypass), so it is not an unapplied proposal — offering "Build & Apply" for it is the exact false
+   * positive the doc comment warns about.
+   */
+  it('does not count a planning artifact — that write applied', () => {
+    expect(messageProposesWrite('<boltAction type="file" filePath="_specs/racing_spec.md"># Spec</boltAction>')).toBe(
+      false,
+    );
+  });
+
+  it('still counts a project write even when a planning artifact rides alongside it', () => {
+    const mixed = [
+      '<boltAction type="file" filePath="_specs/racing_spec.md"># Spec</boltAction>',
+      '<boltAction type="file" filePath="src/scripts/RacerMode.ts">code</boltAction>',
+    ].join('\n');
+    expect(messageProposesWrite(mixed)).toBe(true);
+  });
 });
 
 describe('shouldOfferBuildAndApply', () => {
@@ -63,5 +82,10 @@ describe('shouldOfferBuildAndApply', () => {
     // No PLAN_MODE mark → never offered, even though it contains a file action.
     expect(shouldOfferBuildAndApply([], FILE_ACTION)).toBe(false);
     expect(shouldOfferBuildAndApply([NO_REPLAY], FILE_ACTION)).toBe(false);
+  });
+
+  it('is false for a bt-spec turn that only wrote its planning artifact (that write applied)', () => {
+    const specOnly = '<boltAction type="file" filePath="_specs/racing_spec.md"># Spec</boltAction>';
+    expect(shouldOfferBuildAndApply([NO_REPLAY, PLAN_MODE], specOnly)).toBe(false);
   });
 });

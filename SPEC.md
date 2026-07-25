@@ -349,6 +349,41 @@ identical to Build (same gate, same settlement).
   policy, and the route's annotation all derive from the same `discussModeNote` call, which owns the
   creation-turn guard).
 
+**The wall has exactly ONE door: `_specs/` planning artifacts (2026-07-24).** The read-only
+guarantee blocked the one write a plan-shaped turn legitimately needs — the bt-spec/bt-plan skills
+author `_specs/<feature>_spec.md` / `_specs/<feature>_plan.md` as ordinary file actions, and the
+wall silently dropped them (the skill reported a spec written that did not exist). The bypass is a
+**path rule, never a skill rule** (`lib/chat/plan-artifacts.ts`, `isPlanArtifactPath`, pure +
+traversal-tested): the client cannot reliably know which skill ran while file actions are still
+streaming (`agentMeta.skillsLoaded` arrives after the text), and a folder is a contract the user can
+see. `_specs/` is quarantine by construction — nothing in a project imports from it. Three parts,
+each pinned:
+
+- **A third parser instance** (`useMessageParser`'s `planParser`) executes file actions inside
+  `_specs/` exactly like a build turn and registers everything else completed-only (shell/start
+  never run). **Only a LIVE-streaming plan message reaches it**: parser routing is now **sticky per
+  message id** (the parsers are stateful per id — switching instances mid-life re-parses the whole
+  content: doubled text, doubled actions) and the plan route is granted only to a message that is
+  plan-marked AND currently streaming (loading + last). A RESTORED plan turn freezes onto the
+  transcript parser — re-writing historical `_specs` bodies over the user's later hand-edits is the
+  §4.5.4b stale-replay bug wearing plan clothes. Mutation-verified in `useMessageParser.spec.ts`
+  (dropping the live gate fails 3 tests; dropping the path check fails the write-containment test).
+  🔴 **A route freezes only once the message has TEXT — annotations alone are not decidable.** The
+  marks arrive as separate stream parts and the 50ms parse sampler can catch the frame between them:
+  the first live drive froze a plan turn off a `NO_REPLAY`-without-`PLAN_MODE` frame, recorded it as
+  a restored transcript, and the artifact said "Spec written" while the file 404'd on the real FS.
+  Fixed from both sides (the server also writes `PLAN_MODE` BEFORE `NO_REPLAY`, so the ambiguous
+  frame cannot exist on the wire), race pinned by the marks-only-frame test, and the full loop was
+  re-driven live: both `_specs` files verified as real bytes in the WebContainer (`/@fs` probe),
+  `src/` untouched, message annotated `['plan-mode','no-replay']`.
+- **The note states the exception** (`discuss-note.ts` reads `PLAN_ARTIFACTS_DIR` — the folder name
+  in two prose strings is the silent-drift bug `message-marks.ts` exists to prevent): without it the
+  model obeys the blanket "write nothing" and never even EMITS the artifact, leaving the client
+  bypass nothing to apply.
+- **"Build & Apply" ignores planning artifacts** (`plan-proposal.ts` `messageProposesWrite` now
+  inspects each `<boltAction>` tag's type + filePath): a `_specs/` write APPLIED, so offering to
+  re-run the turn for it is the false positive that spends credits re-doing a change that landed.
+
 ### 4.2a Anthropic Model Configuration & Provider Hardening
 
 **Model is a single constant, never UI.** Credits-mode generations always use upstream's **`DEFAULT_MODEL`** in `app/utils/constants.ts` — currently **`claude-opus-4-8`**, the strongest coding model, chosen because this is a game-coding product (it superseded `claude-sonnet-5`; upstream's original value, `claude-3-5-sonnet-latest`, was retired AND matched no `staticModels` entry). Swapping the platform model = editing that one constant. Deliberately NOT an env var: the model must always be a valid `staticModels` entry, and a typo'd env value would 404 at first generation.
@@ -377,6 +412,7 @@ identical to Build (same gate, same settlement).
 - `@ai-sdk/anthropic@1.2.12` cannot express any of this (`providerOptions` hardcodes the legacy `{type:'enabled', budget_tokens}` — a hard 400 on current models). The **only** seam is a `fetch` wrapper: `thinkingFetch(mode, effort, modelId)`.
 - **Reasoning is a separate stream channel (`g:`), NEVER merged into text** — the client feeds `text` straight into the artifact parser, so leaked reasoning would be written into the user's file. It also does not count as "produced output": a generation that only thought and never wrote must still fail and refund (§4.6).
 - **Config:** `THINKING_MODE=adaptive|disabled` (default `adaptive`). Flipping it invalidates the prompt cache **once**; that one-off is not a regression.
+- **The liveness heartbeat covers the stream the provider cannot silence us out of (2026-07-24, `spec/anthropic-models.md` §3.4a).** `display:'summarized'` only helps when the provider actually returns the text — and KIE's adapter regressed to returning EMPTY thinking text for EVERY model (fable-5 went 224 chars → 0 on a forced 2,980-token think; api.anthropic.com control streams 209 chars with the same body; measurements in `kie-wire.ts`, send-ready report in `KIE_BUG_REPORT.md`), while still billing the thinking tokens. So a long think was minutes of dead dots, indistinguishable from a hang, with credits genuinely burning. The proxy now emits `agent-status` DATA parts on a timer while the model stream is quiet (`agent/heartbeat.ts`, ≥2.5s silent, every 3s: phase + server-clock elapsed + monotonic `seq`), and the client renders a ticking "Thinking — 1m 12s" panel in place of the dots (`stores/agent-status.ts`, `StreamingStatus.tsx`). **It is a liveness signal, never a thinking channel**: data stream only (never `text`/`g:`, zero tokens), it never fabricates reasoning, real content resets its quiet clock (so when KIE fixes their side, real thinking streams through the untouched reasoning pipe and the heartbeat stands down with no code change), empty deltas do NOT count as activity (KIE streams `""` thinking deltas), and the client gates replay on `(generationId, seq)` because `useChat` re-presents the data array every chunk. Pinned by `heartbeat.spec.ts` + `agent-status.spec.ts`.
 
 **Effort — the dial that bounds spend, and the floor beneath it.** `output_config.effort` (GA) **defaults to `high` server-side**, so never sending it is not "no opinion" — it silently buys the second-most-expensive setting on every generation. Setting it to `medium` cut a creation from $0.232/103s to $0.200/80s with an identical deliverable.
 - **`low` is REMOVED from the `EffortLevel` union — it is a correctness bug, not a discount.** It looked free on creation turns (22% cheaper, full-quality output), but on a real **edit** turn it wrote to `src/routing/router.tsx` — READ-ONLY SHELL (§4.4c) — and rewrote whole files instead of patching them, where `medium` created `src/scripts/BoostController.ts` in the correct zone with 5/5 clean diff blocks. An under-thinking model does not return a smaller correct answer; it returns a confident wrong one, and the file zones are the first constraint it drops. `parseEffort()` clamps a literal `THINKING_EFFORT=low` back to `medium` (a `.env` file is a string file; a cast cannot stop an operator) and rejects typos rather than 400-ing mid-generation.

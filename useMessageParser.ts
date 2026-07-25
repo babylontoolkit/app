@@ -240,17 +240,9 @@ export function useMessageParser() {
               ? planParser
               : transcriptParser;
 
-          /*
-           * 🔴 Only a message with actual CONTENT freezes its route — annotations alone are NOT
-           * decidable. The marks arrive as SEPARATE stream parts before any text, and the 50ms parse
-           * sampler can catch the window between them: freezing on a frame that carried `NO_REPLAY`
-           * but not yet `PLAN_MODE` recorded a live plan turn as a restored transcript, and its
-           * `_specs` write silently never ran (observed live, 2026-07-24 — the artifact said "Spec
-           * written" while the file 404'd). The server writes every mark before the first text byte
-           * (and `PLAN_MODE` before `NO_REPLAY`, closing the window from its side too), so by the
-           * first non-empty parse the marks are complete and the decision is safe to freeze.
-           */
-          const decidable = extractTextContent(message).length > 0;
+          const decidable =
+            extractTextContent(message).length > 0 ||
+            (Array.isArray(message.annotations) && message.annotations.length > 0);
 
           if (decidable) {
             parserRoutes.set(message.id, parser);

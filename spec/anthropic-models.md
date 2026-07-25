@@ -253,6 +253,45 @@ and must still refund (§4.6).
 **Flipping the mode invalidates the prompt cache once** (a ~142k-token write at 2×, one generation),
 then steady state resumes. Do not mistake that one-off for a regression.
 
+### 3.4a The provider can take the reasoning stream away — the liveness heartbeat (2026-07-24)
+
+§3.4's fix assumes the provider actually RETURNS the summarized thinking text. KIE's Claude adapter
+stopped doing that: measured 2026-07-24, **every model tested returns thinking blocks with EMPTY
+text while still billing the thinking tokens** — claude-fable-5 went from 224 chars (2026-07-17
+trial) to 0 even on a forced 2,980-token think, and claude-opus-4-7/4-8 are 0. A control run of the
+identical body against `api.anthropic.com` streamed 209 chars of summarized thinking live during the
+think, pinning the fault on KIE's adapter (full table: `kie-wire.ts`; send-ready report:
+`KIE_BUG_REPORT.md`). On KIE's wire the silence is total — `message_start` at ~2s, then nothing but
+a ping until the empty thinking block and the first text arrive together at the END of the think —
+so a creation-sized think was minutes of dead dots, indistinguishable from a hang, while credits
+were genuinely spent. That is §3.4's product complaint back again, with the fix intact and the
+provider quietly defeating it.
+
+**The mitigation must not depend on the provider: `agent/heartbeat.ts` + `stores/agent-status.ts` +
+`StreamingStatus.tsx`.** While the model stream is silent (quiet ≥2.5s, checked every 3s), the proxy
+— which holds the open SSE response the whole time — writes an `agent-status` DATA part (phase
+`thinking`/`generating`, server-clock `elapsedMs`, monotonic `seq`); the client renders a ticking
+"Thinking — 1m 12s" panel in place of the dots. Invariants, each a silent failure if regressed:
+
+- **It is a liveness signal, never a thinking channel.** It rides the data stream (like
+  `media-task`), never `text` (artifact parser) or `reasoning` (`g:`), never the model's context
+  (zero tokens, zero cache impact). It never fabricates or paraphrases reasoning.
+- **Real content wins automatically.** Any non-empty chunk — including real thinking text, the day
+  KIE fixes their adapter — resets the quiet clock, the heartbeats stop, and the client's freshness
+  window (`STATUS_STALE_MS`) expires the panel back to the ordinary indicator. No code change is
+  needed on either side when the reasoning stream returns.
+- **Empty deltas are not activity.** KIE streams thinking deltas whose text is `""`; counting those
+  as activity would suppress the heartbeat during the exact silence it exists to cover.
+- **The client gates replay on `(generationId, seq)`.** `useChat` re-presents the whole data array
+  on every chunk; re-ingesting an old heartbeat refreshes its arrival time and a stale "Thinking —
+  5s" panel would sit on top of the streaming answer forever.
+- **A throwing status write is swallowed** — the narration channel must never break the generation
+  it narrates (same rule as monitoring).
+
+Pinned by `heartbeat.spec.ts` (server: emission timing, phase transitions, pass-through
+byte-identity, stop-on-end/throw) and `agent-status.spec.ts` (client: replay gate, freshness expiry,
+display copy).
+
 ### 3.5 `effort` — the default nobody chose
 
 Thinking tokens are billed as **output** tokens, at the full output rate. So "how long does it think"

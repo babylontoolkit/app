@@ -24,6 +24,7 @@ import type { ProviderInfo } from '~/types/model';
 import { useNavigate, useSearchParams } from '@remix-run/react';
 import { parseClientCommand } from '~/lib/chat/client-commands';
 import { contextPanelOpen, resetContextStats, updateContextStats } from '~/lib/stores/context-stats';
+import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
 import { setPendingOpenProject } from '~/lib/persistence/pending-remix';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
@@ -521,6 +522,15 @@ export const ChatImpl = memo(
       }
     }, [initialMessages]);
 
+    /*
+     * Liveness heartbeat (§4.2a) — clear on EVERY isLoading edge. Rising: a new generation must
+     * never open under the previous one's "Thinking — 4m" panel. Falling: the generation is over;
+     * a lingering fresh status would keep the panel alive into an idle chat.
+     */
+    useEffect(() => {
+      resetAgentStatus();
+    }, [isLoading]);
+
     const handledToolCalls = useRef<Set<string>>(new Set());
     useEffect(() => {
       if (!chatData) {
@@ -529,6 +539,16 @@ export const ChatImpl = memo(
 
       for (const part of chatData) {
         if (!part || typeof part !== 'object') {
+          continue;
+        }
+
+        /*
+         * Generation liveness heartbeat (§4.2a). This effect replays the whole array every chunk;
+         * `updateAgentStatus` gates on `(generationId, seq)` internally, so re-presenting old parts
+         * is free and never refreshes a stale status into looking current.
+         */
+        if ((part as { type?: string }).type === 'agent-status') {
+          updateAgentStatus(part);
           continue;
         }
 

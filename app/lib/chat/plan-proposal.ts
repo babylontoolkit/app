@@ -19,6 +19,7 @@
  * credits re-running a turn that changed nothing, a false negative recreates the silent dead-end.
  */
 import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
+import { isPlanArtifactPath } from '~/lib/chat/plan-artifacts';
 
 export { NO_REPLAY, PLAN_MODE };
 
@@ -29,17 +30,40 @@ export { NO_REPLAY, PLAN_MODE };
  */
 export const BUILD_AND_APPLY_MESSAGE = 'Apply the changes you just proposed — make the edits to the project files now.';
 
-/** A `<boltAction>` that would WRITE or RUN something (as opposed to prose the model wrapped in tags). */
-const ACTIONABLE_BOLT_ACTION = /<boltAction\b[^>]*\btype\s*=\s*["'](?:file|shell|start)["']/i;
+/** Every `<boltAction …>` opening tag — each is inspected individually for type and target. */
+const BOLT_ACTION_TAG = /<boltAction\b[^>]*>/gi;
+
+function tagAttribute(tag: string, name: string): string | undefined {
+  return tag.match(new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, 'i'))?.[1];
+}
 
 /** Was this assistant message produced on a Plan-mode turn? (Server-written `PLAN_MODE` mark.) */
 export function isPlanModeMessage(annotations: unknown): boolean {
   return Array.isArray(annotations) && annotations.includes(PLAN_MODE);
 }
 
-/** Does the message's text propose a concrete change (a file write or a shell/start command)? */
+/**
+ * Does the message's text propose a concrete change the read-only wall PREVENTED (a project file
+ * write or a shell/start command)? A file action inside `_specs/` deliberately does not count: plan
+ * mode's one writable folder (§4.2.9) means that write actually APPLIED, and offering "Build &
+ * Apply" for it is the false positive this module's doc comment warns about — a button that spends
+ * credits re-running a turn whose changes already landed.
+ */
 export function messageProposesWrite(content: string): boolean {
-  return ACTIONABLE_BOLT_ACTION.test(content);
+  for (const match of content.matchAll(BOLT_ACTION_TAG)) {
+    const tag = match[0];
+    const type = tagAttribute(tag, 'type')?.toLowerCase();
+
+    if (type === 'shell' || type === 'start') {
+      return true;
+    }
+
+    if (type === 'file' && !isPlanArtifactPath(tagAttribute(tag, 'filePath'))) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**

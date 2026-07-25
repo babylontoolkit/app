@@ -2,6 +2,7 @@ import type { Message } from 'ai';
 import { Fragment } from 'react';
 import { classNames } from '~/utils/classNames';
 import { AssistantMessage } from './AssistantMessage';
+import { StreamingStatus } from './StreamingStatus';
 import { UserMessage } from './UserMessage';
 import { useLocation } from '@remix-run/react';
 import { db, chatId, projectId } from '~/lib/persistence/useChatHistory';
@@ -299,9 +300,12 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
               );
             })
           : null}
-        {isStreaming && (
-          <div className="text-center w-full  text-bolt-elements-item-contentAccent i-svg-spinners:3-dots-fade text-4xl mt-4"></div>
-        )}
+        {/*
+         * Liveness status (§4.2a): a ticking "Thinking — 1m 12s" panel while the server's heartbeat
+         * reports a silent stream, falling back to the classic dots whenever content is flowing.
+         * A long think is real billed work — it must never look like a hang.
+         */}
+        {isStreaming && <StreamingStatus />}
       </div>
     );
   },
