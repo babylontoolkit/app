@@ -36,7 +36,7 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * against 393/831/574 for cold ones (CLAUDE.md "THE BIGGEST OPEN NUMBER"), i.e. ~13 edits/month on a
  * $50 plan versus ~92. A model that cannot cache honestly cannot be the default at any quality.
  *
- * ✅ **The churn that caused those cold turns is FIXED** (`selectStickyBlocks` + `stickySkillNames`,
+ * ✅ **The churn that caused those cold turns is FIXED** (`selectStickyBlocks`; the skill half was retired 2026-07-26 when the model took over skill selection,
  * 2026-07-17). It was OUR bug and model-independent — `selectOnDemandBlocks` re-routed per message, so
  * the user's PHRASING re-ordered blocks sitting ahead of the ~110k file context and invalidated it. 4.8
  * only made a warm prefix possible; sticky routing is what makes one happen. Post-fix, a warm edit on KIE

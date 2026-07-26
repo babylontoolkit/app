@@ -36,39 +36,113 @@ import { createScopedLogger } from '~/utils/logger';
 const logger = createScopedLogger('preload-skills');
 
 /**
- * Keywords that mean "this build will need this skill".
+ * The two skills the CREATION brief is written against (§4.4b, §4.4c).
  *
- * Deliberately literal and boring. A false positive costs cached tokens (0.1x — cheap); a false
- * negative costs a tool round trip (~50s and thousands of redrafted output tokens — expensive). The
- * asymmetry is enormous, so lean toward loading.
+ * A constant, not a router, and the distinction is the whole point of the 2026-07-26 rewrite. The
+ * creation turn is the one turn whose prompt we WROTE: the brief delegates the landing page + chrome
+ * to `bt-landing`, which builds on `bt-design`'s standards. We do not have to infer that — we know it.
+ *
+ * Everything else is chosen by the MODEL from the skills index, exactly as `load_skill` was always
+ * meant to work.
  */
-const SKILL_KEYWORDS: Record<string, string[]> = {
-  'bt-design': [
-    'design',
-    'landing',
-    'page',
-    'ui',
-    'menu',
-    'hud',
-    'screen',
-    'style',
-    'theme',
-    'look',
-    'game',
-    'make me',
-    'build me',
-    'create',
-  ],
-  'bt-landing': ['landing', 'splash', 'preloader', 'overlay', 'redesign', 'home page', 'frontend'],
-  'bt-prototype': ['prototype', 'scaffold', 'starter', 'boilerplate'],
-  'bt-spec': ['spec', 'specification', 'requirements', 'plan'],
-  'bt-atlas': ['atlas', 'texture', 'skin', 'uv', 'material'],
-  'bt-convert': ['convert', 'import model', 'gltf', 'glb', 'fbx'],
-  'bt-hero': ['hero', 'scroll', 'showcase', 'marketing'],
-};
+const CREATION_SKILLS = ['bt-landing', 'bt-design'];
 
-/** Cap the pre-load so a keyword-soup prompt cannot drag the entire skill library into the prefix. */
-const MAX_PRELOADED = 2;
+/**
+ * How many model-chosen skills a CONVERSATION carries forward in its cached prefix (§4.11).
+ *
+ * Distinct from `MAX_SKILL_LOADS`, which bounds NEW loads in a single response. This bounds the
+ * accumulated set, because every carried skill is 15–25KB living in the prefix of every remaining turn
+ * — cheap to READ (0.1x) but not free, and each addition costs one 2x cache WRITE on the turn it joins.
+ * Three lets a long workflow hold a domain skill, a procedure skill and one more without the prefix
+ * growing without limit.
+ */
+export const MAX_STICKY_SKILLS = 3;
+
+/**
+ * The skills the model has ALREADY loaded earlier in this conversation, oldest first.
+ *
+ * ## Why this exists (2026-07-26) — the last real gap against Claude Code
+ *
+ * In Claude Code a loaded skill stays in context for the rest of the session: you pay for it once. Our
+ * tool loop is server-side and internal (`tools.ts`) — the call and its result never enter the saved
+ * conversation — so a skill loaded on turn 1 was simply GONE on turn 2, and a spec -> plan -> execute
+ * workflow paid a fresh round trip on every single turn for instructions it had already been given.
+ *
+ * The fix is to carry them in the CACHED prefix, which makes us cheaper than the thing we are copying:
+ * Claude Code re-sends a loaded skill in an uncached conversation, we re-send it at 0.1x.
+ *
+ * ## Where the list comes from, and why not a database
+ *
+ * From the conversation itself: `api.agent.ts` writes an `agentMeta` message annotation carrying
+ * `skillsLoaded`, the AI SDK posts annotations back with the message history, and the transcript store
+ * persists them (the `/context` dot already reads them on reload). So the record of what the model
+ * chose travels with the thing it chose for. A `generations` query would add a database round trip to
+ * the hot path of every generation to learn something the request already contains.
+ *
+ * ## The two properties that make it safe to put in the cached prefix
+ *
+ * **First-seen order, append-only.** The set may only grow, and only at the END. This is the same rule
+ * `selectStickyBlocks` documents and for the same reason: a skill inserted at the FRONT shifts every
+ * byte behind it and re-writes the whole prefix at 2x. Reordering here is a silent bill, not a bug.
+ *
+ * **Read from the FULL message list, never the compacted one.** `compactHistory` drops turns outside
+ * the window; reading post-compaction would make the carried set SHRINK as a conversation ages, which
+ * breaks append-only in the most expensive possible way — the prefix would rewrite itself on the turn
+ * the window slides.
+ */
+export function stickyLoadedSkills(messages: Array<{ annotations?: unknown }>): string[] {
+  const seen: string[] = [];
+
+  for (const message of messages) {
+    if (!Array.isArray(message.annotations)) {
+      continue;
+    }
+
+    for (const annotation of message.annotations) {
+      if (!annotation || typeof annotation !== 'object') {
+        continue;
+      }
+
+      const record = annotation as { type?: unknown; value?: { skillsLoaded?: unknown } };
+
+      if (record.type !== 'agentMeta' || !Array.isArray(record.value?.skillsLoaded)) {
+        continue;
+      }
+
+      for (const name of record.value.skillsLoaded) {
+        if (typeof name === 'string' && name && !seen.includes(name)) {
+          seen.push(name);
+        }
+      }
+    }
+  }
+
+  return seen.slice(0, MAX_STICKY_SKILLS);
+}
+
+/** Load the bodies for an already-decided list of skill names, skipping any that are no longer synced. */
+export async function loadSkillBodies(names: string[]): Promise<PreloadedSkill[]> {
+  if (names.length === 0) {
+    return [];
+  }
+
+  const store = getSkillStore();
+
+  const loaded = await Promise.all(
+    names.map(async (name): Promise<PreloadedSkill | null> => {
+      const skill: SkillVersion | null = await store.getActive(name);
+
+      if (!skill) {
+        logger.warn(`Carried skill "${name}" is no longer synced — dropping it from the prefix`);
+        return null;
+      }
+
+      return { name: skill.name, body: skill.body, resourcePaths: skill.resourcePaths ?? [] };
+    }),
+  );
+
+  return loaded.filter((s): s is PreloadedSkill => s !== null);
+}
 
 export interface PreloadedSkill {
   name: string;
@@ -90,66 +164,70 @@ export interface PreloadedSkill {
 }
 
 /**
- * The skills any user message in this conversation asked for, in the order they first appeared.
+ * The skills to inline for this request — the CREATION brief's two, and otherwise NOTHING.
  *
- * Pure and exported so the ordering property can be tested directly — "the set only ever grows, and
- * grows at the END" is the whole point, and it is invisible from the outside otherwise.
+ * 🔴 **Only the creation turn pre-loads. Every other turn's skills are chosen by the model** from the
+ * index of `name — description` that `buildSkillsIndex` bakes into the cached prompt, using
+ * `load_skill`. That is the agentskills.io contract, and it is how Claude Code works.
+ *
+ * ## Why the keyword router is gone (2026-07-26)
+ *
+ * It was a `Record<string, string[]>` of substrings, hardcoded HERE, matched against the user's text.
+ * Every one of its failures was silent:
+ *
+ *   - `'ui'` matched as a bare substring, so it fired on "b**ui**ld", "q**ui**ck", "req**ui**rements".
+ *     `"why is my build failing"` inlined `bt-design` — 24KB, into the cached prefix, on a debugging
+ *     question.
+ *   - Three of the ten SYNCED skills had no entry at all and could therefore never load:
+ *     `bt-copycat`, `bt-plan`, `bt-execute` — the last two being two-thirds of the product's own
+ *     spec → plan → execute workflow.
+ *   - The `description` — which `buildSkillsIndex` documents as THE trigger ("a skill that never
+ *     auto-fires almost always has a weak description; fix it in the repo and resync") — was never
+ *     read by the thing doing the selecting. Rewriting a description changed nothing.
+ *   - Skills are authored EXTERNALLY (`babylontoolkit/skills`). A new skill synced, indexed, and shown
+ *     to the model still could not load until someone edited a TypeScript constant in this repo, which
+ *     breaks the standing "this codebase consumes the skills repo, never edits it" rule.
+ *   - The router's input included the INVOKED SKILL'S OWN BODY, so `/bt-spec` inlined `bt-landing`
+ *     because bt-spec's SKILL.md contains the word "landing" — and routing was sticky, so the mistake
+ *     was then pinned for the rest of the conversation.
+ *
+ * Together those made the feature a prompt library with extra steps: which instructions the model got
+ * was decided by substring accidents in our code rather than by the task in front of it.
+ *
+ * ## Why this does not re-buy the six-round pathology
+ *
+ * The measured disaster (6 rounds, 29,173 output tokens, 350s, to end up with ONE distinct skill) is
+ * quoted at the top of this file, and it is worth being precise about what it was: a `load_skill` call
+ * is ~50 tokens of JSON, so those tens of thousands of tokens were the model DRAFTING the artifact
+ * between rounds and discarding each draft — and the repeat calls were it re-requesting instructions it
+ * had already been handed. Four things now make that unreachable, none of which existed when it was
+ * measured:
+ *
+ *   1. **`MAX_SKILL_LOADS`** (`tools.ts`) — a hard budget on skill BODIES, enforced inside `execute`.
+ *      Past it the tool refuses and tells the model to proceed. Six rounds of skill loading cannot
+ *      happen regardless of what the model wants.
+ *   2. **The already-loaded guard** — a re-request returns one sentence, not a 17KB body.
+ *   3. **Nothing is inlined on an ordinary turn**, so the contradictory state that produced every
+ *      recorded thrash (a skill in the prefix under "ALREADY LOADED — do NOT call load_skill" WHILE
+ *      the tool was offered) no longer exists. One mechanism per turn, never two.
+ *   4. **The index tells the model to load skills BEFORE it starts writing**, which is what stops the
+ *      draft-load-redraft cycle that the token count actually measured.
+ *
+ * The creation turn — the most expensive generation in the product, and the one that produced the
+ * 468s → 114s win when its tools were removed — is deliberately UNCHANGED: fixed skills, no tools.
  */
-export function stickySkillNames(routingTexts: string[], slashSkill?: string): string[] {
-  const seen: string[] = [];
-
-  for (const text of routingTexts) {
-    const haystack = text.toLowerCase();
-
-    for (const [name, keywords] of Object.entries(SKILL_KEYWORDS)) {
-      if (name === slashSkill || seen.includes(name)) {
-        continue;
-      }
-
-      if (keywords.some((keyword) => haystack.includes(keyword))) {
-        seen.push(name);
-      }
-    }
-  }
-
-  return seen;
-}
-
-/**
- * Choose the skills to inline for this request.
- *
- * `slashSkill` is the skill the user explicitly invoked (`/bt-design`). It is already injected by the
- * proxy, so it must not be pre-loaded twice.
- *
- * ⚠️ `routingTexts` is EVERY user message in the conversation (oldest first), not the current one —
- * the pre-loaded skill block is part of the CACHED PREFIX, so routing it per-message makes the user's
- * phrasing invalidate ~110k of context behind it. Same money bug, same fix, as `selectStickyBlocks`:
- * sticky, and ordered by FIRST SEEN rather than by `SKILL_KEYWORDS` declaration order, because a newly
- * matched skill that happens to be declared early would otherwise be inserted at the FRONT of the block
- * and shift every byte behind it.
- */
-export async function preloadSkills(
-  routingTexts: string[],
-  slashSkill?: string,
-  isCreation = false,
-): Promise<PreloadedSkill[]> {
+export async function preloadSkills(slashSkill?: string, isCreation = false): Promise<PreloadedSkill[]> {
   /*
-   * A creation turn gets a FIXED skill list, never keyword routing.
+   * The creation brief is machine-written and delegates to two named skills, so there is nothing to
+   * infer. (It is also why the old router could not be trusted here even in its own terms: the brief's
+   * incidental vocabulary — "created", "starter", "scaffold" — keyword-matched skills the model had no
+   * use for, and we watched it drag in `bt-prototype` for a project that was already scaffolded.)
    *
-   * The routing text on a creation turn is the BRIEF, not the user's words — it is full of incidental
-   * vocabulary ("created", "starter", "scaffold") that keyword-matches skills the model has no use
-   * for; we watched it drag in `bt-prototype` for a project that was already scaffolded. What creation
-   * actually needs is exactly two skills: `bt-landing` (the landing-page + chrome redesign PROCEDURE
-   * the brief now delegates to — 2026-07-18) and `bt-design` (the aesthetics standards that procedure
-   * builds on). Until `bt-landing` reaches the synced skills repo, the missing-skill path below skips
-   * it with a warning and the brief's fallback sentence routes the model to the baked hard-constraints
-   * sections instead — creation never fails on its absence.
+   * A skill named here but missing from the synced snapshot is skipped with a warning below; the
+   * brief's fallback sentence routes the model to the baked hard-constraints sections instead, so
+   * creation never fails on its absence.
    */
-  const candidates = isCreation
-    ? ['bt-landing', 'bt-design'].filter((name) => name !== slashSkill)
-    : stickySkillNames(routingTexts, slashSkill);
-
-  const wanted = candidates.slice(0, MAX_PRELOADED);
+  const wanted = isCreation ? CREATION_SKILLS.filter((name) => name !== slashSkill) : [];
 
   if (wanted.length === 0) {
     return [];
@@ -185,30 +263,52 @@ export async function preloadSkills(
 }
 
 /**
- * The system block carrying the pre-loaded skills.
+ * The system block carrying the skills that are already in context.
  *
- * A pre-loaded turn runs with NO TOOLS (see `allowTools` in the proxy), so this block is everything
- * the model will get. Two consequences, and the second one is counter-intuitive:
+ * Two callers, and the difference matters:
  *
- *   - It says the skills are already loaded, so the model does not go looking for them.
+ *   - **Creation** — the brief's two skills, on a turn with NO skill tools. This block is everything
+ *     the model gets, so it must not name bundled resource paths: naming a file the model has no tool
+ *     to open is not information, it is a dangling instruction, and that is what caused the measured
+ *     160-second thrash (paths listed, `read_skill_resource` available, six rounds spent pulling in
+ *     101KB of hero-scroll templates to change a button's colour, then an empty response).
  *
- *   - It deliberately does NOT list a skill's bundled resource paths, even though `load_skill` does.
- *     Naming a file the model has no tool to open is not information, it is a dangling instruction —
- *     and a dangling instruction is what caused the thrash in the first place: with the paths listed
- *     and `read_skill_resource` available, the model spent all six tool rounds and 160 seconds pulling
- *     in `bt-design`'s hero-scroll templates in order to change a button's colour, then returned
- *     nothing. Tell it about a door it cannot open and it will spend the whole turn pushing on it.
+ *   - **Carried** (`stickyLoadedSkills`) — skills the model itself loaded earlier in the conversation,
+ *     on a turn where the tools ARE offered. Here the resource paths are honest information: the model
+ *     can open them, and withholding them would recreate `bt-design`'s "read `references/…` before
+ *     writing code" as an unfollowable instruction.
  *
- * The corollary — a pre-loaded skill's bundled files are unreachable — is a real limitation, recorded
- * in the proxy and in spec/skills.md rather than papered over.
+ * `withResources` therefore tracks whether the tools exist, and nothing else decides it.
  */
-export function buildPreloadedSkillBlock(skills: PreloadedSkill[]): string {
+export function buildPreloadedSkillBlock(skills: PreloadedSkill[], withResources = false): string {
   const names = skills.map((s) => s.name).join(', ');
 
+  /*
+   * The wording is deliberately "you already have these", never "do NOT call load_skill".
+   *
+   * The old text was an order the tool set contradicted, and we watched the model spend six rounds and
+   * ~11,000 output tokens calling `load_skill('bt-design')` five times against a heading that said not
+   * to. The guard that actually stops that lives in `execute` (a one-sentence already-loaded reply that
+   * costs no budget); prose only has to make the state clear.
+   */
+  const header =
+    `# Skills — already in context\n\n` +
+    `You have the full instructions for these skills below: ${names}. ` +
+    `There is no need to load them again — a repeat request just costs a round trip.\n\n`;
+
   return (
-    `# Skills — ALREADY LOADED\n\n` +
-    `The following skills are loaded and their full instructions are below: ${names}.\n` +
-    `**Do NOT call load_skill for them** — you already have them. Calling it wastes a slow round trip.\n\n` +
-    skills.map((skill) => `## Skill: ${skill.name}\n\n${skill.body}`).join('\n\n---\n\n')
+    header +
+    skills
+      .map((skill) => {
+        const resources =
+          withResources && skill.resourcePaths.length
+            ? `\n\nBundled resources (read with read_skill_resource):\n${skill.resourcePaths
+                .map((p) => `- ${p}`)
+                .join('\n')}`
+            : '';
+
+        return `## Skill: ${skill.name}\n\n${skill.body}${resources}`;
+      })
+      .join('\n\n---\n\n')
   );
 }

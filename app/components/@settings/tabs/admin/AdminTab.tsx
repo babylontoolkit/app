@@ -61,6 +61,21 @@ interface PromptState {
   };
 }
 
+/**
+ * The provider credit pool, as `/api/admin/usage` returns it — the server's shape, verbatim
+ * (`billing/provider-balance.ts`). Declared here rather than imported because that module is
+ * `.server` only: it reads `KIE_API_KEY`, and a client import would pull the key's reader into the
+ * browser bundle (§5).
+ */
+interface ProviderBalance {
+  credits: number | null;
+  usd: number | null;
+  platformCreditsRemaining: number | null;
+  creditsPerUsd: number;
+  fetchedAt: string;
+  reason?: string;
+}
+
 /** The `/api/admin/refunds` report — the server's shapes, verbatim (`admin/refund-report.ts`). */
 interface RefundReport {
   refunds: number;
@@ -94,6 +109,7 @@ export function AdminTab() {
   const [reports, setReports] = useState<Report[]>([]);
   const [template, setTemplate] = useState<TemplateState | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
+  const [providerBalance, setProviderBalance] = useState<ProviderBalance | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = () => {
@@ -106,7 +122,15 @@ export function AdminTab() {
 
         return r.ok ? r.json() : null;
       })
-      .then((data) => data && setReport((data as { report: UsageReport }).report))
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+
+        const payload = data as { report: UsageReport; providerBalance?: ProviderBalance };
+        setReport(payload.report);
+        setProviderBalance(payload.providerBalance ?? null);
+      })
       .catch(() => undefined);
 
     fetch('/api/admin/refunds')
@@ -277,6 +301,49 @@ export function AdminTab() {
 
   return (
     <div className="flex flex-col gap-6 p-1">
+      {/*
+       * The provider pool every user's generation draws from (§4.10). The ledger says what users owe
+       * US; this says what WE have left with KIE — and when it hits zero the product stops for
+       * everybody at once, which nothing else on this page would show.
+       */}
+      <section>
+        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Provider credit pool</h3>
+        {!providerBalance ? (
+          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+        ) : providerBalance.credits === null ? (
+          <div className="mt-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor text-sm text-bolt-elements-textSecondary">
+            <span className="text-bolt-elements-textPrimary font-medium">Balance unknown</span>
+            {providerBalance.reason ? ` — ${providerBalance.reason}` : null}
+          </div>
+        ) : (
+          <>
+            <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <Stat label="KIE credits left" value={Math.floor(providerBalance.credits).toLocaleString()} />
+              <Stat
+                label="Approx. value"
+                value={providerBalance.usd === null ? '—' : `$${providerBalance.usd.toFixed(2)}`}
+              />
+              {/*
+               * The runway number: not "how much money is left" but "how much PRODUCT is left" —
+               * derived from the same unit cost and margin the biller charges by, so it cannot drift
+               * away from real pricing.
+               */}
+              <Stat
+                label="Serves ≈ platform credits"
+                value={
+                  providerBalance.platformCreditsRemaining === null
+                    ? '—'
+                    : providerBalance.platformCreditsRemaining.toLocaleString()
+                }
+              />
+            </div>
+            <div className="mt-1 text-xs text-bolt-elements-textTertiary">
+              {`Dollar and platform-credit figures are estimates at ${providerBalance.creditsPerUsd} KIE credits per $1 (measured 2026-07-26). Read ${new Date(providerBalance.fetchedAt).toLocaleTimeString()}.`}
+            </div>
+          </>
+        )}
+      </section>
+
       <section>
         <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Usage & cost</h3>
         {!report ? (

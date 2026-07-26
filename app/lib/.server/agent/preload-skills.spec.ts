@@ -44,16 +44,31 @@ describe('buildPreloadedSkillBlock', () => {
   });
 
   /**
-   * Load-bearing. Without an explicit "do not call load_skill", the model calls it anyway for a skill
-   * it can already see — we watched it do that four times in one generation, drafting thousands of
-   * output tokens before each call and throwing them away.
+   * The block must make the STATE clear — these instructions are already here — and must NOT issue an
+   * order the tool set contradicts.
+   *
+   * The original text shouted "**Do NOT call load_skill**", and we watched the model call
+   * `load_skill('bt-design')` five times in a row against that heading: six rounds, ~11,000 output
+   * tokens, an empty response, 405 credits. Prose cannot enforce this. What enforces it is the
+   * already-loaded reply in `execute` (one sentence, no budget spent), and since 2026-07-26 the fact
+   * that an ordinary turn inlines nothing the model did not itself ask for.
    */
-  it('tells the model these skills are already loaded and not to fetch them', () => {
+  it('tells the model these skills are already in context', () => {
     const block = buildPreloadedSkillBlock(skills);
 
-    expect(block).toMatch(/ALREADY LOADED/i);
-    expect(block).toMatch(/do NOT call load_skill/i);
+    expect(block).toMatch(/already in context/i);
     expect(block).toContain('bt-design, bt-hero');
+  });
+
+  /**
+   * Carried skills (`stickyLoadedSkills`) run on a turn WITH tools, so their bundled paths are honest
+   * information rather than a dangling instruction — withholding them would recreate `bt-design`'s
+   * "read `references/…` before writing code" as unfollowable. The flag tracks whether the tools exist,
+   * and nothing else may decide it.
+   */
+  it('names bundled resources ONLY when the turn has the tool to open them', () => {
+    expect(buildPreloadedSkillBlock(skills, true)).toContain('references/3d-hero-scroll.md');
+    expect(buildPreloadedSkillBlock(skills, false)).not.toContain('references/3d-hero-scroll.md');
   });
 
   /**
@@ -69,7 +84,7 @@ describe('buildPreloadedSkillBlock', () => {
    * A pre-loaded turn has NO TOOLS. Naming a file the model cannot open is not information, it is a
    * dangling instruction, and it will spend the whole turn trying to follow it.
    */
-  it('does not name bundled resources, which a tool-less turn could not open anyway', () => {
+  it('does not name bundled resources on a tool-less (creation) turn, which could not open them', () => {
     const block = buildPreloadedSkillBlock(skills);
 
     expect(block).not.toContain('references/3d-hero-scroll.md');

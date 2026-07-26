@@ -7,7 +7,7 @@
  * actually occurs.
  */
 import { describe, expect, it } from 'vitest';
-import { CREATION_MEDIA_STEPS, MEDIA_TURN_STEPS, toolPolicyForTurn } from './tool-policy';
+import { CREATION_MEDIA_STEPS, toolPolicyForTurn } from './tool-policy';
 import { MAX_TOOL_ROUNDS } from './tools';
 
 const base = { isCreationTurn: false, hasMcpTools: false, hasMediaTools: false, preloadedCount: 0, isSlash: false };
@@ -48,8 +48,16 @@ describe('toolPolicyForTurn — creation turns', () => {
   });
 });
 
-describe('toolPolicyForTurn — ordinary turns (the pre-existing behaviour, now pinned)', () => {
-  it('opens the full loop when nothing is preloaded and no slash was invoked', () => {
+describe('toolPolicyForTurn — ordinary turns: the skill tools are ALWAYS offered (2026-07-26)', () => {
+  /*
+   * 🔴 The rule this replaced was `hasMcpTools || (preloadedCount === 0 && !isSlash)` — the keyword
+   * router decided, and the instant it fired, `load_skill` was withdrawn. The cached prompt still
+   * listed ten skills and still said "Call load_skill(name) to load one of these", so the model was
+   * holding an instruction for a tool that was not in its tool set, and a wrong routing decision could
+   * never be corrected on any turn. Skills are now chosen by the MODEL from the index; the six-round
+   * thrash is bounded by MAX_SKILL_LOADS inside the tool, not by removing the tool.
+   */
+  it('opens the full loop on a plain turn', () => {
     expect(toolPolicyForTurn({ ...base })).toEqual({
       allowTools: true,
       toolset: 'all',
@@ -57,12 +65,20 @@ describe('toolPolicyForTurn — ordinary turns (the pre-existing behaviour, now 
     });
   });
 
-  it('closes the loop when skills are preloaded or a /slash skill is invoked', () => {
-    expect(toolPolicyForTurn({ ...base, preloadedCount: 2 }).allowTools).toBe(false);
-    expect(toolPolicyForTurn({ ...base, isSlash: true }).allowTools).toBe(false);
+  it('still opens it when a skill is inlined or a /slash skill was invoked — the model may need a SIBLING skill', () => {
+    expect(toolPolicyForTurn({ ...base, preloadedCount: 2 })).toEqual({
+      allowTools: true,
+      toolset: 'all',
+      maxSteps: MAX_TOOL_ROUNDS + 1,
+    });
+    expect(toolPolicyForTurn({ ...base, isSlash: true })).toEqual({
+      allowTools: true,
+      toolset: 'all',
+      maxSteps: MAX_TOOL_ROUNDS + 1,
+    });
   });
 
-  it('MCP tools force the loop open even with skills preloaded (§4.14)', () => {
+  it('MCP tools change nothing on an ordinary turn any more (§4.14)', () => {
     expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMcpTools: true })).toEqual({
       allowTools: true,
       toolset: 'all',
@@ -71,45 +87,37 @@ describe('toolPolicyForTurn — ordinary turns (the pre-existing behaviour, now 
   });
 
   /*
-   * The regression this replaces: media tools were unreachable on any turn that routed a skill, and the
-   * skill router fires on `design`/`landing`/`art`/`theme` — i.e. on exactly the prompts that ask for
-   * art. Creation worked (media-only loop), every later turn was toolless, and the model narrated the
-   * absence and drew the art in CSS. Generation must be reachable from the chat on EVERY turn (§4.16).
+   * The regression that produced the old media-only branch: media tools were unreachable on any turn
+   * that routed a skill, and the router fired on `design`/`landing`/`art`/`theme` — exactly the prompts
+   * that ask for art. The model narrated the absence and drew the art in CSS. With the full toolset on
+   * every ordinary turn, media is reachable by construction rather than by a special case (§4.16).
    */
-  it('opens a bounded media-only loop when media is the only reason to open it', () => {
-    expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMediaTools: true })).toEqual({
-      allowTools: true,
-      toolset: 'media-only',
-      maxSteps: MEDIA_TURN_STEPS,
-    });
-    expect(toolPolicyForTurn({ ...base, isSlash: true, hasMediaTools: true })).toEqual({
-      allowTools: true,
-      toolset: 'media-only',
-      maxSteps: MEDIA_TURN_STEPS,
-    });
+  it('media generation is reachable on every ordinary turn, whatever else the turn is doing', () => {
+    for (const extra of [{}, { preloadedCount: 2 }, { isSlash: true }, { hasMcpTools: true }]) {
+      const policy = toolPolicyForTurn({ ...base, ...extra, hasMediaTools: true });
+      expect(policy.allowTools).toBe(true);
+      expect(policy.toolset).toBe('all');
+    }
   });
 
-  /*
-   * The bound is the point — a media-only turn must never be a door back to the §4.2.8 skill-thrash
-   * pathology (six rounds, 29k redrafted output tokens, to load ONE skill).
-   */
-  it('the media-only loop offers no skill tools and is capped well under MAX_TOOL_ROUNDS', () => {
-    expect(MEDIA_TURN_STEPS).toBeLessThan(MAX_TOOL_ROUNDS + 1);
-  });
-
-  /* When something else already opened the full loop, media rides along in `all` — no separate branch. */
-  it('keeps the full toolset when MCP already opened the loop', () => {
-    expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMcpTools: true, hasMediaTools: true }).toolset).toBe(
-      'all',
-    );
-  });
-
-  it('stays closed when there are no media tools to reach', () => {
-    expect(toolPolicyForTurn({ ...base, preloadedCount: 2 })).toEqual({
-      allowTools: false,
-      toolset: 'all',
-      maxSteps: 1,
-    });
+  it('never closes an ordinary turn — there is no input combination that leaves the model tool-less', () => {
+    for (const hasMcpTools of [false, true]) {
+      for (const hasMediaTools of [false, true]) {
+        for (const preloadedCount of [0, 1, 2]) {
+          for (const isSlash of [false, true]) {
+            const policy = toolPolicyForTurn({
+              isCreationTurn: false,
+              hasMcpTools,
+              hasMediaTools,
+              preloadedCount,
+              isSlash,
+            });
+            expect(policy.allowTools).toBe(true);
+            expect(policy.toolset).toBe('all');
+          }
+        }
+      }
+    }
   });
 });
 

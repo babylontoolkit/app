@@ -62,7 +62,7 @@ import {
   type HistorySize,
 } from '~/lib/.server/llm/history';
 import { envNumber } from '~/lib/.server/env';
-import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
+import { buildPreloadedSkillBlock, loadSkillBodies, preloadSkills, stickyLoadedSkills } from './preload-skills';
 import { buildProjectNotes, type GameBackendState } from './project-notes';
 import { discussModeNote } from './discuss-note';
 import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
@@ -602,8 +602,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /*
    * 7. Route the on-demand doc blocks — from the WHOLE CONVERSATION, not the last message.
    *
-   * Keyed off every user request AND any invoked skill body, so that `/bt-spec build a racing game`
-   * pulls in the RacingSystem docs even though the word "racing" only appears in the task.
+   * Keyed off every USER request. It used to also include the invoked skill's BODY, on the reasoning
+   * that `/bt-spec build a racing game` should pull the RacingSystem docs — but the user's own words
+   * ("build a racing game") already do that, and a skill body is thousands of words of machine-written
+   * prose that matches almost everything. Measured 2026-07-26: `/bt-spec add a gem counter to the HUD`
+   * routed TEN doc blocks including `racing-system` and `demo-rotator`, none of which the task implied,
+   * all of them into the cached prefix and (routing being sticky) pinned there for the conversation.
+   * Same defect as the skill router this file used to carry, one subsystem to the left.
    *
    * ⚠️ These blocks are part of the CACHED PREFIX, so routing them per-message made the user's phrasing
    * set the price of their turn (12 credits vs 160 for the same edit — see `selectStickyBlocks`). The
@@ -615,7 +620,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * and it should say so where it is written rather than reviving a variable that reads as general.
    */
   const userTexts = allUserTexts(messages);
-  const skillText = slash?.skillBlock ?? '';
 
   /*
    * Is this the turn that BUILDS the project? (§4.4b)
@@ -629,7 +633,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const store = getPromptStore();
   const blocks: Array<{ id: string; title: string; body: string }> = [];
 
-  for (const block of selectStickyBlocks([...userTexts, skillText])) {
+  for (const block of selectStickyBlocks(userTexts)) {
     const body = await store.readOnDemand(promptVersion.id, block.id);
 
     if (body) {
@@ -658,25 +662,37 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   });
 
   /*
-   * Hand the model the skills it is obviously going to want, instead of making it fetch them.
+   * 🔴 There is no skill ROUTER any more (2026-07-26). Only the creation turn pre-loads — a constant,
+   * because the brief was written against those two skills. On every other turn the MODEL picks from
+   * the index of `name — description` in the cached prompt and calls `load_skill`, which is the
+   * agentskills.io contract this platform claims to implement and is how Claude Code behaves.
    *
-   * Progressive disclosure loses badly here, and we have the numbers: a real kart-racer build spent
-   * 350s and 29,173 output tokens on SIX tool rounds — 75% of the wall clock and 68% of the bill — to
-   * load exactly ONE distinct skill. A tool call is ~50 tokens; those tens of thousands are the model
-   * drafting the game, deciding it wants a skill, and throwing the draft away to redraft. Pre-loading
-   * into the CACHED prefix (reads bill at 0.1x) deletes the round trips AND the redrafts.
-   *
-   * `load_skill` remains for anything the router does not anticipate.
+   * The keyword table that used to live here decided which instructions the model got by substring
+   * accidents in our own source — `"why is my build failing"` inlined `bt-design` because "b*ui*ld"
+   * contains `ui`, three synced skills had no entry and could never load at all, and the invoked
+   * skill's own body was fed into the router (so `/bt-spec` dragged in `bt-landing`). See
+   * `preload-skills.ts` for the full post-mortem and for why removing it does not re-buy the
+   * six-round pathology.
    */
+  const preloaded = await preloadSkills(slash?.skillName, isCreationTurn);
+
   /*
-   * ⚠️ The creation BRIEF is excluded from skill routing, deliberately, and this is not the same list
-   * the doc blocks route from. The brief is machine-written and full of incidental vocabulary
-   * ("created", "starter", "scaffold") that keyword-matches skills the model has no use for — the
-   * reason `isCreation` short-circuits to `bt-design` at all. Feeding it into the STICKY router would
-   * make that mistake permanent for the life of the conversation instead of lasting one turn.
+   * 🔴 A SKILL THE MODEL LOADED EARLIER IN THIS CONVERSATION STAYS LOADED (2026-07-26).
+   *
+   * The last real gap against Claude Code, where a loaded skill remains in context for the rest of the
+   * session. Our tool loop is server-side and internal, so its call and result never enter the saved
+   * conversation: a skill fetched on turn 1 was GONE on turn 2, and a spec -> plan -> execute workflow
+   * paid a fresh round trip every turn for instructions it had already been given.
+   *
+   * Carrying them in the CACHED prefix makes this cheaper than the thing it copies — Claude Code
+   * re-sends a loaded skill inside an uncached conversation; we re-send it at 0.1x.
+   *
+   * Read from `messages` (the FULL list, pre-compaction) and never from the windowed history: the set
+   * must only ever GROW, or the prefix rewrites itself at 2x on the turn the window slides. Creation is
+   * excluded because it has its own fixed pair and no tools. See `stickyLoadedSkills`.
    */
-  const skillRoutingTexts = [...userTexts.filter((t) => !t.includes(CREATION_BRIEF_MARKER)), skillText];
-  const preloaded = await preloadSkills(skillRoutingTexts, slash?.skillName, isCreationTurn);
+  const carriedNames = isCreationTurn ? [] : stickyLoadedSkills(messages).filter((name) => name !== slash?.skillName);
+  const carried = await loadSkillBodies(carriedNames);
 
   /*
    * 🔴 THE INVOKED SKILL AND THE PRE-LOADED SKILLS SHARE ONE BREAKPOINT — because ANTHROPIC ALLOWS
@@ -702,7 +718,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   const skillBlocks = [
     ...(slash ? [slash.skillBlock] : []),
+
+    /*
+     * Creation's fixed pair has no tools, so its block withholds resource paths (a file the model
+     * cannot open is a dangling instruction). Carried skills DO have the tools, so their paths travel.
+     */
     ...(preloaded.length > 0 ? [buildPreloadedSkillBlock(preloaded)] : []),
+    ...(carried.length > 0 ? [buildPreloadedSkillBlock(carried, true)] : []),
   ];
 
   if (skillBlocks.length > 0) {
@@ -936,18 +958,34 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /*
    * 9. The tool loop runs entirely server-side; the client stream stays pure text + actions.
    *
-   * Pre-loaded skills are seeded as ALREADY LOADED, so if the model calls `load_skill` for one anyway
-   * (it does — we watched it call for `bt-design` four times in a single generation) the tool returns a
-   * cheap acknowledgement instead of re-injecting 19KB and burning a round from the cap.
+   * `loaded` is seeded with everything ALREADY IN CONTEXT — the `/slash` skill, creation's fixed pair,
+   * and the skills this conversation carried forward — so a `load_skill` call for one of them returns a
+   * cheap sentence instead of re-injecting 15–25KB. That guard is what makes it safe to keep offering
+   * the tool at all: the model asking again costs one round, not a body.
+   *
+   * `loadedThisTurn` is what the BUDGET spends. It starts empty even when `loaded` is full, because
+   * charging a conversation for skills it loaded on previous turns would mean a workflow that carried
+   * two skills could never load a third — the "withdraw the tool" failure returning through the budget.
+   *
+   * ⚠️ Whatever ends up in `loaded` is recorded as this generation's `skillsLoaded` (§4.11 metrics) and
+   * is therefore what `stickyLoadedSkills` reads on the NEXT turn. Carried skills must stay in the set
+   * for that reason: dropping them here would make the carried set flicker on and off between turns,
+   * rewriting the cached prefix each time.
    */
   const toolContext: SkillToolContext = {
-    loaded: new Set([...(slash ? [slash.skillName] : []), ...preloaded.map((s) => s.name)]),
+    loaded: new Set([
+      ...(slash ? [slash.skillName] : []),
+      ...preloaded.map((s) => s.name),
+      ...carried.map((s) => s.name),
+    ]),
+    loadedThisTurn: new Set<string>(),
 
     /*
-     * Once the router has put the skills in the prefix, `load_skill` has nothing left to fetch — so it
-     * is removed rather than merely discouraged. Discouraging it did not work: see `offerLoadSkill`.
+     * Offered on every turn that gets skill tools at all. The creation turn is the exception, and it is
+     * excluded upstream by `toolPolicy.toolset` rather than here — creation inlines its pair and runs
+     * with no skill tools, which is the one place "inlined AND offered" would still be a contradiction.
      */
-    offerLoadSkill: preloaded.length === 0 && !slash,
+    offerLoadSkill: !isCreationTurn,
   };
 
   /*

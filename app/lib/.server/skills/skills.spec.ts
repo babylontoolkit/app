@@ -12,6 +12,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseFrontmatter, validateSkill } from './frontmatter';
 import { buildSkillsIndex } from './sync';
+import { MAX_SKILL_LOADS } from '~/lib/.server/agent/tools';
 import { FsSkillStore } from './store';
 
 const VALID = `---
@@ -111,6 +112,34 @@ describe('skills index', () => {
 
   it('degrades gracefully when nothing is synced', () => {
     expect(buildSkillsIndex([])).toMatch(/No skills/i);
+  });
+
+  /*
+   * 🔴 The index is the ONLY thing that tells the model how to choose a skill, now that nothing routes
+   * for it (2026-07-26). Two sentences in it are load-bearing money:
+   *
+   *   - "load them BEFORE you begin writing" is what the 29,173-token / six-round measurement was
+   *     really about. A `load_skill` call is ~50 tokens; what cost tens of thousands was the model
+   *     starting the artifact, wanting a skill mid-draft, and discarding the draft — at 5x input rate,
+   *     over and over. Loading is cheap; INTERLEAVING is not.
+   *   - the load limit, so the model spends its two slots deliberately rather than discovering the
+   *     refusal by hitting it.
+   *
+   * Neither can be verified by any behavioural test we can run offline, and both fail silently and
+   * expensively. Pinning the text is the only guard available.
+   */
+  it('tells the model to choose and load skills BEFORE it starts writing', () => {
+    const index = buildSkillsIndex([skill('bt-spec', 'Creates a spec.')] as any);
+
+    expect(index).toMatch(/before you begin writing/i);
+    expect(index).toMatch(/do not interleave/i);
+  });
+
+  it('states the per-response load limit, and states the REAL one', () => {
+    const index = buildSkillsIndex([skill('bt-spec', 'Creates a spec.')] as any);
+
+    // Not a hardcoded number: it must track the budget the tool actually enforces.
+    expect(index).toContain(`at most ${MAX_SKILL_LOADS} skills`);
   });
 });
 

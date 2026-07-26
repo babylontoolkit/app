@@ -18,9 +18,41 @@ const logger = createScopedLogger('agent-tools');
 /** Tool rounds per generation. On cap, the model proceeds with whatever it has loaded. */
 export const MAX_TOOL_ROUNDS = 6;
 
+/**
+ * How many skill BODIES one generation may pull in (§4.11, `spec/skills.md`).
+ *
+ * 🔴 This is the structural ceiling on the six-round pathology, and it exists because the alternative
+ * is an instruction. The measured disaster — 6 tool rounds, 29,173 output tokens, 350 seconds, to end
+ * up with ONE distinct skill — was not the cost of loading skills (a `load_skill` call is ~50 tokens
+ * of JSON); it was the model calling for skills again and again *between drafts of the artifact*, and
+ * paying 5× output rate to redraft each time. A cap on ROUNDS could not stop it, because each of those
+ * rounds looked individually reasonable.
+ *
+ * So the budget is spent on BODIES, enforced inside `execute` where a bad value is recoverable: past
+ * the cap the tool stops handing over instructions and tells the model to proceed with what it has.
+ * Two is deliberate — a task legitimately spans at most a domain skill and a procedure skill
+ * (`bt-design` + `bt-landing`), which is exactly what the creation turn inlines — and going over it
+ * has never once been the difference between a good answer and a bad one.
+ *
+ * Not counted: an already-loaded re-request (answered with one sentence) and an unknown name (answered
+ * with the index). Neither hands over a body, and charging for them would spend the budget on the
+ * model's mistakes rather than on its work.
+ */
+export const MAX_SKILL_LOADS = 2;
+
 export interface SkillToolContext {
   /** Skills loaded during this generation — recorded on the `generations` row (§4.11 metrics). */
   loaded: Set<string>;
+
+  /**
+   * Skills the model asked for ON THIS TURN — what the budget actually spends.
+   *
+   * Separate from `loaded`, which is seeded with everything already IN CONTEXT (the `/slash` skill, and
+   * the skills this conversation loaded on earlier turns — `stickyLoadedSkills`). Charging the budget
+   * for those would mean a conversation that has carried two skills can never load a third, which is
+   * the "withdraw the tool" failure returning through the budget instead of the tool set.
+   */
+  loadedThisTurn?: Set<string>;
 
   /**
    * Offer `load_skill`? False once the router has already pre-loaded the turn's skills.
@@ -78,6 +110,23 @@ export function createSkillTools(context: SkillToolContext) {
           return `The "${name}" skill is already loaded and its instructions are in your context. Proceed with the task — do not load it again.`;
         }
 
+        /*
+         * The budget (see `MAX_SKILL_LOADS`) — checked BEFORE the store read, so an over-budget call
+         * cannot even pay for a lookup. It is a refusal the model can act on, not an error: it names
+         * what it already has and tells it to get on with the task, which is the recovery the tool
+         * contract is built around everywhere else in this file.
+         */
+        const thisTurn = context.loadedThisTurn;
+
+        if (thisTurn && thisTurn.size >= MAX_SKILL_LOADS) {
+          logger.warn(`load_skill: budget spent (${thisTurn.size}/${MAX_SKILL_LOADS}), refused "${name}"`);
+
+          return (
+            `You have already loaded ${thisTurn.size} skills in this response (${[...context.loaded].join(', ')}), ` +
+            `which is the limit. Proceed with the task using those instructions — do not call load_skill again.`
+          );
+        }
+
         const skill = await store.getActive(name);
 
         if (!skill) {
@@ -93,6 +142,7 @@ export function createSkillTools(context: SkillToolContext) {
         }
 
         context.loaded.add(name);
+        context.loadedThisTurn?.add(name);
         logger.info(`load_skill: ${name} (${skill.bodyBytes} bytes)`);
 
         const resources = skill.resourcePaths.length

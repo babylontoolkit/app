@@ -25,6 +25,15 @@ import { MAX_TOOL_ROUNDS } from './tools';
 export const CREATION_MEDIA_STEPS = 3;
 
 /**
+ * ⚠️ RETIRED for ordinary turns (2026-07-26) — kept because the reasoning below is still the reason
+ * media tools may never be withheld, and because the creation path still uses this budget.
+ *
+ * Ordinary turns now always get the FULL toolset (see `toolPolicyForTurn`), so there is no longer a
+ * "closed loop that media has to prise back open": media, MCP and skill tools are all offered, and the
+ * skill-thrash ceiling moved into `MAX_SKILL_LOADS` where it belongs.
+ *
+ * The historical note:
+ *
  * The same budget for an ORDINARY turn whose only reason to open the loop is media (§4.16).
  *
  * This exists because the original rule — "media tools never force the loop on for ordinary turns; the
@@ -100,20 +109,26 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
       : { allowTools: false, toolset: 'skills-only', maxSteps: 1 };
   }
 
-  const allowTools = input.hasMcpTools || (input.preloadedCount === 0 && !input.isSlash);
-
-  if (allowTools) {
-    return { allowTools: true, toolset: 'all', maxSteps: MAX_TOOL_ROUNDS + 1 };
-  }
-
   /*
-   * Nothing above wants a full loop — but media generation must stay reachable from the CHAT on every
-   * turn, not only on creation and not only on the turns that happen to route no skill (§4.16). A
-   * media-only loop with a small cap is the bounded way to do that: see `MEDIA_TURN_STEPS`.
+   * 🔴 ORDINARY TURNS ALWAYS GET THE SKILL TOOLS (2026-07-26).
+   *
+   * This used to be `hasMcpTools || (preloadedCount === 0 && !isSlash)` — i.e. the keyword router
+   * decided, and the moment it fired, `load_skill` was withdrawn. That produced a system in which the
+   * cached prompt listed ten skills and told the model "Call load_skill(name) to load one of these",
+   * while the tool was not in the tool set. A dangling instruction, which is the exact failure this
+   * file's own header warns about ("the model is TOLD it has tools it cannot call, and drafts around
+   * them") — and it meant a wrong routing decision could never be corrected, on any turn, ever.
+   *
+   * Now: nothing is inlined on an ordinary turn, so the model chooses its own skills, exactly as
+   * agentskills.io (and Claude Code) intend. The six-round pathology is bounded by `MAX_SKILL_LOADS`
+   * inside the tool rather than by taking the tool away — see `preload-skills.ts` for why the two are
+   * not the same trade, and why the recorded thrash always required a skill to be inlined AND the tool
+   * offered at the same time. That contradictory state no longer exists.
+   *
+   * A `/slash` turn keeps its tools too: the invoked skill is inlined, but its instructions routinely
+   * name a SIBLING (`bt-spec` → "Use bt-hero to create…"), and the composability the skill descriptions
+   * advertise is only real if the model can act on it. Re-requesting the inlined skill costs one cheap
+   * round and returns a single sentence (the already-loaded guard), not its body.
    */
-  if (input.hasMediaTools) {
-    return { allowTools: true, toolset: 'media-only', maxSteps: MEDIA_TURN_STEPS };
-  }
-
-  return { allowTools: false, toolset: 'all', maxSteps: 1 };
+  return { allowTools: true, toolset: 'all', maxSteps: MAX_TOOL_ROUNDS + 1 };
 }

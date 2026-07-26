@@ -14,6 +14,7 @@ import { githubJson, githubText } from '~/lib/.server/prompt/github';
 import { SKILLS_REPO } from '~/lib/.server/prompt/sources';
 import { validateSkill } from './frontmatter';
 import { getSkillStore, type SkillVersion } from './store';
+import { MAX_SKILL_LOADS } from '~/lib/.server/agent/tools';
 
 const logger = createScopedLogger('skills-sync');
 
@@ -61,6 +62,18 @@ export function buildSkillsIndex(skills: SkillVersion[]): string {
     '',
     'Call `load_skill(name)` to load one of these before working in its domain.',
     'The user can also invoke one directly by typing `/<name> <task>` in chat.',
+    '',
+
+    /*
+     * 🔴 "DECIDE FIRST, THEN WRITE" is the load-bearing sentence, and it is what the 29,173-token
+     * six-round measurement was actually about (`preload-skills.ts`). A `load_skill` call costs ~50
+     * tokens; what cost tens of thousands was the model beginning the artifact, realising mid-draft
+     * that it wanted a skill, calling for it, and discarding the draft — at 5x input rate, repeatedly.
+     * Loading is cheap; INTERLEAVING loading with writing is not.
+     */
+    'Decide which skills you need and load them BEFORE you begin writing code, files or an artifact.',
+    'Loading is cheap; abandoning a half-written answer to load one is not. Do not interleave the two.',
+    `You may load at most ${MAX_SKILL_LOADS} skills in one response, so choose by the descriptions below.`,
     '',
     ...rows,
   ].join('\n');

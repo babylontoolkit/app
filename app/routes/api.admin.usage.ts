@@ -11,6 +11,7 @@ import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireAdmin } from '~/lib/.server/supabase/auth';
 import { getGenerationStore } from '~/lib/.server/billing/generations';
 import { buildUsageReport } from '~/lib/.server/admin/usage-report';
+import { getProviderBalance } from '~/lib/.server/billing/provider-balance';
 import { errorResponse } from '~/lib/.server/http';
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
@@ -22,7 +23,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
     const records = await getGenerationStore(context).list(limit);
 
-    return json({ report: buildUsageReport(records), sampled: records.length });
+    /*
+     * The provider pool every user's generation draws from (§4.10). Fetched alongside the report
+     * rather than on its own route: it is one number on one panel, and `getProviderBalance` never
+     * throws, so a provider outage degrades this field to "unknown" instead of failing the dashboard.
+     */
+    const providerBalance = await getProviderBalance(context);
+
+    return json({ report: buildUsageReport(records), sampled: records.length, providerBalance });
   } catch (error) {
     return errorResponse(error);
   }

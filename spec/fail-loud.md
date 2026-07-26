@@ -1,11 +1,15 @@
 # spec/fail-loud.md — A paid request never fails silently (governs SPEC §4.2, §4.6, §4.16; owner directive 2026-07-25)
 
-> **Status: POLICY ADOPTED, STAGES A + B + C DONE (2026-07-25), STAGE D OWED.** Owner directive
+> **Status: POLICY ADOPTED, STAGES A + B + C + D DONE (D drove live 2026-07-26).** Owner directive
 > (2026-07-25, verbatim intent): *"we should never have silent fails on a paid service that burns
 > credits."* Much of this document describes guards that already exist — they are listed so nobody
-> rebuilds them. The part that does NOT yet exist is enumerated in §"The kickoff plan", each stage
-> with a paste-able prompt. Until a stage is run, its items are OWED, not done — do not cite this
-> spec as evidence they are built. **Stage A's inventory is §"The money-path inventory" below**; the
+> rebuilds them. **Nothing in the four-stage plan is owed any more** — A, B and C landed 2026-07-25 and
+> D drove live 2026-07-26 — so §"The four stages" is now a record of what was built and why, not a
+> to-do list. Three things are deliberately NOT covered and are named where they are decided rather
+> than left to be rediscovered: the KIE **create-time** media failure branch is still unit-proven only
+> (§"Stage D"); `web_search`'s after-the-fact debit stays sanctioned (§Scope); and the
+> `transport-envelope` tripwire stays a per-occurrence alert rather than a rate (§"Stage C").
+> **Stage A's inventory is §"The money-path inventory" below**; the
 > three defects it found are fixed and pinned (`media.spec.ts` orphan refund,
 > `enhancer-settlement.spec.ts`, `money-swallow-alert.spec.ts`), all mutation-verified. **Stage B is
 > `billing/money-paths.spec.ts`** — default-deny over every ledger-debiting call site, enumerated from
@@ -204,12 +208,13 @@ category Stage A removed from the money paths.
 `web_search`'s after-the-fact debit stays sanctioned exactly as the Scope section describes; and
 `providerRates`' premium-injection swallow stays, because its alternative is taking settlement down.
 
-## The kickoff plan (the owed work)
+## The four stages — ALL COMPLETE (A+B+C 2026-07-25, D 2026-07-26)
 
-Four stages, independent, in value order. Each is kicked off by pasting its prompt into a fresh
-session. Definition of done for every stage: gates green (`pnpm typecheck && pnpm lint:fix && pnpm
-lint && pnpm test`), new guards mutation-verified, and this spec's status banner updated in the same
-change.
+Kept in full, because each stage's brief records *why* its guard exists and what it cost to find —
+which is the part that stops the guard being "simplified" away later. The kickoff prompts remain
+usable for a re-drive. Definition of done for every stage was: gates green (`pnpm typecheck && pnpm
+lint:fix && pnpm lint && pnpm test`), new guards mutation-verified, and this spec's status banner
+updated in the same change.
 
 ### Stage A — ENUMERATE the money paths and audit every swallow ✅ DONE 2026-07-25
 
@@ -310,16 +315,59 @@ is what makes that sentence actionable.
 > rates and per-reason refund rates via the failure-rate pattern, and add them to the Admin usage
 > report."*
 
-### Stage D — LIVE drives of the never-exercised failure paths
+### Stage D — LIVE drives of the never-exercised failure paths ✅ DONE 2026-07-26
 
-The MCP-relay lesson: "correct by construction" until driven live. Owed drives, cheapest first:
-**(1)** one real `/bt-spec` in the browser (exercises the envelope strip, slash resolution, and —
-if the model stalls — the rescue, in one turn); **(2)** a real media render FAILURE → refund
-observed in ledger + panel (spec-pinned, never seen live); **(3)** the agent-tool media path inside
-a chat turn. Each is a manual verification with the ledger open, not a CI test.
+All three driven against real KIE with the ledger open. **No defects found** — but see the caveat on
+(2) and (3) at the end, which is about who drove them, not about the result.
 
-> **Kickoff prompt:** *"Read spec/fail-loud.md, then run Stage D item (N): drive it live with the
-> ledger open and record the result in the spec."*
+**(1) A real `/bt-spec` in the browser.** `gen_ms1dfnia_1l63pn`: `finish=stop`, `toolRounds: 0`,
+`skillsLoaded: ['bt-spec', …]` — so the transport-envelope strip and slash resolution both worked on a
+message carrying the client's `[Model: …][Provider: …]` prefix (defect 1 of the demo day: *every*
+`/slash` was being dropped). 378 credits debited, balance 47,064 → 46,686, and the header balance
+matched the ledger exactly (rule 5 — a settled charge the UI cannot see is a defect). The **unproductive
+rescue did not fire and should not have**: the turn produced 15,221 chars and a real `_specs/` file,
+verified by the model refusing to clobber it on a later turn. DELIVERED, judged from what we observed.
+
+**(2) A real media render FAILURE → refund.** `med_ms1b7770_o21mh0` (nano-banana-2), a prompt the
+provider's moderation refused:
+
+```
+04:39:53  media   -24  bal=48332
+04:40:06  refund  +24  bal=48356   "media refund: The provider reported the generation failed."
+```
+
+Every property of the REFUNDED state held: the task record carries `status: 'failed'`, `error`, and the
+`refunded: true` latch; the `generations` row is `status: failed`; **exactly ONE refund row exists
+across nine media debits** (the exactly-once latch, which is the property no unit test can prove about
+the real poll loop); the balance is whole; and the Media panel renders it with the reason attached
+(*"refunded — The provider reported…"*), so the user is told rather than left to notice. This path was
+spec-pinned and had never been seen live.
+
+**(3) The agent-tool media path inside a chat turn.** Established by correlating every media task
+against the LLM generation in flight at the time — the distinguishing evidence being that the tool
+passes `file_name` (the panel does not, so a panel render is slugged from the prompt):
+
+| media task | created | inside an LLM turn | tool rounds |
+|---|---|---|---|
+| `hero-racing`, `arcade-racing-logo`, `car-showcase` | 20:40:49/52/55 | gen spanning **20:40:34–20:47:09** | 1 |
+| `adventure-hero`, `adventure-emblem`, `adventure-texture` | 20:56:04/10/10 | gen spanning 20:55:49–20:59:00 | 1 |
+| `synty-hero`, `synty-emblem` | 21:06:13/16 | gen spanning 21:05:42–21:08:41 | 1 |
+
+Eight renders, all fired **15–21 seconds into a live generation**, **one tool round each** — which is
+the creation brief's "all generate calls first, in ONE round" behaving exactly as designed, and the
+async-enqueue contract holding (the loop never parked on a render). Three of them chained the
+transparency cut-out (`stage`/`cutout`/`renderUrl` on the record) and were billed once for both stages.
+
+⚠️ **The honest caveat: (2) and (3) were driven by the OWNER's own use of the product, and verified
+afterwards from the ledger, the task records and the panel — not staged by the person writing this
+entry.** That is stronger evidence than a staged drive for the question "does this work in real use",
+and weaker for "can I make it fail on demand": a second failure mode (KIE erroring at CREATE time
+rather than during the render — the `create throws → refund + anchor failed + 502` branch) is still
+only unit-proven. The refund-exactly-once latch is now live-confirmed on the poll branch, which was the
+one that mattered most.
+
+> **Kickoff prompt (for a future re-drive):** *"Read spec/fail-loud.md, then run Stage D item (N):
+> drive it live with the ledger open and record the result in the spec."*
 
 ## When you add a paid path (the checklist that makes this spec cheap)
 

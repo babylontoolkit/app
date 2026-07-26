@@ -75,8 +75,16 @@
 >
 > **The rule: a skill is reached EITHER by pre-loading it into the prefix OR by the model fetching it —
 > never both at once.** Offering a tool while instructing the model not to use it is not redundancy, it
-> is a trap. So `allowTools` is now `!isCreationTurn && preloaded.length === 0 && !slash`: the tools
-> exist only on the turn the keyword router could not anticipate, which is the only turn they can help.
+> is a trap.
+>
+> ⚠️ **UPDATED 2026-07-26 — the rule stands; the way it is satisfied has been INVERTED.** It used to be
+> satisfied by withdrawing the tool whenever the keyword router fired (`allowTools = !isCreationTurn &&
+> preloaded.length === 0 && !slash`). That bounded the tokens and destroyed the feature: the model could
+> not choose its own skills, three synced skills were permanently unreachable, and the cached prompt
+> told it to call a tool it did not have. It is now satisfied from the other side — **nothing is inlined
+> on an ordinary turn, so the tool is always safe to offer**, and skill-loading cost is capped by
+> `MAX_SKILL_LOADS = 2` inside `execute`. Creation still inlines-and-withdraws, unchanged. See
+> `spec/skills.md`.
 >
 > We tried the obvious middle ground first — keep `read_skill_resource` (so a pre-loaded skill's
 > bundled files stay reachable) and drop only `load_skill`. The model thrashed on the remaining tool
@@ -304,18 +312,26 @@ Every one of these came out of a measured failure, and each is a whole wasted ge
 - **A miss is reported alongside the hits, with "do not retry with a different path."** A bad path costs
   one cheap correction instead of a whole extra round of guessing.
 
-### 4. Preload bounds — the keyword router must not drag in the library
+### 4. Skill-load bounds — the model chooses, the BUDGET bounds it (rewritten 2026-07-26)
 
-`app/lib/.server/agent/preload-skills.ts`
+`app/lib/.server/agent/preload-skills.ts`, `app/lib/.server/agent/tools.ts`
 
-- **`MAX_PRELOADED = 2`** — so a keyword-soup prompt cannot pull the entire skill library into the prefix.
-- **A creation turn preloads exactly ONE skill (`bt-design`).** The routing text on a creation turn is the
-  *brief*, which is full of incidental game vocabulary that keyword-matches skills the model has no use
-  for (observed: dragging in `bt-prototype` for an already-scaffolded project).
-- **The asymmetry that sets keyword breadth:** a false positive costs cached tokens (0.1×); a false
-  negative costs a round trip (~50s plus thousands of redrafted output tokens). Lean toward loading.
-- **The preloaded block deliberately OMITS bundled resource paths.** Naming a file the model has no tool
-  to open is a dangling instruction, and it caused the 6-round/160s thrash described above.
+- **There is no keyword router.** It picked skills by substring match against a table hardcoded in this
+  repo — `'ui'` fired on "b**ui**ld", three of ten synced skills had no entry and could never load, and
+  the `description` (which the index calls THE trigger) was never read. `spec/skills.md` has the full
+  post-mortem and the live before/after.
+- **`MAX_SKILL_LOADS = 2`** — a budget on skill BODIES, enforced in `execute`, replacing both
+  `MAX_PRELOADED` and "withdraw the tool". Each body is 15–25KB of prefix on every subsequent step, so
+  an unbounded budget is an unbounded bill; past the cap the tool refuses and names what is loaded.
+- **A creation turn inlines exactly TWO skills (`bt-landing`, `bt-design`) and gets no skill tools.**
+  A constant, not routing: its brief is machine-written and was authored against those two. Feeding that
+  brief to a matcher is what dragged in `bt-prototype` for an already-scaffolded project.
+- **The index tells the model to load BEFORE it writes.** A `load_skill` call is ~50 tokens; the
+  29,173-token measurement was redrafting between rounds. Loading is cheap, interleaving is not.
+- **A tool round re-processes the whole prefix** (~151k tokens: 0.1× warm, 2× WRITE on a cold KIE
+  backend). That is the real unit cost of progressive disclosure here, and the reason the budget is 2.
+- **The inlined block still omits bundled resource paths** on the creation turn, where there is no tool
+  to open them. On an ordinary turn `load_skill` returns them, because the tool exists.
 
 ### 5. Cache-stability guards (a busted cache is a silent 10× on the prefix)
 
@@ -632,7 +648,8 @@ byte-identical starter file context — because the blocks sit ahead of the file
 
 > **RESOLVED.** The churn diagnosed below was real, and the fix is the one this section predicted:
 > **sticky, append-only, first-seen-ordered block routing per conversation** (`selectStickyBlocks` in
-> `prompt/sources.ts`, `stickySkillNames` in `agent/preload-skills.ts`). Verified live: four turns on one
+> `prompt/sources.ts`; the sibling `stickySkillNames` was DELETED 2026-07-26 when skill selection moved
+> to the model — `spec/skills.md`). Verified live: four turns on one
 > project routed an **identical** block list, and the trivial edit that cost 160 credits came back at
 > **18**. A warm edit now measures **~11 credits** at margin 3.34 (~13 at the current 4.0) — a
 > $90/9,500-credit Pro pack is **~730 warm edits**, not 13.
@@ -865,6 +882,41 @@ keyword list had `vr ui` but not `in vr`, and `includes()` makes a bare `vr` unu
 
 ---
 
+## A cached prefix does not pay on its FIRST reuse — it pays on its ~5th (MEASURED 2026-07-26)
+
+`node scripts/cache-probe.mjs [requests] [delayMs]` — same request N times, mirroring the platform's
+exact cache shape (`ephemeral`, `ttl: '1h'`, one system block), a ~5.4k-token prefix and `max_tokens: 1`,
+so a 24-request run costs a rounding error.
+
+| Run | Prefix | Result |
+|---|---|---|
+| 1 | brand new | requests **1–4 MISS (wrote), 5–10 HIT** — 6/10 |
+| 2 | same, minutes later | HIT, HIT, **MISS** — a straggler backend |
+| 3 | same, minutes later | **24/24 HIT** |
+
+**A new prefix costs roughly four or five full cache WRITES before it starts paying back, and each
+write bills at 2x.** So the cost of changing the SHAPE of the cached prefix is not one write, it is
+about eight times a single prefix — and after that it is ~100% hits, indefinitely. KIE warms **per
+backend**; the load balancer has to touch each one before the prefix is universally warm, which is why
+misses cluster at the start and why a lone straggler can appear later.
+
+**This multiplies the value of every append-only rule in this document by ~4.** `selectStickyBlocks`,
+the carried-skills set (`stickyLoadedSkills`), the sorted skills index, the hash-skipped prompt build:
+each one exists to stop the prefix changing shape, and each change is four writes, not one. It also
+bounds `MAX_STICKY_SKILLS = 3` — every skill that joins the carried set re-buys a warmup, so three is
+an order-of-magnitude decision, not a number to raise casually.
+
+⚠️ **THE TRAP FIRED AGAIN, AND IT IS ALREADY WRITTEN DOWN IN CLAUDE.md.** A day of live generations all
+showed `cacheRead: 0`, which reads exactly like a broken cache — and was reported as "costing more than
+everything else fixed today". It was the warmup: prompt-affecting code was being edited *between*
+generations, so no prefix ever survived to its 5th request, and two turns whose prefixes were
+byte-identical were simply requests 1 and 2 of that prefix. This is the same mistake CLAUDE.md records
+under **"A MISS RATE MEASURED OVER A WARMUP IS NOT A MISS RATE"**, where a six-request probe nearly
+bought a 2.5x more expensive provider to fix a defect that did not exist. Reading it did not prevent
+repeating it — **so the probe is now a committed script**, and the rule is: never diagnose the cache
+from production generations whose prefix changed between them; run the probe, which holds the prefix
+still on purpose.
+
 ## Levers that are NOT built
 
 **None outstanding.** The two that were listed here — the unwindowed history and the never-firing
@@ -922,7 +974,9 @@ starting points for the history window above — but they are starting points, n
 | Watcher (keeps the lockfile IN the project) | `app/lib/stores/files.ts` → `watchPaths` |
 | Body-strip before POST (keeps it OUT of the wire) | `app/components/chat/Chat.client.tsx` → `agentFiles` |
 | Tool-set design (rounds, batching, forced answer, `toolChoice`) | `app/lib/.server/agent/tools.ts` |
-| Preload bounds (`MAX_PRELOADED`, creation = 1 skill) | `app/lib/.server/agent/preload-skills.ts` |
+| Skill-load budget (`MAX_SKILL_LOADS`; creation inlines 2, tools off) | `app/lib/.server/agent/tools.ts`, `agent/preload-skills.ts` |
+| Carried skills, append-only (`MAX_STICKY_SKILLS`) | `app/lib/.server/agent/preload-skills.ts` |
+| Cache-warmup probe (never diagnose the cache from live turns) | `scripts/cache-probe.mjs` |
 | Effort policy (escalate-only) | `app/lib/.server/agent/effort-policy.ts` |
 | Declaration file kept OUT of the prompt (~490KB) | `app/lib/.server/prompt/sources.ts` |
 | Attachment limits (vision tokens = unbounded bill) | `app/lib/.server/agent/attachments.ts` |

@@ -220,7 +220,7 @@ against a cached prefix) and a weighting factor is a pricing decision we have no
   ~92. That makes it a **retention and value problem, not a solvency one**, and it means no pricing
   change can fix it and no ledger alarm will ever fire on it. The only fix is to stop the prefix churn.
 
-  **✅ FIXED 2026-07-17 — sticky block routing** (`selectStickyBlocks` / `stickySkillNames`; see
+  **✅ FIXED 2026-07-17 — sticky block routing** (`selectStickyBlocks`; the `stickySkillNames` half was deleted 2026-07-26 — `spec/skills.md`; see
   `spec/context-budget.md` §"Edit turns"). A warm edit now measures **~11 credits (~545 per $50 pack)**,
   and four consecutive live turns routed an identical block list. **The 13-vs-92 figures above are PRE-FIX
   and must not be quoted as current.** The margin claim is unchanged — it was never the problem, which is
