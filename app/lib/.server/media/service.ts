@@ -17,6 +17,9 @@
  * against fakes.
  */
 import { createScopedLogger } from '~/utils/logger';
+import { getMonitor } from '~/lib/.server/monitoring';
+import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
+import { ALERT_SIGNALS } from '~/lib/.server/monitoring/events';
 import { getLedger } from '~/lib/.server/billing/ledger';
 import { getGenerationStore } from '~/lib/.server/billing/generations';
 import { getBillingConfig, creditsForRawCost } from '~/lib/.server/billing/rates';
@@ -290,6 +293,8 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
       .upsert({ id, userId: input.userId, model: quote.model, status: 'failed' })
       .catch(() => undefined);
 
+    recordRefundOutcome(getMonitor(input.context), 'media', true);
+
     throw new MediaRefusedError(`The provider refused the render: ${(error as Error).message}`, 502);
   }
 
@@ -319,7 +324,35 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
     createdAt: now,
     updatedAt: now,
   };
-  await putMediaTask(input.objectStore, record);
+
+  /*
+   * 🔴 THE TASK RECORD IS THE ONLY THING THAT CAN EVER FINISH OR REFUND THIS RENDER.
+   *
+   * By this line the user has been DEBITED and KIE is rendering. The record is what the poll route
+   * reads to deliver the bytes, and what the failure path reads to refund. Left unguarded, an object
+   * store hiccup here produced a fifth terminal state (`spec/fail-loud.md`): money gone, render
+   * running, nothing able to poll it, nothing able to refund it, and the tool result reporting only
+   * that the task "could not start" — the exact silent shape this spec exists to remove.
+   *
+   * So: refund, mark the anchor failed, and refuse out loud. The render at KIE is not recoverable
+   * (it is already paid for on OUR account), but the user's credits are, and that is the half that
+   * is ours to get right.
+   */
+  try {
+    await putMediaTask(input.objectStore, record);
+  } catch (error) {
+    const message = `the render started but its task record could not be stored: ${(error as Error).message}`;
+    logger.error(`Media task ${id} orphaned — ${message}`);
+
+    await refundMediaTask(input.userId, id, debited, message, input.context);
+    await getGenerationStore(input.context)
+      .upsert({ id, userId: input.userId, model: quote.model, status: 'failed' })
+      .catch(() => undefined);
+
+    recordRefundOutcome(getMonitor(input.context), 'media', true);
+
+    throw new MediaRefusedError(`The render could not be tracked, so it was cancelled and refunded: ${message}`, 500);
+  }
 
   logger.info(
     `Media task ${id} started: ${quote.model}${quote.delivery?.cutout ? ' + cut-out' : ''} → ${destPath} ` +
@@ -431,6 +464,7 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
             .upsert({ id: record.id, userId: record.userId, model: record.model, status: 'failed' })
             .catch(() => undefined);
           await putMediaTask(input.objectStore, updated);
+          recordRefundOutcome(getMonitor(input.context), 'media', true);
 
           return updated;
         }
@@ -456,6 +490,19 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
     }
 
     await putMediaTask(input.objectStore, updated);
+
+    /*
+     * One media task reaching a TERMINAL state is one unit of paid work, so this is where the refund
+     * rate gets both its numerator and its denominator (`spec/fail-loud.md` Stage C). Recorded here
+     * rather than inside `refundMediaTask`, which only ever sees the failures — a window fed only its
+     * numerator sits at 100% and alerts on the first refund.
+     *
+     * Reaching this line IS the terminal check — the two non-terminal outcomes (a still-pending render
+     * and the mid-flight cut-out chain) both return earlier, and the compiler agrees: `updated.status`
+     * narrows to `'succeeded' | 'failed'` here. Counting a cut-out's stage 1 would double-count the
+     * same asset when stage 2 lands.
+     */
+    recordRefundOutcome(getMonitor(input.context), 'media', updated.status === 'failed');
 
     return updated;
   });
@@ -483,7 +530,14 @@ async function refundMediaTask(
     });
     logger.info(`Refunded ${credits} credits to ${userId} for failed media task ${mediaId}`);
   } catch (error) {
+    // The user paid for a render they never got. Nothing downstream can see this — so alert (rule 4).
     logger.error(`FAILED TO REFUND media task ${mediaId}: ${(error as Error).message}`);
+    getMonitor(context).alert(
+      ALERT_SIGNALS.LEDGER_INTEGRITY,
+      `Refund of ${credits} credits for failed media task ${mediaId} did NOT land — the user is still ` +
+        `charged for a render they did not get: ${(error as Error).message}`,
+      { severity: 'critical', scope: 'media-refund', userId, tags: { mediaId, credits } },
+    );
   }
 }
 

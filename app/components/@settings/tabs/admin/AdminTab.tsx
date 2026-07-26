@@ -24,6 +24,7 @@ interface UsageReport {
   silentStepOutputTokens: number;
   visibleTextChars: number;
   charsPerOutputToken: number;
+  markers: { forcedContinuation: number; unproductiveRescue: number; providerRetry: number; rescued: number };
   byModel: Array<{ model: string; generations: number; rawCostUsd: number }>;
 }
 interface Submission {
@@ -296,7 +297,28 @@ export function AdminTab() {
                */}
               <Stat label="Output density" value={`${report.charsPerOutputToken.toFixed(1)} ch/tok`} />
               <Stat label="Silent output" value={`${report.silentStepOutputTokens.toLocaleString()} tok`} />
+              {/*
+               * The rescues, made visible (spec/fail-loud.md Stage C). Each one WORKED — the user got
+               * their artifact — which is exactly why nothing else on this page would ever show them.
+               * A rising number means the cause is upstream of the rescue and the rescue is only
+               * paying for it, at 5x output rate, since every one is a second stream.
+               */}
+              <Stat
+                label="Rescued turns"
+                value={
+                  report.generations
+                    ? `${report.markers.rescued} (${((report.markers.rescued / report.generations) * 100).toFixed(1)}%)`
+                    : '0'
+                }
+              />
             </div>
+            {report.markers.rescued > 0 && (
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-bolt-elements-textSecondary">
+                <span>Forced continuation: {report.markers.forcedContinuation}</span>
+                <span>Unproductive rescue: {report.markers.unproductiveRescue}</span>
+                <span>Provider retry: {report.markers.providerRetry}</span>
+              </div>
+            )}
             {report.byModel.length > 0 && (
               <div className="mt-3 text-xs text-bolt-elements-textSecondary">
                 {report.byModel.map((m) => (

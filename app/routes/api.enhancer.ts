@@ -15,6 +15,13 @@
  *
  * And the model is the platform's choice, not the caller's, unless a server-verified Pro entitlement
  * says the user is paying with their own key (§4.6.1).
+ *
+ * FOUR TERMINAL STATES (`spec/fail-loud.md`): REFUSED BEFORE SPEND — no session, an over-long or
+ * missing prompt, or the credit gate (402), all before the model is called. DELIVERED — text streamed
+ * and settled. REFUNDED — a stream error or a zero-text finish, refunded and recorded `failed`. There
+ * is no CHARGED AS CONSUMED here: the enhancer has no Stop affordance. `usePromptEnhancer` calls
+ * `refreshSession()` when the stream ends, which is what puts the settled charge (or its refund) on
+ * screen — this route streams bare text and can carry no `credits` annotation of its own.
  */
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { streamText } from '~/lib/.server/llm/stream-text';
@@ -23,7 +30,8 @@ import { getApiKeysFromCookie, getProviderSettingsFromCookie } from '~/lib/api/c
 import { createScopedLogger } from '~/utils/logger';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
-import { checkCreditGate, settleGeneration } from '~/lib/.server/billing/gate';
+import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
+import { getGenerationStore } from '~/lib/.server/billing/generations';
 import { getPlatformModel, getPlatformProvider } from '~/lib/.server/agent/config';
 
 export async function action(args: ActionFunctionArgs) {
@@ -146,45 +154,90 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
     });
 
     /*
-     * SETTLEMENT (§4.6). `usage` resolves once the stream is drained, which is why this is not awaited
-     * here — the response has to start flowing to the browser now. Settlement can never refuse and
-     * never throws, so nothing downstream depends on it finishing first.
+     * SETTLE, THEN REFUND IF IT FAILED (§4.6, `spec/fail-loud.md`).
      *
-     * The enhancer sends no cache-control, so there are no cache tokens to account for.
+     * The enhancer is a paid KIE-reaching path and must land in the same four terminal states a
+     * generation does. It used to reach only two: the gate could refuse before spend, and everything
+     * else settled as DELIVERED — a stream that errored halfway, or one that produced no text at all,
+     * was logged and charged, with the browser left holding a truncated response and no error. The
+     * proxy's `producedText` rule (a clean `stop` with nothing to show is a FAILURE) applies here for
+     * exactly the same reason; there is just far less machinery around it.
+     *
+     * Not awaited — the response has to start flowing to the browser now. Settlement can never refuse
+     * and never throws, so nothing downstream depends on it finishing first. The enhancer sends no
+     * cache-control, so there are no cache tokens to account for.
      */
-    result.usage
-      .then((usage) =>
-        settleGeneration({
-          userId: user.id,
-          generationId,
-          model,
-          provider,
-          usage: {
-            promptTokens: usage.promptTokens ?? 0,
-            completionTokens: usage.completionTokens ?? 0,
-            cacheReadTokens: 0,
-            cacheCreationTokens: 0,
-          },
-          byok: byok.allowed,
-          context,
-        }),
-      )
-      .catch((error) => logger.error(`Failed to settle enhancement ${generationId}: ${error?.message}`));
+    void (async () => {
+      let failed = false;
+      let producedText = false;
 
-    // Handle streaming errors in a non-blocking way
-    (async () => {
       try {
         for await (const part of result.fullStream) {
           if (part.type === 'error') {
-            const error: any = part.error;
-            logger.error('Streaming error:', error);
-
+            logger.error(`Enhancement ${generationId} stream error:`, part.error as any);
+            failed = true;
             break;
+          }
+
+          if (part.type === 'text-delta' && part.textDelta) {
+            producedText = true;
           }
         }
       } catch (error) {
-        logger.error('Error processing stream:', error);
+        logger.error(`Enhancement ${generationId} stream broke: ${(error as Error)?.message}`);
+        failed = true;
       }
+
+      // No text is a failure however cheerfully the provider finished — the user got nothing.
+      if (!producedText) {
+        failed = true;
+      }
+
+      let usage;
+
+      try {
+        usage = await result.usage;
+      } catch (error) {
+        logger.error(`Failed to read enhancement usage for ${generationId}: ${(error as Error)?.message}`);
+        return;
+      }
+
+      const settlement = await settleGeneration({
+        userId: user.id,
+        generationId,
+        model,
+        provider,
+        usage: {
+          promptTokens: usage.promptTokens ?? 0,
+          completionTokens: usage.completionTokens ?? 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        },
+        byok: byok.allowed,
+        context,
+      });
+
+      if (!failed) {
+        return;
+      }
+
+      /*
+       * The provider still billed US for whatever a broken enhancement burned; the user gets their
+       * credits back and the row says `failed`, so the §4.10 refund audit can see it.
+       */
+      if (settlement && settlement.creditsCharged > 0) {
+        await refundGeneration(
+          user.id,
+          generationId,
+          settlement.creditsCharged,
+          'Automatic refund — the prompt enhancement failed',
+          context,
+        );
+      }
+
+      await getGenerationStore(context)
+        .upsert({ id: generationId, userId: user.id, model, status: 'failed' })
+        .catch(() => undefined);
     })();
 
     // Return the text stream directly since it's already text data

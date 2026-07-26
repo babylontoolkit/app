@@ -67,6 +67,7 @@ import { buildProjectNotes, type GameBackendState } from './project-notes';
 import { discussModeNote } from './discuss-note';
 import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
 import { sharedFailureRate } from '~/lib/.server/monitoring/failure-rate';
+import { recordRefundOutcome, recordRescueMarkers } from '~/lib/.server/monitoring/paid-path-rates';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
 
@@ -375,9 +376,27 @@ export async function resolveSlashInvocation(
     resources,
   ].join('\n');
 
-  // The args become the task. An empty invocation still runs the skill, with no specific task.
+  /*
+   * 🔴 THE REWRITE MUST NAME THE SKILL — dropping it is how a loaded skill stops binding.
+   *
+   * This line replaced the user's message with `invocation.args` ALONE for the life of the product,
+   * and never once ran: `resolveSlashInvocation` was parsing the RAW content, the client's envelope
+   * pushed the `/` off the front, and it returned null every time (the demo bug above). Fixing the
+   * parse switched this on for the first time — and the first live `/bt-spec` afterwards wrote a
+   * pause menu instead of a spec.
+   *
+   * The reason is that the args of a planning skill READ AS A BUILD ORDER. The user typed
+   * `/bt-spec add a pause menu with resume and quit buttons`; the model received exactly
+   * `add a pause menu with resume and quit buttons` as the last user message, with the only
+   * counter-instruction sitting in a system block. It obeyed the user turn and built the feature.
+   *
+   * Ironically the pre-fix behaviour was BETTER here by accident: with the invocation dropped, the
+   * model saw the raw `/bt-spec …` text and improvised the workflow off the literal command. So the
+   * command string must survive the rewrite — now alongside the real skill body rather than instead
+   * of it. (The no-args branch always worded this correctly; only the args branch threw it away.)
+   */
   const task = invocation.args
-    ? invocation.args
+    ? `Run the ${skill.name} skill for this request:\n\n${invocation.args}`
     : `Run the ${skill.name} skill. The user provided no additional input.`;
 
   const rewritten = [...messages];
@@ -1640,6 +1659,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           { severity: 'critical' },
         );
       }
+
+      /*
+       * The rescue markers, as RATES (`spec/fail-loud.md` Stage C). Recorded on EVERY generation, not
+       * only the rescued ones — a rate needs its denominator, and recording only the firings would put
+       * every window at 100% and alert on the first one.
+       *
+       * The refund rate is recorded here too, and it is deliberately NOT the same number as the failure
+       * rate above: a generation can fail having charged nothing (the zero-text check fires before any
+       * credits are owed), and that is a failure with no refund in it.
+       */
+      recordRescueMarkers(monitor, {
+        forcedContinuation,
+        unproductiveRescue,
+        providerRetry: retried,
+      });
+      recordRefundOutcome(monitor, 'generation', failed && (settlement?.creditsCharged ?? 0) > 0);
 
       monitor.track(failed ? FUNNEL_EVENTS.GENERATION_FAILED : FUNNEL_EVENTS.GENERATION_COMPLETED, {
         userId: user.id,

@@ -138,6 +138,45 @@ describe('buildUsageReport', () => {
     expect(buildUsageReport([]).charsPerOutputToken).toBe(0);
   });
 
+  /*
+   * The rescue markers (spec/fail-loud.md Stage C). These count generations that SUCCEEDED — the
+   * user got their artifact — so nothing else on the report can show them; a rescued turn's tokens,
+   * credits and `stop` all look ordinary, which is precisely the shape §4.10 exists to expose.
+   */
+  describe('rescue markers', () => {
+    it('counts each marker, and a turn carrying two counts once as rescued', () => {
+      const report = buildUsageReport([
+        gen({ finishReason: 'stop' }),
+        gen({ finishReason: 'stop+forced-continuation' }),
+        gen({ finishReason: 'stop+unproductive-rescue' }),
+        gen({ finishReason: 'stop+unproductive-rescue+provider-retry' }),
+      ]);
+
+      expect(report.markers).toEqual({
+        forcedContinuation: 1,
+        unproductiveRescue: 2,
+        providerRetry: 1,
+        rescued: 3,
+      });
+    });
+
+    it('is zero for ordinary turns and for records with no finishReason at all', () => {
+      const report = buildUsageReport([gen({ finishReason: 'stop' }), gen({}), gen({ finishReason: 'error' })]);
+
+      expect(report.markers.rescued).toBe(0);
+    });
+
+    /*
+     * The marker is a SUFFIX on a value that already carries the provider's own word — and a substring
+     * match on the bare name would count a provider that one day reports `finishReason: "retry"`.
+     * The `+` is what makes it ours.
+     */
+    it("matches the +marker suffix, not a bare word in the provider's own finish reason", () => {
+      expect(buildUsageReport([gen({ finishReason: 'provider-retry' })]).markers.providerRetry).toBe(0);
+      expect(buildUsageReport([gen({ finishReason: 'stop+provider-retry' })]).markers.providerRetry).toBe(1);
+    });
+  });
+
   it('breaks down by model, most expensive first', () => {
     const report = buildUsageReport([
       gen({ model: 'claude-sonnet-5', rawCostUsd: 0.02 }),

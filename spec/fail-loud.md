@@ -1,10 +1,17 @@
 # spec/fail-loud.md — A paid request never fails silently (governs SPEC §4.2, §4.6, §4.16; owner directive 2026-07-25)
 
-> **Status: POLICY ADOPTED, WORK PARTLY OWED.** Owner directive (2026-07-25, verbatim intent): *"we
-> should never have silent fails on a paid service that burns credits."* Much of this document
-> describes guards that already exist — they are listed so nobody rebuilds them. The part that does
-> NOT yet exist is enumerated in §"The kickoff plan", each stage with a paste-able prompt. Until a
-> stage is run, its items are OWED, not done — do not cite this spec as evidence they are built.
+> **Status: POLICY ADOPTED, STAGES A + B + C DONE (2026-07-25), STAGE D OWED.** Owner directive
+> (2026-07-25, verbatim intent): *"we should never have silent fails on a paid service that burns
+> credits."* Much of this document describes guards that already exist — they are listed so nobody
+> rebuilds them. The part that does NOT yet exist is enumerated in §"The kickoff plan", each stage
+> with a paste-able prompt. Until a stage is run, its items are OWED, not done — do not cite this
+> spec as evidence they are built. **Stage A's inventory is §"The money-path inventory" below**; the
+> three defects it found are fixed and pinned (`media.spec.ts` orphan refund,
+> `enhancer-settlement.spec.ts`, `money-swallow-alert.spec.ts`), all mutation-verified. **Stage B is
+> `billing/money-paths.spec.ts`** — default-deny over every ledger-debiting call site, enumerated from
+> disk, with three scanner controls; four mutations verified. **Stage C is
+> `monitoring/paid-path-rates.ts`** — the rescue markers and per-reason refunds watched as RATES, with
+> the marker counts on the §4.10 Admin panel; five mutations verified.
 
 ## Why this spec exists — the day that produced it
 
@@ -112,6 +119,90 @@ regression hides *inside* the machinery built to catch the last one.
 | Failure-RATE alerting | `monitoring/failure-rate.ts` | A spike of hard failures, as a rate rather than anecdotes |
 | Heartbeat during stream silence | `agent/heartbeat.ts` | Long thinks reading as hangs while credits burn |
 | `finish_reason` markers `+forced-continuation` / `+unproductive-rescue` / `+provider-retry` | `proxy.ts` | Doubled/rescued generations recording as ordinary turns |
+| `LEDGER_INTEGRITY` alerts on the un-throwable money writes | `gate.ts`, `media/service.ts`, `unity-license-service.ts` | Anchor/charge/refund failures that were log-only, i.e. invisible in production |
+| Media task-record write refunds if it cannot be stored | `media/service.ts` | A paid, running render that nothing can poll and nothing can refund |
+| Enhancer zero-text / stream-error → refund + `failed` | `api.enhancer.ts` | A truncated or empty enhancement charged as a success |
+| Default-deny over every ledger-debiting call site | `billing/money-paths.spec.ts` | A debit path shipping with no refund, no alert and no written excuse — the moment it lands |
+| `RESCUE_MARKER_RATE` / `REFUND_RATE` rolling windows | `monitoring/paid-path-rates.ts` | A rescue quietly absorbing an upstream regression; a subsystem refunding most of its work |
+| Rescue-marker counts on the usage panel | `admin/usage-report.ts` → Admin tab | Rescued turns, which look completely ordinary in every other number on the page |
+
+## The money-path inventory (Stage A output, 2026-07-25)
+
+Enumerated from the **ledger API's callers**, not from a keyword — `getLedger(...).append` has
+exactly 11 call sites, and every one is below. The KIE-reaching set is enumerated separately
+(reaching the provider is what makes a path expensive even when it never touches the ledger).
+
+### Every ledger write
+
+| # | Call site | Reason | States it can reach | What reports each transition |
+|---|---|---|---|---|
+| 1 | `billing/gate.ts` `settleGeneration` | `generation` | DELIVERED · CHARGED AS CONSUMED | `credits` annotation → client balance; `generations` row; `agent-usage` log |
+| 2 | `billing/gate.ts` `refundGeneration` | `refund` | REFUNDED | compensating row; `finish_reason: error`; `status: failed`; §4.10 refund audit |
+| 3 | `media/service.ts` `startMediaTask` | `media` | REFUSED BEFORE SPEND (unpriced / 402 / 4K cut-out / empty prompt) · DELIVERED | quote = debit (same code path); `media-task` data part; panel + tool result name the exact price |
+| 4 | `media/service.ts` `refundMediaTask` | `refund` | REFUNDED | `refunded` latch (exactly once); task record `status: failed` + `error`; toast |
+| 5 | `agent/web-search-tool.ts` `debitSearch` | `search` | DELIVERED only | **SANCTIONED after-the-fact debit** (§Scope). May go negative; a failed debit is logged and the research answer proceeds |
+| 6 | `licensing/unity-license-service.ts` | `license` | REFUSED BEFORE SPEND (invalid tier / 402) · DELIVERED | flat price shown on the button; unlock row makes re-issue free |
+| 7 | `licensing/unity-license-service.ts` `refundLicense` | `refund` | REFUNDED | grant-throws and grant-race-loser paths; `LicenseRefusedError` to the caller |
+| 8 | `billing/ledger.ts` `ensureSignupGrant` | `grant` | credit — not a debit | partial unique index; `DuplicateGrantError` → null |
+| 9 | `billing/stripe.ts` pack purchase | `purchase` | credit — not a debit | idempotent on `session.id`; `DuplicatePaymentError` → 2xx |
+| 10 | `billing/stripe.ts` subscription invoice | `purchase` | credit — not a debit | idempotent on `invoice.id`; unattributable invoice logged loudly, never 500 |
+| 11 | `routes/api.admin.credits.ts` | `adjustment` | operator action | admin-only; append-only row; §4.10 audit |
+
+### Every KIE-reaching call site
+
+| Path | Gate | Settles | Failure handling |
+|---|---|---|---|
+| `agent/proxy.ts` (generation, repair, forced continuation, unproductive rescue, premium) | `checkCreditGate` once | `settleGeneration` in `finally` | zero-text → hard failure → auto-refund; abort → CHARGED AS CONSUMED |
+| `routes/api.enhancer.ts` | `checkCreditGate` | `settleGeneration` on stream end | **FIXED in Stage A** — see defect 2 |
+| `media/kie-client.ts` `create` | debit precedes it | n/a (fixed price) | create throws → refund + anchor `failed` + 502 |
+| `media/kie-client.ts` `query` | n/a | n/a | flaky poll ≠ failure (stays pending); a reported failure refunds once |
+
+### The `catch` audit — `app/lib/.server/{agent,billing,media}`
+
+52 `catch`es, every one classified. **Report** = logs *and* alerts monitoring; **log-only** was the
+category Stage A removed from the money paths.
+
+| Classification | Count | Examples |
+|---|---|---|
+| Rethrow (with a typed refusal) | 6 | `MediaRefusedError`, `LicenseRefusedError`, `DuplicatePaymentError` re-raise, KIE non-JSON |
+| Refund | 5 | media create-failure, media poll-failure, cut-out-cannot-start, license grant-throw, license race-loser |
+| Report (alert + log) | 4 | **new in Stage A** — anchor failure, charge failure, generation refund failure, media/license refund failure |
+| Retry | 1 | `retry-policy.ts` — one provider retry, only with zero output produced |
+| Sanctioned swallow (with its sentence) | 36 | observability itself (`monitoring`, `heartbeat`); the documented `'search'` debit; parse/probe misses that return `null` (`store.ts`, `attachments.ts`, `kie-client.ts` result shapes); best-effort enrichment that runs AFTER settlement (`usage.ts`, `generations.ts` upsert, `recoverTranscript`); `providerRates`' premium injection (documented: settlement may never refuse) |
+| **Unclassifiable — FIXED** | 3 | the three defects below |
+
+### The three defects Stage A found
+
+1. **A media render could be paid for, started, and then untrackable** (`media/service.ts`). The
+   `putMediaTask` write happens AFTER the debit and AFTER KIE starts rendering, and it was
+   unguarded. An object-store hiccup there produced a **fifth terminal state**: credits gone, render
+   running, no record for the poll route to deliver from, no record for the failure path to refund
+   from — and the tool result said only that the task "could not start", which reads as a refusal
+   that cost nothing. Now: refund, anchor `failed`, and a 500 that says what happened. Pinned in
+   `media.spec.ts` (mutation-verified: the test fails when the guard rethrows instead).
+2. **The enhancer could only ever reach two states** (`routes/api.enhancer.ts`). It settled every
+   outcome as DELIVERED. A `part.type === 'error'` mid-stream was `break` + a log line, and a
+   zero-text finish was not checked at all — so a truncated or empty enhancement was charged, with
+   the browser holding a broken response and nothing anywhere reporting a problem. This is the
+   proxy's `producedText` rule (a clean `stop` with nothing to show is a FAILURE) missing from the
+   subsystem that has the least machinery to notice. Now: stream error **or** zero text → refund +
+   `status: failed`. Its four-state mapping is in the route's doc comment (the §"When you add a paid
+   path" checklist item). Pinned in `billing/enhancer-settlement.spec.ts` — ⚠️ deliberately NOT in
+   `app/routes/`, where Remix would compile it as a route and 500 every request.
+3. **Four money-path swallows were log-only, i.e. invisible in production** (`gate.ts`,
+   `media/service.ts`, `unity-license-service.ts`). Rule 4 forbids `catch` + log on a money path, and
+   these three writes genuinely cannot refund or retry their way out — settlement runs inside the
+   proxy's `finally`, and a refund is itself the compensating step for an already-failed request — so
+   **reporting is the only loudness available to them**. The FK-anchor failure is the exact defect
+   that would have billed ZERO on every production generation forever, and it announced itself only
+   in a log line nobody reads. All four now fire `ALERT_SIGNALS.LEDGER_INTEGRITY` at `critical`.
+   Pinned in `billing/money-swallow-alert.spec.ts`, **with a control** proving the collector sees
+   traffic at all (the `no-server-storage.spec.ts` lesson: a matcher that silently matches nothing
+   reports a clean bill of health forever).
+
+**Two things Stage A deliberately did NOT change**, both flagged for the owner rather than fixed:
+`web_search`'s after-the-fact debit stays sanctioned exactly as the Scope section describes; and
+`providerRates`' premium-injection swallow stays, because its alternative is taking settlement down.
 
 ## The kickoff plan (the owed work)
 
@@ -120,7 +211,7 @@ session. Definition of done for every stage: gates green (`pnpm typecheck && pnp
 lint && pnpm test`), new guards mutation-verified, and this spec's status banner updated in the same
 change.
 
-### Stage A — ENUMERATE the money paths and audit every swallow
+### Stage A — ENUMERATE the money paths and audit every swallow ✅ DONE 2026-07-25
 
 The lesson of `spec/spend-holes.md`, applied to debits: both of its sweeps failed not at the guard
 but at the *enumeration*, so the enumeration must be structural. Walk every call site that debits
@@ -133,7 +224,31 @@ table appended to this spec, and fixes for any catch that is none of the five.
 > KIE-reaching call site, classify each against the four terminal states, audit every catch in the
 > money paths, fix the unclassifiable ones, and append the inventory to the spec."*
 
-### Stage B — the structural guard (`money-paths.spec.ts`)
+### Stage B — the structural guard (`money-paths.spec.ts`) ✅ DONE 2026-07-25
+
+**Built as `app/lib/.server/billing/money-paths.spec.ts`.** Enumerated from the ledger API's callers
+exactly as the warning below demands: a file counts as a money path when it *imports the ledger* AND
+*calls `.append({`* — which is a complete definition (the ledger is the only way credits move), not a
+guess about which call sites matter. Comment-stripped, so machinery named in a doc comment never
+counts. Default-deny: any file writing a DEBITING reason (`generation`, `media`, `search`, `license`)
+must name a compensating row or a `LEDGER_INTEGRITY` alert, or sit in `NO_LOUDNESS_BY_DESIGN` with a
+justification over 40 characters. One entry qualifies today: `web-search-tool.ts`, the sanctioned
+after-the-fact debit. A reason in neither the debit nor the credit set fails outright, so a *new*
+`LedgerReason` is caught on the day it lands. A second describe pins the §"When you add a paid path"
+doc-comment contract: a module that spends credits must cite the spec that governs it.
+
+**Three controls** (the `no-server-storage.spec.ts` lesson): the scan still finds writers/debiters/
+reasons at all; a comment-only mention does not count; and `props.append(` / `headers.append(` are
+correctly excluded. **Four mutations verified** — a new unguarded debiting file, an unclassified
+reason, a debiter stripped of all loudness, and a blinded scanner all fail it.
+
+⚠️ **One finding worth keeping, because it is the difference between a guard and a decoration:** the
+first draft accepted `MediaRefusedError` / `LicenseRefusedError` as loudness. Stripping *every* refund
+and alert out of `media/service.ts` still went green — those typed refusals belong to the
+REFUSE-BEFORE-SPEND path, which every debiting module has anyway, so they discriminate nothing. They
+are out. **"Can this module refuse a request?" is not the same question as "can it give money back?"**
+
+#### The original brief, kept for the reasoning
 
 Default-deny, the `outbound-enumerate.spec.ts` shape: every call site that debits (`appendLedger` /
 `settleGeneration` / media debit / license debit) must reference refund-or-report machinery or
@@ -147,7 +262,42 @@ and mutation-verify.
 > default-deny structural guard over every ledger-debiting call site, with a scanner control,
 > mutation-verified."*
 
-### Stage C — ALERTS on the rescue markers (a recorded marker nobody watches is rule 9 waiting to fire)
+### Stage C — ALERTS on the rescue markers ✅ DONE 2026-07-25
+
+**Built as `app/lib/.server/monitoring/paid-path-rates.ts`**, on the `failure-rate.ts` pattern —
+generalised there into named `sharedRateWindow(name, config)` windows (bounded, in-process, no
+database read, because the alert has to fire when the database is what is down). Two signals:
+`RESCUE_MARKER_RATE` at 25% over a 40-generation window (a rescue is *expected* to fire sometimes, so
+the threshold sits well above zero) and `REFUND_RATE` at 20% over 50, per ledger reason. Recorded
+from `proxy.ts` (all three markers plus the `generation` refund outcome), from `media/service.ts` at
+each of the four terminal points, and from `unity-license-service.ts`. The §4.10 panel gained a
+**Rescued turns** stat with the per-marker breakdown beneath it, counted from `finish_reason` by a
+pure `countMarkers`.
+
+**Why a rescued turn needs its own number:** when a rescue fires it WORKS — the user gets their
+artifact, the tokens and credits and the `stop` all look ordinary, and no other figure on the page
+moves. That is the most dangerous shape a metric has taken here yet, and the premise the alert makes
+actionable is already written in `proxy.ts`'s comments: **if a rescue fires often, the cause is
+upstream of the rescue and the rescue is only paying for it** — at 5× output rate, since every one of
+them is a second stream.
+
+⚠️ **Two findings from the mutation run, both about the tests rather than the code, and both worth
+generalising.** (1) The obvious denominator test — 40 healthy generations, then one rescue — **cannot
+fail**: dropping the denominator leaves a single sample, which is under `minSamples`, so it passes
+either way. Both denominator tests now spread the firings thinly enough (12 in 120, 10 in 100) that
+the un-denominated version crosses the threshold and the real one does not. (2) The refund-rate
+denominator had the identical hole. **A rate signal's denominator is invisible to any test whose
+numerator alone is below `minSamples`** — and a broken version still prints a confident "100%".
+
+**One item from the brief deliberately NOT converted: the `transport-envelope` tripwire.** It already
+ships a `warning`-level `captureMessage` to the errors collector on every occurrence, and that is the
+right loudness for it — unlike a rescue, it does not fire occasionally under normal operation. If it
+fires at all the client's transport format has drifted, which affects *every* message from that
+build, so a rolling window would delay the alert and cap it at one per cooldown. Left as-is on
+purpose; it is not an oversight.
+
+#### The original brief, kept for the reasoning
+
 
 `+unproductive-rescue`, `+forced-continuation`, `+provider-retry`, refund rate per ledger reason,
 and the `transport-envelope` tripwire all *record* today; nothing *watches* them. Wire rates into

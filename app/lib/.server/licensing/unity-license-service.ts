@@ -15,6 +15,9 @@
  * Pro Tools. This module does no HTTP and no auth; the route owns the two walls.
  */
 import { createScopedLogger } from '~/utils/logger';
+import { getMonitor } from '~/lib/.server/monitoring';
+import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
+import { ALERT_SIGNALS } from '~/lib/.server/monitoring/events';
 import { getLedger } from '~/lib/.server/billing/ledger';
 import { getBillingConfig } from '~/lib/.server/billing/rates';
 import {
@@ -141,6 +144,8 @@ export async function generateUnityLicense(input: GenerateLicenseInput): Promise
       await refundLicense(input.userId, debited, (error as Error).message, input.context);
     }
 
+    recordRefundOutcome(getMonitor(input.context), 'license', true);
+
     throw new LicenseRefusedError(`Could not record the license unlock: ${(error as Error).message}`, 500);
   }
 
@@ -153,10 +158,13 @@ export async function generateUnityLicense(input: GenerateLicenseInput): Promise
    */
   if (!granted && debited > 0) {
     await refundLicense(input.userId, debited, 'a concurrent generation already unlocked this tier', input.context);
+    recordRefundOutcome(getMonitor(input.context), 'license', true);
+
     return { license, tier: input.tier, credits: 0, alreadyUnlocked: true };
   }
 
   logger.info(`Issued ${input.tier} license for ${unityProjectId} to ${input.userId} (${debited} credits).`);
+  recordRefundOutcome(getMonitor(input.context), 'license', false);
 
   return { license, tier: input.tier, credits: debited, alreadyUnlocked: false };
 }
@@ -172,7 +180,14 @@ async function refundLicense(userId: string, credits: number, reason: string, co
     });
     logger.info(`Refunded ${credits} credits to ${userId} for a license that could not be recorded.`);
   } catch (error) {
+    // Charged for a license that was never unlocked, and the request already failed. Alert (rule 4).
     logger.error(`FAILED TO REFUND license charge for ${userId}: ${(error as Error).message}`);
+    getMonitor(context).alert(
+      ALERT_SIGNALS.LEDGER_INTEGRITY,
+      `Refund of ${credits} credits for an unrecorded Unity license did NOT land — the user is still ` +
+        `charged for an unlock they do not have: ${(error as Error).message}`,
+      { severity: 'critical', scope: 'license-refund', userId, tags: { credits } },
+    );
   }
 }
 

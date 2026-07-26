@@ -70,7 +70,32 @@ export interface UsageReport {
   visibleTextChars: number;
   charsPerOutputToken: number;
 
+  /**
+   * How often each AUTOMATIC transition on the paid path fired (`spec/fail-loud.md` Stage C).
+   *
+   * Counted from `finish_reason`, where `proxy.ts` already records them — and the point of surfacing
+   * them is that each one is a rescue that WORKED, which is exactly why it is invisible otherwise. The
+   * user got their artifact, the ledger looks ordinary, and nothing in an aggregate says the platform
+   * had to save the turn to get there. A rising count means the cause is upstream of the rescue and
+   * the rescue is only paying for it (at 5x output rate, since every one of these is a second stream).
+   */
+  markers: MarkerCounts;
+
   byModel: ModelUsage[];
+}
+
+export interface MarkerCounts {
+  /** The tool-loop ran out of steps mid-call and a tool-free pass was forced to finish the answer. */
+  forcedContinuation: number;
+
+  /** The model announced work it did not do, and a corrective pass was bought for the user. */
+  unproductiveRescue: number;
+
+  /** The provider broke before producing anything and the generation was attempted once more. */
+  providerRetry: number;
+
+  /** Generations carrying at least one marker — the denominator-friendly headline for the panel. */
+  rescued: number;
 }
 
 function n(value: number | undefined): number {
@@ -95,6 +120,7 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
     silentStepOutputTokens: 0,
     visibleTextChars: 0,
     charsPerOutputToken: 0,
+    markers: { forcedContinuation: 0, unproductiveRescue: 0, providerRetry: 0, rescued: 0 },
     byModel: [],
   };
 
@@ -125,6 +151,7 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
 
     report.silentStepOutputTokens += silentStepOutput(rec);
     report.visibleTextChars += visibleTextChars(rec);
+    countMarkers(rec, report.markers);
 
     const key = rec.model || 'unknown';
     const m = models.get(key) ?? {
@@ -188,6 +215,38 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
 function silentStepOutput(rec: GenerationRecord): number {
   return (rec.steps ?? []).reduce((sum, s) => (s.textChars === 0 ? sum + n(s.outTokens) : sum), 0);
 }
+
+/**
+ * Tally the `+marker` suffixes `proxy.ts` appends to `finish_reason`.
+ *
+ * SUFFIX MATCHING, deliberately: a marker is written as `stop+forced-continuation+provider-retry`, so
+ * a generation can carry more than one and each must count once. `finishReason` is also the field that
+ * has ALREADY been overwritten once in this codebase's history — `drain` runs twice and the second run
+ * clobbered the first's value, which is precisely why the markers were added — so reading it back is
+ * reading the fix, not the raw provider claim.
+ */
+function countMarkers(rec: GenerationRecord, into: MarkerCounts): void {
+  const finish = rec.finishReason ?? '';
+  let any = false;
+
+  for (const [marker, key] of MARKER_FIELDS) {
+    if (finish.includes(`+${marker}`)) {
+      into[key]++;
+      any = true;
+    }
+  }
+
+  if (any) {
+    into.rescued++;
+  }
+}
+
+/** The marker string as written, paired with where it lands. Renaming one without the other is the bug. */
+const MARKER_FIELDS: Array<[string, keyof Omit<MarkerCounts, 'rescued'>]> = [
+  ['forced-continuation', 'forcedContinuation'],
+  ['unproductive-rescue', 'unproductiveRescue'],
+  ['provider-retry', 'providerRetry'],
+];
 
 /** Characters of text a generation actually streamed. Paired with output tokens, this is the density. */
 function visibleTextChars(rec: GenerationRecord): number {

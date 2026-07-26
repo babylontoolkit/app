@@ -21,9 +21,8 @@
  * skills index (§4.2.8). A new chat sees the whole game; it just does not see the talking.
  */
 import { useStore } from '@nanostores/react';
-import { useNavigate } from '@remix-run/react';
 import { projectId } from '~/lib/persistence/useChatHistory';
-import { setPendingOpenProject } from '~/lib/persistence/pending-remix';
+import { requestChatReset } from '~/lib/stores/chat-reset';
 
 /**
  * Start a fresh conversation on the current game.
@@ -37,7 +36,6 @@ import { setPendingOpenProject } from '~/lib/persistence/pending-remix';
  * the sidebar's "Start new chat" is already that action.
  */
 export function useStartNewChat(): () => void {
-  const navigate = useNavigate();
   const pid = useStore(projectId);
 
   return () => {
@@ -46,11 +44,19 @@ export function useStartNewChat(): () => void {
     }
 
     /*
-     * Through the mount baton rather than by resetting state in place. The builder's mount path already
-     * knows how to put a project's files in front of an empty chat — it is what a dashboard Open does —
-     * and reusing it means this feature cannot drift away from the one that is exercised constantly.
+     * 🔴 IN PLACE, because the project is ALREADY MOUNTED — clearing a conversation is not a project
+     * event (`chat-reset.ts`).
+     *
+     * This used to go through the mount baton (`setPendingOpenProject(pid, 'fresh')` + `navigate('/')`),
+     * reusing the path a dashboard Open takes. That reasoning was sound for reuse and wrong for this
+     * case: the baton exists to mount a project that is not open, and here it re-mounted one that never
+     * left — `mountProjectFiles` ran again, the route remounted, and the workbench tore down and slid
+     * back in. The user asked for the left-hand column to be emptied and watched the entire workspace
+     * reload. Reported as "it makes the workflow look broken".
+     *
+     * The baton path is still correct where it is used from the DASHBOARD (`ProjectsDashboard`, 'fresh')
+     * — there the project genuinely does need mounting. Do not collapse the two.
      */
-    setPendingOpenProject(pid, 'fresh');
-    navigate('/');
+    requestChatReset();
   };
 }

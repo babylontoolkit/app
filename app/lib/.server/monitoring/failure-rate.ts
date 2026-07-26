@@ -82,13 +82,39 @@ export class FailureRateWindow {
   }
 }
 
-let shared: FailureRateWindow | undefined;
+/**
+ * The process-wide windows, by name.
+ *
+ * Generalised for `spec/fail-loud.md` Stage C: generation failure was the first thing worth watching
+ * as a RATE, but it is not the only one. The rescue markers (`+unproductive-rescue`,
+ * `+forced-continuation`, `+provider-retry`) and the per-reason refund rates have exactly the same
+ * shape — a single occurrence is ordinary and a sustained fraction is an incident — and exactly the
+ * same reason to live in-process rather than in a query: the alert must fire even when the database
+ * is the thing that is down.
+ *
+ * A window's config is fixed on first use, deliberately: a caller that later asks for the same name
+ * with a different threshold gets the ORIGINAL window rather than silently re-tuning a live signal
+ * from whichever call site happened to run first.
+ */
+const windows = new Map<string, FailureRateWindow>();
 
-/** The process-wide window the proxy records into. */
-export function sharedFailureRate(): FailureRateWindow {
-  if (!shared) {
-    shared = new FailureRateWindow();
+export function sharedRateWindow(name: string, config: FailureRateConfig = DEFAULT_FAILURE_RATE_CONFIG) {
+  let window = windows.get(name);
+
+  if (!window) {
+    window = new FailureRateWindow(config);
+    windows.set(name, window);
   }
 
-  return shared;
+  return window;
+}
+
+/** The process-wide window the proxy records generation outcomes into. */
+export function sharedFailureRate(): FailureRateWindow {
+  return sharedRateWindow('generation-failure');
+}
+
+/** Test seam — every named window starts clean. A rate that leaks between tests is not a rate. */
+export function resetRateWindows(): void {
+  windows.clear();
 }

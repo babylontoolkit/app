@@ -16,9 +16,19 @@
 import { memo, useEffect, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { agentStatusStore, describeAgentStatus, isStatusFresh } from '~/lib/stores/agent-status';
+import { activeSkillsStore } from '~/lib/stores/active-skills';
+import { SkillBadges } from './SkillBadges';
 
 export const StreamingStatus = memo(() => {
   const status = useStore(agentStatusStore);
+
+  /*
+   * The skills this turn is running (§4.11). Independent of the heartbeat: it arrives once, up
+   * front, and must stay visible for the WHOLE turn — including the stretches when the heartbeat is
+   * quiet because content is flowing. So it renders in both branches below, never only in the panel.
+   */
+  const active = useStore(activeSkillsStore);
+  const skills = active?.skills ?? [];
 
   /*
    * A 1s tick keeps the elapsed label counting BETWEEN heartbeats (they arrive every ~3s) and lets
@@ -33,9 +43,20 @@ export const StreamingStatus = memo(() => {
   }, []);
 
   if (!status || !isStatusFresh(status, now)) {
-    // The pre-heartbeat UI, byte-identical to what this component replaced.
+    /*
+     * The pre-heartbeat UI. The dots are byte-identical to what this component replaced; the badges
+     * sit above them, so "which skill is running" survives the stretches where the heartbeat is
+     * silent because real content is streaming.
+     */
     return (
-      <div className="text-center w-full text-bolt-elements-item-contentAccent i-svg-spinners:3-dots-fade text-4xl mt-4"></div>
+      <>
+        {skills.length > 0 && (
+          <div className="mt-4 flex justify-center">
+            <SkillBadges skills={skills} variant="live" />
+          </div>
+        )}
+        <div className="text-center w-full text-bolt-elements-item-contentAccent i-svg-spinners:3-dots-fade text-4xl mt-4"></div>
+      </>
     );
   }
 
@@ -48,6 +69,11 @@ export const StreamingStatus = memo(() => {
         <span className="font-medium text-bolt-elements-textPrimary">{label}</span>
       </div>
       <div className="mt-1 pl-6 text-xs text-bolt-elements-textSecondary">{detail}</div>
+      {skills.length > 0 && (
+        <div className="mt-2 pl-6">
+          <SkillBadges skills={skills} variant="live" />
+        </div>
+      )}
     </div>
   );
 });

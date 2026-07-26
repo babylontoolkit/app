@@ -258,6 +258,25 @@ async function streamGeneration(
   });
 
   /*
+   * WHICH SKILLS THIS TURN IS RUNNING — emitted BEFORE the model writes a token (§4.11).
+   *
+   * The server already knows: `/slash` invocations are resolved and skills pre-loaded while building
+   * the prompt, well before the stream opens. The same list also rides on the `agentMeta` annotation
+   * at the end (which is what survives a reload), but that arrives with the token counts — i.e. only
+   * once the turn is over, which is the least useful moment to learn what it was doing.
+   *
+   * A DATA part, exactly like the heartbeat: server→client only, never `text`, so it reaches the
+   * model as zero tokens and can never leak into the artifact parser.
+   */
+  if (generation.toolContext.loaded.size > 0) {
+    stream.writeData({
+      type: 'skills-loaded',
+      generationId: generation.generationId,
+      skills: [...generation.toolContext.loaded],
+    });
+  }
+
+  /*
    * Media renders the model started (§4.16). Fire-and-forget, unlike the MCP relay: the debit is
    * taken and the KIE task is running — the client's only job is to poll the task route and write
    * the bytes into the WebContainer at `destPath` when the render lands.

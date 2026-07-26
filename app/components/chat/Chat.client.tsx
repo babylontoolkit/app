@@ -21,11 +21,12 @@ import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
 import { useSettings } from '~/lib/hooks/useSettings';
 import type { ProviderInfo } from '~/types/model';
-import { useNavigate, useSearchParams } from '@remix-run/react';
+import { useSearchParams } from '@remix-run/react';
 import { parseClientCommand } from '~/lib/chat/client-commands';
 import { contextPanelOpen, resetContextStats, updateContextStats } from '~/lib/stores/context-stats';
+import { chatResetRequest } from '~/lib/stores/chat-reset';
 import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
-import { setPendingOpenProject } from '~/lib/persistence/pending-remix';
+import { resetActiveSkills, updateActiveSkills } from '~/lib/stores/active-skills';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
 import { asCreationFailure } from '~/lib/registry/creation-errors';
@@ -62,7 +63,8 @@ const logger = createScopedLogger('Chat');
 export function Chat() {
   renderLogger.trace('Chat');
 
-  const { ready, initialMessages, storeMessageHistory, checkpointProject, importChat, exportChat } = useChatHistory();
+  const { ready, initialMessages, storeMessageHistory, checkpointProject, importChat, exportChat, startFreshChat } =
+    useChatHistory();
   const title = useStore(description);
   useEffect(() => {
     workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
@@ -78,6 +80,7 @@ export function Chat() {
           storeMessageHistory={storeMessageHistory}
           checkpointProject={checkpointProject}
           importChat={importChat}
+          startFreshChat={startFreshChat}
         />
       )}
     </>
@@ -111,10 +114,21 @@ interface ChatProps {
   importChat: (description: string, messages: Message[]) => Promise<void>;
   exportChat: () => void;
   description?: string;
+
+  /** "New chat, same game", in place: reset the chat's identity + history without touching the project (§4.5.6). */
+  startFreshChat: () => void;
 }
 
 export const ChatImpl = memo(
-  ({ description, initialMessages, storeMessageHistory, checkpointProject, importChat, exportChat }: ChatProps) => {
+  ({
+    description,
+    initialMessages,
+    storeMessageHistory,
+    checkpointProject,
+    importChat,
+    exportChat,
+    startFreshChat,
+  }: ChatProps) => {
     useShortcuts();
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -122,7 +136,6 @@ export const ChatImpl = memo(
     const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
     const [imageDataList, setImageDataList] = useState<string[]>([]);
     const [searchParams, setSearchParams] = useSearchParams();
-    const navigate = useNavigate();
     const [fakeLoading, setFakeLoading] = useState(false);
     const files = useStore(workbenchStore.files);
 
@@ -529,6 +542,7 @@ export const ChatImpl = memo(
      */
     useEffect(() => {
       resetAgentStatus();
+      resetActiveSkills();
     }, [isLoading]);
 
     const handledToolCalls = useRef<Set<string>>(new Set());
@@ -549,6 +563,12 @@ export const ChatImpl = memo(
          */
         if ((part as { type?: string }).type === 'agent-status') {
           updateAgentStatus(part);
+          continue;
+        }
+
+        // Which skills this turn loaded (§4.11) — idempotent, so replayed parts are free.
+        if ((part as { type?: string }).type === 'skills-loaded') {
+          updateActiveSkills(part);
           continue;
         }
 
@@ -686,7 +706,7 @@ export const ChatImpl = memo(
     }, [model, provider, searchParams]);
 
     const { enhancingPrompt, promptEnhanced, enhancePrompt, resetEnhancer } = usePromptEnhancer();
-    const { parsedMessages, parseMessages } = useMessageParser();
+    const { parsedMessages, parseMessages, resetParsedMessages } = useMessageParser();
 
     const TEXTAREA_MAX_HEIGHT = chatStarted ? 400 : 200;
 
@@ -1278,6 +1298,55 @@ export const ChatImpl = memo(
       setInput('');
     };
 
+    /**
+     * "New chat, same game" — IN PLACE (§4.5.6, §4.2.9, `chat-reset.ts`).
+     *
+     * Clears the CONVERSATION and nothing else. The project stays mounted exactly as it is: files,
+     * WebContainer, preview, `showWorkbench` and `chatStore.started` are all deliberately absent from
+     * this function. The previous behaviour re-mounted the project through the dashboard's baton path,
+     * so asking for an empty chat visibly reloaded the whole workspace.
+     *
+     * `chatStarted` is likewise left TRUE — the open-state effect keys on `activeProjectId`, which has
+     * not changed, and flipping it back would replay the landing intro over a project that is open.
+     */
+    const clearConversation = () => {
+      if (isLoading) {
+        // A generation in flight belongs to the conversation being cleared; it must not stream into the new one.
+        abort();
+      }
+
+      clearDraftPrompt();
+      resetContextStats();
+      resetParsedMessages();
+      setMessages([]);
+      setData(undefined);
+
+      // A user-initiated reset ends any repair chain in progress (§4.2.7), for the same reason a typed message does.
+      repairAttemptRef.current = 0;
+      repairWatch.current = null;
+
+      // Identity, history and the URL — the half that lives in `useChatHistory`.
+      startFreshChat();
+    };
+
+    /*
+     * The ⋯ menu's "New chat" reaches the conversation from OUTSIDE this component, so it asks through a
+     * signal store rather than a callback (`chat-reset.ts`). Seeded from the CURRENT value, not 0: the
+     * store is module-level and survives an SPA navigate, so a fresh mount must not replay a reset that
+     * already happened.
+     */
+    const resetRequest = useStore(chatResetRequest);
+    const lastResetRequest = useRef(resetRequest);
+
+    useEffect(() => {
+      if (resetRequest === lastResetRequest.current) {
+        return;
+      }
+
+      lastResetRequest.current = resetRequest;
+      clearConversation();
+    }, [resetRequest]);
+
     const sendMessage = async (_event: React.UIEvent, messageInput?: string) => {
       const messageContent = messageInput || input;
 
@@ -1292,21 +1361,22 @@ export const ChatImpl = memo(
 
       /*
        * `/clear` — the Claude-Code-style spelling of "New chat, same game" (§4.5.6). Intercepted HERE,
-       * before anything is posted: it costs zero credits and reuses the exact mount-baton path the
-       * header's New chat button uses, so it cannot drift from the flow that is exercised constantly.
-       * With no project yet there is nothing to keep — that case is the sidebar's "Start new chat",
-       * a plain full-page load of `/` (an SPA navigate would inherit the old chat's identity).
+       * before anything is posted: it costs zero credits, and it takes the SAME path as the ⋯ menu's
+       * "New chat" so the two cannot mean different things.
+       *
+       * With a project open the conversation is cleared IN PLACE — the project is already mounted, and
+       * re-mounting it to empty a chat is what made this look broken. With no project there is nothing
+       * to keep: that case is the sidebar's "Start new chat", a plain full-page load of `/` (an SPA
+       * navigate would inherit the old chat's identity — §4.5.6).
        */
       const clientCommand = parseClientCommand(messageContent);
 
       if (clientCommand?.kind === 'clear') {
-        clearDraftPrompt();
-        resetContextStats();
-
         if (activeProjectId) {
-          setPendingOpenProject(activeProjectId, 'fresh');
-          navigate('/');
+          clearConversation();
         } else {
+          clearDraftPrompt();
+          resetContextStats();
           window.location.href = '/';
         }
 

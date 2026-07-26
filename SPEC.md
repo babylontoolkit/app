@@ -769,12 +769,34 @@ project's files fresh from the WebContainer FS, the project's `CLAUDE.md` as its
 and the skills index. A new chat sees the whole game; it just does not see the talking.
 
 **`/clear` is this feature's chat-command spelling (2026-07-18, `app/lib/chat/client-commands.ts`).**
-Typing `/clear` (aliases `/new`, `/newchat`) in the chat box runs the same mount-baton path as the
-header's New chat button — intercepted in the BROWSER before anything is posted, so it costs zero
-credits and never reaches the model. The parser is pure + tested and matches the bare command ONLY
-(exact after trim, case-insensitive): `/clear the obstacles` is a message for the agent, and a prefix
-match would silently swallow it. With no project yet it falls back to a full-page load of `/` (the
-sidebar's "Start new chat"), because an SPA navigate without the baton inherits the old chat's identity.
+Typing `/clear` (aliases `/new`, `/newchat`) in the chat box takes the same path as the header's ⋯ "New
+chat" — intercepted in the BROWSER before anything is posted, so it costs zero credits and never reaches
+the model. The parser is pure + tested and matches the bare command ONLY (exact after trim,
+case-insensitive): `/clear the obstacles` is a message for the agent, and a prefix match would silently
+swallow it. With no project yet it falls back to a full-page load of `/` (the sidebar's "Start new
+chat"), because an SPA navigate without the baton inherits the old chat's identity.
+
+**🔴 With a project open, the reset happens IN PLACE — it must NEVER re-mount the project (amended
+2026-07-25, `app/lib/stores/chat-reset.ts`).** Both entry points originally hand-balled to the mount
+baton (`setPendingOpenProject(pid, 'fresh')` + `navigate('/')`), reusing the path a dashboard Open takes.
+Sound as reuse, wrong as behaviour: the baton exists to mount a project that is NOT open, and here it
+re-mounted one that never left — `mountProjectFiles` ran again, the route remounted, and the workbench
+tore down and slid back in. The user asked for the left-hand column to be emptied and watched the whole
+workspace reload ("it makes the workflow look broken"). Clearing a conversation is not a project event.
+So the already-mounted case resets only what belongs to the CONVERSATION — the message array, the chat
+identity (via the same pure `identityForMount({ freshChat: true })` the mount path uses, so an inherited
+`serverChatId` can never make the new chat save over the old chat's server transcript), the parsed-message
+cache (keyed by INDEX — leaving it standing renders the previous chat's message 0 in the new chat), the
+context stats, the repair chain, and the URL (`replaceState` to `/`, never `navigate`, which would re-run
+the mount effect). It touches NOTHING of the project: not the WebContainer, not the file tree, not the
+preview, not `showWorkbench`, not `chatStore.started`, not `chatStarted` (the open-state effect keys on
+`activeProjectId`, which has not changed — flipping it back replays the landing intro over an open game).
+The two entry points meet at a monotonic signal store (`requestChatReset()`), because the conversation is
+`ChatImpl` component state and the ⋯ menu is outside it; listeners compare against the value they last
+saw, seeded from the CURRENT value at mount (the store is module-level and survives an SPA navigate, so
+seeding from 0 would replay a reset on every remount). **The baton path stays correct where the
+DASHBOARD uses it** (`ProjectsDashboard`, `'fresh'`) — there the project genuinely does need mounting; do
+not collapse the two. Pinned by `chat-reset.spec.ts` (mutation-verified: restoring the baton fails it).
 
 **`/context` (alias `/usage`) + the context health dot (2026-07-18)** answer "when should I clear?".
 The proxy measures the re-sent conversation AS IT WENT ON THE WIRE — post-compaction, post-window

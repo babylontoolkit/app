@@ -5,6 +5,7 @@ import Popover from '~/components/ui/Popover';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { WORK_DIR } from '~/utils/constants';
 import WithTooltip from '~/components/ui/Tooltip';
+import { SkillBadges } from './SkillBadges';
 import type { Message } from 'ai';
 import type { ProviderInfo } from '~/types/model';
 import type {
@@ -116,6 +117,21 @@ export const AssistantMessage = memo(
       totalTokens: number;
     } = filteredAnnotations.find((annotation) => annotation.type === 'usage')?.value;
 
+    /*
+     * WHICH SKILLS ACTUALLY RAN THIS TURN (§4.11).
+     *
+     * The server has always sent this on `agentMeta`; nothing rendered it, so "a skill ran" was
+     * visible only in a server log and a database column. That is the same invisibility this
+     * codebase keeps paying for elsewhere (`spec/fail-loud.md`): when a `/bt-spec` turn silently
+     * built a feature instead of writing a spec, the contradiction — badge says `bt-spec`, output is
+     * a pause menu — would have been obvious at a glance. Instead it took an argument and a
+     * `git show` to find.
+     *
+     * Read-only, zero cost: the annotation is already on the wire.
+     */
+    const skillsLoaded: string[] =
+      filteredAnnotations.find((annotation) => annotation.type === 'agentMeta')?.value?.skillsLoaded ?? [];
+
     const toolInvocations = parts?.filter((part) => part.type === 'tool-invocation');
     const toolCallAnnotations = filteredAnnotations.filter(
       (annotation) => annotation.type === 'toolCall',
@@ -179,11 +195,14 @@ export const AssistantMessage = memo(
               </Popover>
             )}
             <div className="flex w-full items-center justify-between">
-              {usage && (
-                <div>
-                  Tokens: {usage.totalTokens} (prompt: {usage.promptTokens}, completion: {usage.completionTokens})
-                </div>
-              )}
+              <div className="flex items-center gap-2 flex-wrap">
+                <SkillBadges skills={skillsLoaded} />
+                {usage && (
+                  <div>
+                    Tokens: {usage.totalTokens} (prompt: {usage.promptTokens}, completion: {usage.completionTokens})
+                  </div>
+                )}
+              </div>
               {(onRewind || onFork || onRestore || onRetry) && messageId && (
                 <div className="flex gap-2 flex-col lg:flex-row ml-auto">
                   {/*

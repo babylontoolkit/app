@@ -127,6 +127,6 @@ export function describeAgentStatus(status: AgentStatusSnapshot, now = Date.now(
 
   return {
     label: `Still working — ${elapsed}`,
-    detail: 'The model is reasoning through your request.',
+    detail: 'The model is still reasoning through your request.',
   };
 }

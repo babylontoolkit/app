@@ -98,10 +98,32 @@ beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'ledger-'));
   ledger = new FsLedger(tmp);
   setLedger(ledger);
+
+  /*
+   * 🔴 THE SAME TRAP AGAIN, ONE SEAM TO THE LEFT — and this one wrote to the operator's REAL data.
+   *
+   * `settleGeneration` anchors a `generations` row before its debit, and `getGenerationStore` falls
+   * back to an `FsGenerationStore` at `platformDataDir()`. Only the foreign-key `describe` below
+   * stubbed it, so every other test in this file — `settleGeneration` is called in a dozen of them —
+   * deposited its fixtures into the developer's `.data/generations/`: `g1`, `g-full`, `g-stop`, and a
+   * row literally named `g-fail` recorded as a COMPLETED generation charging 14 credits.
+   *
+   * That is not untidiness. `buildUsageReport` lists that directory, so fake rows land in the §4.10
+   * admin dashboard's failure rate, credits charged, and (as of Stage C) the rescue-marker counts —
+   * the exact numbers an operator reads to decide whether the platform is healthy. Found by driving
+   * the real app in Stage D and noticing the fixtures had this test run's timestamp.
+   *
+   * Same species as `oauth.spec.ts`'s `env()` fallback and `chat-index.spec.ts` depositing ~200 real
+   * rows: A SEAM THAT LOOKS EMPTY IN A TEST IS SILENTLY RESOLVING TO THE REAL THING.
+   *
+   * The FK `describe` sets its own store in a nested `beforeEach`, which runs after this one and wins.
+   */
+  setGenerationStore({ upsert: async () => undefined, list: async () => [] } as unknown as GenerationStore);
 });
 
 afterEach(async () => {
   setLedger(undefined);
+  setGenerationStore(undefined);
   await fs.rm(tmp, { recursive: true, force: true });
   vi.unstubAllEnvs();
   invalidateMarketPricesCache();

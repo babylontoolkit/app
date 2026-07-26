@@ -1532,6 +1532,67 @@ ${value.content}
   return {
     ready: !mixedId || ready,
     initialMessages,
+
+    /**
+     * "New chat, same game" WITHOUT re-mounting the project (§4.5.6, §4.2.9).
+     *
+     * The conversation-side half of the in-place reset (`chat-reset.ts` explains why it is in place at
+     * all). Everything here is chat identity or chat history; nothing here is the project — the files,
+     * the WebContainer, the workbench and `projectId` are deliberately untouched, because they did not
+     * change and re-mounting them is exactly the "the whole workspace reloaded" symptom this replaces.
+     *
+     * The identity comes from `identityForMount({ freshChat: true })` — the SAME pure decision the mount
+     * path uses — and never from spreading what the atoms hold. An inherited `serverChatId` makes the
+     * new chat save over the old chat's server transcript, which is the only copy we hold (§4.5.4b); an
+     * inherited `chatId` does the same to its IndexedDB record. Both are silent.
+     *
+     * The URL goes back to `/` by `replaceState`, NOT `navigate`: a real navigation re-runs the mount
+     * effect and remounts the route — the reload we are removing. The chat gets its own `/chat/:id` back
+     * on its first save, exactly as a chat started from the landing page does.
+     */
+    startFreshChat: () => {
+      const pid = projectId.get();
+
+      if (!pid) {
+        return;
+      }
+
+      const identity = identityForMount({
+        current: {
+          chatId: chatId.get(),
+          description: description.get(),
+          urlId: urlIdRef.current,
+          metadata: chatMetadata.get() ?? {},
+        },
+        projectId: pid,
+        freshChat: true,
+      });
+
+      chatId.set(identity.chatId);
+      description.set(identity.description);
+      chatMetadata.set(identity.metadata);
+
+      // Ref and state together, always — `storeMessageHistory` reads the ref (see `urlIdRef`).
+      urlIdRef.current = identity.urlId;
+      setUrlId(identity.urlId);
+
+      setArchivedMessages([]);
+      setInitialMessages([]);
+      latestMessages.current = [];
+      lastCheckpointedMessage.current = undefined;
+      chatCreatedAt.current = new Date().toISOString();
+
+      /*
+       * The unapplied-turn offer belongs to the conversation it was raised from (§4.5.4c): it asks
+       * whether THAT turn's files ever landed. Carrying it into a chat that cannot show the turn leaves
+       * a banner offering to re-apply something the user can no longer see.
+       */
+      unappliedTurn.set(undefined);
+
+      if (typeof window !== 'undefined') {
+        window.history.replaceState({}, '', '/');
+      }
+    },
     updateChatMestaData: async (metadata: IChatMetadata) => {
       const id = chatId.get();
 

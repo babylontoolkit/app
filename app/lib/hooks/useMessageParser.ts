@@ -218,6 +218,25 @@ const parserRoutes = new Map<string, EnhancedStreamingMessageParser>();
 export function useMessageParser() {
   const [parsedMessages, setParsedMessages] = useState<{ [key: number]: string }>({});
 
+  /**
+   * Forget every message this hook has ever parsed — "New chat, same game" (§4.5.6), in place.
+   *
+   * `parsedMessages` is keyed by message INDEX, so a cleared conversation that leaves it standing does
+   * not merely hold dead entries: the next chat's message 0 renders the OLD chat's message 0 until the
+   * sampler (50ms) catches up. The route map is keyed by message id and would leak forever otherwise —
+   * harmless per entry, unbounded across a session.
+   *
+   * The parser instances are reset too: they hold per-message streaming position, and a fresh chat has
+   * no history for them to be positioned in.
+   */
+  const resetParsedMessages = useCallback(() => {
+    messageParser.reset();
+    transcriptParser.reset();
+    planParser.reset();
+    parserRoutes.clear();
+    setParsedMessages({});
+  }, []);
+
   const parseMessages = useCallback((messages: Message[], isLoading: boolean) => {
     let reset = false;
 
@@ -266,5 +285,5 @@ export function useMessageParser() {
     }
   }, []);
 
-  return { parsedMessages, parseMessages };
+  return { parsedMessages, parseMessages, resetParsedMessages };
 }

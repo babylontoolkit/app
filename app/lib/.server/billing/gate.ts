@@ -16,6 +16,8 @@
  * game out from under a user mid-build.
  */
 import { createScopedLogger } from '~/utils/logger';
+import { getMonitor } from '~/lib/.server/monitoring';
+import { ALERT_SIGNALS } from '~/lib/.server/monitoring/events';
 import { getLedger } from './ledger';
 import { getGenerationStore } from './generations';
 import { creditsForUsage, getBillingConfig, rawCostUsd, type TokenUsage } from './rates';
@@ -157,10 +159,21 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
       status: 'completed',
     });
   } catch (error) {
-    // The debit is now guaranteed to fail. Say so plainly rather than letting it look like bad luck.
+    /*
+     * The debit is now guaranteed to fail. Say so plainly rather than letting it look like bad luck —
+     * and say it somewhere an operator will SEE. A log line is what this was for a year, which is
+     * precisely how the original FK defect could have billed zero on every generation forever
+     * (`spec/fail-loud.md` rule 4: a swallow on a money path must refund, retry, or REPORT).
+     */
     logger.error(
       `Cannot anchor generation ${input.generationId} for ${input.userId} — the debit will be REJECTED ` +
         `by the foreign key and this generation will bill ZERO: ${(error as Error).message}`,
+    );
+    getMonitor(input.context).alert(
+      ALERT_SIGNALS.LEDGER_INTEGRITY,
+      `Generation ${input.generationId} could not be anchored — its debit will be rejected and this ` +
+        `generation will bill ZERO: ${(error as Error).message}`,
+      { severity: 'critical', scope: 'settle-generation', userId: input.userId, tags: { model: input.model } },
     );
   }
 
@@ -186,6 +199,12 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
   } catch (error) {
     // Loud, because this is money. But never fatal to the user's generation.
     logger.error(`FAILED TO CHARGE generation ${input.generationId} for ${input.userId}: ${(error as Error).message}`);
+    getMonitor(input.context).alert(
+      ALERT_SIGNALS.LEDGER_INTEGRITY,
+      `Generation ${input.generationId} consumed ${credits} credits that could not be debited: ` +
+        `${(error as Error).message}`,
+      { severity: 'critical', scope: 'settle-generation', userId: input.userId, tags: { model: input.model, credits } },
+    );
 
     return null;
   }
@@ -219,6 +238,17 @@ export async function refundGeneration(
 
     logger.info(`Refunded ${credits} credits to ${userId} for failed generation ${generationId}`);
   } catch (error) {
+    /*
+     * The user is now charged for OUR failure and nothing downstream can notice: the request has
+     * already ended in an error, and this is the compensating step that was supposed to make that
+     * honest. Alert — there is no other loudness left on this path.
+     */
     logger.error(`Failed to refund ${generationId}: ${(error as Error).message}`);
+    getMonitor(context).alert(
+      ALERT_SIGNALS.LEDGER_INTEGRITY,
+      `Refund of ${credits} credits for failed generation ${generationId} did NOT land — the user is ` +
+        `still charged for a failure: ${(error as Error).message}`,
+      { severity: 'critical', scope: 'refund-generation', userId, tags: { generationId, credits } },
+    );
   }
 }

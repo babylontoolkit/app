@@ -256,6 +256,31 @@ describe('starting a render (billing enforced)', () => {
     expect(upserts.at(-1)?.status).toBe('failed');
   });
 
+  /*
+   * The fifth terminal state (`spec/fail-loud.md`): debited, rendering at KIE, and NO task record —
+   * so nothing can ever poll it and nothing can ever refund it. The caller only sees "could not
+   * start", which reads as a refusal that cost nothing. Money gone, silently.
+   */
+  it('refunds when the task record cannot be stored — a render nothing can poll is a failure', async () => {
+    await grant(100);
+
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+
+    objectStore.put = async () => {
+      throw new Error('object store unavailable');
+    };
+
+    await expect(startMediaTask(imageInput({ provider, objectStore }))).rejects.toMatchObject({
+      name: 'MediaRefusedError',
+      statusCode: 500,
+    });
+
+    expect(provider.created, 'the render did start — that is why this must refund').toHaveLength(1);
+    expect(await ledger.balance(USER), 'the debit came back').toBe(100);
+    expect(upserts.at(-1)?.status).toBe('failed');
+  });
+
   it('anchors a generations row BEFORE the debit (the FK rule)', async () => {
     await grant(100);
     await startMediaTask(imageInput());
