@@ -1,5 +1,5 @@
-import type { WebContainer } from '@webcontainer/api';
 import { atom } from 'nanostores';
+import type { SandboxProvider } from '~/lib/sandbox';
 
 // Extend Window interface to include our custom property
 declare global {
@@ -19,7 +19,7 @@ const PREVIEW_CHANNEL = 'preview-updates';
 
 export class PreviewsStore {
   #availablePreviews = new Map<number, PreviewInfo>();
-  #webcontainer: Promise<WebContainer>;
+  #sandbox: Promise<SandboxProvider>;
   #broadcastChannel?: BroadcastChannel;
   #lastUpdate = new Map<string, number>();
   #watchedFiles = new Set<string>();
@@ -29,8 +29,8 @@ export class PreviewsStore {
 
   previews = atom<PreviewInfo[]>([]);
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
+  constructor(sandboxPromise: Promise<SandboxProvider>) {
+    this.#sandbox = sandboxPromise;
     this.#broadcastChannel = this.#maybeCreateChannel(PREVIEW_CHANNEL);
     this.#storageChannel = this.#maybeCreateChannel('storage-sync-channel');
 
@@ -167,10 +167,10 @@ export class PreviewsStore {
   }
 
   async #init() {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     // Listen for server ready events
-    webcontainer.on('server-ready', (port, url) => {
+    sandbox.onServerReady((port, url) => {
       console.log('[Preview] Server ready on port:', port, url);
       this.broadcastUpdate(url);
 
@@ -179,7 +179,7 @@ export class PreviewsStore {
     });
 
     // Listen for port events
-    webcontainer.on('port', (port, type, url) => {
+    sandbox.onPort((port, type, url) => {
       let previewInfo = this.#availablePreviews.get(port);
 
       if (type === 'close' && previewInfo) {
@@ -208,7 +208,15 @@ export class PreviewsStore {
     });
   }
 
-  // Helper to extract preview ID from URL
+  /*
+   * Helper to extract preview ID from URL.
+   *
+   * ⚠️ Still WebContainer-shaped: it matches StackBlitz's `*.local-credentialless.webcontainer-api.io`
+   * preview hostname. It degrades safely rather than throwing — a provider with different preview
+   * URLs returns null here and every caller guards on that, costing only the cross-tab preview
+   * broadcast. Promoting preview-id extraction onto `SandboxProvider` is follow-up work; it is left
+   * here so this pass stays behaviour-preserving (`spec/sandbox-seam.md`).
+   */
   getPreviewId(url: string): string | null {
     const match = url.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
     return match ? match[1] : null;
@@ -303,10 +311,10 @@ let previewsStore: PreviewsStore | null = null;
 export function usePreviewStore() {
   if (!previewsStore) {
     /*
-     * Initialize with a Promise that resolves to WebContainer
-     * This should match how you're initializing WebContainer elsewhere
+     * Initialize with a Promise that resolves to the session sandbox.
+     * This should match how the sandbox is initialized elsewhere (`~/lib/sandbox`).
      */
-    previewsStore = new PreviewsStore(Promise.resolve({} as WebContainer));
+    previewsStore = new PreviewsStore(Promise.resolve({} as SandboxProvider));
   }
 
   return previewsStore;

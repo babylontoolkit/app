@@ -22,7 +22,8 @@
  *   - **Worker-optional** — if a Worker cannot be constructed (unsupported, SSR), it encodes inline. The
  *     inline path is bounded by the same size gate, so it cannot reach the pathological freeze.
  *
- * ⚠️ Stays ENVELOPE-COMPATIBLE with `saveWorkingCopy` in `projects.ts`: same route, same `{ seq, files }`
+ * ⚠️ Stays ENVELOPE-COMPATIBLE with `saveWorkingCopy` in `projects.ts`: same route, same
+ * `{ seq, files, messageId? }`
  * base64 shape, same secret rule. The two differ only in WHERE the encode runs (here: a worker; there:
  * inline, for the checkpoint path that already holds a serialized map). If you change the envelope,
  * change both.
@@ -95,6 +96,7 @@ function saveViaWorker(
   seq: number,
   entries: WorkingCopyEntry[],
   transfer: Transferable[],
+  messageId?: string,
 ): Promise<boolean> {
   const requestId = nextRequestId++;
 
@@ -110,7 +112,7 @@ function saveViaWorker(
     });
 
     try {
-      w.postMessage({ requestId, url, seq, entries }, transfer);
+      w.postMessage({ requestId, url, seq, messageId, entries }, transfer);
     } catch {
       clearTimeout(timeout);
       pending.delete(requestId);
@@ -125,7 +127,11 @@ function saveViaWorker(
  * Returns why it did or did not save so the caller can log/degrade — never throws (a failed recovery
  * top-up must not surface to the user; the local checkpoint is the durable copy).
  */
-export async function writeWorkingCopyFromStore(projectId: string, seq: number): Promise<WorkingCopyWriteResult> {
+export async function writeWorkingCopyFromStore(
+  projectId: string,
+  seq: number,
+  messageId?: string,
+): Promise<WorkingCopyWriteResult> {
   const files = workbenchStore.files.get();
 
   if (!withinWorkingCopyBudget(files)) {
@@ -167,7 +173,7 @@ export async function writeWorkingCopyFromStore(projectId: string, seq: number):
      * fallback from here: a worker failure returns 'failed' and the caller re-warns rather than re-reads
      * detached bytes.
      */
-    const ok = await saveViaWorker(w, url, seq, entries, transfer);
+    const ok = await saveViaWorker(w, url, seq, entries, transfer, messageId);
     return ok ? 'saved' : 'failed';
   }
 
@@ -176,7 +182,7 @@ export async function writeWorkingCopyFromStore(projectId: string, seq: number):
     const response = await fetch(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: buildWorkingCopyBody(seq, entries),
+      body: buildWorkingCopyBody(seq, entries, messageId),
       credentials: 'same-origin',
     });
 

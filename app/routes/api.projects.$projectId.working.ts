@@ -2,7 +2,7 @@
  * The project's server WORKING COPY — crash recovery (SPEC §4.5.4c).
  *
  *   GET  /api/projects/:id/working  → { copy } | 404
- *   PUT  /api/projects/:id/working  ← { seq, files }  → { ok, seq }
+ *   PUT  /api/projects/:id/working  ← { seq, files, messageId? }  → { ok, seq }
  *
  * ## Why this one DOES have a write method, when the seed route deliberately does not
  *
@@ -63,7 +63,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     const user = await requireUser(request, context);
     const project = await requireOwnedProject(user, params.projectId!, context);
 
-    const body = (await request.json()) as { seq?: number; files?: SerializedFileMap };
+    const body = (await request.json()) as { seq?: number; files?: SerializedFileMap; messageId?: string };
 
     /*
      * `seq` is REQUIRED and must be a real number.
@@ -96,7 +96,19 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
     await putWorkingCopy(
       project.id,
-      { projectId: project.id, seq: body.seq, updatedAt: new Date().toISOString(), files: body.files },
+      {
+        projectId: project.id,
+        seq: body.seq,
+        updatedAt: new Date().toISOString(),
+
+        /*
+         * Optional, and only accepted as a string. It answers "does this copy already contain the last
+         * paid turn?" — a wrong value there offers to overwrite the user's files, so anything that is
+         * not a string is stored as absent (= "cannot say", which asks).
+         */
+        messageId: typeof body.messageId === 'string' ? body.messageId : undefined,
+        files: body.files,
+      },
       context,
     );
 

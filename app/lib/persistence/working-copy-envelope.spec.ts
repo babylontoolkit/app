@@ -59,3 +59,23 @@ describe('buildWorkingCopyBody', () => {
     expect(base64ToBytes(parsed.files['/a.png'].content)).toEqual(bytes);
   });
 });
+
+describe('the envelope carries the turn it contains', () => {
+  /**
+   * Without `messageId` a recovery mount cannot say which turn its files hold, and
+   * `detectUnappliedTurn` reads "cannot say" as "does not have it" — which raised the §4.5.4c dialog
+   * on every single recovery, about work sitting in that very envelope.
+   */
+  it('includes messageId when given one', () => {
+    const body = JSON.parse(buildWorkingCopyBody(7, [{ path: '/a.ts', isBinary: false, text: 'x' }], 'msg-9'));
+
+    expect(body.messageId).toBe('msg-9');
+    expect(body.seq).toBe(7);
+  });
+
+  it('omits it when there is none, rather than inventing one', () => {
+    const body = JSON.parse(buildWorkingCopyBody(7, [{ path: '/a.ts', isBinary: false, text: 'x' }]));
+
+    expect(body.messageId).toBeUndefined();
+  });
+});

@@ -126,6 +126,20 @@ export interface WorkingCopy {
   /** For display only ("recovered from 3 minutes ago"). Never used to order anything. */
   updatedAt: string;
 
+  /**
+   * The assistant turn these files contain — the same id the local checkpoint records.
+   *
+   * 🔴 **Its absence was a bug, not a simplification (fixed 2026-07-26).** `detectUnappliedTurn` asks
+   * "does the mounted copy already carry the last paid turn?", and a copy that cannot answer is read
+   * as "no". So every recovery mount raised the "your last change isn't on this device" dialog —
+   * about work that was very often right there in this very object — and the recovery then wrote a
+   * local checkpoint that ALSO had no id, so the question repeated on every subsequent mount forever.
+   *
+   * Optional because copies written before this field existed have none; absent still means "cannot
+   * say", which degrades to the old ask-the-user behaviour rather than to a silent wrong answer.
+   */
+  messageId?: string;
+
   files: SerializedFileMap;
 }
 
@@ -187,7 +201,12 @@ export async function getWorkingCopy(projectId: string, context?: unknown): Prom
       return null;
     }
 
-    return parsed;
+    /*
+     * A non-string `messageId` is dropped rather than passed on: it feeds an identity comparison that
+     * decides whether to offer to overwrite the user's files, and `undefined` (= "cannot say", ask)
+     * is the safe reading of anything we do not recognise.
+     */
+    return typeof parsed.messageId === 'string' ? parsed : { ...parsed, messageId: undefined };
   } catch (error) {
     logger.error(`Working copy for ${projectId} could not be parsed: ${(error as Error).message}`);
     return null;

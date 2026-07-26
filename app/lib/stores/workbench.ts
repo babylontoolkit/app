@@ -2,7 +2,7 @@ import { atom, map, type MapStore, type ReadableAtom, type WritableAtom } from '
 import type { EditorDocument, ScrollPosition } from '~/components/editor/codemirror/CodeMirrorEditor';
 import { ActionRunner } from '~/lib/runtime/action-runner';
 import type { ActionCallbackData, ArtifactCallbackData } from '~/lib/runtime/message-parser';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
 import type { ITerminal } from '~/types/terminal';
 import { unreachable } from '~/utils/unreachable';
 import { EditorStore } from './editor';
@@ -42,10 +42,10 @@ type Artifacts = MapStore<Record<string, ArtifactState>>;
 export type WorkbenchViewType = 'code' | 'diff' | 'preview';
 
 export class WorkbenchStore {
-  #previewsStore = new PreviewsStore(webcontainer);
-  #filesStore = new FilesStore(webcontainer);
+  #previewsStore = new PreviewsStore(sandbox);
+  #filesStore = new FilesStore(sandbox);
   #editorStore = new EditorStore(this.#filesStore);
-  #terminalStore = new TerminalStore(webcontainer);
+  #terminalStore = new TerminalStore(sandbox);
 
   #reloadedMessages = new Set<string>();
 
@@ -133,13 +133,13 @@ export class WorkbenchStore {
 
   /**
    * Serialize the project for transport (snapshots, share builds, GitHub sync), reading
-   * real bytes for binaries from the WebContainer (SPEC §1.3 principle 10).
+   * real bytes for binaries from the sandbox (SPEC §1.3 principle 10).
    */
   serializeFiles(): Promise<SerializedFileMap> {
     return this.#filesStore.serializeFiles();
   }
 
-  /** Materialize a serialized project back into the WebContainer, byte-faithfully. */
+  /** Materialize a serialized project back into the sandbox, byte-faithfully. */
   restoreFiles(files: SerializedFileMap, options?: { protect: (path: string) => boolean }): Promise<void> {
     return this.#filesStore.restoreFiles(files, options);
   }
@@ -149,7 +149,7 @@ export class WorkbenchStore {
     return this.#filesStore.readBinaryFile(filePath);
   }
 
-  /** Force a full re-scan of the WebContainer FS, rebuilding the file map from disk truth. */
+  /** Force a full re-scan of the sandbox FS, rebuilding the file map from disk truth. */
   refreshFiles(): Promise<void> {
     return this.#filesStore.refreshFiles();
   }
@@ -574,7 +574,7 @@ export class WorkbenchStore {
       closed: false,
       type,
       runner: new ActionRunner(
-        webcontainer,
+        sandbox,
         () => this.boltTerminal,
         (alert) => {
           if (this.#reloadedMessages.has(messageId)) {
@@ -674,8 +674,8 @@ export class WorkbenchStore {
     }
 
     if (data.action.type === 'file') {
-      const wc = await webcontainer;
-      const fullPath = path.join(wc.workdir, data.action.filePath);
+      const activeSandbox = await sandbox;
+      const fullPath = path.join(activeSandbox.workdir, data.action.filePath);
 
       /*
        * For scoped locks, we would need to implement diff checking here
@@ -711,13 +711,13 @@ export class WorkbenchStore {
       /*
        * An edit action is a search/replace patch (§4.2.8), so — unlike a file action — there is no
        * content to stream into the editor as it arrives; half a SEARCH block patches nothing. The
-       * runner applies it to the WebContainer FS in one shot when the action closes, and the file
+       * runner applies it to the sandbox FS in one shot when the action closes, and the file
        * watcher carries the result back into the file map and the open document.
        *
        * All we do here is show the user WHERE it landed.
        */
-      const wc = await webcontainer;
-      const fullPath = path.join(wc.workdir, data.action.filePath);
+      const activeSandbox = await sandbox;
+      const fullPath = path.join(activeSandbox.workdir, data.action.filePath);
 
       if (this.selectedFile.value !== fullPath) {
         this.setSelectedFile(fullPath);

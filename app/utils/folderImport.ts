@@ -1,7 +1,7 @@
 import type { Message } from 'ai';
 import { generateId } from './fileUtils';
 import { detectProjectCommands, createCommandsMessage, escapeBoltTags } from './projectCommands';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
 import { createScopedLogger } from './logger';
 
 const logger = createScopedLogger('FolderImport');
@@ -21,7 +21,7 @@ const writeBinaryFiles = async (files: File[]): Promise<string[]> => {
     return [];
   }
 
-  const container = await webcontainer;
+  const container = await sandbox;
   const written: string[] = [];
 
   for (const file of files) {

@@ -419,7 +419,12 @@ export async function saveMessages(
  * first and is the copy the user is about to rely on; a failed upload must degrade to "no recovery
  * copy", never to "no checkpoint". Callers swallow the error and say so in the log.
  */
-export async function saveWorkingCopy(projectId: string, seq: number, files: SerializedFileMap): Promise<void> {
+export async function saveWorkingCopy(
+  projectId: string,
+  seq: number,
+  files: SerializedFileMap,
+  messageId?: string,
+): Promise<void> {
   /*
    * 🔴 SECRETS NEVER LEAVE THE BROWSER, and this uses the SAME rule as every other path that sends a
    * user's files anywhere (`isSecretPath`, one rule in one place, already shared by the push and the
@@ -442,7 +447,7 @@ export async function saveWorkingCopy(projectId: string, seq: number, files: Ser
 
   await api<{ ok: true; seq: number }>(`/api/projects/${projectId}/working`, {
     method: 'PUT',
-    body: JSON.stringify({ seq, files: safe }),
+    body: JSON.stringify({ seq, messageId, files: safe }),
   });
 }
 
@@ -455,11 +460,11 @@ export async function saveWorkingCopy(projectId: string, seq: number, files: Ser
  */
 export async function loadWorkingCopy(
   projectId: string,
-): Promise<{ seq: number; updatedAt: string; files: SerializedFileMap } | null> {
+): Promise<{ seq: number; updatedAt: string; files: SerializedFileMap; messageId?: string } | null> {
   try {
-    const { copy } = await api<{ copy: { seq: number; updatedAt: string; files: SerializedFileMap } }>(
-      `/api/projects/${projectId}/working`,
-    );
+    const { copy } = await api<{
+      copy: { seq: number; updatedAt: string; files: SerializedFileMap; messageId?: string };
+    }>(`/api/projects/${projectId}/working`);
     return copy;
   } catch {
     return null;

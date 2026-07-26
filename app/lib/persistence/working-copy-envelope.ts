@@ -71,7 +71,13 @@ export function assembleSerializedMap(entries: WorkingCopyEntry[]): SerializedFi
   return map;
 }
 
-/** The exact request body the working-copy route expects: `{ seq, files }`, base64-faithful. */
-export function buildWorkingCopyBody(seq: number, entries: WorkingCopyEntry[]): string {
-  return JSON.stringify({ seq, files: assembleSerializedMap(entries) });
+/**
+ * The exact request body the working-copy route expects: `{ seq, files, messageId? }`, base64-faithful.
+ *
+ * `messageId` is the assistant turn these files contain, mirrored from the local checkpoint. It is
+ * what lets a recovery mount answer "this copy already has the last paid turn" instead of shrugging —
+ * a shrug is read as "no", which is what made the §4.5.4c dialog ask on every single mount.
+ */
+export function buildWorkingCopyBody(seq: number, entries: WorkingCopyEntry[], messageId?: string): string {
+  return JSON.stringify({ seq, messageId, files: assembleSerializedMap(entries) });
 }

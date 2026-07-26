@@ -18,7 +18,7 @@
 import { useState } from 'react';
 import { toast } from 'react-toastify';
 import { useStore } from '@nanostores/react';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { path } from '~/utils/path';
@@ -51,7 +51,7 @@ export type ShareOutcome =
 
 /** Read a built output directory into a byte-faithful SerializedFileMap (the publish route's input). */
 async function readDist(finalBuildPath: string): Promise<SerializedFileMap> {
-  const container = await webcontainer;
+  const container = await sandbox;
   const files: SerializedFileMap = {};
 
   async function walk(dirPath: string): Promise<void> {
@@ -108,7 +108,7 @@ async function buildProject(): Promise<string> {
   }
 
   // Find the real output directory (Vite → dist), the same way the deploy flow does.
-  const container = await webcontainer;
+  const container = await sandbox;
   const candidates = [buildOutput.path.replace('/home/project', ''), '/dist', '/build', '/out', '/output'];
 
   for (const dir of candidates) {

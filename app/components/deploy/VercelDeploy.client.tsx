@@ -2,7 +2,7 @@ import { toast } from 'react-toastify';
 import { useStore } from '@nanostores/react';
 import { vercelConnection } from '~/lib/stores/vercel';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
 import { path } from '~/utils/path';
 import { useState } from 'react';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
@@ -81,7 +81,7 @@ export function useVercelDeploy() {
       deployArtifact.runner.handleDeployAction('deploying', 'running', { source: 'vercel' });
 
       // Get the build files
-      const container = await webcontainer;
+      const container = await sandbox;
 
       // Remove /home/project from buildPath if it exists
       const buildPath = buildOutput.path.replace('/home/project', '');

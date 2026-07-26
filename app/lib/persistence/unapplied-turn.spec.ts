@@ -81,3 +81,47 @@ describe('otherwise it ASKS', () => {
     });
   });
 });
+
+describe('an answered question stays answered', () => {
+  /**
+   * The loop this closes (2026-07-26).
+   *
+   * Neither dialog button recorded anything, so the next mount re-derived the same facts and asked
+   * again — forever, about a turn the user had explicitly decided about. Compounded by the recovery
+   * path writing a `'Recovered'` checkpoint with no `messageId`, which made every SUBSEQUENT mount
+   * re-ask too, even once the working copy was no longer involved.
+   */
+  const base = {
+    source: 'local' as const,
+    lastAssistantMessageId: 'msg-9',
+    hasFileActions: true,
+    mountedMessageId: 'msg-8',
+  };
+
+  it('stops asking once the user has answered for that turn', () => {
+    expect(detectUnappliedTurn({ ...base, resolvedMessageId: 'msg-9' })).toEqual({ action: 'none' });
+  });
+
+  /* Answering for an older turn must NOT silence a newer one — the next paid turn stands alone. */
+  it('still asks about a NEWER turn than the one that was answered', () => {
+    expect(detectUnappliedTurn({ ...base, resolvedMessageId: 'msg-8' })).toEqual({
+      action: 'offer',
+      messageId: 'msg-9',
+    });
+  });
+
+  /* The record outranks the source rules, so it holds wherever the project mounts from next. */
+  it('holds for a working-copy mount too', () => {
+    expect(detectUnappliedTurn({ ...base, source: 'working', resolvedMessageId: 'msg-9' })).toEqual({
+      action: 'none',
+    });
+  });
+
+  /**
+   * The false positive the working-copy `messageId` removes at source: a recovery copy that DOES carry
+   * the last turn must never raise the dialog in the first place, answered or not.
+   */
+  it('never asks when the mounted working copy already carries the last turn', () => {
+    expect(detectUnappliedTurn({ ...base, source: 'working', mountedMessageId: 'msg-9' })).toEqual({ action: 'none' });
+  });
+});

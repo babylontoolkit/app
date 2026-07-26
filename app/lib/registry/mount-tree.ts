@@ -30,7 +30,7 @@
  * Everything here is a pure transform of the file list into the tree — no container, no I/O — so the
  * text/binary partition is unit testable without a sandbox.
  */
-import type { DirectoryNode, FileNode, FileSystemTree } from '@webcontainer/api';
+import type { SandboxDirectoryNode, SandboxFileNode, SandboxFileTree } from '~/lib/sandbox';
 import type { TemplateFile } from '~/types/template';
 
 /**
@@ -99,8 +99,8 @@ export function partitionForMount(files: TemplateFile[]): { textFiles: TemplateF
  * directories are created as they are encountered, and a directory that also appears as an explicit
  * entry never overwrites the children already placed under it (order-independent).
  */
-export function buildFileSystemTree(files: TemplateFile[]): FileSystemTree {
-  const root: FileSystemTree = {};
+export function buildFileSystemTree(files: TemplateFile[]): SandboxFileTree {
+  const root: SandboxFileTree = {};
 
   for (const file of files) {
     if (file.isBinary) {
@@ -117,7 +117,7 @@ export function buildFileSystemTree(files: TemplateFile[]): FileSystemTree {
       continue;
     }
 
-    let node = root;
+    let node: SandboxFileTree = root;
 
     for (let index = 0; index < segments.length - 1; index++) {
       const segment = segments[index];
@@ -126,14 +126,14 @@ export function buildFileSystemTree(files: TemplateFile[]): FileSystemTree {
       if (existing && 'directory' in existing) {
         node = existing.directory;
       } else {
-        const dir: DirectoryNode = { directory: {} };
+        const dir: SandboxDirectoryNode = { directory: {} };
         node[segment] = dir;
         node = dir.directory;
       }
     }
 
     const leaf = segments[segments.length - 1];
-    const fileNode: FileNode = { file: { contents: file.content } };
+    const fileNode: SandboxFileNode = { file: { contents: file.content } };
     node[leaf] = fileNode;
   }
 

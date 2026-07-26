@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
-import type { TextSearchOptions, TextSearchOnProgressCallback, WebContainer } from '@webcontainer/api';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
+import type { SandboxProvider, SandboxTextSearchOptions, SandboxTextSearchProgress } from '~/lib/sandbox';
 import { WORK_DIR } from '~/utils/constants';
 import { debounce } from '~/utils/debounce';
 
@@ -14,23 +14,29 @@ interface DisplayMatch {
 }
 
 async function performTextSearch(
-  instance: WebContainer,
+  instance: SandboxProvider,
   query: string,
-  options: Omit<TextSearchOptions, 'folders'>,
+  options: Omit<SandboxTextSearchOptions, 'folders'>,
   onProgress: (results: DisplayMatch[]) => void,
 ): Promise<void> {
-  if (!instance || typeof instance.internal?.textSearch !== 'function') {
-    console.error('WebContainer instance not available or internal searchText method is missing/not a function.');
+  /*
+   * Search is an OPTIONAL sandbox capability (`spec/sandbox-seam.md`): a server-container provider
+   * may have no ripgrep-class index to offer. Read the declared flag rather than probing for the
+   * method — a `typeof x.internal?.textSearch === 'function'` check (what this used to do) reads as
+   * defensive coding, cannot be tested, and silently returns "no results" instead of "not supported".
+   */
+  if (!instance?.capabilities.textSearch || !instance.textSearch) {
+    console.error('The active sandbox does not support project-wide text search.');
 
     return;
   }
 
-  const searchOptions: TextSearchOptions = {
+  const searchOptions: SandboxTextSearchOptions = {
     ...options,
     folders: [WORK_DIR],
   };
 
-  const progressCallback: TextSearchOnProgressCallback = (filePath: any, apiMatches: any[]) => {
+  const progressCallback: SandboxTextSearchProgress = (filePath: any, apiMatches: any[]) => {
     const displayMatches: DisplayMatch[] = [];
 
     apiMatches.forEach((apiMatch: { preview: { text: string; matches: string | any[] }; ranges: any[] }) => {
@@ -67,9 +73,9 @@ async function performTextSearch(
   };
 
   try {
-    await instance.internal.textSearch(query, searchOptions, progressCallback);
+    await instance.textSearch(query, searchOptions, progressCallback);
   } catch (error) {
-    console.error('Error during internal text search:', error);
+    console.error('Error during sandbox text search:', error);
   }
 }
 
@@ -126,8 +132,8 @@ export function Search() {
     const start = Date.now();
 
     try {
-      const instance = await webcontainer;
-      const options: Omit<TextSearchOptions, 'folders'> = {
+      const instance = await sandbox;
+      const options: Omit<SandboxTextSearchOptions, 'folders'> = {
         homeDir: WORK_DIR, // Adjust this path as needed
         includes: ['**/*.*'],
         excludes: ['**/node_modules/**', '**/package-lock.json', '**/.git/**', '**/dist/**', '**/*.lock'],

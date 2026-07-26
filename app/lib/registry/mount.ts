@@ -15,7 +15,7 @@
  */
 import type { TemplateFile } from '~/types/template';
 import { base64ToBytes } from '~/lib/binary/binary-files';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { createScopedLogger } from '~/utils/logger';
 import { buildFileSystemTree, partitionForMount, withFrameworkPublicAssets } from './mount-tree';
@@ -116,7 +116,7 @@ export async function mountTemplate(files: TemplateFile[]): Promise<void> {
     return;
   }
 
-  const container = await webcontainer;
+  const container = await sandbox;
   const { textFiles, binaryFiles } = partitionForMount(withFrameworkPublicAssets(files));
 
   try {
@@ -145,7 +145,7 @@ export async function mountTemplate(files: TemplateFile[]): Promise<void> {
  * disk before `npm install`/`npm run dev`. `mkdir -p` the parent because a binary-only directory (e.g.
  * `public/scripts/`) may have no text sibling to have created it in the atomic mount.
  */
-async function writeBinaryFiles(container: Awaited<typeof webcontainer>, binaryFiles: TemplateFile[]): Promise<void> {
+async function writeBinaryFiles(container: Awaited<typeof sandbox>, binaryFiles: TemplateFile[]): Promise<void> {
   for (const file of binaryFiles) {
     const dir = file.path.split('/').slice(0, -1).join('/');
 

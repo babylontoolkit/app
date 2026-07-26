@@ -82,7 +82,12 @@ async function push(reason: string): Promise<void> {
      * Reads bytes async, encodes + uploads off the main thread (a worker), and size-gates a project too
      * large to be worth an off-thread copy. Never throws; returns why it did or did not save.
      */
-    const result = await writeWorkingCopyFromStore(pid, current.seq);
+    /*
+     * The checkpoint's `messageId` rides along with its `seq`. Both describe the same state, and a copy
+     * that carries the seq but not the id can be ORDERED against a checkpoint yet cannot say which turn
+     * it contains — which is exactly the gap that made the §4.5.4c dialog unanswerable.
+     */
+    const result = await writeWorkingCopyFromStore(pid, current.seq, current.messageId);
 
     if (result === 'saved') {
       logger.info(`Working copy refreshed for ${pid} at seq ${current.seq} (${reason})`);

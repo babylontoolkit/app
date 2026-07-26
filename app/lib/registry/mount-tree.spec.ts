@@ -11,13 +11,13 @@
  * corrupts, the exact reason the original bug shipped.
  */
 import { describe, expect, it } from 'vitest';
-import type { DirectoryNode, FileNode } from '@webcontainer/api';
+import type { SandboxDirectoryNode, SandboxFileNode } from '~/lib/sandbox';
 import { bytesToBase64 } from '~/lib/binary/binary-files';
 import type { TemplateFile } from '~/types/template';
 import { buildFileSystemTree, partitionForMount, withFrameworkPublicAssets } from './mount-tree';
 
-const dir = (node: unknown): DirectoryNode['directory'] => (node as DirectoryNode).directory;
-const fileContents = (node: unknown): string | Uint8Array => (node as FileNode).file.contents;
+const dir = (node: unknown): SandboxDirectoryNode['directory'] => (node as SandboxDirectoryNode).directory;
+const fileContents = (node: unknown): string | Uint8Array => (node as SandboxFileNode).file.contents;
 
 describe('buildFileSystemTree', () => {
   it('nests files under their directories', () => {

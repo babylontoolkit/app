@@ -1,4 +1,4 @@
-import type { WebContainer } from '@webcontainer/api';
+import type { SandboxProvider } from '~/lib/sandbox';
 import { path as nodePath } from '~/utils/path';
 import { atom, map, type MapStore } from 'nanostores';
 import type { ActionAlert, BoltAction, DeployAlert, FileHistory, SupabaseAction, SupabaseAlert } from '~/types/actions';
@@ -75,7 +75,7 @@ class ActionCommandError extends Error {
 }
 
 export class ActionRunner {
-  #webcontainer: Promise<WebContainer>;
+  #sandbox: Promise<SandboxProvider>;
   #currentExecutionPromise: Promise<void> = Promise.resolve();
   #shellTerminal: () => BoltShell;
   runnerId = atom<string>(`${Date.now()}`);
@@ -86,13 +86,13 @@ export class ActionRunner {
   buildOutput?: { path: string; exitCode: number; output: string };
 
   constructor(
-    webcontainerPromise: Promise<WebContainer>,
+    sandboxPromise: Promise<SandboxProvider>,
     getShellTerminal: () => BoltShell,
     onAlert?: (alert: ActionAlert) => void,
     onSupabaseAlert?: (alert: SupabaseAlert) => void,
     onDeployAlert?: (alert: DeployAlert) => void,
   ) {
-    this.#webcontainer = webcontainerPromise;
+    this.#sandbox = sandboxPromise;
     this.#shellTerminal = getShellTerminal;
     this.onAlert = onAlert;
     this.onSupabaseAlert = onSupabaseAlert;
@@ -412,14 +412,14 @@ export class ActionRunner {
       return; // decided on the first delta; every later delta sees the file we just started writing
     }
 
-    const webcontainer = await this.#webcontainer;
-    const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
+    const sandbox = await this.#sandbox;
+    const relativePath = nodePath.relative(sandbox.workdir, action.filePath);
     const folder = nodePath.dirname(relativePath);
 
     let existed = false;
 
     try {
-      const entries = await webcontainer.fs.readdir(folder === '' || folder === '.' ? '.' : folder);
+      const entries = await sandbox.fs.readdir(folder === '' || folder === '.' ? '.' : folder);
       existed = entries.includes(nodePath.basename(relativePath));
     } catch {
       // The parent directory does not exist yet → this is unambiguously a new file.
@@ -434,8 +434,8 @@ export class ActionRunner {
       unreachable('Expected file action');
     }
 
-    const webcontainer = await this.#webcontainer;
-    const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
+    const sandbox = await this.#sandbox;
+    const relativePath = nodePath.relative(sandbox.workdir, action.filePath);
 
     let folder = nodePath.dirname(relativePath);
 
@@ -444,7 +444,7 @@ export class ActionRunner {
 
     if (folder !== '.') {
       try {
-        await webcontainer.fs.mkdir(folder, { recursive: true });
+        await sandbox.fs.mkdir(folder, { recursive: true });
         logger.debug('Created folder', folder);
       } catch (error) {
         logger.error('Failed to create folder\n\n', error);
@@ -452,7 +452,7 @@ export class ActionRunner {
     }
 
     try {
-      await webcontainer.fs.writeFile(relativePath, action.content);
+      await sandbox.fs.writeFile(relativePath, action.content);
       logger.debug(`File written ${relativePath}`);
     } catch (error) {
       logger.error('Failed to write file\n\n', error);
@@ -487,13 +487,13 @@ export class ActionRunner {
       );
     }
 
-    const webcontainer = await this.#webcontainer;
-    const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
+    const sandbox = await this.#sandbox;
+    const relativePath = nodePath.relative(sandbox.workdir, action.filePath);
 
     let source: string;
 
     try {
-      source = await webcontainer.fs.readFile(relativePath, 'utf-8');
+      source = await sandbox.fs.readFile(relativePath, 'utf-8');
     } catch {
       throw new EditBlockError(
         `${action.filePath} does not exist, so there is nothing to edit. Create it with \`type="file"\` instead.`,
@@ -504,7 +504,7 @@ export class ActionRunner {
     const blocks = parseEditBlocks(action.content);
     const patched = applyEditBlocks(source, blocks, action.filePath);
 
-    await webcontainer.fs.writeFile(relativePath, patched);
+    await sandbox.fs.writeFile(relativePath, patched);
     logger.debug(`Applied ${blocks.length} edit block(s) to ${relativePath}`);
   }
 
@@ -516,9 +516,9 @@ export class ActionRunner {
 
   async getFileHistory(filePath: string): Promise<FileHistory | null> {
     try {
-      const webcontainer = await this.#webcontainer;
+      const sandbox = await this.#sandbox;
       const historyPath = this.#getHistoryPath(filePath);
-      const content = await webcontainer.fs.readFile(historyPath, 'utf-8');
+      const content = await sandbox.fs.readFile(historyPath, 'utf-8');
 
       return JSON.parse(content);
     } catch (error) {
@@ -528,7 +528,7 @@ export class ActionRunner {
   }
 
   async saveFileHistory(filePath: string, history: FileHistory) {
-    // const webcontainer = await this.#webcontainer;
+    // const sandbox = await this.#sandbox;
     const historyPath = this.#getHistoryPath(filePath);
 
     await this.#runFileAction({
@@ -559,10 +559,10 @@ export class ActionRunner {
       source: 'netlify',
     });
 
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     // Create a new terminal specifically for the build
-    const buildProcess = await webcontainer.spawn('npm', ['run', 'build']);
+    const buildProcess = await sandbox.spawn('npm', ['run', 'build']);
 
     let output = '';
     const outputPromise = buildProcess.output.pipeTo(
@@ -620,10 +620,10 @@ export class ActionRunner {
 
     // Try to find the first existing build directory
     for (const dir of commonBuildDirs) {
-      const dirPath = nodePath.join(webcontainer.workdir, dir);
+      const dirPath = nodePath.join(sandbox.workdir, dir);
 
       try {
-        await webcontainer.fs.readdir(dirPath);
+        await sandbox.fs.readdir(dirPath);
         buildDir = dirPath;
         break;
       } catch {
@@ -633,7 +633,7 @@ export class ActionRunner {
 
     // If no build directory was found, use the default (dist)
     if (!buildDir) {
-      buildDir = nodePath.join(webcontainer.workdir, 'dist');
+      buildDir = nodePath.join(sandbox.workdir, 'dist');
     }
 
     const buildResult = {
@@ -760,7 +760,7 @@ export class ActionRunner {
 
         // Check if any of the files exist using WebContainer
         try {
-          const webcontainer = await this.#webcontainer;
+          const sandbox = await this.#sandbox;
           const existingFiles = [];
 
           for (const filePath of filePaths) {
@@ -769,7 +769,7 @@ export class ActionRunner {
             } // Skip flags
 
             try {
-              await webcontainer.fs.readFile(filePath);
+              await sandbox.fs.readFile(filePath);
               existingFiles.push(filePath);
             } catch {
               // File doesn't exist, skip it
@@ -805,8 +805,8 @@ export class ActionRunner {
         const targetDir = cdMatch[1].trim();
 
         try {
-          const webcontainer = await this.#webcontainer;
-          await webcontainer.fs.readdir(targetDir);
+          const sandbox = await this.#sandbox;
+          await sandbox.fs.readdir(targetDir);
         } catch {
           return {
             shouldModify: true,
@@ -825,8 +825,8 @@ export class ActionRunner {
         const sourceFile = parts[1];
 
         try {
-          const webcontainer = await this.#webcontainer;
-          await webcontainer.fs.readFile(sourceFile);
+          const sandbox = await this.#sandbox;
+          await sandbox.fs.readFile(sourceFile);
         } catch {
           return {
             shouldModify: false,
@@ -886,7 +886,7 @@ export class ActionRunner {
         pattern: /command not found/,
         title: 'Command Not Found',
         getMessage: () =>
-          `The command '${firstWord}' is not available in WebContainer.\n\nSuggestion: Check available commands or use a package manager to install it.`,
+          `The command '${firstWord}' is not available in the project sandbox.\n\nSuggestion: Check available commands or use a package manager to install it.`,
       },
       {
         pattern: /Is a directory/,

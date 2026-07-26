@@ -1,18 +1,18 @@
-import type { WebContainer, WebContainerProcess } from '@webcontainer/api';
 import { atom, type WritableAtom } from 'nanostores';
+import type { SandboxProcess, SandboxProvider } from '~/lib/sandbox';
 import type { ITerminal } from '~/types/terminal';
 import { newBoltShellProcess, newShellProcess } from '~/utils/shell';
 import { coloredText } from '~/utils/terminal';
 
 export class TerminalStore {
-  #webcontainer: Promise<WebContainer>;
-  #terminals: Array<{ terminal: ITerminal; process: WebContainerProcess }> = [];
+  #sandbox: Promise<SandboxProvider>;
+  #terminals: Array<{ terminal: ITerminal; process: SandboxProcess }> = [];
   #boltTerminal = newBoltShellProcess();
 
   showTerminal: WritableAtom<boolean> = import.meta.hot?.data.showTerminal ?? atom(true);
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
+  constructor(sandboxPromise: Promise<SandboxProvider>) {
+    this.#sandbox = sandboxPromise;
 
     if (import.meta.hot) {
       import.meta.hot.data.showTerminal = this.showTerminal;
@@ -27,8 +27,8 @@ export class TerminalStore {
   }
   async attachBoltTerminal(terminal: ITerminal) {
     try {
-      const wc = await this.#webcontainer;
-      await this.#boltTerminal.init(wc, terminal);
+      const sandbox = await this.#sandbox;
+      await this.#boltTerminal.init(sandbox, terminal);
     } catch (error: any) {
       terminal.write(coloredText.red('Failed to spawn bolt shell\n\n') + error.message);
       return;
@@ -37,7 +37,7 @@ export class TerminalStore {
 
   async attachTerminal(terminal: ITerminal) {
     try {
-      const shellProcess = await newShellProcess(await this.#webcontainer, terminal);
+      const shellProcess = await newShellProcess(await this.#sandbox, terminal);
       this.#terminals.push({ terminal, process: shellProcess });
     } catch (error: any) {
       terminal.write(coloredText.red('Failed to spawn shell\n\n') + error.message);

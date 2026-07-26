@@ -50,12 +50,23 @@ export interface UnappliedTurnFacts {
   hasFileActions: boolean;
 
   /**
-   * The message id recorded on the copy that was mounted (`LocalSnapshot.messageId`).
+   * The message id recorded on the copy that was mounted (`LocalSnapshot.messageId`, or the server
+   * working copy's).
    *
    * Equal to `lastAssistantMessageId` means that turn is already in the files — the ordinary, healthy
    * case after every successful generation, and the one that must never trigger anything.
    */
   mountedMessageId?: string;
+
+  /**
+   * The turn the user has ALREADY answered this question for (`resolvedUnappliedTurn`).
+   *
+   * Without this the dialog is unanswerable: both buttons only cleared the atom, so the next mount
+   * re-derived the same facts and asked again — forever, about work the user had explicitly decided
+   * to keep or discard. A question that ignores its own answer trains people to dismiss it, which
+   * costs exactly the one time it is real.
+   */
+  resolvedMessageId?: string;
 }
 
 /**
@@ -77,6 +88,14 @@ export function detectUnappliedTurn(facts: UnappliedTurnFacts): UnappliedTurn {
 
   /* The healthy path: the mounted copy already carries this turn. */
   if (facts.mountedMessageId === last) {
+    return { action: 'none' };
+  }
+
+  /*
+   * The user already answered for this exact turn — restored it, or chose to keep the older copy.
+   * Checked BEFORE the source rules so it holds no matter where the project mounts from next time.
+   */
+  if (facts.resolvedMessageId === last) {
     return { action: 'none' };
   }
 
@@ -105,4 +124,38 @@ export function detectUnappliedTurn(facts: UnappliedTurnFacts): UnappliedTurn {
    * checkpoint, or a deliberate §4.12 restore — with opposite correct actions. Ask.
    */
   return { action: 'offer', messageId: last };
+}
+
+/**
+ * Where a user's answer to the §4.5.4c dialog is remembered, per project.
+ *
+ * `localStorage`, not the project record: the question is about what is on THIS device, so the answer
+ * belongs to this device too. A user who keeps an older copy here has said nothing about the machine
+ * they open the project on next, and a server-side flag would silence the dialog there as well — on a
+ * device where the work really is missing.
+ */
+const RESOLVED_KEY_PREFIX = 'bt_unapplied_resolved:';
+
+/** The turn the user has already answered for, or undefined. Never throws — storage can be blocked. */
+export function resolvedUnappliedTurn(projectId: string): string | undefined {
+  try {
+    return localStorage.getItem(RESOLVED_KEY_PREFIX + projectId) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Remember that the user answered for `messageId` — by restoring it OR by keeping the older copy.
+ *
+ * BOTH answers are recorded, deliberately. "Leave it" is a decision, and re-asking after it is how the
+ * dialog became noise; "Restore" is also final, because the files now contain that turn. Storing the
+ * id rather than a boolean means the NEXT paid turn asks again on its own merits.
+ */
+export function resolveUnappliedTurn(projectId: string, messageId: string): void {
+  try {
+    localStorage.setItem(RESOLVED_KEY_PREFIX + projectId, messageId);
+  } catch {
+    /* Storage blocked or full: the dialog may ask again, which is the harmless direction. */
+  }
 }

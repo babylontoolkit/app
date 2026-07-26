@@ -3,7 +3,7 @@ import type { ProviderInfo } from '~/types/model';
 import type { Template } from '~/types/template';
 import { STARTER_TEMPLATES } from './constants';
 import { base64ToBytes } from '~/lib/binary/binary-files';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
 import { createScopedLogger } from './logger';
 
 const logger = createScopedLogger('StarterTemplate');
@@ -153,7 +153,7 @@ const getGitHubRepoContent = async (repoName: string): Promise<TemplateFile[]> =
  * failure this whole path exists to prevent.
  */
 async function writeBinaryTemplateFiles(files: TemplateFile[]) {
-  const container = await webcontainer;
+  const container = await sandbox;
 
   for (const file of files) {
     try {
@@ -184,7 +184,7 @@ async function writeBinaryTemplateFiles(files: TemplateFile[]) {
  * Best-effort by design: a template that carries neither is not broken by this step.
  */
 async function ensureFrameworkPublicAssets(files: TemplateFile[]) {
-  const container = await webcontainer;
+  const container = await sandbox;
 
   for (const name of ['babylon.png', 'spinner.png']) {
     const target = `public/${name}`;

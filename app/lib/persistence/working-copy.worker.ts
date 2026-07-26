@@ -16,6 +16,9 @@ interface WorkerRequest {
   requestId: number;
   url: string;
   seq: number;
+
+  /** The assistant turn these files contain, mirrored from the local checkpoint (§4.5.4c). */
+  messageId?: string;
   entries: WorkingCopyEntry[];
 }
 
@@ -38,10 +41,10 @@ interface WorkerScope {
 const ctx = self as unknown as WorkerScope;
 
 ctx.onmessage = async (event: MessageEvent<WorkerRequest>) => {
-  const { requestId, url, seq, entries } = event.data;
+  const { requestId, url, seq, messageId, entries } = event.data;
 
   try {
-    const body = buildWorkingCopyBody(seq, entries);
+    const body = buildWorkingCopyBody(seq, entries, messageId);
     const response = await fetch(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

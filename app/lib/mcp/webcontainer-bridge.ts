@@ -16,7 +16,7 @@
  * model, never instructions, and the file/shell action allow-lists still apply to whatever the model
  * does with them.
  */
-import type { WebContainer, WebContainerProcess } from '@webcontainer/api';
+import type { SandboxProcess, SandboxProvider } from '~/lib/sandbox';
 import { parseMcpConfig, type McpServerSpec } from './project-config';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -57,7 +57,7 @@ class McpServerConnection {
 
   constructor(
     readonly spec: McpServerSpec,
-    private readonly _process: WebContainerProcess,
+    private readonly _process: SandboxProcess,
   ) {}
 
   async start(): Promise<McpTool[]> {
@@ -191,7 +191,7 @@ export class McpBridge {
    * parse). A server that fails to start is logged and skipped — one broken MCP server must not take
    * down the others or the generation.
    */
-  static async launch(container: WebContainer, mcpJson: string | null): Promise<McpBridge> {
+  static async launch(container: SandboxProvider, mcpJson: string | null): Promise<McpBridge> {
     const bridge = new McpBridge();
     const { servers } = parseMcpConfig(mcpJson);
 

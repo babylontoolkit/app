@@ -1,5 +1,5 @@
-import type { PathWatcherEvent, WebContainer } from '@webcontainer/api';
 import { map, type MapStore } from 'nanostores';
+import type { SandboxProvider, SandboxWatchEvent } from '~/lib/sandbox';
 import {
   fileEntryFromBuffer,
   serializeFileMap,
@@ -34,7 +34,7 @@ export interface File {
   content: string;
 
   /**
-   * When true, `content` is ALWAYS empty: binary bytes live in the WebContainer FS,
+   * When true, `content` is ALWAYS empty: binary bytes live in the sandbox FS,
    * not in this map (SPEC §1.3 principle 10 — binary content never enters the editor's
    * text map or LLM context). Read the bytes with `FilesStore.readBinaryFile()`.
    */
@@ -57,7 +57,7 @@ type Dirent = File | Folder;
 export type FileMap = Record<string, Dirent | undefined>;
 
 export class FilesStore {
-  #webcontainer: Promise<WebContainer>;
+  #sandbox: Promise<SandboxProvider>;
 
   /**
    * Tracks the number of files without folders.
@@ -77,7 +77,7 @@ export class FilesStore {
   #deletedPaths: Set<string> = import.meta.hot?.data.deletedPaths ?? new Set();
 
   /**
-   * Map of files that matches the state of WebContainer.
+   * Map of files that matches the state of the sandbox filesystem.
    */
   files: MapStore<FileMap> = import.meta.hot?.data.files ?? map({});
 
@@ -85,8 +85,8 @@ export class FilesStore {
     return this.#size;
   }
 
-  constructor(webcontainerPromise: Promise<WebContainer>) {
-    this.#webcontainer = webcontainerPromise;
+  constructor(sandboxPromise: Promise<SandboxProvider>) {
+    this.#sandbox = sandboxPromise;
 
     // Load deleted paths from localStorage if available
     try {
@@ -560,10 +560,10 @@ export class FilesStore {
   }
 
   async saveFile(filePath: string, content: string) {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const relativePath = path.relative(sandbox.workdir, filePath);
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, write '${relativePath}'`);
@@ -575,7 +575,7 @@ export class FilesStore {
         unreachable('Expected content to be defined');
       }
 
-      await webcontainer.fs.writeFile(relativePath, content);
+      await sandbox.fs.writeFile(relativePath, content);
 
       if (!this.#modifiedFiles.has(filePath)) {
         this.#modifiedFiles.set(filePath, oldContent);
@@ -602,7 +602,7 @@ export class FilesStore {
   }
 
   async #init() {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     // Clean up any files that were previously deleted
     this.#cleanupDeletedFiles();
@@ -620,7 +620,7 @@ export class FilesStore {
      * context boundary (`~/lib/context/opaque-files`): the model gets a `<boltFile>` marker, and the
      * client strips the body before posting the map to the agent route.
      */
-    webcontainer.internal.watchPaths(
+    sandbox.watchPaths(
       {
         include: [`${WORK_DIR}/**`],
         exclude: ['**/node_modules', '.git'],
@@ -718,7 +718,7 @@ export class FilesStore {
   }
 
   /**
-   * Force a full re-scan of the WebContainer filesystem and rebuild the file map from disk truth.
+   * Force a full re-scan of the sandbox filesystem and rebuild the file map from disk truth.
    *
    * The incremental watcher (`watchPaths`, `#init`) is the normal path and is reliable, but it is
    * asynchronous and event-driven: a coalesced/missed event or an out-of-band write can leave the map
@@ -731,13 +731,13 @@ export class FilesStore {
    * user removed). Binaries keep `content: ''` — their bytes stay on disk (`readBinaryFile`).
    */
   async refreshFiles(): Promise<void> {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     const nextFiles: FileMap = {};
     let size = 0;
 
     const walk = async (relDir: string): Promise<void> => {
-      const dirents = await webcontainer.fs.readdir(relDir || '.', { withFileTypes: true });
+      const dirents = await sandbox.fs.readdir(relDir || '.', { withFileTypes: true });
 
       for (const dirent of dirents) {
         // Match the watcher's exclusions — these never belong in the map.
@@ -767,7 +767,7 @@ export class FilesStore {
         const isLocked = existing?.type === 'file' ? existing.isLocked : undefined;
 
         try {
-          const buffer = await webcontainer.fs.readFile(relPath);
+          const buffer = await sandbox.fs.readFile(relPath);
           nextFiles[absPath] = { ...fileEntryFromBuffer(buffer), isLocked };
         } catch (error) {
           /*
@@ -798,7 +798,7 @@ export class FilesStore {
     logger.info(`Workspace refreshed: ${size} files re-scanned from disk`);
   }
 
-  #processEventBuffer(events: Array<[events: PathWatcherEvent[]]>) {
+  #processEventBuffer(events: Array<[events: SandboxWatchEvent[]]>) {
     const watchEvents = events.flat(2);
 
     for (const { type, path, buffer } of watchEvents) {
@@ -830,7 +830,7 @@ export class FilesStore {
 
           /**
            * Binary files keep `content: ''` here — their bytes stay on disk in the
-           * WebContainer and are read back on demand (`readBinaryFile`). We record
+           * sandbox and are read back on demand (`readBinaryFile`). We record
            * `isBinary` + `size` so the editor can refuse to render them and egress
            * paths know to fetch real bytes instead of trusting `content`.
            */
@@ -858,15 +858,15 @@ export class FilesStore {
   }
 
   /**
-   * Read a binary file's real bytes from the WebContainer — the source of truth for
+   * Read a binary file's real bytes from the sandbox — the source of truth for
    * binary content. Every egress path (snapshot, ZIP, GitHub push, deploy, share build)
    * goes through here rather than reading `File.content`, which is empty for binaries.
    */
   async readBinaryFile(filePath: string): Promise<Uint8Array> {
-    const webcontainer = await this.#webcontainer;
-    const relativePath = path.relative(webcontainer.workdir, filePath);
+    const sandbox = await this.#sandbox;
+    const relativePath = path.relative(sandbox.workdir, filePath);
 
-    return webcontainer.fs.readFile(relativePath);
+    return sandbox.fs.readFile(relativePath);
   }
 
   /**
@@ -875,18 +875,18 @@ export class FilesStore {
    * carried verbatim. A snapshot→restore round-trip is byte-exact.
    */
   async serializeFiles(): Promise<SerializedFileMap> {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     return serializeFileMap(
       this.files.get(),
-      webcontainer.fs,
-      (filePath) => path.relative(webcontainer.workdir, filePath),
+      sandbox.fs,
+      (filePath) => path.relative(sandbox.workdir, filePath),
       (filePath, error) => logger.error(`Failed to read binary file for serialization: ${filePath}`, error),
     );
   }
 
   /**
-   * Materialize a serialized project back into the WebContainer, byte-faithfully.
+   * Materialize a serialized project back into the sandbox, byte-faithfully.
    * Used by snapshot restore and checkpoint restore (SPEC §4.12).
    *
    * 🔴 **Without `protect`, this is an OVERLAY, not a restore** — it writes what it is given and
@@ -902,12 +902,12 @@ export class FilesStore {
    * `protectNothing`).
    */
   async restoreFiles(files: SerializedFileMap, options?: { protect: (path: string) => boolean }): Promise<void> {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     const toContainerPath = (filePath: string) =>
-      filePath.startsWith(webcontainer.workdir) ? path.relative(webcontainer.workdir, filePath) : filePath;
+      filePath.startsWith(sandbox.workdir) ? path.relative(sandbox.workdir, filePath) : filePath;
 
-    await writeSerializedFileMap(files, webcontainer.fs, toContainerPath);
+    await writeSerializedFileMap(files, sandbox.fs, toContainerPath);
 
     if (!options) {
       return;
@@ -941,10 +941,10 @@ export class FilesStore {
   }
 
   async createFile(filePath: string, content: string | Uint8Array = '') {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const relativePath = path.relative(sandbox.workdir, filePath);
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, create '${relativePath}'`);
@@ -953,13 +953,13 @@ export class FilesStore {
       const dirPath = path.dirname(relativePath);
 
       if (dirPath !== '.') {
-        await webcontainer.fs.mkdir(dirPath, { recursive: true });
+        await sandbox.fs.mkdir(dirPath, { recursive: true });
       }
 
       const isBinary = content instanceof Uint8Array;
 
       if (isBinary) {
-        await webcontainer.fs.writeFile(relativePath, content);
+        await sandbox.fs.writeFile(relativePath, content);
 
         /**
          * Bytes now live on disk; the map records metadata only, matching what the
@@ -976,7 +976,7 @@ export class FilesStore {
         });
       } else {
         const contentToWrite = (content as string).length === 0 ? ' ' : content;
-        await webcontainer.fs.writeFile(relativePath, contentToWrite);
+        await sandbox.fs.writeFile(relativePath, contentToWrite);
 
         this.files.setKey(filePath, {
           type: 'file',
@@ -998,16 +998,16 @@ export class FilesStore {
   }
 
   async createFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
+      const relativePath = path.relative(sandbox.workdir, folderPath);
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid folder path, create '${relativePath}'`);
       }
 
-      await webcontainer.fs.mkdir(relativePath, { recursive: true });
+      await sandbox.fs.mkdir(relativePath, { recursive: true });
 
       this.files.setKey(folderPath, { type: 'folder' });
 
@@ -1021,16 +1021,16 @@ export class FilesStore {
   }
 
   async deleteFile(filePath: string) {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     try {
-      const relativePath = path.relative(webcontainer.workdir, filePath);
+      const relativePath = path.relative(sandbox.workdir, filePath);
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid file path, delete '${relativePath}'`);
       }
 
-      await webcontainer.fs.rm(relativePath);
+      await sandbox.fs.rm(relativePath);
 
       this.#deletedPaths.add(filePath);
 
@@ -1053,16 +1053,16 @@ export class FilesStore {
   }
 
   async deleteFolder(folderPath: string) {
-    const webcontainer = await this.#webcontainer;
+    const sandbox = await this.#sandbox;
 
     try {
-      const relativePath = path.relative(webcontainer.workdir, folderPath);
+      const relativePath = path.relative(sandbox.workdir, folderPath);
 
       if (!relativePath) {
         throw new Error(`EINVAL: invalid folder path, delete '${relativePath}'`);
       }
 
-      await webcontainer.fs.rm(relativePath, { recursive: true });
+      await sandbox.fs.rm(relativePath, { recursive: true });
 
       this.#deletedPaths.add(folderPath);
 

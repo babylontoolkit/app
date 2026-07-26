@@ -20,12 +20,22 @@
  * Not "would you like to re-run a generation" — that would sound like it costs money again, and they
  * would say no. They already paid; this is their work, waiting. The wording says exactly that, and the
  * dismissal is safe: the conversation keeps the artifact, so declining loses nothing permanently.
+ *
+ * ## Both answers are FINAL, and that was the bug (fixed 2026-07-26)
+ *
+ * Neither button used to record anything — `close()` just cleared the atom. So the next mount re-derived
+ * the same facts and asked again, and again, about a turn the user had explicitly decided about. A
+ * question that ignores its own answer is worse than no question: it teaches people to dismiss it
+ * reflexively, which costs exactly the one time it is real. `resolveUnappliedTurn` is therefore called
+ * on BOTH paths — restoring settles it because the files now contain the turn, and keeping the older
+ * copy settles it because that was a decision.
  */
 import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { Dialog, DialogRoot, DialogTitle, DialogDescription, DialogButton } from '~/components/ui/Dialog';
 import { unappliedTurn } from '~/lib/persistence/useChatHistory';
+import { resolveUnappliedTurn } from '~/lib/persistence/unapplied-turn';
 import { applyTranscriptArtifact } from '~/lib/persistence/apply-artifact';
 import { workbenchStore } from '~/lib/stores/workbench';
 
@@ -37,7 +47,20 @@ export function UnappliedTurnDialog() {
     return null;
   }
 
-  const close = () => unappliedTurn.set(undefined);
+  /** Put the dialog away WITHOUT settling the question — it will be asked again on the next mount. */
+  const clear = () => unappliedTurn.set(undefined);
+
+  /**
+   * Keeping the older copy is an ANSWER, so it is recorded before the atom is cleared.
+   *
+   * Also covers the outside-click / Escape dismissal: a user who waves the dialog away has, in
+   * practice, chosen to leave the files alone, and re-asking on the next mount is the behaviour that
+   * made this dialog noise in the first place.
+   */
+  const dismiss = () => {
+    resolveUnappliedTurn(pending.projectId, pending.message.id);
+    clear();
+  };
 
   const apply = async () => {
     setBusy(true);
@@ -53,6 +76,12 @@ export function UnappliedTurnDialog() {
       if (applied === 0) {
         toast.error('That change contained no files to restore.');
       } else {
+        /*
+         * Settled: the project now contains this turn. Recorded here rather than relying on the next
+         * checkpoint, because a user who restores and then closes the tab would otherwise be asked
+         * again about work that is already on disk.
+         */
+        resolveUnappliedTurn(pending.projectId, pending.message.id);
         toast.success(`Restored ${applied} file${applied === 1 ? '' : 's'} from your last change.`);
         workbenchStore.showWorkbench.set(true);
       }
@@ -61,12 +90,18 @@ export function UnappliedTurnDialog() {
       toast.error(`Could not restore your last change: ${(error as Error)?.message}`);
     } finally {
       setBusy(false);
-      close();
+
+      /*
+       * `clear`, NOT `dismiss`. A restore that threw settled nothing, and recording it as answered
+       * would bury the work permanently — the failure direction that actually loses something. Only
+       * the success path above records; a failure asks again next time.
+       */
+      clear();
     }
   };
 
   return (
-    <DialogRoot open onOpenChange={(open) => !open && close()}>
+    <DialogRoot open onOpenChange={(open) => !open && dismiss()}>
       <Dialog>
         <DialogTitle>Your last change isn’t on this device</DialogTitle>
         <DialogDescription>
@@ -83,7 +118,7 @@ export function UnappliedTurnDialog() {
           </p>
         </DialogDescription>
         <div className="px-5 pb-4 flex gap-2 justify-end">
-          <DialogButton type="secondary" onClick={close}>
+          <DialogButton type="secondary" onClick={dismiss}>
             Leave it
           </DialogButton>
           <DialogButton type="primary" onClick={apply} disabled={busy}>

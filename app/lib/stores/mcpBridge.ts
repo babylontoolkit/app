@@ -1,7 +1,7 @@
 /**
  * MCP bridge lifecycle (SPEC §4.14).
  *
- * Owns the per-project `McpBridge`: launches the declared stdio servers inside the WebContainer when a
+ * Owns the per-project `McpBridge`: launches the declared stdio servers inside the sandbox when a
  * project with a `.mcp.json` becomes active, exposes the discovered tools (for display and for telling
  * the agent what is available), and tears the servers down when the project changes.
  *
@@ -10,7 +10,7 @@
  * — the result is relayed back as UNTRUSTED input (§4.14); the platform never executes these itself.
  */
 import { atom } from 'nanostores';
-import { webcontainer } from '~/lib/webcontainer';
+import { sandbox } from '~/lib/sandbox';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { McpBridge, UNITY_SERVER_NAME, type McpTool } from '~/lib/mcp/webcontainer-bridge';
 import { createScopedLogger } from '~/utils/logger';
@@ -61,7 +61,7 @@ export async function syncMcpBridge(): Promise<void> {
   }
 
   try {
-    const container = await webcontainer;
+    const container = await sandbox;
     _bridge = await McpBridge.launch(container, mcpJson);
     mcpToolsAtom.set(_bridge.tools);
 
@@ -74,7 +74,7 @@ export async function syncMcpBridge(): Promise<void> {
 }
 
 /**
- * Execute an MCP tool call in the WebContainer. The result is untrusted (§4.14).
+ * Execute an MCP tool call in the sandbox. The result is untrusted (§4.14).
  *
  * `server` comes from the relay event and pins the call to the server the model's tool was built from —
  * without it, two servers exposing the same tool name resolve to whichever launched first.

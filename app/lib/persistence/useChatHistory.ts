@@ -47,7 +47,7 @@ import {
   type LocalSyncState,
 } from './local-snapshots';
 import { selectMountSource, type MountSource } from './mount-source';
-import { detectUnappliedTurn } from './unapplied-turn';
+import { detectUnappliedTurn, resolvedUnappliedTurn } from './unapplied-turn';
 import { applyTranscriptArtifact } from './apply-artifact';
 import { protectForRepoRestore, protectNothing } from './restore-plan';
 import { hasRestorableHistory, markAsTranscript } from './transcript';
@@ -167,6 +167,7 @@ async function checkUnappliedTurn(pid: string): Promise<void> {
       lastAssistantMessageId: lastAssistant?.id,
       hasFileActions: lastAssistant ? turnWritesFiles(lastAssistant) : false,
       mountedMessageId: lastMount?.messageId,
+      resolvedMessageId: resolvedUnappliedTurn(pid),
     });
 
     if (decision.action === 'none') {
@@ -341,8 +342,19 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
     await workbenchStore.restoreFiles(working!.files, { protect: protectForRepoRestore });
 
     if (db) {
-      /* Make it this browser's checkpoint too, so undo works and the next mount reads locally. */
-      await createLocalSnapshot(db, { projectId: pid, files: working!.files, label: 'Recovered' });
+      /*
+       * Make it this browser's checkpoint too, so undo works and the next mount reads locally.
+       *
+       * 🔴 It MUST carry the working copy's `messageId`. Without it this snapshot said "I do not know
+       * which turn I contain", every later mount read that as "not the last one", and the §4.5.4c
+       * dialog re-asked forever — the recovery itself was what made the question permanent.
+       */
+      await createLocalSnapshot(db, {
+        projectId: pid,
+        files: working!.files,
+        messageId: working!.messageId,
+        label: 'Recovered',
+      });
     }
 
     /*
@@ -355,7 +367,7 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
       await prepareMountedProject(working!.files);
     }
 
-    lastMount = { source: 'working', messageId: undefined };
+    lastMount = { source: 'working', messageId: working!.messageId };
     toast.success('Recovered your project from the last checkpoint.');
 
     return;
@@ -1408,7 +1420,7 @@ ${value.content}
           throw new Error('project exceeds the client working-copy budget');
         }
 
-        await saveWorkingCopy(pid, snapshot.seq, files);
+        await saveWorkingCopy(pid, snapshot.seq, files, messageId);
         workingCopySafe.set(true);
       } catch (error) {
         /*

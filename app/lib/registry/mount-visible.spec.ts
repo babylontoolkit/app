@@ -24,7 +24,7 @@ import { atom } from 'nanostores';
 const files = atom<Record<string, unknown>>({});
 
 vi.mock('~/lib/stores/workbench', () => ({ workbenchStore: { files } }));
-vi.mock('~/lib/webcontainer', () => ({ webcontainer: Promise.resolve({}) }));
+vi.mock('~/lib/sandbox', () => ({ sandbox: Promise.resolve({}) }));
 
 const { waitForMountVisible } = await import('./mount');
 
