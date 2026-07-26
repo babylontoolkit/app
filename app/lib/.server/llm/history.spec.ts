@@ -12,7 +12,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { Message } from 'ai';
-import { compactHistory, historySavings, HISTORY_WINDOW_TURNS, MAX_HISTORY_CHARS } from './history';
+import {
+  compactHistory,
+  historySavings,
+  historySize,
+  HISTORY_WINDOW_TURNS,
+  IMAGE_TOKENS_UPPER_BOUND,
+  MAX_HISTORY_CHARS,
+} from './history';
 
 const bigFile = 'const x = 1;\n'.repeat(400); // ~5KB, the size of a real generated source file
 
@@ -70,8 +77,8 @@ describe('what compaction REMOVES', () => {
 });
 
 describe('what compaction MUST KEEP', () => {
-  /* What the user said exists NOWHERE else. Losing it is losing the requirements. */
-  it('never touches user messages', () => {
+  /* What the user WROTE exists NOWHERE else. Losing it is losing the requirements. */
+  it("never touches the user's own words", () => {
     const user = userTurn('make a racing game with boost pads and a lap timer');
     const compacted = compactHistory([user, assistantTurn('a.ts', bigFile)]);
 
@@ -108,6 +115,182 @@ describe('what compaction MUST KEEP', () => {
   it('leaves a body that is already smaller than the marker alone', () => {
     const tiny = { id: 'a', role: 'assistant', content: '<boltAction type="file" filePath="a">x</boltAction>' };
     expect(compactHistory([tiny as Message])[0].content).toContain('>x<');
+  });
+});
+
+/**
+ * The modified-files artifact the CLIENT prepends to a user message when the user has edited files in
+ * the editor (`filesToArtifacts(getModifiedFiles())`). Those bodies are machine-generated, redundant
+ * with `# Current Project Files`, and — because they arrive inside a USER message — used to be the one
+ * part of the history that compaction skipped and that grew without bound.
+ */
+describe('the modified-files artifact in a USER message', () => {
+  const editedBody = 'export const speed = 42;\n'.repeat(400);
+
+  const userWithEdits = (text: string) =>
+    ({
+      id: 'u1',
+      role: 'user',
+      content:
+        `<boltArtifact id="edits" title="User edits">` +
+        `<boltAction type="file" filePath="src/scripts/KartMode.ts">${editedBody}</boltAction>` +
+        `</boltArtifact>${text}`,
+    }) as Message;
+
+  it('strips the file BODY the user never typed', () => {
+    const [out] = compactHistory([userWithEdits('now add a boost pad')]);
+
+    expect(out.content).not.toContain('export const speed = 42;');
+    expect(out.content).toContain('Current Project Files');
+  });
+
+  it('keeps every word the user DID type, and the path they edited', () => {
+    const [out] = compactHistory([userWithEdits('now add a boost pad')]);
+
+    expect(out.content).toContain('now add a boost pad');
+    expect(out.content).toContain('src/scripts/KartMode.ts');
+    expect(out.content).toContain('type="file"');
+  });
+
+  it('strips the body from `parts` TOO — the SDK prefers parts over content', () => {
+    const message = userWithEdits('now add a boost pad');
+    const withParts = { ...message, parts: [{ type: 'text', text: message.content }] } as Message;
+
+    const [out] = compactHistory([withParts]);
+    const text = (out.parts?.[0] as { text: string }).text;
+
+    expect(text).not.toContain('export const speed = 42;');
+    expect(text).toContain('now add a boost pad');
+  });
+
+  it('leaves image parts untouched', () => {
+    const image = { type: 'file', mimeType: 'image/png', data: 'AAA' };
+    const message = userWithEdits('look at this');
+    const withParts = { ...message, parts: [{ type: 'text', text: message.content }, image] } as unknown as Message;
+
+    const [out] = compactHistory([withParts]);
+
+    expect(out.parts?.[1]).toBe(image);
+  });
+
+  it('saves the overwhelming majority of a file-sync turn', () => {
+    const history = [userWithEdits('now add a boost pad')];
+    const before = historySavings(history, []);
+
+    expect(historySavings(history, compactHistory(history)) / before).toBeGreaterThan(0.9);
+  });
+});
+
+/**
+ * `historySize` feeds the §4.5.6 `/context` meter, and it measures `content` ONLY — while every user
+ * message carries a duplicate of that text in `parts` (the client sets both from one string) and the AI
+ * SDK's `convertToCoreMessages` prefers `parts`. So the number on the user's screen is only honest
+ * while the two agree.
+ *
+ * They agree today, and compaction keeps them agreeing. Nothing else enforces it — hence this test: a
+ * future change that compacts one and not the other would leave the meter quietly reporting a size that
+ * is not what went on the wire, which is the class of silent-measurement failure this codebase keeps
+ * rediscovering (`wastedOutput`, `tool_rounds`, the doubled `finishReason`).
+ */
+describe('`parts` and `content` stay mirrored, so /context stays honest', () => {
+  const mirrored = (text: string) =>
+    ({ id: 'u1', role: 'user', content: text, parts: [{ type: 'text', text }] }) as Message;
+
+  it('keeps the text part byte-identical to content after compaction', () => {
+    const withBody =
+      `<boltArtifact id="edits"><boltAction type="file" filePath="a.ts">${bigFile}</boltAction></boltArtifact>` +
+      'now add a boost pad';
+
+    const [out] = compactHistory([mirrored(withBody)]);
+
+    expect((out.parts?.[0] as { text: string }).text).toBe(out.content);
+  });
+
+  it('and on a message with nothing to compact', () => {
+    const [out] = compactHistory([mirrored('make it faster')]);
+
+    expect((out.parts?.[0] as { text: string }).text).toBe(out.content);
+  });
+
+  it('so historySize describes what actually goes on the wire', () => {
+    const [out] = compactHistory([mirrored('make it faster')]);
+    const measured = historySize([out]);
+
+    expect(measured.messages).toBe(1);
+    expect(measured.chars).toBe((out.parts?.[0] as { text: string }).text.length);
+  });
+});
+
+/**
+ * The blind spot the chars-only meter had: an attachment carries ZERO characters, so an image sent
+ * five turns ago measured as free while it was re-sent, uncached, at full rate, on every turn after.
+ * The `/context` panel's `promptTokens` did show the spend — which is exactly why this was hard to
+ * see, and why it had to be fixed in the number the traffic light reads.
+ */
+describe('historySize prices the attachments riding in the history', () => {
+  const png = (bytes: number) => `data:image/png;base64,${'A'.repeat(Math.ceil(bytes / 3) * 4)}`;
+
+  const withAttachments = (attachments: Array<{ contentType: string; url: string }>) =>
+    ({ id: 'u1', role: 'user', content: 'look at this', experimental_attachments: attachments }) as unknown as Message;
+
+  it('counts an image at the per-image upper bound, not at its byte size', () => {
+    const small = historySize([withAttachments([{ contentType: 'image/png', url: png(2_000) }])]);
+    const large = historySize([withAttachments([{ contentType: 'image/png', url: png(4_000_000) }])]);
+
+    expect(small.attachments).toBe(1);
+    expect(small.attachmentTokens).toBe(IMAGE_TOKENS_UPPER_BOUND);
+
+    // base64 length is a terrible proxy for vision tokens — a 2,000× bigger file is not 2,000× the cost.
+    expect(large.attachmentTokens).toBe(IMAGE_TOKENS_UPPER_BOUND);
+  });
+
+  it('prices a TEXT attachment by its decoded bytes — it really is text on the wire', () => {
+    const text = `data:text/plain;base64,${btoa('x'.repeat(400))}`;
+    const size = historySize([withAttachments([{ contentType: 'text/plain', url: text }])]);
+
+    expect(size.attachments).toBe(1);
+    expect(size.attachmentTokens).toBe(100); // 400 bytes / 4 chars-per-token
+  });
+
+  it('sees `file` parts too, so the meter survives the SDK moving off experimental_attachments', () => {
+    const message = {
+      id: 'u1',
+      role: 'user',
+      content: 'look',
+      parts: [
+        { type: 'text', text: 'look' },
+        { type: 'file', mimeType: 'image/png', data: png(1_000) },
+      ],
+    } as unknown as Message;
+
+    expect(historySize([message]).attachmentTokens).toBe(IMAGE_TOKENS_UPPER_BOUND);
+  });
+
+  it('a text-only conversation reports zero, never NaN', () => {
+    const size = historySize([{ id: 'u1', role: 'user', content: 'hello' } as Message]);
+
+    expect(size).toEqual({ messages: 1, chars: 5, attachments: 0, attachmentTokens: 0 });
+  });
+
+  it('accumulates across the whole re-sent history — that is the cost being paid every turn', () => {
+    const size = historySize([
+      withAttachments([{ contentType: 'image/png', url: png(1_000) }]),
+      { id: 'a1', role: 'assistant', content: 'ok' } as Message,
+      withAttachments([
+        { contentType: 'image/png', url: png(1_000) },
+        { contentType: 'image/jpeg', url: png(1_000) },
+      ]),
+    ]);
+
+    expect(size.attachments).toBe(3);
+    expect(size.attachmentTokens).toBe(3 * IMAGE_TOKENS_UPPER_BOUND);
+  });
+
+  it('an unparseable attachment url contributes zero rather than a guess', () => {
+    const size = historySize([withAttachments([{ contentType: 'text/plain', url: 'not-a-data-url' }])]);
+
+    expect(size.attachments).toBe(1);
+    expect(size.attachmentTokens).toBe(0);
   });
 });
 

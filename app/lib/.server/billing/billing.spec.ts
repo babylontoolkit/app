@@ -61,6 +61,20 @@ let ledger: FsLedger;
  * and CI (which has no `.env.local`) would stay green and call them wrong. Scrub first, stub per-test.
  */
 const KIE_ENV = [
+  /*
+   * 🔴 `LLM_MODEL` BELONGS HERE BECAUSE IT OUTRANKS `KIE_DEFAULT_MODEL`, and its absence was this trap
+   * firing a second time in the same file.
+   *
+   * The list was written when `kieEnvModel` read only `KIE_DEFAULT_MODEL`. The 2026-07-20 fix gave it the
+   * same `LLM_MODEL` > `KIE_DEFAULT_MODEL` precedence as `getPlatformModel` — and nothing re-checked the
+   * scrub list, so the higher-precedence half of the pair stayed unscrubbed. The moment an operator set
+   * `LLM_MODEL` in `.env.local` (which is now the DOCUMENTED way to choose the platform model), it won the
+   * precedence inside the test, `KIE_DEFAULT_MODEL` was never consulted, and "reaches the provider model
+   * list" failed — on that developer's machine only, with CI green, blaming code they had not touched.
+   *
+   * Scrub the whole precedence chain, not the variable that happens to be under test.
+   */
+  'LLM_MODEL',
   'KIE_DEFAULT_MODEL',
   'KIE_INPUT_DOLLARS',
   'KIE_OUTPUT_DOLLARS',
@@ -667,6 +681,62 @@ describe('ledger', () => {
 
     expect(rows.filter((r) => r.reason === 'grant')).toHaveLength(1);
     expect(await ledger.balance('u1')).toBe(1000);
+  });
+
+  /*
+   * The §4.10 refund audit reads refunds ACROSS users (`spec/fail-loud.md` — "am I refunding people?"
+   * is an operator question about the platform, not about one account). Display-scoped and read-only:
+   * balances still come only from the per-user chain.
+   */
+  describe('listByReason (the admin refund audit)', () => {
+    it('lists refunds across EVERY user, newest first', async () => {
+      await ledger.append({ userId: 'u1', delta: 100, reason: 'grant' });
+      await ledger.append({ userId: 'u2', delta: 100, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: -30, reason: 'generation', generationId: 'gen_a' });
+      await ledger.append({ userId: 'u1', delta: 30, reason: 'refund', generationId: 'gen_a' });
+      await ledger.append({ userId: 'u2', delta: 24, reason: 'refund', generationId: 'med_b' });
+
+      const refunds = await ledger.listByReason('refund');
+
+      expect(refunds).toHaveLength(2);
+      expect(new Set(refunds.map((r) => r.userId))).toEqual(new Set(['u1', 'u2']));
+      expect(refunds.every((r) => r.reason === 'refund')).toBe(true);
+    });
+
+    it('an empty ledger answers with an empty list, never a throw', async () => {
+      expect(await ledger.listByReason('refund')).toEqual([]);
+    });
+
+    it('respects the limit', async () => {
+      await ledger.append({ userId: 'u1', delta: 100, reason: 'grant' });
+
+      for (let i = 0; i < 5; i++) {
+        await ledger.append({ userId: 'u1', delta: 1, reason: 'refund', generationId: `gen_${i}` });
+      }
+
+      expect(await ledger.listByReason('refund', 3)).toHaveLength(3);
+    });
+
+    /* "See them all": paging must cover every row exactly once — a gap or an overlap both falsify the audit. */
+    it('pages the full history with offset — no gaps, no overlaps', async () => {
+      await ledger.append({ userId: 'u1', delta: 100, reason: 'grant' });
+
+      for (let i = 0; i < 5; i++) {
+        await ledger.append({ userId: 'u1', delta: 1, reason: 'refund', generationId: `gen_${i}` });
+      }
+
+      const page1 = await ledger.listByReason('refund', 2, 0);
+      const page2 = await ledger.listByReason('refund', 2, 2);
+      const page3 = await ledger.listByReason('refund', 2, 4);
+      const beyond = await ledger.listByReason('refund', 2, 6);
+
+      const ids = [...page1, ...page2, ...page3].map((r) => r.id);
+
+      expect(page1).toHaveLength(2);
+      expect(page3).toHaveLength(1);
+      expect(beyond).toEqual([]);
+      expect(new Set(ids).size).toBe(5);
+    });
   });
 
   it('reports a duplicate grant as a no-op, not an error, to the caller', async () => {

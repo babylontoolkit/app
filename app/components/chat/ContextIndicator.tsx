@@ -69,6 +69,14 @@ export function ContextIndicator() {
                 {stats.maxTurns > 0 ? `/${stats.maxTurns}` : ''} msgs · ~{formatTokens(historyTokens)} tok
               </span>
             </div>
+            {stats.attachments > 0 && (
+              <div className="flex justify-between">
+                <span className="text-bolt-elements-textSecondary">Attachments re-sent each turn</span>
+                <span>
+                  {stats.attachments} · ~{formatTokens(stats.attachmentTokens)} tok
+                </span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-bolt-elements-textSecondary">Cached prefix read (0.1x)</span>
               <span>{formatTokens(stats.cacheReadTokens)} tok</span>

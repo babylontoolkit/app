@@ -112,6 +112,18 @@ function parseDataUrl(url: string): ParsedDataUrl | null {
 }
 
 /**
+ * The byte cost of a `data:` URL, measured by ARITHMETIC — never by decoding it.
+ *
+ * Exported so `llm/history.ts` can price prior-turn attachments for the `/context` meter without
+ * writing the base64 length formula a second time. Two writers of one size rule is how a limit and
+ * the report about it drift apart (`storage/limits.ts` records that lesson in the publish path).
+ * Returns 0 for anything unparseable — a size we cannot measure is not a size we may guess at.
+ */
+export function dataUrlByteLength(url: string | undefined): number {
+  return url ? (parseDataUrl(url)?.bytes ?? 0) : 0;
+}
+
+/**
  * Identify an image from its MAGIC NUMBER, not from what the caller called it.
  *
  * Returns null for anything we do not recognise — which then fails the match against the claimed

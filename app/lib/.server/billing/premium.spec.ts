@@ -10,7 +10,7 @@
  *    `PREMIUM_*_DOLLARS` vars stop the show rather than being silently ignored.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { decidePremium, premiumDeclinedNotice } from './premium';
+import { decidePremium, premiumDeclinedNotice, premiumSessionHint } from './premium';
 import {
   DEFAULT_PREMIUM_MINIMUM_CREDITS,
   DEFAULT_PREMIUM_MODEL,
@@ -223,5 +223,67 @@ describe('the premium model is priceable on every provider', () => {
 
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
     expect(getPremiumModel({})).toBe('claude-fable-5');
+  });
+});
+
+/**
+ * `premiumSessionHint` — the `/api/me` rendering hint, and the guard around a MISCONFIGURED tier.
+ *
+ * Why this is a pure function with its own tests rather than an inline expression in the route: both of
+ * its failure directions are silent, and the misconfigured case is an app-wide outage, not a cosmetic bug.
+ */
+describe('premiumSessionHint (§4.6.1 — degrade to OFF, never to ON)', () => {
+  const CONFIGURED = { model: 'claude-fable-5', minimumCredits: 1200 };
+  const FALLBACKS = { fallbackModel: DEFAULT_PREMIUM_MODEL, fallbackMinimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS };
+
+  it('offers premium to a user who holds the minimum', () => {
+    expect(premiumSessionHint({ tier: CONFIGURED, balance: 1200, ...FALLBACKS })).toEqual({
+      model: 'claude-fable-5',
+      minimumCredits: 1200,
+      available: true,
+    });
+  });
+
+  it('locks the toggle for a user below the minimum, and still names the model + threshold', () => {
+    expect(premiumSessionHint({ tier: CONFIGURED, balance: 1199, ...FALLBACKS })).toEqual({
+      model: 'claude-fable-5',
+      minimumCredits: 1200,
+      available: false,
+    });
+  });
+
+  /*
+   * 🔴 THE ASYMMETRY. `getPremiumTier` throws while `PREMIUM_MODEL` names a model the active price list
+   * cannot price — the normal transient state when an operator points SSM at a new premium model before
+   * promoting its row. Premium genuinely cannot be served then (`getPremiumModel` refuses identically at
+   * generation time), so reporting it available would render an enabled toggle that hard-fails on use.
+   *
+   * The balance is deliberately ENORMOUS here: availability must not be recoverable by being rich.
+   */
+  it('reports UNAVAILABLE when the tier is misconfigured, no matter how large the balance', () => {
+    for (const balance of [0, 1200, 10_000_000]) {
+      expect(premiumSessionHint({ tier: null, balance, ...FALLBACKS }).available).toBe(false);
+    }
+  });
+
+  it('falls back to the baked model + threshold so the UI still has something honest to render', () => {
+    expect(premiumSessionHint({ tier: null, balance: 5000, ...FALLBACKS })).toEqual({
+      model: DEFAULT_PREMIUM_MODEL,
+      minimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS,
+      available: false,
+    });
+  });
+
+  /*
+   * ⚠️ Its caller is `/api/me`, the SESSION endpoint on every page load. An unguarded throw there took the
+   * whole app down for every user because a toggle's rendering hint was misconfigured. This must never
+   * throw for ANY input, including the degenerate ones.
+   */
+  it('never throws — it is on the session path, where an exception is an app-wide outage', () => {
+    for (const tier of [null, CONFIGURED, { model: '', minimumCredits: 0 }]) {
+      for (const balance of [-1, 0, Number.MAX_SAFE_INTEGER]) {
+        expect(() => premiumSessionHint({ tier, balance, ...FALLBACKS })).not.toThrow();
+      }
+    }
   });
 });

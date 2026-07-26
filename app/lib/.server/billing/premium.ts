@@ -85,3 +85,48 @@ export function decidePremium(input: PremiumDecisionInput): PremiumDecision {
 export function premiumDeclinedNotice(minimumCredits: number): string {
   return `The premium model needs at least ${minimumCredits.toLocaleString()} credits — this build used the standard model. Add credits to unlock it.`;
 }
+
+/** What `/api/me` tells the client about the premium tier. A rendering hint — never authorization. */
+export interface PremiumSessionHint {
+  model: string;
+  minimumCredits: number;
+  available: boolean;
+}
+
+/**
+ * Derive the premium half of the session payload, INCLUDING the misconfigured case.
+ *
+ * Pure and tested because both of its failure directions are silent, and they are not symmetrical:
+ *
+ * 🔴 **A misconfigured tier must degrade to `available: false`, never to the baked default's
+ * availability.** `getPremiumTier` throws when `PREMIUM_MODEL` names a model the active Marketplace price
+ * list cannot price — the normal transient state while an operator moves to a new premium model (set the
+ * SSM var, promote the price a minute later, or do the two in the wrong order). In that state premium
+ * genuinely cannot be served: `getPremiumModel` applies the same validation and refuses at generation
+ * time. So reporting it available renders an enabled toggle that hard-fails the moment it is used.
+ * Degrading a capability to "off" is honest; degrading it to "on" invents one.
+ *
+ * ⚠️ And it must not THROW, because its caller is `/api/me` — the session endpoint on every page load.
+ * Before this was guarded, an unpriced `PREMIUM_MODEL` took the whole app down for every user because a
+ * toggle's rendering hint was misconfigured. `getPlatformModel` in the same object literal was already
+ * guarded for exactly that reason; this half was not.
+ *
+ * This can never GRANT premium: `decidePremium` re-derives eligibility server-side on every generation.
+ * It can only fail to offer it.
+ */
+export function premiumSessionHint(input: {
+  tier: { model: string; minimumCredits: number } | null;
+  balance: number;
+  fallbackModel: string;
+  fallbackMinimumCredits: number;
+}): PremiumSessionHint {
+  if (!input.tier) {
+    return { model: input.fallbackModel, minimumCredits: input.fallbackMinimumCredits, available: false };
+  }
+
+  return {
+    model: input.tier.model,
+    minimumCredits: input.tier.minimumCredits,
+    available: input.balance >= input.tier.minimumCredits,
+  };
+}

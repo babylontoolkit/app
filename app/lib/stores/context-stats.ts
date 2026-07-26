@@ -25,6 +25,16 @@ export interface ContextStats {
   /** The server's history window (`HISTORY_WINDOW_TURNS`); at this count the oldest turns drop. */
   maxTurns: number;
 
+  /** Attachments still riding in the re-sent history. Zero on the overwhelming majority of chats. */
+  attachments: number;
+
+  /**
+   * Estimated tokens those attachments cost EVERY TURN (`llm/history.ts` — an upper bound per image).
+   * They carry no characters, so before this existed the dot reported them as free while the user
+   * paid for them on every subsequent turn.
+   */
+  attachmentTokens: number;
+
   /** Uncached input tokens last turn (history + the volatile tail). Billed at full rate. */
   promptTokens: number;
 
@@ -58,16 +68,32 @@ export const RED_TURNS_FRACTION = 0.9;
 export const AMBER_HISTORY_CHARS = 24_000;
 export const RED_HISTORY_CHARS = 48_000;
 
+/** The §4.2.8 prose rule of thumb, used to weigh attachment tokens against the char thresholds. */
+export const CHARS_PER_TOKEN = 4;
+
+/**
+ * The history's real weight: text characters PLUS the attachments riding along with them.
+ *
+ * An image contributes no characters and is re-sent, uncached, on every turn after the one it was
+ * attached to — so a chars-only measure called it free and the dot stayed green while the bill grew.
+ * Attachment tokens are converted to char-equivalents rather than the thresholds being restated in
+ * tokens, so `AMBER_/RED_HISTORY_CHARS` keep their one meaning and their one calibration.
+ */
+export function historyWeight(stats: Pick<ContextStats, 'historyChars' | 'attachmentTokens'>): number {
+  return stats.historyChars + (stats.attachmentTokens ?? 0) * CHARS_PER_TOKEN;
+}
+
 export function contextHealth(
-  stats: Pick<ContextStats, 'historyMessages' | 'historyChars' | 'maxTurns'>,
+  stats: Pick<ContextStats, 'historyMessages' | 'historyChars' | 'maxTurns'> & { attachmentTokens?: number },
 ): ContextHealth {
   const turnsFraction = stats.maxTurns > 0 ? stats.historyMessages / stats.maxTurns : 0;
+  const weight = historyWeight({ historyChars: stats.historyChars, attachmentTokens: stats.attachmentTokens ?? 0 });
 
-  if (turnsFraction >= RED_TURNS_FRACTION || stats.historyChars >= RED_HISTORY_CHARS) {
+  if (turnsFraction >= RED_TURNS_FRACTION || weight >= RED_HISTORY_CHARS) {
     return 'red';
   }
 
-  if (turnsFraction >= AMBER_TURNS_FRACTION || stats.historyChars >= AMBER_HISTORY_CHARS) {
+  if (turnsFraction >= AMBER_TURNS_FRACTION || weight >= AMBER_HISTORY_CHARS) {
     return 'amber';
   }
 
@@ -99,7 +125,9 @@ export function updateContextStats(annotations: unknown[] | undefined): void {
   const usage = find('usage');
   const meta = find('agentMeta');
   const credits = find('credits');
-  const history = meta?.history as { messages?: number; chars?: number; maxTurns?: number } | undefined;
+  const history = meta?.history as
+    | { messages?: number; chars?: number; maxTurns?: number; attachments?: number; attachmentTokens?: number }
+    | undefined;
 
   if (!usage && !history) {
     return;
@@ -111,6 +139,8 @@ export function updateContextStats(annotations: unknown[] | undefined): void {
     historyMessages: history?.messages ?? prev?.historyMessages ?? 0,
     historyChars: history?.chars ?? prev?.historyChars ?? 0,
     maxTurns: history?.maxTurns ?? prev?.maxTurns ?? 0,
+    attachments: history?.attachments ?? prev?.attachments ?? 0,
+    attachmentTokens: history?.attachmentTokens ?? prev?.attachmentTokens ?? 0,
     promptTokens: (usage?.promptTokens as number) ?? 0,
     cacheReadTokens: (usage?.cacheReadTokens as number) ?? 0,
     cacheCreationTokens: (usage?.cacheCreationTokens as number) ?? 0,

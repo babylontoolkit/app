@@ -398,6 +398,32 @@ silently drops the oldest turns, i.e. where `/clear` (client-intercepted, zero c
 same game") costs nothing that was going to be kept. The client must NEVER estimate history from its
 own messages: it holds the un-compacted copy, which is exactly the number that does not matter.
 
+**🔴 The meter must measure everything the wire carries, and TWICE it did not (both fixed 2026-07-25).**
+Each failure was in the same direction — under-reporting, which reads as a *cheaper* turn — and each
+left the panel's `promptTokens` (the provider's real number) correct while the traffic light above it
+was wrong. **People read the light.**
+
+1. **`parts` vs `content`.** `historySize` measures `content`, but `convertToCoreMessages` PREFERS
+   `parts`, and compaction only rewrote `content` — so the meter reported the compacted size while the
+   model was sent the uncompacted copy. Both are compacted now (`compactTextParts`), and the mirror is
+   pinned directly (`history.spec.ts` — `parts[0].text === content`, and `historySize().chars` equal to
+   the parts length) rather than assumed.
+2. **Attachments carry ZERO characters.** An image attached five turns ago is still in the history and
+   still re-sent, uncached, at full rate, every turn after — but a chars-only measure priced it at
+   nothing, so the dot stayed green while the bill grew. `historySize` now returns `attachments` +
+   `attachmentTokens` (both `experimental_attachments` and `file` parts, so the meter does not go blind
+   when the SDK's transport moves), `contextHealth` weighs them via `historyWeight`, and the panel shows
+   the row. Images are priced at a per-image UPPER bound (`IMAGE_TOKENS_UPPER_BOUND` = 1,600 — Anthropic
+   downscales to ≤1568px, so nothing exceeds it) rather than estimated from byte size, because base64
+   length is a terrible proxy for vision tokens: **for a spend indicator the safe direction to be wrong
+   is over-reporting.** A tiny icon nags slightly early; that is the failure we can live with.
+
+The generalisable rule: **a measurement that is derived from one representation of the payload must be
+pinned against the representation that actually ships**, and anything on the wire carrying no characters
+must be priced explicitly or a char-based meter will report it as free. Same family as `wastedOutput`,
+`tool_rounds`, and the doubled `finishReason` — a metric that cannot see a cost reports zero, which
+reads as success.
+
 ---
 
 ## Wasted tokens and dead time — the taxonomy, and how to see it
@@ -432,6 +458,9 @@ complaint must never be answered with more caching until the step log has been r
 | 9 | **Cache churn — paying to keep *creating* a cache rather than read one.** | The 5-minute default TTL expires while the user is playing the game we just built; the next turn re-writes ~111k tokens at full price. Ten turns: **~$4.16 vs ~$0.97**. | `ttl: '1h'` (§"The cache TTL is 1 hour"). |
 | 10 | **Re-sending the whole conversation, uncached, forever.** | Turn 5 of a real build: **9,476 → 512 tokens re-sent per turn (−94.6%)** from compaction; a long prose session shaves a further ~49% on top once the turn cap bites. | **Fixed** — compaction + a char cap + a turn cap (`llm/history.ts`, §5 below). |
 | 11 | **Dead time that costs ZERO tokens — text we already had, withheld by our own filter.** The bill is not the only thing a generation spends. | Measured on a live creation: the server-side shell-strip buffered EVERY `<boltAction>` until its close tag, including `type="file"`. A 13,776-char game script reached the browser **51 seconds** after the model began sending it, as one lump — 18 text chunks for the whole generation, biggest silences 51.5s / 31.1s / 12.6s. Nothing threw; the artifact was byte-perfect; the product just looked frozen, and the freeze scaled with file size. | **Fixed 2026-07-16** — a file action forwards its opening tag and streams its body on arrival; only `shell`/`start` (which genuinely cannot be judged half-read) still buffer (`agent/shell-strip.ts`). After: **157 chunks, max 222 chars, zero silences ≥2s.** |
+
+| 12 | **A wire format with two producers, and the consumer never saw it.** The client's `[Model: …]/[Provider: …]` envelope is stripped only on the DEAD `/api/chat` path; `/api/agent` never stripped it. | It reached the model, polluted the routing texts, and re-shipped on every uncached turn — and because `parseSlashInvocation` anchors on `/`, **every `/slash` invocation ever served was silently dropped**. Measured: a `/bt-spec` demo billed **316 credits** for 83 characters of "I'll load the bt-spec skill workflow" and stopped, with `skillsLoaded: ["bt-design","bt-landing"]` and no bt-spec. There was not even a log line — the parse miss returns null one branch ABOVE the unknown-skill warning. | Stripped at the proxy entry, in `content` AND `parts` (`chat/message-envelope.ts`); slash parses the user's TYPED text and carries any leading modified-files artifact through the rewrite. Pinned by `message-envelope.spec.ts` + `slash-invocation.spec.ts`, both built from the string the CLIENT produces. |
+| 13 | **The turn that promised the work and ended.** `!producedText` cannot catch it: a promise IS text. | The same generation as row 12: **524 output tokens bought 83 characters** — 0.16 ch/tok — no actions, no tool calls, `finishReason: 'stop'`, `status: 'completed'`, 316 credits. To the user it looked like the app "just sits there", when in fact it had finished and done nothing. | ONE bounded corrective pass against the now-warm prefix (`unproductive.ts`, pure + mutation-verified), never stacking with the forced continuation. **Rescue, not refund** — a refund returns the credits and no spec; a warm second pass is ~11 credits and returns the work. Recorded as `+unproductive-rescue` in `finish_reason`, because the rescue's own `drain` overwrites `finishReason` with a clean `stop` (the doubled-drain lesson, again). |
 
 **Two things that look like waste and are not.** A **Stop** is not waste: the tokens were really consumed
 and are billed for what was spent to the abort point (§4.12). A **hard failure** is waste, but it is *our*
@@ -739,7 +768,32 @@ displaced into the conversation.
 
 So the bodies are stripped from file/edit actions in assistant turns; **the tags survive**, so the model
 still knows exactly which files it created and edited, and reads their real contents from the file
-context. User messages are never touched: what the user said exists nowhere else.
+context.
+
+**The user's WORDS are never touched — but a file body is not a word (2026-07-25).** This rule used to
+read "user messages are never touched", and that skipped the one part of the history that could still
+grow without bound. When the user edits files in the editor, `Chat.client.tsx` prepends a
+MACHINE-GENERATED `<boltArtifact>` of every modified file — full bodies — to their next message
+(`filesToArtifacts(getModifiedFiles())`). Identical double representation, identical redundancy (the
+same files are sent fresher every turn in `# Current Project Files`), but it rode in a USER message, so
+compaction stepped over it and it was re-sent uncached, at full rate, forever. The same body strip now
+runs over user messages. It is safe **by construction**: `compactContent` only rewrites the inside of
+`<boltAction type="file"|"edit">` tags — our own protocol syntax, which a human does not type — and
+returns every other byte identical. What the user said still exists nowhere else, and is still never
+touched.
+
+⚠️ **It strips `parts` as well as `content`, and that is not belt-and-braces.** The client sets both
+from one string and the AI SDK's `convertToCoreMessages` PREFERS `parts` — so compacting only `content`
+passes every test that reads `content` and changes nothing whatsoever on the wire. Same trap as the
+transport envelope below.
+
+**⚠️ THE TRANSPORT ENVELOPE (2026-07-25).** `Chat.client.tsx` wraps every user message in
+`[Model: …]\n\n[Provider: …]\n\n` — upstream's BYOK transport, consumed by `stream-text.ts` on the
+fail-closed `/api/chat` path and **never stripped by our proxy**. It reached the model as misleading
+context, polluted the skill/block routing texts, and rode the uncached history on every turn forever.
+It also silently broke **every `/slash` invocation the product ever served** — see §"A wire format with
+two producers" below. Stripped at the proxy entry (`chat/message-envelope.ts`), in `content` and in
+`parts`.
 
 A windowing backstop bounds the growth that scales with *conversation* length rather than file size,
 dropping the oldest turns — but **never the first user message**, which is the original brief and the

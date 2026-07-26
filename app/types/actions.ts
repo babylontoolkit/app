@@ -53,6 +53,13 @@ export interface ActionAlert {
   description: string;
   content: string;
   source?: 'terminal' | 'preview'; // Add source to differentiate between terminal and preview errors
+
+  /**
+   * When this alert was raised (ms epoch). Used to retire a preview alert once the preview has
+   * loaded successfully since — see `lib/stores/preview-alert.ts`. Optional so an alert raised by a
+   * path that does not stamp is simply never auto-cleared, rather than cleared on a missing value.
+   */
+  raisedAt?: number;
 }
 
 export interface SupabaseAlert {

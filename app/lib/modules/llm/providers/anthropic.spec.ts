@@ -122,6 +122,29 @@ describe('supportsSamplingParams', () => {
     expect(supportsSamplingParams('anthropic.claude-sonnet-5')).toBe(false);
     expect(supportsSamplingParams('anthropic.claude-haiku-4-5')).toBe(true);
   });
+
+  /*
+   * THE POINT OF THE INVERTED LIST, and the one case the old allow-list got wrong.
+   *
+   * `LLM_MODEL` exists so an operator can move to a new model with an env var and a promoted price row —
+   * no code change, no redeploy. Under an allow-list of MODERN ids that was impossible: a model the
+   * constant had never heard of fell through to the legacy branch, `stripSamplingParams` never fired,
+   * `ai@4` injected `temperature: 0`, and EVERY generation 400'd before a token.
+   *
+   * So the assertion is deliberately about an id that does not exist and never will: a future model must
+   * default to modern handling. If someone re-inverts the list, this is the test that says why not.
+   */
+  it('defaults an UNKNOWN (future) model to modern handling — no sampling params', () => {
+    expect(supportsSamplingParams('claude-opus-5')).toBe(false);
+    expect(supportsSamplingParams('claude-opus-9')).toBe(false);
+    expect(supportsSamplingParams('claude-something-entirely-new')).toBe(false);
+    expect(supportsSamplingParams('anthropic.claude-opus-5')).toBe(false);
+  });
+
+  it('still reports the legacy 3.x family, dated snapshots included', () => {
+    expect(supportsSamplingParams('claude-3-haiku-20240307')).toBe(true);
+    expect(supportsSamplingParams('claude-3-5-sonnet-20241022')).toBe(true);
+  });
 });
 
 describe('stripSamplingParams (§3.1 — `temperature is deprecated for this model`)', () => {
@@ -283,6 +306,59 @@ describe('thinkingFetch (§3.4 — the silent default that costs 90s and 6,000 o
     expect(supportsAdaptiveThinking('anthropic.claude-opus-4-8')).toBe(true);
     expect(supportsAdaptiveThinking('claude-3-haiku-20240307')).toBe(false);
   });
+
+  /*
+   * The silent half of the inverted-list bug (see `supportsSamplingParams` above for the loud half).
+   *
+   * As an allow-list of MODERN ids, an unknown model made `thinkingFetch` early-return — so the request
+   * carried neither `display: 'summarized'` nor `output_config.effort`, silently buying the server-default
+   * `high` effort and returning EMPTY thinking text. Nothing throws and the token count goes DOWN, which
+   * reads like a cheaper turn. A future model must default to modern.
+   */
+  it('defaults an UNKNOWN (future) model to adaptive thinking', () => {
+    expect(supportsAdaptiveThinking('claude-opus-5')).toBe(true);
+    expect(supportsAdaptiveThinking('claude-opus-9')).toBe(true);
+    expect(supportsAdaptiveThinking('anthropic.claude-opus-5')).toBe(true);
+  });
+
+  /*
+   * §Opus 5 — `disabled` is gated by EFFORT, not merely by model.
+   *
+   * `{type:'disabled'}` is accepted at `high` and below, and a 400 at `xhigh`/`max`. This is reachable
+   * from an env file alone and at the worst moment: `effort-policy.ts` escalates a 2nd repair to `xhigh`,
+   * so a `THINKING_MODE=disabled` operator would 400 on the turn that had already failed twice.
+   */
+  it('honours the per-model effort ceiling for disabling thinking', () => {
+    expect(canDisableThinking('claude-opus-5', 'medium')).toBe(true);
+    expect(canDisableThinking('claude-opus-5', 'high')).toBe(true);
+    expect(canDisableThinking('claude-opus-5', 'xhigh')).toBe(false);
+    expect(canDisableThinking('claude-opus-5', 'max')).toBe(false);
+  });
+
+  it('applies no effort ceiling to models that do not have one', () => {
+    for (const effort of ['medium', 'high', 'xhigh', 'max'] as const) {
+      expect(canDisableThinking('claude-opus-4-8', effort)).toBe(true);
+      expect(canDisableThinking('claude-fable-5', effort)).toBe(false);
+    }
+  });
+
+  /*
+   * The clamp, at the wire. A preference that cannot be honoured on this turn must not burn the turn:
+   * `thinkingFetch` falls back to `adaptive` rather than sending a body the API will reject.
+   */
+  it('CLAMPS to adaptive rather than emitting a body the API would 400', async () => {
+    const { captured, fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+    const anthropic = createAnthropic({
+      apiKey: 'test-key',
+      fetch: thinkingFetch('disabled', 'xhigh', 'claude-opus-5', fetchImpl),
+    });
+
+    const model = dropOrphanReasoningSignatures(stripSamplingParams(anthropic('claude-opus-5')));
+    await drain(streamText({ model, prompt: 'hi' }));
+
+    expect(captured.body.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+    expect(captured.body.output_config).toEqual({ effort: 'xhigh' });
+  });
 });
 
 /**
@@ -315,6 +391,45 @@ describe('effort (§3.5 — the default nobody chose)', () => {
     await drain(streamText({ model, prompt: 'hi' }));
 
     expect(captured.body.output_config).toEqual({ effort: 'medium' });
+  });
+
+  /*
+   * END-TO-END PROOF THAT `LLM_MODEL=<a model this code has never heard of>` WORKS.
+   *
+   * This is the whole deliverable: setting an env var and promoting a price row must be enough to move
+   * the platform to a new model — no code change, no redeploy. `claude-opus-5` is used as the concrete
+   * near-term case, but the assertion is really about ANY unrecognised id, so it is repeated against a
+   * fabricated one that will never exist.
+   *
+   * Under the old MODERN-allow-lists both failed: no `temperature` strip (a hard 400 on every request)
+   * and no thinking/effort config (silently buying server-default `high` and empty reasoning text).
+   */
+  it('gives an UNKNOWN model the full modern treatment on the wire', async () => {
+    for (const modelId of ['claude-opus-5', 'claude-opus-9']) {
+      const { captured, fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+      const anthropic = createAnthropic({
+        apiKey: 'test-key',
+        fetch: thinkingFetch('adaptive', 'medium', modelId, fetchImpl),
+      });
+
+      /*
+       * ⚠️ This MUST mirror `getModelInstance`'s gate verbatim (`anthropic.ts` / `kie.ts`) — applying
+       * `stripSamplingParams` unconditionally would test the wrapper (already covered above) instead of
+       * the DECISION to apply it, and would pass even with the predicate inverted. Mutation-verified.
+       */
+      const base = anthropic(modelId);
+      const model = dropOrphanReasoningSignatures(supportsSamplingParams(modelId) ? base : stripSamplingParams(base));
+      await drain(streamText({ model, prompt: 'hi' }));
+
+      // The 400 that used to happen before a single token was emitted.
+      expect(captured.body).not.toHaveProperty('temperature');
+      expect(captured.body).not.toHaveProperty('top_p');
+      expect(captured.body).not.toHaveProperty('top_k');
+
+      // The silent overspend: server-default effort + reasoning we pay for and cannot show.
+      expect(captured.body.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+      expect(captured.body.output_config).toEqual({ effort: 'medium' });
+    }
   });
 
   /**

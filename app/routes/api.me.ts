@@ -15,7 +15,13 @@ import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { getUser } from '~/lib/.server/supabase/auth';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
 import { getPlatformConfig, getPlatformModel } from '~/lib/.server/agent/config';
-import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
+import {
+  DEFAULT_PREMIUM_MINIMUM_CREDITS,
+  DEFAULT_PREMIUM_MODEL,
+  getBillingConfig,
+  getPremiumTier,
+} from '~/lib/.server/billing/rates';
+import { premiumSessionHint } from '~/lib/.server/billing/premium';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { ensureSignupGrant, getLedger } from '~/lib/.server/billing/ledger';
 import { getEntitlement } from '~/lib/.server/licensing/entitlements';
@@ -111,7 +117,32 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
          * renders locked with the threshold shown — that is what protects a fresh grant from a 2x model.
          */
         premium: (() => {
-          const tier = getPremiumTier(context);
+          /*
+           * ⚠️ GUARDED FOR THE REASON THE COMMENT BELOW ALREADY GIVES — it was not, and the asymmetry
+           * was an app-wide outage waiting on a typo.
+           *
+           * `getPremiumTier` THROWS when `PREMIUM_MODEL` names a model the active Marketplace price list
+           * has no row for — which is the normal transient state while an operator moves to a new premium
+           * model (set the SSM var, promote the price a minute later, or simply do the two in the wrong
+           * order). Unguarded, that threw straight past this object literal into the loader's catch, and
+           * `/api/me` is the SESSION endpoint on every page load: the whole app went down for every user
+           * because a toggle's rendering hint was misconfigured. `getPlatformModel` five lines down was
+           * already guarded against exactly this, with exactly this rationale.
+           *
+           * 🔴 The fallback must report `available: false`, NOT the baked default's availability. Premium
+           * genuinely cannot be served in this state — `getPremiumModel` applies the same validation and
+           * would refuse at generation time — so advertising it as available would render an enabled
+           * toggle that hard-fails the moment it is used. Degrading a capability to "off" is honest;
+           * degrading it to "on" invents one. (`decidePremium` re-derives eligibility server-side on every
+           * generation regardless, so this can never grant premium by itself — it can only fail to offer it.)
+           */
+          let tier: { model: string; minimumCredits: number } | null;
+
+          try {
+            tier = getPremiumTier(context);
+          } catch {
+            tier = null;
+          }
 
           /*
            * The STANDARD model, so the composer pill can name the model actually in use when premium is
@@ -127,10 +158,13 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           }
 
           return {
-            model: tier.model,
+            ...premiumSessionHint({
+              tier,
+              balance,
+              fallbackModel: DEFAULT_PREMIUM_MODEL,
+              fallbackMinimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS,
+            }),
             standardModel,
-            minimumCredits: tier.minimumCredits,
-            available: balance >= tier.minimumCredits,
           };
         })(),
       },

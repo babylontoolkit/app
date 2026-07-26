@@ -9,43 +9,76 @@
 import type { LanguageModelV1, LanguageModelV1StreamPart } from 'ai';
 
 /**
- * Claude models that REMOVED the sampling params (`temperature`, `top_p`, `top_k`).
- * Sending any of them is a hard 400 — not a silently-ignored field.
+ * The LEGACY Claude models that still accept the sampling params (`temperature`, `top_p`, `top_k`).
  *
- * Matched as prefixes so Bedrock's `anthropic.`-prefixed ids resolve too.
+ * On every current model, sending any of them is a hard 400 — not a silently-ignored field — so the
+ * DEFAULT here is "strip them", and this list is the shrinking set of exceptions.
+ *
+ * 🔴 **THE DIRECTION OF THIS LIST IS THE POINT — do not invert it back.** It used to name the models
+ * that had REMOVED sampling params, i.e. an allow-list of *modern* ids. That set is open and grows with
+ * every Anthropic release, so a model the constant had never heard of — exactly what `LLM_MODEL` is for
+ * (§"config, never hardcoded") — fell through to the legacy branch and got `temperature: 0` injected by
+ * `ai@4`, which is a **400 on every generation before a token is emitted**. Setting `LLM_MODEL` to a new
+ * model therefore required a code change and a redeploy, which is precisely what that knob exists to
+ * avoid. This complement is CLOSED: no future Claude model will re-add sampling params, so the list can
+ * only shrink, and a brand-new id is handled correctly with no code change at all.
+ *
+ * The residual cost is a genuinely ancient id getting modern treatment → a 400 on the FIRST request:
+ * loud, immediate, free, and self-describing. The failure it replaces was silent and open-ended. Same
+ * fail-loud preference as `assertNotLocalInProduction` and `NotConfiguredError`.
+ *
+ * Matched as prefixes so Bedrock's `anthropic.`-prefixed ids resolve too (`claude-3` covers the whole
+ * 3.x family, dated snapshots included).
  */
-const MODELS_WITHOUT_SAMPLING_PARAMS = ['claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-fable-5'];
+const MODELS_WITH_SAMPLING_PARAMS = ['claude-haiku-4-5', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-3'];
 
 /**
  * Whether a model still accepts `temperature`/`top_p`/`top_k`.
- * Older Claude models (Haiku 4.5, Opus 4.6, Sonnet 4.6) do; the current flagships do not.
+ * Older Claude models (Haiku 4.5, Opus 4.6, Sonnet 4.6, the 3.x family) do; every current model does not.
  */
 export function supportsSamplingParams(modelId: string): boolean {
-  const id = modelId.startsWith('anthropic.') ? modelId.slice('anthropic.'.length) : modelId;
+  const id = bareModelId(modelId);
 
-  return !MODELS_WITHOUT_SAMPLING_PARAMS.some((unsupported) => id.startsWith(unsupported));
+  return MODELS_WITH_SAMPLING_PARAMS.some((supported) => id.startsWith(supported));
 }
 
 /**
- * Claude models that take the MODERN thinking parameter (`{type: 'adaptive' | 'disabled'}`).
+ * The LEGACY Claude models that do NOT take the modern thinking parameter (`{type: 'adaptive' | 'disabled'}`).
  *
- * On these, the legacy `{type: 'enabled', budget_tokens: N}` is a hard 400 — and that is precisely
- * what `@ai-sdk/anthropic@1.2.12` emits, unconditionally, whenever thinking is configured through
- * `providerOptions` (it hardcodes `thinking: {type: 'enabled', budget_tokens}` and *requires* a
- * budget). So on a current model the SDK's thinking option is not merely awkward — it is unusable,
- * and the only way to say anything about thinking is `thinkingFetch` below.
+ * Everything current does, so the DEFAULT here is "modern", and this list is the shrinking set of
+ * exceptions. On a modern model the legacy `{type: 'enabled', budget_tokens: N}` is a hard 400 — and that
+ * is precisely what `@ai-sdk/anthropic@1.2.12` emits, unconditionally, whenever thinking is configured
+ * through `providerOptions` (it hardcodes `thinking: {type: 'enabled', budget_tokens}` and *requires* a
+ * budget). So on a current model the SDK's thinking option is not merely awkward — it is unusable, and
+ * the only way to say anything about thinking is `thinkingFetch` below.
+ *
+ * 🔴 **DIRECTION, again — see `MODELS_WITH_SAMPLING_PARAMS` above; this list failed the same way but
+ * SILENTLY, which is worse.** As an allow-list of modern ids, an unrecognised model made `thinkingFetch`
+ * early-return, so the request carried neither `display: 'summarized'` NOR `output_config.effort`. That
+ * buys the server-side default effort (`high`, the second-most-expensive setting) on every turn and
+ * returns thinking blocks whose text is EMPTY — i.e. it silently re-creates BOTH pathologies this file
+ * exists to prevent (§4.2a: the 90s dead spinner, and paying full output rate for reasoning we cannot
+ * show). Nothing throws, no test fails, and the token count goes DOWN, which reads like a cheaper turn.
  */
-const MODELS_WITH_ADAPTIVE_THINKING = [
-  'claude-sonnet-5',
-  'claude-opus-4-8',
-  'claude-opus-4-7',
-  'claude-opus-4-6',
-  'claude-sonnet-4-6',
-  'claude-fable-5',
-];
+const MODELS_WITHOUT_ADAPTIVE_THINKING = ['claude-3'];
 
 /** Fable 5 thinks unconditionally: an explicit `{type: 'disabled'}` is a 400. Never send it one. */
 const MODELS_THAT_CANNOT_DISABLE_THINKING = ['claude-fable-5'];
+
+/**
+ * Models that accept `{type: 'disabled'}` only up to a CEILING effort — above it, it is a 400.
+ *
+ * Opus 5 is the first model to gate the two parameters against each other: `thinking: {type:'disabled'}`
+ * is accepted at effort `high` and below, and rejected at `xhigh`/`max`. `MODELS_THAT_CANNOT_DISABLE_THINKING`
+ * above cannot express that — it is unconditional — so the rule needs its own table.
+ *
+ * ⚠️ This is REACHABLE FROM AN ENV FILE ALONE, and at the worst possible moment: `effort-policy.ts` only
+ * ever escalates, taking a 2nd repair attempt to `xhigh`. So an operator running `THINKING_MODE=disabled`
+ * would get a hard 400 on the turn that had already failed twice — the generation least able to afford it.
+ */
+const THINKING_DISABLED_EFFORT_CEILING: Record<string, EffortLevel> = {
+  'claude-opus-5': 'high',
+};
 
 export type ThinkingMode = 'adaptive' | 'disabled';
 
@@ -130,12 +163,35 @@ function bareModelId(modelId: string): string {
 
 export function supportsAdaptiveThinking(modelId: string): boolean {
   const id = bareModelId(modelId);
-  return MODELS_WITH_ADAPTIVE_THINKING.some((supported) => id.startsWith(supported));
+  return !MODELS_WITHOUT_ADAPTIVE_THINKING.some((legacy) => id.startsWith(legacy));
 }
 
-export function canDisableThinking(modelId: string): boolean {
+/**
+ * Whether `{type: 'disabled'}` may be sent for this model AT THIS EFFORT.
+ *
+ * Two independent reasons to say no, and the second is why `effort` is a parameter here at all:
+ *   1. The model cannot disable thinking at any effort (Fable 5).
+ *   2. The model allows it only up to a ceiling effort (Opus 5: `high`; `xhigh`/`max` are a 400).
+ *
+ * ⚠️ **The caller CLAMPS on a `false` — it must never throw or propagate the 400.** `thinkingFetch` falls
+ * back to `adaptive`, which every model accepts. That mirrors `parseEffort`, which clamps a bad operator
+ * value at the boundary rather than failing mid-generation: an operator's `THINKING_MODE=disabled` is a
+ * preference, and a preference that cannot be honoured on this turn is not a reason to burn the turn.
+ */
+export function canDisableThinking(modelId: string, effort: EffortLevel = DEFAULT_EFFORT): boolean {
   const id = bareModelId(modelId);
-  return !MODELS_THAT_CANNOT_DISABLE_THINKING.some((locked) => id.startsWith(locked));
+
+  if (MODELS_THAT_CANNOT_DISABLE_THINKING.some((locked) => id.startsWith(locked))) {
+    return false;
+  }
+
+  const ceiling = Object.entries(THINKING_DISABLED_EFFORT_CEILING).find(([model]) => id.startsWith(model))?.[1];
+
+  if (!ceiling) {
+    return true;
+  }
+
+  return EFFORT_LEVELS.indexOf(effort) <= EFFORT_LEVELS.indexOf(ceiling);
 }
 
 /**
@@ -193,7 +249,7 @@ export function thinkingFetch(
      * and turns those tokens into a readable stream we can put on screen. Paying for reasoning and
      * then throwing it away was the actual bug; disabling thinking was only ever a workaround for it.
      */
-    if (mode === 'disabled' && canDisableThinking(modelId)) {
+    if (mode === 'disabled' && canDisableThinking(modelId, effort)) {
       body.thinking = { type: 'disabled' };
     } else {
       body.thinking = { type: 'adaptive', display: 'summarized' };

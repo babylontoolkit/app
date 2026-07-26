@@ -100,6 +100,21 @@ export interface Ledger {
 
   list(userId: string, limit?: number): Promise<LedgerEntry[]>;
 
+  /**
+   * Cross-USER listing by reason, newest first — the §4.10 admin refund audit (`spec/fail-loud.md`).
+   *
+   * Every refund is the platform eating a real provider bill, so "am I refunding people, and why?"
+   * is an operator question the ledger must answer without a database console. READ-ONLY and
+   * display-scoped: nothing may derive a balance from this (balances come from the per-user chain,
+   * ordered by `seq` — migration 0003), which is why the FS backend is allowed to order it by
+   * `createdAt`: good enough to sort a report, never good enough to pick "the latest row".
+   *
+   * `offset` pages deeper into history (newest first) — the audit must be able to reach EVERY row,
+   * not only the most recent page: an audit with an invisible tail is a partial audit presenting as
+   * a complete one.
+   */
+  listByReason(reason: LedgerReason, limit?: number, offset?: number): Promise<LedgerEntry[]>;
+
   /** Has this user ever been granted? Cheap check for the UI; the index is the real guard. */
   hasGrant(userId: string): Promise<boolean>;
 }
@@ -219,6 +234,38 @@ export class FsLedger implements Ledger {
 
   async hasGrant(userId: string): Promise<boolean> {
     return (await this._read(userId)).some((r) => r.reason === 'grant');
+  }
+
+  async listByReason(reason: LedgerReason, limit = 100, offset = 0): Promise<LedgerEntry[]> {
+    let files: string[];
+
+    try {
+      files = await fs.readdir(this._dir);
+    } catch {
+      return []; // No ledger dir yet = no rows, honestly.
+    }
+
+    const all: LedgerEntry[] = [];
+
+    for (const file of files.filter((f) => f.endsWith('.jsonl'))) {
+      // `_read` keys off the userId→filename mapping; read the file directly to cover every user.
+      try {
+        const raw = await fs.readFile(path.join(this._dir, file), 'utf8');
+
+        for (const line of raw.split('\n').filter(Boolean)) {
+          const row = JSON.parse(line) as LedgerEntry;
+
+          if (row.reason === reason) {
+            all.push(row);
+          }
+        }
+      } catch {
+        continue; // One unreadable file must not blank the whole audit.
+      }
+    }
+
+    // Display ordering only (see the interface note) — balances never derive from this.
+    return all.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(offset, offset + limit);
   }
 }
 
@@ -342,6 +389,24 @@ export class SupabaseLedger implements Ledger {
       .maybeSingle();
 
     return Boolean(data);
+  }
+
+  async listByReason(reason: LedgerReason, limit = 100, offset = 0): Promise<LedgerEntry[]> {
+    const db = await this._db();
+
+    // Cross-user by design (admin audit) — service-role read; `seq` gives a total order here too.
+    const { data, error } = await db
+      .from('credit_ledger')
+      .select('*')
+      .eq('reason', reason)
+      .order('seq', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      throw new Error(`Ledger listByReason failed: ${error.message}`);
+    }
+
+    return (data ?? []).map(rowToEntry);
   }
 }
 

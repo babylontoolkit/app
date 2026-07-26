@@ -18,6 +18,7 @@ import { description } from '~/lib/persistence';
 import Cookies from 'js-cookie';
 import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
+import { PREVIEW_RECOVERY_SETTLE_MS, shouldClearStalePreviewAlert } from './preview-alert';
 import type { GitLabCommitAction } from '~/types/GitLab';
 import { bytesToBase64, type SerializedFileMap } from '~/lib/binary/binary-files';
 import { createScopedLogger } from '~/utils/logger';
@@ -47,6 +48,9 @@ export class WorkbenchStore {
   #terminalStore = new TerminalStore(webcontainer);
 
   #reloadedMessages = new Set<string>();
+
+  /** Pending settle timer for `notePreviewLoaded` — a rapid reload restarts it rather than stacking. */
+  #previewRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
 
   artifacts: Artifacts = import.meta.hot?.data.artifacts ?? map({});
 
@@ -177,6 +181,35 @@ export class WorkbenchStore {
   }
   clearAlert() {
     this.actionAlert.set(undefined);
+  }
+
+  /**
+   * The preview iframe finished loading a document — a candidate RECOVERY.
+   *
+   * A preview alert describes one page load, and until now nothing ever retired it: a transient error
+   * (a module request answered with the SPA fallback HTML while Vite reloaded after a git sync) left a
+   * permanent banner — carrying a PAID "Ask" button — beside a preview that had already healed.
+   *
+   * We do not clear immediately. An error thrown *during* this new document's load fires BEFORE its
+   * `load` event, so clearing on the event itself would silence a live failure — much worse than
+   * showing a stale one. Instead we settle: after `PREVIEW_RECOVERY_SETTLE_MS`, clear only if the
+   * alert still predates this load. A genuinely broken preview re-raises within that window (with a
+   * newer `raisedAt`) and its banner correctly survives.
+   */
+  notePreviewLoaded() {
+    const loadCompletedAt = Date.now();
+
+    if (this.#previewRecoveryTimer !== undefined) {
+      clearTimeout(this.#previewRecoveryTimer);
+    }
+
+    this.#previewRecoveryTimer = setTimeout(() => {
+      this.#previewRecoveryTimer = undefined;
+
+      if (shouldClearStalePreviewAlert(this.actionAlert.get(), loadCompletedAt)) {
+        this.actionAlert.set(undefined);
+      }
+    }, PREVIEW_RECOVERY_SETTLE_MS);
   }
 
   get SupabaseAlert() {

@@ -21,6 +21,13 @@ import { getPromptStore } from '~/lib/.server/prompt/store';
 import { selectStickyBlocks } from '~/lib/.server/prompt/sources';
 import { getSkillStore } from '~/lib/.server/skills/store';
 import { parseSlashInvocation } from '~/lib/skills/slash';
+import {
+  countUnstrippedEnvelopes,
+  splitCarriedArtifact,
+  stripTransportEnvelopes,
+  stripTransportPrefix,
+} from '~/lib/chat/message-envelope';
+import { shouldRescueUnproductiveTurn, UNPRODUCTIVE_RESCUE_PROMPT } from './unproductive';
 import { createFilesContext } from '~/lib/.server/llm/utils';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
@@ -47,7 +54,13 @@ import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-inst
 import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
 import { getGenerationLog, type GenerationRecord } from './usage';
-import { compactHistory, historySavings, historySize, HISTORY_WINDOW_TURNS } from '~/lib/.server/llm/history';
+import {
+  compactHistory,
+  historySavings,
+  historySize,
+  HISTORY_WINDOW_TURNS,
+  type HistorySize,
+} from '~/lib/.server/llm/history';
 import { envNumber } from '~/lib/.server/env';
 import { buildPreloadedSkillBlock, preloadSkills } from './preload-skills';
 import { buildProjectNotes, type GameBackendState } from './project-notes';
@@ -241,7 +254,7 @@ export interface AgentGeneration {
    * (`llm/history.ts`). Feeds the client's `/context` report and health dot (§4.5.6): the history is
    * the one UNCACHED, ever-growing input component, so this is the number "should I /clear?" is about.
    */
-  historyStats: { messages: number; chars: number; maxTurns: number };
+  historyStats: HistorySize & { maxTurns: number };
 
   /**
    * This generation ran in Discussion mode (§4.2.9). The route writes the NO_REPLAY message
@@ -311,7 +324,7 @@ function allUserTexts(messages: Message[]): string[] {
  * `load_skill` round trip. The skill body is injected as its own cached system block and the user's
  * message becomes the task, exactly as it behaves in Claude Code.
  */
-async function resolveSlashInvocation(
+export async function resolveSlashInvocation(
   messages: Message[],
 ): Promise<{ skillBlock: string; skillName: string; messages: Message[] } | null> {
   const index = messages.map((m) => m.role).lastIndexOf('user');
@@ -321,7 +334,19 @@ async function resolveSlashInvocation(
   }
 
   const message = messages[index];
-  const text = typeof message.content === 'string' ? message.content : '';
+  const raw = typeof message.content === 'string' ? message.content : '';
+
+  /*
+   * 🔴 Parse the user's TYPED text, not the raw message.
+   *
+   * The client wraps every message in `[Model: …]\n\n[Provider: …]\n\n` and, when the user has edited
+   * files, prepends a modified-files `<boltArtifact>`. `parseSlashInvocation` anchors on `/`, so the
+   * raw content NEVER matched and every `/slash` invocation was dropped — silently, because that miss
+   * returns null one branch ABOVE the unknown-skill warning. See `chat/message-envelope.ts`.
+   *
+   * `carried` is the artifact: real content the model needs, so the rewrite below keeps it.
+   */
+  const { carried, text } = splitCarriedArtifact(stripTransportPrefix(raw));
   const invocation = parseSlashInvocation(text);
 
   if (!invocation) {
@@ -356,7 +381,17 @@ async function resolveSlashInvocation(
     : `Run the ${skill.name} skill. The user provided no additional input.`;
 
   const rewritten = [...messages];
-  rewritten[index] = { ...message, content: task };
+
+  /*
+   * The carried artifact survives the rewrite. Dropping it would silently discard the user's own file
+   * edits from the turn — the model would plan against a project it can no longer see changed.
+   *
+   * `parts` are dropped with the old content on purpose: they are the SAME text the client duplicated
+   * (see `stripTransportEnvelopes`), so leaving them would re-send the un-rewritten message and the AI
+   * SDK would prefer them over `content` — i.e. the slash rewrite would be silently discarded.
+   */
+  const { parts: _replacedByTask, ...withoutParts } = rewritten[index] as Message & { parts?: unknown };
+  rewritten[index] = { ...withoutParts, content: `${carried}${task}` } as Message;
 
   return { skillBlock, skillName: skill.name, messages: rewritten };
 }
@@ -448,11 +483,45 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const premiumTier = getPremiumTier(request.context);
 
   /*
-   * Computed here (from the raw request — a slash rewrite never carries the creation marker) because
+   * 🔴 NORMALIZE THE MESSAGES ONCE, HERE, AND NEVER READ `request.messages` AGAIN.
+   *
+   * The client wraps every user message in `[Model: …]\n\n[Provider: …]\n\n` — upstream's BYOK transport
+   * for the fail-closed `/api/chat` path (`stream-text.ts` parses it off; we never did). Leaving the raw
+   * form reachable is what cost an investor demo: `resolveSlashInvocation` anchors on a leading `/`, the
+   * envelope pushed it off the front, and EVERY `/slash` invocation was silently dropped.
+   *
+   * The specific bug is fixed by stripping. The CLASS is fixed by there being only one value: two forms
+   * of the same messages in one function is the two-readers-disagree trap this codebase keeps
+   * rediscovering, and the next reader will not know to ask which one they hold.
+   * `transport-envelope.spec.ts` fails the build if `request.messages` is read anywhere below.
+   */
+  const messages0 = stripTransportEnvelopes(request.messages);
+
+  /*
+   * The drift tripwire (`countUnstrippedEnvelopes`). The stripper is strict by necessity; if upstream
+   * ever changes the envelope's shape it stops matching, and the demo failure returns with no error and
+   * no log. A LOOSE shape check on the stripped output is the only thing that can see that, because a
+   * tripwire sharing the stripper's regex is blind to exactly what the stripper misses.
+   */
+  const unstripped = countUnstrippedEnvelopes(messages0);
+
+  if (unstripped > 0) {
+    logger.warn(
+      `${unstripped} user message(s) still look enveloped after stripping — the client's transport format ` +
+        'has probably changed. Slash commands and skill routing are degraded until `message-envelope.ts` catches up.',
+    );
+    getMonitor(request.context).captureMessage(`${unstripped} user message(s) survived transport-envelope stripping`, {
+      scope: 'transport-envelope',
+      level: 'warning',
+    });
+  }
+
+  /*
+   * Computed from the NORMALIZED messages (a slash rewrite never carries the creation marker) because
    * the PREMIUM decision needs it: a creation on KIE-buffered Fable 5 dies at the gateway timeout
    * before its artifact can flush (see `premium.ts`). The tool policy below reuses the same value.
    */
-  const isCreationTurn = lastUserText(request.messages).includes(CREATION_BRIEF_MARKER);
+  const isCreationTurn = lastUserText(messages0).includes(CREATION_BRIEF_MARKER);
 
   const premium = decidePremium({
     requested: Boolean(request.premium) && !useByok,
@@ -497,9 +566,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   // Bound to a const so the null-check narrowing survives into the async generator below.
   const promptVersion = activePrompt;
 
-  // 5. Explicit slash invocation force-loads its skill.
-  const slash = await resolveSlashInvocation(request.messages);
-  let messages = slash ? slash.messages : request.messages;
+  // 5. Explicit slash invocation force-loads its skill (against the already-normalized messages).
+  const slash = await resolveSlashInvocation(messages0);
+  let messages = slash ? slash.messages : messages0;
 
   // 6. Repair turn: append the compiler output as the task.
   const isRepair = Boolean(request.errors?.length);
@@ -975,6 +1044,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   let forcedContinuation = false;
 
   /**
+   * Did the unproductive-turn rescue run (`unproductive.ts`)?
+   *
+   * Recorded for the same reason as `forcedContinuation`: the rescue's `drain` OVERWRITES
+   * `finishReason` with its own clean `stop`, so without this the turn that promised-and-stalled looks
+   * identical to one that worked first time — and this class of failure is invisible in every other
+   * column (it bills a normal amount and completes normally). If this starts appearing often, the
+   * cause is upstream of the rescue and the rescue is only paying for it.
+   */
+  let unproductiveRescue = false;
+
+  /**
    * Did we re-run this generation after a provider failure?
    *
    * Recorded in `finish_reason` for the same reason `forcedContinuation` is: the second `drain`
@@ -1218,7 +1298,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       const plan = planTranscriptRecovery({
         serverChatId: request.chatId,
         existing,
-        requestMessages: request.messages.map((m) => ({
+
+        /*
+         * The NORMALIZED messages — a recovered transcript must not preserve the transport envelope.
+         * It is not something the user typed, and this record is what the conversation becomes when the
+         * client dies before saving (§4.5.6).
+         */
+        requestMessages: messages0.map((m) => ({
           id: m.id,
           role: m.role,
           content: String(m.content ?? ''),
@@ -1339,6 +1425,46 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         );
 
         yield* drain(continuation);
+      }
+
+      /*
+       * The sibling failure: the model ANNOUNCED the work and then ended the turn (`unproductive.ts`).
+       *
+       * Measured on a live demo: 524 output tokens bought 83 characters — "I'll load the bt-spec skill
+       * workflow…" — and the ledger recorded a clean 316-credit success. `!producedText` cannot see it,
+       * because a promise is text. So: one more pass, against a prefix that is now warm, telling the
+       * model to stop narrating and do the thing. The user gets their spec instead of their money back.
+       *
+       * Bounded to ONE extra pass and mutually exclusive with the forced continuation above
+       * (`alreadyContinued`), so no turn can ever run three streams.
+       */
+      const visibleTextChars = stepLog.reduce((n, step) => n + (step.textChars ?? 0), 0);
+      const toolCallCount = stepLog.reduce((n, step) => n + step.tools.length, 0);
+
+      if (
+        shouldRescueUnproductiveTurn({
+          aborted: Boolean(request.abortSignal?.aborted),
+          alreadyContinued: forcedContinuation,
+          emittedAction: assistantText.includes('<boltAction'),
+          toolCalls: toolCallCount,
+          textChars: visibleTextChars,
+          outTokens: totals.completionTokens,
+        })
+      ) {
+        unproductiveRescue = true;
+        logger.warn(
+          `Unproductive turn (${visibleTextChars} chars text on ${totals.completionTokens} out tokens, no actions, ` +
+            'no tool calls) — the model announced work it did not do; forcing one corrective pass',
+        );
+
+        const priorMessages = (await first.response).messages;
+
+        const rescue = startStream(
+          [...system, ...coreMessages, ...priorMessages, { role: 'user', content: UNPRODUCTIVE_RESCUE_PROMPT }],
+          false,
+        );
+
+        yield* drain(rescue);
       }
 
       /*
@@ -1476,6 +1602,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          */
         finishReason:
           (failed ? 'error' : forcedContinuation ? `${finishReason}+forced-continuation` : finishReason) +
+          (unproductiveRescue ? '+unproductive-rescue' : '') +
           (retried ? '+provider-retry' : ''),
         status: failed ? 'failed' : 'completed',
       });

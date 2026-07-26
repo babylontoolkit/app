@@ -104,7 +104,7 @@ export const EMPTY_SESSION: SessionState = {
     purchasable: false,
     packs: [],
     plans: [],
-    premium: { model: 'claude-fable-5', standardModel: 'claude-opus-4-8', minimumCredits: 1000, available: false },
+    premium: { model: 'claude-fable-5', standardModel: 'claude-opus-4-8', minimumCredits: 1200, available: false },
   },
   pro: { proFeaturesEnabled: false, byokUnlocked: false, tier: null, status: null, subscriberEmail: null },
 };

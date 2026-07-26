@@ -39,6 +39,7 @@
  * Compaction is orthogonal and composes with that change if it ever lands.
  */
 import type { Message } from 'ai';
+import { dataUrlByteLength } from '~/lib/.server/agent/attachments';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('history');
@@ -88,6 +89,35 @@ function compactContent(content: string): string {
 }
 
 /**
+ * Compact the same bodies out of `text` PARTS, not just `content`.
+ *
+ * 🔴 Both carry the message: `Chat.client.tsx` sets `content` and `parts` from one string, and the AI
+ * SDK's `convertToCoreMessages` prefers `parts` when they exist. Compacting only `content` would look
+ * correct in every test that reads `content` and change nothing at all on the wire — the same trap that
+ * made the transport envelope reach the model for months (`chat/message-envelope.ts`).
+ *
+ * File parts (image attachments) are returned untouched, and a message whose parts hold no file bodies
+ * is returned by IDENTITY, so this is free on the overwhelming majority of turns.
+ */
+function compactTextParts(message: Message): Message {
+  if (!Array.isArray(message.parts)) {
+    return message;
+  }
+
+  const parts = message.parts.map((part) => {
+    if (part.type !== 'text' || typeof part.text !== 'string') {
+      return part;
+    }
+
+    const text = compactContent(part.text);
+
+    return text === part.text ? part : { ...part, text };
+  });
+
+  return parts.some((part, i) => part !== message.parts![i]) ? { ...message, parts } : message;
+}
+
+/**
  * Strip thinking from a PRIOR assistant turn — required for correctness, not just for cost.
  *
  * ## The bug this fixes: every edit turn returned a 400, on every project
@@ -131,32 +161,50 @@ function stripReasoning(message: Message): Message {
 }
 
 /**
- * Compact prior assistant turns.
+ * Compact prior turns.
  *
  * Every assistant message is compacted, including the most recent one: the file-context block is a
  * strictly better source for file contents than any assistant message, because it reflects the file as
  * it is NOW rather than as it was written. A repair turn in particular needs the *current* broken file,
  * not the text the model believed it was emitting.
  *
- * User messages are never touched. What the user said is the one thing in the history that exists
- * nowhere else.
+ * ## User messages: the WORDS are never touched — but a file body is not a word
+ *
+ * This function used to skip user messages entirely, on the rule that "what the user said is the one
+ * thing in the history that exists nowhere else". That rule is right and still holds. What it missed is
+ * that not everything in a user message was said by the user.
+ *
+ * When the user edits files in the editor, `Chat.client.tsx` prepends a MACHINE-GENERATED
+ * `<boltArtifact>` of every modified file — full bodies — to their next message
+ * (`filesToArtifacts(getModifiedFiles())`). Those bodies are the same double representation §4.2.8
+ * diagnosed twice already: the current, fresher contents of exactly those files are sent every turn in
+ * `# Current Project Files`. Because they rode in a USER message, compaction skipped them and they were
+ * re-sent, uncached, at full rate, on every subsequent turn, forever — the one place in the history
+ * that could still grow without bound.
+ *
+ * So the SAME body strip runs over user messages. It is safe by construction: `compactContent` only
+ * rewrites the inside of `<boltAction type="file"|"edit">` tags — our own protocol syntax, which a
+ * human does not type — and returns every other byte untouched. The tags survive, so the model still
+ * knows precisely which files the user changed; it reads their contents from the file context, where
+ * they are correct.
  */
 export function compactHistory(messages: Message[], options: { maxTurns?: number } = {}): Message[] {
   const compacted = messages.map((message) => {
-    if (message.role !== 'assistant') {
+    if (message.role !== 'assistant' && message.role !== 'user') {
       return message;
     }
 
     // Thinking first: it must go whether or not the content is a plain string (see `stripReasoning`).
-    const stripped = stripReasoning(message);
+    const stripped = message.role === 'assistant' ? stripReasoning(message) : message;
+    const withParts = compactTextParts(stripped);
 
-    if (typeof stripped.content !== 'string') {
-      return stripped;
+    if (typeof withParts.content !== 'string') {
+      return withParts;
     }
 
-    const content = compactContent(stripped.content);
+    const content = compactContent(withParts.content);
 
-    return content === stripped.content ? stripped : { ...stripped, content };
+    return content === withParts.content ? withParts : { ...withParts, content };
   });
 
   return windowHistory(compacted, options.maxTurns ?? HISTORY_WINDOW_TURNS);
@@ -216,16 +264,100 @@ function windowHistory(messages: Message[], maxTurns: number): Message[] {
 }
 
 /**
+ * An UPPER bound on what one image attachment costs, in tokens.
+ *
+ * Anthropic downscales any image to a long edge of ~1568px before tokenizing (~(w×h)/750), so no
+ * single image can exceed roughly this. We deliberately use the bound rather than estimating from
+ * byte size: base64 length is a terrible proxy for vision tokens (a 5MB photo and a 5MB screenshot of
+ * flat colour cost wildly different amounts to store and nearly the same to look at), and for a SPEND
+ * indicator the safe direction to be wrong is over-reporting. A 200×200 icon really costs ~54 tokens
+ * and will be counted as 1,600 — the meter nags slightly early on tiny images, which is the failure
+ * we can live with. Under-reporting is the one this whole fix exists to remove.
+ */
+export const IMAGE_TOKENS_UPPER_BOUND = 1_600;
+
+/** The prose rule of thumb used throughout §4.2.8 — for converting text attachments to tokens. */
+const CHARS_PER_TOKEN = 4;
+
+export interface HistorySize {
+  /* All-numeric by design: this object is streamed verbatim as a JSON annotation (`api.agent.ts`). */
+  [field: string]: number;
+
+  messages: number;
+  chars: number;
+
+  /** Attachments still riding in the re-sent history (images and text files). */
+  attachments: number;
+
+  /**
+   * Estimated tokens those attachments cost — EVERY TURN, uncached, like the rest of the history.
+   * Separate from `chars` on purpose: `chars` must keep meaning "characters of text", or the field
+   * becomes a number that is honest only if you know how it was cooked.
+   */
+  attachmentTokens: number;
+}
+
+/**
+ * Everything on a message that can carry attachment bytes. `experimental_attachments` is what our
+ * client sends today; `parts` of type `file` is the shape the SDK is moving toward. Counting both
+ * means the meter does not quietly go blind the day the transport changes underneath it.
+ */
+type AttachmentBearing = Message & {
+  experimental_attachments?: Array<{ contentType?: string; url?: string }>;
+};
+
+function measureAttachments(message: Message): { count: number; tokens: number } {
+  const listed = (message as AttachmentBearing).experimental_attachments ?? [];
+  const fileParts = (message.parts ?? [])
+    .filter((part) => part.type === 'file')
+    .map((part) => {
+      const file = part as { mimeType?: string; data?: string };
+
+      return { contentType: file.mimeType, url: file.data };
+    });
+
+  const all = [...listed, ...fileParts];
+
+  const tokens = all.reduce((sum, attachment) => {
+    if (attachment.contentType?.startsWith('image/')) {
+      return sum + IMAGE_TOKENS_UPPER_BOUND;
+    }
+
+    // A text attachment IS text on the wire: its decoded bytes are its characters.
+    return sum + Math.ceil(dataUrlByteLength(attachment.url) / CHARS_PER_TOKEN);
+  }, 0);
+
+  return { count: all.length, tokens };
+}
+
+/**
  * What actually went on the wire this turn — the numbers behind the client's `/context` report
  * (SPEC §4.5.6). Measured AFTER compaction+windowing, so it is the re-sent history exactly, not the
  * stored conversation. The client must never estimate this from its own messages: it would be
  * measuring the un-compacted copy, which is precisely the number that does not matter.
+ *
+ * ## Why attachments are counted here and not left to `promptTokens`
+ *
+ * An image attached five turns ago is still in the history and is still sent, uncached, at full rate,
+ * on every turn after it — exactly the growth this whole module exists to bound. But it carries ZERO
+ * characters, so a chars-only measure reported it as free and the health dot stayed green while the
+ * user paid for it every turn. The panel's `promptTokens` did show the spend, which is what made this
+ * hard to see: the report was right and the traffic light was wrong, and people read the light.
  */
-export function historySize(messages: Message[]): { messages: number; chars: number } {
-  return {
-    messages: messages.length,
-    chars: messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0),
-  };
+export function historySize(messages: Message[]): HistorySize {
+  return messages.reduce<HistorySize>(
+    (size, message) => {
+      const attachments = measureAttachments(message);
+
+      return {
+        messages: size.messages + 1,
+        chars: size.chars + (typeof message.content === 'string' ? message.content.length : 0),
+        attachments: size.attachments + attachments.count,
+        attachmentTokens: size.attachmentTokens + attachments.tokens,
+      };
+    },
+    { messages: 0, chars: 0, attachments: 0, attachmentTokens: 0 },
+  );
 }
 
 /** Characters removed. Used to log what compaction actually bought on a given turn. */

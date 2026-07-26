@@ -60,9 +60,35 @@ interface PromptState {
   };
 }
 
+/** The `/api/admin/refunds` report — the server's shapes, verbatim (`admin/refund-report.ts`). */
+interface RefundReport {
+  refunds: number;
+  creditsRefunded: number;
+  rawCostEatenUsd: number;
+  unjoined: number;
+  refundRate: number;
+  sampledGenerations: number;
+  byKind: Record<'generation' | 'media' | 'other', { refunds: number; credits: number }>;
+  byCause: Array<{ cause: string; refunds: number; credits: number }>;
+  rows: Array<{
+    id: string;
+    createdAt: string;
+    userId: string;
+    credits: number;
+    kind: string;
+    generationId?: string;
+    model?: string;
+    cause: string;
+    rawCostUsd?: number;
+  }>;
+}
+
 export function AdminTab() {
   const [forbidden, setForbidden] = useState(false);
   const [report, setReport] = useState<UsageReport | null>(null);
+  const [refunds, setRefunds] = useState<RefundReport | null>(null);
+  const [refundsHaveMore, setRefundsHaveMore] = useState(false);
+  const [refundRows, setRefundRows] = useState<RefundReport['rows']>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
   const [template, setTemplate] = useState<TemplateState | null>(null);
@@ -80,6 +106,22 @@ export function AdminTab() {
         return r.ok ? r.json() : null;
       })
       .then((data) => data && setReport((data as { report: UsageReport }).report))
+      .catch(() => undefined);
+
+    fetch('/api/admin/refunds')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+
+        const payload = data as { report: RefundReport; hasMore: boolean };
+
+        // Page one owns the SUMMARY; deeper pages only ever append rows (loadMoreRefunds below).
+        setRefunds(payload.report);
+        setRefundRows(payload.report.rows);
+        setRefundsHaveMore(payload.hasMore);
+      })
       .catch(() => undefined);
 
     fetch('/api/admin/gallery')
@@ -104,6 +146,30 @@ export function AdminTab() {
   };
 
   useEffect(load, []);
+
+  /**
+   * Page deeper into the refund history — the summary stays page one's (it describes the most recent
+   * window); only the ROWS accumulate, so "see them all" never re-aggregates a moving target.
+   */
+  const loadMoreRefunds = async () => {
+    setBusy(true);
+
+    try {
+      const r = await fetch(`/api/admin/refunds?offset=${refundRows.length}`);
+
+      if (!r.ok) {
+        return;
+      }
+
+      const data = (await r.json()) as { report: RefundReport; hasMore: boolean };
+      setRefundRows((rows) => [...rows, ...data.report.rows]);
+      setRefundsHaveMore(data.hasMore);
+    } catch {
+      // A failed page leaves what is already shown; the button stays for a retry.
+    } finally {
+      setBusy(false);
+    }
+  };
 
   /**
    * Promotion and rollback both re-point what EVERY new project mounts (§4.4), so they confirm first —
@@ -243,6 +309,110 @@ export function AdminTab() {
                 ))}
               </div>
             )}
+          </>
+        )}
+      </section>
+
+      {/*
+       * Refund audit (§4.10, spec/fail-loud.md). Every refund is money the OPERATOR ate — the provider
+       * billed us, the user got their credits back — so this section answers "am I refunding people,
+       * and why?" without a database console. Zero refunds is a real answer and renders as one.
+       */}
+      <section>
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Refund audit</h3>
+          {/* The COMPLETE audit — every refund ever, not the panel's window — in spreadsheet form. */}
+          {refunds && refunds.refunds > 0 && (
+            <a
+              href="/api/admin/refunds?format=csv"
+              download
+              className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary hover:bg-bolt-elements-item-backgroundActive"
+            >
+              Download all (CSV)
+            </a>
+          )}
+        </div>
+        {!refunds ? (
+          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+        ) : refunds.refunds === 0 ? (
+          <p className="mt-2 text-sm text-bolt-elements-textSecondary">
+            No refunds recorded — across {refunds.sampledGenerations.toLocaleString()} sampled generations, nothing has
+            been refunded.
+          </p>
+        ) : (
+          <>
+            <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <Stat label="Refunds" value={refunds.refunds.toLocaleString()} />
+              <Stat label="Refund rate" value={`${(refunds.refundRate * 100).toFixed(1)}%`} />
+              <Stat label="Credits refunded" value={refunds.creditsRefunded.toLocaleString()} />
+              {/* A lower bound: refunds we could not join to a generation contribute nothing here. */}
+              <Stat label="Cost eaten" value={`$${refunds.rawCostEatenUsd.toFixed(2)}`} />
+            </div>
+
+            <div className="mt-2 flex gap-3 text-xs text-bolt-elements-textTertiary">
+              {(['generation', 'media', 'other'] as const).map(
+                (kind) =>
+                  refunds.byKind[kind].refunds > 0 && (
+                    <span key={kind}>
+                      {kind}: {refunds.byKind[kind].refunds} ({refunds.byKind[kind].credits.toLocaleString()} cr)
+                    </span>
+                  ),
+              )}
+              {refunds.unjoined > 0 && <span>· {refunds.unjoined} without a generation record</span>}
+            </div>
+
+            {/* The "what do I fix" list — same failure grouped despite differing numbers in the message. */}
+            {refunds.byCause.length > 0 && (
+              <div className="mt-3">
+                <p className="text-[10px] text-bolt-elements-textTertiary uppercase tracking-wide">Top causes</p>
+                {refunds.byCause.slice(0, 6).map((bucket) => (
+                  <div key={bucket.cause} className="flex justify-between gap-3 py-0.5 text-xs">
+                    <span className="truncate text-bolt-elements-textSecondary" title={bucket.cause}>
+                      {bucket.cause}
+                    </span>
+                    <span className="shrink-0 text-bolt-elements-textPrimary">
+                      {bucket.refunds}× · {bucket.credits.toLocaleString()} cr
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-3">
+              <p className="text-[10px] text-bolt-elements-textTertiary uppercase tracking-wide">
+                Refunds ({refundRows.length.toLocaleString()} loaded{refundsHaveMore ? ', more available' : ' — all'})
+              </p>
+              <div className="max-h-56 overflow-y-auto">
+                {refundRows.map((row) => (
+                  <div
+                    key={row.id}
+                    className="flex items-baseline justify-between gap-3 py-1 text-xs border-b border-bolt-elements-borderColor/50 last:border-0"
+                    title={`${row.generationId ?? 'no generation id'} — user ${row.userId}`}
+                  >
+                    <span className="truncate text-bolt-elements-textSecondary">
+                      <span className="text-bolt-elements-textPrimary">{row.credits.toLocaleString()} cr</span>
+                      {' · '}
+                      {row.kind}
+                      {row.model ? ` · ${row.model}` : ''}
+                      {' · '}
+                      <span title={row.cause}>{row.cause.length > 60 ? `${row.cause.slice(0, 60)}…` : row.cause}</span>
+                    </span>
+                    <span className="shrink-0 text-bolt-elements-textTertiary">
+                      {new Date(row.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {refundsHaveMore && (
+                <button
+                  className="mt-1 text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary hover:bg-bolt-elements-item-backgroundActive disabled:opacity-50"
+                  disabled={busy}
+                  onClick={() => void loadMoreRefunds()}
+                >
+                  {busy ? 'Loading…' : 'Load 200 more'}
+                </button>
+              )}
+            </div>
           </>
         )}
       </section>

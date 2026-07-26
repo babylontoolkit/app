@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import { classNames } from '~/utils/classNames';
 import { sessionStore } from '~/lib/stores/session';
+import { compactAge, describeLedgerEntry, type LedgerTone } from '~/lib/billing/ledger-display';
 
 interface MySubscription {
   planId: string;
@@ -21,11 +22,30 @@ interface MySubscription {
   creditsPerMonth: number;
 }
 
+/** One `/api/credits` history row — the ledger as the server reports it, never recomputed here. */
+interface LedgerHistoryRow {
+  id: string;
+  delta: number;
+  reason: string;
+  balanceAfter: number;
+  note?: string;
+  createdAt: string;
+}
+
+/** Refunds stand out (fail-loud rule 5: a refund the user cannot find might as well not exist). */
+const TONE_CLASS: Record<LedgerTone, string> = {
+  refund: 'text-bolt-elements-icon-success font-medium',
+  credit: 'text-bolt-elements-icon-success',
+  debit: 'text-bolt-elements-textSecondary',
+  neutral: 'text-bolt-elements-textTertiary',
+};
+
 export function CreditsIndicator() {
   const session = useStore(sessionStore);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [subscription, setSubscription] = useState<MySubscription | null>(null);
+  const [history, setHistory] = useState<LedgerHistoryRow[] | null>(null);
 
   /*
    * Resolved only when the panel is actually opened. "Am I subscribed?" costs a Stripe API call, so it
@@ -39,7 +59,22 @@ export function CreditsIndicator() {
 
     fetch('/api/credits')
       .then((r) => (r.ok ? r.json() : null))
-      .then((data) => data && setSubscription((data as { subscription: MySubscription | null }).subscription))
+      .then((data) => {
+        if (!data) {
+          return;
+        }
+
+        const payload = data as { subscription: MySubscription | null; history?: LedgerHistoryRow[] };
+        setSubscription(payload.subscription);
+
+        /*
+         * The ledger history (SPEC §4.6, `spec/fail-loud.md` rule 5). This response always carried it;
+         * until 2026-07-25 the panel fetched it and rendered nothing — so a refund ("you have not been
+         * charged") was a claim the user had no way to verify. `null` means "not loaded yet"; an empty
+         * array is a real answer and renders as one.
+         */
+        setHistory(Array.isArray(payload.history) ? payload.history : []);
+      })
       .catch(() => undefined);
   }, [open]);
 
@@ -110,7 +145,7 @@ export function CreditsIndicator() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-64 z-50 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg p-3">
+        <div className="absolute right-0 top-full mt-1 w-72 z-50 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg p-3">
           <div className="flex items-baseline justify-between mb-2">
             <span className="text-sm font-medium text-bolt-elements-textPrimary">
               {balance.toLocaleString()} credits
@@ -199,6 +234,50 @@ export function CreditsIndicator() {
               {/* Not configured is a describable state, never a crash and never a dead button (§1.3). */}
               Purchasing is not configured on this server.
             </p>
+          )}
+
+          {/*
+           * Recent activity — the ledger, verbatim (SPEC §4.6; `spec/fail-loud.md` rule 5).
+           *
+           * Server-reported rows only: the client never recomputes a balance or infers a charge
+           * (the enhancer-drift lesson — the screen's numbers are the LEDGER's numbers or they are
+           * nobody's). Refunds render in the success tone so "you have not been charged" is a claim
+           * the user can verify in two clicks. The tooltip carries the note + running balance.
+           */}
+          {history !== null && (
+            <div className="mt-2 pt-2 border-t border-bolt-elements-borderColor">
+              <p className="text-[10px] text-bolt-elements-textTertiary uppercase tracking-wide mb-1">
+                Recent activity
+              </p>
+              {history.length === 0 ? (
+                <p className="text-[11px] text-bolt-elements-textTertiary">No activity yet.</p>
+              ) : (
+                <div className="max-h-44 overflow-y-auto flex flex-col gap-0.5 pr-0.5">
+                  {history.map((entry) => {
+                    const view = describeLedgerEntry(entry);
+
+                    return (
+                      <div
+                        key={entry.id}
+                        className="flex items-baseline justify-between gap-2 px-1 py-0.5 rounded text-[11px] hover:bg-bolt-elements-background-depth-3"
+                        title={`${entry.note ?? view.label} — balance ${entry.balanceAfter.toLocaleString()} (${new Date(entry.createdAt).toLocaleString()})`}
+                      >
+                        <span className="truncate text-bolt-elements-textSecondary">
+                          {view.label}
+                          <span className="text-bolt-elements-textTertiary">
+                            {' '}
+                            · {compactAge(entry.createdAt, new Date())}
+                          </span>
+                        </span>
+                        <span className={classNames('shrink-0 tabular-nums', TONE_CLASS[view.tone])}>
+                          {view.amount}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}

@@ -52,6 +52,14 @@ if (!import.meta.env.SSR) {
               description: 'message' in message ? message.message : 'Unknown error',
               content: `Error occurred at ${message.pathname}${message.search}${message.hash}\nPort: ${message.port}\n\nStack trace:\n${cleanStackTrace(message.stack || '')}`,
               source: 'preview',
+
+              /*
+               * Stamped so a later successful load can retire it (`lib/stores/preview-alert.ts`).
+               * Without this the alert is permanent, and a transient error — e.g. a module request
+               * served the SPA fallback HTML while Vite reloaded after a git sync — leaves an
+               * "Ask codewrx.ai" button (a PAID action) sitting next to a working preview.
+               */
+              raisedAt: Date.now(),
             });
           }
         });
