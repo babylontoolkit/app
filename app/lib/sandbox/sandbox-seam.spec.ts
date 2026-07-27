@@ -265,7 +265,7 @@ describe('the interface is implementable without WebContainer', () => {
     }
 
     return {
-      capabilities: { terminal: false, textSearch: false, watch: true },
+      capabilities: { terminal: false, textSearch: false, watch: true, clearPort: false },
 
       // An in-memory provider has no previous session to restore from.
       bootRestoredFilesystem: false,
@@ -394,7 +394,8 @@ describe('the WebContainer adapter translates the right calls', () => {
     expect(double.spawn).toHaveBeenCalledWith('npm', [], undefined);
   });
 
-  it('declares all three capabilities, which is what makes it the reference implementation', () => {
-    expect(WEBCONTAINER_CAPABILITIES).toEqual({ terminal: true, textSearch: true, watch: true });
+  it('declares the capabilities it has — and NOT clearPort, which only a reusable sandbox needs', () => {
+    // A WebContainer dies with the tab, so no port can be inherited from a previous session.
+    expect(WEBCONTAINER_CAPABILITIES).toEqual({ terminal: true, textSearch: true, watch: true, clearPort: false });
   });
 });

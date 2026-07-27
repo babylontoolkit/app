@@ -22,7 +22,7 @@ function validList(): MarketPriceList {
     schemaVersion: 1,
     capturedAt: '2026-07-18',
     source: 'test',
-    llm: { 'claude-opus-4-8': { inputPerMTok: 2, outputPerMTok: 10 } },
+    llm: { 'claude-opus-5': { inputPerMTok: 2, outputPerMTok: 10 } },
     media: {
       'nano-banana-2': {
         kind: 'image',
@@ -53,6 +53,25 @@ describe('validation — the promotion wall', () => {
     expect(validateMarketPriceList(validList()).ok).toBe(true);
   });
 
+  /*
+   * 🔴 THE PLATFORM DEFAULT MUST ALWAYS BE PRICED (owner rule, 2026-07-27). An unpriced model bills
+   * at the most-expensive row — the PREMIUM tier's rates, 2x the default's — so a list omitting the
+   * default row would silently double-bill every ordinary generation the moment it went live. This
+   * one wall guards BOTH doors: promotion (`promoteMarketPrices` validates before writing) and load
+   * (`loadVersion` re-validates stored bytes, so a legacy list missing the row fails to load and the
+   * platform serves the BAKED list, which always prices the default). The premium tier can never
+   * become the default's effective price through any path.
+   *
+   * The default's id is pinned LITERALLY here on purpose: changing `DEFAULT_MODEL` must fail this
+   * test and force the pins (and the baked row) to move with it.
+   */
+  it('refuses a list that does not price the platform default — the premium tier must never fall through', () => {
+    const list = validList();
+    list.llm = { 'claude-opus-4-8': { inputPerMTok: 2, outputPerMTok: 10 } }; // priced, but NOT the default
+
+    expect(errorsOf(list).join()).toMatch(/claude-opus-5/);
+  });
+
   it.each([[null], ['a string'], [42], [[]]])('rejects a non-object list: %s', (bad) => {
     expect(validateMarketPriceList(bad).ok).toBe(false);
   });
@@ -69,7 +88,7 @@ describe('validation — the promotion wall', () => {
     'rejects an LLM price it cannot trust: %s',
     (bad) => {
       const list = validList();
-      list.llm['claude-opus-4-8'] = { inputPerMTok: bad as number, outputPerMTok: 10 };
+      list.llm['claude-opus-5'] = { inputPerMTok: bad as number, outputPerMTok: 10 };
       expect(errorsOf(list).join()).toMatch(/inputPerMTok/);
     },
   );
@@ -85,7 +104,7 @@ describe('validation — the promotion wall', () => {
    */
   it('rejects quoted cache rates on an llm row', () => {
     const list = validList();
-    (list.llm['claude-opus-4-8'] as unknown as Record<string, number>).cacheReadPerMTok = 0.2;
+    (list.llm['claude-opus-5'] as unknown as Record<string, number>).cacheReadPerMTok = 0.2;
     expect(errorsOf(list).join()).toMatch(/cache rates derive/i);
   });
 
@@ -124,7 +143,7 @@ describe('validation — the promotion wall', () => {
 
   it('collects EVERY error at once, not just the first', () => {
     const list = validList();
-    list.llm['claude-opus-4-8'] = { inputPerMTok: 0, outputPerMTok: 0 };
+    list.llm['claude-opus-5'] = { inputPerMTok: 0, outputPerMTok: 0 };
     list.media['nano-banana-2'].variants[0].usd = -1;
     expect(errorsOf(list).length).toBeGreaterThanOrEqual(3);
   });

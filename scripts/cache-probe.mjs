@@ -28,7 +28,7 @@ const env = Object.fromEntries(
 );
 
 const KEY = env.KIE_API_KEY;
-const MODEL = env.LLM_MODEL || env.KIE_DEFAULT_MODEL || 'claude-opus-4-8';
+const MODEL = env.LLM_MODEL || env.KIE_DEFAULT_MODEL || 'claude-opus-5';
 const BASE = 'https://api.kie.ai/claude/v1';
 
 if (!KEY) {

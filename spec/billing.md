@@ -32,6 +32,15 @@ the 2× relationship across the whole rate table.
 ⚠️ **Sonnet 5 carries introductory pricing ($2/$10 per MTok) until 2026-08-31; the rate table
 deliberately uses the standard $3/$15.** Seeding the intro rate would compress the margin below target
 the day it lapses — silently. Under-charging ourselves for a few weeks is the right direction to err.
+
+⚠️ **Sandbox compute is a cost input the formula does not see (2026-07-27, PLACEHOLDER in the
+margin).** A CodeSandbox build (SPEC §8) runs the project on a platform-billed microVM (~$0.074/hr
+Pico) with NO metering yet — no `sandbox` ledger reason, no sweep. Until that ships, the cost is
+folded into `CREDIT_MARGIN` as a documented placeholder: ~+25% on raw cost ≈ 5–7 GM points at 4.0
+(~65–69% effective), `5.0` restores the ~75% target — applied to BOTH providers by owner decision
+until real per-provider numbers exist (WebContainer's true marginal compute is ~$0 + a fixed plan
+fee). Full derivation and the operator guidance live in **CREDITS.md §"Sandbox compute"**; the end
+state is metering, at which point the placeholder comes OUT of the margin.
 - Self-healing repair turns: tokens accumulate onto the parent generation at `REPAIR_WEIGHT` (config, e.g. 0.5).
 - Aborted (Stop): charge tokens actually consumed to abort.
 - Hard failure (API error, zero actions parsed + error status): auto-refund row (`reason='refund'`).
@@ -75,7 +84,17 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
 - **Baked fallback in code** (`billing/baked-market-prices.ts`) — captured from KIE's own public
   pricing feed (`POST api.kie.ai/client/v1/model-pricing/page`, 372 rows, 2026-07-18), which
   independently confirmed the measured LLM rates to the cent (4-8 $2/$10, 4-7 $1.425/$7.15, fable-5
-  $4/$20). Billing can never find "no prices".
+  $4/$20). `claude-opus-5` (the platform default since 2026-07-27) was added at 4-8's exact $2/$10 —
+  owner-confirmed, with cache accounting probe-verified against KIE's own usage numbers the same day
+  (writes and reads REPORTED, unlike the 4-7/fable rows that report 0 write while being charged).
+  Billing can never find "no prices".
+- **A list MUST price the platform default model (owner rule, 2026-07-27).** `validateMarketPriceList`
+  refuses a list whose `llm` table lacks the `DEFAULT_MODEL` row — at PROMOTE and at LOAD
+  (`loadVersion` re-validates stored bytes, so a legacy list missing the row fails to load and baked
+  serves instead). Without this, an omitted default would bill every ordinary generation at the
+  most-expensive row's rates — the PREMIUM tier's, 2× the default's — silently. The premium tier can
+  never become the default's effective price through any path (`market-prices.spec.ts` +
+  `market-price-store.spec.ts` pin both doors).
 - **Admin-promoted active list** (`billing/market-price-store.ts`): immutable versions in the
   ObjectStore (`pricing/kie-market/versions/mp_*.json`) + an `active.json` pointer. Promote validates
   BEFORE writing (a refused list changes nothing, all errors reported at once); rollback only
@@ -298,7 +317,7 @@ what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the lic
 
 ## Verified end-to-end (2026-07, local mode)
 
-- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **800** since the KIE move + the 4.0 margin reprice (2026-07-18) — ~3.5× a measured KIE creation at margin 4.0, and deliberately below the 1000-credit premium minimum so a fresh grant cannot buy the 2× model).
+- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **800** since the KIE move + the 4.0 margin reprice (2026-07-18) — ~3.5× a measured KIE creation at margin 4.0, and deliberately below the 1,200-credit premium minimum (`DEFAULT_PREMIUM_MINIMUM_CREDITS`) so a fresh grant cannot buy the 2× model).
 - A live generation settled against real usage: `generation −7 → 993` (raw cost $0.0184,
   `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
 - The `generations` record attributes the charge to a user, a model, and its four token classes.

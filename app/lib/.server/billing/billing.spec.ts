@@ -227,7 +227,7 @@ describe('rate table', () => {
        *
        * This asserted `providerRates()[provider][PLATFORM_MODEL]` while the platform model was one
        * constant shared by both. That coupling is wrong in principle even when the two happen to agree
-       * (as they do today — both default to `claude-opus-4-8`): a provider's default is a fact about
+       * (as they do today — both default to `claude-opus-5`): a provider's default is a fact about
        * THAT provider's catalogue and pricing, and KIE lists rows Anthropic has never heard of
        * (`claude-opus-4-7`, `claude-fable-5` — see `NO_ANTHROPIC_ROW` below). Demanding every provider
        * price the OTHER provider's model is a question with no useful answer; what must hold is that
@@ -278,6 +278,11 @@ describe('KIE rates', () => {
    * admin promotion — covered in the selector describe below.
    */
   it.each([
+    /*
+     * The platform default since 2026-07-27 — KIE serves Opus 5 at 4-8's exact rates
+     * (owner-confirmed; cache accounting probe-verified the same day, see baked-market-prices.ts).
+     */
+    ['claude-opus-5', 2.0, 10.0],
     ['claude-opus-4-8', 2.0, 10.0],
     ['claude-opus-4-7', 1.425, 7.15],
     ['claude-opus-4-6', 1.425, 7.15],
@@ -289,7 +294,7 @@ describe('KIE rates', () => {
     expect(KIE_MODEL_RATES[model].outputPerMTok).toBe(output);
   });
 
-  /* No row beyond the pinned six can slip in unpinned — the "matches nothing" control. */
+  /* No row beyond the pinned seven can slip in unpinned — the "matches nothing" control. */
   it('pins EVERY baked KIE row (a new row must come with its own pin)', () => {
     expect(Object.keys(KIE_MODEL_RATES).sort()).toEqual([
       'claude-fable-5',
@@ -297,6 +302,7 @@ describe('KIE rates', () => {
       'claude-opus-4-6',
       'claude-opus-4-7',
       'claude-opus-4-8',
+      'claude-opus-5',
       'claude-sonnet-5',
     ]);
   });

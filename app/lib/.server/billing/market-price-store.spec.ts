@@ -16,6 +16,7 @@ import {
   invalidateMarketPricesCache,
   listVersions,
   loadVersion,
+  versionKey,
   promoteMarketPrices,
   readPointer,
   rollbackMarketPrices,
@@ -74,6 +75,41 @@ describe('promotion', () => {
     expect(await listVersions(store)).toEqual([]);
     expect(await readPointer(store)).toBeNull();
     expect(activeMarketPrices()).toBe(BAKED_MARKET_PRICES);
+  });
+
+  /*
+   * 🔴 THE PREMIUM TIER MUST NEVER BECOME THE DEFAULT'S PRICE (owner rule, 2026-07-27). A list that
+   * does not price the platform default cannot be PROMOTED — and, below, cannot even be LOADED —
+   * because `ratesFor` bills an unpriced model at the most-expensive row (the premium tier's, 2x).
+   */
+  it('refuses to promote a list that does not price the platform default', async () => {
+    const store = memoryStore();
+    const missingDefault = {
+      ...BAKED_MARKET_PRICES,
+      llm: { 'claude-opus-4-8': { inputPerMTok: 2, outputPerMTok: 10 } },
+    };
+
+    const result = await promoteMarketPrices(store, missingDefault);
+
+    expect(result.ok).toBe(false);
+    expect(result.ok ? '' : result.errors.join('; ')).toMatch(/claude-opus-5/);
+    expect(activeMarketPrices()).toBe(BAKED_MARKET_PRICES);
+  });
+
+  /*
+   * The LOAD half of the same wall: stored bytes are re-validated on read, so a legacy list promoted
+   * before the default-row rule existed (or bytes edited at rest) fails to load, `ensureMarketPrices`
+   * serves the BAKED list, and the default is priced at its own rate — never the premium fallback.
+   */
+  it('refuses to LOAD stored bytes that do not price the platform default — baked serves instead', async () => {
+    const store = memoryStore();
+    const legacy = {
+      ...BAKED_MARKET_PRICES,
+      llm: { 'claude-opus-4-8': { inputPerMTok: 2, outputPerMTok: 10 } },
+    };
+    await store.put(versionKey('mp_legacy'), new TextEncoder().encode(JSON.stringify(legacy)));
+
+    expect(await loadVersion(store, 'mp_legacy')).toBeNull();
   });
 
   it('stores an immutable version and points at it', async () => {

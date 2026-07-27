@@ -50,6 +50,22 @@ export const HEARTBEAT_QUIET_MS = 2500;
 export type AgentStatusPhase = 'thinking' | 'generating';
 
 /**
+ * WHAT this turn is — so the panel can say something instead of "Thinking".
+ *
+ * Reported live (2026-07-27): *"That 2-3min of empty is a killer… thinking about what???"* The panel
+ * answered "is it alive" (its job) and nothing else, and on a creation — the longest wait in the
+ * product, minutes on a hard brief — an anonymous "Thinking" is the least informative thing we could
+ * put in front of someone watching their first project get built.
+ *
+ * 🔴 **These are FACTS THE PROXY ALREADY HOLDS, never a guess about what the model is doing.** The turn
+ * kind is decided before a token is spent (`isCreationTurn`, `isRepair`, the discuss note) — exactly the
+ * signals `effort-policy.ts` uses, and for the same reason: the alternative is inferring activity from
+ * the stream and narrating a story we cannot see. This says "we asked it to build your project", which
+ * is true for the whole turn; it never says "it is writing Home.tsx now", which we do not know.
+ */
+export type AgentStatusKind = 'creation' | 'repair' | 'plan' | 'edit';
+
+/**
  * The wire shape of one heartbeat. `seq` exists for the CLIENT's replay problem: the `useChat`
  * data array is re-scanned from the top on every stream chunk, so without a monotonic key the
  * client would re-ingest old heartbeats each pass and a stale status would look forever fresh.
@@ -60,6 +76,9 @@ export interface AgentStatusPart {
   generationId: string;
   seq: number;
   phase: AgentStatusPhase;
+
+  /** What the turn IS (creation/repair/plan/edit) — a fact the proxy already holds, never a guess. */
+  kind: AgentStatusKind;
 
   /** Wall time since the generation's stream began, per the SERVER's clock — never a client guess. */
   elapsedMs: number;
@@ -84,6 +103,9 @@ export interface HeartbeatController {
 export interface HeartbeatOptions {
   intervalMs?: number;
   quietMs?: number;
+
+  /** What the turn is. Defaults to `edit` — the copy that claims the least. */
+  kind?: AgentStatusKind;
 }
 
 export function createHeartbeat(
@@ -93,6 +115,7 @@ export function createHeartbeat(
 ): HeartbeatController {
   const intervalMs = options.intervalMs ?? HEARTBEAT_INTERVAL_MS;
   const quietMs = options.quietMs ?? HEARTBEAT_QUIET_MS;
+  const kind = options.kind ?? 'edit';
 
   const startedAt = Date.now();
   let lastActivityAt = startedAt;
@@ -124,6 +147,7 @@ export function createHeartbeat(
          * model pausing mid-answer — different message, same liveness guarantee.
          */
         phase: sawText ? 'generating' : 'thinking',
+        kind,
         elapsedMs: now - startedAt,
         silentMs,
       });

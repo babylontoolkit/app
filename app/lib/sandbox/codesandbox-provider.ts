@@ -32,6 +32,7 @@
 import type { SandboxClient } from '@codesandbox/sdk/browser';
 import { brand } from '~/config/brand';
 import {
+  clearPortScript,
   flattenMountTree,
   needsContent,
   resolveInWorkdir,
@@ -59,12 +60,23 @@ import type {
  * `/bin/jsh` shim. `watch` is true because incremental events DO arrive; the missing content is
  * refilled by this adapter rather than being a reason to make callers poll. `textSearch` is false:
  * there is no ripgrep-class API, and `Search.tsx` already reads the flag instead of probing.
+ * `clearPort` is true because it is this provider that NEEDS it: a resumed/forked VM wakes with the
+ * previous session's dev server still bound to its port (see `clearPortScript`).
  */
 export const CODESANDBOX_CAPABILITIES: SandboxCapabilities = {
   terminal: true,
   textSearch: false,
   watch: true,
+  clearPort: true,
 };
+
+/**
+ * Upper bound on {@link SandboxProvider.clearPort}. The script self-bounds at ~6s (its TERM-wait
+ * loop plus the KILL grace); this covers the wire hanging UNDER it — a Pitcher call that never
+ * answers must not hang project creation, whose worst case without the clear was the collision
+ * this exists to prevent.
+ */
+const CLEAR_PORT_TIMEOUT_MS = 10_000;
 
 /**
  * The bash snippet that makes a plain shell speak `BoltShell`'s OSC protocol.
@@ -72,19 +84,43 @@ export const CODESANDBOX_CAPABILITIES: SandboxCapabilities = {
  * `$?` is captured into `__bolt_c` FIRST — the `printf` that reports the status would otherwise
  * overwrite the very status being reported. Escapes are `\033`/`\007` so BASH's printf produces the
  * control bytes; a JavaScript `\x1b` here would be substituted a step too early.
+ *
+ * 🔴 **`PS0` is the half that makes the protocol ATTRIBUTABLE, and removing it kills `npm install`
+ * on every creation (MEASURED live, 2026-07-27).** `PROMPT_COMMAND` fires on EVERY prompt draw —
+ * including the initial one at attach, which jsh never marks — so a fresh bash buffers one or two
+ * `exit`+`prompt` pairs that nothing consumes. `executeCommand`'s exit-wait then resolves against
+ * the PREVIOUS command's markers: the creation's `npm install` "completed" instantly with a stale
+ * exit 0, the chain moved on to `npm run dev`, whose leading interrupt **killed the still-running
+ * install** — and the start action then "failed" (stale 130) over a dev server that was actually
+ * up. `PS0` is expanded by bash after READING a command and before RUNNING it — never on a prompt
+ * redraw — so it is an in-band "command started" marker: `shell.ts` ignores every exit marker that
+ * arrives before it (`beginOsc`). In-band beats arrival-time gating because a stale marker can be
+ * in flight across the network at the moment the command is typed.
+ *
+ * `BROWSER=true` (the no-op binary): the starter's dev script asks vite to open a browser, and
+ * inside a headless VM that spawns `xdg-open`, which does not exist — every `npm run dev` printed
+ * `Error: spawn xdg-open ENOENT` into the user's terminal over a perfectly healthy server.
  */
 const OSC_BASHRC = `
-# --- ${brand.productName}: OSC protocol for the agent's shell (do not edit) ---
+# --- ${brand.productName}: OSC protocol for the agent's shell v2 (do not edit) ---
 __bolt_osc() {
   __bolt_c=$?
   printf "\\033]654;exit=0:%s\\007" "$__bolt_c"
   printf "\\033]654;prompt\\007"
 }
 PROMPT_COMMAND=__bolt_osc
+PS0='\\e]654;begin\\a'
+export BROWSER=true
 # --- end ---
 `;
 
-const OSC_BASHRC_MARKER = '__bolt_osc()';
+/**
+ * VERSIONED: the presence check must name something only the CURRENT block contains, because the
+ * sandboxes this matters most on are the ones that already carry an older block — a v1 marker would
+ * skip the append exactly where the fix is needed. Old blocks are left in place (appending is the
+ * only safe edit to a file the image owns); bash takes the LAST assignment, so the newest block wins.
+ */
+const OSC_BASHRC_MARKER = "PS0='\\e]654;begin";
 
 /** The shells `terminals.create` can start natively — anything else has to be typed into one. */
 const SUPPORTED_SHELLS = ['bash', 'zsh', 'fish', 'ksh', 'dash'] as const;
@@ -235,8 +271,11 @@ export function createCodeSandboxProvider(
      *
      * `readyOsc` is deliberately ABSENT: bash sends no readiness escape, and waiting for one would
      * hang the terminal forever with no error. Omitting it selects the "ready on first output" path.
+     *
+     * `beginOsc` names the PS0 marker from `OSC_BASHRC` — see its doc for the stale-marker kill it
+     * exists to prevent. It must match what the rc block emits, which the provider spec pins.
      */
-    shell: { command: 'bash', args: [] },
+    shell: { command: 'bash', args: [], beginOsc: 'begin' },
 
     get workdir(): string {
       return workdir();
@@ -352,6 +391,23 @@ export function createCodeSandboxProvider(
         open.dispose();
         close.dispose();
       };
+    },
+
+    async clearPort(port: number): Promise<void> {
+      /*
+       * Through `commands.runBackground` like any other spawn — the script does the killing and the
+       * bounded wait-for-release (see `clearPortScript` for why both halves exist). The race is the
+       * provider's deadline promise from the seam contract: resolve, never hang the caller, even if
+       * the wire does.
+       */
+      const process = await spawnBackground(
+        client,
+        toShellCommand('sh', ['-c', clearPortScript(port)]),
+        { cwd: workdir() },
+        false,
+      );
+
+      await Promise.race([process.exit, new Promise((resolve) => setTimeout(resolve, CLEAR_PORT_TIMEOUT_MS))]);
     },
 
     teardown(): void {
@@ -568,11 +624,14 @@ async function spawnInteractive(
 }
 
 /**
- * Make sure `~/.bashrc` installs the OSC hook, exactly once.
+ * Make sure `~/.bashrc` installs the CURRENT OSC hook, exactly once per version.
  *
- * Idempotent via a marker rather than by overwriting: `.bashrc` belongs to the sandbox image and may
- * carry setup the project needs, so appending is the only safe edit. Appending WITHOUT the marker
- * check would grow the file by one block per terminal opened.
+ * Idempotent via a VERSIONED marker rather than by overwriting: `.bashrc` belongs to the sandbox
+ * image and may carry setup the project needs, so appending is the only safe edit. The marker names
+ * something only the newest block contains (`OSC_BASHRC_MARKER`), because the sandboxes that most
+ * need an upgraded block are precisely the ones that already carry an old one — a version-blind
+ * marker would skip the append exactly there. Old blocks stay behind; bash takes the last
+ * assignment, so the newest wins. Appending WITHOUT the check would grow the file per terminal.
  *
  * Best-effort: a failure here costs the OSC protocol (agent shell actions stop reporting completion),
  * which is bad — but throwing would cost the terminal entirely, which is worse, and the user can

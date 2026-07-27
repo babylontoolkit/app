@@ -25,13 +25,19 @@ import type {
 } from './types';
 
 /**
- * WebContainer does all three. Stated as a constant rather than inlined so the contrast with a
- * future server provider is a one-line diff in a readable place.
+ * WebContainer does the first three. Stated as a constant rather than inlined so the contrast with
+ * a server provider is a one-line diff in a readable place.
+ *
+ * `clearPort` is false BECAUSE it is unneeded, not because it is unimplementable: a WebContainer
+ * dies with the tab, so no port can be inherited from a previous page session. (A dev server does
+ * survive SPA navigation within one page — creating a project right after another in the same tab
+ * keeps upstream's long-standing behaviour: the old server keeps serving the newly-mounted files.)
  */
 export const WEBCONTAINER_CAPABILITIES: SandboxCapabilities = {
   terminal: true,
   textSearch: true,
   watch: true,
+  clearPort: false,
 };
 
 export function createWebContainerProvider(container: WebContainer): SandboxProvider {

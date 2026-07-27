@@ -17,7 +17,10 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } fro
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { BaseChat } from './BaseChat';
-import { BootScreen } from './BootScreen';
+import { Menu } from '~/components/sidebar/Menu.client';
+import { ClientOnly } from 'remix-utils/client-only';
+import { BootScreen, CreationSplash } from './BootScreen';
+import { bootProgress } from '~/lib/stores/boot-progress';
 import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
 import { useSettings } from '~/lib/hooks/useSettings';
@@ -25,6 +28,7 @@ import type { ProviderInfo } from '~/types/model';
 import { useSearchParams } from '@remix-run/react';
 import { parseClientCommand } from '~/lib/chat/client-commands';
 import { contextPanelOpen, resetContextStats, updateContextStats } from '~/lib/stores/context-stats';
+import { baseEffortStore, effortPanelOpen } from '~/lib/stores/effort';
 import { chatResetRequest } from '~/lib/stores/chat-reset';
 import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
 import { resetActiveSkills, updateActiveSkills } from '~/lib/stores/active-skills';
@@ -32,6 +36,8 @@ import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
 import { asCreationFailure } from '~/lib/registry/creation-errors';
 import { waitForMountVisible } from '~/lib/registry/mount';
+import { settleAfterCreation } from '~/lib/registry/settle';
+import { waitForActionsSettled } from '~/lib/runtime/actions-settled';
 import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registry/match';
 import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
 import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
@@ -84,7 +90,19 @@ export function Chat() {
           startFreshChat={startFreshChat}
         />
       ) : (
-        <BootScreen />
+        <>
+          {/*
+           * Booting a project must NOT take the whole page (owner decision 2026-07-27). The sidebar is
+           * rendered by `BaseChat`, which does not exist yet on this branch — so the boot screen owned
+           * the entire viewport, and a boot that stalls left the user with no way out: no dashboard, no
+           * other project, no settings. Rendering the sidebar here keeps the chrome reachable while the
+           * content window narrates the wait, and it costs nothing when the sidebar is undocked (it is
+           * hidden until hovered, and slides out OVER the boot screen — `.z-sidebar` beats its z-index).
+           * The creation splash obeys the same rule from the other side: it sits under the chrome.
+           */}
+          <ClientOnly>{() => <Menu />}</ClientOnly>
+          <BootScreen />
+        </>
       )}
     </>
   );
@@ -195,6 +213,12 @@ export const ChatImpl = memo(
     const premiumEnabled = useStore(premiumModelStore);
     const session = useStore(sessionStore);
     const premiumRequested = premiumEnabled && canUsePremium(session);
+
+    /*
+     * The session's thinking-effort floor (§4.2.9), set by `/effort`. Session-scoped by design — it resets
+     * to `medium` on reload so a floor raised for one hard problem cannot quietly bill for months.
+     */
+    const baseEffort = useStore(baseEffortStore);
 
     /*
      * A mounted project means we are BUILDING, even with nothing said yet (§4.5.6).
@@ -409,10 +433,18 @@ export const ChatImpl = memo(
 
         /* The premium-model opt-in (§4.6.1) — a boolean the server maps to the one configured premium model. */
         premium: premiumRequested,
+
+        /*
+         * The session's base thinking effort (§4.2.9) — `medium` (default) or `high`. A FLOOR, not a cap:
+         * the server still escalates repairs and `/slash` turns above it, and it validates the value rather
+         * than trusting it, so this can only ever ask for one of the two user-selectable levels.
+         */
+        effort: baseEffort,
       },
       sendExtraMessageFields: true,
       onError: (e) => {
         setFakeLoading(false);
+
         handleError(e, 'chat');
       },
       onFinish: (message, response) => {
@@ -427,7 +459,36 @@ export const ChatImpl = memo(
          */
         if (creationCompleteRef.current) {
           creationCompleteRef.current = false;
-          toast.success('🎮 Your game is ready — open Preview to play it.');
+
+          /*
+           * 🔴 THE STREAM ENDING IS NOT THE BUILD FINISHING (reported live 2026-07-27).
+           *
+           * `onFinish` fires when the model stops TALKING. The work is the `<boltAction>`s it queued,
+           * which execute against the sandbox afterwards — and on a server sandbox each file write is a
+           * round trip, so the queue lags the text badly. Observed: this toast on screen, the model's
+           * closing summary in the past tense, and the artifact card still spinning on
+           * `Write src/custom/splash.css`. We announced a finished game while writing the splash, and
+           * sent the user to a preview that was mid-rebuild — which reads as a broken build.
+           *
+           * So the celebration waits for every queued action to reach a terminal state (`actions-settled.ts`;
+           * failed and aborted count — waiting for `complete` would hang on the turn that most needs a
+           * message). Fire-and-forget: a slow tail must never block `onFinish`'s other work below.
+           */
+          void waitForActionsSettled({
+            readStatuses: () =>
+              Object.values(workbenchStore.artifacts.get()).flatMap((artifact) =>
+                Object.values(artifact.runner.actions.get()).map((action) => action.status),
+              ),
+          }).then((result) => {
+            if (result.settled) {
+              toast.success('🎮 Your game is ready — open Preview to play it.');
+            } else {
+              /* Never claim ready when it is not — say what is still happening (§"fail loud"). */
+              toast.info(
+                `Your project is still writing ${result.stillPending} file(s). It will be ready in the Preview shortly.`,
+              );
+            }
+          });
         }
 
         /*
@@ -1035,7 +1096,7 @@ export const ChatImpl = memo(
      * stops. `visiblePrompt` is what the user actually typed — the wizard's compiled text is hidden
      * behind its summary card, per §4.7.
      */
-    const startProject = async (options: {
+    const runStartProject = async (options: {
       entry: GameRegistryEntry;
       prompt?: string;
       visiblePrompt?: string;
@@ -1089,6 +1150,9 @@ export const ChatImpl = memo(
        * already answered yes and no later failure may change that answer.
        */
       try {
+        // The rest of the splash's story: server registration + the mount-visibility wait below.
+        bootProgress.set({ step: 'creating-finalize' });
+
         setProjectSeed({ entry, className, title, prompt, matched });
 
         /*
@@ -1198,6 +1262,31 @@ export const ChatImpl = memo(
          */
         await waitForMountVisible(mustBeVisible);
 
+        /*
+         * THE PROJECT IS CREATED. THE BUILD HAS NOT STARTED. That order is the hard rule, and this is
+         * the seam between its two halves (`registry/settle.ts`).
+         *
+         * `waitForMountVisible` above returns the instant its sentinels appear — but the watcher is
+         * still draining the rest of the tree behind them, and on a server sandbox each of those files
+         * is a round trip rather than a memory write. So we hold here until the file map STOPS CHANGING
+         * (bounded 5–10s: a floor, because a watcher that has not started yet is trivially "quiet", and
+         * a ceiling, because the button must never hang — §1.3 principle 0).
+         *
+         * The phase is set FIRST so the splash says "Project created / Preparing to build your
+         * frontend…" for the whole wait. That is not decoration: it is the moment the user's project
+         * exists, and up to now the UI implied it was still being assembled.
+         */
+        bootProgress.set({ step: 'creating-settle' });
+
+        const settled = await settleAfterCreation({
+          readCount: () => Object.keys(workbenchStore.files.get()).length,
+        });
+
+        logger.info(
+          `Creation settled after ${settled.elapsedMs}ms with ${settled.finalCount} files ` +
+            `(${settled.quiesced ? 'quiesced' : 'ceiling reached'}) — starting the build`,
+        );
+
         // This turn IS the creation build — onFinish celebrates it once (see creationCompleteRef).
         creationCompleteRef.current = true;
 
@@ -1226,6 +1315,21 @@ export const ChatImpl = memo(
         setFakeLoading(false);
 
         return true;
+      }
+    };
+
+    /*
+     * Every creation entry point goes through here so the splash lifecycle has ONE owner: the
+     * `creating-*` phases (set inside `createProjectFromRegistry` and the finalize step) drive
+     * `CreationSplash`, and the `finally` guarantees it comes down on every exit — success, fatal
+     * refusal, or a post-create failure. A stale phase would leave a full-screen overlay squatting
+     * on a usable chat, which is worse than the blank screen it replaces.
+     */
+    const startProject = async (options: Parameters<typeof runStartProject>[0]): Promise<boolean> => {
+      try {
+        return await runStartProject(options);
+      } finally {
+        bootProgress.set({ step: 'idle' });
       }
     };
 
@@ -1393,6 +1497,18 @@ export const ChatImpl = memo(
       if (clientCommand?.kind === 'context') {
         clearDraftPrompt();
         contextPanelOpen.set(true);
+
+        return;
+      }
+
+      /*
+       * `/effort` — the thinking-effort picker (§4.2.9). Pure client toggle, like `/context`: it changes a
+       * session preference the NEXT generation carries, so nothing is posted and nothing is charged.
+       */
+      if (clientCommand?.kind === 'effort') {
+        clearDraftPrompt();
+        contextPanelOpen.set(false);
+        effortPanelOpen.set(true);
 
         return;
       }
@@ -1574,7 +1690,7 @@ export const ChatImpl = memo(
       [input, handleInputChange],
     );
 
-    return (
+    const baseChat = (
       <BaseChat
         ref={animationScope}
         textareaRef={textareaRef}
@@ -1653,6 +1769,13 @@ export const ChatImpl = memo(
         addToolResult={addToolResult}
         onWebSearchResult={handleWebSearchResult}
       />
+    );
+
+    return (
+      <>
+        {baseChat}
+        <CreationSplash />
+      </>
     );
   },
 );

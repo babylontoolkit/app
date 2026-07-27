@@ -98,6 +98,68 @@ export async function newShellProcess(sandbox: SandboxProvider, terminal: ITermi
 
 export type ExecutionResult = { output: string; exitCode: number } | undefined;
 
+/** Running state for one OSC wait — see {@link reduceOscSignals}. */
+export interface OscWaitState {
+  /** May exit markers be trusted yet? Starts false only when a begin marker is required. */
+  armed: boolean;
+
+  /** The last exit code recorded from a TRUSTED exit marker. */
+  exitCode: number;
+
+  /** The wait is satisfied. */
+  done: boolean;
+}
+
+/**
+ * Fold one chunk's OSC signals into a wait's state — the accounting half of `waitTillOscCode`,
+ * pure so the stale-marker rules can be pinned by tests.
+ *
+ * 🔴 **Why arming exists (MEASURED live on CodeSandbox, 2026-07-27):** bash's `PROMPT_COMMAND`
+ * emits `exit`+`prompt` markers on prompt draws that follow NO command — the initial draw at
+ * attach, and Ctrl-C at an idle prompt. Nothing consumes those, so they sit buffered in the stream
+ * and the NEXT wait matches them: the creation's `npm install` "completed" instantly against a
+ * stale exit 0, the action chain moved on to `npm run dev`, and its leading interrupt KILLED the
+ * still-running install — then the start action "failed" with the install's stale 130 over a dev
+ * server that was actually up. When the shell declares a `beginOsc` (bash's `PS0`, expanded only
+ * when a typed command actually starts), every signal BEFORE that marker is stale by construction
+ * and ignored. jsh declares none, so `afterOsc` is undefined there and the state starts armed —
+ * byte-identical behaviour to before.
+ */
+export function reduceOscSignals(
+  state: OscWaitState,
+  signals: readonly OscSignal[],
+  waitCode: string,
+  afterOsc?: string,
+): OscWaitState {
+  let { armed, exitCode, done } = state;
+
+  for (const signal of signals) {
+    if (!armed) {
+      if (afterOsc !== undefined && signal.code === afterOsc) {
+        armed = true;
+      }
+
+      // Everything before the begin marker is a previous command's leftovers — never ours.
+      continue;
+    }
+
+    if (signal.code === 'exit' && signal.exitCode !== undefined) {
+      exitCode = signal.exitCode;
+    }
+
+    /*
+     * No early `break` on the exit code above: the status must be recorded BEFORE we stop, and
+     * when `waitCode` is `exit` the very same signal both sets it and ends the wait.
+     */
+    if (signal.code === waitCode) {
+      done = true;
+      break;
+    }
+  }
+
+  return { armed, exitCode, done };
+}
+
 /** One `\x1b]654;…\x07` control message from the shell. */
 export interface OscSignal {
   /** The payload before any `=` — `prompt`, `exit`, `interactive`. */
@@ -367,19 +429,31 @@ export class BoltShell {
   }
 
   async getCurrentExecutionResult(): Promise<ExecutionResult> {
-    const { output, exitCode } = await this.waitTillOscCode('exit');
+    /*
+     * 🔴 On a shell with a begin marker (bash/PS0), the exit-wait must not trust exit markers that
+     * predate OUR command — see `reduceOscSignals` for the measured npm-install kill this prevents.
+     * jsh has no `beginOsc`, so this is `undefined` there and behaviour is unchanged.
+     */
+    const { output, exitCode } = await this.waitTillOscCode('exit', this.#sandbox?.shell.beginOsc);
+
     return { output, exitCode };
   }
 
   onQRCodeDetected?: (qrCode: string) => void;
 
-  async waitTillOscCode(waitCode: string) {
+  async waitTillOscCode(waitCode: string, afterOsc?: string) {
     let fullOutput = '';
-    let exitCode: number = 0;
     let buffer = ''; // <-- Add a buffer to accumulate output
 
+    /*
+     * `afterOsc` (the shell's begin marker) arms the wait: signals seen before it are a PREVIOUS
+     * command's leftovers and must not satisfy this one. Without a marker the state starts armed —
+     * the jsh behaviour, unchanged. Accounting is `reduceOscSignals`, pure and pinned.
+     */
+    let state: OscWaitState = { armed: afterOsc === undefined, exitCode: 0, done: false };
+
     if (!this.#outputStream) {
-      return { output: fullOutput, exitCode };
+      return { output: fullOutput, exitCode: state.exitCode };
     }
 
     const tappedStream = this.#outputStream;
@@ -427,29 +501,24 @@ export class BoltShell {
       const { signals, rest } = scanOscSignals(oscCarry + text);
       oscCarry = rest;
 
-      let reachedWaitCode = false;
+      const wasArmed = state.armed;
+      state = reduceOscSignals(state, signals, waitCode, afterOsc);
 
-      for (const signal of signals) {
-        if (signal.code === 'exit' && signal.exitCode !== undefined) {
-          exitCode = signal.exitCode;
-        }
-
-        /*
-         * No early `break` on the exit code above: the status must be recorded BEFORE we stop, and
-         * when `waitCode` is `exit` the very same signal both sets it and ends the wait.
-         */
-        if (signal.code === waitCode) {
-          reachedWaitCode = true;
-          break;
-        }
+      /*
+       * The output before the begin marker is the previous command's tail (its `^C`, its prompt) —
+       * reporting it as OURS is how the start action's error came to read "npm install ^C". Coarse
+       * (chunk-granular) on purpose: this feeds error messages, not parsing.
+       */
+      if (!wasArmed && state.armed) {
+        fullOutput = text;
       }
 
-      if (reachedWaitCode) {
+      if (state.done) {
         break;
       }
     }
 
-    return { output: fullOutput, exitCode };
+    return { output: fullOutput, exitCode: state.exitCode };
   }
 }
 

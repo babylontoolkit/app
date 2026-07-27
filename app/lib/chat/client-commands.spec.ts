@@ -36,6 +36,21 @@ describe('parseClientCommand', () => {
     expect(parseClientCommand('/context of the game story')).toBeNull();
   });
 
+  it.each(['/effort', '/thinking', ' /Effort '])('recognises %s as the effort picker', (cmd) => {
+    expect(parseClientCommand(cmd)).toEqual({ kind: 'effort' });
+  });
+
+  /*
+   * `/effort high` is NOT a command. It reads like one, which is exactly why it is worth pinning: a
+   * prefix match here would swallow "/effort high on the physics please" — and the picker exists partly
+   * so the user sees what the expensive level costs before choosing it.
+   */
+  it('does NOT match /effort with an argument — the picker is the interface, not a flag', () => {
+    expect(parseClientCommand('/effort high')).toBeNull();
+    expect(parseClientCommand('/effort medium')).toBeNull();
+    expect(parseClientCommand('/effort high on the collision code')).toBeNull();
+  });
+
   it('does not match empty input', () => {
     expect(parseClientCommand('')).toBeNull();
     expect(parseClientCommand('   ')).toBeNull();
@@ -68,6 +83,6 @@ describe('built-in command autocomplete', () => {
 
   it('shows every built-in when the input is a bare slash', () => {
     const result = getSlashAutocomplete('/', CLIENT_COMMAND_SUMMARIES);
-    expect(result?.matches.map((m) => m.name)).toEqual(['clear', 'context']);
+    expect(result?.matches.map((m) => m.name)).toEqual(['clear', 'context', 'effort']);
   });
 });

@@ -87,6 +87,43 @@ export async function waitForMountVisible(paths: string[], timeoutMs = MOUNT_VIS
 }
 
 /**
+ * The port the starter's dev server binds — Vite's default, which the template holds with
+ * `strictPort` semantics: a second `npm run dev` does not walk to 5174, it DIES with
+ * "Port 5173 is already in use". That hard failure is why the port must be cleared, not shared.
+ */
+const STARTER_DEV_PORT = 5173;
+
+/**
+ * Kill a dev server INHERITED from a previous session before creating a project over it.
+ *
+ * A WebContainer boots empty every page load, so this is a no-op there (`capabilities.clearPort` is
+ * false). A CodeSandbox VM is the opposite: it comes back from a snapshot with its processes alive,
+ * and BOTH of its reuse paths deliver a server already bound to 5173 — the per-user sandbox
+ * (`registry.ts`: a "new project" resumes the VM the previous project used, its `npm run dev` still
+ * running) and a fresh fork of `btk@starter` (the template snapshot is taken while its port task is
+ * serving). The creation artifact's own `npm run dev` then dies with "Port 5173 is already in use"
+ * (MEASURED live, 2026-07-27), and the NEW project is left served by the OLD project's process —
+ * stale vite config, stale module graph, a terminal full of red.
+ *
+ * Called BEFORE `mountTemplate`, so the inherited server never gets a window in which it serves the
+ * new project's half-mounted files. Best-effort by design: a clear that fails must never fail a
+ * creation — the worst case of proceeding is exactly the pre-fix behaviour.
+ */
+export async function clearInheritedDevServer(): Promise<void> {
+  try {
+    const container = await sandbox;
+
+    if (!container.capabilities.clearPort || !container.clearPort) {
+      return;
+    }
+
+    await container.clearPort(STARTER_DEV_PORT);
+  } catch (error) {
+    logger.warn('Could not clear an inherited dev server before creation — proceeding anyway', error);
+  }
+}
+
+/**
  * Mount the WHOLE starter into the container in one atomic operation (SPEC §4.4, §4.2.8).
  *
  * 🔴 **This replaced 64 sequential awaited `fs.writeFile` calls, and the replacement is the bug fix,

@@ -23,10 +23,17 @@ import { atom } from 'nanostores';
 
 const files = atom<Record<string, unknown>>({});
 
-vi.mock('~/lib/stores/workbench', () => ({ workbenchStore: { files } }));
-vi.mock('~/lib/sandbox', () => ({ sandbox: Promise.resolve({}) }));
+/** Swappable per test — `clearInheritedDevServer` needs providers with different capabilities. */
+const sandboxDouble = vi.hoisted(() => ({ provider: {} as Record<string, unknown> }));
 
-const { waitForMountVisible } = await import('./mount');
+vi.mock('~/lib/stores/workbench', () => ({ workbenchStore: { files } }));
+vi.mock('~/lib/sandbox', () => ({
+  get sandbox() {
+    return Promise.resolve(sandboxDouble.provider);
+  },
+}));
+
+const { clearInheritedDevServer, waitForMountVisible } = await import('./mount');
 
 const asFile = (paths: string[]) =>
   Object.fromEntries(paths.map((p) => [p, { type: 'file', content: '', isBinary: false }]));
@@ -38,6 +45,7 @@ const ALL = [GAME_MODE, GLOBALS, SOURCE];
 
 beforeEach(() => {
   files.set({});
+  sandboxDouble.provider = {};
   vi.useRealTimers();
 });
 
@@ -98,5 +106,43 @@ describe('waiting for the mount to be visible', () => {
 
   it('is trivially satisfied by an empty requirement', async () => {
     await expect(waitForMountVisible([], 200)).resolves.toBe(true);
+  });
+});
+
+/**
+ * A reused sandbox wakes with the previous session's dev server still bound to 5173 (per-user VM
+ * reuse, or a `btk@starter` snapshot taken while serving), and the creation artifact's `npm run dev`
+ * dies with "Port 5173 is already in use" (MEASURED live, 2026-07-27). Creation clears the port
+ * first — and that clear must NEVER become a reason a project fails to create.
+ */
+describe('clearing an inherited dev server', () => {
+  it('kills the starter port when the provider can (a reused CodeSandbox VM)', async () => {
+    const clearPort = vi.fn().mockResolvedValue(undefined);
+    sandboxDouble.provider = { capabilities: { clearPort: true }, clearPort };
+
+    await clearInheritedDevServer();
+
+    expect(clearPort).toHaveBeenCalledWith(5173);
+  });
+
+  it('is a no-op when the provider declares it cannot (WebContainer boots empty — nothing to inherit)', async () => {
+    const clearPort = vi.fn().mockResolvedValue(undefined);
+    sandboxDouble.provider = { capabilities: { clearPort: false }, clearPort };
+
+    await clearInheritedDevServer();
+
+    expect(clearPort).not.toHaveBeenCalled();
+  });
+
+  it('NEVER fails the creation — a rejecting clearPort resolves and logs', async () => {
+    // The worst case of proceeding is exactly the pre-fix behaviour; refusing the project is worse.
+    sandboxDouble.provider = {
+      capabilities: { clearPort: true },
+      clearPort: vi.fn(async () => {
+        throw new Error('Pitcher message command/run timed out');
+      }),
+    };
+
+    await expect(clearInheritedDevServer()).resolves.toBeUndefined();
   });
 });

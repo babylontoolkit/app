@@ -13,6 +13,7 @@
  * half-loads prices some models and not others; a zero price zero-rates a model forever; a media
  * variant that matches nothing refuses work the operator believes is priced.
  */
+import { DEFAULT_MODEL } from '~/utils/constants';
 
 /** USD per million tokens. Cache rates deliberately absent — they DERIVE (0.1x read / 2.0x 1h write). */
 export interface LlmMarketRate {
@@ -146,6 +147,24 @@ export function validateMarketPriceList(value: unknown): ValidationResult {
     if (Object.keys(value.llm).length === 0) {
       // An empty LLM table would refuse every generation the moment it is promoted.
       errors.push('llm must price at least one model — an empty table cannot bill anything.');
+    }
+
+    /*
+     * 🔴 THE PLATFORM DEFAULT MUST ALWAYS BE PRICED — a list may not omit it (owner rule, 2026-07-27).
+     *
+     * `ratesFor` bills an unpriced model at the MOST EXPENSIVE row (the safe direction for unknown
+     * models), which for this table is the premium tier's rates — 2x the default's. A list that omits
+     * the default row would therefore silently double-bill every ordinary generation the moment it
+     * went live. Refused here, which closes BOTH doors: promotion (`promoteMarketPrices` runs this
+     * before writing) and load (`loadVersion` re-validates stored bytes, so a legacy list missing the
+     * row fails to load and the platform serves the BAKED list, which always prices the default).
+     * The premium tier must NEVER be the fallback price of the default.
+     */
+    if (!isPlainObject(value.llm[DEFAULT_MODEL])) {
+      errors.push(
+        `llm must price the platform default model "${DEFAULT_MODEL}" — a list that omits the default ` +
+          "would bill every ordinary generation at the most-expensive row's rates (the premium tier's).",
+      );
     }
 
     for (const [model, rate] of Object.entries(value.llm)) {

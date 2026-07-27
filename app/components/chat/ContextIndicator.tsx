@@ -13,6 +13,7 @@ import { useStore } from '@nanostores/react';
 import { classNames } from '~/utils/classNames';
 import { contextHealth, contextPanelOpen, contextStatsStore } from '~/lib/stores/context-stats';
 import { IconButton } from '~/components/ui/IconButton';
+import { EFFORT_LABELS, baseEffortStore, effortPanelOpen } from '~/lib/stores/effort';
 
 const DOT_COLORS = {
   green: 'bg-green-500',
@@ -33,6 +34,7 @@ function formatTokens(n: number): string {
 export function ContextIndicator() {
   const stats = useStore(contextStatsStore);
   const open = useStore(contextPanelOpen);
+  const effort = useStore(baseEffortStore);
 
   if (!stats) {
     return null;
@@ -103,6 +105,23 @@ export function ContextIndicator() {
                 <span>{stats.model}</span>
               </div>
             )}
+            {/*
+             * The session's thinking effort (§4.2.9) — it belongs in the cost report because thinking bills
+             * as OUTPUT at the full rate, so a raised floor is the one setting here that moves every future
+             * turn's price. Clickable: the report is where a user notices the cost, which is where they will
+             * want the control.
+             */}
+            <button
+              type="button"
+              className="flex justify-between w-full text-left hover:text-bolt-elements-textPrimary"
+              onClick={() => {
+                contextPanelOpen.set(false);
+                effortPanelOpen.set(true);
+              }}
+            >
+              <span className="text-bolt-elements-textSecondary">Thinking effort</span>
+              <span className="underline decoration-dotted underline-offset-2">{EFFORT_LABELS[effort]}</span>
+            </button>
           </div>
           <div className="mt-3 pt-2 border-t border-bolt-elements-borderColor text-xs text-bolt-elements-textSecondary">
             {HEALTH_ADVICE[health]}

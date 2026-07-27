@@ -82,7 +82,7 @@ runtime GitHub dependency) → §4.2 server agent proxy (platform-as-provider en
 loop; self-healing repair turns; usage recording) with the ANTHROPIC key read from config
 ("not configured" state when absent) → §4.11 skills sync + /slash invocation with
 autocomplete.
-Also: §4.2a Anthropic provider hardening — current model IDs (claude-opus-4-8 default,
+Also: §4.2a Anthropic provider hardening — current model IDs (claude-opus-5 default,
 haiku-4-5 at 64k output, sonnet-5, fable-5), @ai-sdk/anthropic ^1.2.12, stripSamplingParams
 + dropOrphanReasoningSignatures, capabilities.ts OUTSIDE .server, anthropic.spec.ts tests.
 Model comes from the DEFAULT_MODEL constant (app/utils/constants.ts) — never a UI choice.

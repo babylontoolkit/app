@@ -1,6 +1,6 @@
 import type { LanguageModelV1 } from 'ai';
 import type { ProviderInfo, ProviderConfig, ModelInfo } from './types';
-import type { EffortLevel } from './capabilities';
+import type { EffortLevel, ThinkingMode } from './capabilities';
 import type { IProviderSetting } from '~/types/model';
 import { createOpenAI } from '@ai-sdk/openai';
 import { LLMManager } from './manager';
@@ -175,6 +175,16 @@ export abstract class BaseProvider implements ProviderInfo {
      * the agent proxy, which is the only caller that knows what kind of turn this is.
      */
     effort?: EffortLevel;
+
+    /**
+     * Force thinking off for THIS request (§4.2a). OPTIONAL and additive, like `effort` — providers that
+     * do not model thinking ignore it, and omitting it leaves the operator's `THINKING_MODE` in charge.
+     *
+     * Set by the agent proxy on its LAST-RESORT retry only: a step that emits no bytes for ~30s is killed
+     * by KIE's gateway, and an extended think is exactly that silence, so the final attempt trades depth
+     * for a stream that cannot go quiet. Never set on a healthy generation (`retryThinkingMode`).
+     */
+    thinkingMode?: ThinkingMode;
   }): LanguageModelV1;
 }
 

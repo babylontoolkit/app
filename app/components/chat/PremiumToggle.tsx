@@ -6,6 +6,7 @@ import { canUsePremium, sessionStore } from '~/lib/stores/session';
 import { premiumModelStore, updatePremiumModel } from '~/lib/stores/settings';
 import { creationTurnStore } from '~/lib/stores/chat';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
+import { EFFORT_LABELS, baseEffortStore } from '~/lib/stores/effort';
 
 /**
  * `claude-fable-5` → `{ short: 'Fable', full: 'Fable 5' }`. The pill shows `short` (the family), the
@@ -51,6 +52,7 @@ export function PremiumToggle() {
   const session = useStore(sessionStore);
   const enabled = useStore(premiumModelStore);
   const creationTurn = useStore(creationTurnStore);
+  const effort = useStore(baseEffortStore);
   const byokUnlocked = useByokUnlocked();
 
   // BYOK users choose a model directly; nothing to show until we know who the user is.
@@ -99,6 +101,14 @@ export function PremiumToggle() {
     }
   };
 
+  /*
+   * The session's thinking effort rides in this tooltip (§4.2.9). It has no pill of its own — the row is
+   * crowded and effort is a rarely-changed setting — but a raised floor costs credits on every turn, so
+   * it must be READABLE somewhere the user already looks. This pill and the `/context` report are that
+   * somewhere; the control itself is `/effort`.
+   */
+  const effortLine = ` Thinking effort: ${EFFORT_LABELS[effort]} — type /effort to change.`;
+
   // Version detail lives here (the pill shows only the family): "Fable 5", "Opus 4.8".
   const title = !eligible
     ? creationTurn
@@ -110,7 +120,7 @@ export function PremiumToggle() {
 
   return (
     <IconButton
-      title={title}
+      title={title + effortLine}
       className={classNames('transition-all flex items-center gap-1 px-1.5', {
         '!bg-bolt-elements-item-backgroundAccent !text-bolt-elements-item-contentAccent': active,
         'opacity-50': !eligible,

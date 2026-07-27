@@ -52,9 +52,19 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
    */
   llm: {
     /*
-     * THE PLATFORM DEFAULT (see rates.ts for the full history). Wins on ACCOUNTING: the only KIE row
-     * whose usage numbers settle exactly against its published price (10,004 write tokens = 8.02
-     * credits, exact). Known vendor bug: returns no thinking text on KIE.
+     * THE PLATFORM DEFAULT since 2026-07-27 (superseding claude-opus-4-8 below). KIE serves it at
+     * exactly 4-8's rates — owner-confirmed and probe-verified 2026-07-27 against KIE's own usage
+     * numbers: the cold request reported a 5,419-token 1h cache WRITE and warm ones a 5,419-token
+     * cache READ, so it settles like 4-8, not like the 4-7/fable rows (which report 0 write tokens
+     * while being charged the 2x). Same known vendor bug as every KIE Claude model since 2026-07-24:
+     * returns no thinking text (see kie-wire.ts; the §4.2a heartbeat carries the UX).
+     */
+    'claude-opus-5': { inputPerMTok: 2.0, outputPerMTok: 10.0 },
+
+    /*
+     * The platform default until 2026-07-27 (see rates.ts for the full history). Won on ACCOUNTING:
+     * the first KIE row whose usage numbers settle exactly against its published price (10,004 write
+     * tokens = 8.02 credits, exact). Known vendor bug: returns no thinking text on KIE.
      */
     'claude-opus-4-8': { inputPerMTok: 2.0, outputPerMTok: 10.0 },
 

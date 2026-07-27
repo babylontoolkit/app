@@ -64,6 +64,13 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     premium?: boolean;
 
     /**
+     * The user's chosen base thinking effort for this session (§4.2.9): `'medium'` (the default) or
+     * `'high'`. Typed as a plain string here on purpose — it is an untrusted browser value, and the
+     * proxy validates it with `parseUserEffort` rather than a cast that would let `max` through.
+     */
+    effort?: string;
+
+    /**
      * The chat's Discuss toggle (§4.2.9): `'discuss'` asks for a prose-only planning turn — no
      * artifacts, no file writes. Honored via a volatile-tail note, ignored on the creation turn.
      */
@@ -156,6 +163,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       repairAttempt: body.repairAttempt,
       model: body.model,
       premium: body.premium,
+      effort: body.effort,
       chatMode: body.chatMode,
 
       /*
@@ -346,8 +354,13 @@ async function streamGeneration(
    * content streams (including real thinking text, when KIE fixes their adapter), the quiet clock
    * resets and the heartbeat goes silent on its own.
    */
-  const heartbeatSource = withGenerationHeartbeat(generation.textStream, generation.generationId, (status) =>
-    stream.writeData(status),
+  const heartbeatSource = withGenerationHeartbeat(
+    generation.textStream,
+    generation.generationId,
+    (status) => stream.writeData(status),
+
+    /* What the turn IS, so the panel can say "Building your project" instead of an anonymous "Thinking". */
+    { kind: generation.statusKind },
   );
 
   for await (const chunk of heartbeatSource) {

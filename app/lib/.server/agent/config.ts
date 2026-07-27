@@ -40,10 +40,11 @@ export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
  * (1 credit = $0.005) a real call billed 4.36 credits = $0.021800 while `rawCostUsd` computed
  * $0.021800 exactly. The ledger is provably correct against their charges, not merely self-consistent.
  *
- * 🔴 **The accepted cost: `claude-opus-4-8` returns NO thinking text on KIE** (their adapter does not
- * cover the one model they do not document — see `kie-wire.ts`). We pay full output rate for reasoning
- * we cannot show: measured ~27% of output and ~55s of the 205s on a platformer creation. Chosen
- * knowingly on 2026-07-17 as a `for now`.
+ * 🔴 **The accepted cost: no KIE Claude model returns thinking text** (adapter-wide since 2026-07-24;
+ * re-confirmed for the current default `claude-opus-5` on 2026-07-27 — see `kie-wire.ts`). We pay full
+ * output rate for reasoning we cannot show: measured ~27% of output and ~55s of the 205s on a
+ * platformer creation. Chosen knowingly on 2026-07-17 as a `for now`; the §4.2a liveness heartbeat
+ * carries the UX until KIE fixes their adapter.
  */
 export const DEFAULT_PLATFORM_PROVIDER: PlatformProviderName = 'KIE';
 
@@ -99,9 +100,13 @@ export const PLATFORM_MODEL = DEFAULT_MODEL;
  *
  * 🔴 **On KIE there is no free option.** Its only fast model is the one whose thinking text their
  * adapter cannot return; the two that CAN return it cost 8–12s of dead air before the first byte, and
- * 4-7 additionally hard-500s on non-streaming requests with large prompts. So KIE defaults to 4-8:
+ * 4-7 additionally hard-500s on non-streaming requests with large prompts. So KIE defaulted to 4-8:
  * dead air during thinking is at least bounded by how hard the model thought, whereas 4-6/4-7 charge
- * it up front on every single turn including trivial ones. Revisit the moment KIE's adapter covers 4-8.
+ * it up front on every single turn including trivial ones. Since 2026-07-24 the missing thinking text
+ * is adapter-wide anyway (kie-wire.ts), so the table above is history rather than a live comparison.
+ *
+ * 2026-07-27: both defaults are `claude-opus-5` via `DEFAULT_MODEL` — same KIE price as 4-8 ($2/$10),
+ * probe-verified honest cache accounting, thinking text still empty (the heartbeat carries the UX).
  */
 export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = {
   Anthropic: DEFAULT_MODEL,

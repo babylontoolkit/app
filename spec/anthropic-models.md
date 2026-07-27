@@ -22,7 +22,8 @@ exists for *skill* versions; that is unrelated.
 |---|---|---|---|
 | Claude Sonnet 5 | `claude-sonnet-5` | 1_000_000 | 128_000 |
 | Claude Haiku 4.5 | `claude-haiku-4-5` | 200_000 | **64_000** |
-| Claude Opus 4.8 (default) | `claude-opus-4-8` | 1_000_000 | 128_000 |
+| Claude Opus 4.8 | `claude-opus-4-8` | 1_000_000 | 128_000 |
+| Claude Opus 5 (default since 2026-07-27) | `claude-opus-5` | 1_000_000 | 128_000 |
 | Claude Fable 5 | `claude-fable-5` | 1_000_000 | 128_000 |
 
 ⚠️ **Haiku is the exception**: 200k context and a **64k** output cap, not 128k. Copying another
@@ -42,7 +43,7 @@ documentation, tests, or defense-in-depth.
 |---|---|---|
 | `app/lib/modules/llm/providers/anthropic.ts` | ✅ | `staticModels` (table above); fix `getDynamicModels`; compose both wrappers in `getModelInstance`; drop the obsolete `output-128k-2025-02-19` beta header |
 | `app/lib/modules/llm/capabilities.ts` | ✅ | **new** — `supportsSamplingParams`, `stripSamplingParams`, `dropOrphanReasoningSignatures` |
-| `app/utils/constants.ts` | ✅ | `DEFAULT_MODEL = 'claude-opus-4-8'` — the strongest coding model, this being a game-coding product (was `claude-sonnet-5`, and originally the retired `claude-3-5-sonnet-latest`, which matched no `staticModels` entry) |
+| `app/utils/constants.ts` | ✅ | `DEFAULT_MODEL = 'claude-opus-5'` (since 2026-07-27; same KIE price as its predecessor `claude-opus-4-8`, which superseded `claude-sonnet-5`, and originally the retired `claude-3-5-sonnet-latest`, which matched no `staticModels` entry) — the strongest coding model, this being a game-coding product |
 | `package.json` + `pnpm-lock.yaml` | ✅ | `@ai-sdk/anthropic` `0.0.39` → `^1.2.12` (§3.2) |
 | `app/lib/modules/llm/providers/anthropic.spec.ts` | — | **new** — regression tests for §3.1 and §3.3. Not required to run, required to trust (§4) |
 | `app/routes/api.llmcall.ts` | ⚪️ | Gates `temperature` behind `supportsSamplingParams()`. **Redundant** — the provider-level strip already covers every call path. Kept as defense in depth; safe to skip on a rebuild |
@@ -322,6 +323,36 @@ puts Sonnet 5 at `medium` on par with Sonnet 4.6 at `high`.
 **Config, never hardcoded:** `THINKING_EFFORT=medium|high|xhigh|max` (`DEFAULT_EFFORT` in
 `capabilities.ts`). Raise it for hard work. There is nothing below `medium` to drop to.
 
+### 3.4b The last-resort retry runs THINKING-OFF — the silence is the failure (2026-07-27)
+
+Measured against KIE: **every step that emitted no bytes for ~30s was killed** with `Internal error, please
+try again later` (28,956ms / 31,532ms / 30,058ms, all zero-output), while every step that emitted anything
+ran for minutes. An extended think IS that silence — their adapter forwards thinking text on only ~14% of
+requests (3/21 opus-4-8, 1/7 opus-5: identical rates, so it tracks the BACKEND, not the model), so on the
+other 86% a long think puts nothing on the wire and their own gateway times out the request they are
+buffering.
+
+Retrying is a dice roll against the same window. The final attempt therefore sends
+`thinking: {type: 'disabled'}` (`retryThinkingMode`, `getModelInstance({ thinkingMode })`): text starts
+within ~1s, the stream is never quiet, and the timeout cannot fire.
+
+| Attempt | Thinking | Why |
+|---|---|---|
+| 1 | adaptive | normal quality |
+| 2 | adaptive | likely a different backend; often just works |
+| 3 (last) | **disabled** | guaranteed early bytes — cannot hit the silent-stream timeout |
+
+**Scoped to the last attempt deliberately.** The tempting generalisation — "if the stream goes quiet, drop
+thinking" — would sacrifice the reasoning text on exactly the long thinks whose reasoning is worth reading,
+on every generation. Here attempts 1–2 are byte-identical to a build with no retry logic, and the only turn
+that loses thinking is one the silent think had already killed twice: you cannot lose reasoning on a turn
+that was about to die. The trade on that attempt is real (no extended thinking is a weaker build — §3.5a)
+and still better than a red error card and no game.
+
+⚠️ **Clamp with `canDisableThinking(model, effort)`.** Fable 5 rejects `{type:'disabled'}` outright and
+Opus 5 rejects it above `high`; an unclamped override swaps a timeout for a hard 400 on the attempt that
+had already failed twice. Pinned at the wire in `anthropic.spec.ts` (serialized body, both directions).
+
 ### 3.5a `low` is REMOVED — it is a correctness bug, not a discount
 
 The creation sweep above says `low` is 22% cheaper and just as good. That conclusion **does not
@@ -371,6 +402,37 @@ before a single token is bought.
 Precedence: **policy > `THINKING_EFFORT` > `medium`**. The policy overriding operator config is
 deliberate — a build that has already failed twice is not the place to economise, and repairs are
 capped (`MAX_REPAIR_TURNS = 2`), so the escalated spend is bounded and rare.
+
+### 3.6a The user's floor — `/effort`, and why it stops at `high` (2026-07-27)
+
+`effortForTurn` takes one more input: `baseEffort`, the level the USER chose for their session with
+`/effort` (SPEC §4.2.9). It is a **floor**, folded in by rank:
+
+| Turn | `medium` session | `high` session |
+|---|---|---|
+| Creation / ordinary edit | `medium` | `high` |
+| `/slash` skill invocation | `high` | `high` |
+| Repair, attempt 1 | `high` | `high` |
+| Repair, attempt 2 | `xhigh` | `xhigh` |
+
+Three properties, each of which fails silently if dropped:
+
+1. **It never caps.** A `high` session's second repair still gets `xhigh`. Taking the floor there instead
+   would mean choosing `high` makes hard failures think *less* than the default session does — backwards,
+   and invisible.
+2. **Only `medium` and `high` are offerable.** `xhigh`/`max` are what the ladder spends on *evidence*; as a
+   session default they turn an escalation ceiling into a floor, so every ordinary edit would start where a
+   twice-failed build ends. `parseUserEffort` enforces this at the boundary — the value arrives in a
+   **browser body**, on the platform's credit pool, and a tampered client asking for `max` on every turn
+   must cost nothing. Unlike `parseEffort` (which clamps an operator's `low` *up* to `medium`), it never
+   clamps: an unrecognised value is "no choice", i.e. the operator default.
+3. **It is not persisted.** It resets to `medium` on every reload. A raised floor bills more on every
+   subsequent turn while producing no visible signal, so persisting it means a user raises it once for one
+   hard problem and quietly pays more for months. Session-scoped, the expensive state cannot outlive its
+   reason.
+
+This is still not a prose classifier (§3.6): the user is choosing a visible, up-front session floor, not
+having their wording read to guess how hard the turn is.
 
 `xhigh` is the ceiling; `max` exists in the union but nothing selects it. **The policy only ever
 escalates.** Its value is not paying less on easy turns (there is no cheap tier — §3.5a) but paying

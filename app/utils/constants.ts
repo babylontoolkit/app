@@ -39,7 +39,22 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * set. `LLM_MODEL` overrides it at runtime (validated against the rate tables — see
  * `agent/config.ts`); this is what a bare `docker run` with an empty environment gets.
  *
- * ## Why Opus 4.8, despite it being the ONE model KIE cannot stream thinking text for
+ * ## `claude-opus-5` since 2026-07-27 (owner decision), at Opus 4.8's exact KIE price ($2/$10)
+ *
+ * The swap was gated on re-verifying the TWO properties that made 4-8 the default, both probed live
+ * against KIE on 2026-07-27:
+ *
+ *   1. **Cache accounting holds** — the deal-breaker for 4-7/fable (billed for cache writes they
+ *      REPORT as 0, so settlement would silently eat the cache cost). Opus 5 reports honestly: a
+ *      cold request reported a 5,419-token 1h cache WRITE, warm ones a 5,419-token cache READ, flat
+ *      `cache_creation_input_tokens`/`cache_read_input_tokens` fields present — settles like 4-8.
+ *   2. **Thinking text is still empty** (0 deltas on a forced think; 12.4s dead air then the
+ *      answer) — the adapter-wide KIE regression of 2026-07-24 covers Opus 5 too, so the §4.2a
+ *      liveness heartbeat (`agent/heartbeat.ts`) remains load-bearing and nothing about the swap
+ *      changes the thinking story. `capabilities.ts` already knows Opus 5's one API quirk:
+ *      `{type:'disabled'}` is a 400 at `xhigh`/`max` (`THINKING_DISABLED_EFFORT_CEILING`).
+ *
+ * ## Why Opus 4.8 held the slot before that, despite KIE not streaming its thinking text
  *
  * This was 4.7 for exactly one turn (2026-07-17), because 4.7 is the only top-tier model whose
  * thinking text KIE's adapter returns (266 chars measured, against 4.8's 0 in every shape tried). It
@@ -73,10 +88,12 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * The accepted cost: on KIE we pay full output rate for reasoning we cannot show (§4.2a's
  * `display: 'omitted'` pathology). Revisit the day KIE's adapter covers 4-8 — everything else is built.
  *
- * ⚠️ Changing this means adding the new model's rate row first (`billing/rates.ts`) — a price cannot be
- * guessed, only looked up — and re-checking `grantHeadroom()`.
+ * ⚠️ Changing this means adding the new model's rate row first (`billing/baked-market-prices.ts` +
+ * `billing/rates.ts`) — a price cannot be guessed, only looked up — re-checking `grantHeadroom()`,
+ * and LISTING it in `KIE_MODELS` (an unlisted default silently runs `modelsList[0]` on the enhancer
+ * path while settlement charges the configured model's rates).
  */
-export const DEFAULT_MODEL = 'claude-opus-4-8';
+export const DEFAULT_MODEL = 'claude-opus-5';
 export const PROMPT_COOKIE_KEY = 'cachedPrompt';
 export const TOOL_EXECUTION_APPROVAL = {
   APPROVE: 'Yes, approved.',

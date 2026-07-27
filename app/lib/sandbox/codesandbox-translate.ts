@@ -195,6 +195,58 @@ function shellQuote(token: string): string {
 }
 
 /**
+ * The `sh -c` script behind {@link SandboxProvider.clearPort} — kill whatever holds a TCP port.
+ *
+ * Why this exists at all: a CodeSandbox VM comes back from a snapshot with its PROCESSES alive.
+ * Both reuse paths deliver a dev server already bound to 5173 — the per-user sandbox (a "new
+ * project" resumes the VM the previous project was using, its `npm run dev` still running) and a
+ * fresh fork of `btk@starter` (the template snapshot is taken while its `tasks.json` port task is
+ * serving; `csb build` waits on the port before snapshotting). The creation artifact's own
+ * `npm run dev` then dies with "Port 5173 is already in use" (MEASURED live), leaving the NEW
+ * project served by the OLD project's process.
+ *
+ * Shape of the script, and why each line is there:
+ *
+ *   - `fuser -k -TERM` by PORT is the primary path — it kills exactly the listener, whatever its
+ *     name. Its non-zero exit when nothing listens is the FAST path: a fresh VM pays no sleeps.
+ *   - The bounded wait loop (up to 5s) exists because SIGTERM is asynchronous: without it the
+ *     caller's `npm run dev` can start before the dying server has released the socket — the same
+ *     collision, self-inflicted. SIGKILL after the window covers a wedged server.
+ *   - `pkill -f vite` is the fallback for an image without psmisc. It matches by NAME, which is
+ *     honest-but-narrower: the starter's dev server is always vite.
+ *   - `exit 0` always — the exit code is informational; clearing a port is best-effort by contract.
+ *
+ * ⚠️ If the template's `tasks.json` port task is configured to auto-restart, the killed server comes
+ * back and re-takes the port — that would need the task stopped through the SDK instead. Not
+ * observed live; noted so the symptom ("cleared, then collided anyway") has a suspect.
+ *
+ * Pure so it can be pinned by tests; the PORT is interpolated into shell text, so it is validated
+ * here rather than trusted, even though every caller today passes a constant.
+ */
+export function clearPortScript(port: number): string {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`clearPortScript needs a real TCP port, got: ${port}`);
+  }
+
+  return [
+    `if command -v fuser >/dev/null 2>&1; then`,
+    `  fuser -k -TERM ${port}/tcp 2>/dev/null || exit 0`,
+    `  i=0`,
+    `  while [ "$i" -lt 20 ]; do`,
+    `    fuser -s ${port}/tcp 2>/dev/null || exit 0`,
+    `    i=$((i+1))`,
+    `    sleep 0.25`,
+    `  done`,
+    `  fuser -k -KILL ${port}/tcp 2>/dev/null`,
+    `  sleep 0.5`,
+    `else`,
+    `  pkill -f vite 2>/dev/null && sleep 1`,
+    `fi`,
+    `exit 0`,
+  ].join('\n');
+}
+
+/**
  * Did this bootup type bring back the PREVIOUS session's filesystem?
  *
  * 🔴 This answer decides whether the mount path may restore a client-held copy over the sandbox.

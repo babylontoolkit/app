@@ -63,4 +63,61 @@ describe('effortForTurn', () => {
   it('prefers the repair signal over the slash signal', () => {
     expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: true })).toBe('xhigh');
   });
+
+  /**
+   * The user's `/effort` choice (§4.2.9). It is a FLOOR — the only user-facing dial in the whole effort
+   * system, and it may only ever raise. Each test below is a way the floor could silently cost money or
+   * silently do nothing.
+   */
+  describe('the user-chosen base effort is a floor, never a cap', () => {
+    it('takes the user floor on an ordinary edit turn', () => {
+      expect(effortForTurn({ ...EDIT, baseEffort: 'high' })).toBe('high');
+    });
+
+    /**
+     * `medium` is ALSO the operator default, so sending it explicitly and staying silent are the same
+     * request — but they must not be conflated in the other direction: the user picking `medium` is a
+     * positive choice, and an operator running `THINKING_EFFORT=high` should still see it honoured as the
+     * default when the user has said nothing. That is why `undefined` (no choice) stays `undefined`.
+     */
+    it('says nothing when the user never chose — the operator default stays authoritative', () => {
+      expect(effortForTurn(EDIT)).toBeUndefined();
+      expect(effortForTurn({ ...EDIT, baseEffort: undefined })).toBeUndefined();
+    });
+
+    it('honours an explicit `medium`', () => {
+      expect(effortForTurn({ ...EDIT, baseEffort: 'medium' })).toBe('medium');
+    });
+
+    /**
+     * THE LOAD-BEARING ONE. A `high` floor must not become a ceiling: a repair that has already failed
+     * twice is exactly the turn that needs `xhigh`, and taking the floor here instead would mean choosing
+     * `high` makes hard failures think LESS than the default session does. Silent, and backwards.
+     */
+    it('still escalates a second repair to `xhigh` above a `high` floor', () => {
+      expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: false, baseEffort: 'high' })).toBe(
+        'xhigh',
+      );
+    });
+
+    it('still escalates a first repair to `high` from a `medium` floor', () => {
+      expect(effortForTurn({ isRepair: true, repairAttempt: 1, isSlashInvocation: false, baseEffort: 'medium' })).toBe(
+        'high',
+      );
+    });
+
+    /** The floor never LOWERS an escalation either — `medium` chosen, first repair, still `high`. */
+    it('never lowers an escalated turn to the floor', () => {
+      expect(effortForTurn({ isRepair: true, repairAttempt: 1, isSlashInvocation: true, baseEffort: 'medium' })).toBe(
+        'high',
+      );
+    });
+
+    /** A `high` floor and a `/slash` turn agree — the result is `high`, not a double-escalation to `xhigh`. */
+    it('does not compound a floor with an equal escalation', () => {
+      expect(effortForTurn({ isRepair: false, repairAttempt: 1, isSlashInvocation: true, baseEffort: 'high' })).toBe(
+        'high',
+      );
+    });
+  });
 });

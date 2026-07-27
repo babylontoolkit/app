@@ -12,6 +12,7 @@ import { IconButton } from '~/components/ui/IconButton';
 import { toast } from 'react-toastify';
 import { SpeechRecognitionButton } from '~/components/chat/SpeechRecognition';
 import { ContextIndicator } from './ContextIndicator';
+import { EffortPanel } from './EffortPanel';
 import { SupabaseConnection } from './SupabaseConnection';
 import { UnityConnection } from './UnityConnection';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
@@ -408,6 +409,12 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
               <span>{effectiveChatMode === 'discuss' ? 'Plan' : 'Build'}</span>
             </IconButton>
             {props.chatStarted && <ContextIndicator />}
+            {/*
+             * The `/effort` picker (§4.2.9). Renders NOTHING until opened — it is a rarely-changed session
+             * setting, and the row is already crowded. Unconditional (no `chatStarted` gate): the creation
+             * turn takes the same floor as every other turn, so it must be settable before the first send.
+             */}
+            <EffortPanel />
             {/*
              * The PREMIUM model toggle (§4.6.1) — a credits-mode control, deliberately NOT behind
              * `byokUnlocked`. It self-gates: it renders only for credits users and only unlocks once the

@@ -70,7 +70,7 @@ export interface SessionState {
       /** The premium model id, e.g. `claude-fable-5`. */
       model: string;
 
-      /** The standard (default) model id, e.g. `claude-opus-4-8` — named on the pill when premium is off. */
+      /** The standard (default) model id, e.g. `claude-opus-5` — named on the pill when premium is off. */
       standardModel: string;
 
       /** Credits the user must hold to unlock premium — shown in the locked-state copy. */
@@ -104,7 +104,7 @@ export const EMPTY_SESSION: SessionState = {
     purchasable: false,
     packs: [],
     plans: [],
-    premium: { model: 'claude-fable-5', standardModel: 'claude-opus-4-8', minimumCredits: 1200, available: false },
+    premium: { model: 'claude-fable-5', standardModel: 'claude-opus-5', minimumCredits: 1200, available: false },
   },
   pro: { proFeaturesEnabled: false, byokUnlocked: false, tier: null, status: null, subscriberEmail: null },
 };

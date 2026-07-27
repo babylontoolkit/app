@@ -154,6 +154,18 @@ describe('the KIE wire format', () => {
   });
 
   /*
+   * The default moved to Opus 5 on 2026-07-27 (same price, same honest cache accounting, same missing
+   * thinking text — probe-verified, see kie-wire.ts). It MUST be listed, not merely priced: an
+   * unlisted default silently runs `modelsList[0]` on the enhancer path while settlement charges the
+   * configured model's rates.
+   */
+  it('offers claude-opus-5, the platform default since 2026-07-27', () => {
+    const names = KIE_MODELS.map((m) => m.name);
+
+    expect(names).toContain('claude-opus-5');
+  });
+
+  /*
    * ⚠️ `ratesFor` falls back to the PLATFORM model's rates for an unknown model, so every model offered
    * here must be priced explicitly or it bills at 4-8's rates — measured: 4-6 and 4-5 are priced
    * DIFFERENTLY. That would over-charge users and throw nothing. This is the `packMargin` shape of bug:

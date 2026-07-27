@@ -17,6 +17,7 @@ import {
   canDisableThinking,
   dropOrphanReasoningSignatures,
   parseEffort,
+  parseUserEffort,
   stripSamplingParams,
   supportsAdaptiveThinking,
   supportsSamplingParams,
@@ -492,6 +493,123 @@ describe('effort (§3.5 — the default nobody chose)', () => {
     it('rejects a typo instead of putting it on the wire (a 400 mid-generation)', () => {
       expect(parseEffort('hgih')).toBeUndefined();
       expect(parseEffort('extra-high')).toBeUndefined();
+    });
+  });
+
+  /**
+   * `parseUserEffort` — the wall between a BROWSER BODY and the thinking bill (§4.2.9).
+   *
+   * `parseEffort` above guards an operator's `.env`; this guards a value posted by a client we do not
+   * control, on the platform's credit pool. The two rules that make it safe, and the two ways it fails
+   * silently if either is dropped:
+   *
+   *   1. Only the two user-selectable levels survive. `xhigh`/`max` are what `effort-policy.ts` spends on
+   *      EVIDENCE; a body that could name them would let a tampered client buy the most expensive setting
+   *      on every ordinary turn, and nothing would throw.
+   *   2. Anything unrecognised resolves to `undefined` — "no choice", the operator default — and NEVER
+   *      clamps upward the way `parseEffort` clamps `low` to `medium`. An unusable value must cost
+   *      nothing; clamping a garbage value onto a real level is inventing a request the user never made.
+   */
+  /**
+   * The LAST-RESORT retry's thinking override must reach the WIRE (§4.2a) — the whole point is that the
+   * request stops being silent, and a per-request option that never lands in the body would be a
+   * mitigation that changes nothing while reading as fixed.
+   *
+   * ⚠️ Asserted on the serialized body, like every other test in this file, because the failure mode is
+   * exactly the kind our own intermediate objects cannot see.
+   */
+  describe('per-request thinking override — the silent-stream mitigation', () => {
+    it('sends {type:"disabled"} when the proxy forces it for one request', async () => {
+      const captured: any = {};
+
+      /*
+       * A thinking-DISABLED response carries no thinking block at all — text starts immediately, which
+       * is the entire point of the mitigation. Replaying the empty-thinking shape here would be testing
+       * a stream this request cannot produce (and would trip the orphan-signature guard).
+       */
+      const TEXT_ONLY = [
+        EMPTY_THINKING_THEN_TEXT[0],
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Building' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 5 } },
+        { type: 'message_stop' },
+      ];
+
+      const stub = (async (_url: any, init: any) => {
+        captured.body = JSON.parse(init.body);
+        return sseResponse(TEXT_ONLY);
+      }) as unknown as typeof fetch;
+
+      const anthropic = createAnthropic({
+        apiKey: 'k',
+        fetch: thinkingFetch('disabled', 'medium', 'claude-opus-4-8', stub),
+      });
+
+      const text = await drain(streamText({ model: anthropic('claude-opus-4-8'), prompt: 'build it' }));
+
+      expect(captured.body.thinking).toEqual({ type: 'disabled' });
+
+      /* And the stream is productive from the first block — no silent window for a gateway to kill. */
+      expect(text).toBe('Building');
+    });
+
+    /** The common path is untouched: without the override, thinking stays adaptive and summarized. */
+    it('leaves an ordinary request on adaptive/summarized', async () => {
+      const captured: any = {};
+      const stub = (async (_url: any, init: any) => {
+        captured.body = JSON.parse(init.body);
+        return sseResponse(REAL_THINKING_THEN_TEXT);
+      }) as unknown as typeof fetch;
+
+      const anthropic = createAnthropic({
+        apiKey: 'k',
+        fetch: thinkingFetch('adaptive', 'medium', 'claude-opus-4-8', stub),
+      });
+
+      await drain(streamText({ model: anthropic('claude-opus-4-8'), prompt: 'build it' }));
+
+      expect(captured.body.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+    });
+
+    /**
+     * The CLAMP, and it is why the caller must consult `canDisableThinking` rather than passing the mode
+     * blindly: Fable 5 rejects `{type:'disabled'}` outright, and Opus 5 rejects it above `high`. An
+     * unclamped override would trade a ~30s timeout for a hard 400 on the attempt that had already failed
+     * twice — inventing a new failure at the worst possible moment.
+     */
+    it('refuses to disable thinking where the model would 400', () => {
+      expect(canDisableThinking('claude-fable-5', 'medium')).toBe(false);
+      expect(canDisableThinking('claude-opus-5', 'xhigh')).toBe(false);
+      expect(canDisableThinking('claude-opus-5', 'high')).toBe(true);
+      expect(canDisableThinking('claude-opus-4-8', 'medium')).toBe(true);
+    });
+  });
+
+  describe('parseUserEffort — the client-supplied floor', () => {
+    it('accepts exactly the two user-selectable levels', () => {
+      expect(parseUserEffort('medium')).toBe('medium');
+      expect(parseUserEffort('high')).toBe('high');
+      expect(parseUserEffort(' High ')).toBe('high');
+      expect(parseUserEffort('MEDIUM')).toBe('medium');
+    });
+
+    it('refuses the escalation-only levels — a browser may never buy `xhigh`/`max`', () => {
+      expect(parseUserEffort('xhigh')).toBeUndefined();
+      expect(parseUserEffort('max')).toBeUndefined();
+    });
+
+    it('refuses `low` outright rather than clamping it (unlike the operator path)', () => {
+      expect(parseUserEffort('low')).toBeUndefined();
+    });
+
+    it('returns undefined for anything that is not a level string', () => {
+      expect(parseUserEffort(undefined)).toBeUndefined();
+      expect(parseUserEffort('')).toBeUndefined();
+      expect(parseUserEffort('hgih')).toBeUndefined();
+      expect(parseUserEffort(2)).toBeUndefined();
+      expect(parseUserEffort(null)).toBeUndefined();
+      expect(parseUserEffort({ effort: 'max' })).toBeUndefined();
     });
   });
 });

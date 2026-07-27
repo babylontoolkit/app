@@ -76,6 +76,18 @@ body.dock-animate .header-brand {
     --workbench-inner-width: calc(100% - var(--sidebar-dock-width));
     --workbench-left: var(--sidebar-dock-width);
   }
+
+  /*
+   * The creation splash is `position: fixed`, so like the workbench panel above it does not move with
+   * body padding: left at `inset-0` it would slide under the docked sidebar and centre its panel on the
+   * VIEWPORT, while the resume boot screen — in normal flow, beside the same sidebar — centres in the
+   * CONTENT COLUMN. Same panel, same copy, two different centres. Start it after the sidebar so both
+   * land in the same place. (It deliberately stays BELOW `.z-sidebar`; a splash must never cover the
+   * chrome — see `BootScreen.tsx`.)
+   */
+  body.sidebar-docked .creation-splash {
+    left: var(--sidebar-dock-width, 340px);
+  }
 }
 
 :root {

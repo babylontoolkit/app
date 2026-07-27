@@ -1,14 +1,24 @@
 # spec/sandbox-seam.md — The Sandbox Seam (governs SPEC §1.3.5, §8)
 
-> **Status: the seam is BUILT (2026-07-26), and the SECOND PROVIDER now exists (2026-07-26).**
-> `SandboxProvider` exists, every runtime store is constructed with one, and a default-deny source
-> scan keeps it that way — now for **both** vendors. `codesandbox-provider.ts` implements the
-> interface against Together CodeSandbox (`spec/sandbox-codesandbox.md`), with the server half in
-> `app/lib/.server/sandbox/`. What is NOT done is the CUTOVER: nothing constructs it yet, because
-> `index.ts` still boots WebContainer. Routes, a `sandbox_id` on the project record, and the billing
-> term are the remaining work — see §"Swap plan".
+> **Status: the seam is BUILT (2026-07-26), the SECOND PROVIDER is BUILT AND WIRED, and the whole
+> creation path has been DRIVEN LIVE on it (2026-07-26/27).** `SandboxProvider` exists, every runtime
+> store is constructed with one, and a default-deny source scan keeps it that way — for **both**
+> vendors. `codesandbox-provider.ts` implements the interface against Together CodeSandbox
+> (`spec/sandbox-codesandbox.md`), with the server half in `app/lib/.server/sandbox/` (key holder,
+> per-user registry, session/preview routes). **The cutover is a BUILD-TIME switch that already
+> works**: `VITE_SANDBOX_PROVIDER=codesandbox` selects the provider in `index.ts` (unset/typo =
+> WebContainer, the safe direction; both branches are dynamic imports so the unused runtime is never
+> even downloaded), and the same flag drives `WORK_DIR` (`/project/workspace` vs `/home/project`) and
+> the COEP conditional in `entry.server.tsx`.
 >
-> The escape hatch is no longer a paragraph. It is a file with 61 tests behind it.
+> What remains before REAL USERS ride it: the 2026-07-27 review's findings
+> (`spec/sandbox-codesandbox.md` §11 — one CRITICAL cross-project-adoption gate, the VM
+> leak/reap/reset lifecycle, the `/home/project` literal family, `.codesandbox/` ignore rules, the
+> shell demux race), per-project sandboxes (`sandbox_id` on the project record), and the billing
+> term (§"Swap plan" items 4–6; the margin PLACEHOLDER for unmetered VM time is documented in
+> CREDITS.md §"Sandbox compute").
+>
+> The escape hatch is no longer a paragraph. It is a running provider with the defect list to close.
 
 ## Why this exists
 
@@ -59,9 +69,15 @@ Measured against real call sites, not copied from WebContainer's `.d.ts`:
 - `watchPaths` / `onServerReady` / `onPort` — named for what they do. Two of these were
   `container.internal.*`, i.e. `@unstableInternal` in StackBlitz's own types.
 - `textSearch?` — **optional**, gated by a capability flag.
+- `clearPort?` — **optional**, gated by a capability flag. Kills whatever is listening on a port and
+  waits (bounded) for it to free. Exists for sandboxes that OUTLIVE a page session: a resumed/forked
+  microVM wakes with the previous session's dev server still bound to 5173, and a fresh
+  `npm run dev` dies with "Port already in use" (MEASURED live on CodeSandbox, 2026-07-27). Creation
+  calls it (`clearInheritedDevServer`) before mounting the template. WebContainer declares `false` —
+  its runtime dies with the tab, so there is nothing to inherit.
 - `teardown()` — unused by app code today (a WebContainer dies with the tab) but in the contract,
   because a server provider bills for whatever it does not reap.
-- `capabilities: { terminal, textSearch, watch }` — so the UI degrades instead of throwing.
+- `capabilities: { terminal, textSearch, watch, clearPort }` — so the UI degrades instead of throwing.
 
 ### Capability flags replaced method-probing
 
@@ -77,9 +93,13 @@ Honesty matters more here than a clean scorecard:
    It degrades safely — a different provider returns `null` and every caller guards on it, costing
    only the cross-tab preview broadcast. Promoting preview-id extraction onto the provider is
    follow-up work.
-2. **`shell.ts` spawns `/bin/jsh`** with `--osc` and parses WebContainer's OSC escape sequences to
-   detect an interactive prompt. A server provider gives you a real PTY and this shim becomes
-   simpler, not harder — but it is provider-specific today.
+2. **`shell.ts`'s OSC parsing is now provider-CONFIGURED, not provider-specific** (2026-07-27): the
+   shell command and its marker dialect come from the provider's `SandboxShell` (`{command, args,
+   readyOsc?, beginOsc?}` — WebContainer declares `/bin/jsh --osc` + `readyOsc:'interactive'`;
+   CodeSandbox declares `bash` + `beginOsc:'begin'` via the versioned rc block). What remains
+   WebContainer-shaped is the parsing machinery itself living in `shell.ts` rather than behind the
+   seam — and it has a known demux race on the CodeSandbox dialect
+   (`spec/sandbox-codesandbox.md` §11 M5).
 3. **`mount()` corrupts binaries on the WebContainer provider** (`TextDecoder('latin1')` =
    windows-1252). Documented at length in `~/lib/registry/mount-tree.ts`. This is a property of one
    provider; the seam permits `Uint8Array` contents and a correct provider would carry them.
@@ -118,17 +138,31 @@ that would mean deploying a **second application** beside Lightsail.
       available" forever. Two sweeps (t=0 and t=3s), because `ports.getAll()` answers `[]` in the
       first moments after `connectToSandbox` (MEASURED); and it must feed `onPort`, because THAT is
       the listener that fills `PreviewsStore.previews` — `onServerReady` only broadcasts.
-- [ ] **3. Lifecycle + persistence.** A `sandbox_id` on the project record, two-wall routes for
-      session minting and resume, and reaping on project delete. `decideSandboxStart` (pure, tested)
-      already encodes the dangerous half.
+- [~] **3. Lifecycle + persistence — HALF DONE (2026-07-27).** Session minting and preview
+      tokenization are BUILT (`api.sandbox.session.ts` + `api.sandbox.preview.ts`, verified-user
+      wall, sandbox id derived from the registry and never on the wire; `decideSandboxStart` pure +
+      tested, refuse-on-unknown). Still open, and now with a defect list attached
+      (`spec/sandbox-codesandbox.md` §11): the registry is per-USER, not per-project — the §11 C1
+      cross-project-adoption hazard is the reason `sandbox_id` must move to the project record —
+      and **reaping does not exist**: `deleteSandbox`/`hibernateSandbox`/`deleteSandboxRecord` have
+      zero callers, project delete never sweeps `sandboxes/`, `reset` orphans the old VM, and the
+      lock-less registry PUT races two tabs into a leaked sandbox.
 - [ ] **4. Cost model.** SPEC §7's "user project compute: ~$0" stops being true. A `sandbox` ledger
       reason, a metering sweep, an overdraw policy, and a re-run of `packMargin()`. It accrues
       **while the user is idle**, which is a billing shape nothing in the ledger has today.
+      **Until it ships, the cost is folded into the margin as a documented PLACEHOLDER**
+      (CREDITS.md §"Sandbox compute", 2026-07-27): ~+25% on raw cost ≈ 5–7 GM points at
+      `CREDIT_MARGIN=4.0`; `5.0` restores the ~75% target — applied to BOTH providers by owner
+      decision until real per-provider numbers exist.
 - [ ] **5. The binary contract gets a network hop.** Every `readBinaryFile` becomes an RTT and
       `FilesStore.refreshFiles` walks the whole tree — against a MEASURED 3,600 requests/hour cap on
       the free plan. Egress paths (publish, GitHub sync, deploy) want a server-side route where bytes
       never round-trip through the browser at all.
-- [ ] **6. Flag + A/B.** Per-user/per-env, against WebContainers, before cutover.
+- [~] **6. Flag + A/B.** The flag EXISTS and is deliberately BUILD-time, not runtime:
+      `VITE_SANDBOX_PROVIDER=codesandbox` (unset/typo = WebContainer; the runtime's name is not a
+      secret, which is the one legitimate `VITE_` prefix). A/B against WebContainers on real usage
+      is still owed before cutover — per-user runtime switching was rejected (two lifecycles in one
+      session), so the A/B is per-DEPLOY.
 
 One incidental win: dropping WebContainer lets us drop `Cross-Origin-Embedder-Policy: require-corp`
 (`app/entry.server.tsx`), which exists only for SharedArrayBuffer and constrains what the app can embed.

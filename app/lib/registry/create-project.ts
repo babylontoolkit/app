@@ -32,9 +32,10 @@ import registryData from '~/config/game-registry.json';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import type { TemplateFile } from '~/types/template';
 import { WORK_DIR } from '~/utils/constants';
+import { bootProgress } from '~/lib/stores/boot-progress';
 import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
-import { mountTemplate } from './mount';
+import { clearInheritedDevServer, mountTemplate } from './mount';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import {
   CreationError,
@@ -148,6 +149,13 @@ export async function createProjectFromRegistry(options: {
   const { entry, title, prompt } = options;
 
   /*
+   * The creation splash (`CreationSplash`) narrates these phases — set as each await is reached, so
+   * "New Project" is never a blank page with three dots. This function only ever moves the phase
+   * FORWARD; the caller (`startProject`) owns the reset to `idle` on every exit, success or failure.
+   */
+  bootProgress.set({ step: 'creating-starter' });
+
+  /*
    * The starter itself — the ONE fetch a creation cannot survive without. A throw here is correct and
    * fatal: there is nothing to mount.
    */
@@ -236,6 +244,22 @@ export async function createProjectFromRegistry(options: {
    * single representation the model ever sees. Atomic and awaited here, so the whole project is on disk
    * — verified — before `npm install` runs, with no per-file boot race (see `mount-tree.ts`).
    */
+  /*
+   * A reused sandbox can wake with a PREVIOUS session's dev server still bound to 5173 (per-user VM
+   * reuse, or a template snapshot taken while serving — see `clearInheritedDevServer`). Cleared
+   * BEFORE the mount so the stale process never serves this project's files, and so the artifact's
+   * `npm run dev` below cannot die with "Port 5173 is already in use" (MEASURED live, 2026-07-27).
+   * Best-effort and awaited: bounded inside, and a failure logs rather than failing the creation.
+   */
+  /*
+   * The `await sandbox` inside is where a server provider actually boots/forks the VM — the longest
+   * single wait on this path, and the one that most needs a face.
+   */
+  bootProgress.set({ step: 'creating-workspace' });
+  await clearInheritedDevServer();
+
+  bootProgress.set({ step: 'creating-mount' });
+
   try {
     await mountTemplate(projectFiles);
   } catch (error) {

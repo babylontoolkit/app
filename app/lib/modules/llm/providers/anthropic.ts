@@ -54,6 +54,13 @@ export default class AnthropicProvider extends BaseProvider {
       maxCompletionTokens: 128_000,
     },
     {
+      name: 'claude-opus-5',
+      label: 'Claude Opus 5',
+      provider: 'Anthropic',
+      maxTokenAllowed: 1_000_000,
+      maxCompletionTokens: 128_000,
+    },
+    {
       name: 'claude-fable-5',
       label: 'Claude Fable 5',
       provider: 'Anthropic',
@@ -116,6 +123,19 @@ export default class AnthropicProvider extends BaseProvider {
     apiKeys?: Record<string, string>;
     providerSettings?: Record<string, IProviderSetting>;
     effort?: EffortLevel;
+
+    /**
+     * Force thinking OFF for THIS request (§4.2a) — the last-resort retry, and nothing else.
+     *
+     * KIE kills any step that puts no bytes on the wire for ~30s, and an extended think is exactly that:
+     * silence. Disabling thinking makes the model start emitting text almost immediately, so the stream
+     * can never go quiet long enough to be killed. See `retryThinkingMode` in `retry-policy.ts` for why
+     * this is scoped to the final attempt — a general "go quiet, drop thinking" rule would eat the
+     * reasoning text on precisely the long thinks whose reasoning is worth reading.
+     *
+     * Omitted on every ordinary generation, which keeps the operator's `THINKING_MODE` authoritative.
+     */
+    thinkingMode?: ThinkingMode;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
     const { apiKey } = this.getProviderBaseUrlAndKey({
@@ -143,7 +163,8 @@ export default class AnthropicProvider extends BaseProvider {
      * `THINKING_MODE=disabled` remains available as a speed lever (measured: 152s → 72s, $0.293 →
      * $0.200 on one creation), but it is not the default: it buys latency with intelligence.
      */
-    const thinkingMode: ThinkingMode = (serverEnv as any)?.THINKING_MODE === 'disabled' ? 'disabled' : 'adaptive';
+    const thinkingMode: ThinkingMode =
+      options.thinkingMode ?? ((serverEnv as any)?.THINKING_MODE === 'disabled' ? 'disabled' : 'adaptive');
 
     /*
      * Effort — the dial that bounds what thinking COSTS (§4.2a).

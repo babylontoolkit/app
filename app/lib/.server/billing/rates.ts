@@ -98,6 +98,14 @@ export const MODEL_RATES: Record<string, ModelRates> = {
     cacheReadPerMTok: 0.5,
     cacheWritePerMTok: 10.0,
   },
+
+  // Anthropic prices Opus 5 as a drop-in at Opus 4.8's exact rates (launch announcement, 2026-07).
+  'claude-opus-5': {
+    inputPerMTok: 5.0,
+    outputPerMTok: 25.0,
+    cacheReadPerMTok: 0.5,
+    cacheWritePerMTok: 10.0,
+  },
 };
 
 /**
@@ -346,7 +354,7 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
 export function ratesFor(model: string, provider: string, context?: unknown): ModelRates {
   const table = providerRates(context)[provider] ?? MODEL_RATES;
 
-  return table[model] ?? mostExpensive(table) ?? MODEL_RATES['claude-opus-4-8'];
+  return table[model] ?? mostExpensive(table) ?? MODEL_RATES['claude-opus-5'];
 }
 
 /**

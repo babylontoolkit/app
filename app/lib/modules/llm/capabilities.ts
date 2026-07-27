@@ -157,6 +157,46 @@ export function parseEffort(raw: string | undefined): EffortLevel | undefined {
   return value as EffortLevel;
 }
 
+/**
+ * The two levels a USER may choose as the base effort for their session (SPEC §4.2a, §4.2.9).
+ *
+ * Deliberately a STRICT SUBSET of `EFFORT_LEVELS`, not the whole union:
+ *
+ *  - Below `medium` there is nothing — `low` is a correctness bug, not a discount (see `REJECTED_EFFORT`).
+ *  - Above `high` there is `xhigh`/`max`, which `effort-policy.ts` spends ONLY on evidence (a repair that
+ *    has already failed twice). Handing those to a user as a session default turns the escalation ladder
+ *    into a floor — every ordinary edit would start where a twice-failed build ends, on the operator's
+ *    credit pool, with no signal that the turn needed it. The ceiling stays earned, never chosen.
+ *
+ * So the user picks the FLOOR (`medium` or `high`); the policy still escalates above it on evidence.
+ */
+export const USER_EFFORT_LEVELS = ['medium', 'high'] as const;
+
+export type UserEffortLevel = (typeof USER_EFFORT_LEVELS)[number];
+
+/** The base effort a session starts at when the user has not chosen. Matches `DEFAULT_EFFORT`. */
+export const DEFAULT_USER_EFFORT: UserEffortLevel = 'medium';
+
+/**
+ * Validate a CLIENT-SUPPLIED base effort, returning `undefined` for anything that is not one of the two
+ * user-selectable levels.
+ *
+ * This is a request from a browser, so it is untrusted in exactly the way `THINKING_EFFORT` is not: a
+ * tampered body asking for `max` on every turn is a request to multiply the thinking bill on the
+ * platform's credit pool. Anything unrecognised — `max`, `xhigh`, `low`, a typo, a number, an object —
+ * resolves to `undefined`, which means "no user choice" and falls back to the operator default. It never
+ * throws and never clamps upward: an unusable value must cost nothing, not buy the expensive setting.
+ */
+export function parseUserEffort(raw: unknown): UserEffortLevel | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+
+  const value = raw.trim().toLowerCase();
+
+  return (USER_EFFORT_LEVELS as readonly string[]).includes(value) ? (value as UserEffortLevel) : undefined;
+}
+
 function bareModelId(modelId: string): string {
   return modelId.startsWith('anthropic.') ? modelId.slice('anthropic.'.length) : modelId;
 }

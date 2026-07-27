@@ -48,6 +48,9 @@ export const KIE_DEFAULT_BASE_URL = 'https://api.kie.ai/claude/v1';
  * | claude-opus-4-7   | 80                     | 0 ❌          |
  * | claude-fable-5    | 56, then 2,980 forced  | 0 ❌ (was 224/223 on 07-17) |
  * | claude-opus-4-8 via api.anthropic.com (CONTROL) | 121 | 209 ✅ streamed live during the think |
+ * | claude-opus-5 (probed 2026-07-27, on becoming the default) | — | 0 ❌ — ZERO thinking deltas on a
+ * |   forced think (not even empty ones); 12.4s of wire silence, then the answer. The regression
+ * |   covers the new default too; the heartbeat below remains load-bearing. |
  *
  * The control run pins the fault on KIE's adapter, not our request shape: the same body against
  * Anthropic directly streams summarized thinking DURING the think. KIE also still BILLS the
@@ -118,6 +121,10 @@ export function kieFetch(baseFetch: typeof fetch = fetch): typeof fetch {
  * a rate table: get 4-6's published prices, add the row, and only then list it here.
  *
  * Do not remove 4-8 without saying which exit was taken.
+ *
+ * 2026-07-27: the DEFAULT moved to `claude-opus-5` — same KIE price ($2/$10), same honest cache
+ * accounting (probe-verified), same missing thinking text. The trade above carries over unchanged
+ * to the new default; 4-8 stays listed as a selectable prior default.
  */
 export const KIE_MODELS: ModelInfo[] = [
   /*
@@ -135,6 +142,22 @@ export const KIE_MODELS: ModelInfo[] = [
   {
     name: 'claude-opus-4-8',
     label: 'Claude Opus 4.8 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+
+  /*
+   * THE PLATFORM DEFAULT since 2026-07-27 (`DEFAULT_MODEL`), at 4-8's exact KIE price ($2/$10 —
+   * baked-market-prices.ts). Probe-verified same day: cache accounting reports honestly like 4-8
+   * (5,419-token write reported cold, 5,419-token read warm), and thinking text is empty like every
+   * KIE model since the 2026-07-24 regression (see the re-measure table above) — the heartbeat
+   * carries the UX. Listed here for the same reason as the others: an unlisted default silently runs
+   * `modelsList[0]` on the enhancer path while settlement charges the configured model's rates.
+   */
+  {
+    name: 'claude-opus-5',
+    label: 'Claude Opus 5 (KIE)',
     provider: 'KIE',
     maxTokenAllowed: 1_000_000,
     maxCompletionTokens: 128_000,

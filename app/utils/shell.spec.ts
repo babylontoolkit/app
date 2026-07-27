@@ -14,7 +14,7 @@
  * `shell-strip.spec.ts`.
  */
 import { describe, expect, it } from 'vitest';
-import { scanOscSignals } from './shell';
+import { reduceOscSignals, scanOscSignals, type OscWaitState } from './shell';
 
 /** Captured live from `bash` in a CodeSandbox VM. Do not "tidy" it — its shape IS the regression. */
 const MEASURED_PROMPT_CHUNK = '\x1b]654;exit=0:0\x07\x1b]654;prompt\x07\x1b[?2004hroot@f4s3lp:/project/workspace# ';
@@ -108,5 +108,80 @@ describe('scanOscSignals', () => {
     const once = scanOscSignals(MEASURED_PROMPT_CHUNK).signals;
 
     expect(scanOscSignals(MEASURED_PROMPT_CHUNK).signals).toEqual(once);
+  });
+});
+
+/**
+ * The stale-marker accounting (MEASURED live, 2026-07-27). bash's PROMPT_COMMAND fires on prompt
+ * draws that follow NO command — attach, and Ctrl-C at an idle prompt — so their exit/prompt markers
+ * sit buffered and the next wait matches them. On a real creation: `npm install` "completed"
+ * instantly against a stale exit 0, the chain moved to `npm run dev`, whose leading interrupt KILLED
+ * the still-running install, and the start action then "failed" (stale 130) over a healthy server.
+ * `afterOsc` (bash's PS0 begin marker) arms the wait so pre-begin signals can never satisfy it.
+ */
+describe('reduceOscSignals — stale markers must never satisfy a wait', () => {
+  const START: OscWaitState = { armed: false, exitCode: 0, done: false };
+
+  it('the measured kill, as a test: stale exits before the begin marker are ignored', () => {
+    // Attach pair + Ctrl-C pair, buffered before our command ever ran.
+    const stale = [
+      { code: 'exit', exitCode: 0 },
+      { code: 'prompt' },
+      { code: 'exit', exitCode: 130 },
+      { code: 'prompt' },
+    ];
+
+    const afterStale = reduceOscSignals(START, stale, 'exit', 'begin');
+    expect(afterStale.done).toBe(false); // npm install must NOT "complete" off these
+    expect(afterStale.exitCode).toBe(0); // and the stale 130 is not recorded either
+
+    // Our command starts (PS0) and later really exits.
+    const armed = reduceOscSignals(afterStale, [{ code: 'begin' }], 'exit', 'begin');
+    expect(armed.armed).toBe(true);
+    expect(armed.done).toBe(false); // the begin itself satisfies nothing
+
+    const finished = reduceOscSignals(armed, [{ code: 'exit', exitCode: 2 }], 'exit', 'begin');
+    expect(finished).toMatchObject({ done: true, exitCode: 2 });
+  });
+
+  it('without a begin marker the state starts armed — the jsh path, byte-identical to before', () => {
+    const state = reduceOscSignals(
+      { armed: true, exitCode: 0, done: false },
+      [{ code: 'exit', exitCode: 7 }, { code: 'prompt' }],
+      'exit',
+      undefined,
+    );
+
+    expect(state).toMatchObject({ done: true, exitCode: 7 });
+  });
+
+  it('arming survives across chunks — a begin in one chunk arms the exit in a later one', () => {
+    const armed = reduceOscSignals(START, [{ code: 'begin' }], 'exit', 'begin');
+    const finished = reduceOscSignals(armed, [{ code: 'exit', exitCode: 0 }], 'exit', 'begin');
+
+    expect(finished.done).toBe(true);
+  });
+
+  it('records the exit status even when the SAME signal ends the wait (waitCode === exit)', () => {
+    const finished = reduceOscSignals(
+      { armed: true, exitCode: 0, done: false },
+      [{ code: 'exit', exitCode: 130 }],
+      'exit',
+      undefined,
+    );
+
+    expect(finished.exitCode).toBe(130);
+  });
+
+  it('a prompt wait is satisfied by a prompt only, never by an exit', () => {
+    const state = reduceOscSignals(
+      { armed: true, exitCode: 0, done: false },
+      [{ code: 'exit', exitCode: 1 }],
+      'prompt',
+      undefined,
+    );
+
+    expect(state.done).toBe(false);
+    expect(reduceOscSignals(state, [{ code: 'prompt' }], 'prompt', undefined).done).toBe(true);
   });
 });

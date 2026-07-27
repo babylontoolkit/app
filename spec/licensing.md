@@ -17,6 +17,21 @@ Free for all uses including commercial. Obligations: retain the MIT license text
   Contact: webcontainers.io/enterprise form or hello@stackblitz.com.
 - Charging credits requires no *extra* permission beyond the commercial license itself; monetization model is our business decision.
 
+## Together CodeSandbox (commercial API — the built §8 alternative runtime)
+
+- **Why it matters here:** self-serve commercial terms (API key, published usage rates, no
+  negotiation) where StackBlitz requires a contract from a vendor that has not answered. The
+  provider is BUILT and selected per-build via `VITE_SANDBOX_PROVIDER` (`spec/sandbox-seam.md`).
+- **A deploy that runs on the CodeSandbox provider does not serve WebContainers**, so the StackBlitz
+  Phase-3 gate does not apply to that build — the gate binds per-RUNTIME, not per-product. A
+  WebContainer build for external users still requires the StackBlitz plan first.
+- Costs are usage-billed to our workspace (VM-hours by tier + API request caps —
+  `spec/sandbox-codesandbox.md` §7); commercial use is within their published API terms. Get the
+  paid-plan tier ("SDK lite" restrictions on the free Build plan are unverified) confirmed before
+  external users ride it.
+- Data room: keep the CodeSandbox plan/terms alongside the StackBlitz item below — either runtime
+  must be the "properly licensed sandbox" answer.
+
 ## Anthropic
 
 Commercial API terms via the Console org (Appendix A.1). User prompts/content pass to the API — disclosed in the Privacy Policy (SPEC §5A). We never route end-user traffic through consumer Claude subscriptions (prohibited); platform key only.

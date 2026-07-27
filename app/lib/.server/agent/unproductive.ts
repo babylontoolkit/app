@@ -86,6 +86,21 @@ export interface UnproductiveTurnInput {
 
   /** Billed output tokens: thinking + tool JSON + text, as the provider reports them. */
   outTokens: number;
+
+  /**
+   * This turn is only complete if it WROTE something — a creation turn (§4.4b).
+   *
+   * The density/length test below asks "did the model announce work and stop"; it cannot see a turn
+   * that did plenty of *writing* and none of it to disk. Measured 2026-07-27: a creation answered a
+   * provider retry with **31,852 chars of prose and zero `<boltAction>`** — a full essay describing the
+   * landing page, the code included, as text. Density 2.6 and length 31k both read as healthy, so the
+   * rescue sat it out, the project never built, and the user was billed 50 credits for a description of
+   * a game. Every existing signal said "productive"; the disk said otherwise.
+   *
+   * False for ordinary edits and plan turns, where a prose-only answer is often exactly right (and for
+   * plan mode it is guaranteed — the §4.2.9 wall makes writing impossible).
+   */
+  requiresAction: boolean;
 }
 
 /**
@@ -95,12 +110,29 @@ export interface UnproductiveTurnInput {
  * a `true` here spends the user's credits without them asking for it.
  */
 export function shouldRescueUnproductiveTurn(input: UnproductiveTurnInput): boolean {
-  if (input.aborted || input.alreadyContinued || input.emittedAction || input.toolCalls > 0) {
+  if (input.aborted || input.alreadyContinued || input.emittedAction) {
     return false;
   }
 
   // Zero text is the EXISTING hard failure (refund, §4.6) — do not spend a second pass on silence.
   if (input.textChars <= 0 || input.outTokens < MIN_BILLED_OUTPUT_TOKENS) {
+    return false;
+  }
+
+  /*
+   * A turn that MUST write and wrote nothing is unproductive however eloquent it was, so the density
+   * and length tests are skipped — they measure "announced and stopped", and this failure looks like
+   * its opposite from the outside: long, dense, confident, and entirely on the floor.
+   *
+   * The tool-call exemption is skipped too, deliberately: a creation that called `generate_image` and
+   * then described the page instead of building it has spent MORE, not less. A media call is not a
+   * file write, and it must not buy the turn a pass.
+   */
+  if (input.requiresAction) {
+    return true;
+  }
+
+  if (input.toolCalls > 0) {
     return false;
   }
 

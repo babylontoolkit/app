@@ -117,8 +117,8 @@ raw_cost = in·inputRate + cache_read·(0.1×inputRate) + cache_write·(2×input
 credits  = ceil(raw_cost / CREDIT_UNIT_COST_USD × CREDIT_MARGIN)
 ```
 
-Current baked rates (per MTok, KIE): Opus 4.8 (the default) **$2 / $10**; Fable 5 (the premium tier)
-**$4 / $20**. Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
+Current baked rates (per MTok, KIE): Opus 5 (the default since 2026-07-27, at its predecessor
+Opus 4.8's exact price) **$2 / $10**; Fable 5 (the premium tier) **$4 / $20**. Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
 §4.2.8; assuming the 1.25× headline number under-charges every generation and nothing throws).
 
 Measured on KIE (2026-07-16/17, `spec/context-budget.md` §MEASURED) **at the old margin 3.34** — at the
@@ -139,6 +139,48 @@ artifact before the gateway timeout).
 > 2×. Measured: $0.51 for a one-sentence answer right after a schema edit, $0.22 for the identical
 > prompt immediately after. A post-deploy cost spike is expected, not a regression.
 
+## Sandbox compute — the margin fold-in (2026-07-27, PLACEHOLDER)
+
+`CREDIT_MARGIN` has only ever covered **LLM + media raw cost**, and that was complete while projects
+ran on WebContainer: the user's project computes in their own BROWSER (~$0 marginal to us), and the
+only real cost — the StackBlitz plan fee — is a fixed monthly number (SPEC §7) that a per-credit
+margin cannot see. **Nothing was ever folded in for WebContainer, and nothing needed to be.**
+
+The CodeSandbox provider (SPEC §8, `spec/sandbox-codesandbox.md`) changes the shape: the project runs
+on a microVM billed by **wall clock, not tokens** — MEASURED $0.074/hr on Pico (the default
+`CODESANDBOX_VM_TIER`), $0.149/hr Nano — and it accrues while the user *thinks*, not just while the
+model runs. Metering is NOT built yet (no `sandbox` ledger reason, no sweep, no overdraw policy —
+`spec/sandbox-codesandbox.md` §8 item 4), so today every VM-hour is an unbilled cost that comes
+straight out of the generation margin.
+
+**The placeholder, until metering ships:** assume an active build-hour bills ~120 credits (a few warm
+edits plus a share of a creation — the measured ranges above). The raw LLM spend behind those credits
+at margin 4.0 is ~$0.30/hr; a Pico hour adds $0.074 on top ≈ **+25% on raw cost**. What that does to
+the numbers:
+
+- Effective gross margin at `CREDIT_MARGIN=4.0` drops from ~72–75% (LLM-only) to **~65–69%**.
+- Equivalently: one Pico VM-hour eats the margin earned by **~10 billed credits** ($0.074 ÷ $0.0075).
+- To hold the ~75% GM target while sandbox time rides unmetered, set **`CREDIT_MARGIN=5.0`** (env —
+  the code default stays 4.0 until the owner changes it).
+- Sensitivity: +25% assumes ~120 credits/active-hour. Lighter usage is worse (100/hr → +30%), heavier
+  is better (300/hr → +10%); Nano doubles all of it. The hibernation default
+  (`CODESANDBOX_HIBERNATION_SECONDS=300`) bounds the idle tail to ~5 minutes — and the placeholder is
+  only honest while VMs actually get reaped (the 2026-07-27 sandbox review found orphan paths — the
+  two-tab create race and `reset` overwrites — that leak VMs past the model; fix before trusting it).
+
+**WebContainer builds use the SAME +25% placeholder (owner decision, 2026-07-27)** — not because the
+cost shape matches (it does not: browser compute is ~$0 and the StackBlitz license is a fixed fee),
+but as a conservative stand-in until real numbers exist on either side. StackBlitz's
+beyond-500-sessions/month pricing is unpublished, and CodeSandbox's true accrual needs the metering
+sweep to measure. Replace the placeholder with measured $/active-hour per provider when either
+number arrives.
+
+**The honest fix is metering, not margin.** Folding VM time into `CREDIT_MARGIN` makes light sandbox
+users subsidize heavy ones and hides the cost from the ledger it belongs in. The end state
+(`spec/sandbox-codesandbox.md` §8 item 4) is a `sandbox` ledger reason with its own sweep and overdraw
+policy — at which point the placeholder comes OUT of the margin and `CREDIT_MARGIN` goes back to
+pricing model spend only.
+
 ## Config knobs
 
 All are environment config, never hardcoded (`.env.local` locally, SSM → container env when deployed).
@@ -149,7 +191,7 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | `SIGNUP_GRANT_CREDITS` | `800` | Starter credits, once per user (~3.5× a KIE creation at margin 4.0; below the premium minimum on purpose) |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
-| `CREDIT_MARGIN` | `4.0` | Multiplier over raw cost (~75% gross-margin target; realized ~72–75% at the pack prices) |
+| `CREDIT_MARGIN` | `4.0` | Multiplier over raw LLM+media cost (~75% GM target; realized ~72–75% LLM-only, **~65–69% effective while sandbox compute rides unmetered** — see "Sandbox compute"; `5.0` restores the target under the placeholder) |
 | `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-fable-5` / `1200` | The 2× premium tier: a selector + the balance a user must HOLD to unlock it (edit turns only) |
 
 Model PRICES are not env anymore — they live in the Marketplace price list (admin-promoted, baked
@@ -162,6 +204,9 @@ fallback). The retired `KIE_*_DOLLARS` / `PREMIUM_*_DOLLARS` vars are REFUSED if
 | Starter | 3,000 | $30 | $0.0100 | 75% |
 | Pro | 9,500 | $90 | $0.0095 | 74% |
 | Studio | 25,000 | $225 | $0.0090 | 72% |
+
+The GM column is **LLM-only** raw cost at margin 4.0. While sandbox compute rides unmetered
+(the +25% placeholder above), subtract ~5–7 points across the board (~65–69% effective).
 
 Priced as a **premium specialty game platform** (2026-07-18): base $0.01/credit with a shallow volume
 discount to Studio, mirroring the market's shape (Lovable is a flat $0.25/message, discounting only

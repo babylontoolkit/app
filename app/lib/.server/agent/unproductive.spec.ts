@@ -23,6 +23,7 @@ const DEMO_FAILURE: UnproductiveTurnInput = {
   toolCalls: 0,
   textChars: 83,
   outTokens: 524,
+  requiresAction: false,
 };
 
 describe('shouldRescueUnproductiveTurn', () => {
@@ -99,5 +100,57 @@ describe('UNPRODUCTIVE_RESCUE_PROMPT', () => {
   it('names the failure so the model does not repeat it', () => {
     expect(UNPRODUCTIVE_RESCUE_PROMPT).toMatch(/announced/i);
     expect(UNPRODUCTIVE_RESCUE_PROMPT).toMatch(/no skill-loading tools/i);
+  });
+});
+
+/**
+ * The CREATION case (2026-07-27, measured live). A creation retried after a KIE `Internal error`
+ * answered with 31,852 characters of prose — the whole landing page written out as text, code and all —
+ * and **zero `<boltAction>`**. Every existing signal read healthy: long, dense (2.6 ch/tok), confident,
+ * `finish=stop`. The rescue sat it out, the project never built, and the user was billed 50 credits for
+ * a description of a game.
+ */
+describe('shouldRescueUnproductiveTurn — a turn that had to WRITE', () => {
+  const CREATION_PROSE: UnproductiveTurnInput = {
+    aborted: false,
+    alreadyContinued: false,
+    emittedAction: false,
+    toolCalls: 0,
+    textChars: 31_852,
+    outTokens: 12_215,
+    requiresAction: true,
+  };
+
+  it('rescues a creation that wrote 31k chars of prose and no files', () => {
+    expect(shouldRescueUnproductiveTurn(CREATION_PROSE)).toBe(true);
+  });
+
+  /** The control: the identical turn on an ordinary edit is a perfectly good prose answer. */
+  it('leaves the same turn alone when the turn did not have to write', () => {
+    expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, requiresAction: false })).toBe(false);
+  });
+
+  /**
+   * A media call is not a file write. Exempting on `toolCalls` here would let the MORE expensive
+   * failure — commissioned art, then a description instead of a build — buy itself a pass.
+   */
+  it('still rescues when the creation called a tool but wrote nothing', () => {
+    expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, toolCalls: 3 })).toBe(true);
+  });
+
+  /** The turn DID write — nothing to rescue, whatever else it did. */
+  it('never fires once an action was emitted', () => {
+    expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, emittedAction: true })).toBe(false);
+  });
+
+  /** Silence is the existing hard failure (refund, §4.6) — never a second paid pass. */
+  it('does not spend a pass on a creation that produced no text at all', () => {
+    expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, textChars: 0 })).toBe(false);
+  });
+
+  /** A Stop is a user decision, and one corrective pass per generation is the hard limit. */
+  it('respects abort and the one-pass cap on a creation', () => {
+    expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, aborted: true })).toBe(false);
+    expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, alreadyContinued: true })).toBe(false);
   });
 });

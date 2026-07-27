@@ -2,7 +2,9 @@
 
 **Driven live against the real API on 2026-07-26**, `@codesandbox/sdk@2.4.2`, free Build plan, workspace
 `mackeyk24`. Everything below marked MEASURED came off a real VM; everything marked ⚠️ UNVERIFIED did not.
-Nothing is built — this is the evidence a provider would be written against.
+§0–§10 were written as the evidence a provider would be built against; the provider has SINCE BEEN BUILT
+(see the status updates below and `spec/sandbox-seam.md`) — the measurements stand, the "nothing is
+built" framing does not.
 
 Companion to `spec/sandbox-cloudflare.md`, which this **supersedes as the recommendation**: Cloudflare's
 disk is ephemeral (a wake is a full re-materialisation) and it needs a deployed Worker alongside Lightsail.
@@ -64,6 +66,41 @@ CodeSandbox resumes with the filesystem intact and is a plain HTTPS API callable
 > ⚠️ Noticed, not yet handled: `refreshFiles` on a live sandbox now surfaces `.codesandbox/`
 > (Dockerfile, tasks.json, template.json) into the file map — provider plumbing that will ride into
 > context, working copies, exports and git pushes unless the ignore/opaque rules learn about it.
+> (Re-confirmed unhandled at every layer by the 2026-07-27 review — see §11 finding M4.)
+>
+> **THIRD LIVE SESSION, 2026-07-27 (late) — creation on a REUSED VM, two defects fixed + pinned,
+> then re-driven to a fully green creation (`npm install` exit 0, vite up, preview tokenized):**
+>
+> 6. **A reused VM wakes with a dev server already bound to 5173, and the creation's `npm run dev`
+>    died on it** ("Port 5173 is already in use" — strictPort). Both reuse paths deliver one: the
+>    per-user sandbox (a "new project" resumes the VM the previous project was using) and a fresh
+>    `btk@starter` fork (the snapshot is taken while the tasks.json port task serves). Fixed with a
+>    seam capability `clearPort` (fuser-by-port + pkill fallback + bounded wait-for-release;
+>    WebContainer declares `false`) called from `clearInheritedDevServer` BEFORE `mountTemplate`.
+> 7. **🔴 Stale OSC markers made `executeCommand` resolve against the PREVIOUS command — which
+>    KILLED `npm install` on every creation.** bash's `PROMPT_COMMAND` fires on prompt draws that
+>    follow NO command (attach, Ctrl-C at idle) — jsh marks neither — so a fresh bolt terminal
+>    buffers exit+prompt pairs nothing consumes. Measured cascade: `npm install` "completed"
+>    instantly against a stale exit 0 → the action chain moved on → `npm run dev`'s leading
+>    interrupt killed the STILL-RUNNING install (its ^C surfaced as exit 130 on whichever wait was
+>    up next) → the start action "failed" over a healthy server — and the interrupted installs left
+>    `node_modules` corrupted (npm ENOTEMPTY on later installs), which is the "broken build on a
+>    reused VM" tail. Fixed IN-BAND, not by timing: the rc block (v2, versioned marker so old VMs
+>    get the upgrade appended) adds bash's `PS0` — expanded only when a typed command actually
+>    starts — as a `begin` marker; `SandboxShell.beginOsc` declares it; `waitTillOscCode('exit')`
+>    ignores every marker before it (`reduceOscSignals`, pure + pinned in `shell.spec.ts`). jsh
+>    declares no `beginOsc` and is byte-identical. The rc v2 block also exports `BROWSER=true`,
+>    which silences the `xdg-open ENOENT` noise item 4 of the open list flagged.
+>
+> **FOURTH SESSION, 2026-07-27 (later) — creation SPLASH + a full three-track code review.**
+> The blank-purple-screen creation window got the same narrated treatment as the resume path: the
+> `bootProgress` store gained `creating-*` phases (starter download → workspace boot → mount →
+> finalize), written by `createProjectFromRegistry`/`startProject` and rendered by `CreationSplash`
+> (an overlay sibling of `BootScreen`, one shared status panel — `boot-progress.spec.ts` +
+> `create-project.spec.ts` pin the phases and the overlay gate; reset-to-idle is owned by ONE
+> `finally` in `startProject`). Provider-agnostic by construction. Then the whole sandbox surface —
+> server key-holder, client provider, and every integration touchpoint — was reviewed; the verified
+> findings live in **§11** below and gate the cutover.
 
 ## 0. What does NOT change
 
@@ -385,7 +422,11 @@ worked on the free plan; the restriction may be concurrency or tier ceiling (Bui
 
 ## 8. Provider design implied by all of the above
 
-- `capabilities`: `terminal: true`, `watch: true` (no content), `textSearch: false`.
+- `capabilities`: `terminal: true`, `watch: true` (no content), `textSearch: false`, `clearPort: true`
+  (a resumed/forked VM wakes with the previous session's dev server still bound to 5173 — both the
+  per-user sandbox reuse and a `btk@starter` fork deliver one, and the creation artifact's own
+  `npm run dev` then dies with "Port 5173 is already in use", MEASURED live 2026-07-27; creation
+  clears the port via `clearInheritedDevServer` before mounting).
 - **`privacy: 'private'` at every creation site.** Default is public. Pin it.
 - **`batchWrite` paths are relative; everything else is absolute.** Normalise in one place, pin it.
 - **A wake hook is required** — filesystem survives, processes do not. Restart the dev server on resume
@@ -425,6 +466,112 @@ worked on the free plan; the restriction may be concurrency or tier ceiling (Bui
    `packMargin()`. SPEC §7's "user project compute: ~$0" stops being true — and this cost accrues **while
    the user is idle**, which no existing ledger reason does.
 5. Flag it per-user/per-env and A/B against WebContainers before cutover (`spec/sandbox-seam.md` §8).
+
+## 11. Code review, 2026-07-27 — verified findings that GATE the cutover
+
+Three parallel review tracks (server key-holder, client provider, integration touchpoints) over the
+whole sandbox surface; every finding below was verified against the source, the worst by hand a
+second time. **None of these block WebContainer builds** (the review found zero regressions on the
+default path); all of them are between here and flipping `VITE_SANDBOX_PROVIDER=codesandbox` for
+real users.
+
+### 🔴 CRITICAL — fix before ANY multi-project use
+
+- **C1. Cross-project adoption: the per-user sandbox + the warm-boot gate can silently turn project
+  B INTO project A.** The sandbox is keyed per USER (`registry.ts`, documented stopgap), but
+  `liveSandboxIsTruth` (`useChatHistory.ts` mount path) checks only `bootRestoredFilesystem` — a fact
+  about the VM, never *which project* the disk holds. Open project B while the user's single VM holds
+  A: the gate skips B's restore, `refreshFiles` fills B's store with A's files, the next
+  checkpoint/working-copy records A's game under B's identity, and a later Commit pushes A's code to
+  **B's repo**. The gate needs a project-identity sentinel on the disk (written at creation, compared
+  at mount) before it may open — or the per-project `sandbox_id` migration, which subsumes it.
+
+### 🟠 MAJOR — lifecycle & money
+
+- **M1. VMs leak and nothing ever reaps them.** `deleteSandbox` / `hibernateSandbox` /
+  `deleteSandboxRecord` have **zero callers** (verified by grep — `deleteSandbox`'s own comment
+  claims "called when the PROJECT is deleted"; `delete-leaves-nothing.spec.ts` never sweeps
+  `sandboxes/`). A `reset` create overwrites the record without disposing the old VM; two tabs
+  first-booting race the lock-less registry PUT and orphan the loser (which the loser tab still holds
+  a live write session to). Orphans bill until the provider timeout and occupy the 10-concurrent /
+  20-per-hour caps.
+- **M2. `{reset:true}` is an unmetered, unlimited VM-creation loop.** Caller-supplied, honored
+  unconditionally, no rate limit, no ledger reason, and each iteration orphans the previous VM (M1).
+  Twenty requests exhaust the platform's hourly CodeSandbox cap — one confused retry loop takes the
+  sandbox feature down platform-wide.
+- **M3. The promised resume→create fallback does not exist, and gone-detection is a message regex.**
+  `lifecycle.ts`'s comment says a 404'd resume "can fall back to creating"; the route turns it into a
+  generic 500. `sandboxExists` classifies "confirmed gone" by regexing the error MESSAGE — if the SDK's
+  wording shifts, every open is a permanent retryable 503 with no client reset affordance (the
+  `retryable: true` body is read by nobody, and a boot failure is cached forever in the module-level
+  `sandbox` promise).
+
+### 🟠 MAJOR — the `/home/project` literal family (each one is the same bug)
+
+`sandbox-paths.ts` (`toProjectRelativePath`, roots as a LIST) exists precisely for these; five call
+sites never migrated. On a CodeSandbox build (`WORK_DIR=/project/workspace`):
+
+- **M-P1. `stripOpaqueContent`'s default workdir is `/home/project/`** and its one caller passes
+  nothing — the client-side opaque strip is a no-op, so the 218KB lockfile + vendored scripts are
+  POSTed to `/api/agent` every turn (wire freight; the server's own strip still protects the model).
+- **M-P2. `project-instructions.ts` misses `CLAUDE.md`** — no Project Instructions block, no cap, no
+  precedence statement: the §4.2 money-path promotion silently regresses to the pre-2026-07-16 state.
+- **M-P3. `plan-artifacts.ts` refuses `/project/workspace/_specs/...`** — Plan mode silently blocks
+  the one write it is supposed to allow (the exact §4.2.9 defect, reintroduced per-provider).
+- **M-P4. Netlify/Vercel deploy path rebasing no-ops** → file maps keyed with absolute sandbox paths
+  → broken deploys on CSB builds. `share/checklist.ts`'s normalizer is the same copy (its secret
+  regexes survive by accident — `(^|\/)` anchoring).
+
+### 🟠 MAJOR — provider internals
+
+- **M4. `.codesandbox/` rides into everything** (confirmed at every layer: watcher + refresh
+  excludes, `IGNORE_PATTERNS`, opaque rules, working copy, ZIP export, git push — none know it).
+- **M5. Shell signal demultiplexing can deadlock.** `executeCommand`'s prompt-wait is un-armed and
+  shares one stream reader with a parked exit-wait; `reduceOscSignals` **breaks at the awaited code
+  and discards the rest of the chunk's signals**, and bash emits `exit`+`prompt` in ONE chunk on
+  Ctrl-C — whichever waiter gets the chunk starves the other. Creation worked live because stale
+  attach-draw markers happened to backfill the prompt-wait; that balance is accidental and
+  chunk-boundary-dependent.
+- **M6. A failed `.bashrc` install hangs every shell action forever** — `ensureOscBashrc` is
+  best-effort (warn) but the provider *unconditionally* declares `beginOsc`, so if the rc write fails
+  (hardcoded `/root/.bashrc`; non-root image) every `waitTillOscCode` waits for markers bash will
+  never emit. Degrade honestly: don't declare `beginOsc` when the install failed.
+- **M7. `restoreFiles` has no store write-through** — `recordAgentWrite` closed the stale-serialize
+  race for ARTIFACT writes only; repo mounts, working-copy restores, git pulls and checkpoint undos
+  still fill the store via the RTT-per-file watcher, so a post-restore save can capture a stale mix
+  (the 2nd-session defect through a different door).
+- **M8. `resolveInWorkdir` DOUBLES an already-workdir-absolute path** (`/project/workspace/src/x` →
+  nested junk) while its sibling strips it — latent (every caller rebases first), unpinned, at the
+  exact seam the module exists to make safe. Watch-event paths are likewise passed through raw with
+  no pin on the "absolute, workdir-prefixed" contract.
+- **M9. Watch enrichment is the request-rate hazard and is untested.** `include` is silently ignored,
+  the `'**/node_modules'` exclude-glob shape is unverified against the SDK, and no test ever fires
+  the `onEvent` path (enrichment, read-failure classification, disposed gate). This is §7's
+  3,600 req/hr limit — the one the spec says to measure FIRST.
+
+### 🟡 Minor / notes (fix opportunistically)
+
+`teardown()` is a silent no-op (`onTeardown` never injected — the comment claims otherwise);
+mid-session reconnect after a provider-side delete swaps the user onto a fresh template FS silently;
+preview tokens have no re-mint trigger for a long-lived iframe and the cache is keyed by port only
+(serves the OLD sandbox's host after a recreate); `rm({force:true})` swallows ALL errors, not just
+absence; `CODESANDBOX_HOST_TOKEN_MINUTES` has no upper clamp (a typo mints ~41-day bearer tokens);
+the platform user UUID is written into vendor-side metadata under a parameter named `projectId`;
+background exit codes are narrowed to 0/1 (documented); watch enrichment can deliver stale content
+out of order for non-agent writes; `firstBootupType` is frozen per page, so a mid-session
+CLEAN-reconnect reads as restored (data-loss direction, rare); the privacy scan matches the literal
+`sandboxes.create(` (an aliased call evades it); `reset` has no client affordance (dead parameter);
+security behavior of both routes is implemented but not behaviorally pinned (`outbound-auth.spec.ts`
+has no sandbox entries; the enumerate spec passes them on source scan alone).
+
+### ✅ What the review CONFIRMS (keep these properties)
+
+Key hygiene is right (`CODESANDBOX_API_KEY` server-only, never in a response, pinned with controls);
+`privacy: 'private'` at the sole creation site, scanned; sessions/tokens never logged; the tri-state
+`sandboxExists` → refuse-on-unknown bias is correct and exhaustively tested; `decideSandboxStart` is
+pure + tested; the batchWrite relative/absolute split is in ONE pinned place; the seam scans have
+controls and mutation-verified allow-lists; test assertions are single-call (no concatenation trap);
+**zero WebContainer-path regressions found**.
 
 ## Appendix — reproduction
 

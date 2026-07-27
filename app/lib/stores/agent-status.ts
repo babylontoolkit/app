@@ -23,10 +23,14 @@ import { atom } from 'nanostores';
 
 export type AgentStatusPhase = 'thinking' | 'generating';
 
+/** What the turn IS — mirrors `agent/heartbeat.ts`. The server sends a fact; this file owns the words. */
+export type AgentStatusKind = 'creation' | 'repair' | 'plan' | 'edit';
+
 export interface AgentStatusSnapshot {
   generationId: string;
   seq: number;
   phase: AgentStatusPhase;
+  kind: AgentStatusKind;
 
   /** Elapsed since the generation started, per the SERVER's clock at the moment it wrote the part. */
   elapsedMs: number;
@@ -41,6 +45,8 @@ export interface AgentStatusSnapshot {
  * the generation ended) and the panel must yield to the real output.
  */
 export const STATUS_STALE_MS = 8000;
+
+const KINDS: AgentStatusKind[] = ['creation', 'repair', 'plan', 'edit'];
 
 export const agentStatusStore = atom<AgentStatusSnapshot | null>(null);
 
@@ -58,6 +64,7 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     generationId?: unknown;
     seq?: unknown;
     phase?: unknown;
+    kind?: unknown;
     elapsedMs?: unknown;
   };
 
@@ -82,6 +89,13 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     generationId: status.generationId,
     seq: status.seq,
     phase: status.phase,
+
+    /*
+     * An unknown or missing kind falls back to `edit` — the copy that claims the least. A status part
+     * from an older server (or a future kind this client has not learned) must degrade to a vaguer
+     * sentence, never to a wrong one: "Working on your changes" is true of every turn.
+     */
+    kind: KINDS.includes(status.kind as AgentStatusKind) ? (status.kind as AgentStatusKind) : 'edit',
     elapsedMs: status.elapsedMs,
     receivedAt: now,
   });
@@ -111,22 +125,53 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
- * The user-facing copy. Honest by design: it never pretends to BE the reasoning (when a provider
- * streams real thinking text, the ThinkingPanel shows it and this panel never appears), and it
- * answers the exact question dead dots cannot — "is it doing something, or is it frozen?".
+ * The user-facing copy, per turn kind.
+ *
+ * 🔴 **It describes THE TURN, never the model's inner activity.** Reported live: *"2-3 min of empty is
+ * a killer… thinking about what???"* — a fair complaint, because "Thinking" answered only "the pipe is
+ * alive" and left the longest wait in the product (a creation, minutes on a hard brief) with no idea
+ * what it was waiting FOR. The fix is not to guess harder: the server sends what the turn IS, decided
+ * before a token was spent, and these sentences say that. "Building your project" is true for the whole
+ * turn; "writing Home.tsx" would be a story we cannot see, and the moment a provider streams real
+ * reasoning the ThinkingPanel shows it and this panel never appears at all.
+ *
+ * `thinking` = nothing has streamed yet (planning). `generating` = text has streamed and then paused
+ * mid-answer. Same liveness guarantee, different truth about where the turn is.
+ */
+const COPY: Record<AgentStatusKind, { label: string; thinking: string; generating: string }> = {
+  creation: {
+    label: 'Building your project',
+    thinking: 'Designing your landing page and planning the game code. The first build takes a few minutes.',
+    generating: 'Writing your project files — landing page, chrome and game code.',
+  },
+  repair: {
+    label: 'Fixing a build error',
+    thinking: 'Reading the compiler output to work out what broke.',
+    generating: 'Patching the code that failed to build.',
+  },
+  plan: {
+    label: 'Planning',
+    thinking: 'Working through the approach. Nothing is written to your project on a plan turn.',
+    generating: 'Writing up the plan.',
+  },
+  edit: {
+    label: 'Working on your changes',
+    thinking: 'Reading your project and working out the change.',
+    generating: 'Applying the change to your project.',
+  },
+};
+
+/**
+ * Honest by design: it never pretends to BE the reasoning (when a provider streams real thinking text,
+ * the ThinkingPanel shows it and this panel never appears), and it answers the two questions dead dots
+ * cannot — "is it doing something, or is it frozen?" and "doing WHAT?".
  */
 export function describeAgentStatus(status: AgentStatusSnapshot, now = Date.now()): { label: string; detail: string } {
   const elapsed = formatElapsed(currentElapsedMs(status, now));
-
-  if (status.phase === 'thinking') {
-    return {
-      label: `Thinking — ${elapsed}`,
-      detail: 'The model is reasoning through your request.',
-    };
-  }
+  const copy = COPY[status.kind];
 
   return {
-    label: `Still working — ${elapsed}`,
-    detail: 'The model is still reasoning through your request.',
+    label: `${copy.label} — ${elapsed}`,
+    detail: status.phase === 'thinking' ? copy.thinking : copy.generating,
   };
 }

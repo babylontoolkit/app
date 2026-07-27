@@ -18,8 +18,17 @@
  * That inverts the value proposition, honestly: not paying less on easy turns, but paying MORE on the
  * turns that have already demonstrated they need it. A repair turn otherwise thinks exactly as hard as
  * the turn that just failed — which is precisely backwards.
+ *
+ * ## The user may raise the FLOOR, and only to `high` (§4.2.9)
+ *
+ * `baseEffort` is the one thing a person gets to say here, and it is still not a prose classifier: the
+ * user is not describing the turn, they are choosing a session-wide floor, up front, visibly, in exactly
+ * two positions. `medium` (the default, every session, every reload) or `high` — never `xhigh`/`max`,
+ * because those are what the escalation ladder spends on EVIDENCE, and a chosen ceiling is a floor that
+ * makes every ordinary edit start where a twice-failed build ends. The floor never lowers anything and
+ * never caps anything: a `high` session that hits a second repair still gets `xhigh`.
  */
-import type { EffortLevel } from '~/lib/modules/llm/capabilities';
+import { EFFORT_LEVELS, type EffortLevel, type UserEffortLevel } from '~/lib/modules/llm/capabilities';
 
 export interface TurnShape {
   /** A Vite compile error was fed back to the model (§4.2 self-healing). */
@@ -30,6 +39,39 @@ export interface TurnShape {
 
   /** The user explicitly invoked a skill (`/bt-spec`, `/bt-prototype`) — a heavyweight workflow. */
   isSlashInvocation: boolean;
+
+  /**
+   * The user's chosen base effort for this session (`/effort`, §4.2.9) — `medium` or `high` only, already
+   * validated by `parseUserEffort`. `undefined` means they never chose, so the operator default stands.
+   *
+   * It is a FLOOR, never a cap: the escalation rules below still fire above it. A `high` session that hits
+   * a second repair gets `xhigh`, exactly as a `medium` one does.
+   */
+  baseEffort?: UserEffortLevel;
+}
+
+/** Position in `EFFORT_LEVELS` — the ordering IS the levels array, so the two can never disagree. */
+function rank(level: EffortLevel): number {
+  return EFFORT_LEVELS.indexOf(level);
+}
+
+/**
+ * The higher of the policy's escalation and the user's floor.
+ *
+ * `undefined` from the policy means "no opinion", so the floor is the answer; `undefined` from BOTH means
+ * "operator default", which is what the provider resolves. Comparing by rank rather than by a chain of
+ * `if`s means adding a level to `EFFORT_LEVELS` cannot silently invert an ordering here.
+ */
+function atLeast(escalated: EffortLevel | undefined, floor: UserEffortLevel | undefined): EffortLevel | undefined {
+  if (!escalated) {
+    return floor;
+  }
+
+  if (!floor) {
+    return escalated;
+  }
+
+  return rank(floor) > rank(escalated) ? floor : escalated;
 }
 
 /**
@@ -45,7 +87,7 @@ export function effortForTurn(turn: TurnShape): EffortLevel | undefined {
    * wants: a project that actually builds.
    */
   if (turn.isRepair) {
-    return turn.repairAttempt >= 2 ? 'xhigh' : 'high';
+    return atLeast(turn.repairAttempt >= 2 ? 'xhigh' : 'high', turn.baseEffort);
   }
 
   /*
@@ -54,15 +96,17 @@ export function effortForTurn(turn: TurnShape): EffortLevel | undefined {
    * be answering a different question than the one they asked.
    */
   if (turn.isSlashInvocation) {
-    return 'high';
+    return atLeast('high', turn.baseEffort);
   }
 
   /*
-   * Creation and ordinary edits: the configured default (`medium`).
+   * Creation and ordinary edits: the user's chosen base effort (`/effort`), else the configured default
+   * (`medium`). Returning `undefined` when they never chose keeps the operator's config authoritative —
+   * this function must not grow a second copy of the `THINKING_EFFORT` fallback chain (see the footer).
    *
    * There is deliberately no cheaper branch to fall to. See the header.
    */
-  return undefined;
+  return turn.baseEffort;
 }
 
 /*

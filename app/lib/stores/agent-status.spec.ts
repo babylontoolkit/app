@@ -40,6 +40,7 @@ describe('updateAgentStatus', () => {
       generationId: 'gen-1',
       seq: 1,
       phase: 'thinking',
+      kind: 'edit',
       elapsedMs: 5000,
       receivedAt: 1000,
     });
@@ -113,7 +114,7 @@ describe('freshness and display', () => {
     updateAgentStatus(part({ elapsedMs: 70_000 }), 1000);
 
     const thinking = describeAgentStatus(agentStatusStore.get()!, 3000);
-    expect(thinking.label).toBe('Thinking — 1m 12s');
+    expect(thinking.label).toBe('Working on your changes — 1m 12s');
 
     // The label carries the state; the detail is owner-tunable copy — pin only that it exists.
     expect(thinking.detail.length).toBeGreaterThan(0);
@@ -121,6 +122,40 @@ describe('freshness and display', () => {
     updateAgentStatus(part({ seq: 2, phase: 'generating', elapsedMs: 120_000 }), 5000);
 
     const generating = describeAgentStatus(agentStatusStore.get()!, 5000);
-    expect(generating.label).toBe('Still working — 2m 0s');
+    expect(generating.label).toBe('Working on your changes — 2m 0s');
+  });
+
+  /**
+   * The reported failure this copy exists for: *"2-3 min of empty is a killer… thinking about what???"*
+   * A creation is the longest wait in the product, and it must NAME ITSELF rather than say "Thinking".
+   */
+  it('names the turn — a creation says it is building the project', () => {
+    updateAgentStatus(part({ kind: 'creation', elapsedMs: 130_000 }), 1000);
+
+    const status = describeAgentStatus(agentStatusStore.get()!, 1000);
+    expect(status.label).toBe('Building your project — 2m 10s');
+    expect(status.detail).toMatch(/landing page/i);
+  });
+
+  it('distinguishes a repair and a plan turn from an ordinary edit', () => {
+    updateAgentStatus(part({ kind: 'repair' }), 1000);
+    expect(describeAgentStatus(agentStatusStore.get()!, 1000).label).toMatch(/^Fixing a build error/);
+
+    updateAgentStatus(part({ seq: 2, kind: 'plan' }), 1000);
+    expect(describeAgentStatus(agentStatusStore.get()!, 1000).label).toMatch(/^Planning/);
+  });
+
+  /**
+   * A kind this client does not know (an older server, a future turn type) must degrade to the VAGUEST
+   * true sentence, never to a wrong one — the same "degrade to off, never invent" rule as
+   * `premiumSessionHint`. Claiming "Building your project" on a turn that is not one is worse than
+   * saying nothing specific.
+   */
+  it('falls back to the least-claiming copy for a missing or unknown kind', () => {
+    updateAgentStatus(part({ kind: undefined }), 1000);
+    expect(agentStatusStore.get()?.kind).toBe('edit');
+
+    updateAgentStatus(part({ seq: 2, kind: 'teleporting' }), 1000);
+    expect(agentStatusStore.get()?.kind).toBe('edit');
   });
 });

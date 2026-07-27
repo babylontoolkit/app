@@ -42,7 +42,8 @@ import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredErro
 import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
 import { mediaProtocolNote } from './media-note';
-import { shouldRetryGeneration } from './retry-policy';
+import { MAX_PROVIDER_RETRY_ATTEMPTS, retryThinkingMode, retryToolMode, shouldRetryGeneration } from './retry-policy';
+import type { AgentStatusKind } from './heartbeat';
 import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
 import { createWebFetchTool } from './web-fetch-tool';
 import { createWebSearchTool } from './web-search-tool';
@@ -53,6 +54,8 @@ import { getObjectStore } from '~/lib/.server/storage';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
 import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
+import { canDisableThinking, parseUserEffort } from '~/lib/modules/llm/capabilities';
+import type { LanguageModelV1 } from 'ai';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import {
   compactHistory,
@@ -192,6 +195,15 @@ export interface AgentRequest {
   premium?: boolean;
 
   /**
+   * The user's chosen base thinking effort for this session (§4.2.9) — `'medium'` or `'high'`.
+   *
+   * Untrusted and validated at the boundary (`parseUserEffort`): anything else — `max`, `xhigh`, `low`, a
+   * typo — becomes `undefined` and the operator default stands. It is a FLOOR handed to `effortForTurn`,
+   * so the escalation rules still fire above it.
+   */
+  effort?: string;
+
+  /**
    * The chat's Discuss toggle (§4.2.9). `'discuss'` appends a prose-only instruction to the UNCACHED
    * volatile tail — never a prompt swap, which would re-write the cached prefix on every toggle.
    * Ignored on the creation turn (`discussModeNote`).
@@ -264,6 +276,15 @@ export interface AgentGeneration {
    * `<boltAction>` can never write a file.
    */
   discussMode: boolean;
+
+  /**
+   * WHAT this turn is, for the liveness panel (`agent/heartbeat.ts`).
+   *
+   * Reported live: *"2-3min of empty is a killer… thinking about what???"* The panel proved the pipe
+   * was alive and said nothing else. This is the fact — decided before a token is spent, from the same
+   * signals `effort-policy.ts` reads — that lets the client say "Building your project" instead.
+   */
+  statusKind: AgentStatusKind;
 
   /** Skills loaded during this generation — mutated by the tool loop as it runs. */
   toolContext: SkillToolContext;
@@ -1025,6 +1046,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     isRepair,
     repairAttempt: request.repairAttempt ?? 1,
     isSlashInvocation: Boolean(slash),
+
+    /*
+     * The user's session floor (§4.2.9), validated here rather than trusted: a browser body asking for
+     * `max` on every turn would multiply the thinking bill on the platform's pool. Only `medium`/`high`
+     * survive `parseUserEffort`; everything else is `undefined` and falls back to the operator default.
+     */
+    baseEffort: parseUserEffort(request.effort),
   });
 
   const modelInstance = provider.getModelInstance({
@@ -1136,12 +1164,28 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   let stepIndex = 0;
   const stepLog: NonNullable<GenerationRecord['steps']> = [];
 
-  const startStream = (history: CoreMessage[], allowTools: boolean) =>
-    _streamText({
-      model: modelInstance,
+  /**
+   * `toolsOverride` exists for ONE caller: the tool-free retry.
+   *
+   * Everywhere else the tool set must keep travelling even when calls are forbidden — Anthropic
+   * requires the definitions whenever the history contains `tool_use` blocks, which is exactly the
+   * forced-continuation and rescue case. The retry's history is clean (it re-sends the original
+   * messages), so it is the one place the definitions can be dropped outright — and dropping them is
+   * the point: a model that can SEE `generate_image` but may not call it tells the user it is missing.
+   */
+  const startStream = (
+    history: CoreMessage[],
+    allowTools: boolean,
+    toolsOverride?: SkillTools,
+    modelOverride?: LanguageModelV1,
+  ) => {
+    const activeTools = toolsOverride ?? tools;
+
+    return _streamText({
+      model: modelOverride ?? modelInstance,
       messages: history,
       maxTokens: 64_000,
-      tools,
+      tools: activeTools,
 
       onStepFinish: (step) => {
         const now = Date.now();
@@ -1209,8 +1253,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       /*
        * `toolChoice: 'none'` still passes the tool DEFINITIONS (Anthropic requires them whenever the
        * history contains tool_use blocks) while forbidding new calls — that is what forces an answer.
+       *
+       * With an EMPTY tool set there is nothing to forbid, and sending `'none'` alongside no tools is a
+       * malformed request — so the field is omitted entirely on that path.
        */
-      toolChoice: allowTools ? 'auto' : 'none',
+      toolChoice: allowTools ? 'auto' : Object.keys(activeTools).length > 0 ? 'none' : undefined,
 
       /*
        * +1 for the ANSWER step. `maxSteps` counts every LLM round trip, tool calls included, so
@@ -1221,6 +1268,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        */
       maxSteps: allowTools ? toolPolicy.maxSteps : 1,
     });
+  };
 
   /**
    * Drain one streamText result, forwarding text and accumulating usage.
@@ -1392,56 +1440,119 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * call, one answer, no round trips (§4.4b). `tool-policy.ts` decides; skill tools are never
        * offered on creation, so the model cannot abandon its draft to go load skills.
        */
-      const first = startStream([...system, ...coreMessages], allowTools);
+      let first = startStream([...system, ...coreMessages], allowTools);
 
-      try {
-        yield* drain(first);
-      } catch (error) {
-        /*
-         * ONE retry, and only when the provider broke before producing anything (`retry-policy.ts`).
-         *
-         * Measured: `/bt-landing` spent 99s commissioning four images, thought for 47s, and then the
-         * provider answered `Internal error, please try again later` — 146 seconds of spinner, then a
-         * failure, with `0 in / 0 out` recorded. `drain` accumulates usage only after its loop
-         * finishes, so a mid-stream throw records nothing: the ledger has nothing to reverse, which is
-         * what makes a second attempt honest rather than a double charge.
-         */
-        if (
-          !shouldRetryGeneration({
-            error,
-            outTokens: totals.completionTokens,
-            aborted: Boolean(request.abortSignal?.aborted),
-            attempts: retried ? 1 : 0,
-          })
-        ) {
-          throw error;
+      /*
+       * BOUNDED RETRIES, and only while the provider has broken before producing anything
+       * (`retry-policy.ts`, `MAX_PROVIDER_RETRY_ATTEMPTS`).
+       *
+       * Measured 2026-07-27: KIE kills any step that emits no bytes for ~30s with `Internal error,
+       * please try again later` — three failures at 28.9s / 31.5s / 30.1s, all with zero output, while
+       * every step that emitted something ran for minutes. One retry is a coin flip against that; a few
+       * are not. `drain` accumulates usage only after its loop finishes, so a mid-stream throw records
+       * nothing: the ledger has nothing to reverse, which is what makes another attempt honest rather
+       * than a double charge — and `outTokens > 0` stops the loop the instant a step has been billed.
+       */
+      for (let attempt = 0; ; attempt++) {
+        try {
+          yield* drain(first);
+          break;
+        } catch (error) {
+          if (
+            !shouldRetryGeneration({
+              error,
+              outTokens: totals.completionTokens,
+              aborted: Boolean(request.abortSignal?.aborted),
+              attempts: attempt,
+            })
+          ) {
+            throw error;
+          }
+
+          retried = true;
+          logger.warn(
+            `Generation ${generationId} retry ${attempt + 1}/${MAX_PROVIDER_RETRY_ATTEMPTS} after a provider failure: ${(error as Error)?.message}`,
+          );
+
+          /*
+           * 🔴 CAPABILITIES ARE STRIPPED ONLY TO PROTECT MONEY ALREADY SPENT (`retryToolMode`).
+           *
+           * This used to be TOOL-FREE, ALWAYS — correct reasoning (a re-offered media tool would buy the
+           * whole set twice) applied unconditionally, including when nothing had been commissioned. Live:
+           * KIE failed at 29s before any tool call, the retry withdrew the media tools regardless, and the
+           * model told the user "I don't have the generate_image or generate_video tools available in this
+           * session" and wrote an essay instead of building the project. 50 credits, no game.
+           *
+           * So: nothing started → retry with the first attempt's exact policy. Renders started → genuinely
+           * tool-free (definitions DROPPED, not merely forbidden — a visible-but-forbidden tool is what the
+           * model narrated), plus the already-started paths, since inventing an asset path is forbidden.
+           */
+          const alreadyStarted = startedMedia.length
+            ? [
+                {
+                  role: 'system' as const,
+                  content:
+                    '# Media already generated for this request\n\n' +
+                    'These renders were ALREADY commissioned and paid for on a previous attempt and are ' +
+                    'being saved into the project right now. Reference them exactly as listed and do NOT ' +
+                    'ask for them again:\n' +
+                    startedMedia.map((m) => `- ${m.destPath.replace(/^public\//, '/')} (${m.kind})`).join('\n'),
+                },
+              ]
+            : [];
+
+          const toolMode = retryToolMode(startedMedia.length);
+
+          logger.info(
+            `Generation ${generationId} retry: tools=${toolMode}${startedMedia.length ? ` (${startedMedia.length} render(s) already paid for)` : ''}`,
+          );
+
+          /*
+           * 🔴 THE LAST ATTEMPT RUNS WITH THINKING OFF, because the silence IS the failure (§4.2a).
+           *
+           * KIE kills a step that emits no bytes for ~30s, and an extended think is exactly that: their
+           * adapter forwards thinking text on only ~14% of requests, so on the rest a long think puts
+           * nothing on the wire and their own gateway times out the request they are buffering. Two
+           * adaptive attempts are a dice roll against that window; disabling thinking is not — the model
+           * starts emitting text immediately, so the stream can never go quiet long enough to be killed.
+           *
+           * Scoped to the FINAL attempt on purpose (`retryThinkingMode`): attempts 1 and 2 are unchanged,
+           * so the reasoning text a good backend gives us is never sacrificed on a healthy generation.
+           * The turn that loses thinking is one the silent think had already killed twice.
+           *
+           * ⚠️ CLAMPED. Fable 5 rejects `{type:'disabled'}` outright and Opus 5 rejects it above `high`,
+           * so an unclamped override would trade a timeout for a hard 400 on the attempt that has already
+           * failed twice — the worst moment to invent a new failure mode.
+           */
+          const thinkingMode = retryThinkingMode(attempt + 1);
+          const lastResortModel =
+            thinkingMode === 'disabled' && provider && canDisableThinking(model, effort ?? 'medium')
+              ? provider.getModelInstance({
+                  model,
+                  serverEnv: (request.context as { cloudflare?: { env?: Env } })?.cloudflare?.env as Env,
+                  apiKeys: useByok ? request.apiKeys : undefined,
+                  providerSettings: useByok ? request.providerSettings : undefined,
+                  effort,
+                  thinkingMode: 'disabled',
+                })
+              : undefined;
+
+          if (thinkingMode === 'disabled') {
+            logger.warn(
+              `Generation ${generationId} last-resort attempt: thinking ${lastResortModel ? 'DISABLED (bytes flow immediately)' : `kept adaptive — ${model} cannot disable it at effort ${effort ?? 'medium'}`}`,
+            );
+          }
+
+          /*
+           * The next attempt becomes the loop's stream, so a second failure is handled by the same
+           * gate rather than escaping — which is the whole point of making this a loop. `startedMedia`
+           * is re-read each time, so once renders exist every later attempt is tool-free.
+           */
+          first =
+            toolMode === 'same-as-first'
+              ? startStream([...system, ...coreMessages], allowTools, undefined, lastResortModel)
+              : startStream([...system, ...alreadyStarted, ...coreMessages], false, {} as SkillTools, lastResortModel);
         }
-
-        retried = true;
-        logger.warn(`Generation ${generationId} retrying once after a provider failure: ${(error as Error)?.message}`);
-
-        /*
-         * 🔴 TOOL-FREE, ALWAYS. The media tools already DEBITED and started their renders — re-offering
-         * them would buy the whole set twice and bill for it. The art is unaffected: those tasks are
-         * running and the client is already polling them, so the only thing the model is missing is
-         * the paths. Hand it those explicitly, since inventing an asset path is otherwise forbidden.
-         */
-        const alreadyStarted = startedMedia.length
-          ? [
-              {
-                role: 'system' as const,
-                content:
-                  '# Media already generated for this request\n\n' +
-                  'These renders were ALREADY commissioned and paid for on a previous attempt and are ' +
-                  'being saved into the project right now. Reference them exactly as listed and do NOT ' +
-                  'ask for them again:\n' +
-                  startedMedia.map((m) => `- ${m.destPath.replace(/^public\//, '/')} (${m.kind})`).join('\n'),
-              },
-            ]
-          : [];
-
-        const second = startStream([...system, ...alreadyStarted, ...coreMessages], false);
-        yield* drain(second);
       }
 
       /*
@@ -1506,6 +1617,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           toolCalls: toolCallCount,
           textChars: visibleTextChars,
           outTokens: totals.completionTokens,
+
+          /*
+           * A creation MUST write files (§4.4b). Measured 2026-07-27: a creation retried after a KIE
+           * `Internal error` answered with 31,852 chars of prose and no `<boltAction>` — the project
+           * never built and the user paid for a description of a game. Plan turns are excluded by
+           * construction (they are prose by guarantee, §4.2.9) and so are ordinary edits.
+           */
+          requiresAction: isCreationTurn && !discussNote,
         })
       ) {
         unproductiveRescue = true;
@@ -1738,6 +1857,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     blocksLoaded: blocks.map((b) => b.id),
     historyStats,
     discussMode: discussNote !== null,
+
+    /*
+     * The turn's identity for the liveness panel — facts, in the same precedence the effort policy
+     * uses: a repair is a repair even on a creation, and plan mode outranks an ordinary edit.
+     */
+    statusKind: isRepair ? 'repair' : isCreationTurn ? 'creation' : discussNote ? 'plan' : 'edit',
     toolContext,
     usage: usagePromise,
     settlement: settlementPromise,

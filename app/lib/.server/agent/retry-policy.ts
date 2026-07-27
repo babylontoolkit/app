@@ -38,8 +38,8 @@
  *    leaving. Re-running either spends credits for someone who is no longer watching.
  *  - **Zero output only.** If the model already streamed part of an artifact, the user has half a
  *    file on screen; a retry would append a second, different attempt to it.
- *  - **Once.** A provider having a genuinely bad time will fail twice, and the second failure costs
- *    the user another wait for the same error.
+ *  - **Bounded, not once.** See `MAX_PROVIDER_RETRY_ATTEMPTS` — the original "once" was calibrated for
+ *    a provider having an occasional bad minute, and the measured failure is not that.
  *  - **Provider-side errors only.** A 4xx is our request being wrong and will be wrong again;
  *    `429` in particular needs backoff, not an immediate second helping of the same request.
  */
@@ -74,6 +74,36 @@ const RETRYABLE = [
 /** Never retryable, whatever else the message says — checked FIRST so `429` can't match a 5xx pattern. */
 const FATAL = [/\b4\d\d\b/i, /rate limit/i, /too many requests/i, /invalid/i, /not found/i, /unauthorized/i];
 
+/**
+ * How many times a generation may be re-attempted after a provider-side failure that billed nothing.
+ *
+ * ## Why this is 3 and not 1 — measured 2026-07-27, three failures in half an hour
+ *
+ * The step log says exactly what is happening, and it is not "the provider had a bad minute":
+ *
+ *     step 1:  28,956ms ·      0 out                        → Internal error
+ *     step 1:  31,532ms ·      0 out                        → Internal error
+ *     step 3:  30,058ms ·      0 out                        → Internal error
+ *     step 2: 114,765ms ·    615 out · 4 tool calls         → fine
+ *     step 2: 161,768ms · 12,215 out                        → fine
+ *
+ * **Every step that emitted no bytes for ~30s died; every step that emitted anything ran for minutes.**
+ * That is a gateway killing a silent stream, not a sick model — and it compounds with KIE's own
+ * empty-thinking regression (`kie-wire.ts`): their adapter returns thinking text EMPTY, so during a
+ * long think there are literally no bytes on the wire, and their timeout fires on the request they are
+ * themselves buffering. A creation turn thinks the longest, which is why it is hit the hardest.
+ *
+ * A single retry therefore fails against a ~30s coin flip that lands the wrong way often. Each attempt
+ * costs ~30 seconds and **zero credits** (`outTokens === 0` is the gate — a step that completed and
+ * billed is never re-run), so the honest trade is a few more tries rather than handing the user an
+ * error on a project that is otherwise fine.
+ *
+ * ⚠️ This is a MITIGATION for someone else's defect, not a fix, and it must stay bounded: three
+ * attempts is ~90s of dead time in the worst case, which is the most a user should ever wait to be
+ * told it did not work. Raise it only with a measurement, never on a hunch.
+ */
+export const MAX_PROVIDER_RETRY_ATTEMPTS = 3;
+
 export interface RetryDecisionInput {
   /** The error that killed the stream. */
   error: unknown;
@@ -88,8 +118,75 @@ export interface RetryDecisionInput {
   attempts: number;
 }
 
+/**
+ * What the RETRY may use — and why this is not simply "tool-free, always" (2026-07-27, measured live).
+ *
+ * The tool-free retry exists to stop a second attempt re-commissioning media that the FIRST attempt
+ * already debited and started. That reason is real, and it is also **conditional on renders having
+ * actually started** — which the original code never checked. Observed on a live creation: KIE answered
+ * `Internal error, please try again later` at 29s, before a single tool call, so nothing had been
+ * commissioned and there was nothing to protect. The retry withdrew the media tools anyway, and the
+ * model — mid-creation, holding a brief that tells it to generate the hero art first — did the only
+ * thing it could: it narrated the absence ("I don't have the generate_image or generate_video tools
+ * available in this session") and wrote 12,215 tokens of prose describing a landing page instead of
+ * building one. The user paid 50 credits for an essay, and the project never built.
+ *
+ * So the rule is: **strip capabilities only to protect money already spent.**
+ *
+ *  - Nothing started → retry with EXACTLY the first attempt's policy. Nothing has been paid for, so
+ *    there is nothing to double-buy, and a creation turn that cannot generate art is not the turn the
+ *    user asked for.
+ *  - Something started → genuinely tool-free, and the caller passes the already-started paths in a
+ *    system note so the model can reference them without asking for them again.
+ *
+ * ⚠️ "Tool-free" must mean the definitions are GONE, not merely forbidden. Passing the tool set with
+ * `toolChoice: 'none'` leaves `generate_image` visible in the request while refusing every call — which
+ * is precisely the state that produced the narration above. A model can see a tool it may not call, and
+ * it will tell the user about it.
+ */
+/**
+ * Should THIS retry attempt run with extended thinking disabled? (§4.2a, measured 2026-07-27)
+ *
+ * ## The mechanism, not the symptom
+ *
+ * KIE kills any step that emits no bytes for ~30s. An extended think IS that silence: their adapter
+ * forwards thinking text on only ~14% of requests (both models — it tracks the BACKEND, not the model),
+ * so on the other 86% a long think puts literally nothing on the wire and their own gateway times out
+ * the request they are buffering. Retrying is a dice roll against the same window. Disabling thinking is
+ * not: the model starts emitting text within a second or two, the stream is never quiet, and the timeout
+ * cannot fire.
+ *
+ * ## Why ONLY the last attempt
+ *
+ * Because thinking is worth having, and the reasoning text — when a backend does forward it — is worth
+ * reading. The tempting version of this idea is "if the stream goes quiet, drop thinking", and that would
+ * eat the reasoning on exactly the long thinks whose reasoning has the most in it, on every generation.
+ * Scoped to the final attempt, the common path is untouched: attempts 1 and 2 are byte-identical to what
+ * ships today, and the only turn that loses thinking is one where the silent think has ALREADY killed the
+ * generation twice. You cannot lose reasoning text on a turn that was about to die.
+ *
+ * The trade on that last attempt is real and deliberate: no extended thinking is a weaker build (that is
+ * why `low` effort is banned outright — an under-thinking model returns a confident WRONG answer, not a
+ * smaller correct one). It is still better than a red error card and no game, which is the alternative it
+ * replaces — and it never runs on a healthy generation.
+ *
+ * ⚠️ The caller MUST clamp with `canDisableThinking(model, effort)`: Fable 5 rejects `{type:'disabled'}`
+ * outright and Opus 5 rejects it above `high`, so an unclamped "disabled" trades one failure for a 400 on
+ * the attempt that had already failed twice — the worst possible moment, exactly as
+ * `THINKING_DISABLED_EFFORT_CEILING` warns.
+ */
+export function retryThinkingMode(attempt: number, maxAttempts = MAX_PROVIDER_RETRY_ATTEMPTS): 'adaptive' | 'disabled' {
+  return attempt >= maxAttempts - 1 ? 'disabled' : 'adaptive';
+}
+
+export type RetryToolMode = 'same-as-first' | 'tool-free';
+
+export function retryToolMode(startedMediaCount: number): RetryToolMode {
+  return startedMediaCount > 0 ? 'tool-free' : 'same-as-first';
+}
+
 export function shouldRetryGeneration(input: RetryDecisionInput): boolean {
-  if (input.aborted || input.attempts >= 1 || input.outTokens > 0) {
+  if (input.aborted || input.attempts >= MAX_PROVIDER_RETRY_ATTEMPTS || input.outTokens > 0) {
     return false;
   }
 

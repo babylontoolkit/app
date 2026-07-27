@@ -16,13 +16,21 @@
  */
 import type { SkillSummary } from '~/lib/skills/slash';
 
-export type ClientCommand = { kind: 'clear' } | { kind: 'context' };
+export type ClientCommand = { kind: 'clear' } | { kind: 'context' } | { kind: 'effort' };
 
 /** Spellings that all mean "clear my context": the Claude Code verb plus the product's own noun. */
 const CLEAR_ALIASES = ['/clear', '/new', '/newchat'];
 
 /** `/context` — show what this conversation is costing and how close the history window is (§4.5.6). */
 const CONTEXT_ALIASES = ['/context', '/usage'];
+
+/**
+ * `/effort` — open the thinking-effort picker (§4.2.9). A PANEL, not an argument form: `/effort high`
+ * would be a prefix match, and the whole point of exact-matching here is that a message the user meant
+ * for the agent ("/effort high on the physics, please") is never silently swallowed. The picker also
+ * shows what each level costs, which a bare command cannot.
+ */
+const EFFORT_ALIASES = ['/effort', '/thinking'];
 
 /**
  * The built-in commands surfaced in the `/` autocomplete menu, alongside synced skills.
@@ -44,6 +52,12 @@ export const CLIENT_COMMAND_SUMMARIES: (SkillSummary & { takesArgs: false })[] =
     builtin: true,
     takesArgs: false,
   },
+  {
+    name: 'effort',
+    description: 'Set how hard the model thinks this session — Medium (default) or High. Free, no server call.',
+    builtin: true,
+    takesArgs: false,
+  },
 ];
 
 /** True when a completed `/name` is a zero-arg client command — used by autocomplete to skip the trailing space. */
@@ -60,6 +74,10 @@ export function parseClientCommand(message: string): ClientCommand | null {
 
   if (CONTEXT_ALIASES.includes(normalized)) {
     return { kind: 'context' };
+  }
+
+  if (EFFORT_ALIASES.includes(normalized)) {
+    return { kind: 'effort' };
   }
 
   return null;

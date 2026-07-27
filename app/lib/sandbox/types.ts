@@ -164,11 +164,11 @@ export type SandboxTextSearchProgress = (path: string, matches: SandboxTextSearc
  * What this provider can actually do, so the UI degrades instead of throwing
  * (`spec/sandbox-seam.md` — "capability flags so UI degrades gracefully").
  *
- * These are the three things a server-container provider plausibly cannot offer on day one: an
- * interactive PTY over the wire, a ripgrep-class project search, and cheap incremental file events.
- * A caller reads the flag; it must never feature-detect by probing for a method, which is how
- * `Search.tsx` used to do it (`typeof instance.internal?.textSearch !== 'function'`) — that reads
- * as defensive coding rather than as a documented contract, and it cannot be tested.
+ * These are the things one provider offers and another plausibly cannot: an interactive PTY over
+ * the wire, a ripgrep-class project search, cheap incremental file events, and killing an inherited
+ * process by port. A caller reads the flag; it must never feature-detect by probing for a method,
+ * which is how `Search.tsx` used to do it (`typeof instance.internal?.textSearch !== 'function'`) —
+ * that reads as defensive coding rather than as a documented contract, and it cannot be tested.
  */
 export interface SandboxCapabilities {
   /** An interactive shell can be attached to a terminal (`spawn` with `terminal` options). */
@@ -182,6 +182,15 @@ export interface SandboxCapabilities {
    * fall back to `FilesStore.refreshFiles()` polling — the file map is never allowed to be stale.
    */
   readonly watch: boolean;
+
+  /**
+   * {@link SandboxProvider.clearPort} is implemented.
+   *
+   * Only a provider whose sandbox can OUTLIVE a page session needs it: a resumed/forked microVM
+   * wakes with the previous session's processes alive (a dev server already bound to its port),
+   * which a WebContainer — whose runtime dies with the tab — can never do.
+   */
+  readonly clearPort: boolean;
 }
 
 /**
@@ -213,6 +222,18 @@ export interface SandboxShell {
    * error — the failure this field exists to make impossible.
    */
   readonly readyOsc?: string;
+
+  /**
+   * The OSC payload this shell emits when a typed command STARTS executing, if it emits one.
+   *
+   * 🔴 Absent on jsh, REQUIRED on any shell whose prompt hook also fires on prompt draws that
+   * follow no command (bash's `PROMPT_COMMAND` fires at attach and on Ctrl-C at an idle prompt).
+   * Those draws emit completion markers that nothing consumes, and `executeCommand`'s exit-wait
+   * then matches the PREVIOUS command's markers — measured on CodeSandbox as `npm install`
+   * "completing" instantly with a stale exit 0 and then being KILLED by the next command's
+   * interrupt. When set, `shell.ts` ignores every exit marker that arrives before this one.
+   */
+  readonly beginOsc?: string;
 
   /**
    * Environment for the shell process — used to make a shell speak the OSC protocol `BoltShell`
@@ -284,6 +305,19 @@ export interface SandboxProvider {
 
   /** Present only when {@link SandboxCapabilities.textSearch} is true. */
   textSearch?(query: string, options: SandboxTextSearchOptions, onProgress: SandboxTextSearchProgress): Promise<void>;
+
+  /**
+   * Kill whatever is listening on `port` inside the sandbox, and wait (bounded) for the port to
+   * free. Present only when {@link SandboxCapabilities.clearPort} is true.
+   *
+   * Best-effort by contract: it resolves whether or not anything was listening (a fresh sandbox is
+   * the common case and must cost ~nothing), and it must never hang its caller — a provider
+   * implements its own deadline. It exists for exactly one situation: a sandbox that came back from
+   * a snapshot/fork with a PREVIOUS session's dev server still bound to the port, where a freshly
+   * started `npm run dev` dies with "Port already in use" (MEASURED live on CodeSandbox — the
+   * per-user VM reuse and the `btk@starter` snapshot are both taken with a server running).
+   */
+  clearPort?(port: number): Promise<void>;
 
   /**
    * Destroy the sandbox. Unused by app code today (a WebContainer dies with the tab), but part of

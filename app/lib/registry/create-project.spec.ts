@@ -20,12 +20,14 @@ import type { GameRegistryEntry } from '~/types/game-registry';
 import type { TemplateFile } from '~/types/template';
 
 const mountTemplate = vi.hoisted(() => vi.fn());
+const clearInheritedDevServer = vi.hoisted(() => vi.fn());
 const applyProjectHygiene = vi.hoisted(() => vi.fn());
 
-vi.mock('./mount', () => ({ mountTemplate }));
+vi.mock('./mount', () => ({ mountTemplate, clearInheritedDevServer }));
 vi.mock('./hygiene', () => ({ applyProjectHygiene }));
 
 import { createProjectFromRegistry } from './create-project';
+import { bootProgress } from '~/lib/stores/boot-progress';
 
 const ENTRY: GameRegistryEntry = {
   id: 'gm_racing_v1',
@@ -67,6 +69,7 @@ function mountedPaths(): string[] {
 beforeEach(() => {
   vi.clearAllMocks();
   mountTemplate.mockResolvedValue(undefined);
+  clearInheritedDevServer.mockResolvedValue(undefined);
   applyProjectHygiene.mockImplementation((files: TemplateFile[]) => files);
 
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => starterFiles() }));
@@ -88,6 +91,19 @@ describe('createProjectFromRegistry — the project is created first and foremos
 
     expect(created.userMessage).toContain('already copied');
     expect(created.mustBeVisible.some((path) => path.endsWith('src/scripts/KartRacerMode.ts'))).toBe(true);
+  });
+
+  /*
+   * A reused sandbox can wake with a previous session's dev server still holding 5173, and the
+   * artifact's `npm run dev` then dies with "Port 5173 is already in use" (MEASURED live,
+   * 2026-07-27). The clear must run BEFORE the mount, so the stale process never serves this
+   * project's half-mounted files.
+   */
+  it('clears an inherited dev server BEFORE the template mounts', async () => {
+    await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer' });
+
+    expect(clearInheritedDevServer).toHaveBeenCalledTimes(1);
+    expect(clearInheritedDevServer.mock.invocationCallOrder[0]).toBeLessThan(mountTemplate.mock.invocationCallOrder[0]);
   });
 
   it('STILL CREATES THE PROJECT when the registry names a class the template does not ship', async () => {
@@ -156,6 +172,29 @@ describe('createProjectFromRegistry — the project is created first and foremos
 
     expect(created.assistantMessage).toContain('npm install');
     expect(created.assistantMessage).not.toContain('boltAction type="file"');
+  });
+
+  /*
+   * The creation splash (`CreationSplash`) narrates these phases; without them New Project is a
+   * blank page with three dots for the whole starter-download + sandbox-boot + mount sequence.
+   * The reset to `idle` deliberately does NOT happen here — `startProject` owns it in a `finally`,
+   * so a phase left standing after this function returns is correct, not a leak.
+   */
+  it('narrates the creation phases in order, and never resets to idle itself', async () => {
+    bootProgress.set({ step: 'idle' });
+
+    const steps: string[] = [];
+    const unsubscribe = bootProgress.subscribe((phase) => steps.push(phase.step));
+
+    await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer' });
+    unsubscribe();
+
+    const order = ['creating-starter', 'creating-workspace', 'creating-mount'].map((step) => steps.indexOf(step));
+    expect(order.every((index) => index !== -1)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+
+    // The caller owns the reset — the last phase this function set must still be standing.
+    expect(bootProgress.get().step).toBe('creating-mount');
   });
 });
 

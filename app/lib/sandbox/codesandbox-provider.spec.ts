@@ -20,6 +20,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   bootupPreservedFilesystem,
+  clearPortScript,
   flattenMountTree,
   needsContent,
   resolveInWorkdir,
@@ -234,6 +235,34 @@ describe('argv → shell command line', () => {
   });
 });
 
+describe('the clear-port kill script', () => {
+  /*
+   * A resumed/forked VM wakes with the previous session's dev server still bound to 5173, and a
+   * fresh `npm run dev` dies with "Port 5173 is already in use" (MEASURED live, 2026-07-27). The
+   * script kills BY PORT first (exact), falls back to pkill-by-name, and always exits 0 — clearing
+   * is best-effort by contract.
+   */
+  it('kills by port with fuser, with a pkill fallback for images without psmisc', () => {
+    const script = clearPortScript(5173);
+
+    expect(script).toContain('fuser -k -TERM 5173/tcp');
+    expect(script).toContain('fuser -k -KILL 5173/tcp');
+    expect(script).toContain('pkill -f vite');
+    expect(script.trim().endsWith('exit 0')).toBe(true);
+  });
+
+  it('exits FAST when nothing is listening — a fresh VM must not pay the wait loop', () => {
+    // `fuser -k` exits non-zero when no process holds the port; the `|| exit 0` is the fast path.
+    expect(clearPortScript(5173)).toContain('fuser -k -TERM 5173/tcp 2>/dev/null || exit 0');
+  });
+
+  it('refuses a port it cannot safely interpolate into shell text', () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, 70000]) {
+      expect(() => clearPortScript(bad)).toThrow(/real TCP port/);
+    }
+  });
+});
+
 describe('the adapter translates the right calls', () => {
   function createClientDouble() {
     const fs = {
@@ -332,6 +361,110 @@ describe('the adapter translates the right calls', () => {
     await providerOver(d).mount({ empty: { directory: {} } });
 
     expect(d.fs.batchWrite).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The v2 OSC rc block (MEASURED kill, 2026-07-27): without the PS0 begin marker, bash's
+   * attach-time exit/prompt markers satisfied the NEXT command's wait — `npm install` "completed"
+   * instantly with a stale 0 and was then killed by `npm run dev`'s leading interrupt. These pins
+   * hold the three parts together: the rc emits `begin`, the shell DECLARES `begin`, and an old
+   * VM carrying only the v1 block still gets the upgrade appended.
+   */
+  describe('the OSC bashrc hook (v2)', () => {
+    function terminalDouble() {
+      return {
+        onOutput: vi.fn(),
+        open: vi.fn(async () => ''),
+        run: vi.fn(async () => {}),
+        write: vi.fn(async () => {}),
+        kill: vi.fn(),
+      };
+    }
+
+    async function spawnShell(d: ReturnType<typeof createClientDouble>) {
+      d.client.terminals.create.mockResolvedValue(terminalDouble() as never);
+      await providerOver(d).spawn('bash', [], { terminal: { cols: 80, rows: 24 } });
+    }
+
+    it('installs a block whose PS0 emits the begin marker the shell declares', async () => {
+      const d = createClientDouble();
+      d.fs.readTextFile.mockRejectedValue(new Error('ENOENT'));
+
+      await spawnShell(d);
+
+      const [path, written] = d.fs.writeTextFile.mock.calls[0] as unknown as [string, string];
+      expect(path).toBe('/root/.bashrc');
+      expect(written).toContain('PROMPT_COMMAND=__bolt_osc');
+
+      // The marker the rc EMITS must be the marker the shell DECLARES — one fact, two readers.
+      const beginOsc = providerOver(d).shell.beginOsc!;
+      expect(written).toContain(`]654;${beginOsc}\\a`);
+
+      // vite's --open spawns xdg-open in a headless VM without one; BROWSER=true silences it.
+      expect(written).toContain('export BROWSER=true');
+    });
+
+    it('UPGRADES a bashrc that carries only the v1 block — the VMs that need the fix most', async () => {
+      const d = createClientDouble();
+      const v1 = '# --- OSC v1 ---\n__bolt_osc() { :; }\nPROMPT_COMMAND=__bolt_osc\n# --- end ---\n';
+      d.fs.readTextFile.mockResolvedValue(v1);
+
+      await spawnShell(d);
+
+      const [, written] = d.fs.writeTextFile.mock.calls[0] as unknown as [string, string];
+      expect(written.startsWith(v1)).toBe(true); // append, never clobber the image's own setup
+      expect(written).toContain("PS0='\\e]654;begin\\a'");
+    });
+
+    it('does not grow a bashrc that already carries the v2 block', async () => {
+      const d = createClientDouble();
+      d.fs.readTextFile.mockResolvedValue("stuff\nPS0='\\e]654;begin\\a'\nmore");
+
+      await spawnShell(d);
+
+      expect(d.fs.writeTextFile).not.toHaveBeenCalled();
+    });
+
+    it('declares beginOsc, and it is the marker the rc emits', () => {
+      const provider = providerOver(createClientDouble());
+
+      expect(provider.shell.beginOsc).toBe('begin');
+    });
+  });
+
+  it('clearPort runs the kill script in the sandbox and waits for it to finish', async () => {
+    const d = createClientDouble();
+    const command = { onOutput: vi.fn(), waitUntilComplete: vi.fn(async () => {}), kill: vi.fn() };
+    d.client.commands.runBackground.mockResolvedValue(command as never);
+
+    await providerOver(d).clearPort!(5173);
+
+    const [line, opts] = d.client.commands.runBackground.mock.calls[0] as [string, { cwd: string }];
+    expect(line).toContain('fuser -k -TERM 5173/tcp');
+    expect(opts.cwd).toBe(WD);
+    expect(command.waitUntilComplete).toHaveBeenCalled();
+  });
+
+  it('clearPort is BOUNDED — a wire that never answers cannot hang project creation', async () => {
+    /*
+     * The script self-bounds at ~6s; this covers the transport hanging UNDER it. Without the
+     * deadline, creation awaits this forever and the New Project button never returns — strictly
+     * worse than the port collision it was clearing.
+     */
+    vi.useFakeTimers();
+
+    try {
+      const d = createClientDouble();
+      const command = { onOutput: vi.fn(), waitUntilComplete: vi.fn(() => new Promise(() => {})), kill: vi.fn() };
+      d.client.commands.runBackground.mockResolvedValue(command as never);
+
+      const done = providerOver(d).clearPort!(5173);
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(done).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('maps onServerReady and onPort to DISTINCT port events', () => {
@@ -508,11 +641,16 @@ describe('the adapter translates the right calls', () => {
     expect(onTeardown).toHaveBeenCalledTimes(1);
   });
 
-  it('declares textSearch absent rather than shimming it with grep', () => {
+  it('declares textSearch absent rather than shimming it with grep — and clearPort PRESENT', () => {
     const provider = providerOver(createClientDouble());
 
-    expect(CODESANDBOX_CAPABILITIES).toEqual({ terminal: true, textSearch: false, watch: true });
+    /*
+     * `clearPort: true` because this provider is the one that NEEDS it: a resumed/forked VM wakes
+     * with the previous session's dev server still bound to its port.
+     */
+    expect(CODESANDBOX_CAPABILITIES).toEqual({ terminal: true, textSearch: false, watch: true, clearPort: true });
     expect(provider.textSearch).toBeUndefined();
+    expect(typeof provider.clearPort).toBe('function');
   });
 
   it('cancels a watcher that is unsubscribed before it finishes being created', async () => {
