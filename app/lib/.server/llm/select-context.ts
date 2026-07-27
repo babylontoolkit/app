@@ -1,5 +1,6 @@
 import { generateText, type CoreTool, type GenerateTextResult, type Message } from 'ai';
 import ignore from 'ignore';
+import { isSandboxAbsolutePath, toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { IProviderSetting } from '~/types/model';
 import { IGNORE_PATTERNS, type FileMap } from './constants';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROVIDER_LIST } from '~/utils/constants';
@@ -80,7 +81,7 @@ export async function selectContext(props: {
 
   let filePaths = getFilePaths(files || {});
   filePaths = filePaths.filter((x) => {
-    const relPath = x.replace('/home/project/', '');
+    const relPath = toProjectRelativePath(x);
     return !ig.ignores(relPath);
   });
 
@@ -93,8 +94,8 @@ export async function selectContext(props: {
     Object.keys(files || {}).forEach((path) => {
       let relativePath = path;
 
-      if (path.startsWith('/home/project/')) {
-        relativePath = path.replace('/home/project/', '');
+      if (isSandboxAbsolutePath(path)) {
+        relativePath = toProjectRelativePath(path);
       }
 
       if (codeContextFiles.includes(relativePath)) {
@@ -197,17 +198,19 @@ export async function selectContext(props: {
     delete contextFiles[path];
   });
   includeFiles.forEach((path) => {
-    let fullPath = path;
+    /*
+     * The model answers with whatever form it saw, so resolve against the ACTUAL keys rather than
+     * rebuilding an absolute path from an assumed root. The old code did
+     * `` `/home/project/${path}` ``, which is a guess that is simply wrong on any provider with a
+     * different workdir — and its failure mode is this `logger.error` and a silently missing file,
+     * not an exception (`spec/sandbox-codesandbox.md` §5c).
+     */
+    const wanted = toProjectRelativePath(path);
+    const fullPath = filePaths.find((candidate) => toProjectRelativePath(candidate) === wanted);
 
-    if (!path.startsWith('/home/project/')) {
-      fullPath = `/home/project/${path}`;
-    }
-
-    if (!filePaths.includes(fullPath)) {
+    if (!fullPath) {
       logger.error(`File ${path} is not in the list of files above.`);
       return;
-
-      // throw new Error(`File ${path} is not in the list of files above.`);
     }
 
     if (currrentFiles.includes(path)) {
@@ -236,7 +239,7 @@ export async function selectContext(props: {
 export function getFilePaths(files: FileMap) {
   let filePaths = Object.keys(files);
   filePaths = filePaths.filter((x) => {
-    const relPath = x.replace('/home/project/', '');
+    const relPath = toProjectRelativePath(x);
     return !ig.ignores(relPath);
   });
 

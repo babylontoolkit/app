@@ -21,7 +21,7 @@
  * File payloads are `SerializedFileMap`: the same codec the WebContainer serializes to, so binary
  * bytes survive the round trip base64-encoded as a WIRE format (never as live store state).
  */
-import { isSecretPath } from '~/lib/git/paths';
+import { isSecretPath, normalizeRepoFileMap } from '~/lib/git/paths';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { Project } from '~/types/project';
 import type { ServerChat } from './chat-list';
@@ -181,7 +181,11 @@ export async function pullFromRepo(
       return { message: payload?.message ?? `Could not read the repository (${response.status}).` };
     }
 
-    return { files: payload.files, head: payload.head };
+    /*
+     * Fetch-boundary normalization: a damaged repo (nested workdir prefix) must not round-trip
+     * its damage into the sandbox — see `normalizeRepoFileMap`.
+     */
+    return { files: payload.files ? normalizeRepoFileMap(payload.files) : payload.files, head: payload.head };
   } catch {
     return { message: 'Could not reach the server.' };
   }
@@ -233,7 +237,8 @@ export async function resolveDivergence(
       logger.error(`Resolve (${choice}) failed for ${projectId}: ${payload.message ?? response.status}`);
     }
 
-    return payload;
+    // Same fetch-boundary normalization as `pullFromRepo` — pull-overwrite mounts these files.
+    return payload.files ? { ...payload, files: normalizeRepoFileMap(payload.files) } : payload;
   } catch {
     return { ok: false, message: 'Could not reach the server. Your work is still here — try again.' };
   }

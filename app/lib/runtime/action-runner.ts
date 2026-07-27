@@ -83,6 +83,15 @@ export class ActionRunner {
   onAlert?: (alert: ActionAlert) => void;
   onSupabaseAlert?: (alert: SupabaseAlert) => void;
   onDeployAlert?: (alert: DeployAlert) => void;
+
+  /**
+   * Fired after a file/edit action's bytes land on the sandbox FS, with the final content.
+   *
+   * 🔴 The listener (FilesStore.recordAgentWrite) is what keeps the client file map fresh on a
+   * provider whose watcher is a network round trip — without it, a serialization racing the watcher
+   * captures a stale prefix of the generation and a later mount restores it over the real files.
+   */
+  #onFileWritten?: (absoluteFilePath: string, content: string) => void;
   buildOutput?: { path: string; exitCode: number; output: string };
 
   constructor(
@@ -91,12 +100,14 @@ export class ActionRunner {
     onAlert?: (alert: ActionAlert) => void,
     onSupabaseAlert?: (alert: SupabaseAlert) => void,
     onDeployAlert?: (alert: DeployAlert) => void,
+    onFileWritten?: (absoluteFilePath: string, content: string) => void,
   ) {
     this.#sandbox = sandboxPromise;
     this.#shellTerminal = getShellTerminal;
     this.onAlert = onAlert;
     this.onSupabaseAlert = onSupabaseAlert;
     this.onDeployAlert = onDeployAlert;
+    this.#onFileWritten = onFileWritten;
   }
 
   /**
@@ -453,6 +464,9 @@ export class ActionRunner {
 
     try {
       await sandbox.fs.writeFile(relativePath, action.content);
+
+      // Write-through to the file map — see #onFileWritten. Only after a write that SUCCEEDED.
+      this.#onFileWritten?.(action.filePath, action.content);
       logger.debug(`File written ${relativePath}`);
     } catch (error) {
       logger.error('Failed to write file\n\n', error);
@@ -505,6 +519,9 @@ export class ActionRunner {
     const patched = applyEditBlocks(source, blocks, action.filePath);
 
     await sandbox.fs.writeFile(relativePath, patched);
+
+    // Same write-through as #runFileAction — the map must carry the PATCHED content immediately.
+    this.#onFileWritten?.(action.filePath, patched);
     logger.debug(`Applied ${blocks.length} edit block(s) to ${relativePath}`);
   }
 

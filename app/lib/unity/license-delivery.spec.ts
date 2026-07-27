@@ -28,6 +28,7 @@ vi.mock('~/lib/stores/unityBridge', () => ({
 
 import { workbenchStore } from '~/lib/stores/workbench';
 import { callUnityTool } from '~/lib/stores/unityBridge';
+import { WORK_DIR } from '~/utils/constants';
 import {
   writeLicenseToWebProject,
   dropLicenseIntoUnity,
@@ -72,8 +73,17 @@ describe('writeLicenseToWebProject', () => {
     expect(createFileMock).toHaveBeenCalledTimes(1);
 
     const [path, contents] = createFileMock.mock.calls[0];
-    expect(path).toBe('/home/project/license.json');
-    expect(path).toBe(`/home/project/${WEB_LICENSE_PATH}`);
+
+    /*
+     * Against WORK_DIR, not a hardcoded `/home/project`: the workdir is a property of the PROVIDER
+     * (`/project/workspace` on CodeSandbox), and `WORK_DIR` follows the `VITE_SANDBOX_PROVIDER`
+     * build switch — which vitest reads from the developer's `.env.local`. A literal here fails on
+     * exactly the machines that have the CodeSandbox provider configured (the `oauth.spec.ts` /
+     * `KIE_ENV` trap, wearing a path). The property under test is "root of the project, exact
+     * filename" — WORK_DIR IS that root.
+     */
+    expect(path).toBe(`${WORK_DIR}/license.json`);
+    expect(path).toBe(`${WORK_DIR}/${WEB_LICENSE_PATH}`);
     expect(contents).toBe(JSON.stringify(license, null, 2));
 
     // pretty-printed => newline + two-space indent

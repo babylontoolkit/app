@@ -100,6 +100,42 @@ const MAY_IMPORT_BOOT_MODULE: Record<string, string> = {
   'app/lib/sandbox/index.ts': 'The seam entry point — the one place that decides which runtime backs `sandbox`.',
 };
 
+/**
+ * The bare SPECIFIER, so the scan catches `import … from '…'` AND `await import('…')` alike.
+ *
+ * 🔴 It used to be `from '~/lib/webcontainer'`, and that needle silently stopped matching the moment
+ * the entry point switched to a dynamic import — which is a change someone makes for a good reason
+ * (a static import of that module BOOTS a WebContainer as a side effect, so naming it costs a whole
+ * runtime). The default-deny scan would then have passed by seeing NOTHING, forever, which is the
+ * exact trap this file's header describes. Only the CONTROL caught it.
+ *
+ * Both quotes are part of the needle so `'~/lib/webcontainer/auth.client'` is not a false positive —
+ * that path is a separate, already-allow-listed concern.
+ */
+const BOOT_MODULE_SPECIFIER = "'~/lib/webcontainer'";
+
+/**
+ * The SECOND vendor gets the SAME default-deny rule, from its first day.
+ *
+ * The whole point of the seam is that no runtime is special. WebContainer's coupling was allowed to
+ * spread to twenty modules precisely because the rule was prose until someone tested it — and the
+ * temptation with a new vendor is stronger, not weaker, because a fresh SDK looks harmless while it
+ * is still in one file. Swapping one lock-in for another is not an escape hatch.
+ *
+ * ⚠️ The server modules are listed individually rather than exempting `app/lib/.server/sandbox/**`.
+ * A directory-wide exemption is a place to append; a file list is a wall you have to write a reason
+ * on. `config.ts` and `lifecycle.ts` are deliberately absent — they hold no SDK import, and if one
+ * ever appears the scan will say so.
+ */
+const MAY_IMPORT_CODESANDBOX_SDK: Record<string, string> = {
+  'app/lib/sandbox/codesandbox-provider.ts':
+    'The adapter itself — the client-side counterpart to webcontainer-provider.ts.',
+  'app/lib/sandbox/codesandbox-boot.ts':
+    'Boots the client connection from a server-minted session. The counterpart to ~/lib/webcontainer, and it imports the BROWSER entry point only — no API key is reachable from it.',
+  'app/lib/.server/sandbox/service.ts':
+    'Holds CODESANDBOX_API_KEY and does lifecycle (create/resume/hibernate/delete, session + host tokens). Server-only by placement.',
+};
+
 describe('the sandbox seam is default-deny', () => {
   it('no module outside the adapter imports @webcontainer/api', () => {
     const offenders = filesReferencing('@webcontainer/api').filter((file) => !(file in MAY_IMPORT_WEBCONTAINER_API));
@@ -116,13 +152,57 @@ describe('the sandbox seam is default-deny', () => {
   });
 
   it('no module outside the seam entry point imports the boot singleton', () => {
-    const offenders = filesReferencing("from '~/lib/webcontainer'").filter((file) => !(file in MAY_IMPORT_BOOT_MODULE));
+    const offenders = filesReferencing(BOOT_MODULE_SPECIFIER).filter((file) => !(file in MAY_IMPORT_BOOT_MODULE));
 
     expect(offenders).toEqual([]);
   });
 
   it('CONTROL: the scanner really does detect the boot-module import', () => {
-    expect(filesReferencing("from '~/lib/webcontainer'")).toContain('app/lib/sandbox/index.ts');
+    expect(filesReferencing(BOOT_MODULE_SPECIFIER)).toContain('app/lib/sandbox/index.ts');
+  });
+
+  it('no module outside the adapter and the server service imports @codesandbox/sdk', () => {
+    const offenders = filesReferencing('@codesandbox/sdk').filter((file) => !(file in MAY_IMPORT_CODESANDBOX_SDK));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('CONTROL: the scanner really does detect the CodeSandbox import', () => {
+    expect(filesReferencing('@codesandbox/sdk')).toContain('app/lib/sandbox/codesandbox-provider.ts');
+  });
+
+  it('🔴 the CodeSandbox API key is never referenced outside .server/', () => {
+    /*
+     * `CODESANDBOX_API_KEY` is a platform secret (§5). Vite inlines anything `VITE_`-prefixed, and
+     * upstream shipped a route that returned raw provider keys as JSON — so "is it only read on the
+     * server?" is a question worth asking structurally rather than trusting to placement. A client
+     * module naming this variable at all is the regression.
+     */
+    const offenders = filesReferencing('CODESANDBOX_API_KEY').filter((file) => !file.includes('/.server/'));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('CONTROL: the scanner really does detect the API key name', () => {
+    expect(filesReferencing('CODESANDBOX_API_KEY')).toContain('app/lib/.server/sandbox/config.ts');
+  });
+
+  it('🔴 no creation site can forget privacy: private', () => {
+    /*
+     * The SDK's default is `"public"`, so a `sandboxes.create` without an explicit private setting
+     * publishes a user's game at a short, guessable id. Same class as `adoptExisting: false` on the
+     * git save: a vendor default that is wrong for us, and wrong silently.
+     */
+    const creators = filesReferencing('sandboxes.create(');
+
+    expect(creators.length).toBeGreaterThan(0);
+
+    for (const file of creators) {
+      expect(
+        sourceWithoutComments(join(process.cwd(), file)),
+        `${file} creates a sandbox without privacy: 'private'`,
+      ).toContain("privacy: 'private'");
+    }
   });
 
   it('every allow-listed file still exists and still needs its exemption', () => {
@@ -186,6 +266,12 @@ describe('the interface is implementable without WebContainer', () => {
 
     return {
       capabilities: { terminal: false, textSearch: false, watch: true },
+
+      // An in-memory provider has no previous session to restore from.
+      bootRestoredFilesystem: false,
+
+      // No `readyOsc`: a provider without WebContainer's jsh has no readiness marker to offer.
+      shell: { command: 'sh', args: [] },
       workdir: '/workspace',
       fs: {
         readFile,

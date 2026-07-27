@@ -86,8 +86,21 @@ export default async function handleRequest(
 
   responseHeaders.set('Content-Type', 'text/html');
 
-  responseHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
-  responseHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+  /*
+   * COEP `require-corp` exists ONLY for WebContainer — it is what turns on SharedArrayBuffer, which
+   * that runtime needs to exist at all. It is also a wall: under require-corp, a cross-origin iframe
+   * whose response carries no `Cross-Origin-Resource-Policy` header is refused outright
+   * (ERR_BLOCKED_BY_RESPONSE). StackBlitz's preview hosts send CORP for exactly this reason;
+   * CodeSandbox's `*.csb.app` previews do not (MEASURED live — the workbench preview rendered
+   * "refused to connect" over a healthy, token-authorized dev server). A CodeSandbox build boots no
+   * WebContainer, needs no SharedArrayBuffer, and must not pay the embedding restriction — this is
+   * the incidental win `spec/sandbox-seam.md` names ("dropping WebContainer lets us drop COEP").
+   * Same build-time switch as `~/lib/sandbox/index.ts`; the header follows the runtime it serves.
+   */
+  if (import.meta.env.VITE_SANDBOX_PROVIDER !== 'codesandbox') {
+    responseHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+    responseHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+  }
 
   return new Response(body, {
     headers: responseHeaders,

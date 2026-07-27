@@ -11,6 +11,7 @@
  * optional feature.
  */
 import { describe, expect, it } from 'vitest';
+import { normalizeRepoFileMap } from '~/lib/git/paths';
 import {
   buildCommitMessage,
   detectPushDivergence,
@@ -93,6 +94,37 @@ describe('tree blobs — byte-faithful, secret-free', () => {
     expect(toRepoRelativePath('/home/project/src/Game.ts')).toBe('src/Game.ts');
     expect(toRepoRelativePath('home/project/src/Game.ts')).toBe('src/Game.ts');
     expect(toRepoRelativePath('/src/Game.ts')).toBe('src/Game.ts');
+  });
+
+  /**
+   * 🔴 EVERY provider root, not just WebContainer's. This function kept a `home/project`-only regex
+   * after the CodeSandbox provider landed, and a "successful" save nested the user's whole project
+   * under `project/workspace/` in their repo — read live as "the repo is empty" (2026-07-27).
+   * Nothing threw; the paths were non-empty, so every blob uploaded, just in the wrong place.
+   */
+  it('strips the CodeSandbox workdir too — a drifted second copy of this rule ships someone a nested repo', () => {
+    expect(toRepoRelativePath('/project/workspace/src/Game.ts')).toBe('src/Game.ts');
+    expect(toRepoRelativePath('/project/workspace')).toBe('');
+    expect(toRepoRelativePath('project/workspace/package.json')).toBe('package.json');
+  });
+
+  /**
+   * The READ direction of the same defect: a repo already written with nested paths must not
+   * round-trip its damage into the sandbox on pull (restoring `project/workspace/...` at face value
+   * writes a copy of the project INSIDE the project — observed live 2026-07-27).
+   */
+  it('normalizeRepoFileMap heals a nested repo tree on the way in, and is a no-op on a healthy one', () => {
+    const dirent = { type: 'file' as const, content: 'x', isBinary: false };
+
+    expect(
+      normalizeRepoFileMap({ 'project/workspace/src/Game.ts': dirent, 'project/workspace/README.md': dirent }),
+    ).toEqual({
+      'src/Game.ts': dirent,
+      'README.md': dirent,
+    });
+
+    const healthy = { 'src/Game.ts': dirent, 'README.md': dirent };
+    expect(normalizeRepoFileMap(healthy)).toEqual(healthy);
   });
 });
 

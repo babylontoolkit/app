@@ -26,6 +26,7 @@ import {
   clearCache,
 } from '~/lib/persistence/lockedFiles';
 import { getCurrentChatId } from '~/utils/fileLocks';
+import { walkSandboxTree } from '~/lib/stores/refresh-walk';
 
 const logger = createScopedLogger('FilesStore');
 
@@ -559,6 +560,34 @@ export class FilesStore {
     this.#modifiedFiles.clear();
   }
 
+  /**
+   * Record a write the ACTION RUNNER has already made to the sandbox FS — map update only, no disk.
+   *
+   * 🔴 Exists because "on disk is not visible" applies to the PERSISTENCE path too. On WebContainer
+   * the watcher reports a write almost instantly, with content in the event; on a server provider it
+   * is a network round trip per file (event, then an enrichment read), so for a moment after a
+   * generation the map holds a STALE PREFIX of what the artifact wrote. Everything that serializes
+   * the map — the §4.5.4c working copy, local checkpoints — captures that prefix, and a later mount
+   * restores it over the correct files (MEASURED live: a working copy holding the generated
+   * `Home.tsx` beside the STARTER's `Home.css`, which then reverted the landing page on reopen).
+   * Same contract as `saveFile` above: "immediately update the file and don't rely on the `change`
+   * event"; the watcher's later event simply confirms what is already here.
+   */
+  recordAgentWrite(filePath: string, content: string) {
+    const current = this.files.get()[filePath];
+
+    if (current?.type !== 'file') {
+      this.#size++;
+    }
+
+    this.files.setKey(filePath, {
+      type: 'file',
+      content,
+      isBinary: false,
+      isLocked: current?.type === 'file' ? current.isLocked : false,
+    });
+  }
+
   async saveFile(filePath: string, content: string) {
     const sandbox = await this.#sandbox;
 
@@ -729,65 +758,55 @@ export class FilesStore {
    * Invariants preserved: the same `node_modules`/`.git` exclusions the watcher uses; lock state
    * carried forward per file; user-deleted paths honored (a refresh must never resurrect a file the
    * user removed). Binaries keep `content: ''` — their bytes stay on disk (`readBinaryFile`).
+   *
+   * The walk itself lives in `refresh-walk.ts` with bounded read concurrency — on a server provider
+   * every call is a network round trip, and the serial version of this scan measured ~17s for a
+   * 75-file project, all of it on the blank screen a project open shows before `ready`.
+   *
+   * `onProgress` surfaces the scan to the boot UI: (filesRead, totalFiles) after each read.
    */
-  async refreshFiles(): Promise<void> {
+  async refreshFiles(onProgress?: (done: number, total: number) => void): Promise<void> {
     const sandbox = await this.#sandbox;
 
     const nextFiles: FileMap = {};
     let size = 0;
 
-    const walk = async (relDir: string): Promise<void> => {
-      const dirents = await sandbox.fs.readdir(relDir || '.', { withFileTypes: true });
+    const { folders, files } = await walkSandboxTree(sandbox.fs, {
+      // Match the watcher's exclusions — these never belong in the map.
+      exclude: (name) => name === 'node_modules' || name === '.git',
 
-      for (const dirent of dirents) {
-        // Match the watcher's exclusions — these never belong in the map.
-        if (dirent.name === 'node_modules' || dirent.name === '.git') {
+      // Honor user deletions — a refresh must not resurrect what was removed.
+      skip: (relPath) => this.#deletedPaths.has(`${WORK_DIR}/${relPath}`),
+      onFileRead: onProgress,
+    });
+
+    for (const relPath of folders) {
+      nextFiles[`${WORK_DIR}/${relPath}`] = { type: 'folder' };
+    }
+
+    for (const { relPath, buffer, error } of files) {
+      const absPath = `${WORK_DIR}/${relPath}`;
+      const existing = this.files.get()[absPath];
+      const isLocked = existing?.type === 'file' ? existing.isLocked : undefined;
+
+      if (buffer) {
+        nextFiles[absPath] = { ...fileEntryFromBuffer(buffer), isLocked };
+      } else {
+        /*
+         * A file we cannot read (races a delete, permissions) keeps its prior entry rather than
+         * vanishing from the tree — a refresh must not lose a file it merely failed to re-read.
+         */
+        logger.error(`Failed to read ${absPath} during workspace refresh`, error);
+
+        if (!existing) {
           continue;
         }
 
-        const relPath = relDir ? `${relDir}/${dirent.name}` : dirent.name;
-        const absPath = `${WORK_DIR}/${relPath}`;
-
-        // Honor user deletions — a refresh must not resurrect what was removed.
-        if (this.#deletedPaths.has(absPath)) {
-          continue;
-        }
-
-        if (dirent.isDirectory()) {
-          nextFiles[absPath] = { type: 'folder' };
-          await walk(relPath);
-          continue;
-        }
-
-        if (!dirent.isFile()) {
-          continue;
-        }
-
-        const existing = this.files.get()[absPath];
-        const isLocked = existing?.type === 'file' ? existing.isLocked : undefined;
-
-        try {
-          const buffer = await sandbox.fs.readFile(relPath);
-          nextFiles[absPath] = { ...fileEntryFromBuffer(buffer), isLocked };
-        } catch (error) {
-          /*
-           * A file we cannot read (races a delete, permissions) keeps its prior entry rather than
-           * vanishing from the tree — a refresh must not lose a file it merely failed to re-read.
-           */
-          logger.error(`Failed to read ${absPath} during workspace refresh`, error);
-
-          if (existing) {
-            nextFiles[absPath] = existing;
-          } else {
-            continue;
-          }
-        }
-
-        size++;
+        nextFiles[absPath] = existing;
       }
-    };
 
-    await walk('');
+      size++;
+    }
 
     this.#size = size;
     this.files.set(nextFiles);

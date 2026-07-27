@@ -17,20 +17,56 @@
  * because it does not end in `local`. A third copy is how that happens again. Import these; do not
  * reimplement them.
  */
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 
 /**
- * Strip the WebContainer workdir prefix — a repo has no `/home/project`.
+ * Strip the sandbox workdir prefix — a repo has no `/home/project` and no `/project/workspace`.
  *
- * ⚠️ The `(\/|$)` is load-bearing and was missing. The rule used to require a TRAILING SLASH, so the
- * workdir root itself (`/home/project`, no slash) normalised to `home/project` rather than to the
- * empty string — i.e. to a path that looks like an ordinary file two directories deep. Harmless on the
- * push, which only ever maps real files. Not harmless on `planRestore`, which reads "not empty, and
- * not in the incoming map" as **delete it**, and would have handed the workdir itself to `deleteFile`.
- * Caught by `restore-plan.spec.ts`; fixed here rather than worked around there, because the whole
- * point of this module is that there is one rule and everyone gets the same one.
+ * 🔴 Delegates to `toProjectRelativePath`, which knows EVERY provider root (`SANDBOX_ROOTS`). This
+ * function kept its own `home/project`-only regex after the CodeSandbox provider landed — while the
+ * `sandbox-paths.ts` doc comment claimed the delegation already existed — and the result was a
+ * "successful" save that nested the user's entire project under `project/workspace/` in their repo
+ * (found live 2026-07-27: github.com/…/blank-canvas showed one folder and read as an empty repo).
+ * Nothing threw: every path was non-empty, every blob uploaded, the link was recorded. The restore
+ * direction was armed too — `planRestore` comparing `/project/workspace/src/main.ts` against a
+ * repo's `src/main.ts` concludes every file is new and every store file deleted. A second copy of a
+ * path rule does not fail loudly when it drifts; it fails as someone's repository.
+ *
+ * (The trailing-slash lesson from this function's own history — the workdir root itself must
+ * normalise to the empty string, or `planRestore` hands the workdir to `deleteFile` — now lives in
+ * `toProjectRelativePath`, pinned by `sandbox-paths.spec.ts` and `restore-plan.spec.ts`.)
  */
 export function toRepoRelativePath(rawPath: string): string {
-  return rawPath.replace(/^\/?(home\/project(\/|$))?/, '').replace(/^\/+/, '');
+  return toProjectRelativePath(rawPath);
+}
+
+/**
+ * Re-key a repo-fetched file map to repo-relative paths, at the fetch boundary.
+ *
+ * A healthy repo's tree is already relative, so this is a no-op. It exists because the
+ * `home/project`-only era of `toRepoRelativePath` pushed nested `project/workspace/...` trees
+ * (2026-07-27), and a repo written that way ROUND-TRIPS its damage on every pull: the raw keys are
+ * restored at face value, which writes a `project/workspace/` copy INSIDE the user's project — and
+ * a checkpoint then preserves the nesting as if it were the user's work. Normalizing what we READ
+ * heals the sandbox whatever the repo holds; normalizing what we WRITE (`mapToTreeBlobs`) heals the
+ * repo on the next push. Both directions, one rule.
+ *
+ * Keys that normalize to nothing (the workdir root itself) are dropped, and a collision after
+ * normalizing (a nested copy alongside a correct one) resolves to whichever entry sorts LAST —
+ * deterministic, and irrelevant in practice since both copies came from the same push.
+ */
+export function normalizeRepoFileMap<T>(files: Record<string, T | undefined>): Record<string, T | undefined> {
+  const out: Record<string, T | undefined> = {};
+
+  for (const [rawPath, dirent] of Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) {
+    const path = toRepoRelativePath(rawPath);
+
+    if (path) {
+      out[path] = dirent;
+    }
+  }
+
+  return out;
 }
 
 /**

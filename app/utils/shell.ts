@@ -5,10 +5,13 @@ import { atom } from 'nanostores';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
 
 export async function newShellProcess(sandbox: SandboxProvider, terminal: ITerminal) {
-  const args: string[] = [];
-
-  // we spawn a JSH process with a fallback cols and rows in case the process is not attached yet to a visible terminal
-  const process = await sandbox.spawn('/bin/jsh', ['--osc', ...args], {
+  /*
+   * The shell comes from the PROVIDER (`spec/sandbox-seam.md`). `/bin/jsh --osc` is WebContainer's
+   * own shell and does not exist on a real container — hardcoding it made a server-backed terminal
+   * open and immediately print `bash: /bin/jsh: No such file or directory`.
+   */
+  const process = await sandbox.spawn(sandbox.shell.command, [...sandbox.shell.args], {
+    env: sandbox.shell.env,
     terminal: {
       cols: terminal.cols ?? 80,
       rows: terminal.rows ?? 15,
@@ -20,17 +23,21 @@ export async function newShellProcess(sandbox: SandboxProvider, terminal: ITermi
 
   const jshReady = withResolvers<void>();
 
+  /*
+   * A shell with no readiness marker is ready as soon as it speaks. Waiting for an OSC that a real
+   * bash never sends would hang the terminal forever, silently — which is why `readyOsc` is
+   * optional rather than a value every provider has to invent.
+   */
+  const readyOsc = sandbox.shell.readyOsc;
+
   let isInteractive = false;
   output.pipeTo(
     new WritableStream({
       write(data) {
         if (!isInteractive) {
-          const [, osc] = data.match(/\x1b\]654;([^\x07]+)\x07/) || [];
-
-          if (osc === 'interactive') {
-            // wait until we see the interactive OSC
+          // Every signal in the chunk — a readiness marker can share one write with an exit report.
+          if (!readyOsc || scanOscSignals(data).signals.some((signal) => signal.code === readyOsc)) {
             isInteractive = true;
-
             jshReady.resolve();
           }
         }
@@ -91,6 +98,94 @@ export async function newShellProcess(sandbox: SandboxProvider, terminal: ITermi
 
 export type ExecutionResult = { output: string; exitCode: number } | undefined;
 
+/** One `\x1b]654;…\x07` control message from the shell. */
+export interface OscSignal {
+  /** The payload before any `=` — `prompt`, `exit`, `interactive`. */
+  code: string;
+
+  /** Present only on `exit=0:<n>`. */
+  exitCode?: number;
+}
+
+const OSC_PREFIX = '\x1b]654;';
+
+/*
+ * Deliberately GLOBAL, and constructed fresh per scan rather than shared: a global regex carries
+ * `lastIndex` between calls, which is exactly the kind of hidden state that makes a parser work in a
+ * test and fail on the second command.
+ */
+const OSC_PATTERN = /\x1b\]654;([^\x07=]+)=?((-?\d+):(\d+))?\x07/g;
+
+/**
+ * The longest partial sequence worth carrying. A real one is ~20 bytes; anything longer is not an OSC
+ * that got split, it is ordinary output that happens to start with an escape — and carrying it
+ * forever would grow the buffer without bound.
+ */
+const MAX_PARTIAL_OSC = 64;
+
+/**
+ * Every OSC control message in `input`, in order, plus the trailing bytes that might still become one.
+ *
+ * 🔴 **Reading only the FIRST match hangs every shell command, silently and forever.** `executeCommand`
+ * opens by waiting for `prompt`, and a real bash emits `exit=0:<n>` and `prompt` from a single
+ * `PROMPT_COMMAND` — so they arrive in ONE stream chunk (MEASURED on CodeSandbox:
+ * `\x1b]654;exit=0:0\x07\x1b]654;prompt\x07\x1b[?2004hroot@…#`). A non-global `String.match` returns
+ * `exit`, the wait for `prompt` never matches, and nothing throws: `npm install` on mount and every
+ * `<boltAction type="shell">` the model emits just never start. That is the product.
+ *
+ * The `rest` return is the other half. A PTY splits writes wherever it likes, so a sequence can
+ * straddle a chunk boundary; dropping the tail loses that signal and hangs the same way, one time in
+ * however-many. Only bytes that could still COMPLETE into a sequence are retained — a prefix of
+ * `\x1b]654;`, or a started sequence still missing its `\x07` — and only up to {@link MAX_PARTIAL_OSC}.
+ *
+ * Pure and exported so it can be tested against real captured bytes, which is the only way this class
+ * of defect gets caught: the shim reads correctly, the regex reads correctly, and the composition is
+ * wrong.
+ */
+export function scanOscSignals(input: string): { signals: OscSignal[]; rest: string } {
+  const signals: OscSignal[] = [];
+  const pattern = new RegExp(OSC_PATTERN.source, 'g');
+
+  let consumed = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(input)) !== null) {
+    const code = match[1];
+    const exitCode = match[4] === undefined ? undefined : parseInt(match[4], 10);
+
+    signals.push(exitCode === undefined ? { code } : { code, exitCode });
+    consumed = pattern.lastIndex;
+  }
+
+  return { signals, rest: retainPartialOsc(input.slice(consumed)) };
+}
+
+function retainPartialOsc(tail: string): string {
+  /*
+   * 🔴 The `at === 0 ? -1 : …` is load-bearing, and its absence FROZE THE PRODUCT: `lastIndexOf`
+   * CLAMPS a negative fromIndex to 0, so `tail.lastIndexOf('\x1b', -1)` finds an escape sitting at
+   * position 0 again and again — an infinite loop ON THE UI THREAD. The bytes that trigger it are
+   * not exotic; they are every bash prompt redraw (`\x1b[?2004h<prompt>` after the OSC signals are
+   * consumed), so the first `npm install` of every creation pinned the tab at 100% CPU forever
+   * (MEASURED live: renderer at 101% CPU, a no-op evaluate timing out, the generation finishing
+   * server-side with "the client did not save this turn").
+   */
+  for (let at = tail.lastIndexOf('\x1b'); at !== -1; at = at === 0 ? -1 : tail.lastIndexOf('\x1b', at - 1)) {
+    const candidate = tail.slice(at);
+
+    if (candidate.length > MAX_PARTIAL_OSC) {
+      return '';
+    }
+
+    // Either a started sequence still awaiting its terminator, or a prefix of the opener.
+    if (candidate.startsWith(OSC_PREFIX) || OSC_PREFIX.startsWith(candidate)) {
+      return candidate;
+    }
+  }
+
+  return '';
+}
+
 export class BoltShell {
   #initialized: (() => void) | undefined;
   #readyPromise: Promise<void>;
@@ -125,13 +220,23 @@ export class BoltShell {
     // Start background Expo URL watcher immediately
     this._watchExpoUrlInBackground(expoUrlStream);
 
-    await this.waitTillOscCode('interactive');
+    /*
+     * Only wait for a readiness marker on a shell that HAS one. `newBoltShellProcess` has already
+     * resolved on first output for a marker-less shell, so waiting again here for `'interactive'`
+     * would block `ready()` forever on a real bash — and `ready()` gates the action runner, so the
+     * symptom is every shell action silently never starting.
+     */
+    if (sandbox.shell.readyOsc) {
+      await this.waitTillOscCode(sandbox.shell.readyOsc);
+    }
+
     this.#initialized?.();
   }
 
   async newBoltShellProcess(sandbox: SandboxProvider, terminal: ITerminal) {
-    const args: string[] = [];
-    const process = await sandbox.spawn('/bin/jsh', ['--osc', ...args], {
+    // Provider-supplied, for the same reason as `newShellProcess` above.
+    const process = await sandbox.spawn(sandbox.shell.command, [...sandbox.shell.args], {
+      env: sandbox.shell.env,
       terminal: {
         cols: terminal.cols ?? 80,
         rows: terminal.rows ?? 15,
@@ -146,14 +251,17 @@ export class BoltShell {
     const [streamC, streamD] = streamB.tee();
 
     const jshReady = withResolvers<void>();
+    const readyOsc = sandbox.shell.readyOsc;
     let isInteractive = false;
     streamA.pipeTo(
       new WritableStream({
         write(data) {
           if (!isInteractive) {
-            const [, osc] = data.match(/\x1b\]654;([^\x07]+)\x07/) || [];
-
-            if (osc === 'interactive') {
+            /*
+             * No marker (a real PTY) means ready on first output — see `newShellProcess`. Every
+             * signal in the chunk, for the reason `scanOscSignals` documents.
+             */
+            if (!readyOsc || scanOscSignals(data).signals.some((signal) => signal.code === readyOsc)) {
               isInteractive = true;
               jshReady.resolve();
             }
@@ -279,6 +387,13 @@ export class BoltShell {
     // Regex for Expo URL
     const expoUrlRegex = /(exp:\/\/[^\s]+)/;
 
+    /*
+     * Bytes from the previous chunk that could still complete into an OSC sequence. See
+     * `scanOscSignals` — a PTY splits its writes wherever it likes, and a signal lost to a chunk
+     * boundary hangs this loop exactly as a missed one does.
+     */
+    let oscCarry = '';
+
     while (true) {
       const { value, done } = await tappedStream.read();
 
@@ -304,14 +419,32 @@ export class BoltShell {
         buffer = buffer.slice(buffer.indexOf(expoUrlMatch[1]) + expoUrlMatch[1].length);
       }
 
-      // Check if command completion signal with exit code
-      const [, osc, , , code] = text.match(/\x1b\]654;([^\x07=]+)=?((-?\d+):(\d+))?\x07/) || [];
+      /*
+       * EVERY signal in the chunk, in order — not just the first. A single `PROMPT_COMMAND` emits
+       * `exit=0:<n>` and `prompt` back to back, so they land together and reading only the first made
+       * the wait for `prompt` unsatisfiable. See `scanOscSignals` for the measured bytes.
+       */
+      const { signals, rest } = scanOscSignals(oscCarry + text);
+      oscCarry = rest;
 
-      if (osc === 'exit') {
-        exitCode = parseInt(code, 10);
+      let reachedWaitCode = false;
+
+      for (const signal of signals) {
+        if (signal.code === 'exit' && signal.exitCode !== undefined) {
+          exitCode = signal.exitCode;
+        }
+
+        /*
+         * No early `break` on the exit code above: the status must be recorded BEFORE we stop, and
+         * when `waitCode` is `exit` the very same signal both sets it and ends the wait.
+         */
+        if (signal.code === waitCode) {
+          reachedWaitCode = true;
+          break;
+        }
       }
 
-      if (osc === waitCode) {
+      if (reachedWaitCode) {
         break;
       }
     }

@@ -701,7 +701,16 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                   targetPath = '/' + targetPath;
                 }
 
-                const fullUrl = activePreview.baseUrl + targetPath;
+                /*
+                 * URL-join, not string-append: a CodeSandbox preview baseUrl carries
+                 * `?preview_token=…`, and `baseUrl + '/path'` would glue the path onto the QUERY
+                 * (`…token=x/path`), breaking both. `new URL` keeps the token and swaps the path;
+                 * for a query-less WebContainer URL it produces the same string the append did.
+                 */
+                const joined = new URL(activePreview.baseUrl);
+                joined.pathname = targetPath;
+
+                const fullUrl = joined.toString();
                 setIframeUrl(fullUrl);
                 setDisplayPath(targetPath);
 

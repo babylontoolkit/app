@@ -4,6 +4,8 @@ import { atom } from 'nanostores';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { bootProgress } from '~/lib/stores/boot-progress';
+import { sandbox as sandboxRuntime } from '~/lib/sandbox';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
 import {
   getAll,
@@ -245,12 +247,19 @@ interface MountOptions {
   prepareToRun?: boolean;
 }
 
+/*
+ * However the mount ends, the boot screen's phase must end with it — a stale phase would report
+ * progress for work that is not happening the next time a project opens.
+ */
 function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
-  return mountInFlight(pid, () => doMountProjectFiles(pid, opts));
+  return mountInFlight(pid, () => doMountProjectFiles(pid, opts).finally(() => bootProgress.set({ step: 'idle' })));
 }
 
 async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
   const prepareToRun = opts.prepareToRun ?? true;
+
+  // The first long await below is the sandbox runtime itself; say so while we wait.
+  bootProgress.set({ step: 'sandbox' });
 
   /*
    * 🔴 RESET, never inherit. These two module-level values are how `checkUnappliedTurn` sees both
@@ -300,6 +309,55 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
   });
 
   logger.info(`Mounting project ${pid} from: ${decision.source}`);
+
+  /*
+   * 🔴 A LIVE PERSISTENT SANDBOX OUTRANKS EVERY CLIENT-HELD COPY (`spec/sandbox-codesandbox.md` §1:
+   * the working copy is a recovery buffer, never the primary wake mechanism). On WebContainer this
+   * gate never opens (`bootRestoredFilesystem` is always false — the FS is empty every page load, so
+   * the restore below IS the project). On a server provider that resumed warm, the disk is exactly as
+   * the last session left it and is NEWER than anything this browser or the server holds — MEASURED
+   * live: a working copy serialized mid-watcher-lag held the starter's `Home.css` under the
+   * generation's `Home.tsx`, and restoring it over the healthy sandbox silently reverted the user's
+   * landing page two hours after it was built. The store fills FROM the sandbox instead, and the
+   * copies stay what they are: recovery for the day the sandbox comes back CLEAN or gone.
+   *
+   * Only the sources that would OVERWRITE the sandbox from a client/server copy are gated. `repo` is
+   * an explicit user-facing sync decision and `empty`/seed only run when there is nothing to protect.
+   */
+  const runtime = await sandboxRuntime;
+
+  // Sandbox is up — everything from here is file work, whichever branch runs.
+  bootProgress.set({ step: 'files' });
+
+  const liveSandboxIsTruth =
+    runtime.bootRestoredFilesystem &&
+    (decision.source === 'local' || decision.source === 'diverged' || decision.source === 'working');
+
+  if (liveSandboxIsTruth) {
+    await workbenchStore.refreshFiles((done, total) => bootProgress.set({ step: 'files', done, total }));
+
+    if (prepareToRun) {
+      // Serialized from the store just filled from disk — the wake path's install/dev-server check.
+      await prepareMountedProject(await workbenchStore.serializeFiles());
+    }
+
+    /*
+     * Carry the checkpoint's messageId even though its FILES were not used: it names the last turn
+     * this project is known to contain, and the sandbox is at least that new. Dropping it makes
+     * `checkUnappliedTurn` read "unknown turn" as "not the last one" and re-offer the §4.5.4c apply
+     * dialog forever — the exact loop the working-copy branch's comment warns about.
+     */
+    const local = decision.source !== 'working' && db ? await readCurrentLocalSnapshot(db, pid) : undefined;
+    lastMount = { source: decision.source, messageId: local?.messageId ?? working?.messageId };
+
+    unsavedWork.set(decision.source === 'working' || decision.source === 'diverged' || Boolean(decision.unsavedWork));
+
+    if (decision.source === 'diverged') {
+      mountDivergence.set({ projectId: pid, remoteHead: decision.remoteHead });
+    }
+
+    return;
+  }
 
   if (decision.source === 'local' || decision.source === 'diverged') {
     const local = db ? await readCurrentLocalSnapshot(db, pid) : undefined;
@@ -462,6 +520,7 @@ async function prepareMountedProject(files: SerializedFileMap): Promise<void> {
   }
 
   preparingContainer = true;
+  bootProgress.set({ step: 'prepare' });
 
   const ready = await installDependencies(files);
 

@@ -185,6 +185,55 @@ export interface SandboxCapabilities {
 }
 
 /**
+ * How to start an interactive shell in this runtime.
+ *
+ * 🔴 **The shell binary is a property of the PROVIDER, and hardcoding it breaks the terminal with an
+ * error that names nothing useful.** `/bin/jsh` is WebContainer's OWN shell — it does not exist on a
+ * real Linux box, so a server provider's terminal opened and printed
+ * `bash: /bin/jsh: No such file or directory` (MEASURED live on CodeSandbox). Same class as the
+ * workdir: a value that only ever had one possible answer, until it had two.
+ *
+ * `readyOsc` exists because the two runtimes signal readiness differently. WebContainer's jsh emits
+ * an OSC escape (`\x1b]654;interactive\x07`) that `shell.ts` waits for before sending a command; a
+ * real PTY emits no such marker and is ready as soon as it speaks. Encoding that as an OPTIONAL
+ * marker rather than as a hardcoded regex means the fallback ("ready on first output") is a
+ * documented behaviour instead of an infinite wait.
+ */
+export interface SandboxShell {
+  /** The program to spawn — e.g. `/bin/jsh` on WebContainer, `bash` on a real container. */
+  readonly command: string;
+
+  readonly args: readonly string[];
+
+  /**
+   * The OSC payload this shell emits when it becomes interactive, if it emits one.
+   *
+   * Absent means the shell has no readiness marker, and callers must fall back to treating first
+   * output as ready. Waiting for a marker that will never arrive hangs the terminal forever with no
+   * error — the failure this field exists to make impossible.
+   */
+  readonly readyOsc?: string;
+
+  /**
+   * Environment for the shell process — used to make a shell speak the OSC protocol `BoltShell`
+   * parses. Absent when the shell already does (WebContainer's `jsh --osc`).
+   *
+   * 🔴 **Without this, every agent-run shell action HANGS — silently, forever.** `executeCommand`
+   * writes a command and then waits for `\x1b]654;exit=…\x07`; a plain bash never sends it, so the
+   * promise never settles, nothing throws, and the UI sits on "installing its dependencies…"
+   * indefinitely (MEASURED live on CodeSandbox). That covers `npm install` on mount and every
+   * `<boltAction type="shell">` the model emits — i.e. the product.
+   *
+   * Teaching bash to emit the same markers is deliberately preferred over rewriting the parser: the
+   * parser is shared, already handles the interleaving, and a second implementation of "did the
+   * command finish and what did it return" is the two-writers drift this codebase keeps
+   * rediscovering. Delivering it through the ENVIRONMENT rather than as a typed command keeps it
+   * out of the user's visible terminal.
+   */
+  readonly env?: Readonly<Record<string, string>>;
+}
+
+/**
  * The runtime a user's project lives in.
  *
  * One instance per builder session. Obtain it from `~/lib/sandbox` — never construct a provider in
@@ -192,6 +241,23 @@ export interface SandboxCapabilities {
  */
 export interface SandboxProvider {
   readonly capabilities: SandboxCapabilities;
+
+  /**
+   * Did THIS session's boot bring back the filesystem from a previous session?
+   *
+   * 🔴 **This is the fact that decides whether a mount may restore a client-held copy over the
+   * sandbox.** WebContainer is always `false` — its FS is empty on every page load, so the working
+   * copy / local checkpoint IS the project and restoring it is the only way to have one. A
+   * server-backed provider that resumed warm answers `true`: the disk is exactly as the last session
+   * left it and is NEWER than anything the client holds, so writing a client copy over it is data
+   * loss wearing recovery's clothes (MEASURED live on CodeSandbox — a stale working copy reverted a
+   * generated `Home.css` to the starter's, silently, on reopen). `spec/sandbox-codesandbox.md` §1:
+   * the working copy stays a recovery buffer and never becomes the primary wake mechanism.
+   */
+  readonly bootRestoredFilesystem: boolean;
+
+  /** How to open an interactive shell here. See {@link SandboxShell}. */
+  readonly shell: SandboxShell;
 
   /** Absolute path of the project root inside the sandbox (e.g. `/home/project`). */
   readonly workdir: string;

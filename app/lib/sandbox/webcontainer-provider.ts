@@ -39,6 +39,20 @@ export function createWebContainerProvider(container: WebContainer): SandboxProv
     capabilities: WEBCONTAINER_CAPABILITIES,
 
     /*
+     * A WebContainer dies with the tab; every page load boots an empty filesystem. `false` is what
+     * makes the mount path restore the working copy / local checkpoint — here that restore IS the
+     * project, not an overwrite of one.
+     */
+    bootRestoredFilesystem: false,
+
+    /**
+     * WebContainer ships its own shell, `jsh`, which announces interactivity with an OSC escape.
+     * Both values are WebContainer-specific and lived hardcoded in `shell.ts` until a second
+     * provider turned that into a terminal printing `/bin/jsh: No such file or directory`.
+     */
+    shell: { command: '/bin/jsh', args: ['--osc'], readyOsc: 'interactive' },
+
+    /*
      * A getter, not a captured value: `workdir` is a getter on WebContainer too, and every path in
      * the app is rebased against it. Snapshotting it here would be correct today and silently wrong
      * for any provider whose sandbox is created lazily or moves between hosts.

@@ -150,8 +150,8 @@ export class WorkbenchStore {
   }
 
   /** Force a full re-scan of the sandbox FS, rebuilding the file map from disk truth. */
-  refreshFiles(): Promise<void> {
-    return this.#filesStore.refreshFiles();
+  refreshFiles(onProgress?: (done: number, total: number) => void): Promise<void> {
+    return this.#filesStore.refreshFiles(onProgress);
   }
 
   get currentDocument(): ReadableAtom<EditorDocument | undefined> {
@@ -597,6 +597,14 @@ export class WorkbenchStore {
 
           this.deployAlert.set(alert);
         },
+
+        /*
+         * Write-through: the runner just put these bytes on the sandbox FS, so the map records them
+         * NOW rather than a watcher round-trip later. On a server provider that lag is real (network
+         * per file), and everything that serializes the map — working copy, local checkpoints —
+         * otherwise captures a stale prefix of the generation (see FilesStore.recordAgentWrite).
+         */
+        (filePath, content) => this.#filesStore.recordAgentWrite(filePath, content),
       ),
     });
   }
@@ -1148,3 +1156,13 @@ export class WorkbenchStore {
 }
 
 export const workbenchStore = new WorkbenchStore();
+
+/*
+ * Dev-only handle for driving the real UI from a browser session (`CLAUDE.md`: "DRIVE THE REAL UI
+ * BEFORE CLAIMING A USER-FACING FEATURE WORKS"). Every sandbox-provider defect found so far lived in
+ * the wiring BETWEEN correctly-tested units, which is only reachable from a running page. Gated on
+ * `import.meta.env.DEV`, so it is absent from a production bundle.
+ */
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  (window as unknown as { __workbenchStore: WorkbenchStore }).__workbenchStore = workbenchStore;
+}

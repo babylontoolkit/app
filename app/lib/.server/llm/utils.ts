@@ -2,6 +2,7 @@ import { type Message } from 'ai';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, MODEL_REGEX, PROVIDER_REGEX } from '~/utils/constants';
 import { IGNORE_PATTERNS, type FileMap } from './constants';
 import ignore from 'ignore';
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { ContextAnnotation } from '~/types/context';
 import { isOpaqueToModel } from '~/lib/context/opaque-files';
 
@@ -59,7 +60,7 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
   const ig = ignore().add(IGNORE_PATTERNS);
   let filePaths = Object.keys(files);
   filePaths = filePaths.filter((x) => {
-    const relPath = x.replace('/home/project/', '');
+    const relPath = toProjectRelativePath(x);
     return !ig.ignores(relPath);
   });
 
@@ -79,7 +80,7 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
        * is told the file exists and how big it is, and nothing more.
        */
       if (dirent.isBinary) {
-        return `<boltFile filePath="${useRelativePath ? path.replace('/home/project/', '') : path}" binary="true" size="${dirent.size ?? 0}" />`;
+        return `<boltFile filePath="${useRelativePath ? toProjectRelativePath(path) : path}" binary="true" size="${dirent.size ?? 0}" />`;
       }
 
       /**
@@ -88,7 +89,7 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
        * told they exist and how big they are, and nothing more. `public/scripts/` alone is HALF the
        * starter's text payload, and it was being re-sent, at full price, on every step.
        */
-      const relativePath = path.replace('/home/project/', '');
+      const relativePath = toProjectRelativePath(path);
 
       if (isOpaqueToModel(relativePath)) {
         return `<boltFile filePath="${useRelativePath ? relativePath : path}" opaque="true" size="${dirent.content.length}" />`;
@@ -102,7 +103,7 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
       let filePath = path;
 
       if (useRelativePath) {
-        filePath = path.replace('/home/project/', '');
+        filePath = toProjectRelativePath(path);
       }
 
       return `<boltAction type="file" filePath="${filePath}">${codeWithLinesNumbers}</boltAction>`;

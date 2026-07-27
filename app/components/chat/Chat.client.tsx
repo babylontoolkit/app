@@ -17,6 +17,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } fro
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { BaseChat } from './BaseChat';
+import { BootScreen } from './BootScreen';
 import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
 import { useSettings } from '~/lib/hooks/useSettings';
@@ -72,7 +73,7 @@ export function Chat() {
 
   return (
     <>
-      {ready && (
+      {ready ? (
         <ChatImpl
           description={title}
           initialMessages={initialMessages}
@@ -82,6 +83,8 @@ export function Chat() {
           importChat={importChat}
           startFreshChat={startFreshChat}
         />
+      ) : (
+        <BootScreen />
       )}
     </>
   );

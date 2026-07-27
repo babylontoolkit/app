@@ -1,8 +1,35 @@
 import { LLMManager } from '~/lib/modules/llm/manager';
 import type { Template } from '~/types/template';
 
+/**
+ * The name WebContainer is asked to give its working directory (`workdirName`).
+ *
+ * WebContainer-specific by nature — it is a boot parameter of that runtime, and only
+ * `~/lib/webcontainer/index.ts` consumes it. A server provider does not get to choose its path.
+ */
 export const WORK_DIR_NAME = 'project';
-export const WORK_DIR = `/home/${WORK_DIR_NAME}`;
+
+/**
+ * Where the user's project lives inside the sandbox.
+ *
+ * 🔴 **This is a property of the RUNTIME, so it follows the same build-time switch the runtime does.**
+ * It was `/home/${WORK_DIR_NAME}` — correct for WebContainer and silently wrong for anything else.
+ * CodeSandbox puts a project at `/project/workspace`, and the mismatch is invisible rather than
+ * loud: the file map fills with correct `/project/workspace/...` keys from the watcher while the
+ * file tree renders `rootFolder={WORK_DIR}` and matches nothing, so the workbench shows an EMPTY
+ * PROJECT sitting on top of 64 real files (MEASURED live).
+ *
+ * It stays a plain synchronous constant because ~6 call sites — the editor's root folder, the
+ * breadcrumb regex, the search root, the diff regex, and the system prompt's description of the
+ * project layout — read it at module scope and cannot await a provider. Deriving it from
+ * `VITE_SANDBOX_PROVIDER` keeps that shape while making it true per build, which is exactly the
+ * granularity the switch already has (SPEC §8: "we make builds for that").
+ *
+ * ⚠️ It must agree with `SANDBOX_ROOTS` in `~/lib/common/sandbox-paths.ts`, which is the one place
+ * that knows every provider's root. Adding a provider means touching both.
+ */
+export const WORK_DIR =
+  import.meta.env.VITE_SANDBOX_PROVIDER === 'codesandbox' ? '/project/workspace' : `/home/${WORK_DIR_NAME}`;
 export const MODIFICATIONS_TAG_NAME = 'bolt_file_modifications';
 export const MODEL_REGEX = /^\[Model: (.*?)\]\n\n/;
 export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
