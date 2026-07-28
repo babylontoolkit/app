@@ -3,6 +3,7 @@ import { BaseProvider } from './base-provider';
 import type { ModelInfo, ProviderInfo } from './types';
 import * as providers from './registry';
 import { createScopedLogger } from '~/utils/logger';
+import { isNotConfiguredError } from './not-configured';
 
 const logger = createScopedLogger('LLMManager');
 export class LLMManager {
@@ -114,7 +115,17 @@ export class LLMManager {
               return models;
             })
             .catch((err) => {
-              logger.error(`Error getting dynamic models ${provider.name} :`, err);
+              /*
+               * A provider with no key is the DESIGNED state in credits-only mode (§4.6.1), not a
+               * failure — ~24 providers are registered and one is configured. Logging those at ERROR
+               * put ~30 red lines on every page load and buried real failures in them.
+               */
+              if (isNotConfiguredError(err)) {
+                logger.debug(`${provider.name} is not configured — skipping its dynamic models.`);
+              } else {
+                logger.error(`Error getting dynamic models ${provider.name} :`, err);
+              }
+
               return [];
             });
 
@@ -180,7 +191,13 @@ export class LLMManager {
         return models;
       })
       .catch((err) => {
-        logger.error(`Error getting dynamic models ${provider.name} :`, err);
+        // See the sibling call site above: "no key" is expected here, a real failure still shouts.
+        if (isNotConfiguredError(err)) {
+          logger.debug(`${provider.name} is not configured — skipping its dynamic models.`);
+        } else {
+          logger.error(`Error getting dynamic models ${provider.name} :`, err);
+        }
+
         return [];
       });
     const dynamicModelsName = dynamicModels.map((d) => d.name);

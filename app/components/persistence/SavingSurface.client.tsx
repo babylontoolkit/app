@@ -23,10 +23,20 @@ import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { generationCount, projectId as projectIdStore, repoStatus, requestSave, unsavedWork } from '~/lib/persistence';
 import { decideNudge, shouldWarnBeforeUnload } from '~/lib/persistence/save-status';
+import { saveWarningCopy } from '~/lib/persistence/save-warning-copy';
+import { SANDBOX_OUTLIVES_SESSION } from '~/lib/sandbox';
 import { workingCopySafe } from '~/lib/persistence/useChatHistory';
 import { saving } from '~/config/saving';
 import { SaveDivergenceDialog } from './SaveDivergenceDialog.client';
 import { UnappliedTurnDialog } from './UnappliedTurnDialog.client';
+
+/**
+ * Runtime-accurate wording for the save nudges (`save-warning-copy.ts`).
+ *
+ * The ask is identical on both providers; only the REASON differs. `SANDBOX_OUTLIVES_SESSION` is a
+ * build-time constant, so this is resolved once at module scope rather than recomputed per render.
+ */
+const warningCopy = saveWarningCopy({ sandboxOutlivesSession: SANDBOX_OUTLIVES_SESSION });
 
 /**
  * The intro toast is per PROJECT, not per user (§4.5.4b). Its whole job is to remind the user to save
@@ -107,9 +117,7 @@ function SaveNudges() {
     toast.warn(
       <div className="flex flex-col gap-2">
         <div>
-          <strong>⚠️ Save your work — this game is not saved yet.</strong> It exists ONLY in this browser tab. If you
-          clear your browsing data or switch devices, it is gone. Save it to your own GitHub account to keep it safe on
-          any device.
+          <strong>⚠️ {warningCopy.toastHeadline}</strong> {warningCopy.toastDetail}
         </div>
         <button
           onClick={() => void requestSave(activeProjectId)}
@@ -140,10 +148,7 @@ function SaveNudges() {
     <div className="px-4 pt-3">
       <div className="flex items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
         <div className="i-ph:warning-circle shrink-0 text-lg" />
-        <div className="flex-1">
-          This project is only in this browser. If you clear your browsing data or switch devices, it is gone. Saving
-          puts it in your own GitHub account, where it stays yours.
-        </div>
+        <div className="flex-1">{warningCopy.banner}</div>
         <button
           onClick={() => void requestSave(activeProjectId)}
           className="px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white shrink-0"

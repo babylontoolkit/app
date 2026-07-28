@@ -65,14 +65,18 @@ export default class LMStudioProvider extends BaseProvider {
         maxTokenAllowed: 8000,
       }));
     } catch (error) {
+      // Same rule as the Ollama provider: only report "not running" if somebody asked for it.
+      const configured = Boolean(settings?.baseUrl || serverEnv?.LMSTUDIO_API_BASE_URL);
+      const report = configured ? logger.warn.bind(logger) : logger.debug.bind(logger);
+
       if (error instanceof DOMException && error.name === 'TimeoutError') {
-        logger.warn('LMStudio model fetch timed out — is LM Studio running?');
+        report('LMStudio model fetch timed out — is LM Studio running?');
 
         return [];
       }
 
       if (error instanceof TypeError && error.message.includes('fetch')) {
-        logger.warn(`LMStudio not reachable at ${baseUrl} — is LM Studio running?`);
+        report(`LMStudio not reachable at ${baseUrl} — is LM Studio running?`);
 
         return [];
       }

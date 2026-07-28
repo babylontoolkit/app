@@ -135,8 +135,9 @@ export class WorkbenchStore {
    * Serialize the project for transport (snapshots, share builds, GitHub sync), reading
    * real bytes for binaries from the sandbox (SPEC §1.3 principle 10).
    */
-  serializeFiles(): Promise<SerializedFileMap> {
-    return this.#filesStore.serializeFiles();
+  /** `strict` refuses a map missing binaries it could not read — see `FilesStore.serializeFiles`. */
+  serializeFiles(options?: { strict?: boolean }): Promise<SerializedFileMap> {
+    return this.#filesStore.serializeFiles(options);
   }
 
   /** Materialize a serialized project back into the sandbox, byte-faithfully. */

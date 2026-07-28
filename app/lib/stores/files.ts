@@ -1,6 +1,7 @@
 import { map, type MapStore } from 'nanostores';
 import type { SandboxProvider, SandboxWatchEvent } from '~/lib/sandbox';
 import {
+  bytesToBase64,
   fileEntryFromBuffer,
   serializeFileMap,
   writeSerializedFileMap,
@@ -29,6 +30,31 @@ import { getCurrentChatId } from '~/utils/fileLocks';
 import { walkSandboxTree } from '~/lib/stores/refresh-walk';
 
 const logger = createScopedLogger('FilesStore');
+
+/**
+ * Re-reads of the FAILED paths only, before a read failure is treated as one.
+ *
+ * On a server sandbox every read is a round trip and a transient timeout is ordinary; on WebContainer
+ * it is a memory copy and this never fires. Small on purpose — a genuinely unreadable file must be
+ * reported quickly rather than retried into a long stall on a path the user is waiting on.
+ */
+const SERIALIZE_RETRY_ATTEMPTS = 2;
+
+/**
+ * The project could not be fully serialized — raised only for `strict` callers (see `serializeFiles`).
+ *
+ * Carries the paths because "which files are missing?" is the first question, and because a caller that
+ * degrades (skip the checkpoint, warn the user) needs to say what was lost.
+ */
+export class IncompleteSerializationError extends Error {
+  constructor(readonly paths: string[]) {
+    super(
+      `Could not read ${paths.length} file(s) from the sandbox: ${paths.slice(0, 5).join(', ')}` +
+        (paths.length > 5 ? `, and ${paths.length - 5} more` : ''),
+    );
+    this.name = 'IncompleteSerializationError';
+  }
+}
 
 export interface File {
   type: 'file';
@@ -892,16 +918,64 @@ export class FilesStore {
    * Serialize the whole project for transport (snapshot / share build / GitHub sync),
    * reading real bytes for every binary file. Binaries arrive base64-encoded; text is
    * carried verbatim. A snapshot→restore round-trip is byte-exact.
+   *
+   * ## `strict` — and why it is a per-call-site answer, not a default
+   *
+   * `serializeFileMap` OMITS a binary it cannot read (deliberately — a missing file is recoverable, a
+   * silently-zeroed PNG is not). That is the right call for a map you are about to inspect or ship,
+   * and it is dangerous for a map you are about to RESTORE FROM: a local checkpoint restores with
+   * `protectNothing` ("this map is the whole truth"), so a checkpoint written while `havok.wasm` was
+   * unreadable would DELETE the physics engine on undo. Silently.
+   *
+   * So callers whose map becomes a restore source or an egress artifact pass `strict: true` and get an
+   * error instead of a quietly incomplete project. The same shape as `restoreFiles`' required
+   * `protect` argument, and for the same reason: "what is this map authoritative about?" has no safe
+   * default.
+   *
+   * ## Retry
+   *
+   * A failed read is retried before it is called a failure. On a server sandbox a read is a round trip
+   * and a transient timeout is ordinary; only the FAILED paths are retried, never the whole project —
+   * re-reading everything to recover one file is the storm `CoalescedTask` exists to prevent.
    */
-  async serializeFiles(): Promise<SerializedFileMap> {
+  async serializeFiles(options?: { strict?: boolean }): Promise<SerializedFileMap> {
     const sandbox = await this.#sandbox;
+    const toRelative = (filePath: string) => path.relative(sandbox.workdir, filePath);
 
-    return serializeFileMap(
-      this.files.get(),
-      sandbox.fs,
-      (filePath) => path.relative(sandbox.workdir, filePath),
-      (filePath, error) => logger.error(`Failed to read binary file for serialization: ${filePath}`, error),
-    );
+    let failed: string[] = [];
+
+    const serialized = await serializeFileMap(this.files.get(), sandbox.fs, toRelative, (filePath) => {
+      failed.push(filePath);
+    });
+
+    for (let attempt = 1; attempt <= SERIALIZE_RETRY_ATTEMPTS && failed.length > 0; attempt++) {
+      const retrying = failed;
+      failed = [];
+
+      for (const filePath of retrying) {
+        try {
+          const bytes = await sandbox.fs.readFile(toRelative(filePath));
+          serialized[filePath] = {
+            type: 'file',
+            content: bytesToBase64(bytes),
+            isBinary: true,
+            size: bytes.byteLength,
+          };
+        } catch {
+          failed.push(filePath);
+        }
+      }
+    }
+
+    if (failed.length > 0) {
+      logger.error(`Failed to read ${failed.length} binary file(s) for serialization: ${failed.join(', ')}`);
+
+      if (options?.strict) {
+        throw new IncompleteSerializationError(failed);
+      }
+    }
+
+    return serialized;
   }
 
   /**

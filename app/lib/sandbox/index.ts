@@ -38,6 +38,27 @@ export const SANDBOX_PROVIDER: SandboxProviderId =
   import.meta.env.VITE_SANDBOX_PROVIDER === 'codesandbox' ? 'codesandbox' : 'webcontainer';
 
 /**
+ * Can the project's files survive this browser session?
+ *
+ * WebContainer's filesystem dies with the tab: close it, clear site data, or open the project on
+ * another machine and the files are simply gone — so "it exists only in this browser tab" is literally
+ * true, and the save nudges (§4.5.4b) say exactly that.
+ *
+ * A server-backed provider holds the files on a remote disk that outlives the page. The same sentence
+ * there is FALSE, and a warning that says something the user can disprove ("I cleared my cache and my
+ * game was still there") teaches them to ignore the next one — which is the one that matters, because
+ * the conclusion has not changed: a sandbox VM is a workspace, not a backup. It can be reset,
+ * reclaimed or replaced, the platform deliberately stores no project files (§4.5.4b), and the only
+ * durable home for the user's game is their own repository.
+ *
+ * 🔴 Derived HERE rather than compared at the call site. `SANDBOX_PROVIDER === 'codesandbox'` scattered
+ * through the UI means a third provider is durable-by-omission — it inherits WebContainer's copy and
+ * tells its users their files vanish with the tab, silently and wrongly. Adding a provider must be a
+ * deliberate answer to this question, in one place.
+ */
+export const SANDBOX_OUTLIVES_SESSION: boolean = SANDBOX_PROVIDER === 'codesandbox';
+
+/**
  * The active sandbox for this session.
  *
  * 🔴 **Nothing here may run during SSR, and that is not obvious from reading it.** This module is

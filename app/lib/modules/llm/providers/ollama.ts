@@ -92,14 +92,23 @@ export default class OllamaProvider extends BaseProvider {
         maxTokenAllowed: 8000,
       }));
     } catch (error) {
+      /*
+       * "Not running" is only worth reporting if somebody ASKED for Ollama. With no base URL set we are
+       * probing the built-in localhost default on every page load, and on a machine that has never had
+       * Ollama installed that warning is pure noise — the class of noise that buries real errors (see
+       * `not-configured.ts`). Configured and unreachable is a genuine misconfiguration and still warns.
+       */
+      const configured = Boolean(settings?.baseUrl || serverEnv?.OLLAMA_API_BASE_URL);
+      const report = configured ? logger.warn.bind(logger) : logger.debug.bind(logger);
+
       if (error instanceof DOMException && error.name === 'TimeoutError') {
-        logger.warn('Ollama model fetch timed out — is Ollama running?');
+        report('Ollama model fetch timed out — is Ollama running?');
 
         return [];
       }
 
       if (error instanceof TypeError && error.message.includes('fetch')) {
-        logger.warn(`Ollama not reachable at ${baseUrl} — is Ollama running?`);
+        report(`Ollama not reachable at ${baseUrl} — is Ollama running?`);
 
         return [];
       }

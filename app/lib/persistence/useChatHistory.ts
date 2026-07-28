@@ -1,5 +1,5 @@
 import { useLoaderData, useNavigate, useSearchParams } from '@remix-run/react';
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { atom } from 'nanostores';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
@@ -23,6 +23,8 @@ import {
 import type { FileMap } from '~/lib/stores/files';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { Snapshot } from './types';
+import { CoalescedTask } from './coalesce';
+import { streamingState } from '~/lib/stores/streaming';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 import {
@@ -136,6 +138,14 @@ export const workingCopySafe = atom<boolean>(false);
 
 /** One "you are not protected" warning per project per session — see `checkpointProject`. */
 const warnedNoRecoveryCopy = new Set<string>();
+
+/**
+ * Trailing window for the per-chat snapshot (see `snapshotTask`).
+ *
+ * Deliberately short: the deferral that actually matters is `isBusy` (never serialize mid-stream), so
+ * this only has to absorb the settling ticks after the stream ends rather than span a generation.
+ */
+const SNAPSHOT_COALESCE_MS = 1_000;
 
 /**
  * What the last mount produced, for `checkUnappliedTurn` to read.
@@ -671,7 +681,8 @@ function saveQueueFor(pid: string): SaveQueue {
      * user did in between.
      */
     push: async () => {
-      const files = await workbenchStore.serializeFiles();
+      // STRICT: a push that silently drops `havok.wasm` writes a broken project into the user's repo.
+      const files = await workbenchStore.serializeFiles({ strict: true });
       const outcome = await saveProjectToRepo(pid, { files, summary: lastSummary, provider: preferredProvider });
 
       if (outcome.ok && db) {
@@ -1318,36 +1329,81 @@ ${value.content}
     }
   }, [mixedId, db, navigate, searchParams]); // Added db, navigate, searchParams dependencies
 
-  const takeSnapshot = useCallback(
-    async (chatIdx: string, _files: FileMap, _chatId?: string | undefined, chatSummary?: string) => {
-      const id = chatId.get();
+  /**
+   * The LATEST snapshot request. Overwritten, never queued — see `snapshotTask`.
+   *
+   * The snapshot is keyed by chat id and overwritten on every write, so within a burst only the last
+   * request has any effect. Holding the newest one and running once is byte-identical to running for
+   * every one of them.
+   */
+  const pendingSnapshot = useRef<{ chatIndex: string; summary?: string } | undefined>(undefined);
 
-      if (!id || !db) {
-        return;
-      }
+  /**
+   * 🔴 SERIALIZING THE WHOLE PROJECT IS NOT A PER-KEYSTROKE OPERATION (measured live 2026-07-27).
+   *
+   * This used to run inline on every `storeMessageHistory`, which the 50ms sampler calls on every
+   * mutation of the message array — several times a second while a generation streams. Each run reads
+   * EVERY binary in the project out of the sandbox and base64s it.
+   *
+   * On WebContainer a binary read is a memory copy, so this was invisible waste. On CodeSandbox each
+   * read is a round trip, and the passes piled up on top of each other: hundreds of
+   * `Pitcher message fs/readFile timed out` errors for `havok.wasm` / `glslang.wasm` / `twgsl.wasm` and
+   * every starter image, an 870MB heap, a tab that crawled — and, because each failed pass toasted,
+   * a wall of error toasts. `checkpointProject` below already documents this exact trap; only its
+   * SERVER UPLOAD was moved off the sampler, and the expensive local half stayed behind.
+   *
+   * Coalesced and deferred until the stream ends, so a generation produces ONE serialization instead of
+   * a few hundred. `CoalescedTask` also refuses to start a second pass while one is in flight, which is
+   * the part a plain debounce cannot do — the work is slower than the window that schedules it.
+   */
+  const snapshotTask = useMemo(
+    () =>
+      new CoalescedTask({
+        delayMs: SNAPSHOT_COALESCE_MS,
+        isBusy: () => streamingState.get(),
+        run: async () => {
+          const id = chatId.get();
+          const request = pendingSnapshot.current;
 
-      /**
-       * Serialize from the WebContainer rather than snapshotting the in-memory FileMap:
-       * binary files hold no content in the map, so persisting it directly wrote empty
-       * PNGs/GLBs into the snapshot (SPEC §1.3 principle 10).
-       */
-      const files = await workbenchStore.serializeFiles();
+          if (!id || !db || !request) {
+            return;
+          }
 
-      const snapshot: Snapshot = {
-        chatIndex: chatIdx,
-        files,
-        summary: chatSummary,
-      };
+          /**
+           * Serialize from the sandbox rather than snapshotting the in-memory FileMap:
+           * binary files hold no content in the map, so persisting it directly wrote empty
+           * PNGs/GLBs into the snapshot (SPEC §1.3 principle 10).
+           */
+          const files = await workbenchStore.serializeFiles({ strict: true });
 
-      // localStorage.setItem(`snapshot:${id}`, JSON.stringify(snapshot)); // Remove localStorage usage
-      try {
-        await setSnapshot(db, id, snapshot);
-      } catch (error) {
-        console.error('Failed to save snapshot:', error);
-        toast.error('Failed to save chat snapshot.');
-      }
-    },
+          const snapshot: Snapshot = {
+            chatIndex: request.chatIndex,
+            files,
+            summary: request.summary,
+          };
+
+          await setSnapshot(db, id, snapshot);
+        },
+        onError: (error) => {
+          /*
+           * ONE toast per failure, and there is now at most one failure per generation rather than one
+           * per sampler tick. The local checkpoint (`checkpointProject`) is the copy §4.12 restores
+           * from; this snapshot is upstream's per-chat copy, so a failure here is worth saying once and
+           * is not worth saying two hundred times.
+           */
+          console.error('Failed to save snapshot:', error);
+          toast.error('Failed to save chat snapshot.');
+        },
+      }),
     [db],
+  );
+
+  const takeSnapshot = useCallback(
+    (chatIdx: string, _files: FileMap, _chatId?: string | undefined, chatSummary?: string) => {
+      pendingSnapshot.current = { chatIndex: chatIdx, summary: chatSummary };
+      snapshotTask.request();
+    },
+    [snapshotTask],
   );
 
   /**
@@ -1436,7 +1492,14 @@ ${value.content}
     lastSummary = summarizeRequest(latestMessages.current);
 
     try {
-      const files = await workbenchStore.serializeFiles();
+      /*
+       * 🔴 STRICT. This map becomes the LOCAL CHECKPOINT, and a checkpoint restores with
+       * `protectNothing` — "this map is the whole truth", so anything missing from it is DELETED on
+       * undo (§4.12, `restore-plan.ts`). Serializing while `havok.wasm` was unreadable therefore does
+       * not write a slightly-smaller checkpoint; it writes one that destroys the physics engine the
+       * moment the user presses undo. Better to have no checkpoint than a poisoned one.
+       */
+      const files = await workbenchStore.serializeFiles({ strict: true });
 
       /*
        * ⚠️ **AMENDED (§4.5.4c).** This comment used to say the files stay in this browser, full stop —
