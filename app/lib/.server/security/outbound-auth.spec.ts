@@ -56,6 +56,14 @@ import { loader as githubTemplateLoader } from '~/routes/api.github-template';
 import { loader as modelsLoader } from '~/routes/api.models';
 import { action as bugReportAction } from '~/routes/api.bug-report';
 
+/*
+ * The sandbox routes (2026-07-27). These reach out to CodeSandbox on the PLATFORM api key, and the
+ * session route can FORK A VM — an anonymous caller here does not just spend our quota, they leave a
+ * machine running that bills by the second. Both must refuse before the provider is touched at all.
+ */
+import { action as sandboxSessionAction } from '~/routes/api.sandbox.session';
+import { loader as sandboxPreviewLoader } from '~/routes/api.sandbox.preview';
+
 let fetchSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -125,6 +133,32 @@ const cases: Array<{ name: string; call: () => Promise<Response> }> = [
   },
   { name: 'models loader', call: () => (modelsLoader as Handler)({ ...args('GET'), params: {} }) },
   { name: 'bug-report action', call: () => (bugReportAction as Handler)(args('POST')) },
+
+  /*
+   * The session route takes a JSON body naming the project; the preview route is a GET with the
+   * project and port in the query. Both are written so the auth wall is the FIRST thing they do —
+   * before the "is the provider configured?" check, before the body is even read.
+   */
+  {
+    name: 'sandbox.session action',
+    call: () =>
+      (sandboxSessionAction as Handler)({
+        request: new Request('http://localhost/api/sandbox/session', {
+          method: 'POST',
+          body: JSON.stringify({ projectId: 'prj_anything' }),
+          headers: { 'Content-Type': 'application/json' },
+        }),
+        context: {},
+        params: {},
+      }),
+  },
+  {
+    name: 'sandbox.preview loader',
+    call: () =>
+      (sandboxPreviewLoader as Handler)(
+        args('GET', {}, 'http://localhost/api/sandbox/preview?projectId=prj_anything&port=5173'),
+      ),
+  },
 ];
 
 describe('outbound routes refuse an unauthenticated caller before spending', () => {

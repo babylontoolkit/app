@@ -8,6 +8,7 @@ import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-r
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { getProjectStore } from '~/lib/.server/projects/store';
+import { toWireProject } from '~/lib/.server/projects/wire';
 import { deleteMessages } from '~/lib/.server/projects/message-store';
 import { deleteRemixSeed } from '~/lib/.server/share/seed-store';
 import { deleteWorkingCopy } from '~/lib/.server/projects/working-copy';
@@ -18,7 +19,7 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
     const user = await requireUser(request, context);
     const project = await requireOwnedProject(user, params.projectId!, context);
 
-    return json({ project });
+    return json({ project: toWireProject(project) });
   } catch (error) {
     return errorResponse(error);
   }
@@ -79,7 +80,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       ...(body.name !== undefined ? { name: body.name.slice(0, 120) } : {}),
     });
 
-    return json({ project: updated });
+    return json({ project: toWireProject(updated) });
   } catch (error) {
     return errorResponse(error);
   }

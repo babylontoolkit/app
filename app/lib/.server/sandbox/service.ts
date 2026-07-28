@@ -30,6 +30,7 @@ import {
   sandboxTemplate,
   sandboxVmTier,
 } from './config';
+import { isSandboxGoneError } from './lifecycle';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('sandbox-service');
@@ -154,13 +155,17 @@ export async function sandboxExists(sandboxId: string, context?: unknown): Promi
     await sdk(context).sandboxes.get(sandboxId);
     return true;
   } catch (error) {
-    const message = (error as Error)?.message ?? '';
-
-    if (/not found|404|does not exist/i.test(message)) {
+    /*
+     * The classification lives in `lifecycle.ts` (pure, no SDK import) because the resume path needs
+     * the SAME answer: a resume that fails because the VM is gone must fall through to create, and a
+     * resume that fails for any other reason must not. Two copies of this predicate would eventually
+     * disagree, and the direction they would disagree in is "replace the user's project".
+     */
+    if (isSandboxGoneError(error)) {
       return false;
     }
 
-    logger.warn(`Could not determine whether sandbox ${sandboxId} exists: ${message}`);
+    logger.warn(`Could not determine whether sandbox ${sandboxId} exists: ${(error as Error)?.message}`);
 
     return undefined;
   }

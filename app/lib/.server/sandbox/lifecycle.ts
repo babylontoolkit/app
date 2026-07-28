@@ -94,3 +94,124 @@ export function decideSandboxStart(facts: SandboxStartFacts): SandboxStartDecisi
 export function isDestructive(decision: SandboxStartDecision): boolean {
   return decision.action === 'create' && decision.reason === 'sandbox-gone';
 }
+
+export interface CreatePersistFacts {
+  /** The sandbox id on the project row when THIS request decided to create. `undefined` = none yet. */
+  before?: string;
+
+  /** The sandbox this request just forked. Always present — we only ask after creating. */
+  created: string;
+
+  /** The sandbox id on the row NOW, re-read after the fork. The other half of the compare-and-set. */
+  current?: string;
+
+  /** The create came from a deliberate reset, so `before` is meant to stop existing. */
+  resetRequested?: boolean;
+}
+
+export interface CreatePersistDecision {
+  /** The sandbox this request should actually connect the caller to. */
+  canonicalSandboxId: string;
+
+  /** Whether to write `created` onto the project row. False means someone else's write stands. */
+  persist: boolean;
+
+  /** Sandboxes to destroy, best-effort. Never contains `canonicalSandboxId`. */
+  dispose: string[];
+}
+
+/**
+ * Compare-and-set for "which VM does this project actually have?" — the race the per-user registry
+ * used to hide (`spec/sandbox-codesandbox.md` §11 M1).
+ *
+ * Two tabs opening one project both read `sandboxId` unset, both fork a template, and both write.
+ * Last write wins, and the LOSER is a running VM billing by the second that nothing can name again —
+ * with a live write session pointed at it, so the user can be typing into a filesystem that no longer
+ * belongs to their project. Nothing throws; the symptom is a bill and, later, work that vanished.
+ *
+ * Pure because both wrong answers are silent and one of them costs money forever, which is the same
+ * reason `decideSandboxStart` above is pure.
+ *
+ * 🔴 The comparison is against `before`, NEVER simply "is there an id on the row now". A reset leaves
+ * the OLD id on the row until we overwrite it, so a naive `current !== created → we lost` reading
+ * would discard the fresh VM on every reset and reconnect the user to the sandbox they just asked to
+ * throw away.
+ */
+export function decideCreatePersist(facts: CreatePersistFacts): CreatePersistDecision {
+  const lostRace = Boolean(facts.current && facts.current !== facts.before && facts.current !== facts.created);
+
+  if (lostRace) {
+    /*
+     * Another request recorded a different sandbox while we were forking. Theirs is canonical — it is
+     * the one the row names, and other tabs are already connecting to it. Ours has to go, or it bills
+     * until its idle timeout and then sits there as an orphan.
+     */
+    return { canonicalSandboxId: facts.current!, persist: false, dispose: [facts.created] };
+  }
+
+  return {
+    canonicalSandboxId: facts.created,
+    persist: true,
+
+    /*
+     * A reset is the ONE case where the previous VM is deliberately abandoned, so it is the one case
+     * that must destroy it. A `sandbox-gone` create must not: that id is already 404 at the provider,
+     * and asking to delete it would only generate noise.
+     */
+    dispose: facts.resetRequested && facts.before && facts.before !== facts.created ? [facts.before] : [],
+  };
+}
+
+/**
+ * Does this error mean the sandbox is CONFIRMED gone, rather than "we could not ask"?
+ *
+ * The distinction is the whole point of `decideSandboxStart`'s tri-state, so the classifier deserves
+ * the same care: a false positive here re-creates a project from the template while the real VM sits
+ * there holding the user's game.
+ *
+ * Typed/status evidence FIRST, message text last. A 404 from the SDK is a fact; a message matching
+ * `/not found/i` is a guess that a reworded provider error, a localized message, or an unrelated
+ * "template not found" can all satisfy. The regex stays only as a last-resort fallback because the
+ * SDK does not document a stable error type, and losing the classification entirely would brick a
+ * project whose VM was deleted into a permanent 503.
+ */
+export function isSandboxGoneError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  const candidate = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    code?: unknown;
+    response?: { status?: unknown };
+    message?: unknown;
+  };
+
+  const statuses = [candidate.status, candidate.statusCode, candidate.response?.status];
+
+  if (statuses.some((status) => status === 404 || status === '404')) {
+    return true;
+  }
+
+  if (typeof candidate.code === 'string' && /^(not_found|notfound|enoent)$/i.test(candidate.code)) {
+    return true;
+  }
+
+  /*
+   * 🔴 Any OTHER status is a veto, not an invitation to guess. The error carried typed evidence and
+   * that evidence was not 404 — a 403 ("Sandbox not found or you lack access"), a 401, a 429 whose
+   * text mentions a 404, a 500. Every one of those means "could not ask", which upstream must keep as
+   * `undefined`.
+   *
+   * Reading the message anyway is the failure this whole module exists to prevent: `sandboxExists`
+   * would answer `false` = CONFIRMED GONE, `decideSandboxStart` would say `create`, and the user's
+   * project would be replaced by a fresh template while their real VM keeps running and billing.
+   * "Last resort" has to mean *no typed evidence at all*, not *no typed evidence I recognised*.
+   */
+  if (statuses.some((status) => status !== undefined && status !== null)) {
+    return false;
+  }
+
+  return typeof candidate.message === 'string' && /not found|404|does not exist/i.test(candidate.message);
+}

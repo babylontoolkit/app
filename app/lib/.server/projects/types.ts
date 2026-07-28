@@ -95,6 +95,25 @@ export interface Project {
    */
   linkedUnityProjectId?: string;
 
+  /**
+   * The provider sandbox VM holding this project's workspace (`spec/sandbox-codesandbox.md`).
+   *
+   * A plain pointer following `gameBackendRef`/`linkedUnityProjectId` — NEVER a credential, and not
+   * part of the client wire contract (`app/types/project.ts`): the browser supplies a PROJECT id it
+   * must own, and the server mints every scoped session from the platform API key.
+   *
+   * ⚠️ Absent from the wire TYPE is not absent from the wire — a TS type strips nothing at runtime,
+   * and both project routes serialize the whole row. DECIDED (2026-07-27): it is stripped in one
+   * place, `projects/wire.ts`'s `toWireProject`, which both routes call. Read that file for why the
+   * pointer is withheld even though it is not a credential; do not read the omission from
+   * `app/types/project.ts` as the guarantee — it never was one.
+   *
+   * It replaces the per-user registry (`sandboxes/{userId}.json`), which gave one VM to a user rather
+   * than to a project — so opening project B warm-booted project A's filesystem with nothing to check
+   * identity against. `undefined` = no VM has been created for this project yet.
+   */
+  sandboxId?: string;
+
   createdAt: string;
   updatedAt: string;
 }

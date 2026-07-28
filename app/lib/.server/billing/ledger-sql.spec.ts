@@ -235,6 +235,24 @@ describe('the migrations', () => {
   });
 
   /*
+   * Migration 0013: the per-project sandbox pointer (`spec/sandbox-codesandbox.md`). A plain column,
+   * never a credential — it replaces the per-user registry file whose one-VM-per-user shape let one
+   * project silently adopt another's filesystem.
+   */
+  it('adds sandbox_id to projects — the row is the sandbox registry', async () => {
+    const { rows } = await db.query<{ column_name: string; data_type: string; is_nullable: string }>(
+      `select column_name, data_type, is_nullable from information_schema.columns
+       where table_schema = 'public' and table_name = 'projects'`,
+    );
+    const column = rows.find((r) => r.column_name === 'sandbox_id');
+
+    expect(column, 'sandbox_id must exist on projects').toBeTruthy();
+
+    // Nullable with no default: every existing row, and every new project, starts with no VM.
+    expect(column?.is_nullable).toBe('YES');
+  });
+
+  /*
    * Migration 0012: the Unity license unlock records (§4.18). "Once per project+tier, re-download free"
    * is a UNIQUE index on (user, unity project, tier) — the real idempotency guard, not an app check —
    * and the table is RLS-protected (owner read only; writes are service-role, like the credit ledger).

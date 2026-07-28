@@ -4,6 +4,7 @@
 import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { getProjectStore } from '~/lib/.server/projects/store';
+import { toWireProject } from '~/lib/.server/projects/wire';
 import { countChats } from '~/lib/.server/projects/message-store';
 import { errorResponse } from '~/lib/.server/http';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
@@ -30,7 +31,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
      */
     const withCounts = await Promise.all(
       projects.map(async (project) => ({
-        ...project,
+        ...toWireProject(project),
         chatCount: await countChats(project.id, context).catch(() => undefined),
       })),
     );
@@ -76,7 +77,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
       templateId: project.templateId,
     });
 
-    return json({ project }, { status: 201 });
+    return json({ project: toWireProject(project) }, { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

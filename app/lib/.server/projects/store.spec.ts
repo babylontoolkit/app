@@ -1,12 +1,16 @@
 /**
- * `linkedUnityProjectId` round-trips through BOTH project store backends (§4.18, T3).
+ * The plain project POINTERS round-trip through BOTH store backends: `linkedUnityProjectId` (§4.18)
+ * and `sandboxId` (`spec/sandbox-codesandbox.md`).
  *
- * The field is a plain pointer (the linked Unity project's `productGUID`), never a credential — it
- * follows `gameBackendRef`. A store backend that silently drops it is the exact failure this test
- * guards: the FS backend round-trips the whole domain object, the Supabase backend maps camelCase ⇄
- * snake_case by hand in `rowToProject`/`projectToRow`, and a missing entry in either map is a silent
- * data loss with no error and no failing build. So both directions of the Supabase mapping are
- * asserted, not just one.
+ * Each is a plain pointer, never a credential — they follow `gameBackendRef`. A store backend that
+ * silently drops one is the exact failure this test guards: the FS backend round-trips the whole
+ * domain object, the Supabase backend maps camelCase ⇄ snake_case by hand in
+ * `rowToProject`/`projectToRow`, and a missing entry in either map is a silent data loss with no
+ * error and no failing build. So both directions of the Supabase mapping are asserted, not just one.
+ *
+ * For `sandboxId` a dropped field is worse than a lost setting: the project's VM becomes an orphan
+ * that nothing can address, still running and still billing, while the next session forks a fresh
+ * one over the user's workspace.
  */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -170,5 +174,161 @@ describe('SupabaseProjectStore maps linkedUnityProjectId in both directions', ()
     // Clearing: `projectToRow` maps an explicit `undefined` to `null` so the DB column is nulled.
     await new SupabaseProjectStore().update('prj_1', { linkedUnityProjectId: undefined });
     expect(captured.update).toHaveProperty('linked_unity_project_id', null);
+  });
+});
+
+describe('FsProjectStore round-trips sandboxId', () => {
+  let tmp: string;
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'store-spec-sandbox-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('survives create → update → get through a fresh store instance', async () => {
+    const store = new FsProjectStore(tmp);
+    const created = await store.create({ userId: 'user-1', name: 'Kart Racer', templateId: 'racing' });
+
+    // A brand-new project has no VM yet, and `undefined` is the correct reading of that.
+    expect(created.sandboxId).toBeUndefined();
+
+    const recorded = await store.update(created.id, { sandboxId: 'csb_abc123' });
+    expect(recorded.sandboxId).toBe('csb_abc123');
+
+    // A separate instance proves it survived the write to disk, not just the in-memory object.
+    expect((await new FsProjectStore(tmp).get(created.id))?.sandboxId).toBe('csb_abc123');
+  });
+
+  it('is set at create time when a VM is known up front', async () => {
+    const store = new FsProjectStore(tmp);
+    const created = await store.create({
+      userId: 'user-1',
+      name: 'Kart Racer',
+      templateId: 'racing',
+      sandboxId: 'csb_seed',
+    });
+
+    expect((await new FsProjectStore(tmp).get(created.id))?.sandboxId).toBe('csb_seed');
+  });
+
+  it('re-pointing at a new VM replaces the id, and clearing it removes the pointer', async () => {
+    const store = new FsProjectStore(tmp);
+    const created = await store.create({
+      userId: 'user-1',
+      name: 'Kart Racer',
+      templateId: 'racing',
+      sandboxId: 'csb_old',
+    });
+
+    // The resume→create fallback re-points the row; the OLD id must not linger anywhere.
+    const repointed = await store.update(created.id, { sandboxId: 'csb_new' });
+    expect(repointed.sandboxId).toBe('csb_new');
+
+    const cleared = await store.update(created.id, { sandboxId: undefined });
+    expect(cleared.sandboxId).toBeUndefined();
+    expect((await new FsProjectStore(tmp).get(created.id))?.sandboxId).toBeUndefined();
+  });
+
+  it('listByUser carries the pointer — the row IS the registry the per-user file used to be', async () => {
+    const store = new FsProjectStore(tmp);
+    await store.create({ userId: 'user-1', name: 'A', templateId: 'racing', sandboxId: 'csb_a' });
+    await store.create({ userId: 'user-1', name: 'B', templateId: 'racing', sandboxId: 'csb_b' });
+    await store.create({ userId: 'user-2', name: 'C', templateId: 'racing', sandboxId: 'csb_c' });
+
+    const mine = await new FsProjectStore(tmp).listByUser('user-1');
+    expect(mine.map((p) => p.sandboxId).sort()).toEqual(['csb_a', 'csb_b']);
+  });
+});
+
+describe('SupabaseProjectStore maps sandboxId in both directions', () => {
+  beforeEach(() => {
+    captured = {};
+    returnRow = {};
+  });
+
+  it('projectToRow emits sandbox_id on create (camelCase → snake_case)', async () => {
+    returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Kart Racer', created_at: 'now', updated_at: 'now' };
+
+    await new SupabaseProjectStore().create({
+      userId: 'user-1',
+      name: 'Kart Racer',
+      templateId: 'racing',
+      sandboxId: 'csb_abc123',
+    });
+
+    expect(captured.insert).toHaveProperty('sandbox_id', 'csb_abc123');
+  });
+
+  it('rowToProject maps sandbox_id back to sandboxId (snake_case → camelCase)', async () => {
+    returnRow = {
+      id: 'prj_1',
+      user_id: 'user-1',
+      name: 'Kart Racer',
+      sandbox_id: 'csb_abc123',
+      created_at: 'now',
+      updated_at: 'now',
+    };
+
+    expect((await new SupabaseProjectStore().get('prj_1'))?.sandboxId).toBe('csb_abc123');
+  });
+
+  it('a row written before migration 0013 reads back with no pointer, not an empty string', async () => {
+    returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Legacy', created_at: 'now', updated_at: 'now' };
+
+    expect((await new SupabaseProjectStore().get('prj_1'))?.sandboxId).toBeUndefined();
+  });
+
+  it('update writes the column, and clearing it emits null so the DB column is nulled', async () => {
+    returnRow = {
+      id: 'prj_1',
+      user_id: 'user-1',
+      name: 'Kart Racer',
+      sandbox_id: 'csb_new',
+      created_at: 'now',
+      updated_at: 'now',
+    };
+
+    await new SupabaseProjectStore().update('prj_1', { sandboxId: 'csb_new' });
+    expect(captured.update).toHaveProperty('sandbox_id', 'csb_new');
+
+    await new SupabaseProjectStore().update('prj_1', { sandboxId: undefined });
+    expect(captured.update).toHaveProperty('sandbox_id', null);
+  });
+
+  it('a patch that does not mention sandboxId leaves the column alone', async () => {
+    /*
+     * `projectToRow` is key-presence-driven, and that is load-bearing here: an unrelated update (a
+     * rename, a publish) must never null a live VM pointer, which would orphan the running sandbox.
+     */
+    returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Renamed', created_at: 'now', updated_at: 'now' };
+
+    await new SupabaseProjectStore().update('prj_1', { name: 'Renamed' });
+    expect(captured.update).not.toHaveProperty('sandbox_id');
+  });
+});
+
+describe('the client wire type', () => {
+  /**
+   * `sandboxId` is not part of the wire CONTRACT (§4.5.3, §5): the client supplies a PROJECT id it
+   * owns, and the server resolves the VM and mints every scoped session itself.
+   *
+   * ⚠️ This scan proves the TYPE does not declare it — it does NOT prove the field never reaches a
+   * browser, and a TypeScript type strips nothing at runtime. `api.projects.ts` and
+   * `api.projects.$projectId.ts` both serialize the whole server row (`{ ...project }` / `json({
+   * project })`), so once T2 persists a `sandboxId` it WILL ship to the dashboard exactly as `userId`
+   * already does. That is a routing decision for T2 (hand-pick the fields, or state plainly why the
+   * pointer is safe to expose), not something this assertion can see. Do not re-word it into a claim
+   * about the browser — a false claim in a comment is how a defect survives review.
+   */
+  it('does not declare sandboxId — it is not part of the wire contract', async () => {
+    const source = await fs.readFile(path.resolve(process.cwd(), 'app/types/project.ts'), 'utf8');
+
+    expect(source).not.toMatch(/\bsandboxId\b/);
+
+    // Control: the scan is reading the file it thinks it is.
+    expect(source).toMatch(/\btemplateId\b/);
   });
 });

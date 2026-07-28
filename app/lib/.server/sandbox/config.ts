@@ -17,6 +17,7 @@
  * WebContainer.
  */
 import { env, envNumber, NotConfiguredError } from '~/lib/.server/env';
+import { DEFAULT_SANDBOX_CREATES_PER_HOUR } from './create-limit';
 
 /**
  * The template to fork per project — an alias built by `csb build … --alias`, NOT a raw sandbox id.
@@ -102,6 +103,18 @@ export function sandboxHibernationSeconds(context?: unknown): number {
    * than obey it" rule as the working-copy cap and the Unity price ladder.
    */
   return Number.isFinite(seconds) && seconds > 0 && seconds <= 86400 ? seconds : DEFAULT_SANDBOX_HIBERNATION_SECONDS;
+}
+
+/**
+ * How many sandboxes one account may fork per hour (`create-limit.ts`).
+ *
+ * Config rather than a constant for the usual reason: it is a number that costs money and bounds a
+ * platform-wide provider budget, so an operator must be able to move it without a deploy.
+ */
+export function sandboxCreatesPerHour(context?: unknown): number {
+  const limit = envNumber(context, 'CODESANDBOX_MAX_CREATES_PER_HOUR', DEFAULT_SANDBOX_CREATES_PER_HOUR);
+
+  return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_SANDBOX_CREATES_PER_HOUR;
 }
 
 export function sandboxHostTokenMinutes(context?: unknown): number {

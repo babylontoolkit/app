@@ -1,5 +1,6 @@
 /**
- * Mint preview access for a port on the caller's sandbox (SPEC §5, §8, `spec/sandbox-codesandbox.md` §6).
+ * Mint preview access for a port on a PROJECT's sandbox (SPEC §4.5.3, §5, §8,
+ * `spec/sandbox-codesandbox.md` §6).
  *
  * A CodeSandbox project sandbox is created `privacy: 'private'`, so its preview host answers 401 to
  * anyone without a token (MEASURED — and that privacy is the point). The `<iframe src>` cannot set a
@@ -8,17 +9,18 @@
  *
  * Same non-negotiables as `api.sandbox.session.ts`:
  *
- * 1. **No sandbox id from the caller** — the id comes from the registry, keyed by the VERIFIED user.
- *    A caller-supplied id would mint read access to someone else's running game.
+ * 1. **No sandbox id from the caller** — the caller names a PROJECT, `requireOwnedProject` proves they
+ *    own it (404, never 403), and the sandbox id is read off the row. A caller-supplied sandbox id
+ *    would mint read access to someone else's running game.
  * 2. **Nothing derived from `CODESANDBOX_API_KEY` in the response** — the token is a scoped, expiring
  *    credential for one sandbox's preview, minted server-side.
  * 3. `requireVerifiedUser`, because minting resumes the sandbox's billing clock server-side.
  */
 import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
+import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { errorResponse } from '~/lib/.server/http';
 import { isSandboxConfigured } from '~/lib/.server/sandbox/config';
-import { getSandboxRecord } from '~/lib/.server/sandbox/registry';
 import { createPreviewAccess } from '~/lib/.server/sandbox/service';
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
@@ -29,23 +31,30 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       return json({ error: 'Sandbox provider is not configured.', configured: false }, { status: 503 });
     }
 
-    const port = Number(new URL(request.url).searchParams.get('port'));
+    const url = new URL(request.url);
+    const port = Number(url.searchParams.get('port'));
 
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return json({ error: 'Invalid port.' }, { status: 400 });
     }
 
-    const record = await getSandboxRecord(user.id, context);
+    const projectId = (url.searchParams.get('projectId') ?? '').trim();
 
-    if (!record) {
-      /*
-       * 404, not 403 — the same enumeration posture as `requireOwnedProject`, though here there is
-       * nothing to enumerate: the caller simply has no sandbox yet, so there is no preview to grant.
-       */
-      return json({ error: 'No sandbox for this account yet.' }, { status: 404 });
+    if (!projectId) {
+      return json({ error: 'A projectId is required to mint a preview.' }, { status: 400 });
     }
 
-    const access = await createPreviewAccess(record.sandboxId, port, context);
+    const project = await requireOwnedProject(user, projectId, context);
+
+    if (!project.sandboxId) {
+      /*
+       * 404, not 403 — the same enumeration posture as `requireOwnedProject`, though here there is
+       * nothing to enumerate: the project simply has no VM yet, so there is no preview to grant.
+       */
+      return json({ error: 'No sandbox for this project yet.' }, { status: 404 });
+    }
+
+    const access = await createPreviewAccess(project.sandboxId, port, context);
 
     return json({ url: access.url, expiresAt: access.expiresAt });
   } catch (error) {
