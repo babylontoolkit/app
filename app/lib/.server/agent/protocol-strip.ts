@@ -41,7 +41,7 @@
  * immediate `>`, so `<parameterization>` (name is a longer word) is NOT matched — we strip the protocol
  * tags and nothing that merely starts with their letters.
  */
-const PROTOCOL_TAG = /^<\/?(?:antml:)?(?:function_calls|invoke|parameter)(?:\s[^>]*)?>/;
+const PROTOCOL_TAG = /^<\/?(?:antml:)?(?:function_calls|function_results|invoke|parameter)(?:\s[^>]*)?>/;
 
 /**
  * Tag-name OPENERS (no attributes), both bare and namespace-prefixed. A trailing buffer fragment is held
@@ -53,7 +53,13 @@ const PROTOCOL_TAG = /^<\/?(?:antml:)?(?:function_calls|invoke|parameter)(?:\s[^
  * form the platform models emit and the namespace-prefixed form other providers use — and stays in step
  * with `PROTOCOL_TAG`'s optional-prefix group.
  */
-const TAG_NAMES = ['function_calls', 'invoke', 'parameter'];
+/*
+ * `function_results` joined 2026-07-28 (T17c live drive): the model leaked `</function_results>` plus
+ * its own "Let me re-emit the artifact correctly" recovery prose into a streamed artifact, and the
+ * fragment was written VERBATIM into the game's `Home.tsx` — a hard Vite parse error on line 73 of a
+ * user's project. Same defect class the module exists for; the tag was simply missing from the list.
+ */
+const TAG_NAMES = ['function_calls', 'function_results', 'invoke', 'parameter'];
 const TAG_PREFIX = `${'antml'}:`;
 const OPENERS = TAG_NAMES.flatMap((name) => [
   `<${name}`,

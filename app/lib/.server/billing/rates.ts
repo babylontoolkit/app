@@ -394,12 +394,42 @@ export interface BillingConfig {
   /** The free signup grant, in credits. Gated on email verification (§4.5.4). */
   signupGrantCredits: number;
 
+  /**
+   * FLAT credit price for a project-creation turn; `0` disables (cost-proportional, the old behavior).
+   *
+   * Exists because creation cost is dominated by prompt-cache luck the user can neither see nor
+   * influence: the same creation measured **54 credits warm vs 430–633 cold** (cache writes bill 2x,
+   * reads 0.1x, and KIE warms per backend — `spec/context-budget.md`). A 12x spread on the product's
+   * headline action is unsellable ("why did mine cost 10x his?"), so the creation turn charges ONE
+   * predictable number and the platform absorbs the variance — that is what the margin is for, and
+   * `generations.raw_cost_usd` still records the true cost so the Admin report watches realized margin.
+   *
+   * 500 sits mid-band of the measured COLD range (430–633): comfortably profitable on every warm
+   * creation, roughly break-even on the coldest. Owner decision 2026-07-28.
+   */
+  creationFlatCredits: number;
+
   /** Kill-switch: set false to stop issuing new grants without a deploy (§4.6). */
   grantsEnabled: boolean;
 
   stripeSecretKey?: string;
   stripeWebhookSecret?: string;
   stripePublishableKey?: string;
+}
+
+/** See `BillingConfig.creationFlatCredits`. Env-tunable (`CREATION_FLAT_CREDITS`) so pricing moves without a deploy. */
+export const DEFAULT_CREATION_FLAT_CREDITS = 500;
+
+/**
+ * `CREATION_FLAT_CREDITS`, validated: `0` is a real value (disables flat pricing — the operator escape
+ * hatch back to cost-proportional), while a negative or non-finite override is IGNORED in favor of the
+ * default — the same "ignore a bad override rather than obey it" posture as `sandboxHibernationSeconds`.
+ * Obeying a negative here would CREDIT the user for creating a project.
+ */
+function creationFlatCredits(context?: unknown): number {
+  const configured = envNumber(context, 'CREATION_FLAT_CREDITS', DEFAULT_CREATION_FLAT_CREDITS);
+
+  return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : DEFAULT_CREATION_FLAT_CREDITS;
 }
 
 export function getBillingConfig(context?: unknown): BillingConfig {
@@ -441,6 +471,7 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      */
     signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 800),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
+    creationFlatCredits: creationFlatCredits(context),
 
     stripeSecretKey: process.env.STRIPE_SECRET_KEY,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,

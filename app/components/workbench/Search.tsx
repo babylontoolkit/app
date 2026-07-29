@@ -101,6 +101,38 @@ export function Search() {
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
   const [hasSearched, setHasSearched] = useState(false);
 
+  /**
+   * Whether this workspace's runtime can search at all.
+   *
+   * `undefined` while the sandbox is still connecting — a THIRD state, not a default: rendering
+   * "not available" during the boot of a provider that supports search would be wrong for a second
+   * on every load, and rendering "available" and then disabling the input under the user's cursor is
+   * worse. Nothing is claimed until the provider answers.
+   */
+  const [textSearchSupported, setTextSearchSupported] = useState<boolean | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void sandbox
+      .then((instance) => {
+        if (!cancelled) {
+          setTextSearchSupported(Boolean(instance?.capabilities.textSearch && instance.textSearch));
+        }
+      })
+      .catch(() => {
+        /*
+         * A sandbox that failed to boot is not a sandbox that cannot search — the boot failure has
+         * its own loud surface (`onSandboxFailure`). Staying `undefined` keeps this panel from
+         * inventing a second, wrong explanation for it.
+         */
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const groupedResults = useMemo(() => groupResultsByFile(searchResults), [searchResults]);
 
   useEffect(() => {
@@ -136,7 +168,16 @@ export function Search() {
       const options: Omit<SandboxTextSearchOptions, 'folders'> = {
         homeDir: WORK_DIR, // Adjust this path as needed
         includes: ['**/*.*'],
-        excludes: ['**/node_modules/**', '**/package-lock.json', '**/.git/**', '**/dist/**', '**/*.lock'],
+        excludes: [
+          '**/node_modules/**',
+          '**/package-lock.json',
+          '**/.git/**',
+
+          // The sandbox provider's own directory — infrastructure, never the user's project.
+          '**/.codesandbox/**',
+          '**/dist/**',
+          '**/*.lock',
+        ],
         gitignore: true,
         requireGit: false,
         globalIgnoreFiles: true,
@@ -168,8 +209,13 @@ export function Search() {
   const debouncedSearch = useCallback(debounce(handleSearch, 300), [handleSearch]);
 
   useEffect(() => {
+    // Never dispatch a search the runtime cannot answer — the panel above says so instead.
+    if (textSearchSupported === false) {
+      return;
+    }
+
     debouncedSearch(searchQuery);
-  }, [searchQuery, debouncedSearch]);
+  }, [searchQuery, debouncedSearch, textSearchSupported]);
 
   const handleResultClick = (filePath: string, line?: number) => {
     workbenchStore.setSelectedFile(filePath);
@@ -192,22 +238,45 @@ export function Search() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search"
-            className="w-full px-2 py-1 rounded-md bg-bolt-elements-background-depth-3 text-bolt-elements-textPrimary placeholder-bolt-elements-textTertiary focus:outline-none transition-all"
+            placeholder={textSearchSupported === false ? 'Search unavailable' : 'Search'}
+            disabled={textSearchSupported === false}
+            className="w-full px-2 py-1 rounded-md bg-bolt-elements-background-depth-3 text-bolt-elements-textPrimary placeholder-bolt-elements-textTertiary focus:outline-none transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           />
         </div>
       </div>
 
       {/* Results */}
       <div className="flex-1 overflow-auto py-2">
-        {isSearching && (
+        {/*
+         * 🔴 "Not supported" is not "no results". The tab used to run the search, hit the capability
+         * check, log to the console and fall through to the ordinary empty state — so a user on a
+         * runtime without a text index was told, in the product's own words, that their code does not
+         * contain what they just searched for. The tab stays VISIBLE: a limitation the user can read
+         * beats one they have to discover by being misled.
+         */}
+        {textSearchSupported === false && (
+          <div className="flex flex-col items-center justify-center gap-2 h-40 px-6 text-center">
+            <div className="i-ph:magnifying-glass-minus w-6 h-6 text-bolt-elements-textTertiary" />
+            <div className="text-sm text-bolt-elements-textSecondary">
+              Text search isn&apos;t available on this workspace runtime yet
+            </div>
+            <div className="text-xs text-bolt-elements-textTertiary">
+              Open a file from the tree and use the editor&apos;s own find instead.
+            </div>
+          </div>
+        )}
+        {textSearchSupported !== false && isSearching && (
           <div className="flex items-center justify-center h-32 text-bolt-elements-textTertiary">
             <div className="i-ph:circle-notch animate-spin mr-2" /> Searching...
           </div>
         )}
-        {!isSearching && hasSearched && searchResults.length === 0 && searchQuery.trim() !== '' && (
-          <div className="flex items-center justify-center h-32 text-gray-500">No results found.</div>
-        )}
+        {textSearchSupported !== false &&
+          !isSearching &&
+          hasSearched &&
+          searchResults.length === 0 &&
+          searchQuery.trim() !== '' && (
+            <div className="flex items-center justify-center h-32 text-gray-500">No results found.</div>
+          )}
         {!isSearching &&
           Object.keys(groupedResults).map((file) => (
             <div key={file} className="mb-2">

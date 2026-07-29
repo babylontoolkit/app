@@ -1,5 +1,6 @@
 import { atom } from 'nanostores';
 import type { SandboxProvider } from '~/lib/sandbox';
+import { remintDelayMs, REMINT_RETRY_DELAY_MS } from './preview-url';
 
 // Extend Window interface to include our custom property
 declare global {
@@ -12,6 +13,13 @@ export interface PreviewInfo {
   port: number;
   ready: boolean;
   baseUrl: string;
+
+  /**
+   * When `baseUrl`'s credential dies (epoch ms), on providers whose preview URLs expire.
+   *
+   * Absent means "does not expire" (WebContainer), NOT "unknown" — nothing is scheduled for it.
+   */
+  expiresAt?: number;
 }
 
 // Create a broadcast channel for preview updates
@@ -26,6 +34,9 @@ export class PreviewsStore {
   #refreshTimeouts = new Map<string, NodeJS.Timeout>();
   #REFRESH_DELAY = 300;
   #storageChannel?: BroadcastChannel;
+
+  /** Per-port re-mint timers (T8). Only providers whose preview URLs expire ever populate this. */
+  #remintTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   previews = atom<PreviewInfo[]>([]);
 
@@ -183,6 +194,7 @@ export class PreviewsStore {
       let previewInfo = this.#availablePreviews.get(port);
 
       if (type === 'close' && previewInfo) {
+        this.#cancelRemint(port);
         this.#availablePreviews.delete(port);
         this.previews.set(this.previews.get().filter((preview) => preview.port !== port));
 
@@ -204,8 +216,148 @@ export class PreviewsStore {
 
       if (type === 'open') {
         this.broadcastUpdate(url);
+
+        /*
+         * Learn (and then keep ahead of) this URL's expiry. The port event carries only a URL, so the
+         * expiry has to be asked for — on a provider without expiring URLs there is no such method and
+         * this is a no-op. Fire-and-forget: a preview must appear whether or not the mint route answers.
+         */
+        void this.#scheduleRemint(port);
       }
     });
+  }
+
+  /**
+   * Ask the provider for this port's current URL and schedule the next re-mint before it dies.
+   *
+   * 🔴 The whole point is that an EXPIRED preview looks fine: the provider's 401 page is cross-origin,
+   * so it still fires the iframe's `onLoad` and the stale-preview alert clears. Without this the
+   * workbench reports a healthy preview over a dead one after an hour and only a page reload fixes it.
+   */
+  async #scheduleRemint(port: number): Promise<void> {
+    const sandbox = await this.#sandbox;
+
+    // Absent on providers whose preview URLs never expire (WebContainer) — nothing to schedule.
+    if (!sandbox.refreshPreviewUrl) {
+      return;
+    }
+
+    let minted: { url: string; expiresAt?: number } | undefined;
+
+    try {
+      minted = await sandbox.refreshPreviewUrl(port);
+    } catch (error) {
+      console.warn('[Preview] Could not refresh the preview URL for port', port, error);
+    }
+
+    /*
+     * 🔴 The port may have CLOSED while that awaited — a dev-server restart is exactly the moment a
+     * re-mint is in flight. Installing a timer now would tick forever for a preview nothing renders,
+     * one immortal timer per restart, spending provider requests against a rate limit.
+     */
+    if (!this.#availablePreviews.has(port)) {
+      return;
+    }
+
+    /*
+     * 🔴 A mint that produced nothing is a FAILURE, not a new state of the world: keep the URL the
+     * iframe is happily using and try again shortly. Applying a degraded/undated URL here would
+     * replace a still-valid preview with a dead one five minutes EARLY — the very failure this
+     * scheduler exists to prevent — and, with no expiry to schedule from, it would then stop rotating
+     * for the rest of the session.
+     */
+    if (!minted?.expiresAt) {
+      this.#armRemint(port, REMINT_RETRY_DELAY_MS);
+      return;
+    }
+
+    this.#applyPreviewUrl(port, minted);
+
+    const delay = remintDelayMs(minted.expiresAt, Date.now());
+
+    if (delay === undefined) {
+      return;
+    }
+
+    this.#armRemint(port, delay);
+  }
+
+  #armRemint(port: number, delay: number) {
+    this.#cancelRemint(port);
+    this.#remintTimers.set(
+      port,
+      setTimeout(() => {
+        this.#remintTimers.delete(port);
+        void this.#scheduleRemint(port);
+      }, delay),
+    );
+  }
+
+  /**
+   * Swap in a re-minted URL, leaving everything else about the preview alone.
+   *
+   * `port` and `ready` must stay stable: the preview did not close and did not become unready — only
+   * its credential rotated. Changing either would flicker the port dropdown and remount the iframe
+   * through the ready→false path for no reason.
+   */
+  #applyPreviewUrl(port: number, minted: { url: string; expiresAt?: number }) {
+    const previewInfo = this.#availablePreviews.get(port);
+
+    if (!previewInfo) {
+      return;
+    }
+
+    if (previewInfo.baseUrl === minted.url && previewInfo.expiresAt === minted.expiresAt) {
+      return;
+    }
+
+    /*
+     * A NEW object, not a mutation.
+     *
+     * Today's consumer happens to survive either way (`Preview.tsx`'s effect depends on the baseUrl
+     * STRING, and the new array already re-renders it) — but a mutated entry means the atom's old and
+     * new values are the same objects, so any consumer that memoises on identity, diffs, or holds a
+     * captured entry silently keeps the dead token. Rotation is invisible when it fails; publishing a
+     * replacement is what makes the change observable to everyone rather than to one component.
+     */
+    const updated: PreviewInfo = { ...previewInfo, baseUrl: minted.url, expiresAt: minted.expiresAt };
+    this.#availablePreviews.set(port, updated);
+    this.previews.set(this.previews.get().map((preview) => (preview.port === port ? updated : preview)));
+  }
+
+  #cancelRemint(port: number) {
+    const timer = this.#remintTimers.get(port);
+
+    if (timer) {
+      clearTimeout(timer);
+      this.#remintTimers.delete(port);
+    }
+  }
+
+  /**
+   * The current, non-expiring-imminently URL for a port — what the reload button must use.
+   *
+   * `iframe.src = iframe.src` re-requests the SAME token, so a manual reload of an expired preview
+   * reloads the 401 page. Callers await this first and assign what it returns.
+   */
+  async currentPreviewUrl(port: number): Promise<string | undefined> {
+    const sandbox = await this.#sandbox;
+
+    if (sandbox.refreshPreviewUrl) {
+      try {
+        const minted = await sandbox.refreshPreviewUrl(port);
+
+        if (minted) {
+          this.#applyPreviewUrl(port, minted);
+
+          return minted.url;
+        }
+      } catch (error) {
+        console.warn('[Preview] Could not re-mint before reload for port', port, error);
+      }
+    }
+
+    return this.#availablePreviews.get(port)?.baseUrl;
   }
 
   /*

@@ -53,7 +53,28 @@ body.dock-animate .header-brand {
   }
 
   body.sidebar-docked {
-    padding-left: var(--sidebar-dock-width, 340px);
+    /*
+     * 🔴 `!important` is LOAD-BEARING — do not "clean it up".
+     *
+     * Radix's scroll lock (`react-remove-scroll`, used by every modal Dialog) injects a stylesheet at
+     * runtime containing `body[data-scroll-locked] { padding-left: 0; padding-right: 0; … }`. That
+     * selector has the SAME specificity as this one (0,1,1 — element + attribute vs element + class),
+     * so the winner is decided by which rule was appended last, and an injected rule is always later.
+     * The result: opening ANY dialog zeroed the dock offset and the whole in-flow chat column jumped
+     * left by the sidebar's width while the `position: fixed` workbench stayed put.
+     *
+     * MEASURED 2026-07-28 opening the Share dialog with the sidebar docked: the prompt box moved from
+     * `left: 378` to `left: 38` — a 340px tear, reported as *"the dialog pushed the conversation to the
+     * left"*. Body `padding-right` stayed `0px` throughout, which is why this does NOT look like the
+     * usual scrollbar-compensation bug and why `modal={false}` is the wrong remedy here (a form dialog
+     * SHOULD trap focus; it is the padding reset that is wrong, not the modality).
+     *
+     * Same lesson as the toolbar's `TOOLBAR_ICON_BUTTON_FILLED` (§4.1a): when two rules set one
+     * property, generated-stylesheet ORDER decides — so the fix is to win on the cascade explicitly,
+     * not to hope our rule is declared later. The injected `padding-left` carries no `!important`, so
+     * one here is decisive regardless of order.
+     */
+    padding-left: var(--sidebar-dock-width, 340px) !important;
 
     /*
      * The builder splits into an in-flow chat column + an in-flow workbench SPACER (sized by

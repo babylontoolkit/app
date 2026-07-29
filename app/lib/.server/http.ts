@@ -32,6 +32,7 @@ const SAFE_ERRORS = new Set([
   'DuplicatePaymentError',
   'BuildTooLargeError',
   'SeedTooLargeError',
+  'RootAbsoluteAssetError',
 ]);
 
 export function errorResponse(error: unknown): Response {

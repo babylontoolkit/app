@@ -1,11 +1,13 @@
 import { useLoaderData, useNavigate, useSearchParams } from '@remix-run/react';
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { atom } from 'nanostores';
+import { useStore } from '@nanostores/react';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { bootProgress } from '~/lib/stores/boot-progress';
-import { sandbox as sandboxRuntime } from '~/lib/sandbox';
+import { bootProgress, endBootPhase, reportBootFailure } from '~/lib/stores/boot-progress';
+import { bootForProject, bootedProjectId, describeSandboxFailure, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
+import { readSandboxIdentity, writeSandboxIdentity } from '~/lib/sandbox/identity';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
 import {
   getAll,
@@ -50,7 +52,7 @@ import {
   readCurrentLocalSnapshot,
   type LocalSyncState,
 } from './local-snapshots';
-import { selectMountSource, type MountSource } from './mount-source';
+import { decideLiveSandboxIsTruth, selectMountSource, type MountSource } from './mount-source';
 import { detectUnappliedTurn, resolvedUnappliedTurn } from './unapplied-turn';
 import { applyTranscriptArtifact } from './apply-artifact';
 import { protectForRepoRestore, protectNothing } from './restore-plan';
@@ -63,9 +65,12 @@ import {
   hasManifest,
   shouldStartDevServer,
 } from './dependencies';
+import { awaitRunningPreview } from './port-settle';
 import { SaveQueue, saveState } from './save-queue';
-import { takePendingProjectMount, PENDING_REMIX_KEY } from './pending-remix';
+import { takePendingProjectMount, hasPendingProjectMount, setPendingRemix } from './pending-remix';
 import { identityForMount } from './mount-identity';
+import { runCheckpointSerialize, CHECKPOINT_SETTLE_TIMEOUT_MS } from './checkpoint-run';
+import { waitForActionsSettled } from '~/lib/runtime/actions-settled';
 import { slugForChat } from './chat-slug';
 import { createScopedLogger } from '~/utils/logger';
 import { createSingleFlight } from '~/utils/single-flight';
@@ -98,6 +103,25 @@ export const chatMetadata = atom<IChatMetadata | undefined>(undefined);
  * is what lets a reload find its way back to the project.
  */
 export const projectId = atom<string | undefined>(undefined);
+
+/**
+ * "A parked project (remix / dashboard open) is being mounted right now" — the gate that keeps
+ * `BootScreen` up while it happens (owner report 2026-07-29: remix booted behind an already-rendered
+ * empty chat with no splash, unlike creation/resume).
+ *
+ * 🔴 MODULE state, not hook state, because the mount and the splash belong to DIFFERENT hook
+ * instances: several components call `useChatHistory` and the baton is read-once, so the instance
+ * that consumes it (measured live: the sidebar Menu's — child effects run first) is not the instance
+ * whose `ready` decides what renders. A per-instance flag was tried first and the Chat instance
+ * found the baton already eaten, set itself ready, and dismissed the splash while the mount ran on.
+ *
+ * Initialized by PEEKING the baton at module evaluation — before any React render, so the splash is
+ * up from the first client paint of a full page load (SSR-safe: no `sessionStorage` → `false`).
+ * The consuming effect re-asserts it on consumption (the SPA-transition case evaluates the module
+ * long before the baton exists) and clears it on completion — except a CLASSIFIED boot failure,
+ * which keeps the gate up so `BootScreen` shows the failure + Retry instead of a broken empty chat.
+ */
+export const pendingMountGate = atom<boolean>(hasPendingProjectMount());
 
 /**
  * Whether the project currently on screen has work that exists only in this browser (§4.5.4b).
@@ -138,6 +162,13 @@ export const workingCopySafe = atom<boolean>(false);
 
 /** One "you are not protected" warning per project per session — see `checkpointProject`. */
 const warnedNoRecoveryCopy = new Set<string>();
+
+/**
+ * One "checkpoints are failing" toast per project per session (T17c). The logger still records every
+ * individual failure; the toast is the user-facing half and would otherwise nag on every generation
+ * of a session whose sandbox connection is gone.
+ */
+const warnedCheckpointFailure = new Set<string>();
 
 /**
  * Trailing window for the per-chat snapshot (see `snapshotTask`).
@@ -259,10 +290,39 @@ interface MountOptions {
 
 /*
  * However the mount ends, the boot screen's phase must end with it — a stale phase would report
- * progress for work that is not happening the next time a project opens.
+ * progress for work that is not happening the next time a project opens. `endBootPhase` makes the one
+ * exception: a FAILED phase is the outcome, not a leftover, and clearing it would erase the only
+ * explanation the user gets.
  */
 function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
-  return mountInFlight(pid, () => doMountProjectFiles(pid, opts).finally(() => bootProgress.set({ step: 'idle' })));
+  return mountInFlight(pid, () => doMountProjectFiles(pid, opts).finally(endBootPhase));
+}
+
+/**
+ * An open failed. Decide whether the page is usable anyway.
+ *
+ * 🔴 The two outcomes are deliberately different, and conflating them is the defect this replaces. A
+ * mount that fails for an ordinary reason (a repo fetch, a bad checkpoint) still leaves a usable
+ * project: warn, mark the page ready, let the user work. A mount whose SANDBOX never started leaves
+ * NOTHING — and it used to take exactly the same path, so the boot screen came down over a workbench
+ * with no filesystem behind it and no sentence explaining why.
+ *
+ * `onUsable` is therefore called only when there is something to be ready for. On a sandbox failure
+ * the boot surface stays up carrying the server's own words and, when the failure is retryable, a
+ * button that runs `retry`.
+ */
+function handleOpenFailure(pid: string, error: unknown, onUsable: () => void, retry: () => void): void {
+  const failure = describeSandboxFailure(error);
+
+  if (!failure) {
+    logger.warn(`Could not load project ${pid}: ${(error as Error)?.message}`);
+    onUsable();
+
+    return;
+  }
+
+  logger.error(`Could not open the workspace for project ${pid}: ${failure.message}`);
+  reportBootFailure(failure, retry);
 }
 
 async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
@@ -321,34 +381,76 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
   logger.info(`Mounting project ${pid} from: ${decision.source}`);
 
   /*
-   * 🔴 A LIVE PERSISTENT SANDBOX OUTRANKS EVERY CLIENT-HELD COPY (`spec/sandbox-codesandbox.md` §1:
-   * the working copy is a recovery buffer, never the primary wake mechanism). On WebContainer this
-   * gate never opens (`bootRestoredFilesystem` is always false — the FS is empty every page load, so
-   * the restore below IS the project). On a server provider that resumed warm, the disk is exactly as
-   * the last session left it and is NEWER than anything this browser or the server holds — MEASURED
-   * live: a working copy serialized mid-watcher-lag held the starter's `Home.css` under the
-   * generation's `Home.tsx`, and restoring it over the healthy sandbox silently reverted the user's
-   * landing page two hours after it was built. The store fills FROM the sandbox instead, and the
-   * copies stay what they are: recovery for the day the sandbox comes back CLEAN or gone.
+   * 🔴 THE BOOT IS PER PROJECT, AND THIS IS WHERE THE PROJECT ID FINALLY EXISTS.
    *
-   * Only the sources that would OVERWRITE the sandbox from a client/server copy are gated. `repo` is
-   * an explicit user-facing sync decision and `empty`/seed only run when there is nothing to protect.
+   * `~/lib/sandbox` no longer boots at module-evaluation time on a server-backed provider: a sandbox
+   * belongs to a project (its id lives on the project row), and at module load there is no project.
+   * `bootForProject` is idempotent — a second mount of the same project joins the same connection —
+   * and it REJECTS rather than silently rebinding if this tab is already connected to a different
+   * project, which is what makes A→B→A in one tab a page load instead of a quiet cross-project mix.
    */
-  const runtime = await sandboxRuntime;
+  const runtime = await bootForProject(pid);
 
   // Sandbox is up — everything from here is file work, whichever branch runs.
   bootProgress.set({ step: 'files' });
 
-  const liveSandboxIsTruth =
-    runtime.bootRestoredFilesystem &&
-    (decision.source === 'local' || decision.source === 'diverged' || decision.source === 'working');
+  /*
+   * A restored filesystem means a RESUMED VM, which may already have a dev server listening — and its
+   * ports are replayed asynchronously, so "is one serving?" is not answerable yet. Every prepare call
+   * below carries this, whichever branch reaches it: the question is about the SANDBOX, not about
+   * where the files came from.
+   */
+  const awaitPortReplay = runtime.bootRestoredFilesystem;
+
+  /*
+   * 🔴 Does this sandbox agree that it belongs to this project? (`spec/sandbox-codesandbox.md` §11 C1.)
+   *
+   * Read BEFORE the write below, and read from the provider's `fs` rather than the file map — the map
+   * is filled by a watcher and by the very restore this gate is deciding about, so asking it would be
+   * asking the answer to check the question. Only a sentinel that is PRESENT and names ANOTHER project
+   * closes the gate; a sandbox that predates the sentinel makes no claim and is treated as it always
+   * was. With per-project VMs this should never fire, which is exactly why it is worth having: the
+   * failure it catches (a mis-pointed `sandbox_id`) is otherwise silent, and its consequence is one
+   * project's files becoming another project's truth and then being pushed to that project's repo.
+   */
+  const identity = SANDBOX_REQUIRES_PROJECT ? await readSandboxIdentity(runtime, pid) : 'unknown';
+
+  if (identity === 'mismatch') {
+    logger.error(
+      `The sandbox for project ${pid} carries another project's identity — ignoring its filesystem and ` +
+        `restoring from this project's own copies.`,
+    );
+  }
+
+  /*
+   * 🔴 A LIVE PERSISTENT SANDBOX OUTRANKS EVERY CLIENT-HELD COPY (`spec/sandbox-codesandbox.md` §1:
+   * the working copy is a recovery buffer, never the primary wake mechanism). The decision itself is
+   * pure and exhaustively tested — see `decideLiveSandboxIsTruth`, which documents why each of its
+   * three conditions is load-bearing and what each wrong answer destroys. When it opens, the store
+   * fills FROM the sandbox and the copies stay what they are: recovery for the day it comes back
+   * CLEAN or gone.
+   */
+  const liveSandboxIsTruth = decideLiveSandboxIsTruth({
+    bootRestoredFilesystem: runtime.bootRestoredFilesystem,
+    identity,
+    source: decision.source,
+  });
+
+  /*
+   * Stamp the sentinel now the gate has read it. Every mount, not only creation, so sandboxes that
+   * predate it stop being permanently unverifiable. Best-effort inside; a marker file that cannot be
+   * written must never stop a project from opening.
+   */
+  if (SANDBOX_REQUIRES_PROJECT) {
+    void writeSandboxIdentity(runtime, pid);
+  }
 
   if (liveSandboxIsTruth) {
     await workbenchStore.refreshFiles((done, total) => bootProgress.set({ step: 'files', done, total }));
 
     if (prepareToRun) {
       // Serialized from the store just filled from disk — the wake path's install/dev-server check.
-      await prepareMountedProject(await workbenchStore.serializeFiles());
+      await prepareMountedProject(await workbenchStore.serializeFiles(), { awaitPortReplay });
     }
 
     /*
@@ -360,7 +462,16 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
     const local = decision.source !== 'working' && db ? await readCurrentLocalSnapshot(db, pid) : undefined;
     lastMount = { source: decision.source, messageId: local?.messageId ?? working?.messageId };
 
-    unsavedWork.set(decision.source === 'working' || decision.source === 'diverged' || Boolean(decision.unsavedWork));
+    /*
+     * Spelled out per source rather than leaning on the enclosing `if` to narrow `decision`: the gate
+     * is a pure function now (`decideLiveSandboxIsTruth`), so TypeScript can no longer see that this
+     * branch means local/diverged/working — and `unsavedWork` exists only on `local`.
+     */
+    unsavedWork.set(
+      decision.source === 'working' ||
+        decision.source === 'diverged' ||
+        (decision.source === 'local' && decision.unsavedWork),
+    );
 
     if (decision.source === 'diverged') {
       mountDivergence.set({ projectId: pid, remoteHead: decision.remoteHead });
@@ -378,11 +489,14 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
        * a file it does not have is one the project does not have. Without this the mount is an
        * overlay, and a file deleted before the checkpoint would come back from the template mount.
        */
-      await workbenchStore.restoreFiles(local.files, { protect: protectNothing });
+      await workbenchStore.restoreFiles(local.files, {
+        protect: protectNothing,
+        onProgress: (done, total) => bootProgress.set({ step: 'files', done, total }),
+      });
 
       if (prepareToRun) {
         // The container was torn down on reload; reinstall and start the dev server so the game runs.
-        await prepareMountedProject(local.files);
+        await prepareMountedProject(local.files, { awaitPortReplay });
       }
     }
 
@@ -407,7 +521,10 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
      * the whole truth would wipe the user's API keys — the one thing here with no other copy, and the
      * exact bug §4.5.4b deviation 7 records for the repo path.
      */
-    await workbenchStore.restoreFiles(working!.files, { protect: protectForRepoRestore });
+    await workbenchStore.restoreFiles(working!.files, {
+      protect: protectForRepoRestore,
+      onProgress: (done, total) => bootProgress.set({ step: 'files', done, total }),
+    });
 
     if (db) {
       /*
@@ -432,7 +549,7 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
     unsavedWork.set(true);
 
     if (prepareToRun) {
-      await prepareMountedProject(working!.files);
+      await prepareMountedProject(working!.files, { awaitPortReplay });
     }
 
     lastMount = { source: 'working', messageId: working!.messageId };
@@ -443,7 +560,7 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
 
   if (decision.source === 'repo') {
     lastMount = { source: 'repo' };
-    await mountFromRepo(pid, prepareToRun);
+    await mountFromRepo(pid, prepareToRun, { awaitPortReplay });
 
     return;
   }
@@ -455,13 +572,13 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
      * seed here costs one request on a path that had nothing to show anyway.
      */
     lastMount = { source: 'empty' };
-    await mountFromSeed(pid, prepareToRun);
+    await mountFromSeed(pid, prepareToRun, { awaitPortReplay });
 
     return;
   }
 
   lastMount = { source: 'empty' };
-  await mountFromSeed(pid, prepareToRun);
+  await mountFromSeed(pid, prepareToRun, { awaitPortReplay });
 }
 
 /**
@@ -471,7 +588,7 @@ async function doMountProjectFiles(pid: string, opts: MountOptions = {}): Promis
  * the repo, so they are by definition saved. Skipping the mark would make a freshly-opened project
  * claim unsaved work it does not have, and nag the user to save what they just downloaded.
  */
-async function mountFromRepo(pid: string, prepareToRun = true): Promise<void> {
+async function mountFromRepo(pid: string, prepareToRun = true, opts: PrepareOptions = {}): Promise<void> {
   const { files, message } = await pullFromRepo(pid);
 
   if (!files) {
@@ -485,7 +602,10 @@ async function mountFromRepo(pid: string, prepareToRun = true): Promise<void> {
    * `.npmrc`, which `isSecretPath` kept out of every push — so their absence from the tree says
    * nothing, and deleting them would destroy the user's keys, the one thing here with no other copy.
    */
-  await workbenchStore.restoreFiles(files, { protect: protectForRepoRestore });
+  await workbenchStore.restoreFiles(files, {
+    protect: protectForRepoRestore,
+    onProgress: (done, total) => bootProgress.set({ step: 'files', done, total }),
+  });
 
   if (db) {
     await createLocalSnapshot(db, { projectId: pid, files, label: 'Loaded from repository' });
@@ -495,7 +615,7 @@ async function mountFromRepo(pid: string, prepareToRun = true): Promise<void> {
   unsavedWork.set(false);
 
   if (prepareToRun) {
-    await prepareMountedProject(files);
+    await prepareMountedProject(files, opts);
   }
 }
 
@@ -524,13 +644,45 @@ async function mountFromRepo(pid: string, prepareToRun = true): Promise<void> {
  */
 let preparingContainer = false;
 
-async function prepareMountedProject(files: SerializedFileMap): Promise<void> {
+/**
+ * Options for {@link prepareMountedProject}.
+ *
+ * `awaitPortReplay` is the boot's own `bootRestoredFilesystem` fact, threaded rather than read from a
+ * module-level variable: it belongs to ONE mount, and a value that outlives its mount is how the
+ * chat-identity bug (§4.5.6) and `lastMount` both went wrong. False on a tab-local runtime — the
+ * WebContainer dies with the tab, so there is never a port to wait for and the wait would be pure
+ * dead time on every reload.
+ */
+interface PrepareOptions {
+  awaitPortReplay?: boolean;
+}
+
+async function prepareMountedProject(files: SerializedFileMap, opts: PrepareOptions = {}): Promise<void> {
   if (workbenchStore.previews.get().length > 0 || preparingContainer) {
     return;
   }
 
   preparingContainer = true;
   bootProgress.set({ step: 'prepare' });
+
+  /*
+   * 🔴 On a RESUMED sandbox the port list arrives after this point, so the check above answered a
+   * question it could not yet see (`awaitRunningPreview` documents both wrong answers). Wait for the
+   * provider's replay to settle before concluding anything is or is not serving. Inside the guard and
+   * inside the `prepare` phase on purpose: the boot screen must narrate this wait rather than sit on
+   * the previous phase, and a concurrent mount must not slip past while we are in it.
+   */
+  if (opts.awaitPortReplay) {
+    const serving = await awaitRunningPreview({
+      runningPreviews: () => workbenchStore.previews.get().length,
+      wait: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    });
+
+    if (serving) {
+      // A dev server survived the sleep. The container is prepared; leave the guard set.
+      return;
+    }
+  }
 
   const ready = await installDependencies(files);
 
@@ -821,7 +973,7 @@ export function startGitConnect(provider: 'github' | 'gitlab' = 'github'): void 
 }
 
 /** Read the one-time remix seed, if there is one, and adopt it as this browser's first checkpoint. */
-async function mountFromSeed(pid: string, prepareToRun = true): Promise<void> {
+async function mountFromSeed(pid: string, prepareToRun = true, opts: PrepareOptions = {}): Promise<void> {
   const { files } = await readRemixSeed(pid);
 
   if (!files) {
@@ -829,7 +981,10 @@ async function mountFromSeed(pid: string, prepareToRun = true): Promise<void> {
   }
 
   // The seed is built with the same secret rule (`buildRemixSeed` → `isSecretPath`), so it is protected the same way.
-  await workbenchStore.restoreFiles(files, { protect: protectForRepoRestore });
+  await workbenchStore.restoreFiles(files, {
+    protect: protectForRepoRestore,
+    onProgress: (done, total) => bootProgress.set({ step: 'files', done, total }),
+  });
 
   if (db) {
     await createLocalSnapshot(db, { projectId: pid, files, label: 'Opened' });
@@ -838,7 +993,7 @@ async function mountFromSeed(pid: string, prepareToRun = true): Promise<void> {
   unsavedWork.set(true);
 
   if (prepareToRun) {
-    await prepareMountedProject(files);
+    await prepareMountedProject(files, opts);
   }
 }
 
@@ -851,6 +1006,13 @@ export function useChatHistory() {
   const [initialMessages, setInitialMessages] = useState<Message[]>([]);
   const [ready, setReady] = useState<boolean>(false);
   const [urlId, setUrlId] = useState<string | undefined>();
+
+  /*
+   * The shared pending-mount gate (see `pendingMountGate`). Subscribed here so the instance whose
+   * `ready` decides what renders re-renders when the CONSUMING instance (often a different one)
+   * finishes the mount and drops the gate.
+   */
+  const pendingMountActive = useStore(pendingMountGate);
 
   /** Guards against re-checkpointing the same message — see `checkpointProject`. */
   const lastCheckpointedMessage = useRef<string | undefined>(undefined);
@@ -1014,15 +1176,35 @@ export function useChatHistory() {
      *
      * Returns false for "not mine / not found", so the caller keeps its existing behaviour.
      */
-    const openFromServer = async (id: string): Promise<boolean> => {
+    /*
+     * 🔴 Tri-state, because "could not find it" and "found it and the MOUNT blew up" are opposite
+     * answers (T17a, measured live). The old boolean folded both into `false`, so a provider fs error
+     * mid-mount (`21: Os { … IsADirectory }`) silently dropped the user onto the legacy IndexedDB
+     * mount — `prepareToRun: false`, no wake hook, a raw Rust error in a `warn` nobody reads.
+     *
+     *   - 'not-found'  — the chat is not in the caller's list (someone else's id, or the server could
+     *     not answer). Falling back to the browser's copy is DESIRED here — offline-stale beats gone.
+     *   - 'failed'     — the chat is ours and opening it broke. `handleOpenFailure` decides: a
+     *     classified sandbox failure keeps the boot surface up with the provider's words and a Retry;
+     *     anything else warns and lets the chat render (the mount may be partial, but it is THIS
+     *     project's mount, not the legacy one).
+     */
+    const openFromServer = async (id: string): Promise<'opened' | 'not-found' | 'failed'> => {
+      let chat: Awaited<ReturnType<typeof listAllChats>>[number] | undefined;
+
       try {
         const chats = await listAllChats();
-        const chat = chats.find((candidate) => candidate.serverChatId === id);
+        chat = chats.find((candidate) => candidate.serverChatId === id);
+      } catch (error) {
+        logger.warn(`Could not list chats from the server: ${(error as Error).message}`);
+        return 'not-found';
+      }
 
-        if (!chat) {
-          return false;
-        }
+      if (!chat) {
+        return 'not-found';
+      }
 
+      try {
         projectId.set(chat.projectId);
         chatMetadata.set({ projectId: chat.projectId, serverChatId: chat.serverChatId });
 
@@ -1034,10 +1216,15 @@ export function useChatHistory() {
          */
         await checkUnappliedTurn(chat.projectId);
 
-        return true;
+        return 'opened';
       } catch (error) {
-        logger.warn(`Could not open chat ${id} from the server: ${(error as Error).message}`);
-        return false;
+        handleOpenFailure(
+          chat.projectId,
+          error,
+          () => setReady(true),
+          () => void openFromServer(id),
+        );
+        return 'failed';
       }
     };
 
@@ -1070,9 +1257,22 @@ export function useChatHistory() {
            * while the server is only written at the END of a generation (`checkpointProject`), so it is
            * the write-ahead buffer that survives a crash, a closed tab, or a failed generation.
            */
-          if (isServerChatId(mixedId) && (await openFromServer(mixedId))) {
-            setReady(true);
-            return;
+          if (isServerChatId(mixedId)) {
+            const outcome = await openFromServer(mixedId);
+
+            if (outcome === 'opened') {
+              setReady(true);
+              return;
+            }
+
+            /*
+             * 'failed' means OUR chat's mount broke and `handleOpenFailure` has already surfaced it
+             * (boot failure + Retry, or warn + ready). Falling through to the legacy IndexedDB mount
+             * from here is the T17a silent degrade — it must not happen. Only 'not-found' falls back.
+             */
+            if (outcome === 'failed') {
+              return;
+            }
           }
 
           if (storedMessages && storedMessages.messages.length > 0) {
@@ -1219,18 +1419,22 @@ ${value.content}
             const pid = storedMessages.metadata?.projectId;
 
             if (pid) {
-              try {
-                /*
-                 * prepareToRun: false — the artifact spread into `filteredMessages` above carries this
-                 * project's `npm install` + `npm run dev` (createCommandActionsString) and the parser
-                 * replays them. Installing here as well would race that first installer on the shared
-                 * boltTerminal and flash a spurious "dependencies failed" toast over a project that is
-                 * installing and starting perfectly well.
-                 */
-                await mountProjectFiles(pid, { prepareToRun: false });
-              } catch (error) {
-                logger.warn(`Could not restore project ${pid}: ${(error as Error).message}`);
-              }
+              /*
+               * prepareToRun: false — the artifact spread into `filteredMessages` above carries this
+               * project's `npm install` + `npm run dev` (createCommandActionsString) and the parser
+               * replays them. Installing here as well would race that first installer on the shared
+               * boltTerminal and flash a spurious "dependencies failed" toast over a project that is
+               * installing and starting perfectly well.
+               */
+              const openStoredProject = (): Promise<void> =>
+                mountProjectFiles(pid, { prepareToRun: false })
+                  .then(() => setReady(true))
+                  .catch((error) => handleOpenFailure(pid, error, () => setReady(true), openStoredProject));
+
+              // Awaited so the ordinary path still reaches `setReady` before this effect's turn ends.
+              await openStoredProject();
+
+              return;
             }
           } else {
             // The server did not have it and neither does this browser. Nothing to open.
@@ -1261,6 +1465,13 @@ ${value.content}
 
       if (pendingMount) {
         const { projectId: mountProjectId, serverChatId, freshChat } = pendingMount;
+
+        /*
+         * Re-assert the gate (the SPA path evaluated the module before the baton existed) and drop
+         * this instance's own ready — on a full page load both are already in this state.
+         */
+        pendingMountGate.set(true);
+        setReady(false);
 
         projectId.set(mountProjectId);
 
@@ -1311,21 +1522,55 @@ ${value.content}
          * involved. The files still mount, which is the other half of the point: the new chat opens on
          * the same game, and the agent reads it from the FS the way it always does.
          */
-        Promise.all([
-          mountProjectFiles(mountProjectId),
-          freshChat ? Promise.resolve() : restoreTranscript(mountProjectId, serverChatId),
-        ])
-          /*
-           * AFTER both, and only for a chat that actually came back: the check compares what was
-           * mounted against what the transcript says was paid for, so a fresh chat (no transcript)
-           * has nothing to compare and must not raise an offer (§4.5.4c).
-           */
-          .then(() => (freshChat ? undefined : checkUnappliedTurn(mountProjectId)))
-          .catch((error) => logger.warn(`Could not load project ${mountProjectId}: ${error.message}`))
-          .finally(() => setReady(true));
-      } else {
+        /*
+         * Named so the failure surface can run it AGAIN. `createSingleFlight` frees its slot on
+         * rejection and `bootForProject` no longer caches one, so "Try again" is a genuinely fresh
+         * attempt rather than a replay of the first rejection — which is what a page reload used to be
+         * the only cure for.
+         */
+        const openPendingProject = (): Promise<void> =>
+          Promise.all([
+            mountProjectFiles(mountProjectId),
+            freshChat ? Promise.resolve() : restoreTranscript(mountProjectId, serverChatId),
+          ])
+            /*
+             * AFTER both, and only for a chat that actually came back: the check compares what was
+             * mounted against what the transcript says was paid for, so a fresh chat (no transcript)
+             * has nothing to compare and must not raise an offer (§4.5.4c).
+             */
+            .then(() => (freshChat ? undefined : checkUnappliedTurn(mountProjectId)))
+            .then(() => {
+              setReady(true);
+              pendingMountGate.set(false);
+            })
+            /*
+             * The ready callback also drops the gate (the warn-and-continue path). A CLASSIFIED
+             * failure does not run it, which KEEPS the gate up — `BootScreen` then shows the
+             * failure + Retry instead of an empty chat, and a successful retry clears it above.
+             */
+            .catch((error) =>
+              handleOpenFailure(
+                mountProjectId,
+                error,
+                () => {
+                  setReady(true);
+                  pendingMountGate.set(false);
+                },
+                openPendingProject,
+              ),
+            );
+
+        void openPendingProject();
+      } else if (!pendingMountGate.get()) {
         setReady(true);
       }
+
+      /*
+       * else: no baton HERE, but the gate is up — a sibling `useChatHistory` instance consumed the
+       * baton and is driving the mount. Setting this instance ready would flip the `|| ready` arm and
+       * dismiss the splash mid-mount (the exact live failure the gate exists for); the gate's own
+       * clear re-renders us when the mount lands.
+       */
     }
   }, [mixedId, db, navigate, searchParams]); // Added db, navigate, searchParams dependencies
 
@@ -1485,11 +1730,30 @@ ${value.content}
     const pid = projectId.get();
 
     if (!pid || !db || lastCheckpointedMessage.current === messageId) {
+      /*
+       * T17c: a skipped checkpoint says WHY. The `already checkpointed` case is the idempotency
+       * guard doing its job; the other two mean the safety net is OFF for this turn, and a silent
+       * `return` here is exactly how "checkpoints stopped on CSB" went undiagnosed for a day.
+       */
+      if (lastCheckpointedMessage.current !== messageId) {
+        logger.warn(`Checkpoint skipped for message ${messageId}: ${!db ? 'no local database' : 'no project id'}`);
+      }
+
       return;
     }
 
     lastCheckpointedMessage.current = messageId;
     lastSummary = summarizeRequest(latestMessages.current);
+
+    /*
+     * The CONVERSATION save no longer rides on the file serialize (T17c). It needs no file bytes,
+     * and coupling the two (the old `Promise.all`) meant a sandbox read failure also silently lost
+     * the server transcript for the turn — a chat is recoverable on another device only if this
+     * upload happened.
+     */
+    const chatSaved = saveCurrentChat(pid).catch((error) => {
+      logger.error(`Failed to save conversation for ${pid}: ${(error as Error).message}`);
+    });
 
     try {
       /*
@@ -1498,8 +1762,59 @@ ${value.content}
        * undo (§4.12, `restore-plan.ts`). Serializing while `havok.wasm` was unreadable therefore does
        * not write a slightly-smaller checkpoint; it writes one that destroys the physics engine the
        * moment the user presses undo. Better to have no checkpoint than a poisoned one.
+       *
+       * 🔴 And STRICT runs through the T17c policy, never bare: `onFinish` fires when the model stops
+       * TALKING, while the `<boltAction>` writes are still landing over RTT on a server sandbox — so
+       * the serialize must wait for the turn's actions to SETTLE first (photographing the race is the
+       * same poisoned checkpoint, made of not-yet-written files instead of unreadable ones). A dead
+       * sandbox connection makes `fs` calls hang FOREVER rather than error (measured), so each
+       * attempt is time-boxed; transient reads racing the write-queue tail get spaced retries.
        */
-      const files = await workbenchStore.serializeFiles({ strict: true });
+      const outcome = await runCheckpointSerialize({
+        serialize: () => workbenchStore.serializeFiles({ strict: true }),
+        waitForWrites: () =>
+          waitForActionsSettled({
+            readStatuses: () =>
+              Object.values(workbenchStore.artifacts.get()).flatMap((artifact) =>
+                Object.values(artifact.runner.actions.get())
+                  // The dev server (`start`) runs for the life of the project — waiting on it is the stuck-closed trap.
+                  .filter((action) => action.type !== 'start')
+                  .map((action) => action.status),
+              ),
+            timeoutMs: CHECKPOINT_SETTLE_TIMEOUT_MS,
+          }),
+      });
+
+      if (outcome.kind !== 'ok') {
+        /*
+         * LOUD (§4.5.4b: a failed save is never silent). This is the user's undo net and the §4.5.4c
+         * recovery copy both going dark for this turn — the exact failure that shipped as a
+         * console-only `.catch(() => {})` and cost a 500-credit creation on kill-recovery. The guard
+         * resets so the NEXT generation retries, and `workingCopySafe` flips pessimistic so the
+         * beforeunload warning tells the truth.
+         */
+        lastCheckpointedMessage.current = undefined;
+        workingCopySafe.set(false);
+        logger.error(
+          `Checkpoint failed for ${pid} at message ${messageId} ` +
+            `(${outcome.reason}, ${outcome.attempts} attempt(s)): ${outcome.detail}`,
+        );
+
+        if (!warnedCheckpointFailure.has(pid)) {
+          warnedCheckpointFailure.add(pid);
+          toast.error(
+            'A checkpoint could not be saved — Undo and crash recovery will not cover this change. ' +
+              'It will retry after your next change.',
+            { autoClose: 12000 },
+          );
+        }
+
+        await chatSaved;
+
+        return;
+      }
+
+      const files = outcome.files;
 
       /*
        * ⚠️ **AMENDED (§4.5.4c).** This comment used to say the files stay in this browser, full stop —
@@ -1512,19 +1827,20 @@ ${value.content}
        * happened — was gone. §4.12 sells checkpoints as the safety net for non-developers, i.e. the
        * users least likely to have a git remote, and that net lived only in IndexedDB.
        *
-       * So there are now THREE writes here, and the ORDER is load-bearing:
+       * So there are now THREE writes here, and each degrades ALONE:
        *
        *   1. the LOCAL checkpoint — the copy the user is about to rely on for undo, written first;
-       *   2. the CONVERSATION — §4.5.4b has always kept this (resume on another machine, §4.5);
+       *   2. the CONVERSATION — §4.5.4b has always kept this (resume on another machine, §4.5) —
+       *      started BEFORE the serialize (T17c), because it needs no file bytes and must survive a
+       *      serialize failure;
        *   3. the server WORKING COPY — ONE object per project, overwritten, keyed on the project id.
        *
-       * The working copy is deliberately NOT in the `Promise.all`: a failed upload must degrade to "no
-       * recovery copy", never to "no checkpoint".
+       * The working copy is deliberately sequenced after the checkpoint: a failed upload must degrade
+       * to "no recovery copy", never to "no checkpoint".
        */
-      const [snapshot] = await Promise.all([
-        createLocalSnapshot(db, { projectId: pid, files, messageId }),
-        saveCurrentChat(pid),
-      ]);
+      const snapshot = await createLocalSnapshot(db, { projectId: pid, files, messageId });
+
+      await chatSaved;
 
       /*
        * Best-effort, and it shares the local checkpoint's `seq` rather than minting its own — resume
@@ -1590,17 +1906,25 @@ ${value.content}
       void refreshRepoStatus(pid);
     } catch (error) {
       /*
-       * Reset the guard so the next turn retries.
-       *
-       * Still not surfaced here, but the reasoning CHANGED and is worth stating: it used to be "their
-       * game is on disk and in IndexedDB, so a failed upload is our problem". The local half of that
-       * is now the only copy, so a failure to write it is not merely our problem. It stays quiet only
-       * because the files are still live in the WebContainer and on screen — nothing is lost yet, and
-       * the next generation checkpoints again. The LOUD path is the save to the repo (§4.5.4b), which
-       * is the one that decides whether the work survives this browser.
+       * Reset the guard so the next turn retries — and be LOUD (T17c). The old reasoning ("the files
+       * are still live on screen, nothing is lost yet") was written for WebContainer, where the
+       * browser held the runtime; on a server sandbox a dead tab or a killed VM makes THIS checkpoint
+       * the difference between undo working and the project reverting to its last photograph. This
+       * branch now mostly covers the IndexedDB write itself — as fatal to the safety net as a
+       * serialize failure, so it gets the same telling.
        */
       lastCheckpointedMessage.current = undefined;
+      workingCopySafe.set(false);
       logger.error(`Failed to checkpoint project ${pid}: ${(error as Error).message}`);
+
+      if (!warnedCheckpointFailure.has(pid)) {
+        warnedCheckpointFailure.add(pid);
+        toast.error(
+          'A checkpoint could not be saved — Undo and crash recovery will not cover this change. ' +
+            'It will retry after your next change.',
+          { autoClose: 12000 },
+        );
+      }
     }
   }, []);
 
@@ -1616,7 +1940,10 @@ ${value.content}
      * `content` string to `fs.writeFile` for every file, which UTF-8 encoded it — so a
      * binary was written either as a 0-byte file or as literal base64 text.
      */
-    await workbenchStore.restoreFiles(validSnapshot.files);
+    await workbenchStore.restoreFiles(validSnapshot.files, {
+      // No `protect`: this legacy path has always been an OVERLAY (writes, deletes nothing) — only progress rides along.
+      onProgress: (done, total) => bootProgress.set({ step: 'files', done, total }),
+    });
   }, []);
 
   /**
@@ -1664,7 +1991,14 @@ ${value.content}
   }, []);
 
   return {
-    ready: !mixedId || ready,
+    /*
+     * Ready means "there is nothing left to mount before the chat can render". Three cases: a
+     * `/chat/:id` open (`mixedId`) waits on this instance's own `ready`; a parked remix/dashboard
+     * mount waits on the SHARED `pendingMountGate` (the mount may be driven by a sibling instance —
+     * see the atom's doc); a bare `/` with neither is ready immediately. While the gate is up,
+     * `Chat` renders `BootScreen`, which is the whole feature.
+     */
+    ready: (!mixedId && !pendingMountActive) || ready,
     initialMessages,
 
     /**
@@ -1901,9 +2235,20 @@ ${value.content}
           const data = (await response.json()) as { projectId?: string; message?: string };
 
           if (response.ok && data.projectId) {
-            sessionStorage.setItem(PENDING_REMIX_KEY, data.projectId);
-            navigate('/', { replace: true });
-            toast.success('Project remixed');
+            setPendingRemix(data.projectId);
+
+            /*
+             * ONE TAB, ONE SANDBOX CONNECTION (the dashboard's `openBuilder` rule): when this tab is
+             * holding a project's sandbox, an SPA navigate cannot mount the clone — `bootForProject`
+             * refuses to re-point live stores at a second VM. A real page load starts fresh; the
+             * baton is sessionStorage, so it survives, and the boot splash narrates the open.
+             */
+            if (bootedProjectId()) {
+              window.location.href = '/';
+            } else {
+              navigate('/', { replace: true });
+              toast.success('Project remixed');
+            }
 
             return;
           }

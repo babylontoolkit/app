@@ -17,6 +17,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 ARG VITE_PUBLIC_APP_URL
 ENV VITE_PUBLIC_APP_URL=${VITE_PUBLIC_APP_URL}
 
+# 🔴 WHICH SANDBOX RUNTIME THIS IMAGE CONTAINS. Build-time, and it has to be — Vite INLINES
+# `import.meta.env.VITE_SANDBOX_PROVIDER` into the client bundle, and `WORK_DIR` is derived from it,
+# so the choice is baked into the JavaScript the browser downloads. Setting it on a RUNNING container
+# changes nothing: the bundle already decided, and the only thing that moves is the server's opinion
+# of what the bundle decided — which is worse than not setting it at all.
+#
+# Rollback is therefore "deploy the previous image", never an env flip. Unset or misspelled = WebContainer,
+# which is the safe direction (`app/lib/sandbox/index.ts` matches the exact string 'codesandbox').
+ARG VITE_SANDBOX_PROVIDER
+ENV VITE_SANDBOX_PROVIDER=${VITE_SANDBOX_PROVIDER}
+
 # Install deps efficiently
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm fetch

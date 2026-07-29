@@ -26,6 +26,15 @@ export type AgentStatusPhase = 'thinking' | 'generating';
 /** What the turn IS — mirrors `agent/heartbeat.ts`. The server sends a fact; this file owns the words. */
 export type AgentStatusKind = 'creation' | 'repair' | 'plan' | 'edit';
 
+/**
+ * What is happening to the REQUEST — mirrors `agent/heartbeat.ts`. Orthogonal to kind and phase.
+ *
+ * Only `retrying` today, and it exists because this panel was the reason a user concluded they were
+ * being overcharged: a stalled provider being retried rendered as "Thinking — 4m", so four minutes of
+ * unbilled recovery looked like four minutes of billed reasoning.
+ */
+export type AgentStatusActivity = 'retrying';
+
 export interface AgentStatusSnapshot {
   generationId: string;
   seq: number;
@@ -34,6 +43,11 @@ export interface AgentStatusSnapshot {
 
   /** Elapsed since the generation started, per the SERVER's clock at the moment it wrote the part. */
   elapsedMs: number;
+
+  /** Absent unless the server is reporting one. Absent is the ordinary case. */
+  activity?: AgentStatusActivity;
+  attempt?: number;
+  maxAttempts?: number;
 
   /** Client wall time when the part was first ingested — the anchor for live elapsed display. */
   receivedAt: number;
@@ -66,6 +80,9 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     phase?: unknown;
     kind?: unknown;
     elapsedMs?: unknown;
+    activity?: unknown;
+    attempt?: unknown;
+    maxAttempts?: unknown;
   };
 
   if (
@@ -97,6 +114,19 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
      */
     kind: KINDS.includes(status.kind as AgentStatusKind) ? (status.kind as AgentStatusKind) : 'edit',
     elapsedMs: status.elapsedMs,
+
+    /*
+     * An unrecognised activity is DROPPED, not passed through — the panel then falls back to the
+     * phase/kind sentence, which is still true. This is the one axis where being vague is safe and
+     * being specific-but-wrong is not: an activity is a claim about why the user is waiting.
+     */
+    ...(status.activity === 'retrying'
+      ? {
+          activity: 'retrying' as const,
+          ...(typeof status.attempt === 'number' ? { attempt: status.attempt } : {}),
+          ...(typeof status.maxAttempts === 'number' ? { maxAttempts: status.maxAttempts } : {}),
+        }
+      : {}),
     receivedAt: now,
   });
 }
@@ -169,6 +199,23 @@ const COPY: Record<AgentStatusKind, { label: string; thinking: string; generatin
 export function describeAgentStatus(status: AgentStatusSnapshot, now = Date.now()): { label: string; detail: string } {
   const elapsed = formatElapsed(currentElapsedMs(status, now));
   const copy = COPY[status.kind];
+
+  /*
+   * A retry OUTRANKS the phase sentence, because it is the more truthful answer to "why am I waiting?".
+   * It also says the thing the user cannot otherwise know and wrongly assumes the opposite of: a retried
+   * attempt is not charged. Measured 2026-07-28 — a 387s creation with two stalled attempts billed 54
+   * credits — and the user's read of that same screen was *"burning credits for nothing"*. The retry is
+   * unbilled BY CONSTRUCTION (`shouldRetryGeneration` only retries while `outTokens === 0`), so saying so
+   * is a fact, not reassurance.
+   */
+  if (status.activity === 'retrying') {
+    const of = status.attempt && status.maxAttempts ? ` ${status.attempt} of ${status.maxAttempts}` : '';
+
+    return {
+      label: `Reconnecting to the model — ${elapsed}`,
+      detail: `The provider stopped responding, so we're retrying${of}. You are not charged for a retried attempt — your work is still queued.`,
+    };
+  }
 
   return {
     label: `${copy.label} — ${elapsed}`,

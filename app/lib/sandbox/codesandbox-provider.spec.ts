@@ -22,14 +22,21 @@ import {
   bootupPreservedFilesystem,
   clearPortScript,
   flattenMountTree,
+  isDirectoryPathError,
+  isMissingPathError,
   needsContent,
+  normalizeWatchEventPaths,
   resolveInWorkdir,
   SandboxPathError,
   toShellCommand,
   toWorkspaceRelative,
   translateWatchEvent,
 } from './codesandbox-translate';
+import type { CodeSandboxWatchEvent } from './codesandbox-translate';
 import { CODESANDBOX_CAPABILITIES, createCodeSandboxProvider } from './codesandbox-provider';
+import type { SandboxWatchEvent } from './types';
+import { MAP_EXCLUDE_GLOBS } from '~/lib/stores/files';
+import { BoltShell } from '~/utils/shell';
 
 const WD = '/project/workspace';
 
@@ -66,6 +73,44 @@ describe('path rebasing', () => {
 
   it('does not double up when the caller already passed a leading slash', () => {
     expect(resolveInWorkdir(WD, '/src/main.ts')).toBe('/project/workspace/src/main.ts');
+  });
+
+  it('🔴 returns an ALREADY-workdir-absolute path unchanged — the case the leading-slash test misses', () => {
+    /*
+     * `/src/main.ts` and `/project/workspace/dist` both "already have a slash", but only the second
+     * one carries the workdir, and blindly prefixing it produced
+     * `/project/workspace/project/workspace/dist`. Real callers hand this form in:
+     * `action-runner`'s build-directory probe joins `sandbox.workdir` itself before calling
+     * `fs.readdir`, so every candidate threw and the probe became DEAD CODE on this provider —
+     * inside its own `try`, so it read as "that directory does not exist". Publish then worked only
+     * because `useShareGame`'s fallback list happens to contain `dist`, and a project with a custom
+     * `outDir` published nothing at all. Nothing errored, anywhere.
+     */
+    expect(resolveInWorkdir(WD, '/project/workspace/dist')).toBe('/project/workspace/dist');
+    expect(resolveInWorkdir(WD, '/project/workspace/src/main.ts')).toBe('/project/workspace/src/main.ts');
+  });
+
+  it('rebases a path carrying a DIFFERENT provider root, rather than nesting it', () => {
+    /*
+     * `SANDBOX_ROOTS` is a list precisely because a file map outlives the provider that produced it
+     * (a WebContainer-era working copy restored into a CodeSandbox project). Going through
+     * `toProjectRelativePath` — the one definition of "strip the sandbox root" — is what keeps those
+     * keys from landing under `/project/workspace/home/project/…`.
+     */
+    expect(resolveInWorkdir(WD, '/home/project/dist')).toBe('/project/workspace/dist');
+  });
+
+  it('treats the workdir itself as the workdir, not as a two-deep directory name', () => {
+    /*
+     * The `(\/|$)` in `toProjectRelativePath` is load-bearing; without it this becomes
+     * `/project/workspace/project/workspace`, a path that looks like an ordinary directory.
+     */
+    expect(resolveInWorkdir(WD, WD)).toBe(WD);
+  });
+
+  it('still REFUSES traversal that arrives dressed as a workdir-absolute path', () => {
+    // Rebasing must not become an escape hatch around the traversal wall.
+    expect(() => resolveInWorkdir(WD, '/project/workspace/../../etc/passwd')).toThrow(SandboxPathError);
   });
 
   it('REFUSES traversal rather than normalising it away', () => {
@@ -192,6 +237,139 @@ describe('watch event translation', () => {
   });
 });
 
+describe('watch event path normalization', () => {
+  /*
+   * The watch leg is the one path story with no normalization until now. The SDK is OBSERVED to emit
+   * absolute paths, but nothing enforced it: a workspace-relative path would make the enrichment read
+   * fail (classifying every added file as a DIRECTORY, so its content is silently dropped) and would
+   * key `FilesStore` under a second, relative key for a file it already holds. Two entries, no error,
+   * and a working copy that serializes both.
+   */
+  it('puts a workspace-relative path into workdir-absolute form', () => {
+    expect(normalizeWatchEventPaths(WD, { type: 'change', paths: ['src/main.ts'] })).toEqual({
+      type: 'change',
+      paths: ['/project/workspace/src/main.ts'],
+    });
+  });
+
+  it('leaves an already-absolute path exactly as it is — no doubling', () => {
+    expect(normalizeWatchEventPaths(WD, { type: 'add', paths: ['/project/workspace/src/main.ts'] }).paths).toEqual([
+      '/project/workspace/src/main.ts',
+    ]);
+  });
+
+  it('preserves the event type and normalizes every path in a multi-path event', () => {
+    expect(normalizeWatchEventPaths(WD, { type: 'remove', paths: ['a.ts', '/project/workspace/b.ts'] })).toEqual({
+      type: 'remove',
+      paths: ['/project/workspace/a.ts', '/project/workspace/b.ts'],
+    });
+  });
+
+  it('passes an unnormalizable path THROUGH rather than dropping the event', () => {
+    /*
+     * A traversal is meaningless in an observation, and this leg only observes — it never opens a
+     * write. Dropping the path would lose the event silently, which is the worse of the two failures:
+     * a file the user can see on disk that the tree never shows.
+     */
+    expect(normalizeWatchEventPaths(WD, { type: 'change', paths: ['../escape.ts'] }).paths).toEqual(['../escape.ts']);
+  });
+});
+
+describe('classifying "that path is not there"', () => {
+  /*
+   * `fs.rm({ force: true })` means "absent is fine" and NOTHING else. It shipped swallowing every
+   * error, so a permission problem or a dropped connection resolved as a successful delete: the map
+   * loses the entry, the disk keeps the file, and the divergence resurfaces later as an export or a
+   * push containing a file the user deleted.
+   */
+  it('recognises the typed shapes first — including the Rust io error CodeSandbox surfaces', () => {
+    expect(isMissingPathError({ code: 'ENOENT' })).toBe(true);
+    expect(isMissingPathError({ code: 2 })).toBe(true);
+    expect(isMissingPathError({ kind: 'NotFound' })).toBe(true);
+  });
+
+  it('falls back to the message, because CodeSandbox stringifies its io errors', () => {
+    // MEASURED shape: `Os { code: 2, kind: NotFound, message: "No such file or directory" }`.
+    expect(isMissingPathError(new Error('Os { code: 2, kind: NotFound, message: "No such file or directory" }'))).toBe(
+      true,
+    );
+    expect(isMissingPathError(new Error('ENOENT: no such file or directory'))).toBe(true);
+  });
+
+  it('🔴 does NOT classify a permission or connection failure as absence', () => {
+    // The whole point: these must reach the caller, not resolve as a delete that never happened.
+    expect(isMissingPathError(new Error('EACCES: permission denied'))).toBe(false);
+    expect(isMissingPathError(new Error('socket hang up'))).toBe(false);
+    expect(isMissingPathError({ code: 'EPERM' })).toBe(false);
+    expect(isMissingPathError({ code: 13 })).toBe(false);
+  });
+
+  it('🔴 a MISSING SANDBOX is not a missing path — the phrase list names paths only', () => {
+    /*
+     * `null: Sandbox not found` is what the SDK throws when the VM itself is gone (an HTTP 404
+     * through its REST-backed client, where `errno` is null). A `not found` substring match swallows
+     * it under `force: true`, which is the "dead connection reported as a successful delete" this
+     * function exists to refuse — the widest error in the family classified as the narrowest.
+     */
+    expect(isMissingPathError(new Error('null: Sandbox not found'))).toBe(false);
+    expect(isMissingPathError(new Error('Session not found'))).toBe(false);
+    expect(isMissingPathError(new Error('bash: npm: command not found'))).toBe(false);
+
+    // The errno prefix must not match a DIFFERENT errno that merely begins with the digit 2.
+    expect(isMissingPathError(new Error('21: Os { code: 21, kind: IsADirectory }'))).toBe(false);
+    expect(isMissingPathError(new Error('28: Os { code: 28, kind: StorageFull }'))).toBe(false);
+  });
+
+  it('survives non-error rejections without throwing', () => {
+    expect(isMissingPathError(undefined)).toBe(false);
+    expect(isMissingPathError(null)).toBe(false);
+    expect(isMissingPathError('NotFound')).toBe(true);
+  });
+});
+
+describe('classifying "that path is a directory" (T17a)', () => {
+  /*
+   * The sibling classification: a restore wrote a FILE entry over a path that is now a directory on
+   * disk, and the SDK's raw `21: Os { … IsADirectory }` killed the whole primary open path, silently
+   * degrading it to the legacy IndexedDB mount. `restoreFiles` uses this to name the skip loudly.
+   */
+  it('recognises the MEASURED live wire string', () => {
+    // Exactly what the SDK threw during the T17a repro, verbatim.
+    expect(isDirectoryPathError(new Error('21: Os { code: 21, kind: IsADirectory, message: "Is a directory" }'))).toBe(
+      true,
+    );
+  });
+
+  it('recognises the typed node-fs shapes as defense for wrappers', () => {
+    expect(isDirectoryPathError({ code: 'EISDIR' })).toBe(true);
+    expect(isDirectoryPathError({ code: 21 })).toBe(true);
+    expect(isDirectoryPathError({ kind: 'IsADirectory' })).toBe(true);
+    expect(isDirectoryPathError(new Error('EISDIR: illegal operation on a directory, read'))).toBe(true);
+  });
+
+  it('🔴 does NOT classify absence, permission, or a dead sandbox as "is a directory"', () => {
+    // ENOENT in both its spellings — the OTHER classified answer, never this one.
+    expect(
+      isDirectoryPathError(new Error('2: Os { code: 2, kind: NotFound, message: "No such file or directory" }')),
+    ).toBe(false);
+    expect(isDirectoryPathError({ code: 'ENOENT' })).toBe(false);
+    expect(isDirectoryPathError(new Error('ENOENT: no such file or directory'))).toBe(false);
+
+    expect(isDirectoryPathError(new Error('EACCES: permission denied'))).toBe(false);
+    expect(isDirectoryPathError(new Error('null: Sandbox not found'))).toBe(false);
+    expect(isDirectoryPathError(new Error('socket hang up'))).toBe(false);
+
+    // The errno prefix is exact — errno 2 must not match, nor an errno merely starting with 2.
+    expect(isDirectoryPathError(new Error('28: Os { code: 28, kind: StorageFull }'))).toBe(false);
+  });
+
+  it('survives non-error rejections without throwing', () => {
+    expect(isDirectoryPathError(undefined)).toBe(false);
+    expect(isDirectoryPathError(null)).toBe(false);
+    expect(isDirectoryPathError('IsADirectory')).toBe(true);
+  });
+});
+
 describe('argv → shell command line', () => {
   /*
    * Found by RUNNING it, not by reading it: the naive `[command, ...args].join(' ')` sent
@@ -293,7 +471,14 @@ describe('the adapter translates the right calls', () => {
       workspacePath: WD,
       fs,
       ports: { onDidPortOpen, onDidPortClose, getAll },
-      commands: { runBackground: vi.fn() },
+
+      /*
+       * `run` answers the `$HOME` probe. It is on the DEFAULT double because an unresolved home now
+       * declines to claim `beginOsc` (a write into a guessed home "succeeds" against a file bash may
+       * never read), so a double without it exercises the DEGRADED path — which is a different test
+       * from the armed one. The fallback pins delete it deliberately.
+       */
+      commands: { runBackground: vi.fn(), run: vi.fn(async () => '/root') },
       terminals: { create: vi.fn() },
     };
 
@@ -381,23 +566,36 @@ describe('the adapter translates the right calls', () => {
       };
     }
 
-    async function spawnShell(d: ReturnType<typeof createClientDouble>) {
+    /*
+     * The provider instance is passed in rather than minted inside: `beginOsc` is per-provider state
+     * (a claim about THIS shell's rc file), so reading it off a second provider over the same client
+     * answers a different question than the one the test is asking.
+     */
+    async function spawnShell(d: ReturnType<typeof createClientDouble>, provider = providerOver(d)) {
       d.client.terminals.create.mockResolvedValue(terminalDouble() as never);
-      await providerOver(d).spawn('bash', [], { terminal: { cols: 80, rows: 24 } });
+      await provider.spawn('bash', [], { terminal: { cols: 80, rows: 24 } });
+
+      return provider;
     }
 
     it('installs a block whose PS0 emits the begin marker the shell declares', async () => {
       const d = createClientDouble();
       d.fs.readTextFile.mockRejectedValue(new Error('ENOENT'));
 
-      await spawnShell(d);
+      const provider = providerOver(d);
+
+      // The declaration is a promise about a file on disk, so it cannot precede the write.
+      expect(provider.shell.beginOsc).toBeUndefined();
+
+      await spawnShell(d, provider);
 
       const [path, written] = d.fs.writeTextFile.mock.calls[0] as unknown as [string, string];
       expect(path).toBe('/root/.bashrc');
       expect(written).toContain('PROMPT_COMMAND=__bolt_osc');
 
       // The marker the rc EMITS must be the marker the shell DECLARES — one fact, two readers.
-      const beginOsc = providerOver(d).shell.beginOsc!;
+      const beginOsc = provider.shell.beginOsc!;
+      expect(beginOsc).toBe('begin');
       expect(written).toContain(`]654;${beginOsc}\\a`);
 
       // vite's --open spawns xdg-open in a headless VM without one; BROWSER=true silences it.
@@ -425,10 +623,344 @@ describe('the adapter translates the right calls', () => {
       expect(d.fs.writeTextFile).not.toHaveBeenCalled();
     });
 
-    it('declares beginOsc, and it is the marker the rc emits', () => {
-      const provider = providerOver(createClientDouble());
+    it('declares beginOsc only once an install has SUCCEEDED — never before', async () => {
+      /*
+       * 🔴 Declaring a marker bash will never emit makes every `waitTillOscCode` wait forever: one
+       * logged warning turning into "every shell action hangs", silently and permanently. So the
+       * declaration follows the disk, and the rc install is the only thing that can turn it on.
+       */
+      const d = createClientDouble();
+      d.fs.readTextFile.mockRejectedValue(new Error('ENOENT'));
+
+      const provider = providerOver(d);
+      expect(provider.shell.beginOsc).toBeUndefined();
+
+      await spawnShell(d, provider);
+      expect(provider.shell.beginOsc).toBe('begin');
+    });
+
+    it('declares beginOsc on a VM whose bashrc ALREADY carries the block (no write needed)', async () => {
+      const d = createClientDouble();
+      d.fs.readTextFile.mockResolvedValue("stuff\nPS0='\\e]654;begin\\a'\nmore");
+
+      const provider = await spawnShell(d);
+
+      expect(d.fs.writeTextFile).not.toHaveBeenCalled();
+      expect(provider.shell.beginOsc).toBe('begin');
+    });
+
+    it('a FAILED rc install yields a shell WITHOUT beginOsc — degrade, never hang', async () => {
+      const d = createClientDouble();
+      d.fs.readTextFile.mockRejectedValue(new Error('ENOENT'));
+      d.fs.writeTextFile.mockRejectedValue(new Error('EROFS: read-only file system'));
+
+      const provider = await spawnShell(d);
+
+      // The terminal still opened — a failed hook costs the protocol, never the shell.
+      expect(d.client.terminals.create).toHaveBeenCalled();
+      expect(provider.shell.beginOsc).toBeUndefined();
+    });
+
+    it('one success is enough — a later transient failure must not un-arm an installed hook', async () => {
+      const d = createClientDouble();
+      d.fs.readTextFile.mockRejectedValue(new Error('ENOENT'));
+
+      const provider = await spawnShell(d);
+      expect(provider.shell.beginOsc).toBe('begin');
+
+      d.fs.writeTextFile.mockRejectedValue(new Error('transient'));
+      await spawnShell(d, provider);
 
       expect(provider.shell.beginOsc).toBe('begin');
+    });
+  });
+
+  /**
+   * The rc path follows `$HOME`.
+   *
+   * Hardcoding `/root/.bashrc` is right for today's image and silently wrong for any image whose
+   * terminal user is not root: the append lands in a file bash never reads, so the hook is never
+   * installed. Every failure mode falls back to `/root` — asking where HOME is must never be the
+   * thing that stops a terminal from opening.
+   */
+  describe('shellHomeDir — the rc path follows $HOME', () => {
+    function terminalDouble() {
+      return {
+        onOutput: vi.fn(),
+        open: vi.fn(async () => ''),
+        run: vi.fn(async () => {}),
+        write: vi.fn(async () => {}),
+        kill: vi.fn(),
+      };
+    }
+
+    async function spawnOver(d: ReturnType<typeof createClientDouble>, provider = providerOver(d)) {
+      d.client.terminals.create.mockResolvedValue(terminalDouble() as never);
+      d.fs.readTextFile.mockRejectedValue(new Error('ENOENT'));
+      await provider.spawn('bash', [], { terminal: { cols: 80, rows: 24 } });
+
+      return provider;
+    }
+
+    const rcPath = (d: ReturnType<typeof createClientDouble>) =>
+      (d.fs.writeTextFile.mock.calls[0] as unknown as [string, string])[0];
+
+    it('writes to $HOME/.bashrc on a non-root image', async () => {
+      const d = createClientDouble();
+      (d.client.commands as any).run = vi.fn(async () => '/home/user\n');
+
+      await spawnOver(d);
+
+      expect(rcPath(d)).toBe('/home/user/.bashrc');
+    });
+
+    it('asks ONCE per client, however many terminals open', async () => {
+      const d = createClientDouble();
+      const run = vi.fn(async () => '/home/user');
+      (d.client.commands as any).run = run;
+
+      const provider = await spawnOver(d);
+      d.fs.writeTextFile.mockClear();
+      await spawnOver(d, provider);
+
+      // Second spawn re-checks the (idempotent) rc, but must not re-ask where HOME is.
+      expect(run).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * 🔴 An UNRESOLVED home still installs — and still declines to claim `beginOsc`.
+     *
+     * `/root` is a guess, not an answer. On an image whose shell user is not root the append
+     * "succeeds" into a file bash never reads, so declaring the marker off that success is the
+     * promise-a-marker hang wearing a successful write. Install anyway (harmless, possibly right),
+     * claim nothing.
+     */
+    it('falls back to /root when the command REJECTS — installs, but declares no beginOsc', async () => {
+      const d = createClientDouble();
+      (d.client.commands as any).run = vi.fn(async () => {
+        throw new Error('command failed');
+      });
+
+      const provider = await spawnOver(d);
+
+      expect(rcPath(d)).toBe('/root/.bashrc');
+      expect(provider.shell.beginOsc).toBeUndefined();
+    });
+
+    it('falls back to /root on an EMPTY answer — installs, but declares no beginOsc', async () => {
+      const d = createClientDouble();
+      (d.client.commands as any).run = vi.fn(async () => '  \n');
+
+      const provider = await spawnOver(d);
+
+      expect(rcPath(d)).toBe('/root/.bashrc');
+      expect(provider.shell.beginOsc).toBeUndefined();
+    });
+
+    it('falls back to /root when the client has no `commands.run` at all — a SYNCHRONOUS throw', async () => {
+      // An SDK version (or a double) without the method throws a TypeError that `.catch()` cannot see.
+      const d = createClientDouble();
+      delete (d.client.commands as any).run;
+
+      const provider = await spawnOver(d);
+
+      // Asking where HOME is must never be the thing that stops a terminal from opening.
+      expect(rcPath(d)).toBe('/root/.bashrc');
+      expect(d.client.terminals.create).toHaveBeenCalled();
+      expect(provider.shell.beginOsc).toBeUndefined();
+    });
+
+    it('a RESOLVED home is what earns the claim — same write, different answer', async () => {
+      // The control for the three above: only the resolution differs, and only it flips the claim.
+      const d = createClientDouble();
+      (d.client.commands as any).run = vi.fn(async () => '/home/user');
+
+      const provider = await spawnOver(d);
+
+      expect(rcPath(d)).toBe('/home/user/.bashrc');
+      expect(provider.shell.beginOsc).toBe('begin');
+    });
+  });
+
+  /**
+   * The degraded shell must still WORK. A provider whose rc install failed declares no `beginOsc`,
+   * which is the pre-hook (jsh) semantics — stale markers are possible again, and a command that
+   * finishes is still seen to finish. The failure this pins against is the other one: a shell that
+   * waits forever for a `begin` marker bash was never taught to emit.
+   */
+  describe('a shell over a provider whose rc install failed still completes commands', () => {
+    /** A PTY double that answers like bash: Ctrl-C draws a prompt, a command line reports an exit. */
+    function bashPtyDouble({ emitsBegin }: { emitsBegin: boolean }) {
+      let emit: (chunk: string) => void = () => {};
+
+      const terminal = {
+        onOutput: vi.fn((cb: (chunk: string) => void) => {
+          emit = cb;
+        }),
+
+        // The attach-time prompt draw, which is exactly the stale pair the arming rules exist for.
+        open: vi.fn(async () => '\x1b]654;exit=0:0\x07\x1b]654;prompt\x07root@sbx:/project/workspace# '),
+        run: vi.fn(async () => {}),
+        write: vi.fn(async (chunk: string) => {
+          if (chunk === '\x03') {
+            emit('^C\r\n\x1b]654;exit=0:130\x07\x1b]654;prompt\x07');
+            return;
+          }
+
+          if (chunk.endsWith('\n')) {
+            emit(`${emitsBegin ? '\x1b]654;begin\x07' : ''}hi\r\n\x1b]654;exit=0:3\x07\x1b]654;prompt\x07`);
+          }
+        }),
+        kill: vi.fn(),
+      };
+
+      return terminal;
+    }
+
+    function itermDouble() {
+      let onData: (data: string) => void = () => {};
+
+      return {
+        cols: 80,
+        rows: 24,
+        onData: (cb: (data: string) => void) => {
+          onData = cb;
+        },
+        input: (data: string) => onData(data),
+        write: vi.fn(),
+      };
+    }
+
+    /** Bounded, so a regression FAILS the suite instead of hanging it. */
+    function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
+      let timer: ReturnType<typeof setTimeout>;
+
+      return Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} never completed — the shell hung`)), 1000);
+        }),
+      ]).finally(() => clearTimeout(timer)) as Promise<T>;
+    }
+
+    /**
+     * A sandbox whose `.bashrc` state can CHANGE between terminals.
+     *
+     * A PTY emits `begin` only if the hook was on disk when THAT shell started — `.bashrc` is read at
+     * shell startup — which is the whole reason the claim has to be frozen. Each `terminals.create`
+     * therefore mints its own double and captures the flag as it stands at that moment.
+     */
+    function sandboxDouble({ hookInstalls }: { hookInstalls: boolean }) {
+      const d = createClientDouble();
+      d.fs.readTextFile.mockRejectedValue(new Error('ENOENT'));
+
+      let onDisk = false;
+
+      const setInstallable = (ok: boolean) => {
+        if (ok) {
+          d.fs.writeTextFile.mockImplementation(async () => {
+            onDisk = true;
+          });
+        } else {
+          d.fs.writeTextFile.mockRejectedValue(new Error('EROFS'));
+        }
+      };
+
+      setInstallable(hookInstalls);
+
+      const ptys: ReturnType<typeof bashPtyDouble>[] = [];
+      d.client.terminals.create.mockImplementation(async () => {
+        const pty = bashPtyDouble({ emitsBegin: onDisk });
+        ptys.push(pty);
+
+        return pty as never;
+      });
+
+      return { d, ptys, setInstallable, provider: providerOver(d) };
+    }
+
+    async function bootShell(provider: ReturnType<typeof providerOver>) {
+      const shell = new BoltShell();
+      await bounded(shell.init(provider as never, itermDouble() as never), 'init');
+
+      return shell;
+    }
+
+    async function driveCommand(installSucceeds: boolean) {
+      const { provider } = sandboxDouble({ hookInstalls: installSucceeds });
+      const shell = await bootShell(provider);
+
+      const result = await bounded(shell.executeCommand('session-1', 'echo hi'), 'executeCommand');
+
+      return { provider, result };
+    }
+
+    it('COMPLETES when the hook failed to install (no beginOsc) — degraded, never hung', async () => {
+      const { provider, result } = await driveCommand(false);
+
+      expect(provider.shell.beginOsc).toBeUndefined();
+      expect(result).toBeDefined();
+
+      /*
+       * 130, not 3 — and that is the DOCUMENTED cost of degrading. With no begin marker the
+       * exit-wait starts armed, so it resolves off the Ctrl-C pair still buffered from the
+       * interrupt (the pre-hook jsh semantics). A stale status is bad; waiting forever for a
+       * marker bash was never taught to emit is worse, and it is what the old unconditional
+       * `beginOsc` produced. The control below shows an installed hook reporting the real code.
+       */
+      expect(result?.exitCode).toBe(130);
+    });
+
+    it('control: completes the same way when the hook DID install and bash emits `begin`', async () => {
+      const { provider, result } = await driveCommand(true);
+
+      expect(provider.shell.beginOsc).toBe('begin');
+      expect(result?.exitCode).toBe(3);
+    });
+
+    /**
+     * 🔴 The FIRST spawn decides for the session, and a later success must NOT un-degrade it.
+     *
+     * `.bashrc` is read when a shell STARTS, so the hook is a fact about a running process, not about
+     * the disk. A later terminal's install flipping the claim to `true` re-arms the waits of the bash
+     * ALREADY running without one: every shell action on it then waits forever for a marker that
+     * process will never emit — the silent permanent hang this whole degrade exists to prevent,
+     * walking back in through the door marked recovery.
+     */
+    it('a LATER successful install must not re-arm the shell already running unhooked', async () => {
+      const { provider, setInstallable, ptys } = sandboxDouble({ hookInstalls: false });
+
+      const shell = await bootShell(provider);
+      expect(provider.shell.beginOsc).toBeUndefined();
+
+      // The fs recovers, and a second terminal (a new tab) installs the hook successfully.
+      setInstallable(true);
+      await provider.spawn('bash', [], { terminal: { cols: 80, rows: 24 } });
+
+      /*
+       * The user-visible half FIRST: under the old `||=` this wait never returned, because the
+       * exit-wait was armed for a `begin` marker the already-running bash cannot emit.
+       */
+      const result = await bounded(shell.executeCommand('session-1', 'echo hi'), 'executeCommand');
+      expect(result).toBeDefined();
+
+      // The claim is frozen: the first shell is still the one `shell.ts` is talking to.
+      expect(provider.shell.beginOsc).toBeUndefined();
+
+      // The write DID run for the second terminal — only the claim is frozen, not the install.
+      expect(ptys).toHaveLength(2);
+    });
+
+    it('the rc install still RUNS for later terminals — freezing the claim is not skipping the work', async () => {
+      const { d, provider, setInstallable } = sandboxDouble({ hookInstalls: false });
+
+      await bootShell(provider);
+
+      const writesAfterFirstShell = d.fs.writeTextFile.mock.calls.length;
+      setInstallable(true);
+      await provider.spawn('bash', [], { terminal: { cols: 80, rows: 24 } });
+
+      expect(d.fs.writeTextFile.mock.calls.length).toBeGreaterThan(writesAfterFirstShell);
     });
   });
 
@@ -622,6 +1154,204 @@ describe('the adapter translates the right calls', () => {
     await expect(providerOver(d).fs.rm('gone.ts')).rejects.toThrow('ENOENT');
   });
 
+  it('🔴 rm({force:true}) REJECTS a failure that is not absence — force is not "any error is fine"', async () => {
+    /*
+     * The silent version of this: a permission error or a dropped connection resolved as a
+     * successful delete, so the file map dropped the entry while the disk kept the file. Nobody
+     * finds out until an export or a git push ships a file the user deleted.
+     */
+    const d = createClientDouble();
+    d.fs.remove.mockRejectedValue(new Error('EACCES: permission denied'));
+
+    await expect(providerOver(d).fs.rm('locked.ts', { force: true })).rejects.toThrow('EACCES');
+  });
+
+  it('rm({force:true}) still resolves for the Rust io shape CodeSandbox actually emits', async () => {
+    const d = createClientDouble();
+    d.fs.remove.mockRejectedValue(new Error('Os { code: 2, kind: NotFound, message: "No such file or directory" }'));
+
+    await expect(providerOver(d).fs.rm('gone.ts', { force: true })).resolves.toBeUndefined();
+  });
+
+  describe('the watch leg: one path string for the read AND the map key', () => {
+    /** Register a watcher and hand back the `onEvent` callback the provider installed. */
+    async function watchWith(d: ReturnType<typeof createClientDouble>, seen: SandboxWatchEvent[][]) {
+      const onEvent = vi.fn();
+      d.fs.watch.mockResolvedValue({ dispose: vi.fn(), onEvent } as never);
+
+      const unsubscribe = providerOver(d).watchPaths({ includeContent: true }, (events) => seen.push(events));
+      await vi.waitFor(() => expect(onEvent).toHaveBeenCalled());
+
+      return { fire: onEvent.mock.calls[0][0] as (raw: CodeSandboxWatchEvent) => Promise<void>, unsubscribe };
+    }
+
+    it('🔴 normalizes a workspace-relative event so it lands under the WORK_DIR-prefixed key', async () => {
+      /*
+       * The two halves must agree by construction: the enrichment read and the key `FilesStore` maps
+       * the entry under are the SAME string. If a relative path reached the read, it would fail, the
+       * file would be classified as a directory (content dropped), and the map would gain a second
+       * key for a file it already holds.
+       */
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      const bytes = new Uint8Array([7, 7]);
+      d.fs.readFile.mockResolvedValue(bytes);
+
+      const { fire } = await watchWith(d, seen);
+      await fire({ type: 'change', paths: ['src/main.ts'] });
+
+      expect(d.fs.readFile).toHaveBeenCalledWith('/project/workspace/src/main.ts');
+      expect(seen).toEqual([[{ type: 'change', path: '/project/workspace/src/main.ts', buffer: bytes }]]);
+    });
+
+    it('leaves an already-absolute event path alone rather than doubling the workdir onto it', async () => {
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      d.fs.readFile.mockResolvedValue(new Uint8Array([1]));
+
+      const { fire } = await watchWith(d, seen);
+      await fire({ type: 'add', paths: ['/project/workspace/src/new.ts'] });
+
+      expect(d.fs.readFile).toHaveBeenCalledWith('/project/workspace/src/new.ts');
+      expect(seen[0][0].path).toBe('/project/workspace/src/new.ts');
+    });
+
+    it('classifies a path it cannot read as a DIRECTORY rather than an empty file', async () => {
+      /*
+       * A read fails for a directory and for a file deleted between the event and the read. Reporting
+       * a directory is structural; reporting an empty file WRITES emptiness over real content.
+       */
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      d.fs.readFile.mockRejectedValue(new Error('is a directory'));
+
+      const { fire } = await watchWith(d, seen);
+      await fire({ type: 'add', paths: ['src'] });
+
+      expect(seen).toEqual([[{ type: 'add_dir', path: '/project/workspace/src' }]]);
+    });
+
+    it('never reads on a removal — one wasted round trip per deleted file against a 3,600/hr budget', async () => {
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+
+      const { fire } = await watchWith(d, seen);
+      await fire({ type: 'remove', paths: ['src/gone.ts'] });
+
+      expect(d.fs.readFile).not.toHaveBeenCalled();
+      expect(seen).toEqual([[{ type: 'remove_file', path: '/project/workspace/src/gone.ts' }]]);
+    });
+
+    /*
+     * 🔴 THE EXCLUDE LIST IS THE ONLY THING BETWEEN `npm install` AND THE REQUEST CAP.
+     *
+     * Every `add`/`change` event costs one `client.fs.readFile` — an RTT — and an install writes
+     * thousands of files under `node_modules`. Against the 3,600 req/hr API limit an ignored exclude
+     * is not a slow watcher, it is a dead session. The SDK spells it `excludes` (plural) inside the
+     * options object of `fs.watch(path, …)`, while the seam spells it `exclude`; a rename on either
+     * side leaves `excludes: undefined`, which the SDK reads as "watch everything" — no error, no
+     * warning, just a flood. So the wire shape is pinned literally, with the REAL glob list, which is
+     * the same list T17 scenario 2 counts requests against live.
+     */
+    it('forwards the seam’s excludes to the SDK in the shape it documents', async () => {
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      const onEvent = vi.fn();
+      d.fs.watch.mockResolvedValue({ dispose: vi.fn(), onEvent } as never);
+
+      providerOver(d).watchPaths({ includeContent: true, exclude: MAP_EXCLUDE_GLOBS }, (events) => seen.push(events));
+      await vi.waitFor(() => expect(onEvent).toHaveBeenCalled());
+
+      expect(d.fs.watch).toHaveBeenCalledWith(WD, {
+        recursive: true,
+        excludes: ['**/node_modules', '.git', '.codesandbox', 'dist'],
+      });
+
+      // And the list really is the map layer's, not a copy that can drift away from it.
+      expect(MAP_EXCLUDE_GLOBS).toEqual(['**/node_modules', '.git', '.codesandbox', 'dist']);
+    });
+
+    it('does not enrich at all when the caller did not ask for content', async () => {
+      /*
+       * `includeContent` gates the read leg. A watcher registered for structure only must cost ZERO
+       * reads — the same request-budget argument as the excludes above, one layer in.
+       */
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      const onEvent = vi.fn();
+      d.fs.watch.mockResolvedValue({ dispose: vi.fn(), onEvent } as never);
+
+      providerOver(d).watchPaths({ includeContent: false }, (events) => seen.push(events));
+      await vi.waitFor(() => expect(onEvent).toHaveBeenCalled());
+
+      await (onEvent.mock.calls[0][0] as (raw: CodeSandboxWatchEvent) => Promise<void>)({
+        type: 'change',
+        paths: ['src/main.ts'],
+      });
+
+      expect(d.fs.readFile).not.toHaveBeenCalled();
+
+      // Unenriched, so it is reported as a content-less `change` — never as a directory.
+      expect(seen).toEqual([[{ type: 'change', path: '/project/workspace/src/main.ts', buffer: undefined }]]);
+    });
+
+    it('reads EVERY path in a multi-path event, and each read is the enrichment for its own key', async () => {
+      /*
+       * One event can carry several paths. Enriching only the first would leave the rest recorded as
+       * EMPTY files — content written over real content, the failure direction the read leg exists to
+       * prevent — so the fan-out is pinned rather than assumed.
+       */
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      d.fs.readFile.mockImplementation((async (p: string) => new TextEncoder().encode(`bytes:${p}`)) as never);
+
+      const { fire } = await watchWith(d, seen);
+      await fire({ type: 'change', paths: ['src/a.ts', 'src/b.ts'] });
+
+      expect(d.fs.readFile).toHaveBeenCalledTimes(2);
+      expect(d.fs.readFile).toHaveBeenCalledWith('/project/workspace/src/a.ts');
+      expect(d.fs.readFile).toHaveBeenCalledWith('/project/workspace/src/b.ts');
+      expect(seen[0].map((e) => new TextDecoder().decode(e.buffer))).toEqual([
+        'bytes:/project/workspace/src/a.ts',
+        'bytes:/project/workspace/src/b.ts',
+      ]);
+    });
+
+    it('classifies ONLY the path that failed to read — one bad read must not blank its siblings', async () => {
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      d.fs.readFile.mockImplementation((async (p: string) => {
+        if (p.endsWith('/src')) {
+          throw new Error('is a directory');
+        }
+
+        return new Uint8Array([9]);
+      }) as never);
+
+      const { fire } = await watchWith(d, seen);
+      await fire({ type: 'add', paths: ['src', 'src/main.ts'] });
+
+      expect(seen).toEqual([
+        [
+          { type: 'add_dir', path: '/project/workspace/src' },
+          { type: 'add_file', path: '/project/workspace/src/main.ts', buffer: new Uint8Array([9]) },
+        ],
+      ]);
+    });
+
+    it('drops events that arrive AFTER unsubscribe — a dead component must not be written into', async () => {
+      const d = createClientDouble();
+      const seen: SandboxWatchEvent[][] = [];
+      d.fs.readFile.mockResolvedValue(new Uint8Array([1]));
+
+      const { fire, unsubscribe } = await watchWith(d, seen);
+      unsubscribe();
+      await fire({ type: 'change', paths: ['src/main.ts'] });
+
+      expect(seen).toEqual([]);
+    });
+  });
+
   it('reads workdir live rather than snapshotting it', () => {
     const d = createClientDouble();
     const provider = providerOver(d);
@@ -631,14 +1361,53 @@ describe('the adapter translates the right calls', () => {
     expect(provider.workdir).toBe('/somewhere/else');
   });
 
-  it('teardown calls the server-side reaper, and never silently no-ops it away', () => {
-    // A provider that swallowed teardown would leak a billing VM per builder session.
+  it('teardown calls the injected server-side reaper', () => {
+    // Reaping needs the API key, so this provider can only ever delegate it.
     const onTeardown = vi.fn();
     const d = createClientDouble();
 
     createCodeSandboxProvider(d.client as never, { onTeardown }).teardown();
 
     expect(onTeardown).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The seam does not inject `onTeardown` today, so `teardown()` really is a no-op here — pinned so
+   * the doc comment and the code agree. What keeps an abandoned VM from billing forever is
+   * server-side (`hibernationTimeoutSeconds` at creation, `deleteSandbox` on project delete), not
+   * this hook.
+   */
+  it('is a harmless no-op when no reaper is injected — which is the shipped composition', () => {
+    const provider = createCodeSandboxProvider(createClientDouble().client as never, {});
+
+    expect(() => provider.teardown()).not.toThrow();
+  });
+
+  /*
+   * 🔴 The seam reads the PRESENCE of `refreshPreviewUrl` as "this provider's preview URLs expire"
+   * (`SandboxProvider.refreshPreviewUrl`, T8). Declaring it unconditionally would tell `PreviewsStore`
+   * to schedule re-mints against a provider that has no minter wired in — a timer firing forever
+   * against a function that can only ever answer `undefined`. Absent is the honest shape, and it is
+   * the same shape WebContainer has.
+   */
+  it('does NOT declare refreshPreviewUrl when no minter was wired in', () => {
+    const provider = createCodeSandboxProvider(createClientDouble().client as never, {});
+
+    expect(provider.refreshPreviewUrl).toBeUndefined();
+    expect('refreshPreviewUrl' in provider).toBe(false);
+  });
+
+  it('declares refreshPreviewUrl and delegates to the boot’s minter when one is supplied', async () => {
+    const previewUrlForPort = vi.fn(async () => ({ url: 'https://sb1-5173.csb.app/?preview_token=B', expiresAt: 42 }));
+    const provider = createCodeSandboxProvider(createClientDouble().client as never, { previewUrlForPort });
+
+    await expect(provider.refreshPreviewUrl!(5173)).resolves.toEqual({
+      url: 'https://sb1-5173.csb.app/?preview_token=B',
+      expiresAt: 42,
+    });
+
+    // The PORT is the whole argument: only the boot's minter knows the host it recorded.
+    expect(previewUrlForPort).toHaveBeenCalledWith(5173);
   });
 
   it('declares textSearch absent rather than shimming it with grep — and clearPort PRESENT', () => {

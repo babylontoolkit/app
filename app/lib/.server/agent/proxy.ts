@@ -17,6 +17,7 @@ import {
 } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import { getActivePrompt } from '~/lib/.server/prompt/active';
+import { ensureCacheWarmer, PROMPT_CACHE_TTL } from '~/lib/.server/prompt/cache-warmer';
 import { getPromptStore } from '~/lib/.server/prompt/store';
 import { selectStickyBlocks } from '~/lib/.server/prompt/sources';
 import { getSkillStore } from '~/lib/.server/skills/store';
@@ -35,7 +36,7 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getPremiumTier } from '~/lib/.server/billing/rates';
+import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/premium';
 import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
@@ -43,7 +44,7 @@ import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
 import { mediaProtocolNote } from './media-note';
 import { MAX_PROVIDER_RETRY_ATTEMPTS, retryThinkingMode, retryToolMode, shouldRetryGeneration } from './retry-policy';
-import type { AgentStatusKind } from './heartbeat';
+import type { AgentActivitySnapshot, AgentStatusKind } from './heartbeat';
 import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
 import { createWebFetchTool } from './web-fetch-tool';
 import { createWebSearchTool } from './web-search-tool';
@@ -110,7 +111,7 @@ export const MAX_REPAIR_TURNS = 2;
  * SDK passes `cacheControl` through verbatim, and an entry written this way is still a cache READ
  * seven minutes later — i.e. it is genuinely 1h and not a silent fall back to the 5m tier.
  */
-const CACHE_CONTROL = { anthropic: { cacheControl: { type: 'ephemeral' as const, ttl: '1h' as const } } };
+const CACHE_CONTROL = { anthropic: { cacheControl: { type: 'ephemeral' as const, ttl: PROMPT_CACHE_TTL } } };
 
 /**
  * Anthropic's hard limit. A FIFTH breakpoint is not degraded caching — it is HTTP 400 and a dead
@@ -286,6 +287,12 @@ export interface AgentGeneration {
    */
   statusKind: AgentStatusKind;
 
+  /**
+   * What is happening to the REQUEST right now (a provider retry in flight), or null. Read on every
+   * heartbeat tick — the retry loop runs inside `textStream`, where the heartbeat wrapper cannot see it.
+   */
+  currentActivity: () => AgentActivitySnapshot | null;
+
   /** Skills loaded during this generation — mutated by the tool loop as it runs. */
   toolContext: SkillToolContext;
 
@@ -457,6 +464,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   await ensureMarketPrices(request.context);
 
+  /*
+   * Same doorway, same posture: fire-and-forget, can never throw, keeps block 1 of every user's
+   * prompt reading at 0.1x instead of writing at 2x (`prompt/cache-warmer.ts`).
+   */
+  ensureCacheWarmer(request.context);
+
   const config = getPlatformConfig(request.context);
   const user = request.user;
   const monitor = getMonitor(request.context);
@@ -486,27 +499,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   });
 
   /*
-   * 2. Credit gate — once, up front, and only for platform-paid generations. In-flight generations
-   * are never killed for balance (§4.2.1), so this is the ONE moment we may refuse.
-   */
-  const gate = await checkCreditGate({ userId: user.id, byok: byok.allowed, context: request.context });
-
-  if (!gate.allowed) {
-    const error = new Error(gate.message) as Error & { statusCode: number; isRetryable: boolean };
-    error.statusCode = 402;
-    error.isRetryable = false;
-
-    throw error;
-  }
-
-  // Funnel: the generation cleared the gate and is about to run (§5A). Outcome is tracked at settle.
-  monitor.track(FUNNEL_EVENTS.GENERATION_STARTED, {
-    userId: user.id,
-    projectId: request.projectId,
-    repair: Boolean(request.errors?.length),
-  });
-
-  /*
    * 3. Model + key. Three ways the model is decided, in strict precedence:
    *
    *   a. BYOK (Pro) — the user's OWN key pays, so their explicit model choice is honored (§4.6.1).
@@ -520,7 +512,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * the BALANCE regardless of `BILLING_ENFORCED` — settlement debits either way (see `premium.ts`).
    */
   const useByok = byok.allowed;
-  const premiumTier = getPremiumTier(request.context);
 
   /*
    * 🔴 NORMALIZE THE MESSAGES ONCE, HERE, AND NEVER READ `request.messages` AGAIN.
@@ -562,6 +553,47 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * before its artifact can flush (see `premium.ts`). The tool policy below reuses the same value.
    */
   const isCreationTurn = lastUserText(messages0).includes(CREATION_BRIEF_MARKER);
+
+  /*
+   * 2. Credit gate — once, up front, and only for platform-paid generations. In-flight generations
+   * are never killed for balance (§4.2.1), so this is the ONE moment we may refuse.
+   *
+   * It runs AFTER message normalization (moved 2026-07-28) because a flat-priced creation turn
+   * (§4.6, `creationFlatCredits`) gates on the KNOWN price rather than "more than zero" — the one
+   * turn whose cost is knowable pre-flight is the one turn the gate can be honest about, instead of
+   * letting a 10-credit balance start a 500-credit creation and land deep negative.
+   */
+  const billing = getBillingConfig(request.context);
+  const creationFlatCredits = isCreationTurn && !byok.allowed ? billing.creationFlatCredits : 0;
+
+  const gate = await checkCreditGate({
+    userId: user.id,
+    byok: byok.allowed,
+    minimumCredits: creationFlatCredits > 0 ? creationFlatCredits : undefined,
+    context: request.context,
+  });
+
+  if (!gate.allowed) {
+    const error = new Error(gate.message) as Error & { statusCode: number; isRetryable: boolean };
+    error.statusCode = 402;
+    error.isRetryable = false;
+
+    throw error;
+  }
+
+  // Funnel: the generation cleared the gate and is about to run (§5A). Outcome is tracked at settle.
+  monitor.track(FUNNEL_EVENTS.GENERATION_STARTED, {
+    userId: user.id,
+    projectId: request.projectId,
+    repair: Boolean(request.errors?.length),
+  });
+
+  /*
+   * Resolved AFTER the gate on purpose: `getPremiumTier` throws while `PREMIUM_MODEL` names an
+   * unpriced model — the normal transient state mid-repricing — and an out-of-credits user should
+   * still get their 402, not the operator's config error.
+   */
+  const premiumTier = getPremiumTier(request.context);
 
   const premium = decidePremium({
     requested: Boolean(request.premium) && !useByok,
@@ -1150,6 +1182,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   let retried = false;
 
+  /**
+   * The live provider-level activity, for the liveness panel only (`agent/heartbeat.ts`).
+   *
+   * Never billing, never context — a display fact. It is a plain `let` read through a getter on the
+   * handle rather than pushed at the heartbeat, because the heartbeat wrapper is installed OUTSIDE
+   * this function (in `api.agent.ts`, around `textStream`) and therefore cannot see the retry loop
+   * that runs inside it. That invisibility is exactly why the panel reported "Thinking" through four
+   * minutes of provider retries.
+   */
+  let activityState: AgentActivitySnapshot | null = null;
+
   /*
    * Where the wall-clock actually goes (§4.2).
    *
@@ -1470,6 +1513,19 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           }
 
           retried = true;
+
+          /*
+           * Tell the liveness panel this is a RETRY, not a think (`heartbeat.ts` `AgentStatusActivity`).
+           * Recorded here — where the fact is actually known — and read by the heartbeat at tick time;
+           * `since` makes it self-clearing the moment the next attempt streams anything.
+           */
+          activityState = {
+            activity: 'retrying',
+            attempt: attempt + 1,
+            maxAttempts: MAX_PROVIDER_RETRY_ATTEMPTS,
+            since: Date.now(),
+          };
+
           logger.warn(
             `Generation ${generationId} retry ${attempt + 1}/${MAX_PROVIDER_RETRY_ATTEMPTS} after a provider failure: ${(error as Error)?.message}`,
           );
@@ -1708,6 +1764,20 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         provider: config.provider,
         usage: totals,
         byok: useByok,
+
+        /*
+         * FLAT creation pricing (§4.6, `creationFlatCredits`): a COMPLETED creation charges exactly
+         * the flat price (a failed one too — the auto-refund below hands it straight back, same as
+         * today); a STOPPED creation instead CAPS the cost-derived charge at the flat price — §4.12
+         * bills what was consumed, and the advertised price is the ceiling, so a user never pays more
+         * than the flat price for less than a creation. `creationFlatCredits` is 0 for non-creation
+         * turns, BYOK, and when the operator disabled flat pricing — all byte-identical to before.
+         */
+        ...(creationFlatCredits > 0
+          ? request.abortSignal?.aborted
+            ? { maxCredits: creationFlatCredits }
+            : { flatCredits: creationFlatCredits }
+          : {}),
         context: request.context,
       });
 
@@ -1857,6 +1927,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     blocksLoaded: blocks.map((b) => b.id),
     historyStats,
     discussMode: discussNote !== null,
+
+    /**
+     * What is happening to the REQUEST right now, for the liveness panel. A getter, not a value: the
+     * route reads it on every heartbeat tick, long after this object was built.
+     */
+    currentActivity: () => activityState,
 
     /*
      * The turn's identity for the liveness panel — facts, in the same precedence the effort policy

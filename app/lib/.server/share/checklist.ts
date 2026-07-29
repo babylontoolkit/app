@@ -25,6 +25,7 @@
  * Pure and exhaustively tested, because it is the last thing standing between a user's API key and a
  * public URL, and because it must run identically on the pre-share preview and on the publish itself.
  */
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { ChecklistFinding } from '~/types/share';
 
@@ -86,9 +87,16 @@ function textFiles(files: SerializedFileMap): Array<[string, string]> {
   return out;
 }
 
-/** Normalise `/home/project/src/x.ts` → `src/x.ts` so rules read the same however the map was built. */
+/**
+ * Normalise `<sandbox root>/src/x.ts` → `src/x.ts` so rules read the same however the map was built.
+ *
+ * Through `toProjectRelativePath` (every provider root, one rule) rather than the `home/project`-only
+ * regex this replaces. That regex left `project/workspace/`-prefixed keys intact; today's secret
+ * rules survive that only because they anchor on `(^|\/)`, so the miss is invisible — and the first
+ * root-anchored rule anyone adds would break silently on one provider and pass on the other.
+ */
 function relative(path: string): string {
-  return path.replace(/^\/?(home\/project\/)?/, '').replace(/^\/+/, '');
+  return toProjectRelativePath(path);
 }
 
 /**

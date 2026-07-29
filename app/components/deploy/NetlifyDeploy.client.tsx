@@ -4,11 +4,13 @@ import { netlifyConnection } from '~/lib/stores/netlify';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { sandbox } from '~/lib/sandbox';
 import { path } from '~/utils/path';
+import { buildOutputCandidates } from '~/lib/sandbox/build-output';
 import { useState } from 'react';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import { formatBuildFailureOutput } from './deployUtils';
 import { bytesToBase64, isBinaryPath, type DeployFile } from '~/lib/binary/binary-files';
+import { publishReadinessNow } from '~/lib/chat/publish-readiness';
 
 export function useNetlifyDeploy() {
   const [isDeploying, setIsDeploying] = useState(false);
@@ -16,6 +18,14 @@ export function useNetlifyDeploy() {
   const currentChatId = useStore(chatId);
 
   const handleNetlifyDeploy = async () => {
+    // Refuse to build while a generation is streaming or file actions are still applying (T17).
+    const readiness = await publishReadinessNow();
+
+    if (!readiness.ready) {
+      toast.warn(readiness.reason);
+      return false;
+    }
+
     if (!netlifyConn.user || !netlifyConn.token) {
       toast.error('Please connect to Netlify first in the settings tab!');
       return false;
@@ -84,16 +94,18 @@ export function useNetlifyDeploy() {
       // Get the build files
       const container = await sandbox;
 
-      // Remove /home/project from buildPath if it exists
-      const buildPath = buildOutput.path.replace('/home/project', '');
-
-      console.log('Original buildPath', buildPath);
+      /*
+       * The detected build directory, rebased onto the seam's workdir-relative contract.
+       *
+       * `toProjectRelativePath` knows every provider root (`sandbox-paths.ts`); the `/home/project`
+       * literal this replaces was a NO-OP anywhere else, leaving an absolute path that no `readdir`
+       * could resolve — so the detected directory was silently discarded and the deploy fell through
+       * to the guesses below, which cannot be right for a project with a custom `outDir`.
+       */
+      const commonOutputDirs = buildOutputCandidates(buildOutput.path, { includeFrameworkDirs: true });
 
       // Check if the build path exists
-      let finalBuildPath = buildPath;
-
-      // List of common output directories to check if the specified build path doesn't exist
-      const commonOutputDirs = [buildPath, '/dist', '/build', '/out', '/output', '/.next', '/public'];
+      let finalBuildPath = commonOutputDirs[0];
 
       // Verify the build path exists, or try to find an alternative
       let buildPathExists = false;

@@ -387,6 +387,21 @@ describe('nudges are milestone-based', () => {
   it('asks again at the NEXT milestone — five more things have happened since', () => {
     expect(nudge({ generationCount: 10, firstToastShown: true, bannerDismissedAtCount: 5 })).toBe('banner');
   });
+
+  /**
+   * 🔴 T17 (2026-07-28). A creation checkpoints after its first machine-written message, so
+   * `generationCount` reaches 1 while the build is still applying — and the "not saved" toast fired
+   * over a half-built project. Mid-work, every nudge waits.
+   */
+  it('says NOTHING while a generation is still applying, even at a toast-worthy moment', () => {
+    expect(nudge({ generationCount: 1, applying: true })).toBe('none');
+    expect(nudge({ generationCount: 5, firstToastShown: true, applying: true })).toBe('none');
+  });
+
+  it('nudges as before once applying is false', () => {
+    expect(nudge({ generationCount: 1, applying: false })).toBe('toast');
+    expect(nudge({ generationCount: 5, firstToastShown: true, applying: false })).toBe('banner');
+  });
 });
 
 describe('the beforeunload warning', () => {

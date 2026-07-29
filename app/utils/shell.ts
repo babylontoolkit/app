@@ -31,39 +31,43 @@ export async function newShellProcess(sandbox: SandboxProvider, terminal: ITermi
   const readyOsc = sandbox.shell.readyOsc;
 
   let isInteractive = false;
-  output.pipeTo(
-    new WritableStream({
-      write(data) {
-        if (!isInteractive) {
-          // Every signal in the chunk — a readiness marker can share one write with an exit report.
-          if (!readyOsc || scanOscSignals(data).signals.some((signal) => signal.code === readyOsc)) {
-            isInteractive = true;
-            jshReady.resolve();
+  output
+    .pipeTo(
+      new WritableStream({
+        write(data) {
+          if (!isInteractive) {
+            // Every signal in the chunk — a readiness marker can share one write with an exit report.
+            if (!readyOsc || scanOscSignals(data).signals.some((signal) => signal.code === readyOsc)) {
+              isInteractive = true;
+              jshReady.resolve();
+            }
           }
-        }
 
-        terminal.write(data);
+          terminal.write(data);
 
-        // Capture terminal output for debugging
-        try {
-          import('~/utils/debugLogger')
-            .then(({ captureTerminalLog }) => {
-              // Clean the data by removing ANSI escape sequences for logging
-              const cleanData = data.replace(/\x1b\[[0-9;]*[mG]/g, '').trim();
+          // Capture terminal output for debugging
+          try {
+            import('~/utils/debugLogger')
+              .then(({ captureTerminalLog }) => {
+                // Clean the data by removing ANSI escape sequences for logging
+                const cleanData = data.replace(/\x1b\[[0-9;]*[mG]/g, '').trim();
 
-              if (cleanData) {
-                captureTerminalLog(cleanData, 'output');
-              }
-            })
-            .catch(() => {
-              // Ignore if debug logger is not available
-            });
-        } catch {
-          // Ignore errors in debug logging
-        }
-      },
-    }),
-  );
+                if (cleanData) {
+                  captureTerminalLog(cleanData, 'output');
+                }
+              })
+              .catch(() => {
+                // Ignore if debug logger is not available
+              });
+          } catch {
+            // Ignore errors in debug logging
+          }
+        },
+      }),
+    )
+    .catch(() => {
+      // Same reason as `newBoltShellProcess`: a floating pipe must not leak an unhandled rejection.
+    });
 
   terminal.onData((data) => {
     // console.log('terminal onData', { data, isInteractive });
@@ -248,6 +252,23 @@ function retainPartialOsc(tail: string): string {
   return '';
 }
 
+/**
+ * One registered OSC wait, as the demultiplexer sees it.
+ *
+ * The state machine is `reduceOscSignals` (pure, pinned); this is just the bookkeeping around it —
+ * what the wait is for, what it has collected, and how to answer it.
+ */
+interface OscWaiter {
+  waitCode: string;
+  afterOsc?: string;
+  state: OscWaitState;
+  output: string;
+  resolve: (result: { output: string; exitCode: number }) => void;
+
+  /** A stream error reaches the CALLER through this — see `#pumpOutput`'s catch. */
+  reject: (error: Error) => void;
+}
+
 export class BoltShell {
   #initialized: (() => void) | undefined;
   #readyPromise: Promise<void>;
@@ -259,6 +280,27 @@ export class BoltShell {
   >();
   #outputStream: ReadableStreamDefaultReader<string> | undefined;
   #shellInputStream: WritableStreamDefaultWriter<string> | undefined;
+
+  /**
+   * Every OSC wait currently in flight. See {@link waitTillOscCode} for why there can be more than
+   * one, and why they must not each read the stream.
+   */
+  #waiters = new Set<OscWaiter>();
+
+  /** Only one read loop may exist, or the waiters race again through a second door. */
+  #pumping = false;
+
+  /**
+   * Bytes from the previous chunk that could still complete into an OSC sequence.
+   *
+   * On the pump rather than per-wait: a PTY splits its writes wherever it likes, and a signal lost to
+   * a chunk boundary hangs a wait exactly as a missed one does — including when the boundary falls
+   * between two different waits, which a per-wait carry could not see.
+   */
+  #oscCarry = '';
+
+  /** Accumulates output only so an `exp://` URL split across chunks still matches. */
+  #expoBuffer = '';
 
   constructor() {
     this.#readyPromise = new Promise((resolve) => {
@@ -279,8 +321,17 @@ export class BoltShell {
     this.#process = process;
     this.#outputStream = commandStream.getReader();
 
-    // Start background Expo URL watcher immediately
-    this._watchExpoUrlInBackground(expoUrlStream);
+    /*
+     * Start background Expo URL watcher immediately.
+     *
+     * The `catch` is not decoration: when the PTY stream ERRORS, this loop's `read()` rejects and —
+     * being a floating promise — the rejection escapes as an unhandled rejection (a page-level error
+     * event in the browser, noise in monitoring). The failure has a proper home now: `#pumpOutput`
+     * hands it to every pending wait. A URL watcher has nowhere to report it and nothing to do.
+     */
+    void this._watchExpoUrlInBackground(expoUrlStream).catch(() => {
+      // Nothing to do: the wait that CARES about this failure has already been rejected with it.
+    });
 
     /*
      * Only wait for a readiness marker on a shell that HAS one. `newBoltShellProcess` has already
@@ -315,24 +366,32 @@ export class BoltShell {
     const jshReady = withResolvers<void>();
     const readyOsc = sandbox.shell.readyOsc;
     let isInteractive = false;
-    streamA.pipeTo(
-      new WritableStream({
-        write(data) {
-          if (!isInteractive) {
-            /*
-             * No marker (a real PTY) means ready on first output — see `newShellProcess`. Every
-             * signal in the chunk, for the reason `scanOscSignals` documents.
-             */
-            if (!readyOsc || scanOscSignals(data).signals.some((signal) => signal.code === readyOsc)) {
-              isInteractive = true;
-              jshReady.resolve();
+    streamA
+      .pipeTo(
+        new WritableStream({
+          write(data) {
+            if (!isInteractive) {
+              /*
+               * No marker (a real PTY) means ready on first output — see `newShellProcess`. Every
+               * signal in the chunk, for the reason `scanOscSignals` documents.
+               */
+              if (!readyOsc || scanOscSignals(data).signals.some((signal) => signal.code === readyOsc)) {
+                isInteractive = true;
+                jshReady.resolve();
+              }
             }
-          }
 
-          terminal.write(data);
-        },
-      }),
-    );
+            terminal.write(data);
+          },
+        }),
+      )
+      .catch(() => {
+        /*
+         * A dead PTY stops mirroring to the terminal, which is all this pipe does. Without the catch
+         * the rejection is unhandled (the pipe is a floating promise) — and the real failure is
+         * already reported where it matters: `#pumpOutput` rejects every pending wait with it.
+         */
+      });
 
     terminal.onData((data) => {
       if (isInteractive) {
@@ -441,84 +500,158 @@ export class BoltShell {
 
   onQRCodeDetected?: (qrCode: string) => void;
 
-  async waitTillOscCode(waitCode: string, afterOsc?: string) {
-    let fullOutput = '';
-    let buffer = ''; // <-- Add a buffer to accumulate output
-
-    /*
-     * `afterOsc` (the shell's begin marker) arms the wait: signals seen before it are a PREVIOUS
-     * command's leftovers and must not satisfy this one. Without a marker the state starts armed —
-     * the jsh behaviour, unchanged. Accounting is `reduceOscSignals`, pure and pinned.
-     */
-    let state: OscWaitState = { armed: afterOsc === undefined, exitCode: 0, done: false };
-
+  /**
+   * Wait for an OSC code, sharing ONE stream reader with every other wait in flight.
+   *
+   * 🔴 **Two waits genuinely coexist**, and before the demultiplexer they raced: `executeCommand`
+   * interrupts and waits for `prompt` while a parked start action is still waiting for `exit`. Each
+   * had its own read loop over the SAME reader, and a `read()` hands a chunk to exactly one of them —
+   * so when bash emits `exit`+`prompt` in a single chunk (the measured Ctrl-C shape), whichever loop
+   * received it consumed BOTH signals and the other starved forever. The live creations only worked
+   * because stale attach-draw markers happened to backfill the loser — a balance that depends on
+   * where the PTY chose to split its writes.
+   *
+   * Now the pump reads once and routes every signal in a chunk to every registered waiter.
+   */
+  async waitTillOscCode(waitCode: string, afterOsc?: string): Promise<{ output: string; exitCode: number }> {
     if (!this.#outputStream) {
-      return { output: fullOutput, exitCode: state.exitCode };
+      return { output: '', exitCode: 0 };
     }
 
-    const tappedStream = this.#outputStream;
+    return new Promise<{ output: string; exitCode: number }>((resolve, reject) => {
+      this.#waiters.add({
+        waitCode,
+        afterOsc,
 
-    // Regex for Expo URL
-    const expoUrlRegex = /(exp:\/\/[^\s]+)/;
+        /*
+         * `afterOsc` (the shell's begin marker) arms the wait: signals seen before it are a PREVIOUS
+         * command's leftovers and must not satisfy this one. Without a marker the state starts armed —
+         * the jsh behaviour, unchanged. Accounting is `reduceOscSignals`, pure and pinned.
+         */
+        state: { armed: afterOsc === undefined, exitCode: 0, done: false },
+        output: '',
+        resolve,
+        reject,
+      });
+
+      void this.#pumpOutput();
+    });
+  }
+
+  /**
+   * The single reader over the command stream: runs while anything is waiting, stops when nothing is.
+   *
+   * It stops rather than draining continuously on purpose. With no waiter registered there is nobody
+   * to hand a signal to, and DROPPING one would be worse than leaving it in the stream — a marker
+   * arriving in the gap between "the prompt wait resolved" and "the exit wait registered" is exactly
+   * the completion `executeCommand` is about to wait for. Leaving it buffered preserves the
+   * pre-demultiplexer behaviour, which `beginOsc` arming already makes safe against staleness.
+   */
+  async #pumpOutput(): Promise<void> {
+    if (this.#pumping || !this.#outputStream) {
+      return;
+    }
+
+    this.#pumping = true;
+
+    const reader = this.#outputStream;
+
+    try {
+      while (this.#waiters.size > 0) {
+        const { value, done } = await reader.read();
+
+        if (done) {
+          // The shell is gone: every wait resolves with what it has rather than hanging forever.
+          for (const waiter of [...this.#waiters]) {
+            this.#finishWaiter(waiter);
+          }
+
+          return;
+        }
+
+        this.#dispatchChunk(value || '');
+      }
+    } catch (error) {
+      /*
+       * 🔴 A stream ERROR must reach the waits, or the demultiplexer turns a loud failure into a
+       * silent one. Before the pump, `read()` was awaited inside the caller's own promise, so a
+       * rejection rejected the caller; with one shared loop the rejection has nowhere to go — it
+       * escapes as an unhandled rejection while every wait parks forever. Rejecting keeps the
+       * pre-change contract: fail loud, at the call site that was waiting.
+       */
+      for (const waiter of [...this.#waiters]) {
+        this.#waiters.delete(waiter);
+        waiter.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    } finally {
+      this.#pumping = false;
+    }
+  }
+
+  /** Route one chunk's text and OSC signals to every waiter still pending. */
+  #dispatchChunk(text: string) {
+    this.#captureExpoUrl(text);
 
     /*
-     * Bytes from the previous chunk that could still complete into an OSC sequence. See
-     * `scanOscSignals` — a PTY splits its writes wherever it likes, and a signal lost to a chunk
-     * boundary hangs this loop exactly as a missed one does.
+     * EVERY signal in the chunk, in order — not just the first. A single `PROMPT_COMMAND` emits
+     * `exit=0:<n>` and `prompt` back to back, so they land together and reading only the first made
+     * the wait for `prompt` unsatisfiable. See `scanOscSignals` for the measured bytes.
+     *
+     * The carry lives on the PUMP, so an OSC sequence split across a chunk boundary survives even
+     * when that boundary falls between two waits — a per-wait carry dropped it silently.
      */
-    let oscCarry = '';
+    const { signals, rest } = scanOscSignals(this.#oscCarry + text);
+    this.#oscCarry = rest;
 
-    while (true) {
-      const { value, done } = await tappedStream.read();
+    for (const waiter of [...this.#waiters]) {
+      waiter.output += text;
 
-      if (done) {
-        break;
-      }
-
-      const text = value || '';
-      fullOutput += text;
-      buffer += text; // <-- Accumulate in buffer
-
-      // Extract Expo URL from buffer and set store
-      const expoUrlMatch = buffer.match(expoUrlRegex);
-
-      if (expoUrlMatch) {
-        // Remove any trailing ANSI escape codes or non-printable characters
-        const cleanUrl = expoUrlMatch[1]
-          .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
-          .replace(/[^\x20-\x7E]+$/g, '');
-        expoUrlAtom.set(cleanUrl);
-
-        // Remove everything up to and including the URL from the buffer to avoid duplicate matches
-        buffer = buffer.slice(buffer.indexOf(expoUrlMatch[1]) + expoUrlMatch[1].length);
-      }
-
-      /*
-       * EVERY signal in the chunk, in order — not just the first. A single `PROMPT_COMMAND` emits
-       * `exit=0:<n>` and `prompt` back to back, so they land together and reading only the first made
-       * the wait for `prompt` unsatisfiable. See `scanOscSignals` for the measured bytes.
-       */
-      const { signals, rest } = scanOscSignals(oscCarry + text);
-      oscCarry = rest;
-
-      const wasArmed = state.armed;
-      state = reduceOscSignals(state, signals, waitCode, afterOsc);
+      const wasArmed = waiter.state.armed;
+      waiter.state = reduceOscSignals(waiter.state, signals, waiter.waitCode, waiter.afterOsc);
 
       /*
        * The output before the begin marker is the previous command's tail (its `^C`, its prompt) —
        * reporting it as OURS is how the start action's error came to read "npm install ^C". Coarse
        * (chunk-granular) on purpose: this feeds error messages, not parsing.
        */
-      if (!wasArmed && state.armed) {
-        fullOutput = text;
+      if (!wasArmed && waiter.state.armed) {
+        waiter.output = text;
       }
 
-      if (state.done) {
-        break;
+      if (waiter.state.done) {
+        this.#finishWaiter(waiter);
       }
     }
+  }
 
-    return { output: fullOutput, exitCode: state.exitCode };
+  #finishWaiter(waiter: OscWaiter) {
+    this.#waiters.delete(waiter);
+    waiter.resolve({ output: waiter.output, exitCode: waiter.state.exitCode });
+  }
+
+  /** Expo URL detection, once per chunk on the pump — it used to be per-wait, i.e. missed or doubled. */
+  #captureExpoUrl(text: string) {
+    this.#expoBuffer += text;
+
+    const expoUrlMatch = this.#expoBuffer.match(/(exp:\/\/[^\s]+)/);
+
+    if (!expoUrlMatch) {
+      // Bounded: this buffer exists only so a URL split across chunks still matches.
+      if (this.#expoBuffer.length > 2048) {
+        this.#expoBuffer = this.#expoBuffer.slice(-2048);
+      }
+
+      return;
+    }
+
+    // Remove any trailing ANSI escape codes or non-printable characters
+    const cleanUrl = expoUrlMatch[1]
+      .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
+      .replace(/[^\x20-\x7E]+$/g, '');
+    expoUrlAtom.set(cleanUrl);
+
+    // Remove everything up to and including the URL from the buffer to avoid duplicate matches
+    this.#expoBuffer = this.#expoBuffer.slice(this.#expoBuffer.indexOf(expoUrlMatch[1]) + expoUrlMatch[1].length);
   }
 }
 

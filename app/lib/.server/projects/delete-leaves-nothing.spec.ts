@@ -35,6 +35,31 @@ vi.mock('~/lib/.server/supabase/auth', async (importOriginal) => ({
   requireUser: async () => USER,
 }));
 
+/**
+ * The sandbox reaper is mocked, not driven: `~/lib/.server/sandbox/service` imports `@codesandbox/sdk`
+ * at module scope, so an unmocked route import drags the vendor SDK (and its API-key requirement) into
+ * a test about object storage. What matters here is the CALL — that the VM is reaped, exactly once,
+ * with the id the row carried, before the row that names it is gone.
+ */
+const deleteSandbox = vi.fn<(sandboxId: string, context?: unknown) => Promise<void>>();
+
+vi.mock('~/lib/.server/sandbox/service', () => ({
+  deleteSandbox: (...args: [string, unknown?]) => deleteSandbox(...args),
+}));
+
+/** The monitor is stubbed so the best-effort failure path can be asserted as REPORTED, not swallowed. */
+const captureException = vi.fn();
+
+vi.mock('~/lib/.server/monitoring', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  getMonitor: () => ({
+    captureException,
+    captureMessage: vi.fn(),
+    alert: vi.fn(),
+    track: vi.fn(),
+  }),
+}));
+
 let tmp: string;
 let objects: FsObjectStore;
 let projects: FsProjectStore;
@@ -42,6 +67,10 @@ let mine: Project;
 let theirs: Project;
 
 beforeEach(async () => {
+  deleteSandbox.mockReset();
+  deleteSandbox.mockResolvedValue(undefined);
+  captureException.mockReset();
+
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'project-delete-'));
   objects = new FsObjectStore(path.join(tmp, 'objects'));
   projects = new FsProjectStore(path.join(tmp, 'projects'));
@@ -135,6 +164,75 @@ describe('deleting a project leaves nothing behind', () => {
     await deleteProject(mine.id);
 
     expect(await objects.get(workingCopyKey(mine.id))).toBeNull();
+  });
+
+  /*
+   * The VM (migration 0013, plan T4). Same orphan rule as the bytes above, with money attached: the
+   * sandbox id lives ONLY on this row, so a delete that skips the reap leaves a machine billing by the
+   * second that nothing in the product can name. The legacy per-user registry already produced a fleet
+   * of exactly these (`scripts/sweep-legacy-sandboxes.mjs`); this is what stops the delete path from
+   * making more.
+   */
+  it('deletes the project’s sandbox when the row carries one', async () => {
+    await projects.update(mine.id, { sandboxId: 'sbx_mine' });
+
+    await deleteProject(mine.id);
+
+    expect(deleteSandbox).toHaveBeenCalledTimes(1);
+    expect(deleteSandbox.mock.calls[0][0]).toBe('sbx_mine');
+  });
+
+  /**
+   * The common case — a WebContainer or local build, where no VM was ever created. A provider call on
+   * a project with no sandbox is not merely wasted: `deleteSandbox` requires the API key, so on a build
+   * with none configured it would THROW on every delete.
+   */
+  it('never calls the provider when there is no sandbox', async () => {
+    await deleteProject(mine.id);
+
+    expect(deleteSandbox).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 🔴 Ordering, not tidiness: the row is the only thing that names the VM. Reap after the row is gone
+   * and a failure in `store.delete` — or a crash between the two — strands a billing machine with
+   * nothing left that can address it, which is the exact failure this whole file is about. Asserted by
+   * READING the store from inside the provider call rather than by call order, because "the row still
+   * exists at that moment" is the property; the sequence of two statements is only how it is achieved.
+   */
+  it('reaps the sandbox BEFORE deleting the row that names it', async () => {
+    await projects.update(mine.id, { sandboxId: 'sbx_mine' });
+
+    let rowAtReapTime: Project | null = null;
+
+    deleteSandbox.mockImplementation(async () => {
+      rowAtReapTime = await projects.get(mine.id);
+    });
+
+    await deleteProject(mine.id);
+
+    expect(rowAtReapTime).not.toBeNull();
+    expect(await projects.get(mine.id)).toBeNull();
+  });
+
+  /**
+   * Best-effort, per `deleteSandbox`'s own contract: a provider outage must not make a project
+   * undeletable — the user pressed Delete, and refusing would hold their project hostage to a vendor.
+   * But best-effort is not silent: an orphan VM is a bill nobody sees, so the failure is REPORTED.
+   */
+  it('still deletes the project when the provider fails, and reports the failure', async () => {
+    await projects.update(mine.id, { sandboxId: 'sbx_mine' });
+    deleteSandbox.mockRejectedValue(new Error('provider is down'));
+
+    const response = await deleteProject(mine.id);
+
+    expect(response.status).toBe(200);
+    expect(await projects.get(mine.id)).toBeNull();
+    expect(captureException).toHaveBeenCalledTimes(1);
+    expect((captureException.mock.calls[0][0] as Error).message).toBe('provider is down');
+    expect(captureException.mock.calls[0][1]).toMatchObject({
+      tags: { projectId: mine.id, sandboxId: 'sbx_mine' },
+    });
   });
 
   it('deletes the project row', async () => {

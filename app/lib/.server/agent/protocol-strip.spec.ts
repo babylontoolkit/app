@@ -106,3 +106,43 @@ describe('ProtocolTagStreamFilter — streaming contract', () => {
     expect(f.flush()).toBe('</param');
   });
 });
+
+describe('function_results (added 2026-07-28 — leaked into a live project as a Vite parse error)', () => {
+  /*
+   * Measured on a real creation: the model emitted `</function_results>Wait, I made an error in my
+   * artifact format. Let me re-emit the artifact correctly.` inside a streamed file body, and the
+   * fragment landed VERBATIM at src/pages/Home.tsx:73 — a hard parse error in a user's project. The
+   * tag was missing from TAG_NAMES; this pins it, including the exact live payload.
+   */
+  it('strips the exact live leak, keeping the surrounding text', () => {
+    const filter = new ProtocolTagStreamFilter();
+    const out =
+      filter.push('export default Home;\n</function_results>Wait, I made an error in my artifact format.') +
+      filter.flush();
+
+    expect(out).toBe('export default Home;\nWait, I made an error in my artifact format.');
+  });
+
+  it('strips open + close, bare + antml-prefixed', () => {
+    const filter = new ProtocolTagStreamFilter();
+    const out = filter.push('a<function_results>b</function_results>c') + filter.flush();
+
+    expect(out).toBe('abc');
+  });
+
+  it('holds back a split tag across deltas and drops it once complete (single-push assertions)', () => {
+    const filter = new ProtocolTagStreamFilter();
+    const first = filter.push('score</function_res');
+
+    // The withheld text is bounded by the opener length — everything before the candidate is forwarded.
+    expect(first).toBe('score');
+    expect(filter.push('ults>done') + filter.flush()).toBe('done');
+  });
+
+  it('leaves a non-protocol tag that shares the prefix byte-identical', () => {
+    const filter = new ProtocolTagStreamFilter();
+    const out = filter.push('<function_results_view>x</function_results_view>') + filter.flush();
+
+    expect(out).toBe('<function_results_view>x</function_results_view>');
+  });
+});

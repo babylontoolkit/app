@@ -12,7 +12,12 @@ import { toWireProject } from '~/lib/.server/projects/wire';
 import { deleteMessages } from '~/lib/.server/projects/message-store';
 import { deleteRemixSeed } from '~/lib/.server/share/seed-store';
 import { deleteWorkingCopy } from '~/lib/.server/projects/working-copy';
+import { deleteSandbox } from '~/lib/.server/sandbox/service';
+import { getMonitor } from '~/lib/.server/monitoring';
 import { errorResponse } from '~/lib/.server/http';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('api.projects.$projectId');
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
   try {
@@ -58,6 +63,34 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
        * it holds the user's whole game, so leaving it behind is the worst version of that orphan.
        */
       await deleteWorkingCopy(project.id, context);
+
+      /*
+       * The project's VM (migration 0013). Same orphan rule as the bytes above, with money attached:
+       * the sandbox id lives ONLY on this row, so deleting the row without reaping the VM leaves a
+       * machine that bills by the second and that no panel we have can name. That is the exact
+       * "bytes outliving the record that named them" failure the rest of this branch exists to
+       * prevent — the legacy per-user registry produced a fleet of them, which is what
+       * `scripts/sweep-legacy-sandboxes.mjs` is for.
+       *
+       * Best-effort, per `deleteSandbox`'s own contract: a provider outage must not make a project
+       * undeletable, and the user pressed Delete. But NOT swallowed — an orphan is a bill nobody
+       * sees, so the failure is logged AND monitored (§5A) rather than caught into silence.
+       */
+      if (project.sandboxId) {
+        try {
+          await deleteSandbox(project.sandboxId, context, { userId: user.id, projectId: project.id });
+        } catch (error) {
+          logger.warn(
+            `Could not delete sandbox ${project.sandboxId} for project ${project.id}: ${(error as Error)?.message}`,
+          );
+          getMonitor(context).captureException(error, {
+            scope: 'sandbox.delete-project',
+            userId: user.id,
+            tags: { projectId: project.id, sandboxId: project.sandboxId },
+          });
+        }
+      }
+
       await store.delete(project.id);
 
       return json({ ok: true });

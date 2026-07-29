@@ -23,6 +23,7 @@
  *      can be recovered by reading the file is recovered in the adapter; what cannot is documented
  *      in {@link translateWatchEvent} rather than guessed at.
  */
+import { isSandboxAbsolutePath, toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { SandboxFileTree, SandboxWatchEvent } from './types';
 
 /** One entry as `FileSystem.batchWrite` wants it: a workspace-RELATIVE path. */
@@ -46,9 +47,25 @@ export interface CodeSandboxWatchEvent {
  * answer: a legitimate caller never needs `..`, so the check costs nothing and closes the hole.
  *
  * `.` and `''` mean the workdir itself — `FilesStore.refreshFiles` walks with `readdir(relDir || '.')`.
+ *
+ * 🔴 **An ALREADY-workdir-absolute path comes back unchanged, and that is a fix, not a convenience.**
+ * The seam is documented as workdir-relative, but real callers hand it absolutes — `action-runner`'s
+ * build-directory probe joins `sandbox.workdir` itself before calling `fs.readdir`. Blindly prefixing
+ * turned `/project/workspace/dist` into `/project/workspace/project/workspace/dist`, so every probe
+ * candidate threw and the probe became dead code on this provider: publish worked only because
+ * `useShareGame`'s fallback list happens to contain `'/dist'`, and a project with a custom `outDir`
+ * published nothing. Nothing errored — the throw was inside the probe's own `try`, which reads as
+ * "that directory does not exist".
+ *
+ * The rebase goes through `toProjectRelativePath`, the ONE definition of "strip the sandbox root"
+ * (`app/lib/common/sandbox-paths.ts`), so a map written under a DIFFERENT provider's root also lands
+ * correctly rather than under `/project/workspace/home/project/…`. Only a genuinely root-prefixed
+ * path is rebased; an ordinary relative path is untouched, so a project may still contain a directory
+ * literally named `home/project`.
  */
 export function resolveInWorkdir(workdir: string, relativePath: string): string {
-  const clean = stripLeadingSlashes(relativePath.trim());
+  const trimmed = relativePath.trim();
+  const clean = isSandboxAbsolutePath(trimmed) ? toProjectRelativePath(trimmed) : stripLeadingSlashes(trimmed);
 
   if (clean === '' || clean === '.') {
     return workdir;
@@ -57,6 +74,92 @@ export function resolveInWorkdir(workdir: string, relativePath: string): string 
   assertNoTraversal(clean);
 
   return `${stripTrailingSlashes(workdir)}/${clean}`;
+}
+
+/**
+ * Put every path on a watch event into workdir-absolute form.
+ *
+ * The watch leg is the one path story with no normalization and, until now, no test: the SDK is
+ * OBSERVED to emit absolute paths, the enrichment read (`client.fs.readFile`) passes them straight
+ * through, and `FilesStore` keys its map by them. If a future SDK version emitted workspace-relative
+ * paths instead, the read would fail (classifying every added file as a directory) and the map would
+ * gain a second, relative key for a file it already holds — no error, two entries, and a working copy
+ * that serializes both.
+ *
+ * Normalizing ONCE here, before enrichment, keeps the read and the map key the same string by
+ * construction. A path that cannot be normalized (a traversal — meaningless in an event) is passed
+ * through unchanged rather than dropped: this leg only observes, and losing an event silently is the
+ * worse failure of the two.
+ */
+export function normalizeWatchEventPaths(workdir: string, event: CodeSandboxWatchEvent): CodeSandboxWatchEvent {
+  return {
+    ...event,
+    paths: event.paths.map((path) => {
+      try {
+        return resolveInWorkdir(workdir, path);
+      } catch {
+        return path;
+      }
+    }),
+  };
+}
+
+/**
+ * Is this error the provider saying "that path is not there"?
+ *
+ * `fs.rm({ force: true })` means "absent is fine" and NOTHING else. It shipped swallowing every
+ * error, so a permission problem or a dropped connection resolved as a successful delete: the file
+ * map loses the entry, the disk keeps the file, and the divergence surfaces later as an export or a
+ * push containing a file the user deleted. Classify, so only the one intended case is quiet.
+ *
+ * ⚠️ **On the real provider the MESSAGE is all there is**, and saying otherwise in this comment would
+ * be the false-claim-in-a-doc-comment failure the shell-strip defect survived review by. The SDK
+ * throws ``new Error(`${errno}: ${error}`)`` — a plain `Error`, no `code`, no `kind` — where `error`
+ * is a Rust `std::io::Error` stringified as `Os { code: 2, kind: NotFound, message: "No such file or
+ * directory" }` (MEASURED: the same shape produced `21: Os { code: 21, kind: IsADirectory, … }` live).
+ * So the `errno` prefix and the message are the load-bearing checks; the typed `code`/`kind` are kept
+ * as defense for any wrapper that does throw a `node:fs`-shaped error.
+ */
+export function isMissingPathError(error: unknown): boolean {
+  const candidate = error as { code?: unknown; kind?: unknown; message?: unknown } | null | undefined;
+
+  if (candidate?.code === 'ENOENT' || candidate?.code === 2 || candidate?.kind === 'NotFound') {
+    return true;
+  }
+
+  const message = typeof candidate?.message === 'string' ? candidate.message : String(error ?? '');
+
+  /*
+   * `2:` is the SDK's own `errno` prefix and errno 2 IS ENOENT, so no other error can prefix-match it.
+   *
+   * ⚠️ The phrase list is deliberately NARROW. A bare `not found` also matches `null: Sandbox not
+   * found` — what the SDK throws when the VM is gone (an HTTP 404 through its REST-backed client,
+   * where `errno` is null) — and swallowing THAT is exactly the "a dead connection reported as a
+   * successful delete" this function exists to refuse. Every phrase here must name a PATH being
+   * absent, never a session, a sandbox or a command.
+   */
+  return /^2:\s/.test(message) || /ENOENT|NotFound|no such file or directory|(?:path|file) not found/i.test(message);
+}
+
+/**
+ * Is this error the provider saying "that path is a DIRECTORY, not a file"?
+ *
+ * The sibling of `isMissingPathError`, for the other classified fs answer T17a measured live: a
+ * restore wrote a file entry over a path that is now a directory on disk, and the SDK threw its raw
+ * ``new Error(`21: Os { code: 21, kind: IsADirectory, message: "Is a directory" }`)`` — errno 21 IS
+ * EISDIR, so the prefix check is exact for the same reason `2:` is for ENOENT. The typed `code`/`kind`
+ * checks are kept as defense for any wrapper throwing a `node:fs`-shaped error.
+ */
+export function isDirectoryPathError(error: unknown): boolean {
+  const candidate = error as { code?: unknown; kind?: unknown; message?: unknown } | null | undefined;
+
+  if (candidate?.code === 'EISDIR' || candidate?.code === 21 || candidate?.kind === 'IsADirectory') {
+    return true;
+  }
+
+  const message = typeof candidate?.message === 'string' ? candidate.message : String(error ?? '');
+
+  return /^21:\s/.test(message) || /EISDIR|IsADirectory|is a directory/i.test(message);
 }
 
 /**

@@ -41,6 +41,15 @@ export interface CreditGateInput {
   /** Set only when the server has VERIFIED an active Pro entitlement. Never trusted from the client. */
   byok?: boolean;
 
+  /**
+   * Require at least this many credits instead of merely "more than zero". Set by the proxy for
+   * FLAT-PRICED creation turns (§4.6, `creationFlatCredits`): when the price of the turn is known up
+   * front, letting a 10-credit balance start a 500-credit creation is not the bounded one-generation
+   * overshoot the gate's design accepts — it is a knowable deep negative, refused honestly with the
+   * price in the message. Ordinary turns never set it (their cost is unknowable pre-flight).
+   */
+  minimumCredits?: number;
+
   context?: unknown;
 }
 
@@ -74,6 +83,17 @@ export async function checkCreditGate(input: CreditGateInput): Promise<CreditGat
     };
   }
 
+  const minimum = Math.max(0, Math.floor(input.minimumCredits ?? 0));
+
+  if (minimum > 0 && balance < minimum) {
+    return {
+      allowed: false,
+      mode: 'credits',
+      balance,
+      message: `Creating a new project costs ${minimum} credits and you have ${balance}. Add credits to start it.`,
+    };
+  }
+
   return { allowed: true, mode: 'credits', balance };
 }
 
@@ -95,6 +115,23 @@ export interface SettleInput {
   /** BYOK generations are RECORDED but charged zero (§4.5.4 point 6). */
   byok?: boolean;
 
+  /**
+   * Charge EXACTLY this many credits instead of the cost-derived amount — the FLAT creation price
+   * (§4.6, `creationFlatCredits`). `rawCostUsd` is still computed and recorded unchanged, so the Admin
+   * usage report keeps watching realized margin (flat revenue vs true cost) per creation. Ignored for
+   * BYOK (their key paid) and for a generation that consumed nothing (a nothing-generation must stay
+   * free — flat pricing charges for a creation, not for an instant failure).
+   */
+  flatCredits?: number;
+
+  /**
+   * CAP the cost-derived charge — set for a STOPPED creation turn: §4.12 says bill what was actually
+   * consumed, and the flat price is the advertised ceiling, so a Stop charges min(consumed, flat). A
+   * user must never pay more than the flat price for less than a creation. Mutually exclusive with
+   * `flatCredits` by construction at the call site; if both arrive, the flat price wins.
+   */
+  maxCredits?: number;
+
   context?: unknown;
 }
 
@@ -102,6 +139,45 @@ export interface Settlement {
   creditsCharged: number;
   rawCostUsd: number;
   balanceAfter: number;
+}
+
+/**
+ * What a generation is charged — cost-derived by default, overridden by the flat/cap fields.
+ *
+ * Pure and exported because a wrong answer here is a silent mis-bill in one direction or a silent
+ * giveaway in the other (the same category as `decidePremium` / the auto-repair loop): BYOK is always
+ * zero; a generation that consumed NOTHING is always zero (flat pricing must never turn an instant
+ * failure into a 500-credit debit — the auto-refund would usually mask it, but "usually" is not a
+ * money guarantee); a flat price replaces the formula; a cap bounds it.
+ */
+export function decideCredits(
+  input: Pick<SettleInput, 'usage' | 'model' | 'provider' | 'byok' | 'flatCredits' | 'maxCredits' | 'context'>,
+  config: ReturnType<typeof getBillingConfig>,
+): number {
+  if (input.byok) {
+    return 0;
+  }
+
+  const consumed =
+    input.usage.promptTokens +
+    input.usage.completionTokens +
+    input.usage.cacheReadTokens +
+    input.usage.cacheCreationTokens;
+
+  if (consumed <= 0) {
+    return 0;
+  }
+
+  const flat = Math.floor(input.flatCredits ?? 0);
+
+  if (flat > 0) {
+    return flat;
+  }
+
+  const derived = creditsForUsage(input.usage, input.model, input.provider, config, input.context);
+  const cap = Math.floor(input.maxCredits ?? 0);
+
+  return cap > 0 ? Math.min(derived, cap) : derived;
 }
 
 /**
@@ -125,7 +201,7 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
    * rate limits and analytics, but the user's own key paid the provider, so charging credits as well
    * would be double-billing.
    */
-  const credits = input.byok ? 0 : creditsForUsage(input.usage, input.model, input.provider, config, input.context);
+  const credits = decideCredits(input, config);
 
   /*
    * ⚠️ THE FOREIGN-KEY ANCHOR. This MUST happen before the debit, and it lives here rather than in the
@@ -187,7 +263,14 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
       delta: -credits,
       reason: 'generation',
       generationId: input.generationId,
-      note: `${input.model}: ${input.usage.promptTokens} in / ${input.usage.completionTokens} out`,
+
+      /*
+       * A flat-priced debit says so in the audit trail — a 500-credit row beside a $0.20 raw cost reads
+       * as a mis-bill to anyone reconciling the ledger unless the note names the pricing model.
+       */
+      note:
+        `${input.model}: ${input.usage.promptTokens} in / ${input.usage.completionTokens} out` +
+        (Math.floor(input.flatCredits ?? 0) > 0 && credits > 0 ? ' — flat creation price' : ''),
     });
 
     logger.info(

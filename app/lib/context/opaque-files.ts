@@ -24,10 +24,22 @@
  * project and must reach every egress path (ZIP, GitHub sync, snapshot, share build) intact — the
  * lockfile especially, since a project without it installs non-deterministically.
  */
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { FileMap } from '~/lib/stores/files';
 
-/** Vendor runtime shims: framework-required, read-only, and enormous. */
-const OPAQUE_DIRS = ['public/scripts/'];
+/**
+ * Directories whose contents never reach the model.
+ *
+ *   - `public/scripts/` — vendor runtime shims: framework-required, read-only, and enormous.
+ *   - `.codesandbox/` — the sandbox PROVIDER's own directory (task config, the project-identity
+ *     sentinel). It is excluded at the map layer (`MAP_EXCLUDED_DIRS`), so this is the second wall:
+ *     any ingest path that fills context without going through the map (an import, a restore, a
+ *     future one) still cannot put its BODIES in front of the model — and an edit here is not
+ *     harmless, since deleting `tasks.json` stops the template's dev server from ever starting.
+ *     (As with every opaque file, the model is still told the path EXISTS via a `<boltFile>` marker;
+ *     opaque means "not in the conversation", never "not in the project".)
+ */
+const OPAQUE_DIRS = ['public/scripts/', '.codesandbox/'];
 
 /** Image assets that happen to be text. Their PNG/JPG siblings are already opaque by being binary. */
 const OPAQUE_EXTENSIONS = ['.svg'];
@@ -73,11 +85,19 @@ export function isOpaqueToModel(path: string): boolean {
  * with empty content by the same logic (`spec/binary-files.md`) — this closes the text-shaped hole in
  * the same rule.
  */
-export function stripOpaqueContent(files: FileMap, workdir = '/home/project/'): FileMap {
+export function stripOpaqueContent(files: FileMap): FileMap {
   const stripped: FileMap = {};
 
   for (const [path, dirent] of Object.entries(files)) {
-    const relative = path.startsWith(workdir) ? path.slice(workdir.length) : path;
+    /*
+     * 🔴 Through `toProjectRelativePath`, never a workdir literal. This took a `workdir` parameter
+     * defaulting to `'/home/project/'` and every caller used the default — so under a provider rooted
+     * anywhere else the prefix never matched, `isOpaqueToModel` was asked about an ABSOLUTE path,
+     * every check failed, and the whole strip became a NO-OP: the 218KB lockfile and the vendored
+     * `public/scripts/*` bodies went back to being POSTed on every turn. Nothing threw, and the
+     * server-side strip still protected the model, so the only symptom was a bigger request.
+     */
+    const relative = toProjectRelativePath(path);
 
     if (dirent?.type === 'file' && !dirent.isBinary && dirent.content && isOpaqueToModel(relative)) {
       stripped[path] = { ...dirent, content: '', size: dirent.content.length };

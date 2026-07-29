@@ -26,6 +26,10 @@ import { bytesToBase64, isBinaryPath } from '~/lib/binary/binary-files';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import type { ChecklistFinding } from '~/types/share';
+import { buildOutputCandidates } from '~/lib/sandbox/build-output';
+import { SHARE_BUILD_COMMAND } from '~/lib/runtime/build-command';
+import { streamingState } from '~/lib/stores/streaming';
+import { decidePublishReadiness } from '~/lib/chat/publish-readiness';
 
 export interface PublishOptions {
   title?: string;
@@ -82,7 +86,14 @@ async function readDist(finalBuildPath: string): Promise<SerializedFileMap> {
   return files;
 }
 
-/** Run `npm run build` in the WebContainer and return the output directory, or throw with the log. */
+/**
+ * Run the SHARE build in the sandbox and return the output directory, or throw with the log.
+ *
+ * `SHARE_BUILD_COMMAND` passes `--base=./` on the CLI (T17b): a share is served under `/play/<id>/`,
+ * and the template's `base: "/"` made every published game request `/index.js` at the origin root —
+ * a 404 whose body is the builder's own HTML shell, i.e. a game that publishes fine and never boots.
+ * The CLI flag overrides the project's vite config, so this repairs existing projects too.
+ */
 async function buildProject(): Promise<string> {
   const artifact = workbenchStore.firstArtifact;
 
@@ -95,7 +106,7 @@ async function buildProject(): Promise<string> {
     messageId: 'share build',
     artifactId: artifact.id,
     actionId,
-    action: { type: 'build' as const, content: 'npm run build' },
+    action: { type: 'build' as const, content: SHARE_BUILD_COMMAND },
   };
 
   artifact.runner.addAction(actionData);
@@ -107,11 +118,9 @@ async function buildProject(): Promise<string> {
     throw new Error('The project failed to build. Fix the errors in the editor and try again.');
   }
 
-  // Find the real output directory (Vite → dist), the same way the deploy flow does.
   const container = await sandbox;
-  const candidates = [buildOutput.path.replace('/home/project', ''), '/dist', '/build', '/out', '/output'];
 
-  for (const dir of candidates) {
+  for (const dir of buildOutputCandidates(buildOutput.path)) {
     try {
       await container.fs.readdir(dir);
       return dir;
@@ -131,6 +140,23 @@ export function useShareGame() {
     if (!activeProjectId) {
       toast.error('Save your project before sharing it.');
       return { status: 'error', message: 'No active project.' };
+    }
+
+    /*
+     * Refuse to build while a generation is streaming or file actions are still applying (T17):
+     * publishing mid-write ships a half-written game with a green "Build Completed" over it.
+     */
+    const readiness = decidePublishReadiness({
+      streaming: streamingState.get(),
+      actions: Object.values(workbenchStore.firstArtifact?.runner.actions.get() ?? {}).map((action) => ({
+        status: action.status,
+        type: action.type,
+      })),
+    });
+
+    if (!readiness.ready) {
+      toast.warn(readiness.reason);
+      return { status: 'error', message: readiness.reason ?? 'The project is still being written.' };
     }
 
     setIsPublishing(true);

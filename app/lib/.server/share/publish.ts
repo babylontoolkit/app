@@ -22,6 +22,7 @@
 import { randomInt } from 'node:crypto';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { base64ToBytes } from '~/lib/binary/binary-files';
+import { stripSandboxRootPrefix } from '~/lib/common/sandbox-paths';
 import { envNumber } from '~/lib/.server/env';
 import { getObjectStore } from '~/lib/.server/storage';
 import { getProjectStore } from '~/lib/.server/projects/store';
@@ -135,6 +136,62 @@ export class BuildTooLargeError extends Error {
   }
 }
 
+/**
+ * A build whose entry HTML asks for root-absolute assets can never boot as a share (T17b).
+ *
+ * Shares are served under a PREFIX — `/play/<shareId>/` — in every deployment (locally by
+ * `buildContentKey`, and behind CloudFront the same key resolution applies on the play origin; there
+ * is no deployment that serves a share at an origin root). `<script src="/index.js">` therefore
+ * resolves to the BUILDER's 404 page, served as HTML to a module script: the game publishes fine and
+ * renders nothing, silently. The share build passes `--base=./` (`SHARE_BUILD_COMMAND`), so this
+ * refusal only fires on a regression — a project whose config or build path un-relativised the base —
+ * and firing loudly beats shipping a game that cannot boot.
+ */
+export class RootAbsoluteAssetError extends Error {
+  readonly statusCode = 422;
+  readonly isRetryable = false;
+
+  constructor(refs: string[]) {
+    super(
+      `This build cannot run at its share address: index.html points at ${refs
+        .map((r) => `"${r}"`)
+        .join(', ')} — root-absolute paths that break under /play/<id>/. ` +
+        `Publish again (the platform builds shares with a relative base); if the project overrides vite's ` +
+        `"base" during its build, set it to "./".`,
+    );
+    this.name = 'RootAbsoluteAssetError';
+  }
+}
+
+/**
+ * The boot-breaking references ONLY: entry `<script src="/…">` and `<link rel="stylesheet|modulepreload"
+ * href="/…">`. Deliberately narrow — a root-absolute favicon merely misses an icon, and refusing a
+ * publish for it would be vetoing a working game. Protocol-relative (`//cdn…`) is not root-absolute.
+ */
+export function rootAbsoluteEntryRefs(html: string): string[] {
+  const refs: string[] = [];
+
+  for (const match of html.matchAll(/<script\b[^>]*\bsrc\s*=\s*"(\/[^/"][^"]*)"/gi)) {
+    refs.push(match[1]);
+  }
+
+  for (const tag of html.matchAll(/<link\b[^>]*>/gi)) {
+    const link = tag[0];
+
+    if (!/\brel\s*=\s*"(stylesheet|modulepreload)"/i.test(link)) {
+      continue;
+    }
+
+    const href = link.match(/\bhref\s*=\s*"(\/[^/"][^"]*)"/i);
+
+    if (href) {
+      refs.push(href[1]);
+    }
+  }
+
+  return refs;
+}
+
 /** Paths that must never be uploaded to a public bucket, whatever the checklist said. */
 const NEVER_PUBLISH = [/(^|\/)\.env$/, /(^|\/)\.env\.[^/]*local$/, /(^|\/)\.npmrc$/, /(^|\/)\.git\//];
 
@@ -147,10 +204,15 @@ const NEVER_PUBLISH = [/(^|\/)\.env$/, /(^|\/)\.env\.[^/]*local$/, /(^|\/)\.npmr
  */
 export function buildObjectKey(shareId: string, rawPath: string): string {
   /*
-   * Normalise ONLY the known WebContainer workdir and the dist root — never a bare leading slash, so a
-   * genuinely absolute path (`/etc/...`) is rejected below rather than silently relativised.
+   * Normalise ONLY a known sandbox root and the dist root — never a bare leading slash, so a genuinely
+   * absolute path (`/etc/...`) is rejected below rather than silently relativised. That is why this
+   * uses `stripSandboxRootPrefix` and NOT `toProjectRelativePath`, which strips leading slashes.
+   *
+   * It was a `/^\/?home\/project\//` literal, i.e. the T7b family — and invisible to every grep for
+   * `home/project`, because the slashes are regex-escaped and the raw text reads `home\/project`. Only
+   * the source scan (`workdir-literals.spec.ts`) found it, on the run that widened its detector.
    */
-  const path = rawPath.replace(/^\/?home\/project\//, '').replace(/^dist\//, '');
+  const path = stripSandboxRootPrefix(rawPath).replace(/^dist\//, '');
 
   if (!path || path.startsWith('/') || /^[a-zA-Z]:/.test(path)) {
     throw new UnsafeBuildPathError(rawPath);
@@ -243,6 +305,22 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
     bytes: dirent.isBinary ? base64ToBytes(dirent.content) : new TextEncoder().encode(dirent.content),
     path,
   }));
+
+  /*
+   * Refuse a build that cannot boot at its share address (T17b) — checked BEFORE writing, like the
+   * caps: a broken game on a public URL is worse than a refused publish.
+   */
+  const entryHtml = entries.find(
+    ([path, dirent]) => buildObjectKey(shareId, path) === `${prefix}/index.html` && !dirent.isBinary,
+  );
+
+  if (entryHtml) {
+    const refs = rootAbsoluteEntryRefs(entryHtml[1].content);
+
+    if (refs.length > 0) {
+      throw new RootAbsoluteAssetError(refs);
+    }
+  }
 
   const previous = await objects.list(prefix);
   const written = new Set<string>();

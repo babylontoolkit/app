@@ -7,6 +7,7 @@ import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
 import type { BoltShell } from '~/utils/shell';
 import { isAllowedShellCommand } from './shell-allowlist';
+import { buildSpawnArgs } from './build-command';
 import { EditBlockError, applyEditBlocks, parseEditBlocks } from './edit-blocks';
 import { isBinaryPath } from '~/lib/binary/binary-files';
 
@@ -578,8 +579,12 @@ export class ActionRunner {
 
     const sandbox = await this.#sandbox;
 
-    // Create a new terminal specifically for the build
-    const buildProcess = await sandbox.spawn('npm', ['run', 'build']);
+    /*
+     * Argv comes from `buildSpawnArgs` — an exact-match selector between the two known-safe build
+     * commands (T17b). The action's `content` can originate from the model's output channel, so it is
+     * never parsed into argv; unknown content degrades to the plain `npm run build`.
+     */
+    const buildProcess = await sandbox.spawn('npm', buildSpawnArgs(action.content));
 
     let output = '';
     const outputPromise = buildProcess.output.pipeTo(

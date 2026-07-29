@@ -5,6 +5,7 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { PortDropdown } from './PortDropdown';
 import { ScreenshotSelector } from './ScreenshotSelector';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
+import { previewUrlWithPath } from '~/lib/stores/preview-url';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import type { ElementInfo } from './Inspector';
 
@@ -90,18 +91,36 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const expoUrl = useStore(expoUrlAtom);
   const [isExpoQrModalOpen, setIsExpoQrModalOpen] = useState(false);
 
+  /*
+   * The path the user is actually on, as a ref rather than a dep.
+   *
+   * A preview's `baseUrl` now CHANGES underneath a live session: T8 rotates the expiring
+   * `?preview_token=` before it dies. Rebuilding the iframe URL from the base alone would kick the
+   * user back to `/` every rotation — so the committed path is re-applied to the new base. It is a
+   * ref because `displayPath` changes on every keystroke and must not reload the frame.
+   */
+  const committedPathRef = useRef('/');
+  const activePortRef = useRef<number | undefined>(undefined);
+
   useEffect(() => {
     if (!activePreview) {
       setIframeUrl(undefined);
       setDisplayPath('/');
+      committedPathRef.current = '/';
+      activePortRef.current = undefined;
 
       return;
     }
 
-    const { baseUrl } = activePreview;
-    setIframeUrl(baseUrl);
-    setDisplayPath('/');
-  }, [activePreview]);
+    // A different PORT is a different preview; a new baseUrl on the same port is only a new token.
+    if (activePortRef.current !== activePreview.port) {
+      activePortRef.current = activePreview.port;
+      committedPathRef.current = '/';
+      setDisplayPath('/');
+    }
+
+    setIframeUrl(previewUrlWithPath(activePreview.baseUrl, committedPathRef.current));
+  }, [activePreview?.baseUrl, activePreview?.port]);
 
   const findMinPortIndex = useCallback(
     (minIndex: number, preview: { port: number }, index: number, array: { port: number }[]) => {
@@ -117,10 +136,36 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     }
   }, [previews, findMinPortIndex]);
 
+  /*
+   * 🔴 Never `iframe.src = iframe.src`. On a provider whose preview URL carries an expiring
+   * credential (CodeSandbox `?preview_token=`), that re-requests the SAME token — so reloading an
+   * expired preview reloads the provider's 401 page, which is exactly when a user presses reload.
+   * Ask for the current URL first; it re-mints when the token is close to death.
+   */
   const reloadPreview = () => {
-    if (iframeRef.current) {
-      iframeRef.current.src = iframeRef.current.src;
+    const iframe = iframeRef.current;
+
+    if (!iframe) {
+      return;
     }
+
+    const port = activePreview?.port;
+
+    if (port === undefined) {
+      iframe.src = iframe.src;
+      return;
+    }
+
+    void workbenchStore.currentPreviewUrl(port).then((url) => {
+      const current = iframeRef.current;
+
+      if (!current) {
+        return;
+      }
+
+      // Assigning the same string still reloads the frame, so a fresh-token no-op reload is preserved.
+      current.src = url ? previewUrlWithPath(url, committedPathRef.current) : current.src;
+    });
   };
 
   const toggleFullscreen = async () => {
@@ -707,12 +752,12 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                  * (`…token=x/path`), breaking both. `new URL` keeps the token and swaps the path;
                  * for a query-less WebContainer URL it produces the same string the append did.
                  */
-                const joined = new URL(activePreview.baseUrl);
-                joined.pathname = targetPath;
-
-                const fullUrl = joined.toString();
+                const fullUrl = previewUrlWithPath(activePreview.baseUrl, targetPath);
                 setIframeUrl(fullUrl);
                 setDisplayPath(targetPath);
+
+                // Remembered so a token rotation re-lands on this path instead of on `/`.
+                committedPathRef.current = targetPath;
 
                 if (inputRef.current) {
                   inputRef.current.blur();

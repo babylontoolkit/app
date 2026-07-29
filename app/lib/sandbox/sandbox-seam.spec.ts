@@ -98,6 +98,8 @@ const MAY_IMPORT_WEBCONTAINER_API: Record<string, string> = {
  */
 const MAY_IMPORT_BOOT_MODULE: Record<string, string> = {
   'app/lib/sandbox/index.ts': 'The seam entry point — the one place that decides which runtime backs `sandbox`.',
+  'app/lib/sandbox/sandbox-boot.spec.ts':
+    "The entry point's OWN spec. It `vi.mock`s this specifier — i.e. it asserts that the WebContainer branch is chosen and reached WITHOUT ever evaluating the real boot singleton (which starts a runtime as an import side effect). Naming it is how the mock replaces it; no feature code is coupled.",
 };
 
 /**
@@ -134,6 +136,10 @@ const MAY_IMPORT_CODESANDBOX_SDK: Record<string, string> = {
     'Boots the client connection from a server-minted session. The counterpart to ~/lib/webcontainer, and it imports the BROWSER entry point only — no API key is reachable from it.',
   'app/lib/.server/sandbox/service.ts':
     'Holds CODESANDBOX_API_KEY and does lifecycle (create/resume/hibernate/delete, session + host tokens). Server-only by placement.',
+  'app/lib/sandbox/codesandbox-boot.spec.ts':
+    "The boot module's OWN spec. It `vi.mock`s the browser entry so the reconnect and preview rules can be driven without a real WebSocket — the specifier appears only as the mock target, never as a dependency, and mocking it is what proves the module never reaches the vendor on its own.",
+  'app/lib/.server/sandbox/usage-store.spec.ts':
+    'Drives `service.ts`\'s lifecycle marks (T12) against a `vi.mock`ed SDK — the same mock-target carve-out as the boot spec. Proving "a failed hibernate writes NO mark" requires making the provider call fail, which requires standing in for it; the specifier is never a dependency of the module under test.',
 };
 
 describe('the sandbox seam is default-deny', () => {

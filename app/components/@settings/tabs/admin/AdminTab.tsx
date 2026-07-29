@@ -27,6 +27,45 @@ interface UsageReport {
   markers: { forcedContinuation: number; unproductiveRescue: number; providerRetry: number; rescued: number };
   byModel: Array<{ model: string; generations: number; rawCostUsd: number }>;
 }
+
+/** The `/api/admin/usage` `vm` field — `admin/vm-report.ts`'s shape, verbatim (plan T12). */
+interface VmReport {
+  marks: number;
+  sandboxes: number;
+  vmHours: number;
+  running: number;
+  clamped: number;
+  unattributedHours: number;
+  windowStart?: number;
+  windowEnd?: number;
+  users: number;
+  topUsers: Array<{ userId: string; vmHours: number; sandboxes: number; running: number }>;
+}
+
+/**
+ * The `/api/admin/usage` `sandboxStatus` field — `sandbox/provider-status.ts`'s shape, verbatim.
+ * CodeSandbox has NO credit-balance endpoint (verified 2026-07-29); these are the provider's own live
+ * counters — the headroom that fails first — beside the VM-hours estimate that stands in for spend.
+ */
+interface SandboxRateWindow {
+  limit: number;
+  remaining: number;
+  resetAt?: number;
+}
+interface SandboxStatus {
+  requestsHourly: SandboxRateWindow | null;
+  sandboxesHourly: SandboxRateWindow | null;
+  concurrentVms: SandboxRateWindow | null;
+  runningVms: Array<{
+    id: string;
+    specs?: { cpu?: number; memory?: number; storage?: number };
+    creditBasis?: string;
+    sessionStartedAt?: string;
+    lastActiveAt?: string;
+  }> | null;
+  fleetCount: number | null;
+  reason: string | null;
+}
 interface Submission {
   projectId: string;
   shareId: string;
@@ -53,6 +92,22 @@ interface TemplateState {
   pin: TemplatePin | null;
   snapshots: Array<{ sha: string; size: number; storedAt?: string; active: boolean }>;
   storage: string;
+}
+
+/** The `/api/admin/sandbox-template` payload — `sandbox/template-pin.ts`'s shapes, verbatim (plan T14). */
+interface SandboxTemplatePin {
+  target: string;
+  promotedAt: string;
+  promotedBy: 'promote' | 'rollback';
+  provenance?: string;
+}
+interface SandboxTemplateState {
+  configured: boolean;
+  pin: SandboxTemplatePin | null;
+  history: SandboxTemplatePin[];
+  live: string;
+  effective: 'pin' | 'env' | 'default';
+  baked: string;
 }
 interface PromptState {
   summary: {
@@ -108,8 +163,18 @@ export function AdminTab() {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
   const [template, setTemplate] = useState<TemplateState | null>(null);
+  const [sandboxTemplate, setSandboxTemplate] = useState<SandboxTemplateState | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [providerBalance, setProviderBalance] = useState<ProviderBalance | null>(null);
+
+  /**
+   * `null` is a REAL state here, not "loading": the usage route returns `vm: null` when the mark
+   * store could not be read, and rendering "unavailable" is the honest answer. A spinner would
+   * promise a number that is never coming.
+   */
+  const [vm, setVm] = useState<VmReport | null>(null);
+  const [vmLoaded, setVmLoaded] = useState(false);
+  const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = () => {
@@ -127,9 +192,17 @@ export function AdminTab() {
           return;
         }
 
-        const payload = data as { report: UsageReport; providerBalance?: ProviderBalance };
+        const payload = data as {
+          report: UsageReport;
+          providerBalance?: ProviderBalance;
+          vm?: VmReport | null;
+          sandboxStatus?: SandboxStatus | null;
+        };
         setReport(payload.report);
         setProviderBalance(payload.providerBalance ?? null);
+        setVm(payload.vm ?? null);
+        setSandboxStatus(payload.sandboxStatus ?? null);
+        setVmLoaded(true);
       })
       .catch(() => undefined);
 
@@ -167,6 +240,11 @@ export function AdminTab() {
     fetch('/api/admin/prompt')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => data && setPrompt(data as PromptState))
+      .catch(() => undefined);
+
+    fetch('/api/admin/sandbox-template')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => data && setSandboxTemplate(data as SandboxTemplateState))
       .catch(() => undefined);
   };
 
@@ -221,6 +299,41 @@ export function AdminTab() {
         body.action === 'promote'
           ? `Promoted ${data.pin?.ref} → ${data.pin?.sha.slice(0, 8)}. New projects mount this.`
           : `Rolled back to ${data.pin?.sha.slice(0, 8)}.`,
+      );
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Move the SANDBOX template pin (plan T14) — the VM every new project forks.
+   *
+   * Same blast radius as the starter-template pin above and the same posture, with one addition worth
+   * saying out loud in the UI: a promotion validates by forking the candidate for real, so a refusal
+   * here means the template genuinely did not come up, not that a check was fussy.
+   */
+  const moveSandboxTemplate = async (body: { action: 'promote' | 'rollback'; target: string; provenance?: string }) => {
+    setBusy(true);
+
+    try {
+      const r = await fetch('/api/admin/sandbox-template', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = (await r.json()) as { ok?: boolean; pin?: SandboxTemplatePin; message?: string };
+
+      if (!r.ok || !data.ok) {
+        // A refused promotion leaves the pin exactly where it was — say so, and say why it was refused.
+        toast.error(data.message ?? 'Could not move the sandbox template pin.');
+        return;
+      }
+
+      toast.success(
+        body.action === 'promote'
+          ? `Promoted ${data.pin?.target}. New projects fork this.`
+          : `Rolled back to ${data.pin?.target}.`,
       );
       load();
     } finally {
@@ -398,6 +511,141 @@ export function AdminTab() {
                 ))}
               </div>
             )}
+          </>
+        )}
+      </section>
+
+      {/*
+       * Sandbox VM time (plan T12). The launch decision was to BAKE VM compute into the margin rather
+       * than meter it (`billing/vm-cost.ts`), which is only defensible while somebody checks the
+       * estimate that decision rests on. This section is that check — and the number that would
+       * eventually justify building metering, if one account's hours ever stop looking like everyone's.
+       */}
+      <section>
+        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Sandbox VM time</h3>
+        {!vmLoaded ? (
+          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+        ) : !vm ? (
+          <div className="mt-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor text-sm text-bolt-elements-textSecondary">
+            <span className="text-bolt-elements-textPrimary font-medium">Unavailable</span> — the lifecycle mark store
+            could not be read. Usage and cost above are unaffected.
+          </div>
+        ) : (
+          <>
+            <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <Stat label="VM hours" value={vm.vmHours.toFixed(1)} />
+              <Stat label="Running now" value={vm.running.toLocaleString()} />
+              <Stat label="Sandboxes seen" value={vm.sandboxes.toLocaleString()} />
+              <Stat label="Accounts" value={vm.users.toLocaleString()} />
+              <Stat label="Lifecycle marks" value={vm.marks.toLocaleString()} />
+              <Stat label="Unattributed" value={`${vm.unattributedHours.toFixed(1)} h`} />
+            </div>
+            {/*
+             * The accuracy warning, not a footnote: the provider hibernates an idle VM on its own
+             * timeout and never tells us, so those intervals get clamped rather than measured. A count
+             * approaching "running now" means these hours are a ceiling.
+             */}
+            {vm.clamped > 0 && (
+              <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+                {`${vm.clamped} open interval(s) hit the 24h ceiling — the provider's own idle hibernation writes no closing mark, so those hours are an upper bound.`}
+              </div>
+            )}
+            {vm.topUsers.length > 0 && (
+              <div className="mt-3 text-xs text-bolt-elements-textSecondary">
+                {vm.topUsers.map((u) => (
+                  <div key={u.userId} className="flex justify-between py-0.5">
+                    <span className="font-mono">{u.userId}</span>
+                    <span>
+                      {u.vmHours.toFixed(1)} h · {u.sandboxes} VM{u.sandboxes === 1 ? '' : 's'}
+                      {u.running > 0 ? ` · ${u.running} running` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {vm.marks === 0 && (
+              <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+                No lifecycle marks recorded yet. This is empty until a project opens a sandbox.
+              </div>
+            )}
+          </>
+        )}
+      </section>
+
+      {/*
+       * CodeSandbox status (2026-07-29). Their API has NO credit-balance endpoint (verified against
+       * the full REST surface — the spend estimate is the VM-hours section above × the Pico rate), so
+       * this shows the provider's own live counters instead: the three rate-limit gauges (hourly API
+       * requests is the cap that bites first — 3,600/hr; hourly creations is the platform's whole
+       * fork budget), the VMs burning credits right now, and the fleet count the orphan sweep audits.
+       */}
+      <section>
+        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">CodeSandbox status</h3>
+        {!vmLoaded ? (
+          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+        ) : !sandboxStatus ||
+          (!sandboxStatus.requestsHourly && !sandboxStatus.concurrentVms && !sandboxStatus.fleetCount) ? (
+          <div className="mt-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor text-sm text-bolt-elements-textSecondary">
+            <span className="text-bolt-elements-textPrimary font-medium">Unavailable</span>
+            {sandboxStatus?.reason ? ` — ${sandboxStatus.reason}` : ' — the provider could not be read.'} Usage and cost
+            above are unaffected.
+          </div>
+        ) : (
+          <>
+            <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <Stat
+                label="API requests left (this hour)"
+                value={
+                  sandboxStatus.requestsHourly
+                    ? `${sandboxStatus.requestsHourly.remaining.toLocaleString()} / ${sandboxStatus.requestsHourly.limit.toLocaleString()}`
+                    : '—'
+                }
+              />
+              <Stat
+                label="Sandbox creations left (this hour)"
+                value={
+                  sandboxStatus.sandboxesHourly
+                    ? `${sandboxStatus.sandboxesHourly.remaining} / ${sandboxStatus.sandboxesHourly.limit}`
+                    : '—'
+                }
+              />
+              <Stat
+                label="Concurrent VMs"
+                value={
+                  sandboxStatus.concurrentVms
+                    ? `${sandboxStatus.concurrentVms.limit - sandboxStatus.concurrentVms.remaining} of ${sandboxStatus.concurrentVms.limit}`
+                    : '—'
+                }
+              />
+              <Stat
+                label="Running now"
+                value={sandboxStatus.runningVms === null ? '—' : sandboxStatus.runningVms.length.toLocaleString()}
+              />
+              <Stat
+                label="Fleet (btk sandboxes)"
+                value={sandboxStatus.fleetCount === null ? '—' : sandboxStatus.fleetCount.toLocaleString()}
+              />
+            </div>
+            {sandboxStatus.runningVms !== null && sandboxStatus.runningVms.length > 0 && (
+              <div className="mt-3 text-xs text-bolt-elements-textSecondary">
+                {sandboxStatus.runningVms.map((v) => (
+                  <div key={v.id} className="flex justify-between py-0.5">
+                    <span className="font-mono">{v.id}</span>
+                    <span>
+                      {v.specs ? `${v.specs.cpu ?? '?'} vCPU · ${v.specs.memory ?? '?'}GB` : 'specs unknown'}
+                      {v.sessionStartedAt ? ` · up since ${new Date(v.sessionStartedAt).toLocaleTimeString()}` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {sandboxStatus.reason && (
+              <div className="mt-2 text-xs text-bolt-elements-textTertiary">{`Partial read: ${sandboxStatus.reason}`}</div>
+            )}
+            <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+              CodeSandbox exposes no credit balance — estimated spend is the VM hours above × the configured hourly
+              rate; the balance itself lives in their dashboard.
+            </div>
           </>
         )}
       </section>
@@ -710,6 +958,103 @@ export function AdminTab() {
                     onClick={() => {
                       if (confirm(`Roll new projects back to ${snap.sha.slice(0, 8)}?`)) {
                         void moveTemplatePin({ action: 'rollback', sha: snap.sha });
+                      }
+                    }}
+                  >
+                    Roll back
+                  </button>
+                </div>
+              ))}
+          </div>
+        )}
+      </section>
+
+      {/*
+       * Sandbox template pin (plan T14) — §4.4's pin-and-promote applied to the RUNTIME. Sibling of
+       * "Starter template" above and deliberately next to it: one decides the files a new project gets,
+       * the other decides the machine they land on, and both are supply-chain decisions.
+       */}
+      <section>
+        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Sandbox template</h3>
+        {!sandboxTemplate ? (
+          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+        ) : (
+          <div className="mt-2 flex flex-col gap-2">
+            <div className="text-xs text-bolt-elements-textTertiary">
+              New projects fork <span className="font-mono">{sandboxTemplate.live}</span> ({sandboxTemplate.effective}
+              {sandboxTemplate.effective === 'default' ? ` — ${sandboxTemplate.baked}` : ''})
+            </div>
+
+            {!sandboxTemplate.configured && (
+              <div className="text-xs px-3 py-2 rounded-md bg-amber-500/10 text-amber-600">
+                CodeSandbox is not configured on this deploy — promoting is unavailable.
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor">
+              <div className="flex-1 min-w-0">
+                {sandboxTemplate.pin ? (
+                  <>
+                    <div className="text-sm text-bolt-elements-textPrimary truncate font-mono">
+                      {sandboxTemplate.pin.target}
+                    </div>
+                    <div className="text-xs text-bolt-elements-textTertiary truncate">
+                      {sandboxTemplate.pin.promotedBy} {new Date(sandboxTemplate.pin.promotedAt).toLocaleString()}
+                      {sandboxTemplate.pin.provenance ? ` · ${sandboxTemplate.pin.provenance}` : ''}
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-sm text-bolt-elements-textSecondary">
+                    Nothing promoted — new projects fork whatever the alias points at today.
+                  </div>
+                )}
+              </div>
+              <button
+                className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
+                disabled={busy || !sandboxTemplate.configured}
+                onClick={() => {
+                  /*
+                   * A promotion re-points what EVERY new project boots from, and validating it forks a
+                   * real VM — so it asks for the target by name rather than guessing one, and confirms
+                   * before spending.
+                   */
+                  // `window.` is required: `prompt` is this component's own state (the docs/skills panel).
+                  const target = window.prompt('Template id or alias to promote (e.g. btk@starter):');
+
+                  if (target?.trim()) {
+                    void moveSandboxTemplate({
+                      action: 'promote',
+                      target: target.trim(),
+                      provenance:
+                        window.prompt('What is this build? (optional note for the history)')?.trim() || undefined,
+                    });
+                  }
+                }}
+              >
+                Promote…
+              </button>
+            </div>
+
+            {sandboxTemplate.history
+              .filter((entry) => entry.target !== sandboxTemplate.pin?.target)
+              .map((entry) => (
+                <div
+                  key={entry.target}
+                  className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm text-bolt-elements-textPrimary truncate font-mono">{entry.target}</div>
+                    <div className="text-xs text-bolt-elements-textTertiary truncate">
+                      {new Date(entry.promotedAt).toLocaleString()}
+                      {entry.provenance ? ` · ${entry.provenance}` : ''}
+                    </div>
+                  </div>
+                  <button
+                    className="text-xs px-2 py-1 rounded bg-red-500/10 text-red-500 disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => {
+                      if (confirm(`Roll new projects back to ${entry.target}?`)) {
+                        void moveSandboxTemplate({ action: 'rollback', target: entry.target });
                       }
                     }}
                   >

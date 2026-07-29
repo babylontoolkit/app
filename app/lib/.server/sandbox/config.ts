@@ -18,6 +18,7 @@
  */
 import { env, envNumber, NotConfiguredError } from '~/lib/.server/env';
 import { DEFAULT_SANDBOX_CREATES_PER_HOUR } from './create-limit';
+import { activeSandboxTemplatePin, decideSandboxTemplate, type SandboxTemplateDecision } from './template-pin';
 
 /**
  * The template to fork per project — an alias built by `csb build … --alias`, NOT a raw sandbox id.
@@ -31,13 +32,27 @@ import { DEFAULT_SANDBOX_CREATES_PER_HOUR } from './create-limit';
 export const DEFAULT_SANDBOX_TEMPLATE = 'btk@starter';
 
 /**
- * MEASURED: a Vite dev server on the Babylon starter used **490MB of 2309MB** on Pico (1 CPU / 2GiB),
- * so Pico is genuinely enough for a builder session. The expensive step is `vite build` (rollup over
- * the whole Babylon graph) on the §4.8 publish path, which is not yet measured — raise this if that
- * turns out to need more, and note the tier can also be raised per-sandbox at runtime
- * (`updateTier` scales without a reboot, but is UPGRADE-ONLY).
+ * The default VM tier for a project sandbox.
+ *
+ * Raised Pico → **Nano** (2 CPU / 4GiB) by owner decision 2026-07-28, on the measurement the previous
+ * comment here asked for. Both halves are now measured:
+ *
+ *   - **Developing** is cheap: a Vite dev server on the Babylon starter uses ~490MB. Pico is plenty.
+ *   - **Publishing is not.** `vite build` (rollup over the whole Babylon graph, §4.8) peaked at
+ *     **1,958MB of Pico's 2,053MB — 95MB of headroom, and it survived on swap.** It completed, so this
+ *     is not a fix for a broken build; it is refusing to ship a 4.6% margin on a step whose cost grows
+ *     with the user's own asset count. Nano doubles the ceiling for the same workload.
+ *
+ * 💰 This tier is a COST, and raising it raises what the platform pays per wall-clock hour — which is
+ * why `vmUsdPerHourForTier` derives the billing rate FROM this constant rather than making an operator
+ * remember to move a second number (that drift is exactly what happened the first time this was
+ * changed). At Nano every pack and plan still clears `MIN_PACK_MARGIN`, worst case 2.41× — Micro would
+ * NOT (break-even for the weakest pack is ≈$0.240/hr), so this is the last free step up.
+ *
+ * The tier can also be raised per-sandbox at runtime (`updateTier` scales without a reboot, but is
+ * UPGRADE-ONLY), which remains the escape hatch if a publish build ever needs more than Nano.
  */
-export const DEFAULT_SANDBOX_VM_TIER = 'Pico';
+export const DEFAULT_SANDBOX_VM_TIER = 'Nano';
 
 /**
  * Idle seconds before CodeSandbox hibernates the VM.
@@ -86,12 +101,68 @@ export function requireSandboxApiKey(context?: unknown): string {
   return key;
 }
 
-export function sandboxTemplate(context?: unknown): string {
-  return env(context, 'CODESANDBOX_TEMPLATE') || DEFAULT_SANDBOX_TEMPLATE;
+/**
+ * Which template a new project forks (plan T14).
+ *
+ * The decision itself is pure and lives in `template-pin.ts`; this only supplies the two fallbacks.
+ * A PROMOTED pin outranks `CODESANDBOX_TEMPLATE` — that is the whole point of promoting one — and the
+ * pin is read from an in-process cache because this is called synchronously while building a fork
+ * request. `ensureSandboxTemplatePin` refreshes that cache at the async doorways; with nothing loaded
+ * the answer is exactly what it was before pinning existed.
+ */
+export function sandboxTemplateDecision(context?: unknown): SandboxTemplateDecision {
+  return decideSandboxTemplate({
+    pin: activeSandboxTemplatePin(),
+    envTemplate: env(context, 'CODESANDBOX_TEMPLATE'),
+    baked: DEFAULT_SANDBOX_TEMPLATE,
+  });
 }
 
+export function sandboxTemplate(context?: unknown): string {
+  return sandboxTemplateDecision(context).template;
+}
+
+/**
+ * The provider's tier names, in their canonical spelling.
+ *
+ * Exported so the BILLING side keys its price tables off the same list — one spelling, one place.
+ */
+export const SANDBOX_VM_TIERS = ['Pico', 'Nano', 'Micro', 'Small', 'Medium', 'Large', 'XLarge'] as const;
+
+/**
+ * The configured tier, NORMALISED to its canonical spelling.
+ *
+ * 🔴 **The normalisation is a money fix, not tidiness.** Two readers of this value disagreed about what
+ * counts as a match: the provider resolves it case-INSENSITIVELY (`service.ts` lowercases both sides
+ * before comparing), while billing looks the name up EXACTLY in its price tables. So a lowercase value
+ * ran one tier and priced another:
+ *
+ *   - `pico`   → ran Pico ($0.074), billed $0.149  — over-states, merely noisy
+ *   - `micro`  → ran Micro ($0.298), billed $0.149 — **under-states by 2×**
+ *   - `xlarge` → ran XLarge (~$4.77), billed $0.149 — **under-states by 32×**
+ *
+ * The unknown-tier fallback lands on the dearest MEASURED tier, which is conservative only while the
+ * real tier is cheaper than that. Above it the error inverts into the silent direction — a VM that
+ * costs 32× what the margin floor is told it costs, with nothing throwing. Two readers of one variable
+ * must never disagree about what its VALUE IS, which is the same rule `kieEnvModel` had to learn about
+ * `LLM_MODEL` (there it was which variable WINS; here it is which spellings match).
+ *
+ * An unrecognised name is returned UNCHANGED rather than coerced, deliberately: each side already has a
+ * considered fallback for a name it does not know (the provider runs Pico so a typo cannot silently
+ * boot an XLarge; billing prices at the dearest measured tier so a typo cannot silently under-charge).
+ * Those two are conservative in opposite directions ON PURPOSE, and collapsing them here would trade a
+ * loud, safe divergence for a quiet, uniform guess.
+ */
 export function sandboxVmTier(context?: unknown): string {
-  return env(context, 'CODESANDBOX_VM_TIER') || DEFAULT_SANDBOX_VM_TIER;
+  const configured = env(context, 'CODESANDBOX_VM_TIER')?.trim();
+
+  if (!configured) {
+    return DEFAULT_SANDBOX_VM_TIER;
+  }
+
+  const canonical = SANDBOX_VM_TIERS.find((tier) => tier.toLowerCase() === configured.toLowerCase());
+
+  return canonical ?? configured;
 }
 
 export function sandboxHibernationSeconds(context?: unknown): number {
@@ -117,8 +188,47 @@ export function sandboxCreatesPerHour(context?: unknown): number {
   return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_SANDBOX_CREATES_PER_HOUR;
 }
 
+/**
+ * Concurrently RUNNING sandboxes allowed per account (`vm-cap.ts`).
+ *
+ * The constant lives HERE rather than in `vm-cap.ts` so nothing has to import a module that imports
+ * `service.ts`, which imports this file — `create-limit.ts` can own its own default because it is
+ * pure, and `vm-cap.ts` cannot.
+ */
+export const DEFAULT_SANDBOX_MAX_RUNNING_VMS = 2;
+
+/**
+ * How many of one account's sandboxes may be RUNNING at the same time (`vm-cap.ts`).
+ *
+ * Two is enough for the real workflow (the project you are building plus one you flipped back to)
+ * and it bounds the per-user share of a provider concurrency limit that is measured for the whole
+ * API key. Config rather than a constant for the usual reason: it is a number that costs money.
+ */
+export function sandboxMaxRunningVms(context?: unknown): number {
+  const cap = envNumber(context, 'CODESANDBOX_MAX_RUNNING_VMS', DEFAULT_SANDBOX_MAX_RUNNING_VMS);
+
+  /*
+   * A nonsensical override falls back rather than being obeyed — the same rule as
+   * `sandboxHibernationSeconds`. Obeying `0` would hibernate a sandbox the instant it was minted.
+   */
+  return Number.isFinite(cap) && cap > 0 ? Math.floor(cap) : DEFAULT_SANDBOX_MAX_RUNNING_VMS;
+}
+
+/**
+ * Ceiling on a minted preview token's life: 24 hours.
+ *
+ * 🔴 The token is a BEARER credential that rides in an iframe URL — in the address bar of a popped-out
+ * preview, in browser history, in any proxy log the URL passes through — and its expiry is the ONLY
+ * thing that limits the damage of one leaking. An operator typo (`60000` for "sixty") currently mints
+ * ~41-day tokens with nothing to say so. Same ignore-a-bad-override posture as
+ * {@link sandboxHibernationSeconds}: a nonsensical value falls back rather than being obeyed.
+ */
+export const MAX_SANDBOX_HOST_TOKEN_MINUTES = 24 * 60;
+
 export function sandboxHostTokenMinutes(context?: unknown): number {
   const minutes = envNumber(context, 'CODESANDBOX_HOST_TOKEN_MINUTES', DEFAULT_SANDBOX_HOST_TOKEN_MINUTES);
 
-  return Number.isFinite(minutes) && minutes > 0 ? minutes : DEFAULT_SANDBOX_HOST_TOKEN_MINUTES;
+  return Number.isFinite(minutes) && minutes > 0 && minutes <= MAX_SANDBOX_HOST_TOKEN_MINUTES
+    ? minutes
+    : DEFAULT_SANDBOX_HOST_TOKEN_MINUTES;
 }

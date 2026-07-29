@@ -22,9 +22,25 @@ import type { TemplateFile } from '~/types/template';
 const mountTemplate = vi.hoisted(() => vi.fn());
 const clearInheritedDevServer = vi.hoisted(() => vi.fn());
 const applyProjectHygiene = vi.hoisted(() => vi.fn());
+const bootForProject = vi.hoisted(() => vi.fn());
+const writeSandboxIdentity = vi.hoisted(() => vi.fn());
 
 vi.mock('./mount', () => ({ mountTemplate, clearInheritedDevServer }));
 vi.mock('./hygiene', () => ({ applyProjectHygiene }));
+
+/*
+ * The seam, not the runtime. Creation now BOOTS the sandbox for the project it was given (a
+ * server-backed VM belongs to a project, so there is nothing to boot until one exists) — importing the
+ * real module here would evaluate a provider and hang on a runtime that cannot exist in a test.
+ * `SANDBOX_REQUIRES_PROJECT: false` keeps these tests on the WebContainer-shaped path they describe;
+ * the project-scoped behaviour is pinned in `create-project-boot.spec.ts`.
+ */
+vi.mock('~/lib/sandbox', () => ({
+  bootForProject,
+  SANDBOX_REQUIRES_PROJECT: false,
+  describeSandboxFailure: () => undefined,
+}));
+vi.mock('~/lib/sandbox/identity', () => ({ writeSandboxIdentity }));
 
 import { createProjectFromRegistry } from './create-project';
 import { bootProgress } from '~/lib/stores/boot-progress';
@@ -70,6 +86,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mountTemplate.mockResolvedValue(undefined);
   clearInheritedDevServer.mockResolvedValue(undefined);
+  bootForProject.mockResolvedValue({ fs: {} });
+  writeSandboxIdentity.mockResolvedValue(undefined);
   applyProjectHygiene.mockImplementation((files: TemplateFile[]) => files);
 
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => starterFiles() }));

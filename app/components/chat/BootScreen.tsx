@@ -20,7 +20,39 @@
  */
 import { useStore } from '@nanostores/react';
 import { useEffect, useState } from 'react';
-import { bootProgress, bootPhaseCopy, isCreationPhase } from '~/lib/stores/boot-progress';
+import { bootProgress, bootPhaseCopy, bootRetry, isCreationPhase } from '~/lib/stores/boot-progress';
+
+/**
+ * The terminal state: no spinner, the server's own sentence, and a way forward.
+ *
+ * A failed open used to render as the boot screen disappearing over an empty workbench — the failure
+ * mode this repo keeps rediscovering, where the honest answer ("this did not work, here is why")
+ * loses to a surface that simply stops. The retry is offered only when the failure is retryable,
+ * because a button that cannot help is worse than none: it teaches the user that pressing it does
+ * nothing.
+ */
+function BootFailurePanel({ message, retryable }: { message: string; retryable: boolean }) {
+  const retry = useStore(bootRetry);
+
+  return (
+    <div className="flex max-w-md flex-col items-center gap-4 text-center" role="alert">
+      <div className="i-ph:warning-circle text-4xl text-bolt-elements-icon-error" aria-hidden="true" />
+      <div>
+        <div className="text-lg font-medium text-bolt-elements-textPrimary">Your workspace could not be opened</div>
+        <div className="mt-1 text-sm text-bolt-elements-textSecondary">{message}</div>
+      </div>
+      {retryable && retry && (
+        <button
+          type="button"
+          onClick={retry}
+          className="rounded-md bg-bolt-elements-button-primary-background px-4 py-2 text-sm text-bolt-elements-button-primary-text hover:bg-bolt-elements-button-primary-backgroundHover"
+        >
+          Try again
+        </button>
+      )}
+    </div>
+  );
+}
 
 /** Spinner + phase copy + progress + elapsed — the shared body of both boot surfaces. */
 function BootStatusPanel() {
@@ -38,6 +70,14 @@ function BootStatusPanel() {
       clearInterval(tick);
     };
   }, [startedAt]);
+
+  /*
+   * After the hooks, never before: the panel must keep its reveal timer and elapsed clock mounted
+   * across the transition into a failure, or the whole surface unmounts and remounts mid-open.
+   */
+  if (phase.step === 'failed') {
+    return <BootFailurePanel message={phase.message} retryable={phase.retryable} />;
+  }
 
   const copy = bootPhaseCopy(phase);
   const fraction =

@@ -33,14 +33,74 @@ the 2× relationship across the whole rate table.
 deliberately uses the standard $3/$15.** Seeding the intro rate would compress the margin below target
 the day it lapses — silently. Under-charging ourselves for a few weeks is the right direction to err.
 
-⚠️ **Sandbox compute is a cost input the formula does not see (2026-07-27, PLACEHOLDER in the
-margin).** A CodeSandbox build (SPEC §8) runs the project on a platform-billed microVM (~$0.074/hr
-Pico) with NO metering yet — no `sandbox` ledger reason, no sweep. Until that ships, the cost is
-folded into `CREDIT_MARGIN` as a documented placeholder: ~+25% on raw cost ≈ 5–7 GM points at 4.0
-(~65–69% effective), `5.0` restores the ~75% target — applied to BOTH providers by owner decision
-until real per-provider numbers exist (WebContainer's true marginal compute is ~$0 + a fixed plan
-fee). Full derivation and the operator guidance live in **CREDITS.md §"Sandbox compute"**; the end
-state is metering, at which point the placeholder comes OUT of the margin.
+⚠️ **"User project compute ≈ $0" is RETIRED, and sandbox compute is now an ASSERTED cost input
+(2026-07-28, `billing/vm-cost.ts`).** It was true on WebContainer — the project ran in the user's own
+browser, and the only real cost is a fixed StackBlitz plan fee (SPEC §7) that a per-credit margin
+cannot see. A CodeSandbox build (SPEC §8) runs the project on a platform-billed microVM charged by
+**wall clock**, and the clock runs while the user THINKS. Metering is still not built (no `sandbox`
+ledger reason, no sweep), so by owner decision (2026-07-27) the cost is folded into the margin — but
+it is no longer folded in *invisibly*:
+
+- Two explicit inputs, kept apart because one is a measurement and one is a guess:
+  `SANDBOX_VM_USD_PER_HOUR` (MEASURED list price — **$0.149/hr Nano, the default tier since
+  2026-07-28**; $0.074/hr Pico. **Derived from `CODESANDBOX_VM_TIER`**, since "raise it with the tier"
+  was a comment and an operator moving to Nano without it priced compute at half its real cost; the
+  DEFAULT price is `MEASURED_VM_TIER_USD_PER_HOUR[DEFAULT_SANDBOX_VM_TIER]`, so the pair cannot drift.
+  An unrecognised tier name prices at the DEAREST measured tier — note the sandbox itself PROVISIONS
+  the cheapest in that case, which is deliberate: each side fails in its own safe direction) and
+  `SANDBOX_EST_VM_HOURS_PER_KCREDIT` (the operator ESTIMATE, 8.33 ≈ CREDITS.md's ~120 credits per
+  active build-hour, inverted). A nonsensical override falls back rather than being obeyed — obeying
+  `0` would silently restore the belief this retires.
+- `effectivePackMargin()` is `packMargin()` with VM overhead added to the cost side, and
+  **`billing.spec.ts` and `subscriptions.spec.ts` assert every active pack AND PLAN still clears
+  `MIN_PACK_MARGIN` after it** — plans are a second, independently editable price array, which is why
+  they need the second floor too (a repriced plan can clear the LLM floor and fail this one). The same
+  floor discipline that caught the packs shipping at 0.84×. Measured today at the Nano default:
+  **2.67× / 2.53× / 2.41×** (Starter / Pro / Studio), i.e. ~63% / 61% / 58% GM, which is exactly
+  CREDITS.md's ~58–63% band (Pico's 3.21× / 3.04× / 2.89× is graded too, as its own case). The specs
+  also assert the **CEILING**: at Micro ($0.298/hr) the Pro and Studio packs and every plan fall under
+  `MIN_PACK_MARGIN` — so Nano is the last tier the current prices support.
+- ⚠️ **Never restore a failing floor by lowering a cost input or raising `CREDIT_MARGIN` to cover it.**
+  Same rule as `rates.ts`: these are the numbers we PAY. A failing floor means the pack price or the
+  estimate is wrong, and both of those are answers.
+- Applied to BOTH providers by owner decision until real per-provider numbers exist. `5.0` restores
+  the ~75% target under the placeholder. Full derivation and operator guidance stay in **CREDITS.md
+  §"Sandbox compute"** — and the two documents must keep agreeing, since the placeholder's
+  credits-per-active-hour assumption IS `SANDBOX_EST_VM_HOURS_PER_KCREDIT` inverted. The end state is
+  metering, at which point the placeholder comes OUT of the margin.
+🔴 **CREATION TURNS ARE FLAT-PRICED (2026-07-28, `creationFlatCredits`, default 500, env
+`CREATION_FLAT_CREDITS`).** The cost-proportional formula above is the DEFAULT for every turn except
+the one the product is sold on: a creation's cost is dominated by prompt-cache luck (the same creation
+measured **54 credits warm vs 430–633 cold** — cache writes at 2×, reads at 0.1×, KIE warming per
+backend), a 12× spread the user can neither see nor influence. So the creation turn (detected by the
+same `CREATION_BRIEF_MARKER` predicate the proxy already computes — never a second predicate) charges
+ONE number and the platform absorbs the variance; that is what the margin is for. Rules, each of which
+fails silently if broken:
+
+- The override lives INSIDE `settleGeneration` (`decideCredits`, pure + exported like `decidePremium` —
+  it spends/waives money without the user asking), so the `generations` row, the ledger debit, the
+  auto-refund, and the client `credits` annotation cannot disagree about the number.
+- `raw_cost_usd` is STILL the true token-derived cost — the Admin report watches realized margin
+  (flat revenue vs true cost) per creation. Overriding the cost instead of the credits blinds it.
+- A **Stop** mid-creation charges `min(consumed, flat)` (`maxCredits`) — §4.12 bills what was consumed,
+  and the advertised price is a ceiling: never more than the flat price for less than a creation.
+- A generation that consumed NOTHING stays free even when a flat price is set — flat pricing charges
+  for a creation, not for an instant failure. A failed creation settles flat then auto-refunds flat,
+  same net-zero as today.
+- The pre-flight gate takes `minimumCredits = flat` on creation turns only: the one turn whose price is
+  knowable up front is refused honestly (402 naming price and balance) instead of landing 490 negative.
+  BYOK and unenforced modes bypass, as ever. Ordinary turns still gate on "balance > 0" — their cost is
+  unknowable pre-flight and the one-generation overshoot stays the accepted design.
+- `0` disables (operator escape hatch back to cost-proportional); negative/garbage → default 500.
+- The ledger debit note appends `— flat creation price` so reconciliation doesn't read a 500-credit
+  debit beside a $0.20 raw cost as a mis-bill.
+
+The companion lever is the **base-prompt cache warmer** (`prompt/cache-warmer.ts`): it keeps the one
+byte-identical-for-everyone block warm (platform-paid, no `generations` row, no ledger entry — ops
+spend by design) so the AVERAGE true cost under the flat price falls. It cannot warm per-project bytes;
+`spec/context-budget.md` §"Levers that are NOT built" records the shared-starter prefix restructure
+that could.
+
 - Self-healing repair turns: tokens accumulate onto the parent generation at `REPAIR_WEIGHT` (config, e.g. 0.5).
 - Aborted (Stop): charge tokens actually consumed to abort.
 - Hard failure (API error, zero actions parsed + error status): auto-refund row (`reason='refund'`).

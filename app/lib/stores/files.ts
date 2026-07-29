@@ -1,12 +1,14 @@
 import { map, type MapStore } from 'nanostores';
 import type { SandboxProvider, SandboxWatchEvent } from '~/lib/sandbox';
 import {
+  base64ByteLength,
   bytesToBase64,
   fileEntryFromBuffer,
   serializeFileMap,
   writeSerializedFileMap,
   type SerializedFileMap,
 } from '~/lib/binary/binary-files';
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import { path } from '~/utils/path';
 import { bufferWatchEvents } from '~/utils/buffer';
 import { WORK_DIR } from '~/utils/constants';
@@ -28,6 +30,7 @@ import {
 } from '~/lib/persistence/lockedFiles';
 import { getCurrentChatId } from '~/utils/fileLocks';
 import { walkSandboxTree } from '~/lib/stores/refresh-walk';
+import { isDirectoryPathError } from '~/lib/sandbox/codesandbox-translate';
 
 const logger = createScopedLogger('FilesStore');
 
@@ -54,6 +57,55 @@ export class IncompleteSerializationError extends Error {
     );
     this.name = 'IncompleteSerializationError';
   }
+}
+
+/**
+ * Directories that never enter the file map, in ONE place, for BOTH readers.
+ *
+ * The watcher and the full re-scan have always had to agree — they are two spellings of the same
+ * rule, and the walk's comment says so ("Match the watcher's exclusions"). A comment is not a
+ * mechanism, so the list is now the mechanism and each reader derives its own spelling from it.
+ *
+ * 🔴 `.codesandbox` is here because the map is the SOURCE for every egress path, and this directory is
+ * the provider's, not the user's. Excluding it at the map layer removes it from the model's context,
+ * the file tree, ZIP exports, working copies, checkpoints and git pushes in one move — and defuses a
+ * real data-loss hazard: `tasks.json` lives in it, no repo contains that path, so a repo restore
+ * (`planRestore` + `protectForRepoRestore`) planned it for DELETION off the VM, and without it the
+ * template's port task never starts (MEASURED: the build times out waiting for the port).
+ *
+ * ⚠️ This is the MAP layer only. It is deliberately NOT `isSecretPath`, which doubles as
+ * restore-protection semantics — overloading that rule would change what a restore protects.
+ *
+ * 🔴 `dist` is here because a PUBLISH runs `npm run build` in the sandbox and the watcher then
+ * streamed the whole build output into the map (MEASURED, T17c: 67 files → 113 after one publish —
+ * ~25MB of minified bundles riding into the model's context, every checkpoint, the working copy,
+ * ZIP exports, git pushes and the next publish's remix seed, forever). Build output is DERIVED —
+ * `readDist` and every deploy client read it straight off the sandbox FS, so nothing consumes it
+ * from the map. Like the others this matches the directory NAME at any depth; a user directory
+ * named `dist` inside `src/` would be excluded too, which is accepted — the name is reserved as
+ * build output by the template's own Vite config.
+ */
+export const MAP_EXCLUDED_DIRS = ['node_modules', '.git', '.codesandbox', 'dist'] as const;
+
+/**
+ * The watcher's spelling of {@link MAP_EXCLUDED_DIRS}.
+ *
+ * ⚠️ Written out rather than generated, because the two shapes are not interchangeable and neither is
+ * ours to redefine: `**\/node_modules` must match at any depth (a nested dependency tree), while
+ * `.git` and `.codesandbox` are single root-level directories. `.codesandbox` copies `.git`'s
+ * spelling because that is the one this codebase has always used for a root dotdir — NOT because
+ * either form is proven on this provider: `.git`'s history is WebContainer's, and the CodeSandbox
+ * SDK types its excludes as a bare `readonly string[]` with the matcher unspecified. **Which shapes
+ * that watcher actually honours is exactly what T17 scenario 2 owes a live check** — and an ignored
+ * exclude is not quiet: one `npm install` then floods enrichment reads at an RTT each, into a
+ * 3,600 req/hr cap. A spec asserts every excluded dir appears here, so the two lists cannot drift
+ * even though one is not derived from the other.
+ */
+export const MAP_EXCLUDE_GLOBS = ['**/node_modules', '.git', '.codesandbox', 'dist'];
+
+/** The walk's spelling of {@link MAP_EXCLUDED_DIRS}: a predicate over a single directory name. */
+export function isMapExcludedDir(name: string): boolean {
+  return (MAP_EXCLUDED_DIRS as readonly string[]).includes(name);
 }
 
 export interface File {
@@ -678,7 +730,7 @@ export class FilesStore {
     sandbox.watchPaths(
       {
         include: [`${WORK_DIR}/**`],
-        exclude: ['**/node_modules', '.git'],
+        exclude: MAP_EXCLUDE_GLOBS,
         includeContent: true,
       },
       bufferWatchEvents(100, this.#processEventBuffer.bind(this)),
@@ -781,7 +833,7 @@ export class FilesStore {
    * stale". This walks the tree from `WORK_DIR` and rebuilds the map from the filesystem itself, so the
    * Code view reflects precisely what exists.
    *
-   * Invariants preserved: the same `node_modules`/`.git` exclusions the watcher uses; lock state
+   * Invariants preserved: the same {@link MAP_EXCLUDED_DIRS} exclusions the watcher uses; lock state
    * carried forward per file; user-deleted paths honored (a refresh must never resurrect a file the
    * user removed). Binaries keep `content: ''` — their bytes stay on disk (`readBinaryFile`).
    *
@@ -798,8 +850,8 @@ export class FilesStore {
     let size = 0;
 
     const { folders, files } = await walkSandboxTree(sandbox.fs, {
-      // Match the watcher's exclusions — these never belong in the map.
-      exclude: (name) => name === 'node_modules' || name === '.git',
+      // The watcher's exclusions, from the one list both read (`MAP_EXCLUDED_DIRS`).
+      exclude: isMapExcludedDir,
 
       // Honor user deletions — a refresh must not resurrect what was removed.
       skip: (relPath) => this.#deletedPaths.has(`${WORK_DIR}/${relPath}`),
@@ -994,15 +1046,90 @@ export class FilesStore {
    * `protect` is how a caller says it has thought about it (`protectForRepoRestore` /
    * `protectNothing`).
    */
-  async restoreFiles(files: SerializedFileMap, options?: { protect: (path: string) => boolean }): Promise<void> {
+  async restoreFiles(
+    files: SerializedFileMap,
+    options?: { protect?: (path: string) => boolean; onProgress?: (done: number, total: number) => void },
+  ): Promise<void> {
     const sandbox = await this.#sandbox;
 
-    const toContainerPath = (filePath: string) =>
-      filePath.startsWith(sandbox.workdir) ? path.relative(sandbox.workdir, filePath) : filePath;
+    /*
+     * 🔴 Through the ONE root rule, so a FOREIGN root is rebased rather than passed through.
+     *
+     * This used to hand an unrecognised path to the provider verbatim. On CodeSandbox that happened
+     * to be rescued (`resolveInWorkdir` rebases), so a WebContainer-era working copy restored into a
+     * CodeSandbox project landed correctly — but the WebContainer adapter is a bare `container.fs`
+     * with nothing to rescue it, so the same map going the other way (a rollback to WebContainer,
+     * which is the documented way to revert the provider) would write OUTSIDE the project. Same rule
+     * as the map write-through below: keys of unknown provenance are normalised, once, here.
+     */
+    const toContainerPath = (filePath: string) => toProjectRelativePath(filePath);
 
-    await writeSerializedFileMap(files, sandbox.fs, toContainerPath);
+    /*
+     * 🔴 The T9 excludes apply on the way IN, too (T17a). A checkpoint or working copy written before
+     * `.codesandbox` joined `MAP_EXCLUDED_DIRS` still CARRIES those entries, and writing one over the
+     * provider's live directory throws a raw `21: Os { … IsADirectory }` that used to kill the whole
+     * mount. What the map layer refuses to hold, a restore must refuse to write.
+     */
+    const restorable = Object.fromEntries(
+      Object.entries(files).filter(([filePath]) => !toContainerPath(filePath).split('/').some(isMapExcludedDir)),
+    );
 
-    if (!options) {
+    /*
+     * One bad entry is REPORTED and skipped, never the whole restore lost (T17a): classified as
+     * "that path is a directory on disk" where the provider says so, raw otherwise. Loud, because a
+     * skipped entry is a file the user does not get back — but a mount that silently degrades to the
+     * legacy path loses ALL of them plus the wake hook.
+     */
+    const failures: string[] = [];
+
+    await writeSerializedFileMap(restorable, sandbox.fs, toContainerPath, {
+      onError: (filePath, error) => {
+        failures.push(filePath);
+
+        const reason = isDirectoryPathError(error)
+          ? 'the path is a directory on disk'
+          : ((error as Error)?.message ?? String(error));
+        logger.warn(`Restore skipped ${filePath}: ${reason}`);
+      },
+      onProgress: options?.onProgress,
+    });
+
+    if (failures.length > 0) {
+      logger.error(`Restore completed with ${failures.length} skipped file(s): ${failures.slice(0, 5).join(', ')}`);
+    }
+
+    /*
+     * 🔴 Report the restore into the map SYNCHRONOUSLY — the same write-through `recordAgentWrite`
+     * gives artifact writes, for the same reason and against the same measured defect.
+     *
+     * The disk is now correct; the map is not, and on a server provider it will not be for a while
+     * (an event per file, then an enrichment read, each a round trip). Anything that SERIALIZES the
+     * store in that window — the §4.5.4c working copy, a checkpoint, a push — captures a stale mix of
+     * the old project and the new one, and a later mount restores that mix over correct files. That
+     * is exactly the measured second-session defect (a generated `Home.tsx` beside the starter's
+     * `Home.css`), reached through the restore door instead of the artifact door: checkpoint undo,
+     * working-copy restore, repo restore and git pull all land here.
+     *
+     * ⚠️ Binaries go in as METADATA ONLY (`isBinary` + `size`, empty content — SPEC §1.3 principle
+     * 10). The incoming map holds base64, which is a WIRE format: putting it in `content` would put
+     * binary bytes in the editor's text map and in the model's context.
+     *
+     * 🔴 And it is keyed off THIS sandbox's workdir, never the incoming path. An incoming map may
+     * carry a FOREIGN root — that is the whole reason `SANDBOX_ROOTS` is a list: a working copy
+     * written under WebContainer (`/home/project/...`) is restored into a CodeSandbox project
+     * (`/project/workspace/...`), which is precisely the cutover this plan performs. The disk write
+     * above rebases (via the provider's `resolveInWorkdir`), so keying the map on the raw path would
+     * record entries that exist on disk under a DIFFERENT key: a strict serialize then fails to read
+     * them (the working-copy save and every checkpoint), and once the watcher catches up every
+     * restored file is in the map twice — doubled context, doubled exports, and phantom keys that the
+     * next restore plans for deletion.
+     */
+    this.#recordRestoredFiles(restorable, sandbox.workdir);
+
+    // Only a caller that PASSED `protect` has opted into deletions (see the doc comment above).
+    const protect = options?.protect;
+
+    if (!protect) {
       return;
     }
 
@@ -1015,8 +1142,8 @@ export class FilesStore {
       current: Object.entries(this.files.get())
         .filter(([, dirent]) => dirent?.type === 'file')
         .map(([filePath]) => filePath),
-      incoming: Object.keys(files),
-      protect: options.protect,
+      incoming: Object.keys(restorable),
+      protect,
     });
 
     for (const filePath of toDelete) {
@@ -1030,6 +1157,62 @@ export class FilesStore {
 
     if (toDelete.length > 0) {
       logger.info(`Restore removed ${toDelete.length} file(s) the incoming version does not have.`);
+    }
+  }
+
+  /**
+   * Put a just-restored map into the store, without touching the disk (it was written a moment ago).
+   *
+   * Deliberately mirrors `recordAgentWrite`'s contract: lock state is carried forward (a restore is
+   * not an unlock), the size counter tracks genuinely new entries, and a binary is recorded by
+   * `isBinary` + `size` with EMPTY content — its bytes live on disk and are read back through
+   * `readBinaryFile`, never from this map.
+   *
+   * `size` for a binary comes from the entry when it has one and is derived from the base64 length
+   * otherwise, so the marker the model sees stays truthful rather than reporting a base64 length as a
+   * byte count (~4/3 too big).
+   *
+   * 🔴 Every key is REBASED onto `workdir` first — see the caller. An incoming map is allowed to carry
+   * another provider's root, and the disk write rebases it, so recording the raw key would put the
+   * entry somewhere the file is not.
+   */
+  #recordRestoredFiles(files: SerializedFileMap, workdir: string) {
+    const toStoreKey = (filePath: string) => `${workdir}/${toProjectRelativePath(filePath)}`;
+
+    for (const [rawPath, dirent] of Object.entries(files)) {
+      if (!dirent) {
+        continue;
+      }
+
+      const filePath = toStoreKey(rawPath);
+      const current = this.files.get()[filePath];
+
+      if (dirent.type === 'folder') {
+        if (current?.type !== 'folder') {
+          this.files.setKey(filePath, { type: 'folder' });
+        }
+
+        continue;
+      }
+
+      if (current?.type !== 'file') {
+        this.#size++;
+      }
+
+      const isLocked = current?.type === 'file' ? current.isLocked : false;
+
+      this.files.setKey(
+        filePath,
+        dirent.isBinary
+          ? {
+              type: 'file',
+              content: '',
+              isBinary: true,
+              size: dirent.size ?? base64ByteLength(dirent.content),
+              isLocked,
+            }
+          : { type: 'file', content: dirent.content, isBinary: false, size: dirent.size, isLocked },
+      );
     }
   }
 

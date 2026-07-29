@@ -110,6 +110,152 @@ describe('createHeartbeat', () => {
   });
 });
 
+/**
+ * The retry activity (2026-07-28).
+ *
+ * A stalled provider being retried rendered as "Thinking — 4m", so four minutes of UNBILLED recovery
+ * looked like four minutes of billed reasoning — measured live on a 387s creation whose step 1 ran 239s
+ * for 553 chars, and read by the user as *"burning credits for nothing"*. The property that makes naming
+ * it safe is that it is SELF-CLEARING: it is reported only while the retry began at-or-after the last
+ * real content, so a later genuine long think can never inherit the label from a flag nobody cleared.
+ */
+describe('createHeartbeat — retry activity', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('reports a retry in flight, with the attempt count', () => {
+    const writes: AgentStatusPart[] = [];
+    const activity = vi.fn(() => ({ activity: 'retrying' as const, attempt: 2, maxAttempts: 3, since: Date.now() }));
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), { activity });
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+
+    expect(writes[0]).toMatchObject({ activity: 'retrying', attempt: 2, maxAttempts: 3 });
+
+    // Pulled at tick time, never pushed — the heartbeat stays a passive reader of proxy facts.
+    expect(activity).toHaveBeenCalled();
+
+    hb.stop();
+  });
+
+  it('a null getter result leaves the part byte-identical to an ordinary heartbeat', () => {
+    const writes: AgentStatusPart[] = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), { activity: () => null });
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+
+    expect(Object.keys(writes[0])).not.toContain('activity');
+    expect(Object.keys(writes[0])).not.toContain('attempt');
+    expect(Object.keys(writes[0])).not.toContain('maxAttempts');
+
+    hb.stop();
+  });
+
+  /**
+   * 🔴 THE SELF-CLEARING PROPERTY — the whole reason this is a `since` comparison rather than a boolean.
+   *
+   * A retry that began BEFORE the last real content is over: that attempt already streamed something, so
+   * the silence being narrated now is a fresh think, not the stalled connection. Reporting it anyway would
+   * pin "Reconnecting to the model" over minutes of genuinely billed reasoning — the same lie as the bug
+   * this feature fixes, pointing the other way, and this time in our favour rather than the user's.
+   *
+   * Mutation-verified: relaxing the guard (`pending.since >= lastActivityAt` → reporting whenever a
+   * snapshot exists) fails this test.
+   */
+  it('SELF-CLEARING: a retry older than the last content is NOT reported', () => {
+    const writes: AgentStatusPart[] = [];
+
+    // The retry was decided at t=0…
+    const since = Date.now();
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), {
+      activity: () => ({ activity: 'retrying' as const, attempt: 2, maxAttempts: 3, since }),
+    });
+
+    // …and while it is still the newest fact, it is reported.
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+    expect(writes.at(-1)?.activity).toBe('retrying');
+
+    /*
+     * …then the retried attempt streams real content. The getter still returns the SAME stale snapshot
+     * (nothing clears it — that is the design), so only the `since` comparison can stop it.
+     */
+    vi.advanceTimersByTime(1000);
+    hb.activity('text');
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+
+    const last = writes.at(-1)!;
+    expect(last.activity).toBeUndefined();
+    expect(Object.keys(last)).not.toContain('activity');
+
+    // CONTROL: the heartbeat is still running and still emitting — it stopped the LABEL, not the panel.
+    expect(last.phase).toBe('generating');
+    expect(writes.length).toBeGreaterThan(1);
+
+    hb.stop();
+  });
+
+  it('a SECOND retry decided after that content is reported again', () => {
+    // Proves the test above pins a comparison, not "activity is reported at most once".
+    const writes: AgentStatusPart[] = [];
+    let snapshot = { activity: 'retrying' as const, attempt: 2, maxAttempts: 3, since: Date.now() };
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), { activity: () => snapshot });
+
+    vi.advanceTimersByTime(1000);
+    hb.activity('text');
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+    expect(writes.at(-1)?.activity).toBeUndefined();
+
+    snapshot = { ...snapshot, attempt: 3, since: Date.now() };
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+
+    expect(writes.at(-1)).toMatchObject({ activity: 'retrying', attempt: 3, maxAttempts: 3 });
+
+    hb.stop();
+  });
+
+  it('NO getter: the part carries no activity KEYS at all (older wire shape, byte-identical)', () => {
+    const writes: AgentStatusPart[] = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s));
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+
+    /*
+     * Key ABSENCE, not an undefined value: this part is JSON-serialised onto the SSE wire, and an
+     * explicit `activity: undefined` would be a different object here yet identical after a round trip —
+     * so asserting `toBeUndefined()` alone cannot tell the two apart, and the conditional-spread rule
+     * this pins would be free to rot.
+     */
+    expect(Object.keys(writes[0]).sort()).toEqual([
+      'elapsedMs',
+      'generationId',
+      'kind',
+      'phase',
+      'seq',
+      'silentMs',
+      'type',
+    ]);
+
+    hb.stop();
+  });
+
+  it('a throwing activity getter cannot break the generation', () => {
+    const hb = createHeartbeat('gen-1', () => undefined, {
+      activity: () => {
+        throw new Error('proxy state exploded');
+      },
+    });
+
+    expect(() => vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2)).not.toThrow();
+    hb.stop();
+  });
+});
+
 describe('withGenerationHeartbeat', () => {
   beforeEach(() => {
     vi.useFakeTimers();

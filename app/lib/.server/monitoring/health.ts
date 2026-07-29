@@ -19,6 +19,7 @@
 import { getPlatformConfig, hasPlatformKey } from '~/lib/.server/agent/config';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
 import { isStripeConfigured } from '~/lib/.server/billing/stripe';
+import { isSandboxConfigured } from '~/lib/.server/sandbox/config';
 import { isMonitoringConfigured } from './index';
 
 export type DependencyState = 'ok' | 'degraded';
@@ -73,12 +74,48 @@ export function buildHealthReport(context: unknown): HealthReport {
     monitoringAnalytics: isMonitoringConfigured(context).analytics ? 'ok' : 'degraded',
   };
 
+  /*
+   * The sandbox runtime, reported ONLY when this build actually uses CodeSandbox (plan T13).
+   *
+   * `VITE_SANDBOX_PROVIDER` is a BUILD-time switch, so which sandbox a deploy needs is a fact about
+   * the image, not about the environment — and a WebContainer build has correctly dropped
+   * `CODESANDBOX_API_KEY`. Reporting `degraded` there would be the exact mirror-image mistake the
+   * `platformKey` comment above describes: asking about a credential this deploy does not need, and
+   * dragging `ready` to false forever on a perfectly healthy deploy that §9a keys on.
+   *
+   * 🔴 Config presence ONLY. No reachability probe — that is this endpoint's stated contract, and a
+   * live call here would let a CodeSandbox outage flip the uptime monitor and start a retry storm.
+   * Reachability lives in the rate windows (`sandbox-rates.ts`), where it belongs.
+   */
+  if (usesCodeSandbox()) {
+    dependencies.codesandbox = isSandboxConfigured(context) ? 'ok' : 'degraded';
+  }
+
   return {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     dependencies,
     ready: Object.values(dependencies).every((d) => d === 'ok'),
   };
+}
+
+/**
+ * Does THIS BUILD run on CodeSandbox?
+ *
+ * Read from `import.meta.env` rather than `env(context, …)` because it is a build-time switch — the
+ * same source `app/lib/sandbox/index.ts` and `entry.server.tsx` read it from, so the ordinary case
+ * agrees with the runtime that is actually loaded.
+ *
+ * ⚠️ The `|| process.env` arm can DISAGREE with that runtime: a container that sets the variable
+ * without a matching build runs WebContainer while this reports a CodeSandbox dependency, and a
+ * missing key there makes `ready` false on a deploy that is fine. That direction is chosen
+ * deliberately — the mirror error is reporting `ready` on a CodeSandbox deploy with no key, which is
+ * an outage §9a exists to catch. Pinned by a test, so it is a decision rather than an accident.
+ */
+function usesCodeSandbox(): boolean {
+  return (
+    import.meta.env?.VITE_SANDBOX_PROVIDER === 'codesandbox' || process.env.VITE_SANDBOX_PROVIDER === 'codesandbox'
+  );
 }
 
 /** `PLAY_URL` is a URL string, not a flag — presence is what matters, so read it directly. */

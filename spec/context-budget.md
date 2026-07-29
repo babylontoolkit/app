@@ -929,6 +929,23 @@ cheaper). It is not a free win — see §3.5a: an under-thinking model does not 
 answer, it returns a confident wrong one, and the repair turns cost more than the routing saved. If it is
 ever attempted, it must be routed on turn KIND (as the effort policy is), never on a prose classifier.
 
+**Second deferred lever (2026-07-28, measure-first): the shared-starter prefix restructure.** A cold
+creation bills **430–633 credits vs 54 warm** — the spread is cache-write luck, and the dominant cached
+entry (the ~110k file context) can NEVER be pre-warmed as shaped today because per-project bytes sit
+inside or ahead of it: the scaffolded `src/scripts/<Title>Mode.ts` (named from the project title,
+`registry/scaffold.ts`), the doc blocks routed from the user's own brief wording (`sources.ts`
+`selectStickyBlocks` — placed at breakpoints 2–3, BEFORE the file context, so even byte-identical
+starter files miss behind them), and the project `CLAUDE.md`. The restructure: order the prefix so the
+starter-identical file bytes (identical across every project on the same template pin) form a shared
+cacheable segment, with the per-project bytes after it. That would genuinely shrink cold cost at the
+source — but the 4-breakpoint budget is fully spent (`MAX_CACHE_BREAKPOINTS`), the append-only rules
+(`selectStickyBlocks`, `stickyLoadedSkills`) all bind on the ordering, and a cache-shape change costs
+~8× one prefix in warmup writes (§"QUANTIFIED") — so this is a measured redesign, never a quick flip.
+Until then the variance is absorbed by the **flat creation price** (`spec/billing.md`,
+`CREATION_FLAT_CREDITS`) and the average cost trimmed by the **base-prompt cache warmer**
+(`prompt/cache-warmer.ts` — the one block that IS byte-identical across all users, kept warm on an
+interval + re-warmed on prompt promotion).
+
 ---
 
 ## Dead levers — present in the tree, NOT on the live path

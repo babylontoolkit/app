@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { createFilesContext } from '~/lib/.server/llm/utils';
+import { SANDBOX_ROOTS } from '~/lib/common/sandbox-paths';
 import { buildProjectInstructions, instructionsKey, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
 
 const file = (content: string, isBinary = false) => ({ type: 'file' as const, content, isBinary });
@@ -127,5 +128,75 @@ describe('one copy, never two', () => {
     const files = project();
     expect(buildProjectInstructions(files)).toBeNull();
     expect(createFilesContext(files, true)).toContain('package.json');
+  });
+});
+
+/**
+ * PROMOTION IS KEYED ON THE PROJECT-RELATIVE PATH, NOT ON ONE PROVIDER'S ROOT (T7b, SPEC §8).
+ *
+ * `instructionsKey` used to strip a `/home/project/` literal. On a CodeSandbox build the map is keyed
+ * under `/project/workspace`, the strip matched nothing, and `CLAUDE.md` was simply never FOUND — no
+ * Project Instructions block, no `MAX_INSTRUCTIONS_CHARS` cap, no precedence statement. The §4.2 money
+ * path back to its pre-2026-07-16 state on one provider and correct on the other, with nothing throwing
+ * on either. The file still reached the model as an anonymous file-context entry, so even the token
+ * count barely moved — which is exactly the §4.2.8 failure shape (cheaper-looking, quietly worse).
+ *
+ * Root-ONLY promotion is asserted under every root too: it is a real property (a nested file addresses
+ * a subtree, and merging every one of them puts unbounded user text in the prompt on every turn), and a
+ * root-blind "does the path END with CLAUDE.md" fix would pass the promotion test while breaking it.
+ */
+describe.each(SANDBOX_ROOTS)('project instructions under the %s root', (root) => {
+  const under = (extra: FileMap = {}): FileMap => ({
+    [`${root}/package.json`]: file('{"name":"game"}'),
+    [`${root}/src/pages/Home.tsx`]: file('export const Home = () => null;'),
+    ...extra,
+  });
+
+  it('promotes the root CLAUDE.md', () => {
+    const files = under({ [`${root}/CLAUDE.md`]: file('# House rules\n\nUse tabs.') });
+    const built = buildProjectInstructions(files)!;
+
+    expect(instructionsKey(files)).toBe(`${root}/CLAUDE.md`);
+    expect(built.key).toBe(`${root}/CLAUDE.md`);
+    expect(built.block).toContain('Use tabs.');
+    expect(built.block).toMatch(/non-negotiables/i);
+  });
+
+  it('still ignores a NESTED CLAUDE.md — root-only is the rule, not an artefact of the prefix', () => {
+    const files = under({ [`${root}/src/CLAUDE.md`]: file('# nested') });
+
+    expect(instructionsKey(files)).toBeNull();
+    expect(buildProjectInstructions(files)).toBeNull();
+  });
+
+  it('still ignores files that merely look like it', () => {
+    const files = under({
+      [`${root}/AGENTS.md`]: file('# for a different tool'),
+      [`${root}/CLAUDE.md.bak`]: file('# old'),
+    });
+
+    expect(instructionsKey(files)).toBeNull();
+  });
+
+  /*
+   * Moved, not copied. The lift is by KEY, so a key found under one root must be the key the proxy can
+   * delete — otherwise the block is added, the file stays, and every turn pays for it twice forever.
+   */
+  it('reports a key the caller can lift, leaving no second copy in the file context', () => {
+    const files = under({ [`${root}/CLAUDE.md`]: file('# House rules\n\nUse tabs.') });
+    const built = buildProjectInstructions(files)!;
+
+    const { [built.key]: _lifted, ...rest } = files;
+    const context = createFilesContext(rest, true);
+
+    expect(context).not.toContain('Use tabs.');
+    expect(context).toContain('src/pages/Home.tsx');
+  });
+
+  it('still caps a huge file under this root', () => {
+    const built = buildProjectInstructions(under({ [`${root}/CLAUDE.md`]: file('x'.repeat(50_000)) }))!;
+
+    expect(built.truncated).toBe(true);
+    expect(built.block).toContain('truncated');
   });
 });

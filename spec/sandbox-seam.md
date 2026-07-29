@@ -5,20 +5,25 @@
 > store is constructed with one, and a default-deny source scan keeps it that way — for **both**
 > vendors. `codesandbox-provider.ts` implements the interface against Together CodeSandbox
 > (`spec/sandbox-codesandbox.md`), with the server half in `app/lib/.server/sandbox/` (key holder,
-> per-user registry, session/preview routes). **The cutover is a BUILD-TIME switch that already
+> session/preview routes; per-PROJECT `sandbox_id` on the project row since 2026-07-28 — the interim
+> per-user registry is deleted). **The cutover is a BUILD-TIME switch that already
 > works**: `VITE_SANDBOX_PROVIDER=codesandbox` selects the provider in `index.ts` (unset/typo =
 > WebContainer, the safe direction; both branches are dynamic imports so the unused runtime is never
 > even downloaded), and the same flag drives `WORK_DIR` (`/project/workspace` vs `/home/project`) and
 > the COEP conditional in `entry.server.tsx`.
 >
-> What remains before REAL USERS ride it: the 2026-07-27 review's findings
-> (`spec/sandbox-codesandbox.md` §11 — one CRITICAL cross-project-adoption gate, the VM
-> leak/reap/reset lifecycle, the `/home/project` literal family, `.codesandbox/` ignore rules, the
-> shell demux race), per-project sandboxes (`sandbox_id` on the project record), and the billing
-> term (§"Swap plan" items 4–6; the margin PLACEHOLDER for unmetered VM time is documented in
-> CREDITS.md §"Sandbox compute").
->
-> The escape hatch is no longer a paragraph. It is a running provider with the defect list to close.
+> ~~What remains before REAL USERS ride it: the 2026-07-27 review's findings…~~ **SUPERSEDED
+> 2026-07-28: the production plan (`_specs/codesandbox-production_plan.md`, T1–T16 + T17a/T17b)
+> closed the review list** — per-project sandboxes are built (the per-user registry is DELETED;
+> `sandbox_id` lives on the project row), the VM lifecycle has callers (teardown on delete, cap-2
+> hibernate-oldest, reset-disposes, resume→create fallback), the `/home/project` literal family is
+> migrated behind a default-deny scan, `.codesandbox/` is excluded at the map layer, and the shell
+> demux is one pump. Every §11 finding is dispositioned in `spec/sandbox-codesandbox.md`. Nine of
+> ten T17 live scenarios ran clean against the real provider (numbers in that spec's status block).
+> **Still between here and real users:** T17c (checkpoints silently stop on CSB; `dist/` leaks into
+> the file map after publish — FILED, not fixed), T17 scenario 3 (Assets-tab upload), metering
+> (item 4 below — placeholder folded into margin, now ASSERTED by T11's floors and MEASURED by
+> T12's report), and the per-deploy A/B (item 6).
 
 ## Why this exists
 
@@ -98,8 +103,8 @@ Honesty matters more here than a clean scorecard:
    readyOsc?, beginOsc?}` — WebContainer declares `/bin/jsh --osc` + `readyOsc:'interactive'`;
    CodeSandbox declares `bash` + `beginOsc:'begin'` via the versioned rc block). What remains
    WebContainer-shaped is the parsing machinery itself living in `shell.ts` rather than behind the
-   seam — and it has a known demux race on the CodeSandbox dialect
-   (`spec/sandbox-codesandbox.md` §11 M5).
+   seam. (The §11 M5 demux race on the CodeSandbox dialect was FIXED 2026-07-28 — one pump owns the
+   stream reader, every signal reaches every waiter; plan T9c.)
 3. **`mount()` corrupts binaries on the WebContainer provider** (`TextDecoder('latin1')` =
    windows-1252). Documented at length in `~/lib/registry/mount-tree.ts`. This is a property of one
    provider; the seam permits `Uint8Array` contents and a correct provider would carry them.
@@ -138,26 +143,29 @@ that would mean deploying a **second application** beside Lightsail.
       available" forever. Two sweeps (t=0 and t=3s), because `ports.getAll()` answers `[]` in the
       first moments after `connectToSandbox` (MEASURED); and it must feed `onPort`, because THAT is
       the listener that fills `PreviewsStore.previews` — `onServerReady` only broadcasts.
-- [~] **3. Lifecycle + persistence — HALF DONE (2026-07-27).** Session minting and preview
+- [x] **3. Lifecycle + persistence — DONE (2026-07-28, plan T1–T5).** Session minting and preview
       tokenization are BUILT (`api.sandbox.session.ts` + `api.sandbox.preview.ts`, verified-user
-      wall, sandbox id derived from the registry and never on the wire; `decideSandboxStart` pure +
-      tested, refuse-on-unknown). Still open, and now with a defect list attached
-      (`spec/sandbox-codesandbox.md` §11): the registry is per-USER, not per-project — the §11 C1
-      cross-project-adoption hazard is the reason `sandbox_id` must move to the project record —
-      and **reaping does not exist**: `deleteSandbox`/`hibernateSandbox`/`deleteSandboxRecord` have
-      zero callers, project delete never sweeps `sandboxes/`, `reset` orphans the old VM, and the
-      lock-less registry PUT races two tabs into a leaked sandbox.
-- [ ] **4. Cost model.** SPEC §7's "user project compute: ~$0" stops being true. A `sandbox` ledger
-      reason, a metering sweep, an overdraw policy, and a re-run of `packMargin()`. It accrues
-      **while the user is idle**, which is a billing shape nothing in the ledger has today.
-      **Until it ships, the cost is folded into the margin as a documented PLACEHOLDER**
-      (CREDITS.md §"Sandbox compute", 2026-07-27): ~+25% on raw cost ≈ 5–7 GM points at
-      `CREDIT_MARGIN=4.0`; `5.0` restores the ~75% target — applied to BOTH providers by owner
-      decision until real per-provider numbers exist.
-- [ ] **5. The binary contract gets a network hop.** Every `readBinaryFile` becomes an RTT and
-      `FilesStore.refreshFiles` walks the whole tree — against a MEASURED 3,600 requests/hour cap on
-      the free plan. Egress paths (publish, GitHub sync, deploy) want a server-side route where bytes
-      never round-trip through the browser at all.
+      wall; `decideSandboxStart` pure + tested, refuse-on-unknown). The 2026-07-27 gaps are closed:
+      `sandbox_id` is a per-PROJECT pointer on the project row (the per-user `registry.ts` is
+      DELETED); reaping exists — teardown on project delete (`delete-leaves-nothing` pins it),
+      `reset` disposes the old VM, the create race converges via compare-and-set with the loser
+      disposed, a per-user create rate limit bounds the fork budget, `decideVmCap` hibernates the
+      oldest beyond `CODESANDBOX_MAX_RUNNING_VMS` (default 2, never refuses), and a deleted VM falls
+      back resume→create ONCE (live-proven: 52s to a fresh VM).
+- [~] **4. Cost model — HALF DONE (2026-07-28, T11+T12).** The `sandbox` ledger reason, metering
+      sweep and overdraw policy are still unbuilt (bake-into-margin, owner decision 2026-07-27) —
+      but the fold-in is no longer invisible: `effectivePackMargin` ASSERTS every pack and plan
+      clears `MIN_PACK_MARGIN` with VM overhead on the cost side (`billing/vm-cost.ts`,
+      `spec/billing.md`), and per-user VM-hours are MEASURED from append-only lifecycle marks on the
+      Admin tab — the number that decides whether metering ever needs to exist. Placeholder
+      derivation stays in CREDITS.md §"Sandbox compute"; it accrues **while the user is idle**,
+      which is a billing shape nothing in the ledger has today.
+- [~] **5. The binary contract gets a network hop.** Every `readBinaryFile` becomes an RTT and
+      `FilesStore.refreshFiles` walks the whole tree — the fear was the 3,600 requests/hour cap.
+      **MEASURED 2026-07-28: ~26 REST calls in 81 minutes across three creations (~1% of cap)** —
+      file traffic rides the Pitcher websocket and the `.codesandbox`/`node_modules` excludes held.
+      Egress paths (publish, GitHub sync, deploy) still round-trip bytes through the browser; a
+      server-side route remains future work, no longer urgent.
 - [~] **6. Flag + A/B.** The flag EXISTS and is deliberately BUILD-time, not runtime:
       `VITE_SANDBOX_PROVIDER=codesandbox` (unset/typo = WebContainer; the runtime's name is not a
       secret, which is the one legitimate `VITE_` prefix). A/B against WebContainers on real usage

@@ -20,7 +20,10 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@nanostores/react';
+import { map } from 'nanostores';
 import { toast } from 'react-toastify';
+import { streamingState } from '~/lib/stores/streaming';
+import { workbenchStore } from '~/lib/stores/workbench';
 import { generationCount, projectId as projectIdStore, repoStatus, requestSave, unsavedWork } from '~/lib/persistence';
 import { decideNudge, shouldWarnBeforeUnload } from '~/lib/persistence/save-status';
 import { saveWarningCopy } from '~/lib/persistence/save-warning-copy';
@@ -69,11 +72,33 @@ export function SavingSurface() {
   );
 }
 
+/** Stable empty fallback so the hook below can subscribe unconditionally (hooks cannot be optional). */
+const NO_ACTIONS = map({});
+
 function SaveNudges() {
   const activeProjectId = useStore(projectIdStore);
   const repo = useStore(repoStatus);
   const count = useStore(generationCount);
   const [dismissedAt, setDismissedAt] = useState<number | undefined>();
+
+  /*
+   * Mid-work gate (T17): a creation checkpoints after its first machine-written message, so
+   * `generationCount` reaches 1 while the real generation is still streaming — and the "not saved"
+   * toast fired over a half-built project. Both signals are stores, so the nudge recomputes (and the
+   * toast finally fires) the moment the last file action lands. No timers — the file's own rule.
+   */
+  const streaming = useStore(streamingState);
+  const artifacts = useStore(workbenchStore.artifacts);
+  const firstArtifactId = Object.keys(artifacts)[0];
+  const actions = useStore(firstArtifactId ? artifacts[firstArtifactId].runner.actions : NO_ACTIONS);
+  const applying =
+    streaming ||
+    Object.values(actions).some((action) => {
+      const a = action as { status?: string; type?: string };
+
+      // `start` actions (the dev server) run for the whole session — they never hold a nudge back.
+      return a.type !== 'start' && (a.status === 'pending' || a.status === 'running');
+    });
 
   /** Projects whose intro toast fired THIS session — the StrictMode double-fire guard, per project. */
   const shownProjects = useRef<Set<string>>(new Set());
@@ -88,6 +113,7 @@ function SaveNudges() {
   const nudge = activeProjectId
     ? decideNudge({
         linked,
+        applying,
         generationCount: count,
         firstToastShown:
           shownProjects.current.has(activeProjectId) || localStorage.getItem(introShownKey(activeProjectId)) === '1',

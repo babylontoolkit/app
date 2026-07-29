@@ -56,6 +56,41 @@ export function buildContentKey(shareId: string, requestPath: string): string {
   return `${buildPrefix(shareId)}/${segments.join('/')}`;
 }
 
+export type PlayRequestMode = 'asset' | 'game-document' | 'wrapper';
+
+/**
+ * What a `/play/:shareId/<rest>` request actually wants (T17b).
+ *
+ * Three answers, and the distinction is load-bearing because the game is a BrowserRouter SPA served
+ * under a prefix:
+ *
+ * - **asset** — the path has an extension: serve the build file's bytes. Unchanged.
+ * - **game-document** — the request is the IFRAME loading the game (`?embed=1`, set by the wrapper's
+ *   own markup, or a `sec-fetch-dest: iframe` in-game full-reload navigation): serve `index.html`'s
+ *   bytes whatever the path, so the game's client-side routes (`/play/<id>/play`) resolve inside the
+ *   game instead of 404ing. This is SPA fallback scoped to the iframe.
+ * - **wrapper** — a person at a top-level URL: the shell page (badge + iframe).
+ *
+ * `embed` must win over everything extensionless or the wrapper recurses: the iframe's directory URL
+ * has no extension, and serving it the wrapper would put a wrapper inside the wrapper forever. A
+ * browser that sends neither signal (no `sec-fetch-dest`) degrades to the wrapper on in-game reloads —
+ * nested chrome, but a game that still boots — never to a 404.
+ */
+export function resolvePlayRequest(
+  rest: string,
+  signals: { embed: boolean; secFetchDest: string | null },
+): PlayRequestMode {
+  if (/\.[a-z0-9]+$/i.test(rest)) {
+    return 'asset';
+  }
+
+  if (signals.embed || signals.secFetchDest === 'iframe') {
+    return 'game-document';
+  }
+
+  return 'wrapper';
+}
+
 export interface PlayOrigin {
   /** Absolute origin the game iframe is served from. Empty string means same-origin (local dev only). */
   origin: string;

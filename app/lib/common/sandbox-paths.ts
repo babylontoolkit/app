@@ -73,3 +73,26 @@ export function toProjectRelativePath(rawPath: string): string {
 export function isSandboxAbsolutePath(rawPath: string): boolean {
   return SANDBOX_ROOTS.some((root) => rawPath === root || rawPath.startsWith(`${root}/`));
 }
+
+/**
+ * Strip a sandbox root prefix and NOTHING else — a bare leading slash survives.
+ *
+ * The distinction matters exactly once, and it is a security boundary. `buildObjectKey` (§4.8) turns
+ * CLIENT-SUPPLIED build paths into storage keys and must REJECT a genuinely absolute path (`/etc/…`)
+ * rather than silently relativise it into some other valid key. {@link toProjectRelativePath} strips
+ * leading slashes by design — correct for a file map whose keys are known-good, catastrophic here —
+ * so that function is the wrong tool and this one exists so the caller does not hand-roll a third
+ * copy of the root list. The leading slash is OPTIONAL on the prefix (`home/project/x` strips too),
+ * matching the regex this replaced.
+ */
+export function stripSandboxRootPrefix(rawPath: string): string {
+  for (const root of SANDBOX_ROOTS) {
+    for (const prefix of [`${root}/`, `${root.replace(/^\//, '')}/`]) {
+      if (rawPath.startsWith(prefix)) {
+        return rawPath.slice(prefix.length);
+      }
+    }
+  }
+
+  return rawPath;
+}

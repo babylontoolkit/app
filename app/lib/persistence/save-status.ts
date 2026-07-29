@@ -270,6 +270,15 @@ export interface NudgeFacts {
 
   /** `saving.bannerEveryNGenerations`, injected so the rule is testable without importing config. */
   bannerEvery: number;
+
+  /**
+   * A generation is still streaming, or its file actions are still being applied (T17, 2026-07-28).
+   * A creation CHECKPOINTS after its first machine-written message, so `generationCount` reaches 1
+   * while the real build is still running — and the "your game is not saved" toast fired over a
+   * half-built project. Mid-work is the one moment the platform has nothing useful to add (the same
+   * argument that bans a clock here); every nudge waits until the work is actually finished.
+   */
+  applying?: boolean;
 }
 
 /**
@@ -291,6 +300,11 @@ export type Nudge = 'toast' | 'banner' | 'none';
  * are chrome.
  */
 export function decideNudge(facts: NudgeFacts): Nudge {
+  // Mid-generation or mid-write: say nothing yet. The nudge fires when the work is FINISHED.
+  if (facts.applying) {
+    return 'none';
+  }
+
   // Saved is saved. Nothing to nudge about, ever.
   if (facts.linked) {
     return 'none';

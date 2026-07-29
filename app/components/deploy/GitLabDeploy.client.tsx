@@ -9,12 +9,21 @@ import { chatId } from '~/lib/persistence/useChatHistory';
 import { getLocalStorage } from '~/lib/persistence/localStorage';
 import { formatBuildFailureOutput } from './deployUtils';
 import { brand } from '~/config/brand';
+import { publishReadinessNow } from '~/lib/chat/publish-readiness';
 
 export function useGitLabDeploy() {
   const [isDeploying, setIsDeploying] = useState(false);
   const currentChatId = useStore(chatId);
 
   const handleGitLabDeploy = async () => {
+    // Refuse to build while a generation is streaming or file actions are still applying (T17).
+    const readiness = await publishReadinessNow();
+
+    if (!readiness.ready) {
+      toast.warn(readiness.reason);
+      return false;
+    }
+
     const connection = getLocalStorage('gitlab_connection');
 
     if (!connection?.token || !connection?.user) {

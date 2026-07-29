@@ -21,6 +21,7 @@ import { useNavigate } from '@remix-run/react';
 import { toast } from 'react-toastify';
 import { projectId } from '~/lib/persistence/useChatHistory';
 import { setPendingRemix } from '~/lib/persistence/pending-remix';
+import { bootedProjectId } from '~/lib/sandbox';
 
 /**
  * Remix the current game.
@@ -54,8 +55,21 @@ export function useRemixProject(): { remix: () => Promise<void>; busy: boolean }
       if (response.ok && data?.projectId) {
         // Hand the clone to the builder's mount path, same baton a shared-game remix uses.
         setPendingRemix(data.projectId);
-        navigate('/', { replace: true });
-        toast.success('Project remixed');
+
+        /*
+         * 🔴 ONE TAB, ONE SANDBOX CONNECTION (the dashboard's `openBuilder` rule). This hook runs
+         * INSIDE the builder, so the tab is holding the SOURCE project's sandbox — an SPA navigate
+         * would ask `bootForProject` to re-point the live stores at the clone's VM, which it refuses
+         * ("already connected to another project"), leaving the user on the old project while the
+         * toast claims success (observed live 2026-07-29). A real page load starts every store fresh;
+         * the baton is sessionStorage, so it survives — and the boot splash narrates the open.
+         */
+        if (bootedProjectId()) {
+          window.location.href = '/';
+        } else {
+          navigate('/', { replace: true });
+          toast.success('Project remixed');
+        }
 
         return;
       }

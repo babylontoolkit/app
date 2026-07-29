@@ -60,6 +60,15 @@ const { setLedger, getLedger } = ledgerModule;
 const { handleWebhook, createSubscriptionCheckout, SUBSCRIPTION_PLANS, planAsPack, packMargin, MIN_PACK_MARGIN } =
   await import('./stripe');
 
+const {
+  effectivePackMargin,
+  packsUnderVmAdjustedFloor,
+  vmOverheadUsdPerCredit,
+  DEFAULT_SANDBOX_VM_USD_PER_HOUR,
+  DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT,
+  MEASURED_VM_TIER_USD_PER_HOUR,
+} = await import('./vm-cost');
+
 let tmp: string;
 
 beforeEach(async () => {
@@ -229,4 +238,93 @@ describe('subscription plan pricing', () => {
       expect(packMargin(planAsPack(plan), config)).toBeGreaterThanOrEqual(MIN_PACK_MARGIN);
     },
   );
+
+  /*
+   * 🔴 The SAME floor, after sandbox compute (T11) — because a plan is a SECOND, independently
+   * editable price array, which is the entire reason this file has its own floor test at all
+   * (`planAsPack`'s comment: "so one margin floor covers both revenue shapes").
+   *
+   * T11 added a second floor and, in its first draft, covered only the packs. Plans mirror the packs
+   * exactly today, so nothing was underwater — but a promo month or a repriced plan would clear the
+   * LLM floor and never meet the VM-adjusted one, silently, which is precisely the failure T11 exists
+   * to end. Two price arrays, two floors, or the second floor is decorative.
+   */
+  it.each(SUBSCRIPTION_PLANS.filter((p) => p.isActive).map((p) => [p.id, p] as const))(
+    '%s still clears the floor once sandbox compute is paid out of it',
+    (_id, plan) => {
+      const withVm = {
+        ...config,
+        vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({
+          usdPerHour: DEFAULT_SANDBOX_VM_USD_PER_HOUR,
+          estHoursPerKCredit: DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT,
+        }),
+      };
+
+      expect(effectivePackMargin(planAsPack(plan), withVm)).toBeGreaterThanOrEqual(MIN_PACK_MARGIN);
+    },
+  );
+
+  /*
+   * The same plan floor at every MEASURED tier, not only the default one (2026-07-28).
+   *
+   * The hourly rate now derives from `CODESANDBOX_VM_TIER`, so an operator doubles the compute cost of
+   * every plan by editing one env var — and the floor above, graded at Pico, would keep passing.
+   * Two price arrays, two floors; two tiers, both graded.
+   */
+  it.each(Object.entries(MEASURED_VM_TIER_USD_PER_HOUR))(
+    'every active plan clears the floor on the %s tier ($%s/hr)',
+    (_tier, usdPerHour) => {
+      const withVm = {
+        ...config,
+        vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({
+          usdPerHour,
+          estHoursPerKCredit: DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT,
+        }),
+      };
+
+      const active = SUBSCRIPTION_PLANS.filter((plan) => plan.isActive).map(planAsPack);
+
+      expect(active.length).toBeGreaterThan(0);
+      expect(packsUnderVmAdjustedFloor(withVm, MIN_PACK_MARGIN, active)).toEqual([]);
+    },
+  );
+
+  /*
+   * The CEILING on plans too: Micro ($0.298/hr, derived) puts EVERY plan under the floor.
+   *
+   * Plans are the weaker of the two revenue shapes here (margin 3.34 against the packs' 4.0), so where
+   * Micro leaves `starter` clinging on at 2.01x in `billing.spec.ts`, not one plan survives. That
+   * asymmetry is the reason both files carry the test: an operator raising `CODESANDBOX_VM_TIER` breaks
+   * subscriptions first, and nothing in the product refuses the env var.
+   */
+  it('CEILING: the next tier up (Micro) puts every plan under the floor', () => {
+    const micro = {
+      ...config,
+      vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({
+        usdPerHour: 0.298,
+        estHoursPerKCredit: DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT,
+      }),
+    };
+
+    const active = SUBSCRIPTION_PLANS.filter((plan) => plan.isActive).map(planAsPack);
+
+    expect(packsUnderVmAdjustedFloor(micro, MIN_PACK_MARGIN, active)).toHaveLength(active.length);
+  });
+
+  /** The floor BINDS on plans too — an absurd hours estimate must put them underwater, not pass. */
+  it('reports plans as underwater when the VM estimate says they are', () => {
+    const absurd = {
+      ...config,
+      vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({
+        usdPerHour: DEFAULT_SANDBOX_VM_USD_PER_HOUR,
+        estHoursPerKCredit: 200,
+      }),
+    };
+
+    const active = SUBSCRIPTION_PLANS.filter((plan) => plan.isActive).map(planAsPack);
+    const underwater = packsUnderVmAdjustedFloor(absurd, MIN_PACK_MARGIN, active);
+
+    expect(underwater).toHaveLength(active.length);
+    expect(underwater.every(({ effectiveMargin }) => effectiveMargin < 1)).toBe(true);
+  });
 });

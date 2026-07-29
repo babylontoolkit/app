@@ -92,6 +92,83 @@ CodeSandbox resumes with the filesystem intact and is a plain HTTPS API callable
 >    declares no `beginOsc` and is byte-identical. The rc v2 block also exports `BROWSER=true`,
 >    which silences the `xdg-open ENOENT` noise item 4 of the open list flagged.
 >
+> **STATUS UPDATE 2026-07-28 — THE PRODUCTION PLAN EXECUTED (`_specs/codesandbox-production_plan.md`,
+> T1–T16 + T17a/T17b shipped; T17 all TEN scenarios driven; T17c FILED).** Per-project sandboxes are
+> BUILT (the per-user `registry.ts` is DELETED — `sandbox_id` lives on the project row, T1–T3), the
+> §11 findings are dispositioned below, and the whole thing was re-driven live against real
+> CodeSandbox. **T17 live results (2026-07-28 evening, numbers not adjectives):**
+>
+> - **Request rate: ~26 REST calls in 81 minutes** (13 session mints, 4 forks, 9 resumes) across
+>   THREE full creations plus heavy reopening — **~1% of the 3,600/hr cap** that §7 said to measure
+>   first. File traffic rides one Pitcher websocket per client (not REST); the baked `node_modules`
+>   makes the creation install a 2s no-op, so no enrichment flood. The T9 excludes HELD live (no
+>   `node_modules`/`.git`/`.codesandbox` ever appeared in the map).
+> - **Byte-identity end-to-end:** Export ZIP is byte-faithful (113 files; `havok.wasm` 2,094,566B and
+>   `glslang.wasm` sha256-identical to template source); a 3.4MB generated hero JPEG is
+>   sha256-IDENTICAL across VM → ZIP export AND VM → publish → `/play` serve (4.6MB transparent PNG
+>   likewise).
+> - **Two browsers, one project:** second tab mounted the same project in 15s; two Pitcher clients on
+>   one VM; no watcher echo storms, no terminal contention.
+> - **A→B→A in one tab:** each switch landed on the CORRECT per-project VM (`rdkhpl` → `3n53kf` →
+>   `rdkhpl`), ~12s per switch, disk edits survived — the §11 C1 cross-project adoption is dead in
+>   practice, not just in code.
+> - **Kill recovery: 52s.** VM deleted provider-side → reload → fresh VM minted via T2's
+>   resume→create fallback, working-copy restore refilled it, no permanent 503, no silent template
+>   adoption. ⚠️ It restored the STARTER — the T17c defect's cost, measured end-to-end (see below).
+> - **Wake check: 39s.** Dev server killed in the VM + hibernate → reload → boot narrated "Getting
+>   the project ready…", exactly ONE vite restarted, preview back with zero typing (T6 live-proven).
+> - **Publish build memory (scenario 1): Pico survives, barely** — peak 1,958MB of 2,053MB (95MB /
+>   4.6% headroom, swap behind it), build 9.19s, dist 25M, publish end-to-end 32s. A per-build
+>   `updateTier` bump is not needed today and IS worth pricing; the eroding variable is the user's
+>   own asset count.
+> - **Money:** the flat creation price charged exactly 500 (+media) on all three creations; a warm
+>   creation ran 79.7s vs 205/247s cold; the cache warmer ran live (`6 sent, 6 reads, 0 writes`).
+> - 🔴 **Alias propagation lag (found by T17b's live drive): a fork 19s after promoting a freshly
+>   built alias got the PREVIOUS bytes.** Self-healed within minutes; a probe fork then confirmed the
+>   alias serves the new code. **Never trust the first fork right after a promote** — validate with a
+>   probe fork, not with the promote's own success.
+>
+> **Serving a published game — the T17b contract (`share/serve.ts` `resolvePlayRequest`).** Every
+> published game was broken twice over (root-absolute asset URLs under the `/play/:shareId/` prefix,
+> then a router basename that matched nothing) — fixed at three layers, live-verified: **(a)** the
+> share build runs with `--base=./` via `SHARE_BUILD_COMMAND` (exact-match allow-list — the model can
+> only SELECT between fixed argv arrays), with a server backstop (`rootAbsoluteEntryRefs` →
+> `RootAbsoluteAssetError`, 422 pre-write) so a root-absolute entry HTML can never ship silently
+> again; **(b)** the template resolves its router basename at runtime (`appBasename()` — `/` in dev,
+> `/play/<id>/` on a share) and reloads prefix-preserving; **(c)** `resolvePlayRequest` serves three
+> modes — asset, game DOCUMENT, or wrapper: the wrapper's iframe loads the DIRECTORY URL with
+> `?embed=1` (never `/index.html`, which leaves a route path no router matches), `embed` or
+> `sec-fetch-dest: iframe` gets the game document for any extensionless path (SPA fallback scoped to
+> the iframe), and a no-signal browser degrades to the wrapper — never 404, never recursion. Publish
+> is also guarded by `decidePublishReadiness` (refuses mid-generation publishes; running `start`
+> actions excluded — the dev server runs forever).
+>
+> **The "Still open after the live run" list above is SUPERSEDED.** What genuinely remains as of
+> 2026-07-28:
+>
+> 1. ~~**T17 scenario 3** — Assets-tab upload has never been driven on this provider.~~ **DONE later the same day:** upload accepted, listed, and the stored object sha256-identical to the uploaded bytes (validation/quota refusals stay unit-covered only).
+> 2. ~~**T17c (FILED, not fixed)** — checkpoints silently stop after the first machine message.~~
+>    **FIXED + LIVE-VERIFIED 2026-07-29** (`persistence/checkpoint-run.ts` — settle-wait + 60s
+>    per-attempt timeout + spaced retries + LOUD failure with guard reset; conversation save decoupled
+>    from the file serialize; `dist/` in `MAP_EXCLUDED_DIRS` with a membership pin). Live on the real
+>    provider: creation + edit → seq 0/1/2; VM deleted provider-side → recovery restored the
+>    POST-EDIT state, not the starter. Details in the plan's T17c entry. (The `</function_results>`
+>    leak seen in an old transcript during the drive is already covered — the tag joined
+>    `protocol-strip.ts` 2026-07-28, spec-pinned with the measured leak string.)
+> 3. **Metering** — the `sandbox` ledger reason/sweep is still unbuilt; VM cost is folded into
+>    `CREDIT_MARGIN` as the documented placeholder, now ASSERTED by T11's `effectivePackMargin`
+>    floors (`spec/billing.md`) and MEASURED by T12's Admin VM-hours report.
+> 4. ~~**Owner actions:** promote the rebuilt starter and commit the template-side changes.~~ **DONE
+>    2026-07-29:** the AppTemplate changes are committed (`62a34a9 "Base Path Updates"` — `base: "./"`,
+>    `appBasename()`, `.codesandbox/`, clean tree), and `btk@starter-20260728c` — built from exactly
+>    that state — is the CURRENT promoted pin (pin store, 2026-07-29T00:33Z). `-20260728b` is
+>    superseded by `-c` and needs no promotion. Only HMR-over-wss in a hosted preview still lacks an
+>    explicit check (minor — dev-loop quality, not correctness).
+> 5. **Egress paths** (seam swap-plan item 5) — publish/sync/deploy bytes still round-trip through
+>    the browser; a server-side route is future work (the measured request rate says it is not
+>    urgent).
+> 6. §11 minor leftovers marked "still open" in the disposition below.
+>
 > **FOURTH SESSION, 2026-07-27 (later) — creation SPLASH + a full three-track code review.**
 > The blank-purple-screen creation window got the same narrated treatment as the resume path: the
 > `bootProgress` store gained `creating-*` phases (starter download → workspace boot → mount →
@@ -413,8 +490,11 @@ another way. That is the one genuinely memory-hungry server-side step, and it is
 
 🔴 **3,600 requests/hour is the limit to watch, not the credits.** That is 1/second sustained, and our
 `FilesStore` is chatty: with content-less watch events (§5b) every file change becomes a `readFile`. A
-single generation writing 20 files could burn 40+ requests. ⚠️ UNVERIFIED under real load — **measure this
-before the tier question**, because it bites first.
+single generation writing 20 files could burn 40+ requests. ~~⚠️ UNVERIFIED under real load~~ **MEASURED
+2026-07-28 (T17 scenario 2): ~26 REST calls in 81 minutes across three full creations — ~1% of the cap.**
+File traffic rides the Pitcher websocket, not REST, and the T9 excludes held; the fear was reasonable and
+did not materialise. The Pico memory question is also answered: peak 1,958MB of 2,053MB during a publish
+build (95MB headroom — survives, barely, with swap behind it).
 
 ⚠️ UNVERIFIED: what the free plan's **"CodeSandbox SDK lite"** actually restricts. Everything probed here
 worked on the free plan; the restriction may be concurrency or tier ceiling (Build lists "VMs up to 4 vCPUs
@@ -424,7 +504,7 @@ worked on the free plan; the restriction may be concurrency or tier ceiling (Bui
 
 - `capabilities`: `terminal: true`, `watch: true` (no content), `textSearch: false`, `clearPort: true`
   (a resumed/forked VM wakes with the previous session's dev server still bound to 5173 — both the
-  per-user sandbox reuse and a `btk@starter` fork deliver one, and the creation artifact's own
+  per-user sandbox reuse (historical — sandboxes are per-project now) and a `btk@starter` fork deliver one, and the creation artifact's own
   `npm run dev` then dies with "Port 5173 is already in use", MEASURED live 2026-07-27; creation
   clears the port via `clearInheritedDevServer` before mounting).
 - **`privacy: 'private'` at every creation site.** Default is public. Pin it.
@@ -437,8 +517,10 @@ worked on the free plan; the restriction may be concurrency or tier ceiling (Bui
 - The API key is a platform secret: `app/lib/.server/**` only, never `VITE_`-prefixed, never in a response
   body (SPEC §5).
 - Billing: sandbox time is a **new cost input** that scales with wall-clock, not tokens. It needs its own
-  ledger reason, a metering sweep, and an overdraw policy, and `packMargin()` must be re-run. None of that
-  exists yet.
+  ledger reason, a metering sweep, and an overdraw policy, and `packMargin()` must be re-run. ~~None of that
+  exists yet.~~ **SUPERSEDED 2026-07-28:** the ledger reason/sweep are still unbuilt (bake-into-margin by
+  owner decision), but the margin re-run is now a TESTED floor (`effectivePackMargin`, T11 —
+  `spec/billing.md`) and per-user VM-hours are measured (T12, Admin tab).
 
 ## 9. Verify before building
 
@@ -457,6 +539,11 @@ worked on the free plan; the restriction may be concurrency or tier ceiling (Bui
 
 ## 10. Build order, once started
 
+> **SUPERSEDED 2026-07-28:** items 1–3 are BUILT (per-project `sandbox_id`, provider, T14
+> pin-and-promote panel); item 4 is half-built (T11 floors + T12 report; ledger reason/metering
+> still owed); item 5's flag exists and the per-deploy A/B is still owed. Kept as the historical
+> ordering.
+
 1. `app/lib/.server/sandbox/` — key holder: create/resume/hibernate/delete, mint sessions, mint host
    tokens. Two-wall routes (`requireOwnedProject`), and a `sandbox_id` on the project record.
 2. `app/lib/sandbox/codesandbox-provider.ts` — `connectToSandbox` wrapped in `SandboxProvider`. The seam
@@ -474,6 +561,55 @@ whole sandbox surface; every finding below was verified against the source, the 
 second time. **None of these block WebContainer builds** (the review found zero regressions on the
 default path); all of them are between here and flipping `VITE_SANDBOX_PROVIDER=codesandbox` for
 real users.
+
+> **DISPOSITION 2026-07-28 (T18):** every finding below now carries a verdict — **fixed-by-T\<n\>**
+> (the production plan's shipped task, `_specs/codesandbox-production_plan.md`) or **STILL OPEN** —
+> none ambiguous. The plan's checked boxes are the authority.
+>
+> - **C1** — **FIXED by T1–T3** (per-project `sandbox_id` on the project row; registry DELETED;
+>   project-pinned boot + the T3(h) identity sentinel as defense-in-depth). **Live-proven** by T17
+>   scenario 8 (A→B→A landed on the correct VMs) and scenario 9 (no silent template adoption).
+> - **M1 (VM leak/reap)** — **FIXED by T2** (create-race compare-and-set + loser disposed; `reset`
+>   disposes the old VM), **T4** (teardown on project delete + `delete-leaves-nothing` sandbox case +
+>   one-shot legacy orphan sweep) and **T5** (running-VM cap, hibernate-oldest). T12's lifecycle
+>   marks make a leak visible on the Admin tab.
+> - **M2 (`reset` loop)** — **FIXED by T2** (per-user create rate limit, described 429; reset
+>   disposes).
+> - **M3 (resume→create fallback)** — **FIXED by T2** (typed gone-classification preferred over the
+>   message regex; falls back to create ONCE and records the new id) + **T3(e)** (boot failure
+>   retryable, never cached forever). **Live-proven** by T17 scenario 9 (deleted VM → fresh VM in
+>   52s, no permanent 503).
+> - **M-P1..P4 (`/home/project` literal family)** — **FIXED by T7** (publish/deploy candidates via
+>   one shared `build-output.ts`) and **T7b** (opaque strip, `CLAUDE.md` promotion, plan-artifacts,
+>   publish checklist — plus a TENTH regex-escaped instance no grep could find, and a default-deny
+>   source scan with controls so the eleventh cannot ship).
+> - **M4 (`.codesandbox/` rides into everything)** — **FIXED by T9** (`MAP_EXCLUDED_DIRS` feeding
+>   watcher + walk, `OPAQUE_DIRS` second wall, Search excludes). **Live-verified** by T17 scenario 2
+>   (never appeared in the map). Known recorded consequence: a repo already containing
+>   `.codesandbox/` loses it on the next Commit (no `base_tree` push, recoverable from git history).
+> - **M5 (shell demux deadlock)** — **FIXED by T9c** (one pump owns the stream reader; every signal
+>   reaches every waiter; rejected reads reject waiters, `close()` resolves).
+> - **M6 (failed rc install hangs shells)** — **FIXED by T9c** (`beginOsc` declared only when the
+>   hook is actually installed; the claim is frozen at first spawn).
+> - **M7 (`restoreFiles` no write-through)** — **FIXED by T9b** (synchronous map write-through for
+>   every restore door, path-rebased through `toProjectRelativePath` on BOTH sides).
+> - **M8 (`resolveInWorkdir` doubling + watch-path contract)** — **FIXED by T7** (rebase-then-wall;
+>   watch-event paths normalized once, pinned).
+> - **M9 (watch enrichment untested / exclude-glob unverified)** — **FIXED by T9** (watch-leg tests
+>   through the provider double) and **live-verified** by T17 scenario 2 (excludes honored; ~26 REST
+>   calls in 81 min vs the 3,600/hr cap).
+> - **Minor:** `teardown()` no-op — **fixed by T4**; mid-session reconnect adoption — **fixed by
+>   T3(f)** (a reconnect that would CREATE fails loudly); preview token re-mint + port-keyed cache —
+>   **fixed by T8** (+ T3(b) per-(project,port) keying); `rm({force:true})` swallowing — **fixed by
+>   T7**; `CODESANDBOX_HOST_TOKEN_MINUTES` clamp — **fixed by T8**; user-UUID-as-`projectId`
+>   metadata — **fixed by T2** (the `project:${id}` tags are truthful now); `firstBootupType` frozen
+>   per page — **fixed by T3(g)**; route security behaviorally pinned — **fixed by T2**
+>   (`outbound-auth.spec.ts` entries). **STILL OPEN (minor, accepted or unscheduled):** background
+>   exit codes narrowed to 0/1 (documented behavior); watch enrichment can deliver stale content out
+>   of order for non-agent, non-restore writes (agent writes have `recordAgentWrite`, restores have
+>   T9b); the privacy scan matches the literal `sandboxes.create(` (an aliased call evades it); a
+>   user-facing `reset` affordance (T3(e) added boot-failure retry; a deliberate reset control does
+>   not exist).
 
 ### 🔴 CRITICAL — fix before ANY multi-project use
 

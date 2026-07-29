@@ -46,6 +46,18 @@ import {
 } from './ledger';
 import { checkCreditGate, refundGeneration, settleGeneration } from './gate';
 import { CREDIT_PACKS, MIN_PACK_MARGIN, packMargin } from './stripe';
+import { DEFAULT_SANDBOX_VM_TIER, SANDBOX_VM_TIERS, sandboxVmTier } from '~/lib/.server/sandbox/config';
+import {
+  DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT,
+  DEFAULT_SANDBOX_VM_USD_PER_HOUR,
+  effectivePackMargin,
+  getVmCostConfig,
+  MEASURED_VM_TIER_USD_PER_HOUR,
+  packsUnderVmAdjustedFloor,
+  tierCoverage,
+  vmOverheadUsdPerCredit,
+  vmUsdPerHourForTier,
+} from './vm-cost';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from './generations';
 
 let tmp: string;
@@ -84,8 +96,52 @@ const KIE_ENV = [
   'PREMIUM_OUTPUT_DOLLARS',
 ] as const;
 
+/**
+ * The SAME trap, for the sandbox VM cost inputs (T11, `vm-cost.ts`).
+ *
+ * `getVmCostConfig` reads through `envNumber` → `env()` → `process.env`, so an operator with
+ * `SANDBOX_VM_USD_PER_HOUR` in their `.env.local` (which `.env.example` tells them to set) would have
+ * the margin-floor assertions below silently graded against THEIR rate instead of the measured Pico
+ * one. Scrubbed here, stubbed per-test where a specific value is the point.
+ *
+ * Kept as its own list rather than appended to `KIE_ENV`: these are not KIE variables, and a scrub
+ * list that stops describing its own contents is how `LLM_MODEL` went missing from the one above.
+ */
+const SANDBOX_VM_ENV = [
+  'SANDBOX_VM_USD_PER_HOUR',
+  'SANDBOX_EST_VM_HOURS_PER_KCREDIT',
+
+  /*
+   * 🔴 `CODESANDBOX_VM_TIER` BELONGS HERE BECAUSE THE PRICE NOW DERIVES FROM IT — the third time this
+   * trap has fired in this repo, and the second time in this file (see `LLM_MODEL` above).
+   *
+   * The list was written when `SANDBOX_VM_USD_PER_HOUR` defaulted to a flat constant, so the tier was
+   * not in its precedence chain. The 2026-07-28 fix made `getVmCostConfig` default to
+   * `vmUsdPerHourForTier(sandboxVmTier(context))` — and the owner's `.env.local` sets
+   * `CODESANDBOX_VM_TIER=Nano`, which `env()` resolves through `process.env`. Every "defaults when
+   * unset" assertion below then graded Nano's $0.149 against Pico's $0.074, ON THAT DEVELOPER'S
+   * MACHINE ONLY, with CI green.
+   *
+   * When you add a variable to a precedence chain, add it to every scrub list that already names its
+   * siblings.
+   */
+  'CODESANDBOX_VM_TIER',
+] as const;
+
+/**
+ * The SAME trap, for the flat creation price (§4.6, `creationFlatCredits`).
+ *
+ * `getBillingConfig` reads `CREATION_FLAT_CREDITS` through `envNumber` → `env()` → `process.env`, so
+ * an operator with the var in their `.env.local` (the documented way to reprice creations without a
+ * deploy) would have every `getBillingConfig()`-derived assertion in this file — and the flat-pricing
+ * suite in `creation-flat.spec.ts` — silently graded against THEIR price, on that machine only, with
+ * CI green. Own list for the same reason `SANDBOX_VM_ENV` is: it is not a KIE variable, and a scrub
+ * list that stops describing its contents is how `LLM_MODEL` went missing above.
+ */
+const CREATION_ENV = ['CREATION_FLAT_CREDITS'] as const;
+
 beforeEach(async () => {
-  for (const key of KIE_ENV) {
+  for (const key of [...KIE_ENV, ...SANDBOX_VM_ENV, ...CREATION_ENV]) {
     vi.stubEnv(key, undefined as unknown as string);
   }
 
@@ -1221,5 +1277,580 @@ describe('credit pack margins', () => {
       const revenue = credits * (pack.priceCents / 100 / pack.credits);
       expect(revenue).toBeGreaterThan(raw);
     }
+  });
+});
+
+/**
+ * The SAME floor, with sandbox VM time on the cost side (T11, `billing/vm-cost.ts`).
+ *
+ * 🔴 **"User project compute ≈ $0" is RETIRED.** It was true on WebContainer — the project ran in the
+ * user's own browser and the only real cost was a fixed StackBlitz plan fee, which a per-credit margin
+ * cannot see and does not need to. A CodeSandbox microVM is billed by WALL CLOCK, and the clock runs
+ * while the user THINKS, not only while the model runs. There is no `sandbox` ledger reason yet, so
+ * that cost comes straight out of generation margin: **no meter, no row, nothing that throws.**
+ *
+ * This is the `packMargin()` bug one layer up, and it is worth restating because the shape is
+ * identical: every file involved is internally sensible, the arithmetic that connects them lives in
+ * nobody's head, and the failure mode is selling below cost quietly. `packMargin` caught packs
+ * shipping at 0.84×; these tests are the same discipline applied to the cost input that the provider
+ * cutover adds.
+ *
+ * ⚠️ **Never restore a failing assertion here by lowering a cost input or raising `CREDIT_MARGIN`.**
+ * `$0.074/hr` is what CodeSandbox charges for Pico; 8.33 hours per 1,000 credits is what CREDITS.md's
+ * ~120-credits-per-active-build-hour placeholder inverts to. If the floor fails, the pack price is
+ * wrong or the estimate is — and both of those are answers. A fudged input is not.
+ */
+describe('credit pack margins with sandbox VM overhead', () => {
+  /*
+   * `margin: 4.0` MIRRORS the code default (`rates.ts` `creditConfig`), rather than the 3.34 the
+   * describe above still uses — that block predates the 2026-07-18 raise and pins historical
+   * arithmetic on purpose. The VM floor has to be graded against what we actually charge today.
+   *
+   * ⚠️ It is a LITERAL, not a read of `creditConfig()` — deliberately, so `.env.local` cannot move
+   * it (the `env()`-falls-back-to-`process.env` trap), and by the same convention as the block above.
+   * The cost of that choice is real and worth stating: if the code default ever changes, the pinned
+   * 3.21/3.04/2.89 here and the same numbers in CREDITS.md and `spec/billing.md` all keep passing
+   * while describing a margin the product no longer charges. The mitigation is that all four places
+   * name the number explicitly, so a change has to walk past them.
+   */
+  const money = { creditUnitCostUsd: 0.01, margin: 4.0 };
+
+  /**
+   * The DEFAULT TIER's measured rate + the stated hours estimate — i.e. what a deploy with nothing
+   * configured actually pays.
+   *
+   * 🔴 Read from `DEFAULT_SANDBOX_VM_USD_PER_HOUR` rather than a literal, and that constant is itself
+   * `MEASURED_VM_TIER_USD_PER_HOUR[DEFAULT_SANDBOX_VM_TIER]` — so the numbers pinned in this describe
+   * are the SHIPPING economics, not one tier's arithmetic. Changing the default tier (Pico → Nano,
+   * 2026-07-28) is therefore SUPPOSED to fail these three tests: they are the alarm that says CREDITS.md
+   * and `spec/billing.md` now describe a margin the product no longer earns. Re-baseline them and the
+   * two documents together, never one of them.
+   */
+  const measured = {
+    usdPerHour: DEFAULT_SANDBOX_VM_USD_PER_HOUR,
+    estHoursPerKCredit: DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT,
+  };
+
+  const shipping = { ...money, vmOverheadUsdPerCredit: vmOverheadUsdPerCredit(measured) };
+
+  it('prices the DEFAULT tier from the measured table, with no second copy of the number', () => {
+    /*
+     * The property first: the default price is the default TIER's price. This is what stops the pair
+     * drifting — the failure that put a Nano VM on Pico's rate, silently, in the first place.
+     */
+    expect(DEFAULT_SANDBOX_VM_USD_PER_HOUR).toBe(MEASURED_VM_TIER_USD_PER_HOUR[DEFAULT_SANDBOX_VM_TIER]);
+    expect(vmUsdPerHourForTier(DEFAULT_SANDBOX_VM_TIER)).toBe(DEFAULT_SANDBOX_VM_USD_PER_HOUR);
+
+    // And today's answer, named, so a default-tier change has to walk past this line.
+    expect(DEFAULT_SANDBOX_VM_TIER).toBe('Nano');
+    expect(DEFAULT_SANDBOX_VM_USD_PER_HOUR).toBe(0.149);
+  });
+
+  it('prices one credit of sandbox compute at the derivation both documents state', () => {
+    // $0.149/hr (Nano, the default tier) x 8.33 h per 1,000 credits = $1.241 per 1,000 = $0.001241/credit.
+    expect(vmOverheadUsdPerCredit(measured)).toBeCloseTo(0.001241, 6);
+
+    /*
+     * Stated the other way round, which is how CREDITS.md words it: one default-tier hour eats the
+     * margin earned by ~20 billed credits ($0.149 / $0.0075 of margin per credit at 4.0). It was ~10 on
+     * Pico — doubling the tier doubles the credits an idle hour burns, which is the sentence the
+     * document has to keep saying correctly.
+     */
+    expect(
+      DEFAULT_SANDBOX_VM_USD_PER_HOUR / (money.creditUnitCostUsd - money.creditUnitCostUsd / money.margin),
+    ).toBeCloseTo(19.87, 2);
+  });
+
+  /*
+   * The SAME derivation on Pico, stubbed explicitly rather than inherited from the default.
+   *
+   * Kept because Pico is still a supported tier an operator can select, and because a number that is
+   * only true "while the default happens to be X" is the class of claim this whole module exists to
+   * end. This one stays true whatever the default becomes.
+   */
+  it('prices a Pico credit at the Pico derivation, whatever the default tier is', () => {
+    const pico = { usdPerHour: MEASURED_VM_TIER_USD_PER_HOUR.Pico, estHoursPerKCredit: 8.33 };
+
+    expect(pico.usdPerHour).toBe(0.074);
+    expect(vmOverheadUsdPerCredit(pico)).toBeCloseTo(0.000616, 6);
+  });
+
+  // THE HEADLINE. Every pack a user can actually buy, after paying for the VM-hours those credits drag.
+  it.each(CREDIT_PACKS.filter((p) => p.isActive).map((p) => [p.id, p] as const))(
+    '%s still clears the floor after sandbox compute',
+    (_id, pack) => {
+      expect(effectivePackMargin(pack, shipping)).toBeGreaterThanOrEqual(MIN_PACK_MARGIN);
+    },
+  );
+
+  it('leaves no active pack under the floor at the measured rate', () => {
+    expect(packsUnderVmAdjustedFloor(shipping)).toEqual([]);
+  });
+
+  /*
+   * 🔴 AND AT EVERY TIER WE HAVE MEASURED — because the tier is a config change an operator makes
+   * without touching this file.
+   *
+   * The floor above is graded at Pico. The owner moved to Nano (2× the hourly rate) with one env var,
+   * and until `vmUsdPerHourForTier` existed the floor kept passing against Pico's number. A floor that
+   * only holds for the tier that happens to be the default is the "one floor, two revenue shapes"
+   * problem one level down.
+   */
+  it.each(Object.entries(MEASURED_VM_TIER_USD_PER_HOUR))(
+    'leaves no active pack under the floor on the %s tier ($%s/hr)',
+    (_tier, usdPerHour) => {
+      const atTier = {
+        ...money,
+        vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({ ...measured, usdPerHour }),
+      };
+
+      expect(packsUnderVmAdjustedFloor(atTier)).toEqual([]);
+    },
+  );
+
+  /*
+   * 🔴 AND THE CEILING: MICRO IS THE STEP THAT BREAKS THE BUSINESS, so it is asserted, not assumed.
+   *
+   * `sandbox/config.ts` justifies Nano as "the last free step up". That sentence is a claim about
+   * MONEY made in a sandbox module, and this is the test that makes it one — an operator raising
+   * `CODESANDBOX_VM_TIER` to Micro doubles the hourly rate again ($0.298, derived at ~$0.0745/CPU-hr)
+   * and puts the two largest packs UNDER the floor while `starter` squeaks over at 2.01x. Nothing in
+   * the product refuses that env var, so the only thing standing between it and a silent ~20-point
+   * margin loss is this being written down where a change has to walk past it.
+   */
+  it('CEILING: the next tier up (Micro) puts real packs under the floor', () => {
+    const micro = {
+      ...money,
+      vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({ ...measured, usdPerHour: vmUsdPerHourForTier('Micro') }),
+    };
+
+    expect(vmUsdPerHourForTier('Micro')).toBe(0.298);
+
+    const under = packsUnderVmAdjustedFloor(micro);
+
+    expect(under.map(({ pack }) => pack.id).sort()).toEqual(['pro', 'studio']);
+
+    // Not marginally under — a fifth of the margin gone, on the two packs that carry the volume.
+    for (const { effectiveMargin } of under) {
+      expect(effectiveMargin).toBeLessThan(MIN_PACK_MARGIN);
+    }
+
+    expect(effectivePackMargin(CREDIT_PACKS.find((p) => p.id === 'studio')!, micro)).toBeCloseTo(1.81, 2);
+  });
+
+  /*
+   * Numbers, not adjectives. CREDITS.md claims the fold-in costs "~5–7 GM points" and lands the packs
+   * at "~65–69%"; `spec/billing.md` repeats 3.21x / 3.04x / 2.89x. Pinned here so the two documents and
+   * the code cannot drift apart in silence — the whole reason this module exists as code rather than a
+   * paragraph.
+   */
+  it('lands where CREDITS.md and spec/billing.md say it lands', () => {
+    const byId = Object.fromEntries(
+      CREDIT_PACKS.filter((p) => p.isActive).map((p) => [p.id, effectivePackMargin(p, shipping)]),
+    );
+
+    // At the Nano default. (Pico's 3.21 / 3.04 / 2.89 is what these read before 2026-07-28.)
+    expect(byId.starter).toBeCloseTo(2.67, 2);
+    expect(byId.pro).toBeCloseTo(2.53, 2);
+    expect(byId.studio).toBeCloseTo(2.41, 2);
+
+    // Gross margin = 1 - 1/multiple. CREDITS.md's "~58-63% effective" band, to the tenth of a point.
+    const gm = (m: number) => (1 - 1 / m) * 100;
+    expect(gm(byId.starter)).toBeCloseTo(62.6, 1);
+    expect(gm(byId.pro)).toBeCloseTo(60.5, 1);
+    expect(gm(byId.studio)).toBeCloseTo(58.4, 1);
+
+    // And the "~12-14 points" claim: the drop from the LLM-only figure, per pack.
+    for (const pack of CREDIT_PACKS.filter((p) => p.isActive)) {
+      const drop = gm(packMargin(pack, money)) - gm(effectivePackMargin(pack, shipping));
+      expect(drop).toBeGreaterThan(12);
+      expect(drop).toBeLessThan(14);
+    }
+
+    /*
+     * 🔴 The headroom, stated as a number rather than left as a feeling: the weakest pack clears the
+     * floor by ~0.41x at the default tier. That is what makes Nano "the last free step up" — Micro
+     * (below) puts two of the three packs underwater, so this margin is not a detail, it is the reason
+     * the tier decision stopped where it did.
+     */
+    expect(Math.min(...Object.values(byId)) - MIN_PACK_MARGIN).toBeCloseTo(0.41, 2);
+  });
+
+  /*
+   * 🔴 THE ASSERTION HAS TO BIND, AND THAT IS ITS OWN TEST.
+   *
+   * A floor that passes because the cost it adds rounds to nothing is not a floor — it is a test that
+   * reports success on the failure it was written to catch (`wastedOutput`, `tool_rounds`,
+   * `charsPerOutputToken`: this repo has found the same shape four times). So: feed the same packs an
+   * absurd estimate and require them to FALL. Expressed as an assertion about
+   * `packsUnderVmAdjustedFloor`'s output rather than a commented-out mutation, because a comment
+   * cannot fail.
+   */
+  it('BINDS: an absurd hours estimate puts every pack under the floor', () => {
+    /*
+     * 200 VM-hours per 1,000 credits — i.e. a user idling ~5 credits an hour. $0.0148 per credit,
+     * ~6x what a credit even sells for.
+     */
+    const absurd = {
+      ...money,
+      vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({ ...measured, estHoursPerKCredit: 200 }),
+    };
+
+    const under = packsUnderVmAdjustedFloor(absurd);
+
+    expect(under.map(({ pack }) => pack.id).sort()).toEqual(
+      CREDIT_PACKS.filter((p) => p.isActive)
+        .map((p) => p.id)
+        .sort(),
+    );
+
+    /*
+     * Not merely "under 2" — under ONE, i.e. every sale loses money. Pinned so the test that proves
+     * the floor binds is itself arithmetic rather than a vibe.
+     */
+    for (const { effectiveMargin } of under) {
+      expect(effectiveMargin).toBeLessThan(1);
+    }
+
+    expect(under.find(({ pack }) => pack.id === 'studio')!.effectiveMargin).toBeCloseTo(0.28, 2);
+  });
+
+  it('BINDS the other input too: an absurd hourly rate fails the same way', () => {
+    // The estimate is the guess, but the rate is the one an operator edits when they change VM tier.
+    const absurd = { ...money, vmOverheadUsdPerCredit: vmOverheadUsdPerCredit({ ...measured, usdPerHour: 5 }) };
+
+    expect(packsUnderVmAdjustedFloor(absurd)).toHaveLength(CREDIT_PACKS.filter((p) => p.isActive).length);
+  });
+
+  /*
+   * `effectivePackMargin` is DERIVED from `packMargin`'s arithmetic rather than re-deriving the price
+   * formula, so that a change to how a credit is priced cannot move one and not the other. These two
+   * assertions are what pins that relationship in SHAPE, independently of today's numbers: adding cost
+   * can only ever lower the multiple, and adding NO cost must reproduce `packMargin` exactly.
+   */
+  it('is strictly below packMargin for any positive overhead, and identical at zero', () => {
+    for (const pack of CREDIT_PACKS.filter((p) => p.isActive)) {
+      const llmOnly = packMargin(pack, money);
+
+      expect(effectivePackMargin(pack, { ...money, vmOverheadUsdPerCredit: 0 })).toBeCloseTo(llmOnly, 10);
+
+      for (const overhead of [1e-9, 0.000616, 0.005, 1]) {
+        expect(effectivePackMargin(pack, { ...money, vmOverheadUsdPerCredit: overhead })).toBeLessThan(llmOnly);
+      }
+    }
+  });
+
+  it('honours an explicit packs argument, so the floor can be re-run on a proposed reprice', () => {
+    const proposed = [{ id: 'mega', name: 'Mega', credits: 100_000, priceCents: 50_000, isActive: true }];
+
+    /*
+     * $0.005/credit against a $0.00312 total cost = 1.60x: a pack that clears the LLM-only floor
+     * (2.0x) and fails once compute is paid for. Exactly the state this task exists to make visible.
+     */
+    expect(packMargin(proposed[0], money)).toBeCloseTo(2.0, 2);
+    expect(packsUnderVmAdjustedFloor(shipping, MIN_PACK_MARGIN, proposed)).toHaveLength(1);
+  });
+});
+
+/**
+ * The config door for the two VM cost inputs.
+ *
+ * ⚠️ Every test here stubs its own env explicitly. `env()` falls back to `process.env` and vitest
+ * loads `.env.local` — and `.env.example` actively tells operators to set both of these — so an
+ * "unset" assertion written without a stub would silently grade the developer's own configuration
+ * (the `oauth.spec.ts` trap; the file-level `SANDBOX_VM_ENV` scrub is the first line of defence).
+ */
+describe('sandbox VM cost config', () => {
+  /**
+   * 🔴 THE OWNER'S REQUIREMENT, AS A TEST: nothing in `.env`, nothing in SSM → **Nano at $0.149/hr.**
+   *
+   * Every variable in the chain is stubbed to `undefined` rather than left ambient — including
+   * `CODESANDBOX_VM_TIER`, which is what a fresh deploy genuinely has and what `.env.local` genuinely
+   * does not (the `oauth.spec.ts` trap; the file-level scrub is the first line of defence, this is the
+   * second).
+   */
+  it('defaults to the default TIER rate and the stated estimate when nothing is configured', () => {
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', undefined as unknown as string);
+    vi.stubEnv('SANDBOX_EST_VM_HOURS_PER_KCREDIT', undefined as unknown as string);
+    vi.stubEnv('CODESANDBOX_VM_TIER', undefined as unknown as string);
+
+    expect(getVmCostConfig({})).toEqual({
+      usdPerHour: DEFAULT_SANDBOX_VM_USD_PER_HOUR,
+      estHoursPerKCredit: DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT,
+    });
+
+    /*
+     * Named, so nobody has to resolve two constants to know what an unconfigured deploy pays — and so
+     * a default-tier change has to walk past this line and the documents it mirrors.
+     */
+    expect(getVmCostConfig({}).usdPerHour).toBe(0.149);
+    expect(DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT).toBe(8.33);
+
+    // The pairing itself: the default price IS the default tier's price, not a second copy of it.
+    expect(DEFAULT_SANDBOX_VM_USD_PER_HOUR).toBe(MEASURED_VM_TIER_USD_PER_HOUR[DEFAULT_SANDBOX_VM_TIER]);
+  });
+
+  it('honours a sane override — a negotiated rate is a config change, not a code change', () => {
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Pico');
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', '0.149');
+    vi.stubEnv('SANDBOX_EST_VM_HOURS_PER_KCREDIT', '4');
+
+    expect(getVmCostConfig({})).toEqual({ usdPerHour: 0.149, estHoursPerKCredit: 4 });
+  });
+
+  /*
+   * 🔴 THE POINT OF THE 2026-07-28 CHANGE: RAISING THE TIER IS ENOUGH.
+   *
+   * The owner set `CODESANDBOX_VM_TIER=Nano` and — exactly as `.env.example` and this module's own
+   * comment invited — did not also set `SANDBOX_VM_USD_PER_HOUR`. The margin floor kept passing while
+   * asserting against HALF the real compute cost. "Raise it with the tier" was a COMMENT, and a
+   * comment cannot fail; this test is the mechanism that replaced it.
+   */
+  it('DERIVES the hourly rate from the configured tier when no override is set', () => {
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', undefined as unknown as string);
+
+    /*
+     * ⚠️ Both tiers here are deliberately NOT the default one. Stubbing the default tier and asserting
+     * the default price proves nothing — a regression to a flat constant returns exactly that number
+     * and the test passes. The assertion has to be able to tell "followed the tier" apart from
+     * "returned the default", which means picking a tier the default does not answer with: one CHEAPER
+     * than the default and one DEARER, so neither direction of the bug can hide.
+     */
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Pico');
+    expect(getVmCostConfig({}).usdPerHour).toBe(0.074);
+    expect(getVmCostConfig({}).usdPerHour).toBeLessThan(DEFAULT_SANDBOX_VM_USD_PER_HOUR);
+
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Micro');
+    expect(getVmCostConfig({}).usdPerHour).toBe(0.298);
+    expect(getVmCostConfig({}).usdPerHour).toBeGreaterThan(DEFAULT_SANDBOX_VM_USD_PER_HOUR);
+  });
+
+  it('still lets an explicit override win over the tier-derived default', () => {
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Nano');
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', '0.11');
+
+    // A negotiated rate, or a vendor price change between releases — the reason the override survives.
+    expect(getVmCostConfig({}).usdPerHour).toBe(0.11);
+  });
+
+  /*
+   * 🔴 A NONSENSICAL OVERRIDE FALLS BACK — IT IS NEVER OBEYED, AND `0` IS THE ONE THAT MATTERS.
+   *
+   * `0` is the dangerous value precisely because it looks valid: it makes `vmOverheadUsdPerCredit`
+   * return nothing, collapses `effectivePackMargin` back onto `packMargin`, and leaves the whole floor
+   * above passing while asserting nothing about compute. That is a typo or a leftover restoring the
+   * exact "user project compute ≈ $0" belief this module retires — so it falls back, loudly in effect
+   * if not in output. (The predicate shipped as `>= 0` and obeyed it; fixed 2026-07-28.)
+   */
+  it.each([
+    ['zero', '0'],
+    ['negative', '-1'],
+    ['unparseable', 'free'],
+    ['empty-ish word', 'NaN'],
+  ])('falls back rather than obeying a %s hourly rate', (_label, raw) => {
+    // The tier is stated, so the expected number is Pico's own rate rather than "whatever the default is".
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Pico');
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', raw);
+    vi.stubEnv('SANDBOX_EST_VM_HOURS_PER_KCREDIT', undefined as unknown as string);
+
+    expect(getVmCostConfig({}).usdPerHour).toBe(MEASURED_VM_TIER_USD_PER_HOUR.Pico);
+    expect(getVmCostConfig({}).usdPerHour).toBe(0.074);
+  });
+
+  /*
+   * 🔴 AND IT FALLS BACK TO THE **TIER**, NOT TO THE FLAT CONSTANT.
+   *
+   * The obvious fallback is `DEFAULT_SANDBOX_VM_USD_PER_HOUR`, which answers for ONE tier — so an
+   * operator on any other tier who typo'd the override would be silently re-priced at the default's
+   * rate. Under-stating VM cost is the invisible direction, hence its own test.
+   *
+   * ⚠️ Both tiers are non-default ON PURPOSE (see the DERIVES test above): stub the default tier here
+   * and the flat-constant regression returns the right number by coincidence and this test goes blind.
+   * Pico catches it from below, Micro from above.
+   */
+  it.each([
+    ['Pico', 0.074],
+    ['Micro', 0.298],
+  ])('falls back to the %s TIER rate, not the flat default, on a bad override', (tier, expected) => {
+    for (const raw of ['0', '-1', 'free']) {
+      vi.stubEnv('CODESANDBOX_VM_TIER', tier as string);
+      vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', raw);
+
+      expect(getVmCostConfig({}).usdPerHour).toBe(expected);
+      expect(getVmCostConfig({}).usdPerHour).not.toBe(DEFAULT_SANDBOX_VM_USD_PER_HOUR);
+    }
+  });
+
+  it.each([
+    ['zero', '0'],
+    ['negative', '-8'],
+    ['unparseable', 'lots'],
+  ])('falls back rather than obeying a %s hours estimate', (_label, raw) => {
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Pico');
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', undefined as unknown as string);
+    vi.stubEnv('SANDBOX_EST_VM_HOURS_PER_KCREDIT', raw);
+
+    expect(getVmCostConfig({}).estHoursPerKCredit).toBe(DEFAULT_SANDBOX_EST_VM_HOURS_PER_KCREDIT);
+  });
+
+  it('never lets a bad override make sandbox compute look free', () => {
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Nano');
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', '0');
+    vi.stubEnv('SANDBOX_EST_VM_HOURS_PER_KCREDIT', '0');
+
+    // The property, not the mechanism: whatever the operator typed, the overhead is a real cost.
+    expect(vmOverheadUsdPerCredit(getVmCostConfig({}))).toBeGreaterThan(0);
+  });
+
+  it('reads the Cloudflare loader context, not only process.env', () => {
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', '0.074');
+
+    expect(getVmCostConfig({ cloudflare: { env: { SANDBOX_VM_USD_PER_HOUR: '0.149' } } }).usdPerHour).toBe(0.149);
+  });
+
+  /** The tier reaches the price through the same loader context, not only through `process.env`. */
+  it('derives from the tier in the Cloudflare loader context too', () => {
+    vi.stubEnv('CODESANDBOX_VM_TIER', 'Pico');
+    vi.stubEnv('SANDBOX_VM_USD_PER_HOUR', undefined as unknown as string);
+
+    expect(getVmCostConfig({ cloudflare: { env: { CODESANDBOX_VM_TIER: 'Nano' } } }).usdPerHour).toBe(0.149);
+  });
+});
+
+/**
+ * The tier → price table (`vmUsdPerHourForTier`), which is the mechanism that replaced the comment
+ * telling operators to keep two variables in sync.
+ */
+describe('vmUsdPerHourForTier', () => {
+  it('returns the measurement for a tier we have measured', () => {
+    expect(vmUsdPerHourForTier('Pico')).toBe(0.074);
+    expect(vmUsdPerHourForTier('Nano')).toBe(0.149);
+
+    // The measured table is the source of both numbers — not a coincidence of two literals.
+    for (const [tier, usd] of Object.entries(MEASURED_VM_TIER_USD_PER_HOUR)) {
+      expect(vmUsdPerHourForTier(tier)).toBe(usd);
+    }
+  });
+
+  it('derives an unmeasured but known tier from the per-CPU rate the anchors agree on', () => {
+    // Micro is 4 CPU; $0.0745/CPU-hour is what $0.074/1 and $0.149/2 both imply.
+    expect(vmUsdPerHourForTier('Micro')).toBe(0.298);
+    expect(vmUsdPerHourForTier('XLarge')).toBe(4.768);
+
+    // Monotonic in size, which is the only property a derived rate has to keep.
+    expect(vmUsdPerHourForTier('Micro')).toBeGreaterThan(vmUsdPerHourForTier('Nano'));
+  });
+
+  /*
+   * 🔴 THE DIRECTION IS THE ASSERTION, not the number — AND IT MUST NOT BE STATED IN TERMS OF THE
+   * DEFAULT.
+   *
+   * The obvious way to write this ("the fallback is dearer than the default tier") went blind the day
+   * the default moved Pico → Nano: with two measured tiers, the most expensive one now IS the default,
+   * so `toBeGreaterThan(DEFAULT_SANDBOX_VM_USD_PER_HOUR)` became `0.149 > 0.149` — a false assertion
+   * about a correct implementation, i.e. the test breaking for a reason that has nothing to do with the
+   * property it guards. That property is: an unrecognised tier is priced at the DEAREST thing we know,
+   * never the cheapest, because under-stating VM cost is the invisible failure (a pack looks profitable
+   * and is not) where over-stating it merely looks bad and gets corrected. Same asymmetry as `ratesFor`
+   * billing an unpriced model at the most expensive row.
+   *
+   * So it is stated against the MEASURED TABLE and nothing else: equal to its maximum, and at least
+   * every entry in it. That survives the next default change, a third measured tier, and a reprice.
+   */
+  it.each(['Gigantic', '', 'nano', 'Pico ', 'undefined'])(
+    'prices an unrecognised tier (%j) at the MOST expensive measured rate, never the cheapest',
+    (tier) => {
+      const measured = Object.values(MEASURED_VM_TIER_USD_PER_HOUR);
+      const fallback = vmUsdPerHourForTier(tier);
+
+      expect(fallback).toBe(Math.max(...measured));
+
+      // Dominates every measured tier — the `Math.min` mutation fails here even at table size 1.
+      for (const usd of measured) {
+        expect(fallback).toBeGreaterThanOrEqual(usd);
+      }
+
+      expect(fallback).toBeGreaterThan(Math.min(...measured));
+    },
+  );
+
+  /*
+   * ⚠️ THE GUARD ABOVE CAN ONLY BIND WHILE THE TABLE HAS TWO DIFFERENT PRICES IN IT.
+   *
+   * `toBeGreaterThan(Math.min(...))` is vacuously satisfiable if the measured table is ever reduced to
+   * one row (max === min), and `toBe(Math.max(...))` alone cannot tell `Math.max` from `Math.min` in
+   * that world. This repo has found five metrics that reported success on the failure they were written
+   * to catch; this is the same shape, so the precondition is asserted rather than assumed — a table
+   * edit that blinds the direction check fails HERE, loudly, instead of silently downgrading it.
+   */
+  it('keeps the direction check meaningful: the measured table holds at least two distinct prices', () => {
+    const distinct = new Set(Object.values(MEASURED_VM_TIER_USD_PER_HOUR));
+
+    expect(distinct.size).toBeGreaterThanOrEqual(2);
+    expect(Math.max(...distinct)).toBeGreaterThan(Math.min(...distinct));
+  });
+
+  /*
+   * 🔴 THE REGRESSION THAT MOTIVATED THE NORMALISATION — A LOWERCASE TIER RAN ONE VM AND PRICED ANOTHER.
+   *
+   * `service.ts` resolves the tier case-INSENSITIVELY; this module looks it up EXACTLY. So before
+   * `sandboxVmTier` normalised, `CODESANDBOX_VM_TIER=micro` ran a Micro ($0.298/hr) and billed the
+   * unknown-tier fallback ($0.149) — a 2× UNDER-statement — and `xlarge` under-stated by 32×. The
+   * fallback is conservative ONLY while the real tier is cheaper than the dearest measured one; above
+   * it the error inverts into the silent direction, which is the whole reason this test exists.
+   *
+   * Stated as an EQUIVALENCE over the whole tier list rather than as two literals: whatever spelling
+   * the operator typed, the price is the price of the tier they will actually get.
+   */
+  it('prices a lowercase configured tier exactly as its canonical spelling', () => {
+    for (const tier of SANDBOX_VM_TIERS) {
+      vi.stubEnv('CODESANDBOX_VM_TIER', tier.toLowerCase());
+      expect(vmUsdPerHourForTier(sandboxVmTier({}))).toBe(vmUsdPerHourForTier(tier));
+      expect(getVmCostConfig({}).usdPerHour).toBe(vmUsdPerHourForTier(tier));
+    }
+  });
+
+  /*
+   * The specific under-statement, named. An equivalence alone would still pass if BOTH sides collapsed
+   * onto the fallback, so the two tiers whose real rate exceeds the dearest measured one are asserted
+   * against that fallback directly.
+   */
+  it.each([
+    ['micro', 0.298],
+    ['xlarge', 4.768],
+  ])('does not price a lowercase %j at the unknown-tier fallback', (raw, expected) => {
+    vi.stubEnv('CODESANDBOX_VM_TIER', raw);
+
+    const fallback = Math.max(...Object.values(MEASURED_VM_TIER_USD_PER_HOUR));
+
+    expect(getVmCostConfig({}).usdPerHour).toBe(expected);
+    expect(getVmCostConfig({}).usdPerHour).not.toBe(fallback);
+    expect(getVmCostConfig({}).usdPerHour).toBeGreaterThan(fallback);
+  });
+});
+
+/**
+ * 🔴 EVERY TIER THE PROVIDER ACCEPTS MUST BE PRICEABLE.
+ *
+ * A tier present in `SANDBOX_VM_TIERS` and missing from this module's tables falls through to the
+ * unknown-tier fallback — and that fallback under-states the moment the real tier is dearer than the
+ * dearest measured one. Adding a tier to one list and not the other is exactly the "a number that is
+ * only correct RELATIVE to another must be derived from it or asserted against it" lesson, so it is
+ * asserted rather than left to a comment.
+ */
+describe('tierCoverage', () => {
+  it('can price every tier the provider config accepts', () => {
+    const { priced, unpriced } = tierCoverage();
+
+    expect(unpriced).toEqual([]);
+    expect(priced).toEqual([...SANDBOX_VM_TIERS]);
+  });
+
+  /** The control: coverage is computed FROM the tier list, so it cannot report a clean bill by seeing nothing. */
+  it('reports on the whole tier list, not an empty one', () => {
+    const { priced, unpriced } = tierCoverage();
+
+    expect(priced.length + unpriced.length).toBe(SANDBOX_VM_TIERS.length);
+    expect(SANDBOX_VM_TIERS.length).toBeGreaterThan(2);
   });
 });

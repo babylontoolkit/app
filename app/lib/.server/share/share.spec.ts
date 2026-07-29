@@ -14,8 +14,16 @@
 import { describe, expect, it } from 'vitest';
 import { runPublishingChecklist } from './checklist';
 import { buildObjectKey, buildPrefix, contentTypeFor, generateShareId, UnsafeBuildPathError } from './publish';
-import { buildContentKey, cacheControlFor, isPlayServableInProduction, resolvePlayOrigin } from './serve';
+import {
+  buildContentKey,
+  cacheControlFor,
+  isPlayServableInProduction,
+  resolvePlayOrigin,
+  resolvePlayRequest,
+} from './serve';
+import { renderPlayWrapper } from './wrapper';
 import { deriveRemix } from './remix';
+import { SANDBOX_ROOTS } from '~/lib/common/sandbox-paths';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { Project } from '~/lib/.server/projects/types';
 
@@ -91,6 +99,63 @@ describe('the publishing checklist', () => {
   });
 });
 
+/**
+ * THE CHECKLIST NORMALISES EVERY PROVIDER ROOT (T7b, SPEC §8).
+ *
+ * Its `relative()` helper was a `/^\/?(home\/project\/)?/` regex, so a map keyed under CodeSandbox's
+ * `/project/workspace` kept its root. Today's secret rules survive that only by ACCIDENT — they anchor
+ * on `(^|\/)`, so `project/workspace/.env` still matches `(^|\/)\.env$` — which is precisely why the
+ * miss is invisible and why it gets a test rather than a shrug: the first root-anchored rule anyone
+ * adds (`^dist/`, `^\.env`) would block on one provider and wave the key through on the other.
+ *
+ * The reported `path` is also asserted, because a finding is USER-FACING text (§4.8 renders it in the
+ * Share dialog) and "/project/workspace/.env holds your private keys" is the same leak of provider
+ * plumbing the workdir rule exists to end.
+ */
+describe.each(SANDBOX_ROOTS)('the publishing checklist under the %s root', (root) => {
+  it('BLOCKS a .env keyed under the root, and reports the path relative', () => {
+    const result = runPublishingChecklist({ [`${root}/.env`]: file('KIE_API_KEY=sk-live-abcdef') });
+
+    expect(result.ok).toBe(false);
+    expect(result.findings[0].code).toBe('secret-file');
+    expect(result.findings[0].path).toBe('.env');
+    expect(result.findings[0].message).toContain('.env holds your private keys');
+  });
+
+  it('BLOCKS a key pasted into source under the root, naming the project-relative file', () => {
+    const result = runPublishingChecklist({
+      [`${root}/src/config.ts`]: file('const key = "sk-ant-api03-abcdefghijklmnop1234";'),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.findings[0].code).toBe('secret-in-source');
+    expect(result.findings[0].path).toBe('src/config.ts');
+  });
+
+  it('WARNS on a debug overlay under the root with the same relative path', () => {
+    const result = runPublishingChecklist({ [`${root}/src/Game.ts`]: file('scene.showDebugLayer = true;') });
+
+    expect(result.ok).toBe(true);
+    expect(result.findings[0].level).toBe('warning');
+    expect(result.findings[0].path).toBe('src/Game.ts');
+  });
+
+  it('still lets .env.example through under the root', () => {
+    const result = runPublishingChecklist({ [`${root}/.env.example`]: file('KIE_API_KEY=your-key-here') });
+
+    expect(result.ok).toBe(true);
+    expect(result.findings).toHaveLength(0);
+  });
+
+  it('still flags a network-capable game for solo launch', () => {
+    const result = runPublishingChecklist({
+      [`${root}/src/Net.ts`]: file('const room = await client.joinOrCreate("race");'),
+    });
+
+    expect(result.soloLaunchRequired).toBe(true);
+  });
+});
+
 describe('build object keys — the path-traversal wall', () => {
   it('maps a normal dist path under the share prefix', () => {
     expect(buildObjectKey('abc123', 'dist/assets/index-a1b2.js')).toBe('builds/abc123/assets/index-a1b2.js');
@@ -100,16 +165,37 @@ describe('build object keys — the path-traversal wall', () => {
     expect(buildObjectKey('abc123', 'home/project/dist/index.html')).toBe('builds/abc123/index.html');
   });
 
+  it('keys the same build file identically under EVERY provider root', () => {
+    /*
+     * The root is a provider fact (SPEC §8): a CodeSandbox build arrives under `/project/workspace`
+     * and a WebContainer build under `/home/project`. A share URL must not depend on which sandbox
+     * produced the bytes, and the old `/^\/?home\/project\//` literal made it depend silently — on a
+     * CodeSandbox build the prefix never matched, so the key kept the whole absolute path.
+     */
+    const expected = 'builds/abc123/index.html';
+
+    expect(buildObjectKey('abc123', '/project/workspace/dist/index.html')).toBe(expected);
+    expect(buildObjectKey('abc123', '/home/project/dist/index.html')).toBe(expected);
+    expect(buildObjectKey('abc123', 'dist/index.html')).toBe(expected);
+  });
+
   it.each([
     ['../../etc/passwd', 'parent traversal'],
     ['/etc/passwd', 'absolute'],
+    ['/dist/index.html', 'absolute, dist-shaped — a leading slash is never stripped'],
     ['a/../../b', 'embedded traversal'],
     ['C:\\windows', 'windows drive'],
     ['a\\b', 'backslash'],
     ['a/\0/b', 'null byte'],
+    ['a//b', 'empty segment'],
+    ['', 'empty path'],
     ['.env', 'never-publish secret'],
     ['sub/.git/config', 'git internals'],
   ])('REJECTS %s (%s)', (badPath) => {
+    /*
+     * The rejections are the important half: `stripSandboxRootPrefix` was chosen over
+     * `toProjectRelativePath` precisely so `/etc/passwd` still LOOKS absolute when it gets here.
+     */
     expect(() => buildObjectKey('abc123', badPath)).toThrow(UnsafeBuildPathError);
   });
 });
@@ -151,6 +237,86 @@ describe('play origin isolation (§5)', () => {
   it('serves in production once PLAY_URL points at a separate origin', () => {
     const context = { cloudflare: { env: { NODE_ENV: 'production', PLAY_URL: 'https://play.example.com' } } };
     expect(isPlayServableInProduction(context)).toBe(true);
+  });
+});
+
+describe('resolvePlayRequest — asset vs game document vs wrapper (T17b)', () => {
+  const noSignals = { embed: false, secFetchDest: null };
+  const embedded = { embed: true, secFetchDest: null };
+
+  it('serves a path with an extension as an asset', () => {
+    expect(resolvePlayRequest('assets/index-a1b2.js', noSignals)).toBe('asset');
+    expect(resolvePlayRequest('havok.wasm', noSignals)).toBe('asset');
+  });
+
+  it('serves index.html as an asset — an extension always wins', () => {
+    expect(resolvePlayRequest('index.html', noSignals)).toBe('asset');
+  });
+
+  /**
+   * 🔴 The recursion-critical case. The wrapper's iframe loads the extensionless directory URL with
+   * `?embed=1` — if embed does not win here, that request gets the wrapper again, which embeds the
+   * wrapper, forever.
+   */
+  it('serves the game document for the embedded directory request — or the wrapper recurses', () => {
+    expect(resolvePlayRequest('', embedded)).toBe('game-document');
+  });
+
+  it('extension outranks embed — the iframe still fetches its assets as assets', () => {
+    expect(resolvePlayRequest('assets/x.js', embedded)).toBe('asset');
+  });
+
+  /**
+   * An in-game full reload of a client-side route (`/play/<id>/play`) carries no `?embed=1` — the game
+   * navigated itself there. `sec-fetch-dest: iframe` is what identifies it as the iframe's document.
+   */
+  it('serves the game document for an in-game full reload signalled by sec-fetch-dest: iframe', () => {
+    expect(resolvePlayRequest('play', { embed: false, secFetchDest: 'iframe' })).toBe('game-document');
+  });
+
+  it('serves the wrapper to a person at the top-level URL', () => {
+    expect(resolvePlayRequest('', noSignals)).toBe('wrapper');
+  });
+
+  /** A browser sending neither signal degrades to nested chrome — never to a 404. */
+  it('degrades an extensionless route with no signals to the wrapper, never a 404', () => {
+    expect(resolvePlayRequest('play', noSignals)).toBe('wrapper');
+    expect(resolvePlayRequest('play', { embed: false, secFetchDest: 'document' })).toBe('wrapper');
+  });
+});
+
+describe('the play wrapper iframe src (T17b)', () => {
+  const input = { shareId: 'abc123def456', title: 'Kart Racer', solo: false, playOrigin: '' };
+
+  it('loads the DIRECTORY URL with ?embed=1 — same-origin (local dev)', () => {
+    expect(renderPlayWrapper(input)).toContain('src="/play/abc123def456/?embed=1"');
+  });
+
+  it('appends &solo=true for a network-capable game', () => {
+    expect(renderPlayWrapper({ ...input, solo: true })).toContain('src="/play/abc123def456/?embed=1&solo=true"');
+  });
+
+  it('crosses to the play origin when one is configured', () => {
+    const html = renderPlayWrapper({ ...input, playOrigin: 'https://play.example.com' });
+
+    expect(html).toContain('src="https://play.example.com/abc123def456/?embed=1"');
+  });
+
+  /**
+   * 🔴 Never `/index.html`: the game is a BrowserRouter SPA whose basename is `/play/<id>/`, so a
+   * document URL ending in `index.html` leaves `index.html` as the route path — which matches nothing
+   * and renders a blank page.
+   */
+  it('does NOT point the iframe at index.html', () => {
+    for (const html of [
+      renderPlayWrapper(input),
+      renderPlayWrapper({ ...input, playOrigin: 'https://play.example.com' }),
+    ]) {
+      const src = html.match(/src="([^"]+)"/)?.[1];
+
+      expect(src).toBeDefined();
+      expect(src).not.toContain('index.html');
+    }
   });
 });
 

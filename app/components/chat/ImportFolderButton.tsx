@@ -6,10 +6,11 @@ import { createChatFromFolder } from '~/utils/folderImport';
 import { logStore } from '~/lib/stores/logs'; // Assuming logStore is imported from this location
 import { Button } from '~/components/ui/Button';
 import { classNames } from '~/utils/classNames';
+import type { IChatMetadata } from '~/lib/persistence/db';
 
 interface ImportFolderButtonProps {
   className?: string;
-  importChat?: (description: string, messages: Message[]) => Promise<void>;
+  importChat?: (description: string, messages: Message[], metadata?: IChatMetadata) => Promise<void>;
 }
 
 export const ImportFolderButton: React.FC<ImportFolderButtonProps> = ({ className, importChat }) => {
@@ -76,10 +77,14 @@ export const ImportFolderButton: React.FC<ImportFolderButtonProps> = ({ classNam
         toast.info(`Importing ${binaryFiles.length} binary asset(s)`);
       }
 
-      const messages = await createChatFromFolder(textFiles, binaryFiles, folderName);
+      const { messages, projectId } = await createChatFromFolder(textFiles, binaryFiles, folderName);
 
       if (importChat) {
-        await importChat(folderName, [...messages]);
+        /*
+         * The project the folder was imported into — see `createChatFromFolder`. Omitted where the
+         * runtime needs none (WebContainer), which is the behaviour this flow has always had.
+         */
+        await importChat(folderName, [...messages], projectId ? { projectId } : undefined);
       }
 
       logStore.logSystem('Folder imported successfully', {
@@ -91,7 +96,12 @@ export const ImportFolderButton: React.FC<ImportFolderButtonProps> = ({ classNam
     } catch (error) {
       logStore.logError('Failed to import folder', error, { folderName });
       console.error('Failed to import folder:', error);
-      toast.error('Failed to import folder');
+
+      /*
+       * Named, not generic: on a project-backed runtime the reason a folder cannot be imported is a
+       * sentence worth reading, and a fixed string reads as a button that did nothing (T3b).
+       */
+      toast.error(`Failed to import folder: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setIsLoading(false);
       toast.dismiss(loadingToast);

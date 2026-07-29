@@ -357,10 +357,25 @@ async function streamGeneration(
   const heartbeatSource = withGenerationHeartbeat(
     generation.textStream,
     generation.generationId,
-    (status) => stream.writeData(status),
 
-    /* What the turn IS, so the panel can say "Building your project" instead of an anonymous "Thinking". */
-    { kind: generation.statusKind },
+    /*
+     * The optional retry fields widen the part's index signature to include `undefined`, which
+     * `JSONValue` refuses. They are written by conditional spread, so an absent one is a MISSING KEY
+     * rather than a present-but-undefined one — the shape on the wire really is JSON-safe.
+     */
+    (status) => stream.writeData(status as Record<string, string | number>),
+
+    {
+      /* What the turn IS, so the panel can say "Building your project" instead of an anonymous "Thinking". */
+      kind: generation.statusKind,
+
+      /*
+       * And what is happening to the REQUEST — a provider retry reads as a four-minute "Thinking" from
+       * out here, because the retry loop lives inside `textStream`. Pulled per tick so the panel can say
+       * "the provider stalled, retrying 2 of 3" instead of implying the user is paying to think.
+       */
+      activity: () => generation.currentActivity(),
+    },
   );
 
   for await (const chunk of heartbeatSource) {

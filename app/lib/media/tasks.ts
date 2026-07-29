@@ -13,6 +13,7 @@
  * (debit up-front, auto-refund on failure), so a closed tab costs nothing; the task can be polled
  * again from the Media panel's history.
  */
+import { atom } from 'nanostores';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { refreshWorkingCopySoon } from '~/lib/persistence/refresh-working-copy';
@@ -57,6 +58,36 @@ export function isTrackingMediaTask(taskId: string): boolean {
 }
 
 /**
+ * How many renders are in flight RIGHT NOW, for the live status panel (`StreamingStatus.tsx`).
+ *
+ * 🔴 **This is a CLIENT fact and it belongs on the client.** The tool call that commissions a render
+ * returns in milliseconds — it debits, enqueues at KIE and hands back the destination path (§4.16), so
+ * the server-side generation is long finished while the picture is still rendering. The server heartbeat
+ * therefore cannot report this and must not try: it would be narrating work it is no longer doing.
+ *
+ * Derived from `tracking` rather than kept alongside it — one source of truth, updated at the two lines
+ * that already own the lifecycle, so a poller can never finish without the count following it down.
+ */
+export const mediaRenderStore = atom<{ images: number; videos: number }>({ images: 0, videos: 0 });
+
+const inFlightKinds = new Map<string, 'image' | 'video'>();
+
+function republishRenderCounts(): void {
+  let images = 0;
+  let videos = 0;
+
+  for (const kind of inFlightKinds.values()) {
+    if (kind === 'video') {
+      videos++;
+    } else {
+      images++;
+    }
+  }
+
+  mediaRenderStore.set({ images, videos });
+}
+
+/**
  * Poll until terminal, then write the bytes into the project (or surface the failure + refund).
  * Resolves when tracking ends; callers fire-and-forget.
  *
@@ -73,6 +104,8 @@ export async function trackMediaTask(handle: MediaTaskHandle, opts: { force?: bo
   }
 
   tracking.add(handle.taskId);
+  inFlightKinds.set(handle.taskId, handle.kind);
+  republishRenderCounts();
 
   const intervalMs = handle.kind === 'video' ? 10_000 : 4_000;
   const deadline = Date.now() + MAX_POLL_MS;
@@ -109,7 +142,14 @@ export async function trackMediaTask(handle: MediaTaskHandle, opts: { force?: bo
 
     toast.warning(`The ${handle.kind} render is taking unusually long — check the Media panel later.`);
   } finally {
+    /*
+     * Both sides in the SAME finally that already guaranteed `tracking` is released. A render that
+     * fails, times out or throws must drop out of the count exactly as a successful one does — a
+     * "generating images" panel that never goes away is a worse lie than no panel at all.
+     */
     tracking.delete(handle.taskId);
+    inFlightKinds.delete(handle.taskId);
+    republishRenderCounts();
   }
 }
 

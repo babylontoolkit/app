@@ -23,6 +23,7 @@
  * on turn one if obeyed. The precedence list below is what makes those directives inert without making
  * the whole file inert.
  */
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { FileMap } from '~/lib/.server/llm/constants';
 
 /**
@@ -48,7 +49,14 @@ export function instructionsKey(files: FileMap): string | null {
       continue;
     }
 
-    if (path.replace('/home/project/', '') === INSTRUCTIONS_PATH) {
+    /*
+     * 🔴 `toProjectRelativePath`, never a workdir literal. A `.replace('/home/project/','')` matched
+     * nothing on a provider rooted elsewhere, so `CLAUDE.md` was never FOUND: no Project Instructions
+     * block, no `MAX_INSTRUCTIONS_CHARS` cap, no precedence statement — the §4.2 money path silently
+     * back to its pre-2026-07-16 state, including the hazard that an imported `CLAUDE.md` written for
+     * another host ("fetch <url> first; if it fails, stop") stalls the agent on turn one.
+     */
+    if (toProjectRelativePath(path) === INSTRUCTIONS_PATH) {
       return path;
     }
   }

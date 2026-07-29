@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
-import { sandbox as sandboxPromise } from '~/lib/sandbox';
+import { bootedProjectId, requireBootedSandbox, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import type { SandboxProvider } from '~/lib/sandbox';
+import { NO_ROLLBACK, openImportWorkspace } from '~/lib/registry/import-project';
 import git, { type GitAuth, type PromiseFsClient } from 'isomorphic-git';
 import http from 'isomorphic-git/http/web';
 import Cookies from 'js-cookie';
 import { toast } from 'react-toastify';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('useGit');
 
 const lookupSavedPassword = (url: string) => {
   const domain = url.split('/')[2];
@@ -23,6 +27,19 @@ const lookupSavedPassword = (url: string) => {
   }
 };
 
+/**
+ * What to call the project a clone creates: the repository's own name.
+ *
+ * Deliberately tolerant — a URL that does not parse still yields something a person recognises,
+ * because a bad name is never a reason to refuse someone an import.
+ */
+export const repoNameOf = (url: string): string => {
+  const withoutRef = url.split('#')[0].replace(/\/+$/, '');
+  const last = withoutRef.split('/').pop() ?? '';
+
+  return last.replace(/\.git$/i, '') || 'Imported Repository';
+};
+
 const saveGitAuth = (url: string, auth: GitAuth) => {
   const domain = url.split('/')[2];
   Cookies.set(`git:${domain}`, JSON.stringify(auth));
@@ -34,18 +51,63 @@ export function useGit() {
   const [fs, setFs] = useState<PromiseFsClient>();
   const fileData = useRef<Record<string, { data: any; encoding?: string }>>({});
   useEffect(() => {
-    sandboxPromise.then((container) => {
-      fileData.current = {};
-      setSandbox(container);
-      setFs(getFs(container, fileData));
+    /*
+     * 🔴 A clone runs from the landing page, before any project exists — and on a runtime whose
+     * sandbox belongs to a project there is nothing to await here yet. Awaiting the seam anyway is how
+     * this used to sit pending forever with `ready` false and nothing to explain it.
+     *
+     * So on that runtime the hook is ready IMMEDIATELY and acquires its workspace when the user
+     * actually clones: `openImportWorkspace` registers the project and boots the sandbox for it, which
+     * is the shape a creation already has. Anything else — WebContainer, or a clone started from
+     * inside an open project — keeps the eager await it has always had.
+     */
+    if (SANDBOX_REQUIRES_PROJECT && !bootedProjectId()) {
       setReady(true);
-    });
+      return;
+    }
+
+    requireBootedSandbox()
+      .then((container) => {
+        fileData.current = {};
+        setSandbox(container);
+        setFs(getFs(container, fileData));
+        setReady(true);
+      })
+      .catch((error) => logger.warn(`Git is unavailable here: ${(error as Error).message}`));
   }, []);
 
   const gitClone = useCallback(
     async (url: string, retryCount = 0) => {
-      if (!sandbox || !fs || !ready) {
+      if (!ready) {
         throw new Error('The project sandbox is not initialized. Please try again later.');
+      }
+
+      /*
+       * Deferred acquisition (see the effect). On the eager path these are already set and this is a
+       * no-op; on a project-backed runtime this is where the project is registered and its VM booted.
+       * A failure throws with the reason — never a spinner that runs out the clock.
+       */
+      let activeSandbox = sandbox;
+      let activeFs = fs;
+      let workspaceProjectId = bootedProjectId();
+
+      /*
+       * Undo the registration if the clone below fails — a project this hook created a moment ago and
+       * never filled is an empty card on the dashboard and a VM billing by the second. A no-op when
+       * this call registered nothing (the eager path, or a clone from inside an open project), which
+       * is what keeps a retry from deleting the project the first attempt legitimately created.
+       */
+      let rollback = NO_ROLLBACK;
+
+      if (!activeSandbox || !activeFs) {
+        const workspace = await openImportWorkspace({ name: repoNameOf(url) });
+        activeSandbox = workspace.sandbox;
+        activeFs = getFs(workspace.sandbox, fileData);
+        workspaceProjectId = workspace.projectId;
+        rollback = workspace.rollback;
+
+        setSandbox(activeSandbox);
+        setFs(activeFs);
       }
 
       fileData.current = {};
@@ -74,105 +136,125 @@ export function useGit() {
         headers.Authorization = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
       }
 
+      /*
+       * The clone below is the LAST thing that can fail, and until now it failed with a project
+       * already registered — a typo'd URL or a rejected credential left an empty card on the
+       * dashboard and a VM billing by the second (T3b). The inner block owns retries and messaging;
+       * this one owns the undo. A retry that succeeds never reaches here.
+       */
       try {
-        // Add a small delay before retrying to allow for network recovery
-        if (retryCount > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount));
-          console.log(`Retrying git clone (attempt ${retryCount + 1})...`);
-        }
-
-        await git.clone({
-          fs,
-          http,
-          dir: sandbox.workdir,
-          url: baseUrl,
-          depth: 1,
-          singleBranch: true,
-          ref: branch,
-          corsProxy: '/api/git-proxy',
-          headers,
-          onProgress: (event) => {
-            console.log('Git clone progress:', event);
-          },
-          onAuth: (baseUrl) => {
-            let auth = lookupSavedPassword(baseUrl);
-
-            if (auth) {
-              console.log('Using saved authentication for', baseUrl);
-              return auth;
-            }
-
-            console.log('Repository requires authentication:', baseUrl);
-
-            if (confirm('This repository requires authentication. Would you like to enter your GitHub credentials?')) {
-              auth = {
-                username: prompt('Enter username') || '',
-                password: prompt('Enter password or personal access token') || '',
-              };
-              return auth;
-            } else {
-              return { cancel: true };
-            }
-          },
-          onAuthFailure: (baseUrl, _auth) => {
-            console.error(`Authentication failed for ${baseUrl}`);
-            toast.error(
-              `Authentication failed for ${baseUrl.split('/')[2]}. Please check your credentials and try again.`,
-            );
-            throw new Error(
-              `Authentication failed for ${baseUrl.split('/')[2]}. Please check your credentials and try again.`,
-            );
-          },
-          onAuthSuccess: (baseUrl, auth) => {
-            console.log(`Authentication successful for ${baseUrl}`);
-            saveGitAuth(baseUrl, auth);
-          },
-        });
-
-        const data: Record<string, { data: any; encoding?: string }> = {};
-
-        for (const [key, value] of Object.entries(fileData.current)) {
-          data[key] = value;
-        }
-
-        return { workdir: sandbox.workdir, data };
-      } catch (error) {
-        console.error('Git clone error:', error);
-
-        // Handle specific error types
-        const errorMessage = error instanceof Error ? error.message : String(error);
-
-        // Check for common error patterns
-        if (errorMessage.includes('Authentication failed')) {
-          toast.error(`Authentication failed. Please check your GitHub credentials and try again.`);
-          throw error;
-        } else if (
-          errorMessage.includes('ENOTFOUND') ||
-          errorMessage.includes('ETIMEDOUT') ||
-          errorMessage.includes('ECONNREFUSED')
-        ) {
-          toast.error(`Network error while connecting to repository. Please check your internet connection.`);
-
-          // Retry for network errors, up to 3 times
-          if (retryCount < 3) {
-            return gitClone(url, retryCount + 1);
+        try {
+          // Add a small delay before retrying to allow for network recovery
+          if (retryCount > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount));
+            console.log(`Retrying git clone (attempt ${retryCount + 1})...`);
           }
 
-          throw new Error(
-            `Failed to connect to repository after multiple attempts. Please check your internet connection.`,
-          );
-        } else if (errorMessage.includes('404')) {
-          toast.error(`Repository not found. Please check the URL and make sure the repository exists.`);
-          throw new Error(`Repository not found. Please check the URL and make sure the repository exists.`);
-        } else if (errorMessage.includes('401')) {
-          toast.error(`Unauthorized access to repository. Please connect your GitHub account with proper permissions.`);
-          throw new Error(
-            `Unauthorized access to repository. Please connect your GitHub account with proper permissions.`,
-          );
-        } else {
-          toast.error(`Failed to clone repository: ${errorMessage}`);
-          throw error;
+          await git.clone({
+            fs: activeFs,
+            http,
+            dir: activeSandbox.workdir,
+            url: baseUrl,
+            depth: 1,
+            singleBranch: true,
+            ref: branch,
+            corsProxy: '/api/git-proxy',
+            headers,
+            onProgress: (event) => {
+              console.log('Git clone progress:', event);
+            },
+            onAuth: (baseUrl) => {
+              let auth = lookupSavedPassword(baseUrl);
+
+              if (auth) {
+                console.log('Using saved authentication for', baseUrl);
+                return auth;
+              }
+
+              console.log('Repository requires authentication:', baseUrl);
+
+              if (
+                confirm('This repository requires authentication. Would you like to enter your GitHub credentials?')
+              ) {
+                auth = {
+                  username: prompt('Enter username') || '',
+                  password: prompt('Enter password or personal access token') || '',
+                };
+                return auth;
+              } else {
+                return { cancel: true };
+              }
+            },
+            onAuthFailure: (baseUrl, _auth) => {
+              console.error(`Authentication failed for ${baseUrl}`);
+              toast.error(
+                `Authentication failed for ${baseUrl.split('/')[2]}. Please check your credentials and try again.`,
+              );
+              throw new Error(
+                `Authentication failed for ${baseUrl.split('/')[2]}. Please check your credentials and try again.`,
+              );
+            },
+            onAuthSuccess: (baseUrl, auth) => {
+              console.log(`Authentication successful for ${baseUrl}`);
+              saveGitAuth(baseUrl, auth);
+            },
+          });
+
+          const data: Record<string, { data: any; encoding?: string }> = {};
+
+          for (const [key, value] of Object.entries(fileData.current)) {
+            data[key] = value;
+          }
+
+          /*
+           * `projectId` rides out with the files. The caller puts it on the imported chat's metadata:
+           * the import ends in a full page load of `/chat/<id>`, and that pointer is the only thing that
+           * will boot THIS sandbox again rather than leaving the clone stranded on a VM nothing names.
+           */
+          return { workdir: activeSandbox.workdir, data, projectId: workspaceProjectId };
+        } catch (error) {
+          console.error('Git clone error:', error);
+
+          // Handle specific error types
+          const errorMessage = error instanceof Error ? error.message : String(error);
+
+          // Check for common error patterns
+          if (errorMessage.includes('Authentication failed')) {
+            toast.error(`Authentication failed. Please check your GitHub credentials and try again.`);
+            throw error;
+          } else if (
+            errorMessage.includes('ENOTFOUND') ||
+            errorMessage.includes('ETIMEDOUT') ||
+            errorMessage.includes('ECONNREFUSED')
+          ) {
+            toast.error(`Network error while connecting to repository. Please check your internet connection.`);
+
+            // Retry for network errors, up to 3 times
+            if (retryCount < 3) {
+              return gitClone(url, retryCount + 1);
+            }
+
+            throw new Error(
+              `Failed to connect to repository after multiple attempts. Please check your internet connection.`,
+            );
+          } else if (errorMessage.includes('404')) {
+            toast.error(`Repository not found. Please check the URL and make sure the repository exists.`);
+            throw new Error(`Repository not found. Please check the URL and make sure the repository exists.`);
+          } else if (errorMessage.includes('401')) {
+            toast.error(
+              `Unauthorized access to repository. Please connect your GitHub account with proper permissions.`,
+            );
+            throw new Error(
+              `Unauthorized access to repository. Please connect your GitHub account with proper permissions.`,
+            );
+          } else {
+            toast.error(`Failed to clone repository: ${errorMessage}`);
+            throw error;
+          }
         }
+      } catch (error) {
+        await rollback();
+        throw error;
       }
     },
     [sandbox, fs, ready],

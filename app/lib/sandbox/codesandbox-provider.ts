@@ -34,7 +34,9 @@ import { brand } from '~/config/brand';
 import {
   clearPortScript,
   flattenMountTree,
+  isMissingPathError,
   needsContent,
+  normalizeWatchEventPaths,
   resolveInWorkdir,
   toShellCommand,
   toWorkspaceRelative,
@@ -46,6 +48,7 @@ import type {
   SandboxDirent,
   SandboxFileSystem,
   SandboxFileTree,
+  SandboxPreviewUrl,
   SandboxProcess,
   SandboxProvider,
   SandboxSpawnOptions,
@@ -137,8 +140,19 @@ function asSupportedShell(command: string): SupportedShell | undefined {
 export interface CodeSandboxProviderOptions {
   /**
    * Called by {@link SandboxProvider.teardown}. Reaping is a SERVER concern — only the server holds
-   * the API key that can hibernate or delete a VM — so this provider cannot reap itself, and a
-   * no-op default would silently bill for every sandbox the app thought it had torn down.
+   * the API key that can hibernate or delete a VM — so this provider cannot reap itself.
+   *
+   * ⚠️ **Nothing injects this today, and nothing calls `teardown()` either** — the seam's composition
+   * in `~/lib/sandbox/index.ts` omits it, so `teardown()` is genuinely a no-op on this provider. That
+   * is stated here rather than implied away: an earlier version of this comment claimed a no-op
+   * "would silently bill", which reads as a guarantee that the hook is wired. It is not — a false
+   * claim in a comment is how the shell-strip defect survived review.
+   *
+   * What actually stops an abandoned VM from billing forever is server-side and does not need this
+   * hook: `hibernationTimeoutSeconds` is set at every creation (the VM puts itself to sleep), and a
+   * project delete reaps the VM outright (`DELETE /api/projects/:id` → `deleteSandbox`). Wiring a
+   * client-triggered reap would need its own authenticated route; until one exists, leaving the hook
+   * un-injected is the honest state, not an oversight.
    */
   onTeardown?: () => void;
 
@@ -151,6 +165,17 @@ export interface CodeSandboxProviderOptions {
    * the bare host URL is used.
    */
   previewUrl?: (port: number, host: string) => Promise<string>;
+
+  /**
+   * Re-mint (or return the still-fresh) URL for a port already seen open — backs
+   * {@link SandboxProvider.refreshPreviewUrl}.
+   *
+   * Absent (tests, or a boot that predates it) the provider reports no `refreshPreviewUrl` at all,
+   * which the store reads as "these URLs do not expire" and schedules nothing. That is the same
+   * shape as the WebContainer answer, so an unwired option degrades to today's behaviour rather
+   * than to a timer firing against a function that cannot mint.
+   */
+  previewUrlForPort?: (port: number) => Promise<SandboxPreviewUrl | undefined>;
 
   /**
    * Whether the boot that produced `client` brought back the previous session's filesystem —
@@ -175,6 +200,23 @@ export function createCodeSandboxProvider(
   const workdir = () => client.workspacePath;
 
   const abs = (path: string) => resolveInWorkdir(workdir(), path);
+
+  /**
+   * Does the shell this session actually talks to emit the `begin` marker?
+   *
+   * 🔴 **Decided by the FIRST terminal spawn and never changed** — because `.bashrc` is read when a
+   * shell STARTS, so the hook is a fact about a running process, not about the disk. Letting a later
+   * spawn's success flip this to `true` would re-arm the waits of the bash that is ALREADY running
+   * without one: every subsequent shell action on it waits forever for a marker that process will
+   * never emit. That is the exact "a warning becomes a permanent silent hang" failure this degrade
+   * exists to prevent, walking back in through the door marked recovery.
+   *
+   * The rc write itself stays idempotent and keeps running for later terminals — only the CLAIM is
+   * frozen, and it is frozen in the safe direction: at worst this session runs unarmed (pre-hook jsh
+   * semantics, where a stale marker can mis-report a status) rather than hanging.
+   */
+  let oscHookInstalled = false;
+  let oscHookDecided = false;
 
   async function readFile(path: string, encoding?: null): Promise<Uint8Array>;
   async function readFile(path: string, encoding: BufferEncoding): Promise<string>;
@@ -236,19 +278,36 @@ export function createCodeSandboxProvider(
       try {
         await client.fs.remove(abs(path), opts?.recursive ?? false);
       } catch (error) {
-        // `force` means "absent is fine" — the same contract `node:fs` gives, and callers rely on it.
-        if (!opts?.force) {
+        /*
+         * `force` means "absent is fine" — the same contract `node:fs` gives, and callers rely on it.
+         * It does NOT mean "any failure is fine": swallowing a permission or connection error reports
+         * a delete that did not happen, so the map drops the entry while the disk keeps the file and
+         * the divergence resurfaces in an export or a push. See `isMissingPathError`.
+         */
+        if (!opts?.force || !isMissingPathError(error)) {
           throw error;
         }
       }
     },
   };
 
+  /*
+   * Present ONLY when the boot supplied a minter. The seam reads the METHOD's presence as "these URLs
+   * expire" (`SandboxProvider.refreshPreviewUrl`), so declaring it unconditionally would tell the
+   * store to keep asking a provider that can never answer — the honest shape is the same one
+   * WebContainer has: absent.
+   */
+  const refreshPreviewUrl = options.previewUrlForPort
+    ? { refreshPreviewUrl: (port: number) => options.previewUrlForPort!(port) }
+    : {};
+
   return {
     capabilities: CODESANDBOX_CAPABILITIES,
 
     // See CodeSandboxProviderOptions — the boot module answers this from the session's bootupType.
     bootRestoredFilesystem: options.bootRestoredFilesystem ?? false,
+
+    ...refreshPreviewUrl,
 
     /**
      * A real PTY running plain `bash`, taught to speak the OSC protocol through `PROMPT_COMMAND`.
@@ -274,8 +333,26 @@ export function createCodeSandboxProvider(
      *
      * `beginOsc` names the PS0 marker from `OSC_BASHRC` — see its doc for the stale-marker kill it
      * exists to prevent. It must match what the rc block emits, which the provider spec pins.
+     *
+     * 🔴 **A GETTER, because declaring it is a claim about the RUNNING SHELL.** The rc install is
+     * best-effort (a non-root image, a transient fs error), and a shell that promises a `begin`
+     * marker it will never emit makes every `waitTillOscCode` wait forever — one logged warning
+     * turning into "every shell action hangs", permanently and silently.
+     *
+     * The value is whatever the FIRST terminal spawn established and is then frozen — see
+     * `oscHookDecided`, which is the authoritative statement of the rule. A later successful install
+     * therefore does NOT flip this to `'begin'`: `.bashrc` is read at shell start, so the bash already
+     * running is still unhooked. `undefined` means pre-hook (jsh) semantics: stale markers become
+     * possible again, and a command that finishes is still seen to finish.
      */
-    shell: { command: 'bash', args: [], beginOsc: 'begin' },
+    shell: {
+      command: 'bash',
+      args: [],
+
+      get beginOsc(): string | undefined {
+        return oscHookInstalled ? 'begin' : undefined;
+      },
+    },
 
     get workdir(): string {
       return workdir();
@@ -327,9 +404,25 @@ export function createCodeSandboxProvider(
        */
       const native = args.length === 0 ? asSupportedShell(command) : undefined;
 
-      return spawnOptions?.terminal
-        ? spawnInteractive(client, line, { cwd, env }, spawnOptions.terminal, native)
-        : spawnBackground(client, line, { cwd, env }, spawnOptions?.output !== false);
+      if (!spawnOptions?.terminal) {
+        return spawnBackground(client, line, { cwd, env }, spawnOptions?.output !== false);
+      }
+
+      /*
+       * The rc install runs HERE rather than inside `spawnInteractive` so its answer is recorded:
+       * `shell.beginOsc` is a claim about the shell we are about to start, and a shell that promises
+       * a marker bash will never emit hangs every wait forever. The FIRST spawn decides for the
+       * session — see `oscHookDecided`; a later spawn re-runs the (idempotent) install for its own
+       * shell but must never re-arm the one already running unhooked.
+       */
+      const installed = await ensureOscBashrc(client);
+
+      if (!oscHookDecided) {
+        oscHookInstalled = installed;
+        oscHookDecided = true;
+      }
+
+      return spawnInteractive(client, line, { cwd, env }, spawnOptions.terminal, native);
     },
 
     watchPaths(watchOptions: SandboxWatchOptions, callback: (events: SandboxWatchEvent[]) => void): () => void {
@@ -412,9 +505,9 @@ export function createCodeSandboxProvider(
 
     teardown(): void {
       /*
-       * Deliberately NOT a no-op fallback. A server sandbox bills for whatever it does not reap, and
-       * a provider that silently swallowed teardown would leak a VM per builder session with nothing
-       * to show for it.
+       * A no-op unless a caller injects `onTeardown` — see that option's doc comment for why that is
+       * the current, deliberate state and what reaps a VM instead (provider-side hibernation timeout;
+       * `deleteSandbox` on project delete).
        */
       options.onTeardown?.();
     },
@@ -569,8 +662,6 @@ async function spawnInteractive(
    * caller asked for a shell the SDK can start natively, start it natively and run nothing;
    * anything else gets a bash terminal with the command typed into it.
    */
-  await ensureOscBashrc(client);
-
   const terminal = await client.terminals.create(shellName ?? 'bash', opts);
 
   let size = dimensions;
@@ -624,6 +715,49 @@ async function spawnInteractive(
 }
 
 /**
+ * The shell's home directory, asked for ONCE per connected client.
+ *
+ * The rc path used to be hardcoded `/root/.bashrc`. That is right for today's image and silently
+ * wrong for any image whose terminal user is not root: the append lands in a file bash never reads,
+ * the hook is never installed, and — before this change — the provider still declared `beginOsc`, so
+ * every shell action waited forever for a marker that could not arrive.
+ */
+const homeDirs = new WeakMap<SandboxClient, Promise<{ path: string; resolved: boolean }>>();
+
+function shellHomeDir(client: SandboxClient): Promise<{ path: string; resolved: boolean }> {
+  let pending = homeDirs.get(client);
+
+  if (!pending) {
+    /*
+     * Every failure mode lands on `/root`: a rejected command, an empty answer, and — the reason for
+     * the try — an SDK or a test double with no `commands.run` at all, which throws SYNCHRONOUSLY and
+     * would otherwise escape a `.catch()`. Asking where HOME is must never be the thing that stops a
+     * terminal from opening.
+     *
+     * 🔴 But `resolved` is reported separately, because a GUESSED home is not a known one. On an
+     * image whose shell user is not root, writing the hook to `/root/.bashrc` "succeeds" against a
+     * file bash never reads — and declaring `beginOsc` off that success is the promise-a-marker hang
+     * all over again. An unresolved home therefore installs anyway (harmless, possibly right) and
+     * declines to make the claim.
+     */
+    const fallback = { path: '/root', resolved: false };
+
+    try {
+      pending = client.commands
+        .run('printf %s "$HOME"')
+        .then((out) => (out.trim() ? { path: out.trim(), resolved: true } : fallback))
+        .catch(() => fallback);
+    } catch {
+      pending = Promise.resolve(fallback);
+    }
+
+    homeDirs.set(client, pending);
+  }
+
+  return pending;
+}
+
+/**
  * Make sure `~/.bashrc` installs the CURRENT OSC hook, exactly once per version.
  *
  * Idempotent via a VERSIONED marker rather than by overwriting: `.bashrc` belongs to the sandbox
@@ -636,9 +770,17 @@ async function spawnInteractive(
  * Best-effort: a failure here costs the OSC protocol (agent shell actions stop reporting completion),
  * which is bad — but throwing would cost the terminal entirely, which is worse, and the user can
  * still see and drive the shell by hand. Logged rather than swallowed.
+ *
+ * 🔴 **It ANSWERS, and the answer is load-bearing.** A `void` return plus a warn was the whole bug:
+ * the provider declared `beginOsc` unconditionally, so a failed install turned "the OSC hook is
+ * missing" into "every shell action waits forever for a `begin` marker bash will never emit" — a
+ * logged warning converting into a silent, permanent hang. The caller degrades on `false` to the
+ * pre-hook semantics (no arming), which is strictly worse than arming and strictly better than
+ * hanging.
  */
-async function ensureOscBashrc(client: SandboxClient): Promise<void> {
-  const path = '/root/.bashrc';
+async function ensureOscBashrc(client: SandboxClient): Promise<boolean> {
+  const home = await shellHomeDir(client);
+  const path = `${home.path}/.bashrc`;
 
   try {
     let current = '';
@@ -650,12 +792,20 @@ async function ensureOscBashrc(client: SandboxClient): Promise<void> {
     }
 
     if (current.includes(OSC_BASHRC_MARKER)) {
-      return;
+      return home.resolved;
     }
 
     await client.fs.writeTextFile(path, `${current}${OSC_BASHRC}`);
+
+    /*
+     * A write that landed in a GUESSED home is not evidence the shell will read it — see
+     * `shellHomeDir`. The block is installed either way; only the claim is withheld.
+     */
+    return home.resolved;
   } catch (error) {
     console.warn('[codesandbox] could not install the OSC shell hook:', (error as Error)?.message);
+
+    return false;
   }
 }
 
@@ -694,7 +844,13 @@ function startWatch(
 
       watcher = created;
 
-      created.onEvent(async (event: CodeSandboxWatchEvent) => {
+      created.onEvent(async (raw: CodeSandboxWatchEvent) => {
+        /*
+         * Normalize FIRST, so the enrichment read below and the map key produced by
+         * `translateWatchEvent` are the same string by construction — see `normalizeWatchEventPaths`
+         * for what a relative path would silently do to the file map.
+         */
+        const event = normalizeWatchEventPaths(workdir(), raw);
         const enriched = new Map<string, { isDirectory: boolean; buffer?: Uint8Array }>();
 
         if (options.includeContent && needsContent(event)) {

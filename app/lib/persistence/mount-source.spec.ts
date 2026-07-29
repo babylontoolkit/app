@@ -12,7 +12,7 @@
  * choosing — that is the user's call, always.
  */
 import { describe, expect, it } from 'vitest';
-import { selectMountSource, type MountFacts } from './mount-source';
+import { decideLiveSandboxIsTruth, selectMountSource, type MountFacts, type MountSource } from './mount-source';
 
 /** A linked project sitting exactly where it was last saved. Each test perturbs one fact. */
 const inSync: MountFacts = {
@@ -260,5 +260,108 @@ describe('the server working copy (§4.5.4c)', () => {
         hasWorkingCopy: true,
       }),
     ).toMatchObject({ source: 'diverged' });
+  });
+});
+
+/**
+ * The warm-boot gate: does the LIVE sandbox disk outrank every client-held copy?
+ *
+ * `selectMountSource` above decides WHICH copy would be mounted; this decides whether that copy gets
+ * written over a sandbox that is already holding the project. Both wrong answers are silent, and they
+ * destroy different things:
+ *
+ *   - `true` when it should be `false` — a stale or FOREIGN filesystem becomes the project's truth,
+ *     and §4.5.4b then pushes it to the user's own repository under their name;
+ *   - `false` when it should be `true` — a client copy serialized mid-watcher-lag is restored over a
+ *     healthy warm sandbox (MEASURED live: the starter's `Home.css` landing under a generation's
+ *     `Home.tsx`, reverting a landing page two hours after it was built).
+ *
+ * Enumerated rather than spot-checked for the same reason as the matrix above: there are only
+ * 6 × 3 × 2 inputs, and every one of them is somebody's only copy of a game.
+ */
+const ALL_SOURCES: MountSource['source'][] = ['local', 'repo', 'seed', 'working', 'empty', 'diverged'];
+const ALL_IDENTITIES = ['match', 'mismatch', 'unknown'] as const;
+
+/** The sources that would OVERWRITE a live sandbox, and therefore the only ones the gate can open for. */
+const PROTECTED_SOURCES: MountSource['source'][] = ['local', 'diverged', 'working'];
+
+describe('decideLiveSandboxIsTruth — the warm-boot gate', () => {
+  /*
+   * 🔴 THE WEBCONTAINER CASE, and the reason this can never be reduced to the source check alone. A
+   * tab-local WASM filesystem is EMPTY on every page load, so `bootRestoredFilesystem` is always
+   * false there and the restore IS the project. Opening the gate on that provider would mount a
+   * project by mounting nothing — an empty editor, with no error, for every user of the incumbent
+   * runtime.
+   */
+  it('never opens when the boot restored no filesystem — whatever the source or the sentinel says', () => {
+    for (const source of ALL_SOURCES) {
+      for (const identity of ALL_IDENTITIES) {
+        expect(decideLiveSandboxIsTruth({ bootRestoredFilesystem: false, identity, source })).toBe(false);
+      }
+    }
+  });
+
+  /*
+   * 🔴 THE SENTINEL MISMATCH — a sandbox that is present and NAMES ANOTHER PROJECT
+   * (`readIdentityVerdict`). With per-project VMs this should be impossible, which is exactly why it
+   * is worth a clause: the failure it catches is a mis-pointed `sandbox_id` (an operator edit, a
+   * restored old row, a compare-and-set that lost), and the consequence of trusting that disk is one
+   * project's files becoming another project's truth and then being pushed to that project's repo.
+   * The gate must stay CLOSED even on a warm boot whose source is otherwise protected.
+   */
+  it('stays closed on a mismatch, even warm and on an otherwise-qualifying source', () => {
+    for (const source of PROTECTED_SOURCES) {
+      expect(decideLiveSandboxIsTruth({ bootRestoredFilesystem: true, identity: 'mismatch', source })).toBe(false);
+    }
+  });
+
+  /*
+   * 🔴 `unknown` IS NOT A MISMATCH, and this is the asymmetry that matters. A sandbox created before
+   * the sentinel existed — or one whose `.codesandbox/` was cleaned — makes no claim, and treating
+   * silence as an accusation would send EVERY warm VM in existence down the restore-from-a-client-copy
+   * path the gate exists to avoid. Pinned as an equivalence rather than as separate cases, so the two
+   * verdicts cannot drift apart later.
+   */
+  it('treats a sandbox that makes no claim exactly like one that agrees', () => {
+    for (const source of ALL_SOURCES) {
+      expect(decideLiveSandboxIsTruth({ bootRestoredFilesystem: true, identity: 'unknown', source })).toBe(
+        decideLiveSandboxIsTruth({ bootRestoredFilesystem: true, identity: 'match', source }),
+      );
+    }
+  });
+
+  /*
+   * The source gate. `local`, `diverged` and `working` are the copies that would be WRITTEN over the
+   * sandbox, so they are the only ones the gate can protect against.
+   */
+  it('opens for the sources that would overwrite the sandbox', () => {
+    for (const source of PROTECTED_SOURCES) {
+      for (const identity of ['match', 'unknown'] as const) {
+        expect(decideLiveSandboxIsTruth({ bootRestoredFilesystem: true, identity, source })).toBe(true);
+      }
+    }
+  });
+
+  /*
+   * And stays shut for the rest — not because they are dangerous, but because there is nothing to
+   * protect: `repo` is an EXPLICIT user-facing sync decision (§4.13 — the user asked for the repo's
+   * version, and a gate that overrode that would make "Sync from GitHub" do nothing), while `empty`
+   * and `seed` only run when the browser holds no copy at all.
+   */
+  it('stays shut for repo, seed and empty on a warm boot', () => {
+    for (const source of ALL_SOURCES.filter((candidate) => !PROTECTED_SOURCES.includes(candidate))) {
+      for (const identity of ALL_IDENTITIES) {
+        expect(decideLiveSandboxIsTruth({ bootRestoredFilesystem: true, identity, source })).toBe(false);
+      }
+    }
+  });
+
+  /*
+   * CONTROL. Every assertion above is a `false` except one, so a function that simply returned `false`
+   * — or a loop that iterated nothing — would pass most of this block. This is the case that has to
+   * be TRUE: the whole point of the gate is that a healthy warm sandbox wins.
+   */
+  it('CONTROL: the ordinary warm resume genuinely opens the gate', () => {
+    expect(decideLiveSandboxIsTruth({ bootRestoredFilesystem: true, identity: 'match', source: 'local' })).toBe(true);
   });
 });

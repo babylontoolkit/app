@@ -32,6 +32,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsProjectStore, setProjectStore } from '~/lib/.server/projects/store';
 import type { Project } from '~/lib/.server/projects/types';
+import { resetRateWindows } from '~/lib/.server/monitoring/failure-rate';
 import { resetSandboxCreateLimits } from './create-limit';
 
 const USER = { id: 'user-1', email: 'a@example.com', emailVerified: true } as const;
@@ -53,10 +54,50 @@ const service = vi.hoisted(() => ({
   deleteSandbox: vi.fn(),
   createBrowserSession: vi.fn(),
   createPreviewAccess: vi.fn(),
+
+  /*
+   * The running-VM cap's two provider calls (`vm-cap.ts`). They live here because this mock object
+   * REPLACES the whole module: an export the route path reaches that is missing from it is a
+   * `TypeError` in the middle of a session mint, not a compile error.
+   */
+  listRunningSandboxes: vi.fn(),
+  hibernateSandbox: vi.fn(),
 }));
 
 vi.mock('./service', () => service);
 vi.mock('~/lib/.server/sandbox/service', () => service);
+
+/*
+ * The monitoring seam (plan T13, `monitoring/sandbox-rates.ts`).
+ *
+ * These are SPIES WRAPPING THE REAL IMPLEMENTATION, not replacements: every call still feeds the real
+ * `sharedRateWindow`, so nothing here can pass against a `sandbox-rates.ts` that has stopped working —
+ * the spies only make "which attempt was recorded, and as what?" a question this suite can ask.
+ *
+ * Asserting through the windows alone was the first choice and it cannot express these cases: a window
+ * exposes nothing but an alert, so "a successful create was recorded" would have to be inferred from
+ * ~8 requests NOT alerting, which passes just as well when nothing was recorded at all. The rate
+ * arithmetic itself — the denominator, the thresholds, the independence of the three windows — is
+ * pinned directly in `sandbox-rates.spec.ts` against the real windows; what belongs HERE is that the
+ * route calls it on every path, including the two paths that are easy to forget: a failure that throws
+ * out of the route, and a success that nobody thinks of as an event.
+ */
+const rates = vi.hoisted(() => ({ recordSandboxOutcome: vi.fn(), recordSandboxCleanBoot: vi.fn() }));
+
+vi.mock('~/lib/.server/monitoring/sandbox-rates', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('~/lib/.server/monitoring/sandbox-rates')>();
+
+  return {
+    recordSandboxOutcome: rates.recordSandboxOutcome.mockImplementation(actual.recordSandboxOutcome),
+    recordSandboxCleanBoot: rates.recordSandboxCleanBoot.mockImplementation(actual.recordSandboxCleanBoot),
+  };
+});
+
+/** What the route recorded this test, as `[kind, failed]` pairs — the readable form of the assertions. */
+const recordedOutcomes = () => rates.recordSandboxOutcome.mock.calls.map((call) => [call[1], call[2]]);
+
+/** What the route recorded about how a resume came back, as `wasClean` booleans. */
+const recordedCleanBoots = () => rates.recordSandboxCleanBoot.mock.calls.map((call) => call[1]);
 
 let tmp: string;
 let projects: FsProjectStore;
@@ -70,6 +111,13 @@ beforeEach(async () => {
   vi.stubEnv('CODESANDBOX_API_KEY', 'csb_test_key');
   resetSandboxCreateLimits();
 
+  /* `mockClear`, never `mockReset` — the spies carry the real implementation and must keep it. */
+  rates.recordSandboxOutcome.mockClear();
+  rates.recordSandboxCleanBoot.mockClear();
+
+  // A rate that leaks between tests is not a rate; the real windows are shared per process.
+  resetRateWindows();
+
   for (const spy of Object.values(service)) {
     spy.mockReset();
   }
@@ -77,6 +125,10 @@ beforeEach(async () => {
   service.createBrowserSession.mockResolvedValue({ session: 'scoped' });
   service.createPreviewAccess.mockResolvedValue({ url: 'https://p.csb.app/?preview_token=t', expiresAt: 'later' });
   service.deleteSandbox.mockResolvedValue(undefined);
+
+  /* Nothing else running by default, so the cap is a no-op for every test that is not about it. */
+  service.listRunningSandboxes.mockResolvedValue([]);
+  service.hibernateSandbox.mockResolvedValue(undefined);
 
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'sandbox-routes-'));
   projects = new FsProjectStore(tmp);
@@ -215,7 +267,7 @@ describe('create records the sandbox on the project row', () => {
     const response = await session({ projectId: mine.id });
 
     expect(await response.json()).toMatchObject({ sandboxId: 'sb-1', bootupType: 'RESUME', created: false });
-    expect(service.resumeSandbox).toHaveBeenCalledWith('sb-1', expect.anything());
+    expect(service.resumeSandbox).toHaveBeenCalledWith('sb-1', expect.anything(), expect.anything());
     expect(service.createSandboxForProject).not.toHaveBeenCalled();
   });
 
@@ -275,7 +327,7 @@ describe('reset', () => {
 
     expect(await response.json()).toMatchObject({ sandboxId: 'sb-new', created: true });
     expect((await projects.get(mine.id))!.sandboxId).toBe('sb-new');
-    expect(service.deleteSandbox).toHaveBeenCalledWith('sb-old', expect.anything());
+    expect(service.deleteSandbox).toHaveBeenCalledWith('sb-old', expect.anything(), expect.anything());
     expect(service.resumeSandbox).not.toHaveBeenCalled();
   });
 
@@ -360,7 +412,7 @@ describe('🔴 concurrent creates converge on one sandbox and the loser is destr
 
     // The row names it once, and the loser is gone.
     expect((await projects.get(mine.id))!.sandboxId).toBe('sb-first');
-    expect(service.deleteSandbox).toHaveBeenCalledWith('sb-second', expect.anything());
+    expect(service.deleteSandbox).toHaveBeenCalledWith('sb-second', expect.anything(), expect.anything());
     expect(service.deleteSandbox).toHaveBeenCalledTimes(1);
 
     /*
@@ -447,5 +499,297 @@ describe('the fork ceiling is enforced on the route, not only in the pure functi
     service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-ok', bootupType: 'FORK' });
 
     expect((await session({ projectId: mine.id })).status).toBe(200);
+  });
+});
+
+describe('the running-VM cap MAKES ROOM on the route, and never refuses (§11, `vm-cap.ts`)', () => {
+  /** Two other projects of this user, already holding running sandboxes of different ages. */
+  const twoOtherProjectsRunning = async () => {
+    const older = await projects.create({ userId: USER.id, name: 'Older', templateId: 'racing' });
+    const newer = await projects.create({ userId: USER.id, name: 'Newer', templateId: 'racing' });
+
+    await projects.update(older.id, { sandboxId: 'sb-old' });
+    await projects.update(newer.id, { sandboxId: 'sb-new' });
+
+    service.listRunningSandboxes.mockResolvedValue([
+      { sandboxId: 'sb-old', startedAt: 1_000 },
+      { sandboxId: 'sb-new', startedAt: 900_000 },
+    ]);
+  };
+
+  it('🔴 opening a THIRD project still returns a session, and hibernates exactly the oldest VM', async () => {
+    /*
+     * The acceptance case for T5. Per-project sandboxes (T1–T3) mean a user with three open projects
+     * has three VMs billing until each one's own idle timeout; hibernating the oldest costs a 1–3s
+     * resume and nothing else. Refusing the session instead would trade a bill for "you cannot open
+     * your project", which is the worse failure.
+     */
+    await twoOtherProjectsRunning();
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-third', bootupType: 'FORK' });
+
+    const response = await session({ projectId: mine.id });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ sandboxId: 'sb-third', created: true });
+
+    // Exactly the oldest, and only the oldest: cap 2 keeps the new VM plus one other.
+    expect(service.hibernateSandbox).toHaveBeenCalledTimes(1);
+    expect(service.hibernateSandbox).toHaveBeenCalledWith('sb-old', expect.anything(), expect.anything());
+
+    /* The session is minted for the kept sandbox — and BEFORE the sweep, see the ordering test below. */
+    expect(service.createBrowserSession).toHaveBeenCalledWith('sb-third', expect.anything(), expect.anything());
+
+    // And no row was touched — hibernation is reversible, so the project keeps naming its VM.
+    expect((await projects.get(mine.id))!.sandboxId).toBe('sb-third');
+  });
+
+  it('applies the cap to a RESUME too, not only to a fresh fork', async () => {
+    /* Flipping back to an existing project is the ordinary way an account goes over the cap. */
+    await twoOtherProjectsRunning();
+    await projects.update(mine.id, { sandboxId: 'sb-mine' });
+    service.sandboxExists.mockResolvedValue(true);
+    service.resumeSandbox.mockResolvedValue({ sandboxId: 'sb-mine', bootupType: 'RESUME' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+    expect(service.hibernateSandbox).toHaveBeenCalledWith('sb-old', expect.anything(), expect.anything());
+  });
+
+  it('honours a raised cap — nothing sleeps when the operator allows three', async () => {
+    vi.stubEnv('CODESANDBOX_MAX_RUNNING_VMS', '3');
+    await twoOtherProjectsRunning();
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-third', bootupType: 'FORK' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+    expect(service.hibernateSandbox).not.toHaveBeenCalled();
+  });
+
+  it('🔴 still returns a session when hibernation itself fails', async () => {
+    /* Best-effort by contract: a cost optimisation that can fail an open is not a cost optimisation. */
+    await twoOtherProjectsRunning();
+    service.listRunningSandboxes.mockRejectedValue(new Error('provider is having a day'));
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-third', bootupType: 'FORK' });
+
+    const response = await session({ projectId: mine.id });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ sandboxId: 'sb-third' });
+  });
+
+  it('🔴 never hibernates ANOTHER USER’s sandbox, even when it is the oldest VM the provider lists', async () => {
+    /*
+     * `listRunningSandboxes` is workspace-wide — the API key is ours and every user's VM is in that
+     * list. Two things make this a per-user cap: the candidate set comes from `listByUser(user.id)`,
+     * and the provider list is intersected with it. Lose either and one user opening a third project
+     * puts a STRANGER's project to sleep — silently, since hibernation throws nothing and the victim
+     * only experiences a resume wait the next time they type.
+     *
+     * The numbers are chosen so that both mutations change the answer: without the intersection the
+     * stranger's VM is the oldest candidate and sleeps first; without the per-user scoping it enters
+     * the candidate set from the project rows and sleeps just the same.
+     */
+    const theirsToo = await projects.create({ userId: 'someone-else', name: 'Theirs too', templateId: 'racing' });
+    const mine2 = await projects.create({ userId: USER.id, name: 'Mine 2', templateId: 'racing' });
+    const mine3 = await projects.create({ userId: USER.id, name: 'Mine 3', templateId: 'racing' });
+
+    await projects.update(theirsToo.id, { sandboxId: 'sb-theirs' });
+    await projects.update(mine2.id, { sandboxId: 'sb-mine-2' });
+    await projects.update(mine3.id, { sandboxId: 'sb-mine-3' });
+
+    service.listRunningSandboxes.mockResolvedValue([
+      { sandboxId: 'sb-theirs', startedAt: 1_000, lastActiveAt: 1_000 },
+      { sandboxId: 'sb-mine-2', startedAt: 300_000, lastActiveAt: 300_000 },
+      { sandboxId: 'sb-mine-3', startedAt: 600_000, lastActiveAt: 600_000 },
+      { sandboxId: 'sb-third', startedAt: 900_000, lastActiveAt: 900_000 },
+    ]);
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-third', bootupType: 'FORK' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+
+    /* Exactly one of THIS user's other VMs — the older — and nothing belonging to anyone else. */
+    expect(service.hibernateSandbox).toHaveBeenCalledTimes(1);
+    expect(service.hibernateSandbox).toHaveBeenCalledWith('sb-mine-2', expect.anything(), expect.anything());
+    expect(service.hibernateSandbox.mock.calls.map((call) => call[0])).not.toContain('sb-theirs');
+
+    // Their row still names their VM: hibernation is reversible, but it was never asked for here.
+    expect((await projects.get(theirsToo.id))!.sandboxId).toBe('sb-theirs');
+  });
+
+  it('🔴 mints the session BEFORE the cost sweep runs — the credential never queues behind it', async () => {
+    /*
+     * The sweep is best-effort and deadline-bounded, but it is still up to five seconds of provider
+     * round trips, and the user is waiting on the credential that lets their project boot. Ordering it
+     * first would add that latency to every open of a third project — and unlike a failure, latency
+     * bought here shows up as nothing at all in the logs.
+     */
+    await twoOtherProjectsRunning();
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-third', bootupType: 'FORK' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+
+    expect(service.createBrowserSession.mock.invocationCallOrder[0]).toBeLessThan(
+      service.listRunningSandboxes.mock.invocationCallOrder[0],
+    );
+    expect(service.createBrowserSession.mock.invocationCallOrder[0]).toBeLessThan(
+      service.hibernateSandbox.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not spend a provider list when the account has no other sandbox', async () => {
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-only', bootupType: 'FORK' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+    expect(service.listRunningSandboxes).not.toHaveBeenCalled();
+  });
+});
+
+describe('every sandbox attempt is recorded, not only the ones that fail (T13)', () => {
+  /*
+   * 🔴 THE DENOMINATOR, at the call site.
+   *
+   * `sandbox-rates.ts` computes a RATE, so it needs the successes as much as the failures — a window
+   * fed only its failures reads 100% and alerts on the eighth one no matter how healthy the platform
+   * is, which turns the signal into a per-event alarm somebody switches off. That property is arithmetic
+   * and is pinned in `sandbox-rates.spec.ts`; what is pinned HERE is the half nobody remembers to write:
+   * the route calling `record…(…, false)` on the paths where nothing went wrong.
+   *
+   * The failure side has its own trap — three of the four failure paths leave this route by THROWING
+   * (a fork that rejects, a resume that rejects, and the refusal that returns 503 before either), so a
+   * recording placed after the provider call is skipped exactly when it matters most.
+   */
+  it('records a SUCCESSFUL create as a non-failure', async () => {
+    /*
+     * The mundane case, and the one a "record the failures" implementation gets wrong: nothing here is
+     * an event to a human, and without it the create window has no denominator at all.
+     */
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-1', bootupType: 'FORK' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+    expect(recordedOutcomes()).toEqual([['create', false]]);
+
+    /*
+     * A fresh fork is template state by definition — feeding it to the clean-boot window would bury
+     * the signal under the very thing that window exists to distinguish from.
+     */
+    expect(recordedCleanBoots()).toEqual([]);
+  });
+
+  it('records a FAILING create as a failure, even though the route throws', async () => {
+    service.createSandboxForProject.mockRejectedValue(new Error('the provider is having a day'));
+
+    const response = await session({ projectId: mine.id });
+
+    expect(response.status).toBeGreaterThanOrEqual(500);
+    expect(recordedOutcomes()).toEqual([['create', true]]);
+  });
+
+  it('records a SUCCESSFUL resume as a non-failure, plus how it came back', async () => {
+    await projects.update(mine.id, { sandboxId: 'sb-1' });
+    service.sandboxExists.mockResolvedValue(true);
+    service.resumeSandbox.mockResolvedValue({ sandboxId: 'sb-1', bootupType: 'RESUME' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+
+    expect(recordedOutcomes()).toEqual([['resume', false]]);
+
+    /* An ordinary resume is the clean-boot window's denominator — same argument, one window over. */
+    expect(recordedCleanBoots()).toEqual([false]);
+  });
+
+  it('🔴 records a CLEAN resume as a clean boot — a success no failure metric can ever show', async () => {
+    /*
+     * The request succeeded and the user got a working sandbox, so the failure windows will never see
+     * this. But `CLEAN` means the hibernation snapshot had expired and setup re-ran, so the files are
+     * template state and the project the user is looking at came from the §4.5.4c working copy rather
+     * than from the VM. It is the closest thing this subsystem has to a data-loss signal, and it is
+     * invisible by construction — exactly the shape of every metric this codebase has watched die
+     * reporting zero.
+     */
+    await projects.update(mine.id, { sandboxId: 'sb-1' });
+    service.sandboxExists.mockResolvedValue(true);
+    service.resumeSandbox.mockResolvedValue({ sandboxId: 'sb-1', bootupType: 'CLEAN' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+
+    expect(recordedCleanBoots()).toEqual([true]);
+    expect(recordedOutcomes(), 'a CLEAN resume is a SUCCESS — it must never enter a failure window').toEqual([
+      ['resume', false],
+    ]);
+  });
+
+  it('records a FAILING resume as a failure when the error is not a fallback case', async () => {
+    await projects.update(mine.id, { sandboxId: 'sb-live' });
+    service.sandboxExists.mockResolvedValue(true);
+    service.resumeSandbox.mockRejectedValue(Object.assign(new Error('upstream exploded'), { status: 500 }));
+
+    expect((await session({ projectId: mine.id })).status).toBeGreaterThanOrEqual(500);
+    expect(recordedOutcomes()).toEqual([['resume', true]]);
+  });
+
+  it('🔴 records the 503 REFUSAL as a failed resume', async () => {
+    /*
+     * From the user's side a refusal IS a failed open: they asked for their project and did not get it.
+     * It is reached only when `sandboxExists` could not find out — i.e. the provider is unreachable,
+     * the precise platform-wide condition this window exists to surface. Leaving it unrecorded makes a
+     * total provider outage look like an IDLE window: no attempts, no failures, no alert, while every
+     * user in the product is staring at a retryable 503.
+     */
+    await projects.update(mine.id, { sandboxId: 'sb-1' });
+    service.sandboxExists.mockResolvedValue(undefined);
+
+    expect((await session({ projectId: mine.id })).status).toBe(503);
+    expect(recordedOutcomes()).toEqual([['resume', true]]);
+  });
+
+  it('records BOTH halves of the resume→create fallback', async () => {
+    /*
+     * The resume genuinely failed and the create genuinely succeeded, so both windows should hear about
+     * their own attempt. The recording lives inside `createAndRecord` precisely so this path cannot
+     * diverge from the ordinary create path.
+     */
+    await projects.update(mine.id, { sandboxId: 'sb-stale' });
+    service.sandboxExists.mockResolvedValue(true);
+    service.resumeSandbox.mockRejectedValue(Object.assign(new Error('Sandbox not found'), { status: 404 }));
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-fresh', bootupType: 'FORK' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+    expect(recordedOutcomes()).toEqual([
+      ['resume', true],
+      ['create', false],
+    ]);
+  });
+
+  it('🔴 records NOTHING when WE refuse for rate limiting', async () => {
+    /*
+     * A 429 is us rationing forks, not the provider failing — the provider was never called. Counting it
+     * would let one user's runaway loop (a reload storm, a broken client retry) trip a platform-wide
+     * "nobody can start a project" alert while the platform is perfectly healthy, which is how an
+     * operator learns to ignore the signal.
+     */
+    vi.stubEnv('CODESANDBOX_MAX_CREATES_PER_HOUR', '1');
+    service.createSandboxForProject.mockResolvedValue({ sandboxId: 'sb-1', bootupType: 'FORK' });
+
+    const other = await projects.create({ userId: USER.id, name: 'Other', templateId: 'racing' });
+
+    expect((await session({ projectId: mine.id })).status).toBe(200);
+
+    rates.recordSandboxOutcome.mockClear();
+
+    expect((await session({ projectId: other.id })).status).toBe(429);
+    expect(recordedOutcomes()).toEqual([]);
+    expect(recordedCleanBoots()).toEqual([]);
+  });
+
+  it('records nothing at all when a wall refuses before the provider is reached', async () => {
+    /*
+     * Someone else's project (404) and an unconfigured deploy (503) are refusals that never touch the
+     * provider. Recording them would report an outage caused by an unauthenticated poke at the route.
+     */
+    expect((await session({ projectId: theirs.id })).status).toBe(404);
+
+    vi.stubEnv('CODESANDBOX_API_KEY', '');
+    expect((await session({ projectId: mine.id })).status).toBe(503);
+
+    expect(recordedOutcomes()).toEqual([]);
+    expect(recordedCleanBoots()).toEqual([]);
   });
 });

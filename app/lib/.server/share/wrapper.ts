@@ -34,7 +34,15 @@ export function renderPlayWrapper(input: PlayWrapperInput): string {
   const description = input.description ? escapeHtml(input.description) : '';
 
   const base = playOrigin ? `${playOrigin}/${encodeURIComponent(shareId)}` : `/play/${encodeURIComponent(shareId)}`;
-  const gameSrc = `${base}/index.html${solo ? '?solo=true' : ''}`;
+
+  /*
+   * The iframe loads the DIRECTORY URL, never `/index.html` (T17b). The game is a BrowserRouter app
+   * whose basename resolves to `/play/<id>/` at runtime — a document URL ending in `index.html` leaves
+   * `index.html` as the route path, which matches nothing and renders a blank page. `?embed=1` is what
+   * tells the serve layer "this request wants the game document, not the wrapper" (`resolvePlayRequest`
+   * — without it, the extensionless directory URL would serve the wrapper again, recursively).
+   */
+  const gameSrc = `${base}/?embed=1${solo ? '&solo=true' : ''}`;
 
   return `<!doctype html>
 <html lang="en">

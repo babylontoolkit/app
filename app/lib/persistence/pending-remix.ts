@@ -106,6 +106,27 @@ export interface PendingMount {
 }
 
 /**
+ * Non-consuming peek: is a project mount parked for this load?
+ *
+ * Exists so the builder can decide, on its FIRST render, whether to show the boot splash — the
+ * consuming read (`takePendingProjectMount`) runs in an effect, i.e. after the render that already
+ * chose what to draw. Without the peek, `ready` on `/` was `!mixedId` = instantly true, so a remix or
+ * dashboard open mounted the project BEHIND a fully-rendered empty chat: no "Waking your workspace…",
+ * no file counts — the same silent-boot gap `BootScreen` was built to close for resume (owner report
+ * 2026-07-29: "Remix this project should have the same splash progress creations and resumes get").
+ *
+ * MUST stay read-only: this runs per hook instance and multiple components call `useChatHistory`;
+ * a consuming peek would eat the baton before the mount effect could act on it.
+ */
+export function hasPendingProjectMount(): boolean {
+  if (typeof sessionStorage === 'undefined') {
+    return false;
+  }
+
+  return sessionStorage.getItem(PENDING_OPEN_KEY) !== null || sessionStorage.getItem(PENDING_REMIX_KEY) !== null;
+}
+
+/**
  * The single reader the builder calls on a fresh mount: either a just-cloned remix or a dashboard
  * "open" resolves to the same thing — a project id whose files should be mounted. Open takes precedence
  * (it is the more explicit user action), then remix.

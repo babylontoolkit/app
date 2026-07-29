@@ -159,3 +159,83 @@ describe('freshness and display', () => {
     expect(agentStatusStore.get()?.kind).toBe('edit');
   });
 });
+
+/**
+ * The retry activity (2026-07-28; server: `agent/heartbeat.ts`).
+ *
+ * Measured live: a 387s creation spent two stalled provider attempts showing "Thinking", and the user
+ * concluded they were *"burning credits for nothing"*. The retries bill ZERO by construction
+ * (`shouldRetryGeneration` gates on `outTokens === 0`), so the panel was wrong about the one thing the
+ * user cannot check for themselves. These pin that the copy says it — and that an activity this client
+ * does not understand degrades to the vaguer true sentence rather than to a wrong specific one.
+ */
+describe('retry activity', () => {
+  beforeEach(() => resetAgentStatus());
+
+  it('ingests the retry fields', () => {
+    updateAgentStatus(part({ activity: 'retrying', attempt: 2, maxAttempts: 3 }), 1000);
+
+    expect(agentStatusStore.get()).toMatchObject({ activity: 'retrying', attempt: 2, maxAttempts: 3 });
+  });
+
+  it('an ordinary part carries no activity KEY — absence is the normal case', () => {
+    updateAgentStatus(part(), 1000);
+
+    expect(Object.keys(agentStatusStore.get()!)).not.toContain('activity');
+  });
+
+  /**
+   * 🔴 An unknown activity is DROPPED, and the rest of the part is still ingested. Both halves matter:
+   * passing a future activity string through would make `describeAgentStatus` fall out of its `retrying`
+   * branch into the phase copy anyway (fine) — but a client that instead REJECTED the whole part would
+   * blank the liveness panel during exactly the stall it exists to cover, which is the failure mode
+   * `phase` already has and the reason activity was added as a separate optional field.
+   */
+  it('DROPS an unrecognised activity while still ingesting the rest of the part', () => {
+    updateAgentStatus(part({ activity: 'exploding', attempt: 2, maxAttempts: 3, elapsedMs: 42_000 }), 1000);
+
+    const status = agentStatusStore.get()!;
+    expect(status).not.toBeNull();
+    expect(Object.keys(status)).not.toContain('activity');
+    expect(status.elapsedMs).toBe(42_000);
+
+    // …and the panel falls back to the phase/kind sentence, which is still true.
+    expect(describeAgentStatus(status, 1000).label).toMatch(/^Working on your changes/);
+  });
+
+  it('the retry copy OUTRANKS the phase sentence and states the not-charged fact', () => {
+    updateAgentStatus(
+      part({ kind: 'creation', activity: 'retrying', attempt: 2, maxAttempts: 3, elapsedMs: 130_000 }),
+      1000,
+    );
+
+    const { label, detail } = describeAgentStatus(agentStatusStore.get()!, 1000);
+
+    expect(label).toBe('Reconnecting to the model — 2m 10s');
+    expect(detail).toMatch(/2 of 3/);
+
+    // The fact the user cannot otherwise know and had assumed the opposite of.
+    expect(detail).toMatch(/not charged/i);
+
+    /*
+     * CONTROL: the SAME part without the activity gets the creation phase copy. Without this, the
+     * assertions above pass for a `describeAgentStatus` that ignores `activity` and simply never says
+     * "Building your project".
+     */
+    updateAgentStatus(part({ seq: 2, kind: 'creation', elapsedMs: 130_000 }), 1000);
+    expect(describeAgentStatus(agentStatusStore.get()!, 1000).label).toBe('Building your project — 2m 10s');
+  });
+
+  it('degrades gracefully when attempt/maxAttempts are absent', () => {
+    updateAgentStatus(part({ activity: 'retrying' }), 1000);
+
+    const { label, detail } = describeAgentStatus(agentStatusStore.get()!, 1000);
+
+    expect(label).toMatch(/^Reconnecting to the model/);
+    expect(detail).toMatch(/not charged/i);
+
+    // No dangling "attempt  of  " — a half-known count is simply not narrated.
+    expect(detail).not.toMatch(/\sof\s/);
+    expect(detail).not.toMatch(/undefined|NaN/);
+  });
+});

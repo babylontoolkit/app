@@ -4,11 +4,14 @@ import { vercelConnection } from '~/lib/stores/vercel';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { sandbox } from '~/lib/sandbox';
 import { path } from '~/utils/path';
+import { buildOutputCandidates } from '~/lib/sandbox/build-output';
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import { useState } from 'react';
 import type { ActionCallbackData } from '~/lib/runtime/message-parser';
 import { chatId } from '~/lib/persistence/useChatHistory';
 import { formatBuildFailureOutput } from './deployUtils';
 import { bytesToBase64, isBinaryPath, type DeployFile } from '~/lib/binary/binary-files';
+import { publishReadinessNow } from '~/lib/chat/publish-readiness';
 
 export function useVercelDeploy() {
   const [isDeploying, setIsDeploying] = useState(false);
@@ -16,6 +19,14 @@ export function useVercelDeploy() {
   const currentChatId = useStore(chatId);
 
   const handleVercelDeploy = async () => {
+    // Refuse to build while a generation is streaming or file actions are still applying (T17).
+    const readiness = await publishReadinessNow();
+
+    if (!readiness.ready) {
+      toast.warn(readiness.reason);
+      return false;
+    }
+
     if (!vercelConn.user || !vercelConn.token) {
       toast.error('Please connect to Vercel first in the settings tab!');
       return false;
@@ -83,14 +94,18 @@ export function useVercelDeploy() {
       // Get the build files
       const container = await sandbox;
 
-      // Remove /home/project from buildPath if it exists
-      const buildPath = buildOutput.path.replace('/home/project', '');
+      /*
+       * The detected build directory, rebased onto the seam's workdir-relative contract.
+       *
+       * `toProjectRelativePath` knows every provider root (`sandbox-paths.ts`); the `/home/project`
+       * literal this replaces was a NO-OP anywhere else, leaving an absolute path that no `readdir`
+       * could resolve — so the detected directory was silently discarded and the deploy fell through
+       * to the guesses below, which cannot be right for a project with a custom `outDir`.
+       */
+      const commonOutputDirs = buildOutputCandidates(buildOutput.path, { includeFrameworkDirs: true });
 
       // Check if the build path exists
-      let finalBuildPath = buildPath;
-
-      // List of common output directories to check if the specified build path doesn't exist
-      const commonOutputDirs = [buildPath, '/dist', '/build', '/out', '/output', '/.next', '/public'];
+      let finalBuildPath = commonOutputDirs[0];
 
       // Verify the build path exists, or try to find an alternative
       let buildPathExists = false;
@@ -156,14 +171,12 @@ export function useVercelDeploy() {
             try {
               const content = await container.fs.readFile(fullPath, 'utf-8');
 
-              // Store with relative path from project root
-              let relativePath = fullPath;
-
-              if (fullPath.startsWith('/home/project/')) {
-                relativePath = fullPath.replace('/home/project/', '');
-              } else if (fullPath.startsWith('./')) {
-                relativePath = fullPath.replace('./', '');
-              }
+              /*
+               * Store with a path relative to the project root. `toProjectRelativePath` handles every
+               * provider root and is idempotent on an already-relative path, so the only case left to
+               * strip by hand is the `./` this walk introduces itself (it starts at `'.'`).
+               */
+              const relativePath = toProjectRelativePath(fullPath.replace(/^\.\//, ''));
 
               allProjectFiles[relativePath] = content;
             } catch (error) {
@@ -180,8 +193,8 @@ export function useVercelDeploy() {
       try {
         await getAllProjectFiles('.');
       } catch {
-        // Fallback to /home/project if current directory doesn't work
-        await getAllProjectFiles('/home/project');
+        // Fallback to the sandbox's own workdir if the current directory does not resolve.
+        await getAllProjectFiles(container.workdir);
       }
 
       // Use chatId instead of artifact.id

@@ -283,6 +283,69 @@ describe('the migrations', () => {
     ).toBe(true);
   });
 
+  /*
+   * Migration 0014: sandbox lifecycle marks (plan T12). Append-only, RLS-enabled with no policy
+   * (service-role only, like `git_tokens` — a forged mark is a forged cost report), and the CHECK on
+   * `event` is what keeps the pairing honest: `admin/vm-report.ts` treats create/resume as OPENING an
+   * interval and everything else as CLOSING one, so a fifth event value silently invented by a future
+   * writer would close intervals nobody meant to close.
+   */
+  describe('sandbox lifecycle marks', () => {
+    it('creates the table with RLS enabled and no policy', async () => {
+      const { rows } = await db.query<{ relname: string; relrowsecurity: boolean }>(
+        `select relname, relrowsecurity from pg_class
+         where relnamespace = 'public'::regnamespace and relkind = 'r'`,
+      );
+      const table = rows.find((r) => r.relname === 'sandbox_lifecycle_marks');
+
+      expect(table, 'the table must exist').toBeTruthy();
+      expect(table?.relrowsecurity, 'RLS must be enabled').toBe(true);
+
+      const { rows: policies } = await db.query(
+        `select policyname from pg_policies where schemaname = 'public' and tablename = 'sandbox_lifecycle_marks'`,
+      );
+
+      expect(policies, 'service-role only — a user must never read or forge these').toHaveLength(0);
+    });
+
+    it('accepts the four lifecycle events and REJECTS anything else at the CHECK constraint', async () => {
+      for (const event of ['create', 'resume', 'hibernate', 'delete']) {
+        await db.query(`insert into public.sandbox_lifecycle_marks (sandbox_id, event) values ($1, $2)`, [
+          'sb-1',
+          event,
+        ]);
+      }
+
+      await expect(
+        db.query(`insert into public.sandbox_lifecycle_marks (sandbox_id, event) values ('sb-1', 'paused')`),
+      ).rejects.toThrow(/check|constraint/i);
+
+      await db.exec(`delete from public.sandbox_lifecycle_marks`);
+    });
+
+    it('keeps a mark when its user is deleted — the hour still happened', async () => {
+      /*
+       * `on delete set null`, deliberately NOT a cascade. A user who deletes their account still ran a
+       * VM yesterday, and cascading the evidence away would make historical hours vanish from the
+       * report retroactively — the one thing an append-only cost record must never do.
+       */
+      await db.query(
+        `insert into public.sandbox_lifecycle_marks (user_id, sandbox_id, event) values ($1, 'sb-9', 'create')`,
+        [USER],
+      );
+      await db.query(`delete from auth.users where id = $1`, [USER]);
+
+      const { rows } = await db.query<{ user_id: string | null }>(
+        `select user_id from public.sandbox_lifecycle_marks where sandbox_id = 'sb-9'`,
+      );
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].user_id).toBeNull();
+
+      await db.exec(`delete from public.sandbox_lifecycle_marks`);
+    });
+  });
+
   /* Migration 0002: without these, production can see THAT a generation cost money, never WHY. */
   it('adds the diagnostics columns the admin dashboards are built from', async () => {
     const { rows } = await db.query<{ column_name: string }>(

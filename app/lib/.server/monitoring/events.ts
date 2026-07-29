@@ -67,6 +67,26 @@ export const ALERT_SIGNALS = {
    * sustained fraction of a ledger reason's work ending in a refund is a broken subsystem.
    */
   REFUND_RATE: 'refund_rate',
+
+  /**
+   * A rising fraction of sandbox creates or resumes is failing (`sandbox-rates.ts`).
+   *
+   * This is "users cannot open their projects" — the sandbox is where their game lives, so a sustained
+   * failure rate here is a product outage even while generation, billing and auth are all perfectly
+   * healthy. It is a RATE and not a per-failure alert because a single provider hiccup is ordinary and
+   * the route already retries around the ones it can classify.
+   */
+  SANDBOX_FAILURE_RATE: 'sandbox_failure_rate',
+
+  /**
+   * A rising fraction of resumes is coming back `CLEAN` (`sandbox-rates.ts`).
+   *
+   * Deliberately NOT folded into the failure rate: every one of these requests SUCCEEDED. But `CLEAN`
+   * means the hibernation snapshot had expired and the VM came up as template state, so the project's
+   * files came from the working copy rather than from the machine — the closest thing this subsystem
+   * has to a data-loss signal, and one that no failure metric can ever show.
+   */
+  SANDBOX_CLEAN_BOOT_RATE: 'sandbox_clean_boot_rate',
 } as const;
 
 export type AlertSignal = (typeof ALERT_SIGNALS)[keyof typeof ALERT_SIGNALS];

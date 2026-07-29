@@ -6,7 +6,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
-import { createProject, getRepoStatus, mintServerChatId } from '~/lib/persistence/projects';
+import { createProject, deleteProject, getRepoStatus, mintServerChatId } from '~/lib/persistence/projects';
 import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { workbenchStore } from '~/lib/stores/workbench';
@@ -34,6 +34,8 @@ import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
 import { resetActiveSkills, updateActiveSkills } from '~/lib/stores/active-skills';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
+import { rollbackRegisteredProject } from '~/lib/registry/creation-rollback';
+import { onSandboxFailure, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import { asCreationFailure } from '~/lib/registry/creation-errors';
 import { waitForMountVisible } from '~/lib/registry/mount';
 import { settleAfterCreation } from '~/lib/registry/settle';
@@ -66,6 +68,25 @@ import {
 } from '~/lib/runtime/auto-repair';
 
 const logger = createScopedLogger('Chat');
+
+/*
+ * How a mid-session sandbox failure reaches a person.
+ *
+ * 🔴 The one failure the boot screen cannot show, because it happens long after the page is ready: a
+ * RECONNECT that the seam refused (`SandboxAdoptionError` — the server offered a different sandbox
+ * than this page booted, so accepting it would swap the user's filesystem underneath a live
+ * workbench). The SDK turns the refusal into a connection that simply stops working, which reads as
+ * "the app froze", so it has to be said out loud. `autoClose: false` because there is nothing to do
+ * but reload, and a toast that fades leaves the user with a dead tab and no explanation.
+ *
+ * Registered here rather than inside the seam so that module stays free of React and of a toast
+ * library — and registered at all, because an exported notifier with no caller is a capability that
+ * only looks present.
+ */
+onSandboxFailure((error) => {
+  logger.error(`Sandbox connection refused: ${error.message}`);
+  toast.error(error.message, { autoClose: false });
+});
 
 export function Chat() {
   renderLogger.trace('Chat');
@@ -523,7 +544,11 @@ export const ChatImpl = memo(
          * waiting on.
          */
         checkpointProject(message.id).catch(() => {
-          // Already logged. A failed checkpoint is our problem, not something the user can act on.
+          /*
+           * Already handled inside: every failure branch logs AND toasts (T17c) — this catch only
+           * keeps an unexpected rejection out of onFinish. The silent `.catch(() => {})` here used to
+           * be the LAST line of defense and the reason "checkpoints stopped on CSB" had no symptom.
+           */
         });
 
         /*
@@ -1107,10 +1132,94 @@ export const ChatImpl = memo(
 
       // ================= PHASE 1 — CREATE THE PROJECT. Nothing below may be skipped or deferred. ====
 
+      /*
+       * 🔴 THE PROJECT RECORD COMES FIRST NOW, BEFORE A SINGLE BYTE IS WRITTEN — and the ORDER is the
+       * whole point (§4.5.3, `spec/sandbox-codesandbox.md`).
+       *
+       * A server-backed sandbox belongs to a project: `POST /api/sandbox/session` takes a project id,
+       * runs it through `requireOwnedProject`, and records the VM on the row. So there is no sandbox to
+       * write the starter INTO until the project exists. Registration used to happen after the mount —
+       * correct when the runtime was a tab-local WebContainer that needed nothing, impossible now.
+       *
+       * If it fails the outcome depends on the runtime, and both answers are honest:
+       *   - WebContainer: exactly as before — a local-only project, mounted and usable, that says so.
+       *   - a server sandbox: there is nowhere to put the files, so this is a real creation failure and
+       *     is reported as one rather than mounting into whatever VM happened to be connected.
+       */
+      let registeredProjectId: string | undefined;
+
+      try {
+        const project = await createProject({ name: title, templateId: entry.id });
+        registeredProjectId = project.id;
+        projectId.set(project.id);
+
+        /*
+         * 🔴 MINT THE SERVER CHAT ID HERE — before the generation, not at first save (§4.5.4c, §4.6).
+         *
+         * It used to be minted by `mintUrlId`, called from `storeMessageHistory` — which runs AFTER
+         * the request has already gone out. The AI SDK refreshes its body from committed render
+         * state, so a creation sent `chatId: undefined`, and that is the id everything downstream
+         * keys on: the `generations` row recorded no chat (a 427-credit generation the audit trail
+         * could not attribute), and `recoverTranscript` returned early because it had no key to
+         * write against.
+         *
+         * That left the CREATION turn — the most expensive in the product, measured at 646 credits —
+         * as the least protected: no chat id, and no checkpoint yet either, so a crash meant charged,
+         * no record, no files. Minting alongside `projectId` puts it in the same committed render
+         * state, which is the one we know reaches the wire.
+         *
+         * Free (a `crypto.randomUUID()`, not a write) and idempotent downstream: both
+         * `ensureServerChatId` and `mintUrlId` return an id the atom already has, so this cannot
+         * produce a second chat.
+         */
+        chatMetadata.set({
+          ...chatMetadata.get(),
+          projectId: project.id,
+          serverChatId: chatMetadata.get()?.serverChatId ?? mintServerChatId(),
+        });
+
+        /*
+         * A newly created project is UNLINKED. Reset the badge from any previous project's state and
+         * then fetch this one's — fire-and-forget so it never delays the generation below (the fetch
+         * also carries `configuredProviders`, which is what lets the Save badge offer a GitHub/GitLab
+         * choice on a deployment that has both; without it Save silently defaults to GitHub, §4.5.4b).
+         */
+        repoStatus.set({ linked: false });
+        void getRepoStatus(project.id)
+          .then((status) => repoStatus.set(status))
+          .catch((statusError) => {
+            /*
+             * Swallowed on purpose. This races the rollback below: a creation that fails takes the row
+             * with it, and this in-flight read then 404s into an unhandled rejection reporting a
+             * project the user was already told was not created. A badge is never worth an error.
+             */
+            logger.warn(`Could not read the repo status: ${(statusError as Error).message}`);
+          });
+      } catch (error) {
+        projectId.set(undefined);
+        logger.error(`Could not register the project with the server: ${(error as Error).message}`);
+
+        if (SANDBOX_REQUIRES_PROJECT) {
+          const message = 'We could not create your project on the server, so there is no workspace to build in.';
+          toast.error(message);
+          setLlmErrorAlert({
+            type: 'error',
+            title: 'No project was created',
+            description: `${message}\n\nDetails: ${(error as Error).message}`,
+            errorType: 'network',
+          });
+          setFakeLoading(false);
+
+          return false;
+        }
+
+        toast.warn('This project is saved on this device only — we could not reach the server.');
+      }
+
       let created: Awaited<ReturnType<typeof createProjectFromRegistry>>;
 
       try {
-        created = await createProjectFromRegistry({ entry, title, prompt });
+        created = await createProjectFromRegistry({ entry, title, prompt, projectId: registeredProjectId });
       } catch (error) {
         /*
          * The only genuinely fatal outcome: the starter never arrived, or it did not land on disk.
@@ -1126,6 +1235,25 @@ export const ChatImpl = memo(
          * that silently did nothing, which is exactly how this reads when it happens.
          */
         const failure = asCreationFailure(error);
+
+        /*
+         * 🔴 ROLL THE ROW BACK — see `creation-rollback.ts` for why an empty project is worse than no
+         * project at all, and why the deletion lives in a tested module rather than in this closure.
+         *
+         * Fire-and-forget: it never rejects, and nothing below depends on the row being gone (T3b).
+         */
+        const orphanId = registeredProjectId;
+        registeredProjectId = undefined;
+
+        void rollbackRegisteredProject({
+          projectId: orphanId,
+          remove: deleteProject,
+          clear: () => {
+            projectId.set(undefined);
+            chatMetadata.set({ ...chatMetadata.get(), projectId: undefined });
+          },
+          onError: (cleanupError) => logger.error(`Could not roll back the empty project ${orphanId}`, cleanupError),
+        });
 
         logger.error(`Project creation failed — ${failure.message} (${failure.detail})`, error);
         toast.error(failure.message);
@@ -1145,67 +1273,15 @@ export const ChatImpl = memo(
       const { assistantMessage, userMessage, className, mustBeVisible } = created;
 
       /*
-       * From here on the project EXISTS in the WebContainer. Everything that follows is best-effort by
+       * From here on the project EXISTS in the sandbox. Everything that follows is best-effort by
        * construction: the catch at the bottom returns `true`, because "did the user get a project?" is
        * already answered yes and no later failure may change that answer.
        */
       try {
-        // The rest of the splash's story: server registration + the mount-visibility wait below.
+        // The rest of the splash's story: the mount-visibility wait below.
         bootProgress.set({ step: 'creating-finalize' });
 
         setProjectSeed({ entry, className, title, prompt, matched });
-
-        /*
-         * Register the project with the PLATFORM (§4.5.5) — before the first generation, because the
-         * agent route checks ownership of `projectId` and enforces one in-flight build per project.
-         *
-         * If this fails the build still runs: the game is already written into the WebContainer and
-         * refusing to continue because our bookkeeping call timed out would be an absurd way to lose
-         * someone's work. It simply stays a local-only project (no checkpoints, no resume elsewhere),
-         * and says so rather than pretending.
-         */
-        try {
-          const project = await createProject({ name: title, templateId: entry.id });
-          projectId.set(project.id);
-
-          /*
-           * 🔴 MINT THE SERVER CHAT ID HERE — before the generation, not at first save (§4.5.4c, §4.6).
-           *
-           * It used to be minted by `mintUrlId`, called from `storeMessageHistory` — which runs AFTER
-           * the request has already gone out. The AI SDK refreshes its body from committed render
-           * state, so a creation sent `chatId: undefined`, and that is the id everything downstream
-           * keys on: the `generations` row recorded no chat (a 427-credit generation the audit trail
-           * could not attribute), and `recoverTranscript` returned early because it had no key to
-           * write against.
-           *
-           * That left the CREATION turn — the most expensive in the product, measured at 646 credits —
-           * as the least protected: no chat id, and no checkpoint yet either, so a crash meant charged,
-           * no record, no files. Minting alongside `projectId` puts it in the same committed render
-           * state, which is the one we know reaches the wire.
-           *
-           * Free (a `crypto.randomUUID()`, not a write) and idempotent downstream: both
-           * `ensureServerChatId` and `mintUrlId` return an id the atom already has, so this cannot
-           * produce a second chat.
-           */
-          chatMetadata.set({
-            ...chatMetadata.get(),
-            projectId: project.id,
-            serverChatId: chatMetadata.get()?.serverChatId ?? mintServerChatId(),
-          });
-
-          /*
-           * A newly created project is UNLINKED. Reset the badge from any previous project's state and
-           * then fetch this one's — fire-and-forget so it never delays the generation below (the fetch
-           * also carries `configuredProviders`, which is what lets the Save badge offer a GitHub/GitLab
-           * choice on a deployment that has both; without it Save silently defaults to GitHub, §4.5.4b).
-           */
-          repoStatus.set({ linked: false });
-          void getRepoStatus(project.id).then((status) => repoStatus.set(status));
-        } catch (error) {
-          projectId.set(undefined);
-          logger.error(`Could not register the project with the server: ${(error as Error).message}`);
-          toast.warn('This project is saved on this device only — we could not reach the server.');
-        }
 
         const shown = visiblePrompt ?? prompt;
         const stamp = new Date().getTime();
@@ -1251,14 +1327,19 @@ export const ChatImpl = memo(
          *
          *   2. **`projectId` must have reached a COMMITTED render.** The AI SDK refreshes its request
          *      body from a `useEffect` (`extraMetadataRef`), so it only ever sends values from a render
-         *      that has committed. `createProject` above sets the atom, but `reload()` runs in the same
-         *      synchronous block, so the body still carried `projectId: undefined` on every creation —
+         *      that has committed. `createProject` sets the atom — it now runs at the TOP of phase 1,
+         *      because a server-backed sandbox cannot be booted for a project that does not exist yet,
+         *      which puts several awaits between the set and here. That is a happy accident, not the
+         *      guarantee: originally the two sat in the same synchronous block as `reload()` and the
+         *      body carried `projectId: undefined` on every creation —
          *      the server's ownership check and its per-project attribution both got nothing. Fixing
          *      only (1) left this one standing, silently: the files came through and the id did not.
          *
          * Awaiting here fixes both, because it yields — the store update and the `projectId.set` above
-         * both land in a commit before `reload()` reads the ref. That is also why the wait is HERE and
-         * not inside `createProjectFromRegistry`, which returns before the project is registered.
+         * both land in a commit before `reload()` reads the ref. The wait stays HERE, at the end of the
+         * caller's sequence, rather than inside `createProjectFromRegistry`: that function is not the
+         * last thing that sets state the request needs, and "one wait, after everything" is the rule
+         * that made both halves true at once.
          */
         await waitForMountVisible(mustBeVisible);
 

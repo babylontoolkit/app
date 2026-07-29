@@ -177,6 +177,31 @@ export function base64ToBytes(base64: string): Uint8Array {
 }
 
 /**
+ * How many BYTES a CANONICAL base64 string decodes to, without decoding it.
+ *
+ * "Canonical" is the honest qualifier: this counts characters and subtracts padding, so it is exact
+ * for anything `bytesToBase64` produces (with or without line breaks) and merely approximate for
+ * input that is not valid base64 at all. Its only caller is a fallback for a serialized entry that
+ * omitted its `size`, where the alternative is decoding a whole project's binaries to learn a number.
+ *
+ * `size` on a binary file map entry is the only thing anyone (including the model) is told about its
+ * contents, so reporting the base64 length there would overstate every binary by ~4/3 — silently,
+ * since nothing compares the two. Computed rather than decoded because the callers are hot paths that
+ * only want the number (a restore write-through over a whole project).
+ */
+export function base64ByteLength(base64: string): number {
+  const clean = base64.replace(/[\r\n]/g, '');
+
+  if (clean.length === 0) {
+    return 0;
+  }
+
+  const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
+
+  return Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
+}
+
+/**
  * Best-effort binary sniff, matching upstream's heuristic (istextorbinary) so that a
  * file classified as binary here is classified the same way by the editor.
  */
@@ -288,36 +313,68 @@ export async function serializeFileMap(
  * Binary entries are base64-decoded and written as `Uint8Array` — never handed to
  * `writeFile` as a string, which would UTF-8 re-encode them and corrupt every byte
  * above 0x7F.
+ *
+ * 🔴 ONE bad entry must not kill the whole restore (T17a, measured live 2026-07-28): a stale
+ * checkpoint carried an entry whose on-disk path is now a DIRECTORY, the provider threw a raw
+ * `21: Os { code: 21, kind: IsADirectory }` out of `writeFile`, and the ENTIRE primary open path
+ * silently degraded to the legacy mount. With `onError` set, a failing entry is reported and the
+ * rest of the map still lands; without it the historical throw-out behaviour is preserved.
+ *
+ * `onProgress` reports (written, total) over the FILE entries — on a server provider each write is
+ * an RTT, so a large restore is minutes of wall clock that must not render as a dead spinner.
  */
 export async function writeSerializedFileMap(
   files: SerializedFileMap,
   fs: BinaryFs,
   toRelativePath: (path: string) => string,
+  opts?: {
+    onError?: (path: string, error: unknown) => void;
+    onProgress?: (done: number, total: number) => void;
+  },
 ): Promise<void> {
   const entries = Object.entries(files);
+  const guard = async (filePath: string, work: () => Promise<void>): Promise<void> => {
+    if (!opts?.onError) {
+      await work();
+      return;
+    }
+
+    try {
+      await work();
+    } catch (error) {
+      opts.onError(filePath, error);
+    }
+  };
 
   for (const [filePath, dirent] of entries) {
     if (dirent?.type === 'folder') {
-      await fs.mkdir(toRelativePath(filePath), { recursive: true });
+      await guard(filePath, () => fs.mkdir(toRelativePath(filePath), { recursive: true }));
     }
   }
 
-  for (const [filePath, dirent] of entries) {
+  const fileEntries = entries.filter(([, dirent]) => dirent?.type === 'file');
+  let written = 0;
+
+  for (const [filePath, dirent] of fileEntries) {
     if (dirent?.type !== 'file') {
       continue;
     }
 
-    const relativePath = toRelativePath(filePath);
-    const dir = relativePath.split('/').slice(0, -1).join('/');
+    await guard(filePath, async () => {
+      const relativePath = toRelativePath(filePath);
+      const dir = relativePath.split('/').slice(0, -1).join('/');
 
-    if (dir) {
-      await fs.mkdir(dir, { recursive: true });
-    }
+      if (dir) {
+        await fs.mkdir(dir, { recursive: true });
+      }
 
-    if (dirent.isBinary) {
-      await fs.writeFile(relativePath, base64ToBytes(dirent.content));
-    } else {
-      await fs.writeFile(relativePath, dirent.content);
-    }
+      if (dirent.isBinary) {
+        await fs.writeFile(relativePath, base64ToBytes(dirent.content));
+      } else {
+        await fs.writeFile(relativePath, dirent.content);
+      }
+    });
+
+    opts?.onProgress?.(++written, fileEntries.length);
   }
 }

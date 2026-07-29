@@ -170,6 +170,29 @@ export function describeStarterPayloadFailure(received: unknown): CreationFailur
  * or that the sentinel was missing). The job here is only to keep them LOUD and attribute them to the
  * right phase, never to flatten them into a generic message.
  */
+/**
+ * The workspace itself never started.
+ *
+ * A distinct classification from {@link describeMountFailure} for the reason this whole module
+ * exists: "we could not write the files" and "there was nowhere to write them" have different fixes,
+ * and on a server-backed sandbox the second one is the operator's (an unconfigured provider, a rate
+ * limit, a provider outage) while the first is ours. The sandbox layer already produces an actionable
+ * sentence and a retryability verdict — `describeSandboxFailure` — so it is carried through verbatim
+ * rather than re-guessed from a flattened string.
+ */
+export function describeSandboxBootFailure(
+  described: { message: string; retryable: boolean } | undefined,
+  error: unknown,
+): CreationFailure {
+  const raw = error instanceof Error ? error.message : String(error);
+
+  return {
+    message: described?.message ?? 'Your project workspace could not be started.',
+    detail: raw || 'the sandbox failed to start without a message',
+    isRetryable: described?.retryable ?? true,
+  };
+}
+
 export function describeMountFailure(error: unknown): CreationFailure {
   const raw = error instanceof Error ? error.message : String(error);
 

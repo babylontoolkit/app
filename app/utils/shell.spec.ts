@@ -13,8 +13,8 @@
  * concatenates several scans before asserting cannot see that class of failure. Same discipline as
  * `shell-strip.spec.ts`.
  */
-import { describe, expect, it } from 'vitest';
-import { reduceOscSignals, scanOscSignals, type OscWaitState } from './shell';
+import { describe, expect, it, vi } from 'vitest';
+import { BoltShell, reduceOscSignals, scanOscSignals, type OscWaitState } from './shell';
 
 /** Captured live from `bash` in a CodeSandbox VM. Do not "tidy" it — its shape IS the regression. */
 const MEASURED_PROMPT_CHUNK = '\x1b]654;exit=0:0\x07\x1b]654;prompt\x07\x1b[?2004hroot@f4s3lp:/project/workspace# ';
@@ -183,5 +183,235 @@ describe('reduceOscSignals — stale markers must never satisfy a wait', () => {
 
     expect(state.done).toBe(false);
     expect(reduceOscSignals(state, [{ code: 'prompt' }], 'prompt', undefined).done).toBe(true);
+  });
+});
+
+/**
+ * The demultiplexer (`BoltShell.waitTillOscCode` + the pump).
+ *
+ * 🔴 **Two waits genuinely coexist.** `executeCommand` interrupts and waits for `prompt` while a
+ * parked start action is still waiting for `exit`. Each used to run its OWN read loop over the SAME
+ * reader, and a `read()` hands a chunk to exactly one of them — so when bash emits `exit`+`prompt`
+ * in a single chunk (`MEASURED_PROMPT_CHUNK`, the Ctrl-C shape), whichever loop received it consumed
+ * BOTH signals and the other starved forever. Nothing threw; the live creations only worked because
+ * stale attach-draw markers happened to backfill the loser, a balance that depends on where the PTY
+ * chose to split its writes.
+ *
+ * Every assertion here is BOUNDED rather than a bare `await`: a regression in this file's subject is
+ * a HANG, and a hung suite reports nothing.
+ */
+describe('BoltShell — one reader, every signal routed to every wait', () => {
+  /** The measured Ctrl-C shape with a chosen status, so a starved wait cannot pass by luck. */
+  const ctrlCChunk = (code: number) =>
+    `\x1b]654;exit=0:${code}\x07\x1b]654;prompt\x07\x1b[?2004hroot@f4s3lp:/project/workspace# `;
+
+  function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+
+    return Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} starved — it never resolved`)), 1000);
+      }),
+    ]).finally(() => clearTimeout(timer)) as Promise<T>;
+  }
+
+  function harness(shellDecl: { readyOsc?: string; beginOsc?: string }) {
+    let push!: (chunk: string) => void;
+    let close!: () => void;
+    let fail!: (error: Error) => void;
+
+    const output = new ReadableStream<string>({
+      start(controller) {
+        push = (chunk) => controller.enqueue(chunk);
+        close = () => controller.close();
+        fail = (error) => controller.error(error);
+      },
+    });
+
+    const process = {
+      // A PTY outlives any one command, so its exit never settles — same as the real adapters.
+      exit: new Promise<number>(vi.fn()),
+      input: new WritableStream<string>({ write: vi.fn() }),
+      output,
+      kill: vi.fn(),
+      resize: vi.fn(),
+    };
+
+    const sandbox = {
+      shell: { command: 'bash', args: [] as string[], ...shellDecl },
+      spawn: async () => process,
+    };
+
+    const terminal = { cols: 80, rows: 24, onData: vi.fn(), input: vi.fn(), write: vi.fn() };
+
+    const shell = new BoltShell();
+    const ready = shell.init(sandbox as never, terminal as never);
+
+    return { shell, push, close, fail, ready };
+  }
+
+  /** A bash-like shell: no readiness marker (ready on first output), PS0 `begin` declared. */
+  async function bashShell() {
+    const h = harness({ beginOsc: 'begin' });
+    h.push('root@f4s3lp:/project/workspace# ');
+    await bounded(h.ready, 'init');
+
+    return h;
+  }
+
+  it('one chunk carrying exit+prompt satisfies BOTH waits — neither starves', async () => {
+    const h = await bashShell();
+
+    // The parked start action, and then `executeCommand`'s interrupt wait.
+    const exitWait = h.shell.waitTillOscCode('exit', 'begin');
+    const promptWait = h.shell.waitTillOscCode('prompt');
+
+    h.push('\x1b]654;begin\x07'); // our command really started (PS0) — arms the exit wait
+    h.push(ctrlCChunk(130)); // ONE chunk, both signals
+
+    await expect(bounded(promptWait, 'the prompt wait')).resolves.toBeDefined();
+    expect((await bounded(exitWait, 'the exit wait')).exitCode).toBe(130);
+  });
+
+  it('the same, with the waits registered in the OTHER order', async () => {
+    // Order must not decide who eats the chunk — that was the whole defect, in one direction.
+    const h = await bashShell();
+
+    const promptWait = h.shell.waitTillOscCode('prompt');
+    const exitWait = h.shell.waitTillOscCode('exit', 'begin');
+
+    h.push('\x1b]654;begin\x07');
+    h.push(ctrlCChunk(7));
+
+    await expect(bounded(promptWait, 'the prompt wait')).resolves.toBeDefined();
+    expect((await bounded(exitWait, 'the exit wait')).exitCode).toBe(7);
+  });
+
+  it('a sequence SPLIT across two chunks still reaches both waits (the carry lives on the pump)', async () => {
+    const h = await bashShell();
+
+    const exitWait = h.shell.waitTillOscCode('exit', 'begin');
+    const promptWait = h.shell.waitTillOscCode('prompt');
+
+    h.push('\x1b]654;begin\x07');
+    h.push('\x1b]654;ex'); // a PTY splits its writes wherever it likes
+    h.push('it=0:5\x07\x1b]654;prompt\x07');
+
+    await expect(bounded(promptWait, 'the prompt wait')).resolves.toBeDefined();
+    expect((await bounded(exitWait, 'the exit wait')).exitCode).toBe(5);
+  });
+
+  it('the carry survives a boundary that falls BETWEEN two waits', async () => {
+    /*
+     * The pump stops when nothing is waiting. A per-wait carry could not see this case at all: the
+     * partial arrives on the wait that is about to resolve, and the wait that completes it has not
+     * been registered yet.
+     */
+    const h = await bashShell();
+
+    const promptWait = h.shell.waitTillOscCode('prompt');
+    h.push('\x1b]654;begin\x07\x1b]654;prompt\x07\x1b]654;ex');
+    await bounded(promptWait, 'the prompt wait');
+
+    const exitWait = h.shell.waitTillOscCode('exit');
+    h.push('it=0:9\x07');
+
+    expect((await bounded(exitWait, 'the exit wait')).exitCode).toBe(9);
+  });
+
+  it('a stream ERROR REJECTS every pending wait — fail loud, at the call site that was waiting', async () => {
+    /*
+     * 🔴 Before the demultiplexer, `read()` was awaited inside the CALLER's promise, so a stream
+     * error rejected the caller. With one shared loop the rejection has nowhere to go: it escaped as
+     * an unhandled rejection while every wait parked forever — a loud failure turned silent and
+     * permanent. The pump catches it and hands it to the waits instead.
+     */
+    const h = await bashShell();
+
+    const exitWait = h.shell.waitTillOscCode('exit', 'begin');
+    const promptWait = h.shell.waitTillOscCode('prompt');
+
+    h.fail(new Error('the PTY vanished'));
+
+    await expect(bounded(exitWait, 'the exit wait')).rejects.toThrow('the PTY vanished');
+    await expect(bounded(promptWait, 'the prompt wait')).rejects.toThrow('the PTY vanished');
+  });
+
+  it('a wait registered AFTER the stream errored still rejects rather than parking', async () => {
+    const h = await bashShell();
+
+    h.fail(new Error('the PTY vanished'));
+
+    // The pump restarts for the new waiter, hits the same error, and answers it.
+    await expect(bounded(h.shell.waitTillOscCode('exit'), 'a late wait')).rejects.toThrow('the PTY vanished');
+  });
+
+  it('the pump’s own promise swallows nothing — no unhandled rejection escapes it', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const h = await bashShell();
+      const wait = h.shell.waitTillOscCode('exit', 'begin');
+
+      h.fail(new Error('the PTY vanished'));
+      await expect(bounded(wait, 'the exit wait')).rejects.toThrow('the PTY vanished');
+
+      // Unhandled rejections are reported a macrotask later; give the loop a turn to report one.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(unhandled.map(String)).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('EVERY wait resolves when the shell dies — a dead shell must not leave a wait parked', async () => {
+    const h = await bashShell();
+
+    const exitWait = h.shell.waitTillOscCode('exit', 'begin');
+    const promptWait = h.shell.waitTillOscCode('prompt');
+
+    h.close();
+
+    await expect(bounded(exitWait, 'the exit wait')).resolves.toBeDefined();
+    await expect(bounded(promptWait, 'the prompt wait')).resolves.toBeDefined();
+  });
+
+  describe('the jsh / WebContainer path is unchanged', () => {
+    /** jsh declares a readiness marker and NO begin marker — waits start armed, as before. */
+    async function jshShell() {
+      const h = harness({ readyOsc: 'interactive' });
+      h.push('\x1b]654;interactive\x07');
+      await bounded(h.ready, 'init');
+
+      return h;
+    }
+
+    it('readiness still gates init on the `interactive` marker', async () => {
+      await expect(jshShell()).resolves.toBeDefined();
+    });
+
+    it('an exit wait with no begin marker starts ARMED and resolves off the measured chunk', async () => {
+      const h = await jshShell();
+
+      const exitWait = h.shell.waitTillOscCode('exit'); // `beginOsc` is undefined on this path
+      h.push(MEASURED_PROMPT_CHUNK);
+
+      expect((await bounded(exitWait, 'the exit wait')).exitCode).toBe(0);
+    });
+
+    it('and a coexisting prompt wait is satisfied by the same chunk', async () => {
+      const h = await jshShell();
+
+      const exitWait = h.shell.waitTillOscCode('exit');
+      const promptWait = h.shell.waitTillOscCode('prompt');
+      h.push(MEASURED_COMMAND_CHUNK);
+
+      await expect(bounded(promptWait, 'the prompt wait')).resolves.toBeDefined();
+      await expect(bounded(exitWait, 'the exit wait')).resolves.toBeDefined();
+    });
   });
 });

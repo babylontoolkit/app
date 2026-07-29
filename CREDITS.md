@@ -139,6 +139,32 @@ artifact before the gateway timeout).
 > 2×. Measured: $0.51 for a one-sentence answer right after a schema edit, $0.22 for the identical
 > prompt immediately after. A post-deploy cost spike is expected, not a regression.
 
+### Creation pricing is FLAT (2026-07-28)
+
+The formula above still computes every turn's TRUE cost, but the **creation turn charges a flat
+`CREATION_FLAT_CREDITS` (default 500)** instead. Why: creation cost is dominated by prompt-cache luck —
+the same creation measured **54 credits warm vs 430–633 cold**, a 12× spread the user can neither see
+nor influence, which made "what does a game cost?" unanswerable. Now it is one sentence: **creating a
+game costs 500 credits.** The platform absorbs the variance (that is what `CREDIT_MARGIN` is for);
+`generations.raw_cost_usd` still records the true cost, so the Admin usage report shows realized margin
+per creation. Operator notes:
+
+- **`CREATION_FLAT_CREDITS=0` disables it** (back to cost-proportional). Negative/garbage values are
+  ignored in favor of the default.
+- A **Stop** mid-creation charges `min(actual, flat)` — never more than the advertised price for less
+  than a creation. A **failed** creation refunds in full, as ever.
+- The pre-flight gate refuses a creation when the balance is below the flat price (a clear 402 naming
+  both numbers) instead of allowing a deep negative. Ordinary turns still only need a positive balance.
+- The ledger note carries `— flat creation price` so a 500-credit debit beside a $0.20 raw cost reads
+  as pricing, not a mis-bill.
+- Two companions shrink the platform's own average cost under the flat price: the **base-prompt cache
+  warmer** (`CACHE_WARMER_*` — keeps the byte-identical-for-everyone prompt block reading at 0.1×
+  instead of writing at 2×; pennies/day, platform-paid, no ledger rows) and, later, the measured
+  shared-starter prefix restructure (`spec/context-budget.md` §"Levers that are NOT built").
+- Re-check this number when `CREDIT_MARGIN`, the provider, or the model changes — flat price and
+  margin are one decision in two knobs: the flat price is denominated in credits, so a margin change
+  moves the USD the platform keeps per creation without touching this file.
+
 ## Sandbox compute — the margin fold-in (2026-07-27, PLACEHOLDER)
 
 `CREDIT_MARGIN` has only ever covered **LLM + media raw cost**, and that was complete while projects
@@ -147,33 +173,70 @@ only real cost — the StackBlitz plan fee — is a fixed monthly number (SPEC �
 margin cannot see. **Nothing was ever folded in for WebContainer, and nothing needed to be.**
 
 The CodeSandbox provider (SPEC §8, `spec/sandbox-codesandbox.md`) changes the shape: the project runs
-on a microVM billed by **wall clock, not tokens** — MEASURED $0.074/hr on Pico (the default
-`CODESANDBOX_VM_TIER`), $0.149/hr Nano — and it accrues while the user *thinks*, not just while the
+on a microVM billed by **wall clock, not tokens** — MEASURED $0.149/hr on Nano (the default
+`CODESANDBOX_VM_TIER` since 2026-07-28), $0.074/hr Pico — and it accrues while the user *thinks*, not just while the
 model runs. Metering is NOT built yet (no `sandbox` ledger reason, no sweep, no overdraw policy —
 `spec/sandbox-codesandbox.md` §8 item 4), so today every VM-hour is an unbilled cost that comes
 straight out of the generation margin.
 
 **The placeholder, until metering ships:** assume an active build-hour bills ~120 credits (a few warm
 edits plus a share of a creation — the measured ranges above). The raw LLM spend behind those credits
-at margin 4.0 is ~$0.30/hr; a Pico hour adds $0.074 on top ≈ **+25% on raw cost**. What that does to
-the numbers:
+at margin 4.0 is ~$0.30/hr; a **Nano** hour adds $0.149 on top ≈ **+50% on raw cost** (it was +25% while
+Pico was the default tier — the tier change doubled it, and the numbers below moved with it). What that
+does to the numbers:
 
-- Effective gross margin at `CREDIT_MARGIN=4.0` drops from ~72–75% (LLM-only) to **~65–69%**.
-- Equivalently: one Pico VM-hour eats the margin earned by **~10 billed credits** ($0.074 ÷ $0.0075).
-- To hold the ~75% GM target while sandbox time rides unmetered, set **`CREDIT_MARGIN=5.0`** (env —
-  the code default stays 4.0 until the owner changes it).
-- Sensitivity: +25% assumes ~120 credits/active-hour. Lighter usage is worse (100/hr → +30%), heavier
-  is better (300/hr → +10%); Nano doubles all of it. The hibernation default
+- Effective gross margin at `CREDIT_MARGIN=4.0` drops from ~72–75% (LLM-only) to **~58–63%**.
+- Equivalently: one Nano VM-hour eats the margin earned by **~20 billed credits** ($0.149 ÷ $0.0075).
+- To hold the ~75% GM target while sandbox time rides unmetered you would now need **`CREDIT_MARGIN`
+  ≈ 8.0**, not the 5.0 this section used to quote — that figure was derived against Pico and 5.0 now
+  buys only ~68%.
+
+  🔴 **`CREDIT_MARGIN` STAYS 4.0 — owner decision 2026-07-28.** Not an oversight and not a number
+  waiting to be raised: pricing is management's call, it is env/SSM-configurable, and nothing here
+  forces it. Every pack and plan still clears `MIN_PACK_MARGIN` at 4.0 on the Nano default (worst case
+  2.41× packs / 2.13× plans, asserted in `billing.spec.ts` + `subscriptions.spec.ts`), so this is a
+  margin the business chose, not a floor being breached. **Raising `CREDIT_MARGIN` is a PRICE INCREASE
+  to customers** — the same generation bills proportionally more credits, so a pack buys proportionally
+  fewer generations. Treat it as a pricing decision, never as a knob for making this section's numbers
+  look nicer (`vm-cost.ts` and `rates.ts` both carry that warning for the same reason).
+
+  ⚠️ **The ≈8.0 figure assumes `SANDBOX_EST_VM_HOURS_PER_KCREDIT` is left at 8.33, and that assumption
+  is wrong the moment you act on it.** That estimate is denominated in CREDITS, so it moves with
+  `CREDIT_MARGIN`: at 8.0 a credit represents half the raw cost it does at 4.0, so the same VM-hour
+  spans twice as many credits and the honest estimate becomes ~4.17, not 8.33. Rescale it and 8.0
+  actually lands near **81%**, overshooting the target badly. Whoever changes `CREDIT_MARGIN` must
+  change this estimate with it — the two are one model, and (like "raise the price with the tier"
+  before it) that instruction currently lives in prose rather than in a mechanism. The margin-free way
+  to state the estimate is **~$0.30 of raw LLM spend per active VM-hour**, from which the hours-per-
+  kcredit figure derives at any margin; deriving it was considered and deliberately deferred
+  (owner, 2026-07-28) since it fails in the SAFE direction — an unrescaled estimate over-states VM cost.
+- Sensitivity: +50% assumes ~120 credits/active-hour. Lighter usage is worse (100/hr → +60%), heavier
+  is better (300/hr → +20%); dropping back to Pico halves all of it. The hibernation default
   (`CODESANDBOX_HIBERNATION_SECONDS=300`) bounds the idle tail to ~5 minutes — and the placeholder is
   only honest while VMs actually get reaped (the 2026-07-27 sandbox review found orphan paths — the
   two-tab create race and `reset` overwrites — that leak VMs past the model; fix before trusting it).
 
-**WebContainer builds use the SAME +25% placeholder (owner decision, 2026-07-27)** — not because the
+**WebContainer builds use the SAME placeholder as CodeSandbox — whatever it currently is (owner
+decision, 2026-07-27; +50% on the Nano default as of 2026-07-28)** — not because the
 cost shape matches (it does not: browser compute is ~$0 and the StackBlitz license is a fixed fee),
 but as a conservative stand-in until real numbers exist on either side. StackBlitz's
 beyond-500-sessions/month pricing is unpublished, and CodeSandbox's true accrual needs the metering
 sweep to measure. Replace the placeholder with measured $/active-hour per provider when either
 number arrives.
+
+**The placeholder is ASSERTED as of 2026-07-28 (`app/lib/.server/billing/vm-cost.ts`).** The two
+numbers above are now explicit config — `SANDBOX_VM_USD_PER_HOUR` (the MEASURED list price) and
+`SANDBOX_EST_VM_HOURS_PER_KCREDIT` (the ESTIMATE; **8.33 is the ~120-credits-per-active-hour figure
+above, inverted** — change one and change the other) — and `effectivePackMargin()` re-runs the
+`MIN_PACK_MARGIN` floor with compute on the cost side. `billing.spec.ts` and `subscriptions.spec.ts`
+assert it for every active pack AND plan **at the default tier**: measured **2.67× / 2.53× / 2.41×**
+(Starter / Pro / Studio), i.e. **62.6% / 60.5% / 58.4%** GM — the band this section states, now pinned
+rather than described. The rate is **derived from `CODESANDBOX_VM_TIER`**, so those figures follow the
+tier automatically; the specs also grade Pico (3.21× / 3.04× / 2.89×) and assert the CEILING — **Micro
+($0.298/hr) puts the Pro and Studio packs and every plan UNDER the floor**, which is what makes Nano
+the last free step up.
+⚠️ A nonsensical override (including a literal `0`) falls back rather than being obeyed: obeying it
+would collapse the floor onto the LLM-only one and silently restore "compute is free".
 
 **The honest fix is metering, not margin.** Folding VM time into `CREDIT_MARGIN` makes light sandbox
 users subsidize heavy ones and hides the cost from the ledger it belongs in. The end state
@@ -191,8 +254,14 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | `SIGNUP_GRANT_CREDITS` | `800` | Starter credits, once per user (~3.5× a KIE creation at margin 4.0; below the premium minimum on purpose) |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
-| `CREDIT_MARGIN` | `4.0` | Multiplier over raw LLM+media cost (~75% GM target; realized ~72–75% LLM-only, **~65–69% effective while sandbox compute rides unmetered** — see "Sandbox compute"; `5.0` restores the target under the placeholder) |
+| `CREDIT_MARGIN` | `4.0` | Multiplier over raw LLM+media cost (~75% GM target; realized ~72–75% LLM-only, **~58–63% effective while sandbox compute rides unmetered on the Nano default tier** — see "Sandbox compute"). **4.0 is a DECISION, not a placeholder (owner, 2026-07-28)** — every pack and plan clears `MIN_PACK_MARGIN` at it, and raising it is a price increase to customers, so it is management's call and env/SSM-configurable. The "~`8.0` restores ~75%" figure in that section is arithmetic, NOT a plan — and it is only true if `SANDBOX_EST_VM_HOURS_PER_KCREDIT` is rescaled alongside it. |
+| `SANDBOX_VM_USD_PER_HOUR` | *derived from `CODESANDBOX_VM_TIER`* | MEASURED list price of the configured VM tier (**default Nano `0.149`**, Pico `0.074`; larger tiers derived at ~$0.0745/CPU-hour, an unknown name priced at the most expensive measured tier). An OPTIONAL override for a negotiated or changed rate — leave it unset so raising the tier raises the price. "Raise it with the tier" was a comment, and a comment cannot fail — see "Sandbox compute" |
+| `SANDBOX_EST_VM_HOURS_PER_KCREDIT` | `8.33` | The ESTIMATE: VM-hours dragged along by 1,000 billed credits (~120 credits per active build-hour, inverted). Replaced by measurement once the Admin VM-hours report has data |
 | `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-fable-5` / `1200` | The 2× premium tier: a selector + the balance a user must HOLD to unlock it (edit turns only) |
+| `CREATION_FLAT_CREDITS` | `500` | Flat price of a creation turn (`0` disables → cost-proportional). Kills the 54-vs-633 cache-luck spread for the user; true cost still recorded. See "Creation pricing is FLAT" |
+| `CACHE_WARMER_ENABLED` | `true` | Base-prompt cache warmer (KIE only): keeps the shared prompt block warm so generations read at 0.1× instead of writing at 2×. Platform-paid, no ledger rows |
+| `CACHE_WARMER_INTERVAL_MINUTES` | `45` | Warm cycle cadence; must stay under the 60m cache TTL (values >55 or <1 are ignored) |
+| `CACHE_WARMER_FANOUT` | `6` | Requests per cycle — KIE warms per BACKEND (~4–5 measured behind their balancer) |
 
 Model PRICES are not env anymore — they live in the Marketplace price list (admin-promoted, baked
 fallback). The retired `KIE_*_DOLLARS` / `PREMIUM_*_DOLLARS` vars are REFUSED if set.
@@ -206,7 +275,8 @@ fallback). The retired `KIE_*_DOLLARS` / `PREMIUM_*_DOLLARS` vars are REFUSED if
 | Studio | 25,000 | $225 | $0.0090 | 72% |
 
 The GM column is **LLM-only** raw cost at margin 4.0. While sandbox compute rides unmetered
-(the +25% placeholder above), subtract ~5–7 points across the board (~65–69% effective).
+(the +50% placeholder above, at the Nano default tier), subtract ~12–14 points across the board
+(~58–63% effective).
 
 Priced as a **premium specialty game platform** (2026-07-18): base $0.01/credit with a shallow volume
 discount to Studio, mirroring the market's shape (Lovable is a flat $0.25/message, discounting only

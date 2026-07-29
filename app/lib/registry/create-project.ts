@@ -33,6 +33,8 @@ import type { GameRegistryEntry } from '~/types/game-registry';
 import type { TemplateFile } from '~/types/template';
 import { WORK_DIR } from '~/utils/constants';
 import { bootProgress } from '~/lib/stores/boot-progress';
+import { bootForProject, describeSandboxFailure, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
+import { writeSandboxIdentity } from '~/lib/sandbox/identity';
 import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
 import { clearInheritedDevServer, mountTemplate } from './mount';
@@ -40,6 +42,7 @@ import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import {
   CreationError,
   describeMountFailure,
+  describeSandboxBootFailure,
   describeStarterFetchFailure,
   describeStarterPayloadFailure,
   describeStarterTransportFailure,
@@ -145,8 +148,17 @@ export async function createProjectFromRegistry(options: {
   entry: GameRegistryEntry;
   title: string;
   prompt?: string;
+
+  /**
+   * The platform project this creation belongs to, when the server registration succeeded.
+   *
+   * Required in practice on a server-backed sandbox — that runtime has no VM to write into until a
+   * project row names one — and genuinely optional on WebContainer, whose runtime is tab-local and
+   * anonymous. The caller enforces which of those it is; this function just passes it to the boot.
+   */
+  projectId?: string;
 }): Promise<CreatedProject> {
-  const { entry, title, prompt } = options;
+  const { entry, title, prompt, projectId } = options;
 
   /*
    * The creation splash (`CreationSplash`) narrates these phases — set as each await is reached, so
@@ -256,6 +268,20 @@ export async function createProjectFromRegistry(options: {
    * single wait on this path, and the one that most needs a face.
    */
   bootProgress.set({ step: 'creating-workspace' });
+
+  /*
+   * 🔴 The boot is EXPLICIT and PER PROJECT, and it happens here rather than at module load.
+   *
+   * On a server-backed provider this is where the VM is forked or resumed for the project the caller
+   * just registered — `~/lib/sandbox` cannot do it on its own, because at module-evaluation time
+   * there is no project to do it for. A failure is fatal and correctly attributed: the starter is on
+   * hand and there is nowhere to put it, which is a different problem with a different fix than a
+   * template that never downloaded.
+   */
+  const runtime = await bootForProject(projectId).catch((error) => {
+    throw new CreationError(describeSandboxBootFailure(describeSandboxFailure(error), error));
+  });
+
   await clearInheritedDevServer();
 
   bootProgress.set({ step: 'creating-mount' });
@@ -269,6 +295,16 @@ export async function createProjectFromRegistry(options: {
      * own messages are specific (which file, or that the sentinel was missing) and are preserved.
      */
     throw new CreationError(describeMountFailure(error));
+  }
+
+  /*
+   * Stamp whose project this sandbox now holds (`spec/sandbox-codesandbox.md` §11 C1). Written at
+   * creation so the very first warm resume can be verified, and best-effort inside: a marker file is
+   * defense in depth for the warm-boot gate, never a reason to fail a creation that has already
+   * landed on disk.
+   */
+  if (projectId && SANDBOX_REQUIRES_PROJECT) {
+    await writeSandboxIdentity(runtime, projectId);
   }
 
   const binaryCount = projectFiles.filter((file) => file.isBinary).length;

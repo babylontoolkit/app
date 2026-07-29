@@ -29,6 +29,7 @@
     "companion": "node companion/src/cli.js",
     "credits": "node scripts/credits.mjs",
     "clean:projects": "node scripts/clean-projects.mjs --yes",
+    "sweep:sandboxes": "node scripts/sweep-legacy-sandboxes.mjs",
     "typecheck": "tsc",
     "typegen": "wrangler types",
     "preview": "pnpm run build && pnpm run start",

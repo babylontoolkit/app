@@ -78,9 +78,44 @@ aws ssm put-parameter --name /btk/staging/S3_SNAPSHOTS_BUCKET --type String --va
 aws ssm put-parameter --name /btk/staging/S3_PLAY_BUCKET --type String --value 'btk-play-builds-staging'
 aws ssm put-parameter --name /btk/staging/APP_URL --type String --value 'https://staging.app.babylontoolkit.com'
 aws ssm put-parameter --name /btk/staging/PLAY_URL --type String --value 'https://play.<playdomain>'
+
+# Sandbox provider (CodeSandbox). The KEY is a platform secret — server-only, never VITE_-prefixed.
+aws ssm put-parameter --name /btk/staging/CODESANDBOX_API_KEY --type SecureString --value 'csb_...'
 ```
 
+#### CodeSandbox tunables (`CODESANDBOX_*`)
+
+All optional — each falls back to the default below, and a nonsensical override is IGNORED rather than
+obeyed (`app/lib/.server/sandbox/config.ts`). Every one of them costs money in one direction or the
+other, which is why they are config and not constants.
+
+| Variable | Default | What it decides |
+|---|---|---|
+| `CODESANDBOX_API_KEY` | — | **Required to serve the CodeSandbox provider.** Absent = "not configured": the app runs, the workbench reports it, nothing crashes. Mint at https://codesandbox.io/t/api with all five scopes. |
+| `CODESANDBOX_TEMPLATE` | `btk@starter` | The alias each new project forks. ⚠️ **A pin promoted in Settings → Admin → Sandbox template OUTRANKS this** (plan T14) — set it while a pin exists and it is silently ignored. |
+| `CODESANDBOX_VM_TIER` | `Nano` | VM size per project (raised from Pico 2026-07-28: `vite build` peaked at 1,958MB of Pico's 2,053MB). **It also sets the billing rate** — `vmUsdPerHourForTier` derives $/hr from this, so raising it is a margin decision, not just a capacity one (Nano $0.149/hr clears every pack and plan at 2.41× worst case; **Micro would put the Pro and Studio packs and ALL plans under the floor**). An unknown name is handled deliberately differently by the two subsystems: the sandbox PROVISIONS Pico (cheapest — the failure that matters is "silently ran everyone on XLarge") while billing PRICES it at the dearest measured tier (the failure that matters there is under-stating cost, which is invisible). Both are the conservative direction for their own side. |
+| `CODESANDBOX_HIBERNATION_SECONDS` | `300` | Idle seconds before the VM sleeps. **The main cost lever.** Must be 1–86400; anything else falls back, because obeying `0` would bill all night. |
+| `CODESANDBOX_HOST_TOKEN_MINUTES` | `60` | Preview-token life. Capped at 24h: the token is a bearer credential riding in an iframe URL, and expiry is its only mitigation — an operator typo (`60000`) would otherwise mint ~41-day tokens silently. |
+| `CODESANDBOX_MAX_CREATES_PER_HOUR` | `20` | Forks one account may start per hour. Bounds a platform-wide provider budget against one runaway loop. |
+| `CODESANDBOX_MAX_RUNNING_VMS` | `2` | Concurrently RUNNING sandboxes per account. Never refuses a session — it hibernates the least-recently-touched one to make room. |
+
+`SANDBOX_VM_USD_PER_HOUR` and `SANDBOX_EST_VM_HOURS_PER_KCREDIT` are billing inputs, not provider
+config — see `spec/billing.md`. They are asserted against the pack/plan margin floor at test time and
+are not read at runtime.
+
 (Lightsail deployments take env vars directly; simplest launch path is injecting these values into the deployment config from CI via `aws ssm get-parameters`. Reading SSM at boot from the app is the later refinement.)
+
+> 🔴 **A variable in the container env only reaches the app if it is NAMED in `worker-configuration.d.ts`.**
+> The image starts with `pnpm run dockerstart` → `bindings.sh` → `wrangler pages dev`, and the app runs
+> under **workerd, where `process.env` is empty**. `bindings.sh` greps that file for names and forwards
+> only those it finds set, as `--binding NAME=value`. MEASURED (2026-07-28): before this was fixed the
+> file listed only upstream's provider keys, so a production container would have booted with **no
+> Supabase, no Stripe, no S3, no KIE key and no CodeSandbox key** — and because every one of those
+> degrades to "not configured" rather than crashing, it would have served happily while being unable to
+> bill, authenticate, or open a sandbox.
+>
+> **Adding an `env(context, 'NEW_VAR')` read means adding the name to `worker-configuration.d.ts`.**
+> Listing an unset name costs nothing; omitting a set one is a silent outage.
 
 ---
 
@@ -98,13 +133,42 @@ aws lightsail get-container-services --service-name btk-builder-staging   # wait
 
 ### 2.2 Build & push the image (first time manually; CI thereafter)
 
+> 🔴 **`VITE_SANDBOX_PROVIDER` is a BUILD ARG, not an environment variable.** Vite inlines
+> `import.meta.env.VITE_SANDBOX_PROVIDER` into the client bundle and `WORK_DIR` is derived from it, so
+> which sandbox runtime a deploy uses is baked into the JavaScript the browser downloads. **Setting it on
+> a running container does nothing** except make the server disagree with its own bundle.
+>
+> **Rollback is "deploy the previous image", never an env flip.** Unset or misspelled builds WebContainer,
+> which is the safe direction.
+
 ```bash
-docker build -t btk-builder .          # uses the fork's Dockerfile (production target)
+# CodeSandbox build (what production runs):
+docker build --build-arg VITE_SANDBOX_PROVIDER=codesandbox -t btk-builder .
+
+# WebContainer build (omit the arg — this is also the rollback image):
+# docker build -t btk-builder .
+
 aws lightsail push-container-image \
   --service-name btk-builder-staging \
   --label app --image btk-builder
 # Note the returned image ref, e.g. ":btk-builder-staging.app.7"
 ```
+
+> ⚠️ **Omitting the arg is only reliable INSIDE Docker.** `.dockerignore` excludes `*.local`, so the image
+> build sees no `.env.local` and the build arg is the single source of truth. A build on a developer's
+> machine does NOT have that guarantee — Vite loads `.env.local`, so `pnpm build` there silently inherits
+> whatever `VITE_SANDBOX_PROVIDER` that file sets (MEASURED while writing this: a "control" build with no
+> arg produced a CodeSandbox bundle). To force a value locally, pass it explicitly:
+> `VITE_SANDBOX_PROVIDER=webcontainer pnpm build` — a process env var wins over `.env.local`.
+>
+> **How to tell which one you built** (MEASURED): look for the provider CHUNK, not for a path string.
+> A WebContainer build emits `build/client/assets/webcontainer-provider-*.js`; a CodeSandbox build does
+> not emit it at all (the flag folds to a constant and Rollup drops the branch), which is also what makes
+> "no WebContainer WASM is ever fetched" true by absence rather than merely at runtime.
+>
+> ⚠️ Do NOT grep for `/home/project` to tell them apart — it appears in BOTH bundles (`SANDBOX_ROOTS`
+> lists every root a file map may carry, plus two literals in `Chat.client`). The path strings are not
+> discriminating; the chunk is.
 
 ### 2.3 Deploy
 
@@ -135,7 +199,8 @@ Create `deployment-staging.json` (CI renders this template with SSM values):
         "AWS_REGION": "us-west-2",
         "S3_SNAPSHOTS_BUCKET": "btk-snapshots-staging",
         "S3_PLAY_BUCKET": "btk-play-builds-staging",
-        "BILLING_ENFORCED": "false"
+        "BILLING_ENFORCED": "false",
+        "CODESANDBOX_API_KEY": "<from SSM>"
       }
     }
   },
@@ -156,7 +221,14 @@ aws lightsail get-container-services --service-name btk-builder-staging   # wait
 
 The service gets a URL like `https://btk-builder-staging.xxxx.us-west-2.cs.amazonlightsail.com` — verify `/healthz` there before touching DNS.
 
-> `/healthz` must check: DB reachable, active prompt version present, S3 credentials valid (spec/hosting.md). Build it in Phase 2 before first deploy.
+> **`/healthz` reports CONFIG PRESENCE ONLY — it never makes a live network call, and that is a
+> contract, not an omission** (`app/lib/.server/monitoring/health.ts`). An earlier draft of this line
+> asked it to check "DB reachable, S3 credentials valid"; that is exactly the probe the endpoint refuses
+> to be, because Lightsail polls it every 10s and a Supabase blip would then cycle containers and start a
+> retry storm. Liveness is always `healthy`; each dependency is `ok` (configured) or `degraded` (not),
+> and `ready` is true only when every dependency THIS BUILD needs is wired — which is what §9a's
+> credential pass keys on. Reachability lives in the rate windows (`sandbox-rates.ts`,
+> `failure-rate.ts`), where a sustained failure is an alert instead of a restart.
 
 ### 2.4 Custom domain + TLS
 
@@ -173,7 +245,15 @@ aws lightsail update-container-service \
 
 DNS: CNAME `staging.app.babylontoolkit.com` → the Lightsail service hostname. (Prod: same with `app.babylontoolkit.com` / `btk-prod-cert`.)
 
-**Verify WebContainers after DNS:** load the app on the real domain and confirm a project boots. WebContainers needs cross-origin isolation headers (COOP/COEP) — bolt.diy's server config sets them; if a proxy/CDN is ever placed in front, confirm it passes them through untouched.
+**Verify the sandbox runtime after DNS:** load the app on the real domain and confirm a project boots.
+
+- **WebContainer images** need cross-origin isolation headers (COOP/COEP) — bolt.diy's server config sets
+  them; if a proxy/CDN is ever placed in front, confirm it passes them through untouched.
+- **CodeSandbox images do NOT** — the VM is remote, so the app drops COEP entirely (`entry.server.tsx`
+  branches on the same build-time flag). Confirm the build is the one you think it is: DevTools →
+  Network should show **no `.wasm` fetch for the WebContainer runtime**, and `GET /healthz` should list
+  `codesandbox` in `dependencies`. That key is present ONLY on a CodeSandbox build, so its absence is the
+  fastest way to catch an image built without the build arg (plan T13).
 
 ---
 
@@ -182,6 +262,15 @@ DNS: CNAME `staging.app.babylontoolkit.com` → the Lightsail service hostname. 
 - [ ] **Stripe:** Dashboard → Webhooks → add `https://staging.app.babylontoolkit.com/api/stripe-webhook` (test mode for staging; the route is `api.stripe-webhook` → `/api/stripe-webhook`, NOT `/api/stripe/webhook`) → copy signing secret into SSM → redeploy.
 - [ ] **Supabase Auth:** set Site URL + redirect URLs to the env domain (and OAuth providers' consoles: Google/GitHub redirect URIs).
 - [ ] **GitHub doc-sync webhook (Phase 3):** on `babylontoolkit/agent` and `/skills` repos → `https://.../api/admin/webhooks/github`, secret from SSM, push events only.
+- [x] **CodeSandbox commercial terms — CONFIRMED by owner 2026-07-29.** VM credits are pre-purchased
+      and the plan covers embedding VM previews and reselling that VM time to users. (Original gate:
+      the same `spec/licensing.md` StackBlitz reasoning — the runtime is somebody else's product and
+      the builder stops without it.) The measured **3,600 requests/hour** API limit stands as the
+      capacity number to watch (`spec/sandbox-codesandbox.md` — it bites before concurrency; live
+      creation traffic measured ~1% of it).
+- [ ] **Promote the sandbox template** (Settings → Admin → Sandbox template) once per environment. A
+      fresh deploy forks whatever `btk@starter` points at today; promoting pins it, and until someone
+      does, a `csb build --alias` by anyone reaches every new project with no review step (plan T14).
 
 ---
 

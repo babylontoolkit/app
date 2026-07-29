@@ -15,6 +15,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { requireAdmin } from '~/lib/.server/supabase/auth';
 import { buildSystemPrompt } from '~/lib/.server/prompt/build';
 import { invalidateActivePrompt } from '~/lib/.server/prompt/active';
+import { warmAfterPromptChange } from '~/lib/.server/prompt/cache-warmer';
 import { getPromptStore } from '~/lib/.server/prompt/store';
 import { AGENT_REPO, SKILLS_REPO } from '~/lib/.server/prompt/sources';
 import { syncSkills } from '~/lib/.server/skills/sync';
@@ -132,6 +133,12 @@ export async function action({ request, context }: ActionFunctionArgs) {
       await getPromptStore().activate(body.versionId);
       invalidateActivePrompt();
 
+      /*
+       * New active bytes = ~fanout cold cache writes coming. Prepay them off-request so no user's
+       * creation eats the first miss (fire-and-forget — a promote must not block on KIE).
+       */
+      warmAfterPromptChange(context);
+
       logger.info(`Activated prompt version ${body.versionId}`);
 
       return json({ ok: true, activated: body.versionId });
@@ -159,6 +166,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
       });
 
       invalidateActivePrompt();
+      warmAfterPromptChange(context);
 
       return json({
         ok: true,

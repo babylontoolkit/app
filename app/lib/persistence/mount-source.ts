@@ -180,3 +180,38 @@ export function selectMountSource(facts: MountFacts): MountSource {
    */
   return { source: 'local', unsavedWork };
 }
+
+/**
+ * Does the LIVE sandbox filesystem outrank every client-held copy of this project?
+ *
+ * 🔴 Both wrong answers silently overwrite a user's project, which is why this is a pure function
+ * rather than an expression inside the mount — the same reason `selectMountSource`, `restore-plan`
+ * and `auto-repair` are pure. Answer `true` when it should be `false` and a stale or foreign disk
+ * becomes the project's truth; answer `false` when it should be `true` and a client copy serialized
+ * mid-watcher-lag is restored over a healthy sandbox (MEASURED live: the starter's `Home.css` under a
+ * generation's `Home.tsx`, reverting a landing page two hours after it was built).
+ *
+ * Three conditions, each load-bearing:
+ *
+ *   - **the boot restored a filesystem.** On WebContainer this is always false — the FS is empty every
+ *     page load, so the restore IS the project. On a server provider that resumed warm, the disk is
+ *     exactly as the last session left it and is NEWER than anything this browser or the server holds.
+ *   - **the sandbox does not claim to belong to someone else.** `mismatch` means a sentinel is present
+ *     and names ANOTHER project (`readIdentityVerdict`) — a mis-pointed `sandbox_id`, and the only
+ *     thing standing between that and one project's files becoming another's truth. `unknown` is NOT a
+ *     mismatch: a sandbox predating the sentinel makes no claim, and treating silence as an accusation
+ *     would send every warm VM down the restore path this gate exists to avoid.
+ *   - **the mount source is one that would OVERWRITE the sandbox.** `repo` is an explicit user-facing
+ *     sync decision, and `empty`/seed only run when there is nothing to protect.
+ */
+export function decideLiveSandboxIsTruth(facts: {
+  bootRestoredFilesystem: boolean;
+  identity: 'match' | 'mismatch' | 'unknown';
+  source: MountSource['source'];
+}): boolean {
+  if (!facts.bootRestoredFilesystem || facts.identity === 'mismatch') {
+    return false;
+  }
+
+  return facts.source === 'local' || facts.source === 'diverged' || facts.source === 'working';
+}

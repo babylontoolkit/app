@@ -255,6 +255,17 @@ export interface SandboxShell {
 }
 
 /**
+ * A preview URL and, when the provider's URLs expire, when this one dies.
+ *
+ * `expiresAt` is epoch milliseconds and is OPTIONAL by design: absent means "this URL does not
+ * expire", which is the WebContainer answer and must never be confused with "expires now".
+ */
+export interface SandboxPreviewUrl {
+  url: string;
+  expiresAt?: number;
+}
+
+/**
  * The runtime a user's project lives in.
  *
  * One instance per builder session. Obtain it from `~/lib/sandbox` — never construct a provider in
@@ -302,6 +313,20 @@ export interface SandboxProvider {
 
   /** Fires when a port opens or closes. Returns an unsubscribe function. */
   onPort(listener: (port: number, type: 'open' | 'close', url: string) => void): () => void;
+
+  /**
+   * The current iframe-renderable URL for an already-open port, re-minting its credential if that
+   * credential is close to expiring.
+   *
+   * 🔴 **Present only on providers whose preview URL EXPIRES.** A CodeSandbox preview is a private
+   * host plus a bearer `?preview_token=` with a finite life; when it dies the iframe silently becomes
+   * the provider's 401 page — and a cross-origin 401 still fires `onLoad`, so nothing downstream can
+   * tell a dead preview from a healthy one. WebContainer preview URLs never expire, so it omits this
+   * and the caller schedules no timers at all (an absent `expiresAt` means "never re-mint").
+   *
+   * Returns `undefined` for a port this provider has never seen open — there is nothing to re-mint.
+   */
+  refreshPreviewUrl?(port: number): Promise<SandboxPreviewUrl | undefined>;
 
   /** Present only when {@link SandboxCapabilities.textSearch} is true. */
   textSearch?(query: string, options: SandboxTextSearchOptions, onProgress: SandboxTextSearchProgress): Promise<void>;

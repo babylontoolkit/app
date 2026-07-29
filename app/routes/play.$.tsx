@@ -23,6 +23,7 @@ import {
   cacheControlFor,
   isPlayServableInProduction,
   resolvePlayOrigin,
+  resolvePlayRequest,
 } from '~/lib/.server/share/serve';
 import { contentTypeFor } from '~/lib/.server/share/publish';
 import { renderPlayWrapper } from '~/lib/.server/share/wrapper';
@@ -69,10 +70,20 @@ export async function loader({ params, request, context }: LoaderFunctionArgs) {
     return notFound();
   }
 
-  const wantsWrapper = rest === '' || rest === 'play' || rest === 'index';
+  /*
+   * Three request shapes (T17b, `resolvePlayRequest`): a person gets the wrapper, the wrapper's
+   * iframe (`?embed=1` / `sec-fetch-dest: iframe`) gets the game DOCUMENT — index.html's bytes for
+   * any extensionless path, so the game's client-side routes work under the share prefix — and a
+   * path with an extension gets the build file's bytes.
+   */
+  const url = new URL(request.url);
+  const mode = resolvePlayRequest(rest, {
+    embed: url.searchParams.has('embed'),
+    secFetchDest: request.headers.get('sec-fetch-dest'),
+  });
 
   // The bare /play/:shareId URL is the shell page: it frames the game and overlays the badge.
-  if (wantsWrapper && !isAssetRequest(request)) {
+  if (mode === 'wrapper') {
     const origin = resolvePlayOrigin(context);
     const html = renderPlayWrapper({
       shareId,
@@ -94,11 +105,11 @@ export async function loader({ params, request, context }: LoaderFunctionArgs) {
     });
   }
 
-  // Otherwise: serve a build file's bytes.
+  // Otherwise: serve bytes — the game document for the iframe, or the requested build file.
   let key: string;
 
   try {
-    key = buildContentKey(shareId, rest);
+    key = buildContentKey(shareId, mode === 'game-document' ? 'index.html' : rest);
   } catch {
     return notFound();
   }
@@ -120,9 +131,4 @@ export async function loader({ params, request, context }: LoaderFunctionArgs) {
       'referrer-policy': 'no-referrer',
     },
   });
-}
-
-/** A request for `/play/:id` that is really an asset fetch (has an extension) is not a wrapper request. */
-function isAssetRequest(request: Request): boolean {
-  return /\.[a-z0-9]+$/i.test(new URL(request.url).pathname);
 }

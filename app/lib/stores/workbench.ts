@@ -97,6 +97,16 @@ export class WorkbenchStore {
   }
 
   /**
+   * The URL to (re)load a preview with — re-minted first if its credential is close to expiring.
+   *
+   * The reload button used to assign `iframe.src = iframe.src`, which re-requests the same, possibly
+   * dead, token; on a provider with expiring preview credentials that reloads the 401 page.
+   */
+  currentPreviewUrl(port: number): Promise<string | undefined> {
+    return this.#previewsStore.currentPreviewUrl(port);
+  }
+
+  /**
    * Re-render every running preview (§4.16).
    *
    * Exists for ASSETS that appear WITHOUT a module graph change. Vite's HMR is driven by module
@@ -141,7 +151,10 @@ export class WorkbenchStore {
   }
 
   /** Materialize a serialized project back into the sandbox, byte-faithfully. */
-  restoreFiles(files: SerializedFileMap, options?: { protect: (path: string) => boolean }): Promise<void> {
+  restoreFiles(
+    files: SerializedFileMap,
+    options?: { protect?: (path: string) => boolean; onProgress?: (done: number, total: number) => void },
+  ): Promise<void> {
     return this.#filesStore.restoreFiles(files, options);
   }
 

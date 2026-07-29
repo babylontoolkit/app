@@ -29,7 +29,10 @@ import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { errorResponse } from '~/lib/.server/http';
-import { isSandboxConfigured, sandboxCreatesPerHour } from '~/lib/.server/sandbox/config';
+import { isSandboxConfigured, sandboxCreatesPerHour, sandboxMaxRunningVms } from '~/lib/.server/sandbox/config';
+import { enforceRunningVmCap } from '~/lib/.server/sandbox/vm-cap';
+import { ensureSandboxTemplatePin } from '~/lib/.server/sandbox/template-pin';
+import { getObjectStore } from '~/lib/.server/storage';
 import { decideCreatePersist, decideSandboxStart, isSandboxGoneError } from '~/lib/.server/sandbox/lifecycle';
 import { decideCreateAllowed, recentSandboxCreates, recordSandboxCreate } from '~/lib/.server/sandbox/create-limit';
 import {
@@ -40,6 +43,7 @@ import {
   sandboxExists,
 } from '~/lib/.server/sandbox/service';
 import { getMonitor } from '~/lib/.server/monitoring';
+import { recordSandboxCleanBoot, recordSandboxOutcome } from '~/lib/.server/monitoring/sandbox-rates';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('api.sandbox.session');
@@ -69,6 +73,15 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
     // The second wall. Someone else's project is a 404, never a 403 — a 403 confirms the id exists.
     const project = await requireOwnedProject(user, projectId, context);
+
+    /*
+     * The async doorway for the template pin (T14). `sandboxTemplate()` is called synchronously deep
+     * in the fork request, so the promoted pin has to already be in the in-process cache by then —
+     * same seam, and same reason, as `ensureMarketPrices()` before a generation. TTL'd, so this is a
+     * storage read at most once a minute; a failed load keeps the previous answer and never blocks.
+     */
+    await ensureSandboxTemplatePin(getObjectStore(context));
+
     const store = getProjectStore(context);
 
     const resetRequested = body.reset === true;
@@ -99,6 +112,14 @@ export async function action({ request, context }: ActionFunctionArgs) {
        */
       logger.warn(`Refusing to start a sandbox for project ${project.id}: ${decision.reason}`);
 
+      /*
+       * A refusal IS a failed resume from the user's side — they asked to open their project and it
+       * did not open. It reaches here only when `sandboxExists` could not find out, i.e. the provider
+       * is unreachable, which is precisely the platform-wide condition the rate window exists to
+       * surface. Leaving it unrecorded would make a total provider outage look like an idle window.
+       */
+      recordSandboxOutcome(getMonitor(context), 'resume', true);
+
       return json(
         { error: 'Could not reach the sandbox provider. Please try again.', retryable: true },
         { status: 503 },
@@ -109,7 +130,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
     const dispose = async (ids: string[]) => {
       for (const id of ids) {
         try {
-          await deleteSandbox(id, context);
+          await deleteSandbox(id, context, { userId: user.id, projectId: project.id });
           logger.info(`Disposed sandbox ${id} for project ${project.id}.`);
         } catch (error) {
           getMonitor(context).captureException(error, {
@@ -134,7 +155,22 @@ export async function action({ request, context }: ActionFunctionArgs) {
         return { limited: limit } as const;
       }
 
-      const created = await createSandboxForProject(project.id, context);
+      /*
+       * The window covers the PROVIDER call only, and it is inside `createAndRecord` so that both
+       * callers — the ordinary create and the resume→create fallback — feed it. A rate-limited request
+       * returns above without recording: that is US refusing, not the provider failing, and counting it
+       * would let one user's runaway loop trip a platform-wide outage alert.
+       */
+      let created: Awaited<ReturnType<typeof createSandboxForProject>>;
+
+      try {
+        created = await createSandboxForProject(project.id, context, { userId: user.id, projectId: project.id });
+        recordSandboxOutcome(getMonitor(context), 'create', false);
+      } catch (error) {
+        recordSandboxOutcome(getMonitor(context), 'create', true);
+        throw error;
+      }
+
       recordSandboxCreate(user.id);
 
       // Re-read to see whether a concurrent request recorded a different sandbox while we were forking.
@@ -196,12 +232,23 @@ export async function action({ request, context }: ActionFunctionArgs) {
       logger.info(`Sandbox ${sandboxId} ready for project ${project.id} (${decision.reason}).`);
     } else {
       try {
-        const resumed = await resumeSandbox(before!, context);
+        const resumed = await resumeSandbox(before!, context, { userId: user.id, projectId: project.id });
         sandboxId = resumed.sandboxId;
         bootupType = resumed.bootupType;
         didCreate = false;
+        recordSandboxOutcome(getMonitor(context), 'resume', false);
+
+        /*
+         * A separate window, on the RESUME path only. This request succeeded — but `CLEAN` means the
+         * snapshot expired and the files are template state, so the project the user sees came from the
+         * working copy, not from the VM. No failure metric can ever show that.
+         */
+        recordSandboxCleanBoot(getMonitor(context), bootupType === 'CLEAN');
+
         logger.info(`Resumed sandbox ${sandboxId} for project ${project.id} (${bootupType}).`);
       } catch (error) {
+        recordSandboxOutcome(getMonitor(context), 'resume', true);
+
         /*
          * `sandboxExists` said the VM was there and the resume disagrees — a VM deleted provider-side
          * between the two calls, or one whose existence check answered from a stale cache. Without
@@ -238,6 +285,22 @@ export async function action({ request, context }: ActionFunctionArgs) {
     }
 
     const session = await createBrowserSession(sandboxId, { permission: 'write' }, context);
+
+    /*
+     * Make room, never refuse (`vm-cap.ts`). Per-project sandboxes mean a user with six open projects
+     * has six VMs billing until each one's own idle timeout; hibernating the least-recently-touched
+     * one costs a 1–3s resume and nothing else.
+     *
+     * AFTER the session is minted, deliberately: this is a cost sweep, and the credential the user is
+     * waiting for must not queue behind it. It is best-effort and deadline-bounded, so it can neither
+     * fail nor stall the response.
+     */
+    await enforceRunningVmCap({
+      userId: user.id,
+      keepSandboxId: sandboxId,
+      cap: sandboxMaxRunningVms(context),
+      context,
+    });
 
     /*
      * `bootupType` is REPORTED, not swallowed. `CLEAN` means the hibernation snapshot had expired and

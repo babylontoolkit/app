@@ -63,7 +63,7 @@ export default function GitCloneButton({ importChat, className }: GitCloneButton
     setSelectedProvider(null);
 
     try {
-      const { workdir, data } = await gitClone(repoUrl);
+      const { workdir, data, projectId } = await gitClone(repoUrl);
 
       if (importChat) {
         const filePaths = Object.keys(data).filter((filePath) => !ig.ignores(filePath));
@@ -150,11 +150,26 @@ ${escapeBoltTags(file.content)}
           messages.push(commandsMessage);
         }
 
-        await importChat(`Git Project:${repoUrl.split('/').slice(-1)[0]}`, messages);
+        /*
+         * The project the clone was written into (`openImportWorkspace`) — omitted on a runtime that
+         * needs none. Without it the reloaded chat has no project to boot a sandbox for, and the
+         * cloned files are on a VM nothing points at.
+         */
+        await importChat(
+          `Git Project:${repoUrl.split('/').slice(-1)[0]}`,
+          messages,
+          projectId ? { projectId } : undefined,
+        );
       }
     } catch (error) {
+      /*
+       * Say WHAT went wrong. This used to be a fixed "Failed to import repository", which is
+       * indistinguishable from a button that did nothing — and on a project-backed runtime the real
+       * reason ("open or create a project first", a refused workspace) is precisely the sentence the
+       * user needs (T3b).
+       */
       console.error('Error during import:', error);
-      toast.error('Failed to import repository');
+      toast.error(`Failed to import repository: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setLoading(false);
     }

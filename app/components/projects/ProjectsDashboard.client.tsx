@@ -19,10 +19,11 @@ import { toast } from 'react-toastify';
 import { formatDistanceToNow } from 'date-fns';
 import { db, getAll, deleteById, type ChatHistoryItem } from '~/lib/persistence';
 import { listProjects, deleteProject, renameProject, ApiError } from '~/lib/persistence/projects';
-import { setPendingOpenProject, PENDING_REMIX_KEY } from '~/lib/persistence/pending-remix';
+import { setPendingOpenProject, setPendingRemix } from '~/lib/persistence/pending-remix';
 import { describeProjectSaveBadge } from '~/lib/persistence/save-status';
 import { readCurrentLocalSnapshot } from '~/lib/persistence/local-snapshots';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
+import { bootedProjectId } from '~/lib/sandbox';
 import type { Project } from '~/types/project';
 import { classNames } from '~/utils/classNames';
 import { Dialog, DialogButton, DialogDescription, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
@@ -126,13 +127,42 @@ export function ProjectsDashboard() {
     load().finally(() => setRefreshing(false));
   }, [load]);
 
+  /**
+   * Go to the builder for a project — as an SPA transition, or as a real page load when this tab is
+   * already holding another project's sandbox.
+   *
+   * 🔴 ONE TAB, ONE SANDBOX CONNECTION. The seam hands every store a single `Promise<SandboxProvider>`
+   * captured in their constructors (`filesStore`, `previewsStore`, the terminals), so there is no way
+   * to re-point them at a second VM mid-page: an SPA navigate to project B would mount B's files
+   * through A's connection, into A's filesystem. `bootForProject` refuses that outright — but a
+   * refusal the user meets as an error is a worse answer than simply reloading, which is cheap next to
+   * the VM resume it precedes and leaves every module-level store honestly fresh for the new project
+   * (the class of bug §4.5.6 kept rediscovering: state that survives an SPA navigate).
+   *
+   * The baton lives in `sessionStorage`, which survives a page load, so `setPendingOpenProject` above
+   * still reaches the builder either way.
+   */
+  const openBuilder = useCallback(
+    (to: string, targetProjectId: string) => {
+      const booted = bootedProjectId();
+
+      if (booted && booted !== targetProjectId) {
+        window.location.href = to;
+        return;
+      }
+
+      navigate(to);
+    },
+    [navigate],
+  );
+
   const openProject = useCallback(
     (project: Project) => {
       const [mostRecent] = localChats.get(project.id) ?? [];
 
       if (mostRecent?.urlId) {
         // The conversation lives in this browser — reopen it exactly where it was left.
-        navigate(`/chat/${mostRecent.urlId}`);
+        openBuilder(`/chat/${mostRecent.urlId}`, project.id);
         return;
       }
 
@@ -142,9 +172,9 @@ export function ProjectsDashboard() {
        * recent conversation back from the server.
        */
       setPendingOpenProject(project.id, 'latest');
-      navigate('/');
+      openBuilder('/', project.id);
     },
-    [localChats, navigate],
+    [localChats, openBuilder],
   );
 
   /**
@@ -156,9 +186,9 @@ export function ProjectsDashboard() {
   const newChatOnProject = useCallback(
     (project: Project) => {
       setPendingOpenProject(project.id, 'fresh');
-      navigate('/');
+      openBuilder('/', project.id);
     },
-    [navigate],
+    [openBuilder],
   );
 
   const remixProject = useCallback(
@@ -189,8 +219,14 @@ export function ProjectsDashboard() {
         const data = (await response.json()) as { projectId?: string; message?: string };
 
         if (response.ok && data.projectId) {
-          sessionStorage.setItem(PENDING_REMIX_KEY, data.projectId);
-          navigate('/');
+          setPendingRemix(data.projectId);
+
+          /*
+           * Through `openBuilder`, not a bare navigate: a dashboard reached by SPA from the builder
+           * still holds that project's sandbox, and mounting the clone through it is exactly the
+           * cross-connection `bootForProject` refuses. `openBuilder` decides SPA vs page load.
+           */
+          openBuilder('/', data.projectId);
           toast.success('Project remixed');
 
           return;
@@ -203,7 +239,7 @@ export function ProjectsDashboard() {
         setBusyId(null);
       }
     },
-    [navigate],
+    [openBuilder],
   );
 
   const doDelete = useCallback(

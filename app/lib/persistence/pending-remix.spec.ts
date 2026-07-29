@@ -4,6 +4,7 @@ import {
   PENDING_FRESH_CHAT_KEY,
   PENDING_OPEN_KEY,
   PENDING_REMIX_KEY,
+  hasPendingProjectMount,
   setPendingOpenProject,
   takePendingProjectMount,
   takePendingRemix,
@@ -65,6 +66,54 @@ describe('pending project mount baton', () => {
 
   it('returns null when nothing is parked', () => {
     expect(takePendingProjectMount()).toBeNull();
+  });
+});
+
+/**
+ * The peek decides, on the builder's FIRST render, whether the boot splash shows for a parked
+ * remix/open (the consuming read runs in an effect — after that render already chose what to draw).
+ * The property that must never regress: peeking CONSUMES NOTHING. Multiple `useChatHistory` instances
+ * peek; if peeking ate the baton, the mount effect would find nothing and the project would never open.
+ */
+describe('hasPendingProjectMount (the splash peek)', () => {
+  let store: Map<string, string>;
+
+  beforeEach(() => {
+    store = new Map();
+    vi.stubGlobal('sessionStorage', {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sees a parked remix', () => {
+    store.set(PENDING_REMIX_KEY, 'proj-clone');
+    expect(hasPendingProjectMount()).toBe(true);
+  });
+
+  it('sees a parked open', () => {
+    setPendingOpenProject('proj-open');
+    expect(hasPendingProjectMount()).toBe(true);
+  });
+
+  it('sees nothing when nothing is parked', () => {
+    expect(hasPendingProjectMount()).toBe(false);
+  });
+
+  it('never consumes: the take still finds the baton after any number of peeks', () => {
+    store.set(PENDING_REMIX_KEY, 'proj-clone');
+
+    expect(hasPendingProjectMount()).toBe(true);
+    expect(hasPendingProjectMount()).toBe(true);
+    expect(takePendingProjectMount()?.projectId).toBe('proj-clone');
+
+    // And after consumption the peek agrees the baton is gone.
+    expect(hasPendingProjectMount()).toBe(false);
   });
 });
 

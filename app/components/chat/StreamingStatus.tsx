@@ -17,7 +17,35 @@ import { memo, useEffect, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { agentStatusStore, describeAgentStatus, isStatusFresh } from '~/lib/stores/agent-status';
 import { activeSkillsStore } from '~/lib/stores/active-skills';
+import { mediaRenderStore } from '~/lib/media/tasks';
 import { SkillBadges } from './SkillBadges';
+
+/**
+ * "Generating 2 images…" — the render line.
+ *
+ * Rendered in BOTH branches below, like the skill badges and for the same reason: a render is
+ * commissioned in milliseconds and then takes 20–60s at KIE (§4.16), so it routinely outlives both the
+ * heartbeat and the whole generation. Showing it only inside the heartbeat panel would hide it during
+ * exactly the stretch when it is the only thing still happening — which is the state the user described
+ * as the product "spinning for nothing".
+ */
+function renderLine(images: number, videos: number): string | null {
+  if (images === 0 && videos === 0) {
+    return null;
+  }
+
+  const parts: string[] = [];
+
+  if (images > 0) {
+    parts.push(`${images} image${images === 1 ? '' : 's'}`);
+  }
+
+  if (videos > 0) {
+    parts.push(`${videos} video${videos === 1 ? '' : 's'}`);
+  }
+
+  return `Generating ${parts.join(' and ')}…`;
+}
 
 export const StreamingStatus = memo(() => {
   const status = useStore(agentStatusStore);
@@ -29,6 +57,9 @@ export const StreamingStatus = memo(() => {
    */
   const active = useStore(activeSkillsStore);
   const skills = active?.skills ?? [];
+
+  const renders = useStore(mediaRenderStore);
+  const media = renderLine(renders.images, renders.videos);
 
   /*
    * A 1s tick keeps the elapsed label counting BETWEEN heartbeats (they arrive every ~3s) and lets
@@ -55,6 +86,12 @@ export const StreamingStatus = memo(() => {
             <SkillBadges skills={skills} variant="live" />
           </div>
         )}
+        {media && (
+          <div className="mt-4 flex items-center justify-center gap-2 text-xs text-bolt-elements-textSecondary">
+            <div className="text-sm i-svg-spinners:90-ring-with-bg text-bolt-elements-item-contentAccent" />
+            <span>{media}</span>
+          </div>
+        )}
         <div className="text-center w-full text-bolt-elements-item-contentAccent i-svg-spinners:3-dots-fade text-4xl mt-4"></div>
       </>
     );
@@ -69,6 +106,12 @@ export const StreamingStatus = memo(() => {
         <span className="font-medium text-bolt-elements-textPrimary">{label}</span>
       </div>
       <div className="mt-1 pl-6 text-xs text-bolt-elements-textSecondary">{detail}</div>
+      {media && (
+        <div className="mt-1 flex items-center gap-2 pl-6 text-xs text-bolt-elements-textSecondary">
+          <div className="text-sm i-svg-spinners:90-ring-with-bg text-bolt-elements-item-contentAccent" />
+          <span>{media}</span>
+        </div>
+      )}
       {skills.length > 0 && (
         <div className="mt-2 pl-6">
           <SkillBadges skills={skills} variant="live" />
