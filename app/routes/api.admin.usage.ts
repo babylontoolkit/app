@@ -42,6 +42,10 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
      * The provider pool every user's generation draws from (§4.10). Fetched alongside the report
      * rather than on its own route: it is one number on one panel, and `getProviderBalance` never
      * throws, so a provider outage degrades this field to "unknown" instead of failing the dashboard.
+     * That claim is load-bearing HERE (there is deliberately no try/catch around it) and it briefly
+     * stopped being true: the function reached `getBillingConfig`, which refuses a retired
+     * `CREATION_FLAT_CREDITS` (§4.4a), so a leftover env line 500ed the very dashboard an operator
+     * would open to diagnose billing. It reads the config through `getBillingConfigSafe` now.
      */
     const providerBalance = await getProviderBalance(context);
 

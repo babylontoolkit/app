@@ -20,6 +20,16 @@ export interface ProjectSeed {
   /** The prompt that was seeded, so re-seeding can re-run it against a different entry. */
   prompt?: string;
 
+  /**
+   * What the user actually TYPED, when that differs from `prompt`.
+   *
+   * They are the same on the typed-prompt path and absent on the card path. They diverge only for the
+   * wizard (§4.7), where `prompt` is the compiled brief and this is the short text shown in its place.
+   * Kept because creation no longer sends anything to a model: the prompt is carried into the chat
+   * textbox for the user to edit, and what belongs in a textbox is the user's own words.
+   */
+  visiblePrompt?: string;
+
   /** Keywords that fired, for the chip's tooltip — the seed should never feel like magic. */
   matched?: string[];
 }

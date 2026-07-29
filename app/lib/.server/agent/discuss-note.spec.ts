@@ -3,7 +3,7 @@ import { discussModeNote } from './discuss-note';
 
 describe('discussModeNote', () => {
   it('emits the instruction on an ordinary plan-mode turn', () => {
-    const note = discussModeNote({ chatMode: 'discuss', isCreationTurn: false });
+    const note = discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: false });
     expect(note).toContain('PLAN mode');
     expect(note).toContain('Do NOT emit `<boltArtifact>`');
   });
@@ -15,7 +15,7 @@ describe('discussModeNote', () => {
    * agree on the folder, which is why both read `PLAN_ARTIFACTS_DIR`.
    */
   it('states the _specs planning-artifact exception so the skills still write their files', () => {
-    const note = discussModeNote({ chatMode: 'discuss', isCreationTurn: false });
+    const note = discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: false });
     expect(note).toContain('`_specs/`');
     expect(note).toContain('_spec.md');
     expect(note).toContain('_plan.md');
@@ -23,15 +23,15 @@ describe('discussModeNote', () => {
   });
 
   it('is silent in build mode and when the mode is absent (every existing caller)', () => {
-    expect(discussModeNote({ chatMode: 'build', isCreationTurn: false })).toBeNull();
-    expect(discussModeNote({ isCreationTurn: false })).toBeNull();
+    expect(discussModeNote({ chatMode: 'build', isFirstBuildTurn: false })).toBeNull();
+    expect(discussModeNote({ isFirstBuildTurn: false })).toBeNull();
   });
 
   /*
    * The creation turn MUST build (§4.4): the user asked for a game, and the whole creation context has
    * been assembled and billed. A discuss note here would buy an essay instead of a game, silently.
    */
-  it('is ignored on the creation turn, like the premium toggle', () => {
-    expect(discussModeNote({ chatMode: 'discuss', isCreationTurn: true })).toBeNull();
+  it('is ignored on the first build turn, like the premium toggle', () => {
+    expect(discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: true })).toBeNull();
   });
 });

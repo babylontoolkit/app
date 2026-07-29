@@ -27,11 +27,11 @@ export interface DiscussNoteInput {
   chatMode?: 'discuss' | 'build';
 
   /** The creation turn MUST build (§4.4) — Discuss is ignored on it, like the premium toggle. */
-  isCreationTurn: boolean;
+  isFirstBuildTurn: boolean;
 }
 
 export function discussModeNote(input: DiscussNoteInput): string | null {
-  if (input.chatMode !== 'discuss' || input.isCreationTurn) {
+  if (input.chatMode !== 'discuss' || input.isFirstBuildTurn) {
     return null;
   }
 

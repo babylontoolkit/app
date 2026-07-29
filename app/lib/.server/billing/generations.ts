@@ -141,6 +141,20 @@ export interface GenerationStore {
   upsert(row: GenerationUpsert): Promise<void>;
 
   list(limit?: number): Promise<GenerationRecord[]>;
+
+  /**
+   * Has this project ever had a generation the user was actually CHARGED for? (§4.4a, migration 0015.)
+   *
+   * The observable definition of "the flat creation charge bought something": the project-create refund
+   * on delete asks exactly this. `credits_charged > 0` rather than "a row exists" on purpose — a failed
+   * generation is auto-refunded (§4.6), so its row records an attempt the user got nothing for, and
+   * treating that as delivery would keep the creation charge for a project that never built anything.
+   *
+   * A BYOK or unmetered generation charges zero and so reads as "not delivered" — harmless, because
+   * neither ever paid the creation charge either (`decideProjectCreateCharge` frees both), so there is
+   * nothing to refund and the answer is never consulted.
+   */
+  hasBilledGeneration(projectId: string): Promise<boolean>;
 }
 
 /*
@@ -185,6 +199,34 @@ export class FsGenerationStore implements GenerationStore {
       // Never fail a user's generation because we could not write our own bookkeeping.
       logger.error(`Failed to record generation ${row.id}: ${(error as Error).message}`);
     }
+  }
+
+  async hasBilledGeneration(projectId: string): Promise<boolean> {
+    /*
+     * Local mode has no index to lean on, so this is a directory scan — acceptable because it runs once
+     * per project DELETE and never on a hot path. It stops at the first match.
+     */
+    let files: string[];
+
+    try {
+      files = await fs.readdir(this._dir);
+    } catch {
+      return false;
+    }
+
+    for (const file of files.filter((f) => f.endsWith('.json'))) {
+      try {
+        const record = JSON.parse(await fs.readFile(path.join(this._dir, file), 'utf8')) as GenerationRecord;
+
+        if (record.projectId === projectId && (record.creditsCharged ?? 0) > 0) {
+          return true;
+        }
+      } catch {
+        // A corrupt record cannot prove delivery; keep looking.
+      }
+    }
+
+    return false;
   }
 
   async list(limit = 100): Promise<GenerationRecord[]> {
@@ -267,6 +309,28 @@ export class SupabaseGenerationStore implements GenerationStore {
       logger.error(`FAILED TO WRITE generation row ${row.id} — the ledger debit will be REJECTED: ${error.message}`);
       throw new Error(`Generation row write failed: ${error.message}`);
     }
+  }
+
+  async hasBilledGeneration(projectId: string): Promise<boolean> {
+    const db = await createAdminClient(this._context);
+    const { data, error } = await db
+      .from('generations')
+      .select('id')
+      .eq('project_id', projectId)
+      .gt('credits_charged', 0)
+      .limit(1);
+
+    /*
+     * A read failure must answer TRUE, not false: the caller uses this to decide whether to hand credits
+     * BACK, so an outage that reads as "nothing was ever built" refunds projects that were. Failing
+     * closed here costs a user one refund they can ask for; failing open pays out on every deletion.
+     */
+    if (error) {
+      logger.warn(`Could not check billed generations for project ${projectId}: ${error.message}`);
+      return true;
+    }
+
+    return (data ?? []).length > 0;
   }
 
   async list(limit = 100): Promise<GenerationRecord[]> {

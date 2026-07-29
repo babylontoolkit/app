@@ -58,7 +58,7 @@ export type AgentStatusPhase = 'thinking' | 'generating';
  * put in front of someone watching their first project get built.
  *
  * 🔴 **These are FACTS THE PROXY ALREADY HOLDS, never a guess about what the model is doing.** The turn
- * kind is decided before a token is spent (`isCreationTurn`, `isRepair`, the discuss note) — exactly the
+ * kind is decided before a token is spent (`isFirstBuildTurn`, `isRepair`, the discuss note) — exactly the
  * signals `effort-policy.ts` uses, and for the same reason: the alternative is inferring activity from
  * the stream and narrating a story we cannot see. This says "we asked it to build your project", which
  * is true for the whole turn; it never says "it is writing Home.tsx now", which we do not know.

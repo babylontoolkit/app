@@ -67,8 +67,14 @@ async function enhance() {
 }
 
 beforeEach(async () => {
-  // The oauth.spec trap: `env()` falls back to `process.env`, and vitest loads `.env.local`.
-  for (const key of ['BILLING_ENFORCED', 'CREDIT_UNIT_COST_USD', 'CREDIT_MARGIN']) {
+  /*
+   * The oauth.spec trap: `env()` falls back to `process.env`, and vitest loads `.env.local`.
+   *
+   * `CREATION_FLAT_CREDITS` is RETIRED (§4.4a) and `getBillingConfig` throws when it is set, so it
+   * belongs in this list for a stronger reason than the price vars beside it: leaving it out does not
+   * skew an assertion, it kills the settlement path outright on the operator's machine only.
+   */
+  for (const key of ['BILLING_ENFORCED', 'CREDIT_UNIT_COST_USD', 'CREDIT_MARGIN', 'CREATION_FLAT_CREDITS']) {
     vi.stubEnv(key, undefined as unknown as string);
   }
 

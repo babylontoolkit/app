@@ -11,11 +11,20 @@
  * Each of these is a case where MONEY MOVED AND THE BOOKS DID NOT FOLLOW IT. The FK-anchor failure is
  * the same defect that would have billed ZERO on every production generation forever; a failed refund
  * leaves the user paying for our failure. If nobody is told, nobody ever finds out.
+ *
+ * The enumeration, kept complete on purpose — a paid path added without a line here is a swallow
+ * nobody will ever hear about:
+ *
+ *   1. `settleGeneration` — the debit is refused.
+ *   2. `settleGeneration` — the FK anchor (`generations` row) cannot be written.
+ *   3. `refundGeneration` — the compensating refund does not land.
+ *   4. `refundProjectCreate` — the flat creation charge cannot be given back (§4.4a, migration 0015).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { setLedger, type Ledger } from './ledger';
+import { DuplicateRefundError, setLedger, type Ledger } from './ledger';
 import { setGenerationStore, type GenerationStore } from './generations';
 import { refundGeneration, settleGeneration } from './gate';
+import { projectCreateNote, refundProjectCreate } from './project-create-service';
 
 const COLLECTOR = 'https://collector.example/ingest';
 
@@ -30,6 +39,9 @@ function brokenLedger(): Ledger {
     balance: async () => 0,
     list: async () => [],
     listByReason: async () => [],
+    listByNote: async () => {
+      throw new Error('ledger unavailable');
+    },
   } as unknown as Ledger;
 }
 
@@ -38,7 +50,8 @@ function ledgerIntegrityAlerts() {
 }
 
 beforeEach(() => {
-  for (const key of ['BILLING_ENFORCED', 'CREDIT_UNIT_COST_USD', 'CREDIT_MARGIN']) {
+  /* `CREATION_FLAT_CREDITS` is retired (§4.4a) — `getBillingConfig` THROWS when it is set. */
+  for (const key of ['BILLING_ENFORCED', 'CREDIT_UNIT_COST_USD', 'CREDIT_MARGIN', 'CREATION_FLAT_CREDITS']) {
     vi.stubEnv(key, undefined as unknown as string);
   }
 
@@ -51,7 +64,11 @@ beforeEach(() => {
   });
 
   setLedger(brokenLedger());
-  setGenerationStore({ upsert: async () => undefined, list: async () => [] } as unknown as GenerationStore);
+  setGenerationStore({
+    upsert: async () => undefined,
+    list: async () => [],
+    hasBilledGeneration: async () => false,
+  } as unknown as GenerationStore);
 });
 
 afterEach(() => {
@@ -104,6 +121,42 @@ describe('a swallowed money-path write is reported, never merely logged', () => 
 
     await vi.waitFor(() => expect(ledgerIntegrityAlerts()).toHaveLength(1));
     expect(ledgerIntegrityAlerts()[0]).toMatchObject({ severity: 'critical', scope: 'refund-generation' });
+  });
+
+  /*
+   * 4. The flat New Project charge (§4.4a). The project is GONE by the time this runs, so there is no
+   * retry and no second chance: if the refund does not land, the platform has kept money for a project
+   * it never delivered, and the only trace is a ledger the user has to go and read. Best-effort by
+   * design — a ledger outage must not make a project undeletable — which is exactly why it must be
+   * loud.
+   */
+  it('alerts when the project-creation refund does not land', async () => {
+    await refundProjectCreate({ userId: 'u1', projectId: 'prj_1' });
+
+    await vi.waitFor(() => expect(ledgerIntegrityAlerts()).toHaveLength(1));
+    expect(ledgerIntegrityAlerts()[0]).toMatchObject({ severity: 'critical', scope: 'refund-project-create' });
+    expect(String(ledgerIntegrityAlerts()[0].detail)).toContain('prj_1');
+  });
+
+  /*
+   * 🔴 CONTROL — `DuplicateRefundError` is the SUCCESS path, not a failure. It means migration 0015's
+   * partial unique index caught a concurrent delete and the user already HAS their credits back.
+   * Paging an operator here would train them to ignore the signal that matters four lines above.
+   */
+  it('does NOT alert when the index refuses a refund that was already paid', async () => {
+    const note = projectCreateNote('prj_2');
+
+    setLedger({
+      ...brokenLedger(),
+      listByNote: async () => [{ id: 'e1', userId: 'u1', delta: -150, reason: 'project_create', note }],
+      append: async () => {
+        throw new DuplicateRefundError(note);
+      },
+    } as unknown as Ledger);
+
+    expect(await refundProjectCreate({ userId: 'u1', projectId: 'prj_2' })).toBe(0);
+
+    expect(ledgerIntegrityAlerts()).toHaveLength(0);
   });
 
   /*

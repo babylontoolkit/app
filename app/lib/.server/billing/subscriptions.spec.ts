@@ -71,7 +71,21 @@ const {
 
 let tmp: string;
 
+/**
+ * The `oauth.spec.ts` trap: `env()` falls back to `process.env` and vitest loads `.env.local`.
+ *
+ * `CREATION_FLAT_CREDITS` is RETIRED (§4.4a) and `getBillingConfig` now THROWS when it is set — and
+ * every plan-margin assertion below reaches it through `planAsPack`/`packMargin`. Left unscrubbed,
+ * this whole file fails with a `NotConfiguredError` naming a variable subscriptions have nothing to
+ * do with, on the operator's machine only, with CI green.
+ */
+const SCRUBBED_ENV = ['CREATION_FLAT_CREDITS'] as const;
+
 beforeEach(async () => {
+  for (const key of SCRUBBED_ENV) {
+    vi.stubEnv(key, undefined as unknown as string);
+  }
+
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'subs-'));
   setLedger(new ledgerModule.FsLedger(tmp));
   subscriptions.clear();

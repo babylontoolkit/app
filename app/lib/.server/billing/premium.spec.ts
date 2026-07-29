@@ -86,15 +86,15 @@ describe('decidePremium — the eligibility rule', () => {
    * gateway timeout — the generation died at finish=error after 449s with the artifact never arriving.
    * Premium starts at the first edit turn.
    */
-  it('declines premium on a creation turn regardless of balance', () => {
-    expect(decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isCreationTurn: true })).toEqual({
+  it('declines premium on a first build turn regardless of balance', () => {
+    expect(decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isFirstBuildTurn: true })).toEqual({
       usePremium: false,
       reason: 'creation_turn',
     });
 
     // The same balance on an ordinary turn: premium runs. The control that pins the distinction.
     expect(
-      decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isCreationTurn: false }).usePremium,
+      decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isFirstBuildTurn: false }).usePremium,
     ).toBe(true);
   });
 

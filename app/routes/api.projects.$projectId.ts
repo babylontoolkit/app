@@ -13,6 +13,7 @@ import { deleteMessages } from '~/lib/.server/projects/message-store';
 import { deleteRemixSeed } from '~/lib/.server/share/seed-store';
 import { deleteWorkingCopy } from '~/lib/.server/projects/working-copy';
 import { deleteSandbox } from '~/lib/.server/sandbox/service';
+import { refundProjectCreate } from '~/lib/.server/billing/project-create-service';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { errorResponse } from '~/lib/.server/http';
 import { createScopedLogger } from '~/utils/logger';
@@ -91,7 +92,26 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
         }
       }
 
+      /*
+       * The flat creation charge comes BACK if this project never delivered a build (§4.4a, migration
+       * 0015) — i.e. it never had a generation the user was actually charged for. That is the observable
+       * definition of "creation did not deliver", and it correctly declines to refund someone who built
+       * a game and then deleted it.
+       *
+       * On the SERVER's delete path deliberately, not the client's `rollbackRegisteredProject`: that one
+       * is fire-and-forget and never rejects, so a refund hung off it is a refund that can silently not
+       * happen.
+       *
+       * 🔴 AFTER `store.delete`, never before. A refund written first is paid again on every retry of a
+       * FAILED delete — and a failed delete leaves the card in place, so retrying is exactly what the
+       * user does next. Ordering it here means the money only moves once the project is actually gone,
+       * and `requireOwnedProject` then 404s the retry before it can reach this line. Two CONCURRENT
+       * deletes still race past that, so uniqueness is enforced structurally by migration 0015's partial
+       * unique index — the ordering and the index close different holes, so keep both.
+       */
       await store.delete(project.id);
+
+      await refundProjectCreate({ userId: user.id, projectId: project.id, context });
 
       return json({ ok: true });
     }

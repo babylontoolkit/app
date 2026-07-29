@@ -44,7 +44,7 @@ export interface PremiumDecisionInput {
    * = 307.8s, 17,635 chars reasoning, 0 text). Creations run the standard streaming model; the
    * premium preference kicks in from the first edit turn.
    */
-  isCreationTurn?: boolean;
+  isFirstBuildTurn?: boolean;
 }
 
 export type PremiumDecision =
@@ -66,7 +66,7 @@ export function decidePremium(input: PremiumDecisionInput): PremiumDecision {
     return { usePremium: false, reason: 'not_requested' };
   }
 
-  if (input.isCreationTurn) {
+  if (input.isFirstBuildTurn) {
     return { usePremium: false, reason: 'creation_turn' };
   }
 

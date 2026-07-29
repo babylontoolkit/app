@@ -12,6 +12,8 @@
  * blank workbench and no sentence about why, which is exactly the state this phase was built for.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   bootPhaseCopy,
   bootProgress,
@@ -27,6 +29,16 @@ const CREATION_PHASES: BootPhase[] = [
   { step: 'creating-workspace' },
   { step: 'creating-mount' },
   { step: 'creating-finalize' },
+  { step: 'creating-settle' },
+
+  /*
+   * The last two steps of creation (T6). A project that is not RUNNING is not created: the owner's
+   * success condition is *"npm install + npm run dev and showing the starter app template basic home
+   * page"*, so the splash covers those two waits rather than coming down while they run in a terminal
+   * nobody is looking at. Both must be creation-family phases or the overlay they narrate never draws.
+   */
+  { step: 'creating-install' },
+  { step: 'creating-serve' },
 ];
 
 const RESUME_PHASES: BootPhase[] = [
@@ -42,6 +54,86 @@ const RESUME_PHASES: BootPhase[] = [
   { step: 'files' },
   { step: 'prepare' },
 ];
+
+/**
+ * 🔴 THE LISTS ABOVE ARE HAND-WRITTEN, AND A HAND-WRITTEN LIST CANNOT NOTICE AN OMISSION.
+ *
+ * Everything below iterates `CREATION_PHASES` / `RESUME_PHASES`, so a phase added to `BootPhase` and
+ * forgotten here is simply never tested — the suite stays green and the new phase quietly falls through
+ * to the generic "Opening project…" copy, or (worse) is not recognised by `isCreationPhase` and its
+ * overlay never draws. That is not hypothetical: `creating-settle` had shipped, and was missing from
+ * this file until T6 went looking.
+ *
+ * TypeScript cannot help — the union is erased at runtime, and `BootPhase[]` accepts a SHORT array
+ * happily. So the phase set is derived from the SOURCE of the union and compared against the lists.
+ * Being a source scan, it is worthless without controls: one proving the extractor actually reads a
+ * real union (not an empty match reporting a clean bill of health forever), and one proving it can
+ * SEE an omission on a fixture where an omission exists.
+ */
+const BOOT_PROGRESS_SOURCE = readFileSync(join(process.cwd(), 'app/lib/stores/boot-progress.ts'), 'utf-8');
+
+/** Every `step: '…'` literal in the `BootPhase` union declaration, in declaration order. */
+function declaredPhaseSteps(source: string): string[] {
+  const start = source.indexOf('export type BootPhase =');
+  const end = source.indexOf('export const bootProgress', start);
+  const union = start < 0 || end < 0 ? '' : source.slice(start, end);
+
+  return [...union.matchAll(/\bstep:\s*'([^']+)'/g)].map((match) => match[1]);
+}
+
+const DECLARED_STEPS = declaredPhaseSteps(BOOT_PROGRESS_SOURCE);
+
+const COVERED_STEPS = new Set([
+  ...CREATION_PHASES.map((phase) => phase.step),
+  ...RESUME_PHASES.map((phase) => phase.step),
+  'failed',
+]);
+
+describe('CONTROLS — the phase scanner can see what it judges', () => {
+  it('read a real union with the phases it is known to contain', () => {
+    expect(DECLARED_STEPS.length).toBeGreaterThan(5);
+    expect(DECLARED_STEPS).toContain('idle');
+    expect(DECLARED_STEPS).toContain('sandbox');
+    expect(DECLARED_STEPS).toContain('failed');
+    expect(new Set(DECLARED_STEPS).size).toBe(DECLARED_STEPS.length);
+  });
+
+  /* The other direction: on a union that declares a phase the lists do not carry, the check FAILS. */
+  it('detects a phase the test lists would have missed', () => {
+    const fabricated = declaredPhaseSteps(
+      BOOT_PROGRESS_SOURCE.replace(
+        'export const bootProgress',
+        "  | { step: 'creating-teleport' }\n\nexport const bootProgress",
+      ),
+    );
+
+    expect(fabricated).toContain('creating-teleport');
+    expect(COVERED_STEPS.has('creating-teleport')).toBe(false);
+  });
+});
+
+describe('every declared phase is covered by this file', () => {
+  /*
+   * The assertion that makes the parameterized tests below trustworthy. A new phase must be added to
+   * one of the two lists — which is also the moment its copy and its `isCreationPhase` answer get
+   * checked, because everything else here iterates them.
+   */
+  it('leaves no phase untested', () => {
+    expect([...DECLARED_STEPS].sort()).toEqual([...COVERED_STEPS].sort());
+  });
+
+  /*
+   * And the family rule, read off the names rather than off the lists: `isCreationPhase` is a
+   * `startsWith('creating-')` prefix test, so a creation phase filed under `RESUME_PHASES` (or the
+   * reverse) would be asserted to behave in exactly the way that breaks it.
+   */
+  it('files each declared phase in the list its own name puts it in', () => {
+    for (const step of DECLARED_STEPS) {
+      const inCreationList = CREATION_PHASES.some((phase) => phase.step === step);
+      expect(inCreationList).toBe(step.startsWith('creating-'));
+    }
+  });
+});
 
 describe('isCreationPhase — the gate on the creation splash overlay', () => {
   it('recognises every creation phase', () => {
@@ -70,6 +162,28 @@ describe('bootPhaseCopy — every phase has its own words', () => {
     }
 
     expect(new Set(titles).size).toBe(titles.length);
+  });
+
+  /*
+   * The last two sentences of creation, and the ones a user is most likely to sit in front of: a cold
+   * `npm install` is the long wait, and the dev server binding a port is the moment their own project
+   * appears. Both said "Opening project… / Fetching the conversation and project record" before T6 —
+   * copy from the RESUME path, describing work that is not happening, on the splash whose entire job
+   * is to say what is.
+   */
+  it('names the install and serve steps rather than falling through to the idle copy', () => {
+    const install = bootPhaseCopy({ step: 'creating-install' });
+    const serve = bootPhaseCopy({ step: 'creating-serve' });
+
+    expect(install.title.toLowerCase()).toContain('install');
+    expect(install.detail).toContain('npm install');
+    expect(serve.title.toLowerCase()).toContain('start');
+    expect(serve.detail.toLowerCase()).toContain('dev server');
+
+    for (const copy of [install, serve]) {
+      expect(copy.title).not.toBe(bootPhaseCopy({ step: 'idle' }).title);
+      expect(copy.detail).not.toBe(bootPhaseCopy({ step: 'idle' }).detail);
+    }
   });
 
   it('shows file counts once the scan knows its total', () => {

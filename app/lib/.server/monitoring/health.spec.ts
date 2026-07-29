@@ -43,6 +43,19 @@ describe('buildHealthReport', () => {
      */
     'VITE_SANDBOX_PROVIDER',
     'CODESANDBOX_API_KEY',
+
+    /*
+     * 🔴 A RETIRED VARIABLE IS PART OF THE PRECEDENCE CHAIN TOO — it decides whether
+     * `getBillingConfig()` returns or THROWS.
+     *
+     * `buildHealthReport` → `isStripeConfigured` → `getBillingConfig`, which now refuses
+     * `CREATION_FLAT_CREDITS` outright (§4.4a). The owner's `.env.local` still sets it (it was the
+     * documented way to price a creation until 2026-07-29), so every test in this file threw a
+     * `NotConfiguredError` on that machine while CI stayed green — the `oauth.spec.ts` trap wearing
+     * the retirement's clothes. Scrubbed here rather than in the sandbox block because the throw is
+     * upstream of every assertion, not just the sandbox ones.
+     */
+    'CREATION_FLAT_CREDITS',
   ];
 
   const saved: Record<string, string | undefined> = {};

@@ -20,6 +20,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { LEDGER_REASONS } from './ledger';
 
 let db: PGlite;
 
@@ -55,6 +56,7 @@ async function append(entry: {
   reason: string;
   generationId?: string | null;
   paymentRef?: string | null;
+  note?: string | null;
   allowNegative?: boolean;
 }) {
   const result = await db.query<{ balance_after: number }>(
@@ -66,7 +68,7 @@ async function append(entry: {
       entry.generationId ?? null,
       null,
       entry.paymentRef ?? null,
-      null,
+      entry.note ?? null,
       entry.allowNegative ??
         (entry.reason === 'generation' || entry.reason === 'adjustment' || entry.reason === 'search'),
     ],
@@ -440,6 +442,56 @@ describe('credit_ledger.generation_id → generations(id)', () => {
   it('rejects an unknown ledger reason at the CHECK constraint', async () => {
     await expect(append({ delta: -1, reason: 'bogus', allowNegative: true })).rejects.toThrow(/check|constraint/i);
   });
+
+  /*
+   * The 'project_create' reason (migration 0015): the flat New Project charge. It is the 'media' shape,
+   * not the 'search' shape — debited BEFORE anything is provisioned, so it must REFUSE rather than
+   * overdraw. Both halves are asserted, because getting this backwards gives away project creation for
+   * free and throws nothing.
+   */
+  it('accepts a project_create debit with no generation anchor', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+
+    const row = await append({ delta: -150, reason: 'project_create' });
+
+    expect(row.balance_after).toBe(850);
+  });
+
+  it('REFUSES a project_create debit that would overdraw — it debits before anything is provisioned', async () => {
+    await append({ delta: 100, reason: 'grant' });
+
+    await expect(append({ delta: -150, reason: 'project_create' })).rejects.toThrow(/insufficient|balance|negative/i);
+  });
+});
+
+/**
+ * The three lockstep places (`ledger.ts`'s union, `mayGoNegative`, and the SQL `CHECK`) drifting apart is
+ * a mis-bill that throws nothing: a reason the TypeScript accepts and Postgres rejects fails only in
+ * production, and only on the path that uses it. Assert the SQL constraint's member list against the
+ * runtime inventory the union is derived from, in BOTH directions.
+ */
+describe('the SQL reason CHECK and the TypeScript inventory agree', () => {
+  it('names exactly the reasons LEDGER_REASONS declares', async () => {
+    const { rows } = await db.query<{ def: string }>(
+      `select pg_get_constraintdef(oid) as def from pg_constraint where conname = 'credit_ledger_reason_check'`,
+    );
+
+    expect(rows).toHaveLength(1);
+
+    const inSql = [...rows[0].def.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+
+    expect(inSql).toEqual([...LEDGER_REASONS].sort());
+  });
+
+  /* CONTROL — a constraint definition that stopped parsing would make the assertion above vacuous. */
+  it('CONTROL — the constraint definition really was read from Postgres', async () => {
+    const { rows } = await db.query<{ def: string }>(
+      `select pg_get_constraintdef(oid) as def from pg_constraint where conname = 'credit_ledger_reason_check'`,
+    );
+
+    expect(rows[0].def).toMatch(/reason/);
+    expect(rows[0].def).toContain("'project_create'");
+  });
 });
 
 describe('grant integrity and payment idempotency (partial unique indexes, not app checks)', () => {
@@ -715,6 +767,136 @@ describe("the 'license' ledger reason (migration 0012)", () => {
     const refunded = await append({ delta: 500, reason: 'refund' });
 
     expect(refunded.balance_after).toBe(2000);
+  });
+});
+
+/**
+ * The 'project_create' reason and its AT-MOST-ONCE refund (migration 0015).
+ *
+ * The refund is the interesting half, and it is the half `FsLedger` cannot prove: two concurrent
+ * DELETEs of one project both read "not refunded yet" and both insert, MINTING the creation price —
+ * delete-and-recreate in a loop and get paid. TypeScript's read-then-write check is a race by
+ * construction, so the guarantee is a PARTIAL UNIQUE INDEX, and this is the only place it is real.
+ *
+ * The predicate is the other half of the design, and getting it wrong is WORSE than the bug it
+ * prevents: every other refund carries a free-text note that legitimately repeats ("Generation failed"
+ * arrives many times for one user), so a blanket unique index on (user_id, note) would reject every
+ * second generation refund and leave users unrefunded — silently, and only for people already having a
+ * bad day. Hence the CONTROLS below: they are not padding, they are the reason the predicate exists.
+ */
+describe("the 'project_create' reason and its at-most-once refund (migration 0015)", () => {
+  const NOTE = 'project_create:prj_a';
+
+  it('accepts a project_create debit with no generation anchor', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+
+    // No createGeneration(): the flat creation price is not cost-recovery, so it names no generation.
+    const row = await append({ delta: -150, reason: 'project_create', note: NOTE });
+
+    expect(row.balance_after).toBe(850);
+  });
+
+  /*
+   * It debits BEFORE anything is provisioned, so an insufficient balance must REFUSE rather than
+   * overdraw — a refusal leaves nothing half-made. ('search' is the opposite case: a vendor was already
+   * paid, so refusing there would only lose the audit trail.)
+   */
+  it('REFUSES a project_create debit that would overdraw — the project must not be created', async () => {
+    await append({ delta: 100, reason: 'grant' });
+
+    await expect(append({ delta: -150, reason: 'project_create', note: NOTE })).rejects.toThrow(
+      /insufficient credits/i,
+    );
+
+    expect(await balance()).toBe(100);
+  });
+
+  /* 🔴 The faucet, closed in the database. The second insert is REJECTED, not merely detected. */
+  it('refuses a SECOND refund carrying the same project_create note', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await append({ delta: -150, reason: 'project_create', note: NOTE });
+    await append({ delta: 150, reason: 'refund', note: NOTE });
+
+    await expect(append({ delta: 150, reason: 'refund', note: NOTE })).rejects.toThrow(/duplicate key|unique/i);
+
+    expect(await balance()).toBe(1000);
+  });
+
+  /* Per-user, like the grant and payment indexes — two accounts each get their own project refunded. */
+  it('is per-user: another account may still be refunded for its own project', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await append({ userId: OTHER, delta: 1000, reason: 'grant' });
+
+    await append({ delta: 150, reason: 'refund', note: NOTE });
+    await append({ userId: OTHER, delta: 150, reason: 'refund', note: NOTE });
+
+    expect(await balance()).toBe(1150);
+    expect(await balance(OTHER)).toBe(1150);
+  });
+
+  /* Per-project: one user deleting two undelivered projects is refunded for both. */
+  it('is per-project: a second, different project is still refunded', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await append({ delta: 150, reason: 'refund', note: NOTE });
+    await append({ delta: 150, reason: 'refund', note: 'project_create:prj_b' });
+
+    expect(await balance()).toBe(1300);
+  });
+
+  /*
+   * 🔴 CONTROL — the collision the predicate exists to avoid. If the index were widened to all refunds,
+   * this is what would break: every second generation refund rejected, users left paying for our
+   * failures. It must stay possible to write the same free-text refund note twice.
+   */
+  it('CONTROL — two generation refunds noted identically both land', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await createGeneration('gen_a');
+    await createGeneration('gen_b');
+    await append({ delta: -30, reason: 'generation', generationId: 'gen_a' });
+    await append({ delta: -30, reason: 'generation', generationId: 'gen_b' });
+
+    await append({ delta: 30, reason: 'refund', generationId: 'gen_a', note: 'Generation failed' });
+    await append({ delta: 30, reason: 'refund', generationId: 'gen_b', note: 'Generation failed' });
+
+    expect(await balance()).toBe(1000);
+  });
+
+  /* CONTROL — a NULL note is not a value, so unnoted refunds never collide with each other either. */
+  it('CONTROL — refunds with no note at all repeat freely', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await append({ delta: 10, reason: 'refund' });
+    await append({ delta: 10, reason: 'refund' });
+
+    expect(await balance()).toBe(1020);
+  });
+
+  /*
+   * 🔴 THE ESCAPE. The predicate is `note like 'project\_create:%'` — the underscore is ESCAPED, so it
+   * matches a literal `_`. Drop the backslash and `_` becomes LIKE's single-character wildcard, which
+   * silently widens the index to notes that merely resemble the prefix. This pair proves the index is
+   * matching a literal underscore rather than any character, which also proves the tests above are
+   * exercising the index and not a coincidence.
+   */
+  it('CONTROL — the underscore is literal: a project?create-shaped note is NOT constrained', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await append({ delta: 10, reason: 'refund', note: 'projectXcreate:prj_a' });
+    await append({ delta: 10, reason: 'refund', note: 'projectXcreate:prj_a' });
+
+    expect(await balance()).toBe(1020);
+  });
+
+  /* And the index really is named + partial in the catalog, not a full unique constraint in disguise. */
+  it('is a PARTIAL unique index — the predicate is on the index, not enforced in the application', async () => {
+    const { rows } = await db.query<{ indexdef: string }>(
+      `select indexdef from pg_indexes
+       where schemaname = 'public' and indexname = 'credit_ledger_project_create_refund_idx'`,
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].indexdef).toMatch(/unique/i);
+    expect(rows[0].indexdef).toMatch(/where/i);
+    expect(rows[0].indexdef).toMatch(/user_id/);
+    expect(rows[0].indexdef).toMatch(/note/);
   });
 });
 

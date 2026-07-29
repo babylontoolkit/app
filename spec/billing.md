@@ -68,8 +68,18 @@ it is no longer folded in *invisibly*:
   §"Sandbox compute"** — and the two documents must keep agreeing, since the placeholder's
   credits-per-active-hour assumption IS `SANDBOX_EST_VM_HOURS_PER_KCREDIT` inverted. The end state is
   metering, at which point the placeholder comes OUT of the margin.
+> ⚠️ **SUPERSEDED 2026-07-29 (§4.4a). The section below describes a mechanism that has been RETIRED**,
+> and is kept because it explains the shape of the replacement. Under the project-first flow there is no
+> creation TURN to price: New Project clones the pinned starter, installs it and serves it without
+> running a generation at all, and carries its own flat charge at registration (`PROJECT_CREATE_CREDITS`,
+> ledger reason `project_create`). The first BUILD turn bills cost-derived like every other turn.
+> `CREATION_FLAT_CREDITS` is now **REFUSED** — `getBillingConfig` throws a `NotConfiguredError` naming
+> the replacement, on the retired-KIE-price-var precedent. `decideCredits`' `flat`/`maxCredits` levers
+> and the gate's `minimumCredits` wall survive as tested-but-uncalled capability (`creation-flat.spec.ts`
+> pins both the refusal and the levers).
+
 🔴 **CREATION TURNS ARE FLAT-PRICED (2026-07-28, `creationFlatCredits`, default 500, env
-`CREATION_FLAT_CREDITS`).** The cost-proportional formula above is the DEFAULT for every turn except
+`CREATION_FLAT_CREDITS`) — RETIRED, see the banner above.** The cost-proportional formula above is the DEFAULT for every turn except
 the one the product is sold on: a creation's cost is dominated by prompt-cache luck (the same creation
 measured **54 credits warm vs 430–633 cold** — cache writes at 2×, reads at 0.1×, KIE warming per
 backend), a 12× spread the user can neither see nor influence. So the creation turn (detected by the
@@ -208,7 +218,7 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   nothing objecting (observed live). A deploy that wants free premium says `PREMIUM_MINIMUM_CREDITS=0`
   explicitly. Pinned by a structural tripwire in `premium.spec.ts` (no enforcement input exists to
   bypass with).
-- **A CREATION turn never runs premium (2026-07-18)**: `decidePremium({ isCreationTurn: true })` →
+- **A CREATION turn never runs premium (2026-07-18)**: `decidePremium({ isFirstBuildTurn: true })` →
   `reason: 'creation_turn'`, whatever the balance. KIE serves Fable 5 with a BUFFERED answer
   (accepted for edit-sized replies); a creation-sized artifact (~25k out tokens, 4–7 min decode)
   cannot flush before KIE's ~5-min gateway timeout — measured live: 307.8s of streamed reasoning,

@@ -53,7 +53,7 @@ export const MEDIA_TURN_STEPS = CREATION_MEDIA_STEPS;
 
 export interface ToolPolicyInput {
   /** The turn carries `CREATION_BRIEF_MARKER` — the expensive one-shot that writes the whole game. */
-  isCreationTurn: boolean;
+  isFirstBuildTurn: boolean;
 
   /** The project has live MCP relay tools (§4.14) — these force the loop on for non-creation turns. */
   hasMcpTools: boolean;
@@ -91,7 +91,7 @@ export interface ToolPolicy {
 }
 
 export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
-  if (input.isCreationTurn) {
+  if (input.isFirstBuildTurn) {
     return input.hasMediaTools
       ? { allowTools: true, toolset: 'media-only', maxSteps: CREATION_MEDIA_STEPS }
       : { allowTools: false, toolset: 'all', maxSteps: 1 };

@@ -1,22 +1,39 @@
 /**
- * Flat-priced creation turns (§4.6, `creationFlatCredits`) — a money path in both directions.
+ * The RETIREMENT of flat creation pricing (§4.4a, 2026-07-29), and the flat/cap levers that outlived it.
  *
- * A wrong answer here throws nothing: charging the flat price on a BYOK or zero-usage generation is a
- * silent mis-bill; falling back to cost-derived when the flat price should apply silently restores the
- * 12x cold/warm variance the feature exists to remove; and a gate that lets a 10-credit balance start
- * a 500-credit creation is a knowable deep negative. Every branch of `decideCredits` and the gate's
- * `minimumCredits` wall is pinned by intent, plus the settlement integration against the real
- * `FsLedger` (flat debit lands, note names the pricing model, `rawCostUsd` stays the TRUE cost).
+ * Two things are pinned here, and they are deliberately different in kind:
+ *
+ * 1. **`CREATION_FLAT_CREDITS` is REFUSED, not ignored.** Under the project-first flow there is no
+ *    creation TURN to price: New Project clones the pinned starter, installs it and serves it without
+ *    running a generation at all, and carries its own flat charge at registration
+ *    (`PROJECT_CREATE_CREDITS`, ledger reason `project_create`). An operator who leaves the old
+ *    variable set is expressing a pricing intent nothing honours — the exact shape of the retired KIE
+ *    price vars, and the reason that precedent exists: a price variable nothing reads is a mis-bill
+ *    waiting to be believed. `getBillingConfig` throws a `NotConfiguredError` NAMING the replacement.
+ *
+ * 2. **`decideCredits`' `flat`/`maxCredits` levers and the gate's `minimumCredits` wall are KEPT** —
+ *    pure, exported, tested money decisions with (as of the retirement) no production caller. Ceasing
+ *    to PASS them was the pricing decision; deleting them would discard a tested capability the
+ *    operator may want back, and an untested one is worse than an absent one. Their branches stay
+ *    pinned by intent: charging a flat price on a BYOK or zero-usage generation is a silent mis-bill
+ *    in one direction, and silently falling back to cost-derived is one in the other.
+ *
+ * The settlement block below still drives the real `FsLedger` end-to-end (flat debit lands, the note
+ * names the pricing model, `rawCostUsd` stays the TRUE token-derived cost) — that is what makes the
+ * retained lever genuinely retained rather than nominally so.
  *
  * Sibling to `billing.spec.ts` (that file is ~1,900 lines); same FsLedger/store setup, same env-scrub
  * posture — the `oauth.spec.ts` trap means the WHOLE precedence chain is scrubbed first, or a
  * developer with `CREATION_FLAT_CREDITS` in `.env.local` fails money assertions locally with CI green.
+ * That trap is now sharper than it was: an unscrubbed value does not skew a number, it THROWS.
  */
 import fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { creditsForUsage, DEFAULT_CREATION_FLAT_CREDITS, getBillingConfig, rawCostUsd, type TokenUsage } from './rates';
+import { NotConfiguredError } from '~/lib/.server/env';
 import { checkCreditGate, decideCredits, settleGeneration } from './gate';
 import { FsLedger, setLedger } from './ledger';
 import { setGenerationStore, type GenerationStore } from './generations';
@@ -78,41 +95,183 @@ afterEach(async () => {
   invalidateMarketPricesCache();
 });
 
-describe('creationFlatCredits config (CREATION_FLAT_CREDITS)', () => {
-  it('defaults to 500', () => {
-    expect(DEFAULT_CREATION_FLAT_CREDITS).toBe(500);
-    expect(getBillingConfig().creationFlatCredits).toBe(500);
+/**
+ * THE GENERATION PATH NO LONGER FLAT-PRICES — asserted at the SOURCE, and here is why that is the
+ * honest form rather than the lazy one.
+ *
+ * The behavioural assertion we would prefer is "a settlement for a turn carrying
+ * `CREATION_BRIEF_MARKER` bills cost-derived". It has no seam: nothing in the suite drives
+ * `streamAgent` as far as `settleGeneration` — the proxy specs stop at the prompt (`preload-skills`,
+ * `cache-breakpoints`, `skill-selection`) and the billing specs start at `settleGeneration`'s
+ * arguments. Standing up a real generation to observe an ARGUMENT THAT IS NOT PASSED would be a large
+ * fixture asserting an absence, which is exactly what a source scan does honestly.
+ *
+ * So this reads the call sites and pins that they carry no pricing overrides. Two failure modes it is
+ * built against: a bare `expect(source).not.toContain('minimumCredits')` would be a LIE (the proxy
+ * legitimately passes `minimumCredits` to `decidePremium` two statements below the gate), so each scan
+ * is scoped to ONE call's arguments; and a scan that silently matches nothing reports all-clear
+ * forever, so every scoped extraction is guarded by a CONTROL proving it found the real call.
+ */
+describe('proxy.ts passes no flat price on the generation path (§4.4a)', () => {
+  const proxySource = readFileSync(path.join(process.cwd(), 'app/lib/.server/agent/proxy.ts'), 'utf-8');
+
+  /*
+   * Comments are documentation, not behaviour — and here that distinction is load-bearing in BOTH
+   * directions: the retirement is documented in prose directly above both call sites (so a
+   * post-mortem naming `flatCredits` must not read as the code passing it), and the rename is
+   * documented by quoting the OLD name `isCreationTurn` (so the stripped source is the only place the
+   * "no stale name" assertion can honestly look).
+   */
+  const stripped = proxySource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+  /** The arguments of one call, brace-matched from `name({` to its closing `}`. */
+  function callArgs(name: string): string {
+    const source = stripped;
+    const start = source.indexOf(`${name}({`);
+
+    if (start < 0) {
+      return '';
+    }
+
+    const open = source.indexOf('{', start);
+    let depth = 0;
+
+    for (let i = open; i < source.length; i++) {
+      if (source[i] === '{') {
+        depth++;
+      } else if (source[i] === '}' && --depth === 0) {
+        return source.slice(open, i + 1);
+      }
+    }
+
+    return '';
+  }
+
+  const gate = callArgs('checkCreditGate');
+  const settle = callArgs('settleGeneration');
+
+  it('CONTROL — the scan finds both real call sites and their real arguments', () => {
+    expect(gate).toContain('userId');
+    expect(gate).toContain('byok');
+    expect(settle).toContain('generationId');
+    expect(settle).toContain('usage');
+    expect(settle).toContain('provider');
   });
 
-  /* `0` is a REAL value — the operator escape hatch back to cost-proportional pricing. */
-  it('accepts 0 as "flat pricing disabled"', () => {
-    vi.stubEnv('CREATION_FLAT_CREDITS', '0');
-    expect(getBillingConfig().creationFlatCredits).toBe(0);
+  /*
+   * CONTROL for the scoping itself. `minimumCredits` IS still in proxy.ts — on the `decidePremium`
+   * call, which is a different decision entirely. If the extraction ever degenerated to "the whole
+   * file", this assertion and the gate assertion below could not both hold.
+   */
+  it('CONTROL — the scoping is real: minimumCredits still appears elsewhere in the file', () => {
+    expect(stripped).toContain('minimumCredits');
+    expect(stripped).toContain('decidePremium');
   });
 
-  it('honors a positive override', () => {
-    vi.stubEnv('CREATION_FLAT_CREDITS', '250');
-    expect(getBillingConfig().creationFlatCredits).toBe(250);
+  /* CONTROL — the comment strip works, proven on the one name that survives ONLY in prose. */
+  it('CONTROL — comments are stripped, so the rename post-mortem does not count as code', () => {
+    expect(proxySource).toContain('isCreationTurn');
+    expect(stripped).not.toContain('isCreationTurn');
   });
 
-  /* Obeying a negative would CREDIT the user for creating a project — ignore, never obey. */
-  it('ignores a negative override in favor of the default', () => {
-    vi.stubEnv('CREATION_FLAT_CREDITS', '-5');
-    expect(getBillingConfig().creationFlatCredits).toBe(DEFAULT_CREATION_FLAT_CREDITS);
+  it('sets no minimumCredits on the pre-flight gate — no turn cost is knowable up front', () => {
+    expect(gate).not.toContain('minimumCredits');
   });
 
-  it('ignores a non-numeric override in favor of the default', () => {
-    vi.stubEnv('CREATION_FLAT_CREDITS', 'abc');
-    expect(getBillingConfig().creationFlatCredits).toBe(DEFAULT_CREATION_FLAT_CREDITS);
+  it('passes neither flatCredits nor maxCredits at settlement — every turn is cost-derived', () => {
+    expect(settle).not.toContain('flatCredits');
+    expect(settle).not.toContain('maxCredits');
   });
 
-  it('floors a fractional override — credits are integers', () => {
-    vi.stubEnv('CREATION_FLAT_CREDITS', '250.9');
-    expect(getBillingConfig().creationFlatCredits).toBe(250);
+  /*
+   * The first-build turn must still EXIST as a concept — it drives ten behaviours (premium lock, skill
+   * preload, tool policy, `requiresAction`, discuss suppression, status copy). What changed is that
+   * none of them is money. Pinning this stops the retirement from being "fixed" by deleting the marker
+   * check, which would silently restore premium on a turn that cannot flush through KIE's gateway.
+   */
+  it('still derives isFirstBuildTurn from the brief marker, for its NON-billing consumers', () => {
+    expect(stripped).toContain('isFirstBuildTurn');
+    expect(stripped).toContain('CREATION_BRIEF_MARKER');
+    expect(stripped).not.toContain('isCreationTurn');
   });
 });
 
-describe('decideCredits', () => {
+describe('CREATION_FLAT_CREDITS is RETIRED and REFUSED (§4.4a)', () => {
+  it('reads 0 — and works — when the variable is unset', () => {
+    expect(() => getBillingConfig()).not.toThrow();
+    expect(getBillingConfig().creationFlatCredits).toBe(0);
+  });
+
+  /*
+   * The field survives the retirement (always 0) so the absence is visible where the price used to be
+   * read. The old default survives as an exported constant for the same documentary reason — but it
+   * must NOT be what the config returns, or the retirement is nominal.
+   */
+  it('keeps the historical default as a documented constant that prices nothing', () => {
+    expect(DEFAULT_CREATION_FLAT_CREDITS).toBe(500);
+    expect(getBillingConfig().creationFlatCredits).not.toBe(DEFAULT_CREATION_FLAT_CREDITS);
+  });
+
+  it('throws when the variable is set, rather than ignoring it', () => {
+    vi.stubEnv('CREATION_FLAT_CREDITS', '500');
+    expect(() => getBillingConfig()).toThrow(NotConfiguredError);
+  });
+
+  /*
+   * 🔴 `0` THROWS TOO, and that is the deliberate answer — the one value where "ignore it" is
+   * tempting, because `0` used to mean "flat pricing disabled" and cost-derived billing is exactly
+   * what happens now. It still throws for two reasons. (a) The variable no longer has a semantics to
+   * agree with: there is no creation turn, so `0` is not a statement about today's system, it is a
+   * leftover line about a mechanism that is gone. (b) More concretely, an operator running `=0` was
+   * getting FREE creations; under the replacement they are charged `PROJECT_CREATE_CREDITS` (default
+   * 150) per New Project. Silently accepting their `0` would let them keep believing creation is free
+   * while their users are billed — precisely the mis-bill-waiting-to-be-believed the retired-KIE-price
+   * precedent exists to prevent. A one-time boot failure naming the replacement is the cheap half.
+   */
+  it('throws on 0 as well — the value whose old meaning was "disabled"', () => {
+    vi.stubEnv('CREATION_FLAT_CREDITS', '0');
+    expect(() => getBillingConfig()).toThrow(NotConfiguredError);
+  });
+
+  it('throws on a garbage value — the refusal is about the KEY, never the value', () => {
+    vi.stubEnv('CREATION_FLAT_CREDITS', 'abc');
+    expect(() => getBillingConfig()).toThrow(NotConfiguredError);
+  });
+
+  /*
+   * Whitespace-only is treated as unset (`?.trim()`), matching `env()`'s own empty-string-is-undefined
+   * rule. Refusing to boot over a blank line an operator left behind is a refusal with no intent
+   * behind it — the honest reading of `FOO=` is "not set", not "set to nothing".
+   */
+  it('treats an empty or whitespace-only value as unset', () => {
+    vi.stubEnv('CREATION_FLAT_CREDITS', '   ');
+    expect(() => getBillingConfig()).not.toThrow();
+
+    vi.stubEnv('CREATION_FLAT_CREDITS', '');
+    expect(() => getBillingConfig()).not.toThrow();
+  });
+
+  /*
+   * The message is the whole point of failing loudly rather than ignoring: an operator who hits this
+   * must not have to read the source to learn what replaced it. Naming BOTH the retired variable and
+   * its successor is what turns a boot failure into a migration instruction.
+   */
+  it('names the replacement variable in the error', () => {
+    vi.stubEnv('CREATION_FLAT_CREDITS', '500');
+
+    expect(() => getBillingConfig()).toThrow(/PROJECT_CREATE_CREDITS/);
+    expect(() => getBillingConfig()).toThrow(/CREATION_FLAT_CREDITS/);
+  });
+});
+
+/**
+ * RETAINED LEVERS, NO PRODUCTION CALLER. `proxy.ts` stopped passing `flatCredits`/`maxCredits` at the
+ * retirement (§4.4a) — every turn settles cost-derived. The parameters stay because they are pure,
+ * exported money decisions: not passing them is a pricing choice an operator could reverse, whereas
+ * deleting them throws the capability away. What must NEVER regress is that they stay TESTED while
+ * uncalled — an untested lever someone re-enables later is worse than no lever at all.
+ */
+describe('decideCredits (retained flat/cap levers)', () => {
   const base = { model: 'claude-sonnet-5', provider: 'Anthropic' } as const;
 
   it('charges BYOK zero even when a flat price is set — their key already paid', () => {
@@ -177,7 +336,14 @@ describe('decideCredits', () => {
   });
 });
 
-describe('credit gate with minimumCredits (the flat-creation wall)', () => {
+/**
+ * The gate's `minimumCredits` wall — likewise retained and likewise uncalled since the retirement
+ * (`proxy.ts` sets no minimum: no turn's cost is knowable pre-flight any more, and the flat charge
+ * moved ahead of the generation entirely). ⚠️ Its refusal message still reads "Creating a new project
+ * costs N credits", which describes the charge that `decideProjectCreateCharge` now owns — if this
+ * lever is ever re-enabled for something else, the copy has to move with it.
+ */
+describe('credit gate with minimumCredits (retained, currently uncalled)', () => {
   it('refuses when enforced and the balance is below the minimum, naming both numbers', async () => {
     vi.stubEnv('BILLING_ENFORCED', 'true');
     await ledger.append({ userId: 'u1', delta: 100, reason: 'grant' });
@@ -250,7 +416,7 @@ describe('credit gate with minimumCredits (the flat-creation wall)', () => {
   });
 });
 
-describe('settlement with a flat creation price', () => {
+describe('settlement with a flat price (retained lever, driven against the real FsLedger)', () => {
   it('debits exactly the flat price, records the TRUE raw cost, and names the pricing model in the note', async () => {
     await ledger.append({ userId: 'u1', delta: 10_000, reason: 'grant' });
 

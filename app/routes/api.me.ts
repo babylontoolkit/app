@@ -18,7 +18,7 @@ import { getPlatformConfig, getPlatformModel } from '~/lib/.server/agent/config'
 import {
   DEFAULT_PREMIUM_MINIMUM_CREDITS,
   DEFAULT_PREMIUM_MODEL,
-  getBillingConfig,
+  getBillingConfigSafe,
   getPremiumTier,
 } from '~/lib/.server/billing/rates';
 import { premiumSessionHint } from '~/lib/.server/billing/premium';
@@ -37,7 +37,23 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
     const user = await getUser(request, context);
     const platform = getPlatformConfig(context);
-    const billing = getBillingConfig(context);
+
+    /*
+     * 🔴 A MISCONFIGURED PRICE VARIABLE MUST NOT TAKE `/api/me` DOWN — it is the session endpoint on
+     * EVERY page load, so a throw here is the whole app, for every user, over a line in an env file.
+     * This is exactly the `premiumSessionHint` defect (2026-07-25) in a second place: `getBillingConfig`
+     * gained a refusal when `CREATION_FLAT_CREDITS` was retired (§4.4a) and this call inherited it
+     * unguarded, five lines from a `getPlatformConfig` call that IS guarded for the same reason.
+     *
+     * Degraded honestly rather than invented: with no readable configuration we do not know the grant
+     * size, so no grant is issued (it is idempotent — the real one lands on the next request once the
+     * operator fixes their env, and issuing a guessed number of credits is the unrecoverable
+     * direction), and `enforced` reports TRUE, the conservative reading — telling the client credits
+     * do not bind when we cannot tell is the same class of invention as advertising premium we cannot
+     * serve. Nothing here can SPEND: the gate and settlement still call `getBillingConfig` and still
+     * throw.
+     */
+    const billing = getBillingConfigSafe(context);
 
     if (!user) {
       return json({
@@ -54,7 +70,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     }
 
     // The grant. Idempotent — a partial unique index means exactly one lands, however many race.
-    if (user.emailVerified && billing.grantsEnabled) {
+    if (user.emailVerified && billing?.grantsEnabled) {
       const granted = await ensureSignupGrant(user.id, billing.signupGrantCredits, context);
 
       /*
@@ -97,7 +113,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
          * Off = beta mode: usage is recorded in full, but a zero balance blocks nobody (§4.6). The UI
          * uses this to decide whether to show an "out of credits" wall or just a usage read-out.
          */
-        enforced: billing.enforced,
+        enforced: billing?.enforced ?? true,
         purchasable: isStripeConfigured(context),
         packs: CREDIT_PACKS.filter((p) => p.isActive),
 

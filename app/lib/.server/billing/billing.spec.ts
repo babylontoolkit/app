@@ -23,6 +23,7 @@ import {
   rawCostUsd,
   ratesFor,
   ratesFromBase,
+  type BillingConfig,
   type TokenUsage,
 } from './rates';
 import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
@@ -39,6 +40,7 @@ import {
 import {
   DuplicateGrantError,
   DuplicatePaymentError,
+  DuplicateRefundError,
   ensureSignupGrant,
   FsLedger,
   getLedger,
@@ -211,7 +213,22 @@ async function promoteLlmRows(rows: Record<string, { inputPerMTok: number; outpu
   }
 }
 
-const config = getBillingConfig();
+/**
+ * 🔴 BUILT IN `beforeEach`, NEVER AT MODULE SCOPE — the scrub above has not run yet at import time.
+ *
+ * This was `const config = getBillingConfig()` at the top level, which is the `oauth.spec.ts` trap in
+ * its purest form: the whole `CREATION_ENV`/`KIE_ENV`/`SANDBOX_VM_ENV` apparatus a screen above is a
+ * `beforeEach`, so a module-scope read is graded against the developer's UNSCRUBBED `.env.local` — the
+ * one environment the scrub exists to exclude. It went unnoticed while the mismatch only skewed a
+ * margin; it became visible when `CREATION_FLAT_CREDITS` was RETIRED (§4.4a) and `getBillingConfig`
+ * started THROWING on it, taking the whole FILE down at collection (`0 test`) rather than failing an
+ * assertion. A scrub that runs after the value it protects has already been read is decoration.
+ */
+let config: BillingConfig;
+
+beforeEach(() => {
+  config = getBillingConfig();
+});
 
 describe('rate table', () => {
   /*
@@ -823,6 +840,140 @@ describe('ledger', () => {
     });
   });
 
+  /**
+   * `listByNote` — the EXACT lookup that finds a `project_create` charge (migration 0015).
+   *
+   * A `project_create` row has no generation to anchor to, so its note is the only link to the project
+   * it paid for. The implementation it replaced was `list(userId, 500)` filtered in TypeScript — a PAGE
+   * SCAN, which is correct right up until the user has 500 rows of history, at which point their oldest
+   * project's charge falls off the end of the window and the refund silently declines to happen. That
+   * failure is invisible from both ends: the DELETE still returns `{ok: true}`, the project still
+   * disappears, and it is worst for exactly the users with the most history, i.e. the best customers.
+   */
+  describe('listByNote (the project_create charge/refund pair)', () => {
+    const NOTE = 'project_create:prj_a';
+
+    it('returns only the rows carrying that exact note', async () => {
+      await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: -150, reason: 'project_create', note: NOTE });
+      await ledger.append({ userId: 'u1', delta: -150, reason: 'project_create', note: 'project_create:prj_b' });
+      await ledger.append({ userId: 'u1', delta: -30, reason: 'generation', generationId: 'gen_a' });
+
+      const rows = await ledger.listByNote('u1', NOTE);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].reason).toBe('project_create');
+      expect(rows[0].delta).toBe(-150);
+    });
+
+    /*
+     * Oldest first, because the caller reads position: the FIRST row is the charge whose magnitude is
+     * given back, and the presence of a later `refund` row is the "already paid" fast path. Newest-first
+     * would make `find(reason === 'project_create')` pick the same row here but reverse the meaning of
+     * the pair on any note that ever grows a third entry.
+     */
+    it('returns them oldest first', async () => {
+      await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: -150, reason: 'project_create', note: NOTE });
+      await ledger.append({ userId: 'u1', delta: 150, reason: 'refund', note: NOTE });
+
+      expect((await ledger.listByNote('u1', NOTE)).map((r) => r.reason)).toEqual(['project_create', 'refund']);
+    });
+
+    it('is scoped to the user — another account’s identically-noted charge is invisible', async () => {
+      await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u2', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u2', delta: -150, reason: 'project_create', note: NOTE });
+
+      expect(await ledger.listByNote('u1', NOTE)).toEqual([]);
+      expect(await ledger.listByNote('u2', NOTE)).toHaveLength(1);
+    });
+
+    it('answers with an empty list for an unknown note, never a throw', async () => {
+      expect(await ledger.listByNote('nobody', NOTE)).toEqual([]);
+    });
+
+    /*
+     * 🔴 THE BUG THE PAGE SCAN HAD. The charge is buried under more rows than any window would hold, so
+     * a `list(userId, 500)` filter finds nothing and the user is never refunded. Nothing throws.
+     */
+    it('finds a charge buried under more than 500 later rows', async () => {
+      await ledger.append({ userId: 'u1', delta: 1_000_000, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: -150, reason: 'project_create', note: NOTE });
+
+      for (let i = 0; i < 600; i++) {
+        await ledger.append({ userId: 'u1', delta: -1, reason: 'generation', generationId: `gen_${i}` });
+      }
+
+      // The scan this replaced: the charge is off the end of the window, so it reports "no charge".
+      expect((await ledger.list('u1', 500)).some((r) => r.note === NOTE)).toBe(false);
+
+      const rows = await ledger.listByNote('u1', NOTE);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].delta).toBe(-150);
+    });
+  });
+
+  /**
+   * The project-create refund happens AT MOST ONCE per project, and in the FS backend that is enforced
+   * inside `append`'s mutex — the local-mode equivalent of migration 0015's partial unique index, not a
+   * read-then-write check at a call site (which two concurrent deletes sail straight through).
+   */
+  describe('single-refund notes (migration 0015 mirrored)', () => {
+    const NOTE = 'project_create:prj_a';
+
+    it('refuses a second refund carrying the same project_create note', async () => {
+      await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: -150, reason: 'project_create', note: NOTE });
+      await ledger.append({ userId: 'u1', delta: 150, reason: 'refund', note: NOTE });
+
+      await expect(ledger.append({ userId: 'u1', delta: 150, reason: 'refund', note: NOTE })).rejects.toThrow(
+        DuplicateRefundError,
+      );
+      expect(await ledger.balance('u1')).toBe(1000);
+    });
+
+    it('survives CONCURRENT refunds of the same project with exactly one row', async () => {
+      await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: -150, reason: 'project_create', note: NOTE });
+
+      const attempts = Array.from({ length: 5 }, () =>
+        ledger.append({ userId: 'u1', delta: 150, reason: 'refund', note: NOTE }).catch(() => undefined),
+      );
+      await Promise.all(attempts);
+
+      expect((await ledger.list('u1')).filter((r) => r.reason === 'refund')).toHaveLength(1);
+      expect(await ledger.balance('u1')).toBe(1000);
+    });
+
+    /*
+     * 🔴 CONTROL — the predicate must stay NARROW. Ordinary refunds carry free-text notes that repeat
+     * legitimately ("Generation failed" arrives many times for one user), so a rule that keyed on
+     * (user, note) alone would reject every second generation refund and leave users unrefunded. That is
+     * a worse bug than the one being prevented, and it is silent.
+     */
+    it('CONTROL — other refund notes still repeat freely', async () => {
+      await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: 30, reason: 'refund', note: 'Generation failed' });
+      await ledger.append({ userId: 'u1', delta: 30, reason: 'refund', note: 'Generation failed' });
+
+      expect((await ledger.list('u1')).filter((r) => r.reason === 'refund')).toHaveLength(2);
+      expect(await ledger.balance('u1')).toBe(1060);
+    });
+
+    /* Per-user, like every other idempotency guard here: two accounts each get their own refund. */
+    it('is per-user — another account may still be refunded for its own project', async () => {
+      await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u2', delta: 1000, reason: 'grant' });
+      await ledger.append({ userId: 'u1', delta: 150, reason: 'refund', note: NOTE });
+      await ledger.append({ userId: 'u2', delta: 150, reason: 'refund', note: NOTE });
+
+      expect(await ledger.balance('u1')).toBe(1150);
+      expect(await ledger.balance('u2')).toBe(1150);
+    });
+  });
+
   it('reports a duplicate grant as a no-op, not an error, to the caller', async () => {
     expect(await ensureSignupGrant('u1', 1000)).not.toBeNull();
     expect(await ensureSignupGrant('u1', 1000)).toBeNull();
@@ -870,6 +1021,36 @@ describe('ledger', () => {
   /* But nothing else may. A purchase or refund that computes negative is a BUG, not a business case. */
   it('refuses a non-generation entry that would go negative', async () => {
     await expect(ledger.append({ userId: 'u1', delta: -5, reason: 'refund' })).rejects.toThrow(/negative/i);
+  });
+
+  /*
+   * `project_create` (migration 0015) is the `media` shape, NOT the `search` shape: it debits BEFORE
+   * anything is provisioned, so it must REFUSE. Mutation-verified — adding it to `mayGoNegative` gives
+   * project creation away for free, silently.
+   */
+  it('REFUSES a project_create debit that would overdraw', async () => {
+    await ledger.append({ userId: 'u1', delta: 100, reason: 'grant' });
+
+    await expect(ledger.append({ userId: 'u1', delta: -150, reason: 'project_create' })).rejects.toThrow(/negative/i);
+  });
+
+  it('records a project_create debit that fits, with no generation anchor', async () => {
+    await ledger.append({ userId: 'u1', delta: 1000, reason: 'grant' });
+
+    const row = await ledger.append({ userId: 'u1', delta: -150, reason: 'project_create' });
+
+    expect(row.balanceAfter).toBe(850);
+    expect(row.generationId).toBeUndefined();
+  });
+
+  /*
+   * The debit-before-spend family, pinned as a FAMILY rather than one reason at a time — this is the
+   * list whose membership decides whether a refusal is possible at all.
+   */
+  it.each(['media', 'license', 'project_create'] as const)('%s may never overdraw', async (reason) => {
+    await ledger.append({ userId: 'u1', delta: 10, reason: 'grant' });
+
+    await expect(ledger.append({ userId: 'u1', delta: -50, reason })).rejects.toThrow(/negative/i);
   });
 
   it('is append-only — a refund is a new row, not an edit', async () => {
@@ -1121,6 +1302,9 @@ describe('the generation row a debit points at', () => {
       },
       async list() {
         return [];
+      },
+      async hasBilledGeneration() {
+        return false;
       },
     };
 

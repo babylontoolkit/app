@@ -26,6 +26,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { LEDGER_REASONS } from './ledger';
 
 const APP_DIR = join(process.cwd(), 'app');
 
@@ -42,8 +43,15 @@ function stripComments(source: string): string {
 const LEDGER_IMPORT = /from\s+'[^']*(?:billing\/ledger|\.\/ledger)'/;
 const APPEND_CALL = /\.append\(\s*\{/;
 
-/** The reason on each write — this is what says whether money left the user or arrived. */
-const REASON = /reason:\s*'([a-z]+)'/g;
+/**
+ * The reason on each write — this is what says whether money left the user or arrived.
+ *
+ * ⚠️ The character class MUST admit `_`. It was `[a-z]+` when `project_create` (migration 0015) landed,
+ * which does not merely mis-read the reason — it makes the writing file scan as having NO reasons at all,
+ * so the file drops out of `debiters` and the loudness loop never runs over it. A guard that reports
+ * green over an unguarded debit path is worse than no guard; see the CONTROL below.
+ */
+const REASON = /reason:\s*'([a-z_]+)'/g;
 
 /**
  * The reasons that TAKE credits (`spec/fail-loud.md` §Scope). Anything writing one of these must be
@@ -51,7 +59,7 @@ const REASON = /reason:\s*'([a-z]+)'/g;
  * unclassified reason" test below — which is how a NEW debit reason gets noticed on the day it lands
  * rather than the day someone audits.
  */
-const DEBIT_REASONS = new Set(['generation', 'media', 'search', 'license']);
+const DEBIT_REASONS = new Set(['generation', 'media', 'search', 'license', 'project_create']);
 
 /** The reasons that GIVE credits. A grant has nothing to refund; its risk is duplication, not silence. */
 const CREDIT_REASONS = new Set(['grant', 'purchase', 'refund', 'promo', 'adjustment']);
@@ -136,6 +144,27 @@ describe('every ledger-debiting call site can make its own failure loud', () => 
     expect(APPEND_CALL.test(commented), 'the call itself must still be seen').toBe(true);
   });
 
+  /*
+   * The regex that decides WHICH files are debiters must be able to read every reason in the inventory.
+   * A narrowed character class does not mis-read a reason — it erases the file from the scan, and the
+   * suite goes green over a debit path nothing checked (`project_create` vs `[a-z]+`, migration 0015).
+   */
+  it('CONTROL — the reason regex can read every declared LedgerReason, including underscored ones', () => {
+    for (const reason of LEDGER_REASONS) {
+      const matched = [...`await ledger.append({ reason: '${reason}' });`.matchAll(REASON)].map((m) => m[1]);
+      expect(matched, `the scanner cannot see reason '${reason}' — it would vanish from the audit`).toEqual([reason]);
+    }
+  });
+
+  it('CONTROL — every declared LedgerReason is classified as a debit or a credit', () => {
+    for (const reason of LEDGER_REASONS) {
+      expect(
+        DEBIT_REASONS.has(reason) || CREDIT_REASONS.has(reason),
+        `'${reason}' is declared in LEDGER_REASONS but classified in neither map — see spec/fail-loud.md`,
+      ).toBe(true);
+    }
+  });
+
   it('CONTROL — the scanner ignores `.append` on things that are not the ledger', () => {
     // `props.append(` in Messages.client.tsx and `headers.append(` in the Supabase client both match APPEND_CALL.
     expect(writers.map((w) => w.file)).not.toContain('components/chat/Messages.client.tsx');
@@ -154,6 +183,7 @@ describe('every ledger-debiting call site can make its own failure loud', () => 
         'lib/.server/media/service.ts',
         'lib/.server/agent/web-search-tool.ts',
         'lib/.server/licensing/unity-license-service.ts',
+        'lib/.server/billing/project-create-service.ts',
       ]),
     );
   });

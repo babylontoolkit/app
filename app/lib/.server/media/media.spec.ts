@@ -81,7 +81,18 @@ class FakeProvider implements MediaProvider {
  * that changes a price or the enforcement mode is stubbed explicitly, or these tests assert against
  * whatever the developer happens to be running.
  */
-const MONEY_ENV = ['BILLING_ENFORCED', 'CREDIT_UNIT_COST_USD', 'CREDIT_MARGIN'] as const;
+const MONEY_ENV = [
+  'BILLING_ENFORCED',
+  'CREDIT_UNIT_COST_USD',
+  'CREDIT_MARGIN',
+
+  /*
+   * RETIRED (§4.4a) and therefore MORE dangerous than a stale price, not less: `getBillingConfig`
+   * THROWS when this is set, so an operator who still has it in `.env.local` fails every media money
+   * assertion here with a `NotConfiguredError` that names a variable this file never mentions.
+   */
+  'CREATION_FLAT_CREDITS',
+] as const;
 
 beforeEach(async () => {
   for (const key of MONEY_ENV) {

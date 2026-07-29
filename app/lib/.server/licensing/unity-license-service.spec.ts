@@ -38,6 +38,13 @@ const PRICE_ENV = [
   'UNITY_LICENSE_CREDITS_INDIE',
   'UNITY_LICENSE_CREDITS_SMALLBUSINESS',
   'UNITY_LICENSE_CREDITS_PREMIUMCONTENT',
+
+  /*
+   * Not a Unity variable — but the license charge goes through `getBillingConfig`, which REFUSES the
+   * retired `CREATION_FLAT_CREDITS` (§4.4a). A scrub list must cover the whole precedence chain, not
+   * only the variables the file is named after.
+   */
+  'CREATION_FLAT_CREDITS',
 ] as const;
 
 beforeEach(async () => {

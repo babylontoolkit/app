@@ -152,8 +152,26 @@ async function getStripe(context?: unknown): Promise<Stripe> {
   return new stripeSdk.default(config.stripeSecretKey);
 }
 
+/**
+ * Is Stripe configured? A RENDERING/REPORTING hint — it must never throw.
+ *
+ * 🔴 `getBillingConfig` refuses a retired price variable (§4.4a, `CREATION_FLAT_CREDITS`), and this
+ * function is on `/api/health`'s path via `buildHealthReport`. Unguarded, a retired var in someone's
+ * environment would 503 the health endpoint — so the container fails its own readiness check and the
+ * operator gets NO report telling them why. That is the `premiumSessionHint` defect exactly (`/api/me`
+ * taken down by an unguarded `getPremiumTier`): a misconfiguration must not make the thing that would
+ * REPORT it unreachable.
+ *
+ * Fail-loud still binds where it matters — every money path calls `getBillingConfig` directly and gets
+ * the throw. Here the honest degraded answer is "not configured", which is also the safe direction: it
+ * reports a capability as OFF rather than inventing one.
+ */
 export function isStripeConfigured(context?: unknown): boolean {
-  return Boolean(getBillingConfig(context).stripeSecretKey);
+  try {
+    return Boolean(getBillingConfig(context).stripeSecretKey);
+  } catch {
+    return false;
+  }
 }
 
 export interface CheckoutInput {

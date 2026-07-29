@@ -395,6 +395,17 @@ export interface BillingConfig {
   signupGrantCredits: number;
 
   /**
+   * ⚠️ RETIRED 2026-07-29 (§4.4a) — always `0`, and `CREATION_FLAT_CREDITS` is REFUSED if set.
+   *
+   * Kept as a field rather than deleted so the retirement is visible where the price used to be read.
+   * Under the project-first flow the creation turn does not exist: creating a project runs no generation
+   * (it clones the starter, installs and serves it) and carries its own flat charge at registration
+   * (`projectCreateCredits`, ledger reason `project_create`, migration 0015), while the first BUILD turn
+   * bills cost-derived like any other. A price variable nothing reads is a mis-bill waiting to be
+   * believed, which is why setting the old one now throws rather than being ignored.
+   *
+   * The historical rationale, preserved because it still explains the shape of the replacement:
+   *
    * FLAT credit price for a project-creation turn; `0` disables (cost-proportional, the old behavior).
    *
    * Exists because creation cost is dominated by prompt-cache luck the user can neither see nor
@@ -409,6 +420,20 @@ export interface BillingConfig {
    */
   creationFlatCredits: number;
 
+  /**
+   * FLAT credit price for CREATING a project; `0` disables (creation is free).
+   *
+   * Distinct from `creationFlatCredits`, and the distinction is the point (§4.4a, 2026-07-29): under the
+   * project-first flow, New Project runs NO generation at all — it clones the pinned starter, installs it
+   * and serves it. That work has a real cost (a VM, a template fetch, storage) and a completely
+   * predictable one, so it carries its own flat charge under its own ledger reason (`project_create`,
+   * migration 0015), debited at registration BEFORE anything is provisioned. The build turn the user
+   * sends afterwards is an ORDINARY turn billed cost-derived.
+   *
+   * Owner decision 2026-07-29: 100–200 credits; 150 is the mid-band default.
+   */
+  projectCreateCredits: number;
+
   /** Kill-switch: set false to stop issuing new grants without a deploy (§4.6). */
   grantsEnabled: boolean;
 
@@ -417,22 +442,49 @@ export interface BillingConfig {
   stripePublishableKey?: string;
 }
 
-/** See `BillingConfig.creationFlatCredits`. Env-tunable (`CREATION_FLAT_CREDITS`) so pricing moves without a deploy. */
+/**
+ * ⚠️ RETIRED (§4.4a, 2026-07-29). Was the flat price of a creation TURN; the flat price now attaches to
+ * project CREATION (`DEFAULT_PROJECT_CREATE_CREDITS`) and the first build turn bills cost-derived.
+ * Exported still, as the documented predecessor — nothing reads it to price anything.
+ */
 export const DEFAULT_CREATION_FLAT_CREDITS = 500;
 
 /**
- * `CREATION_FLAT_CREDITS`, validated: `0` is a real value (disables flat pricing — the operator escape
- * hatch back to cost-proportional), while a negative or non-finite override is IGNORED in favor of the
- * default — the same "ignore a bad override rather than obey it" posture as `sandboxHibernationSeconds`.
- * Obeying a negative here would CREDIT the user for creating a project.
+ * `CREATION_FLAT_CREDITS` is REFUSED, not ignored.
+ *
+ * The same posture as the retired KIE price vars: an operator who leaves this set is expressing a
+ * pricing intent that nothing honours any more, and silently ignoring it means they believe creations
+ * cost 500 credits while they are billed by tokens. Fail loudly, name the replacement.
  */
-function creationFlatCredits(context?: unknown): number {
-  const configured = envNumber(context, 'CREATION_FLAT_CREDITS', DEFAULT_CREATION_FLAT_CREDITS);
+function refuseRetiredCreationPriceEnv(context?: unknown): void {
+  if (env(context, 'CREATION_FLAT_CREDITS')?.trim()) {
+    throw new NotConfiguredError(
+      'CREATION_FLAT_CREDITS (set, but retired)',
+      'Creating a project no longer runs a generation, so there is no creation turn to flat-price ' +
+        '(§4.4a). The flat charge is now taken at project registration — set PROJECT_CREATE_CREDITS ' +
+        'instead (default 150, 0 disables). The first BUILD turn bills cost-derived like any other turn.',
+    );
+  }
+}
 
-  return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : DEFAULT_CREATION_FLAT_CREDITS;
+/** See `BillingConfig.projectCreateCredits`. Env-tunable (`PROJECT_CREATE_CREDITS`), no deploy needed. */
+export const DEFAULT_PROJECT_CREATE_CREDITS = 150;
+
+/**
+ * `PROJECT_CREATE_CREDITS`, validated with the same posture as `creationFlatCredits` above: `0` is a real
+ * value (project creation is free), while a negative or non-finite override is IGNORED in favor of the
+ * default. Obeying a negative would CREDIT a user for creating a project — i.e. hand out free credits to
+ * anyone who clicks New Project in a loop.
+ */
+function projectCreateCredits(context?: unknown): number {
+  const configured = envNumber(context, 'PROJECT_CREATE_CREDITS', DEFAULT_PROJECT_CREATE_CREDITS);
+
+  return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : DEFAULT_PROJECT_CREATE_CREDITS;
 }
 
 export function getBillingConfig(context?: unknown): BillingConfig {
+  refuseRetiredCreationPriceEnv(context);
+
   return {
     enforced: envFlag(context, 'BILLING_ENFORCED'),
     creditUnitCostUsd: envNumber(context, 'CREDIT_UNIT_COST_USD', 0.01),
@@ -471,12 +523,41 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      */
     signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 800),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
-    creationFlatCredits: creationFlatCredits(context),
+
+    /* Retired — see the field's doc comment. Always 0; the env var that set it is refused above. */
+    creationFlatCredits: 0,
+    projectCreateCredits: projectCreateCredits(context),
 
     stripeSecretKey: process.env.STRIPE_SECRET_KEY,
     stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
     stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
   };
+}
+
+/**
+ * `getBillingConfig` for a READ path — returns `null` rather than throwing.
+ *
+ * 🔴 **A misconfigured price variable must not take a rendering surface down.** `getBillingConfig`
+ * gained a throw when `CREATION_FLAT_CREDITS` was retired (§4.4a), and every caller inherited it —
+ * including `/api/me` (the session endpoint on EVERY page load), `/api/credits`, and the provider
+ * balance the Admin usage dashboard reads. So a single leftover line in an operator's env took the
+ * whole app down for every user, and took down the one panel they would use to diagnose it.
+ *
+ * This is the `premiumSessionHint` precedent (2026-07-25) restated for money CONFIG rather than for a
+ * capability hint: a degraded read reports honestly ("we could not read the billing configuration")
+ * instead of inventing an answer, while the paths that SPEND — the gate, settlement, project-create,
+ * the Stripe webhook — keep calling `getBillingConfig` and keep throwing. Charging money on a
+ * configuration we could not read is the one direction that is never safe.
+ *
+ * Same shape as `isStripeConfigured`'s try/catch, one level up: there the degraded value is `false`
+ * (payments unavailable), here it is `null` (nothing is known, so the caller must say so).
+ */
+export function getBillingConfigSafe(context?: unknown): BillingConfig | null {
+  try {
+    return getBillingConfig(context);
+  } catch {
+    return null;
+  }
 }
 
 export interface TokenUsage {

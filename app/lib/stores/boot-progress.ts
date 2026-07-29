@@ -66,6 +66,25 @@ export type BootPhase =
    */
   | { step: 'creating-settle' }
 
+  /*
+   * ---- and the last two, because a project that is not RUNNING is not created ----
+   *
+   * The owner's success condition for New Project is *"npm install + npm run dev and showing the starter
+   * app template basic home page"*. Creation used to dismiss the splash the moment the files settled and
+   * fire the game build over the top, so `npm install` ran in a terminal nobody was looking at. With the
+   * build gone, these two steps ARE the end of creation and they get the splash's last two sentences.
+   *
+   * Both waits are bounded and degrade silently (`starter-ready.ts`): reaching a ceiling dismisses the
+   * splash on a project that exists and keeps installing in the background — a slow install must never
+   * hang the New Project button (§1.3 principle 0).
+   */
+
+  /** Running the starter's `npm install`. The long one on a cold WebContainer; ~2s on a forked VM. */
+  | { step: 'creating-install' }
+
+  /** Install is done; waiting for the dev server to bind a port so there is a home page to show. */
+  | { step: 'creating-serve' }
+
   /**
    * The open FAILED and there is nothing to look at.
    *
@@ -184,6 +203,21 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          */
         title: 'Creating project files',
         detail: 'Finishing the starter files and settling your workspace…',
+      };
+    case 'creating-install':
+      return {
+        title: 'Installing dependencies…',
+        detail: 'Running npm install in your project. The first one takes the longest.',
+      };
+    case 'creating-serve':
+      return {
+        /*
+         * "Starting", not "Almost ready" — this is the last thing that happens before the user is looking
+         * at their own running project, and naming it is what makes the preview appearing feel like the
+         * end of a sequence rather than something that eventually showed up.
+         */
+        title: 'Starting your project…',
+        detail: 'Launching the dev server and loading the starter home page.',
       };
     default:
       return { title: 'Opening project…', detail: 'Fetching the conversation and project record.' };

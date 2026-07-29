@@ -30,7 +30,7 @@
  * dashboard, and a provider outage must not take that page down with it.
  */
 import { env } from '~/lib/.server/env';
-import { getBillingConfig } from './rates';
+import { getBillingConfigSafe } from './rates';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('provider-balance');
@@ -116,6 +116,15 @@ export function describeProviderBalance(input: {
 /**
  * Read the provider's remaining credit, cached briefly. Never throws.
  *
+ * "Never throws" is a claim `api.admin.usage.ts` relies on IN A COMMENT — it wraps the VM report in a
+ * try/catch and deliberately does not wrap this one. That claim quietly stopped being true when
+ * `getBillingConfig` gained its retired-variable refusal (§4.4a): a leftover `CREATION_FLAT_CREDITS`
+ * 500ed the whole Admin usage dashboard, i.e. the surface an operator opens to diagnose billing. The
+ * config read is `getBillingConfigSafe` now, so an unreadable configuration degrades this to
+ * "remaining platform credits unknown" (the margin formula needs both rates and reports `null`
+ * without them) rather than taking the panel down — `premiumSessionHint`'s rule that a degraded
+ * capability reports off, never on, applied to a number.
+ *
  * The key is read server-side and used to make the call — it is never returned, logged, or included in
  * any part of the result (§5: a server route may ACT on a secret, never EMIT one).
  */
@@ -126,14 +135,16 @@ export async function getProviderBalance(context?: unknown): Promise<ProviderBal
     return cached.value;
   }
 
-  const billing = getBillingConfig(context);
+  const billing = getBillingConfigSafe(context);
   const creditsPerUsd = Number(env(context, 'KIE_CREDITS_PER_USD')) || DEFAULT_CREDITS_PER_USD;
   const fetchedAt = new Date(now).toISOString();
 
   const base = {
     creditsPerUsd,
-    creditUnitCostUsd: billing.creditUnitCostUsd,
-    margin: billing.margin,
+
+    /* 0 is the "unknown" input to `describeProviderBalance`'s guard — it yields `null`, never a lie. */
+    creditUnitCostUsd: billing?.creditUnitCostUsd ?? 0,
+    margin: billing?.margin ?? 0,
     fetchedAt,
   };
 

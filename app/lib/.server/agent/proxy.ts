@@ -36,7 +36,7 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getBillingConfig, getPremiumTier } from '~/lib/.server/billing/rates';
+import { getPremiumTier } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/premium';
 import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
@@ -330,6 +330,45 @@ function lastUserText(messages: Message[]): string {
 }
 
 /**
+ * Does this turn carry the machine-written creation brief? — the FIRST BUILD turn (§4.4a).
+ *
+ * Exported and pure so the derivation has a real seam: it drives ten non-billing behaviours (skill
+ * preload, sticky-skill suppression, `offerLoadSkill`, `requiresAction`, the premium lock, the tool
+ * policy, the liveness copy), and a verifier once broke five of them at once with the whole suite
+ * green. See `first-build-turn.spec.ts` for the paired assertions.
+ *
+ * Read from the LAST user message only, and from the NORMALIZED messages — a slash rewrite never
+ * carries the marker, and a brief three turns back is a conversation ABOUT a build, not one.
+ */
+export function carriesCreationBrief(messages: Message[]): boolean {
+  return lastUserText(messages).includes(CREATION_BRIEF_MARKER);
+}
+
+/**
+ * The turn's identity for the liveness panel — facts, in the same precedence the effort policy uses:
+ * a repair is a repair even on a first build, and plan mode outranks an ordinary edit.
+ *
+ * Pure and exported for the same reason as `carriesCreationBrief`: it is the only consumer of
+ * `isFirstBuildTurn` whose correctness is an ORDERING, and an ordering degrades silently (drop the
+ * first-build arm and every build narrates itself as an ordinary edit — nothing throws).
+ */
+export function statusKindFor(input: {
+  isRepair: boolean;
+  isFirstBuildTurn: boolean;
+  isDiscussTurn: boolean;
+}): 'repair' | 'creation' | 'plan' | 'edit' {
+  if (input.isRepair) {
+    return 'repair';
+  }
+
+  if (input.isFirstBuildTurn) {
+    return 'creation';
+  }
+
+  return input.isDiscussTurn ? 'plan' : 'edit';
+}
+
+/**
  * Every user message, oldest first — the routing input for the CACHED prefix (`selectStickyBlocks`).
  *
  * ⚠️ Deliberately NOT `lastUserText`. Routing the cached prefix from one message means the user's
@@ -548,28 +587,36 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
-   * Computed from the NORMALIZED messages (a slash rewrite never carries the creation marker) because
-   * the PREMIUM decision needs it: a creation on KIE-buffered Fable 5 dies at the gateway timeout
-   * before its artifact can flush (see `premium.ts`). The tool policy below reuses the same value.
+   * The FIRST BUILD turn — the turn that carries the machine-written creation brief (§4.4a).
+   *
+   * 🔴 **This is a BEHAVIOURAL fact, not a PRICING one, and the rename records that (2026-07-29).**
+   * It was `isCreationTurn` and it drove eleven things, exactly one of which was money. Under the
+   * project-first flow the flat charge moved to project REGISTRATION (`project_create`, migration 0015)
+   * and this turn bills cost-derived like any other — so the ten protections it still drives (premium
+   * lock, skill preload, sticky-skill suppression, discuss suppression, the media-only bounded loop,
+   * `offerLoadSkill`, `requiresAction`, the media-note suppression, the liveness copy) had to stop
+   * travelling under a name that reads as a price. Do not re-attach billing to it.
+   *
+   * Decoupling also closed a latent exploit: while this decided the price, a user who typed the marker
+   * sentence verbatim bought flat pricing on an arbitrary turn. Now the worst a forged marker buys is
+   * 24KB of inlined skills the user pays tokens for anyway.
+   *
+   * Computed from the NORMALIZED messages (a slash rewrite never carries the marker) because the
+   * PREMIUM decision needs it: a first build on KIE-buffered Fable 5 dies at the gateway timeout before
+   * its artifact can flush (see `premium.ts`). The tool policy below reuses the same value.
    */
-  const isCreationTurn = lastUserText(messages0).includes(CREATION_BRIEF_MARKER);
+  const isFirstBuildTurn = carriesCreationBrief(messages0);
 
   /*
    * 2. Credit gate — once, up front, and only for platform-paid generations. In-flight generations
    * are never killed for balance (§4.2.1), so this is the ONE moment we may refuse.
    *
-   * It runs AFTER message normalization (moved 2026-07-28) because a flat-priced creation turn
-   * (§4.6, `creationFlatCredits`) gates on the KNOWN price rather than "more than zero" — the one
-   * turn whose cost is knowable pre-flight is the one turn the gate can be honest about, instead of
-   * letting a 10-credit balance start a 500-credit creation and land deep negative.
+   * No `minimumCredits`: no turn's cost is knowable pre-flight any more. The flat price this gate used
+   * to enforce is charged at project creation now, before a generation exists (§4.4a).
    */
-  const billing = getBillingConfig(request.context);
-  const creationFlatCredits = isCreationTurn && !byok.allowed ? billing.creationFlatCredits : 0;
-
   const gate = await checkCreditGate({
     userId: user.id,
     byok: byok.allowed,
-    minimumCredits: creationFlatCredits > 0 ? creationFlatCredits : undefined,
     context: request.context,
   });
 
@@ -599,7 +646,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     requested: Boolean(request.premium) && !useByok,
     balance: gate.mode === 'byok' ? 0 : gate.balance,
     minimumCredits: premiumTier.minimumCredits,
-    isCreationTurn,
+    isFirstBuildTurn,
   });
 
   const model =
@@ -682,7 +729,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * and redrafted, six times, for 350s and 29,173 wasted output tokens. The system prompt forbids this
    * in words and the model did it anyway. So the tools are taken away rather than argued about.
    */
-  // `isCreationTurn` is computed above the premium decision (raw request messages) and reused here.
+  // `isFirstBuildTurn` is computed above the premium decision (raw request messages) and reused here.
   const store = getPromptStore();
   const blocks: Array<{ id: string; title: string; body: string }> = [];
 
@@ -727,7 +774,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * `preload-skills.ts` for the full post-mortem and for why removing it does not re-buy the
    * six-round pathology.
    */
-  const preloaded = await preloadSkills(slash?.skillName, isCreationTurn);
+  const preloaded = await preloadSkills(slash?.skillName, isFirstBuildTurn);
 
   /*
    * 🔴 A SKILL THE MODEL LOADED EARLIER IN THIS CONVERSATION STAYS LOADED (2026-07-26).
@@ -744,7 +791,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * must only ever GROW, or the prefix rewrites itself at 2x on the turn the window slides. Creation is
    * excluded because it has its own fixed pair and no tools. See `stickyLoadedSkills`.
    */
-  const carriedNames = isCreationTurn ? [] : stickyLoadedSkills(messages).filter((name) => name !== slash?.skillName);
+  const carriedNames = isFirstBuildTurn ? [] : stickyLoadedSkills(messages).filter((name) => name !== slash?.skillName);
   const carried = await loadSkillBodies(carriedNames);
 
   /*
@@ -892,10 +939,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * Discussion mode (§4.2.9), decided ONCE — the note, the tool policy, and the route's NO_REPLAY
    * annotation must all agree, and `discussModeNote` owns the rule (including the creation-turn guard).
    */
-  const discussNote = discussModeNote({ chatMode: request.chatMode, isCreationTurn });
+  const discussNote = discussModeNote({ chatMode: request.chatMode, isFirstBuildTurn });
 
   const toolPolicy = toolPolicyForTurn({
-    isCreationTurn,
+    isFirstBuildTurn,
     hasMcpTools,
     hasMediaTools: Object.keys(mediaTools).length > 0,
     preloadedCount: preloaded.length,
@@ -980,7 +1027,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   const mediaNote = mediaProtocolNote({
     hasMediaTools: toolPolicy.toolset !== 'skills-only' && Object.keys(mediaTools).length > 0,
-    isCreationTurn,
+    isFirstBuildTurn,
   });
 
   if (mediaNote && allowTools) {
@@ -1038,7 +1085,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * excluded upstream by `toolPolicy.toolset` rather than here — creation inlines its pair and runs
      * with no skill tools, which is the one place "inlined AND offered" would still be a contradiction.
      */
-    offerLoadSkill: !isCreationTurn,
+    offerLoadSkill: !isFirstBuildTurn,
   };
 
   /*
@@ -1098,8 +1145,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   logger.info(
     `Generation: model=${model} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
-      `mode=${useByok ? 'byok' : 'platform'}${isCreationTurn ? ' CREATION' : ''}${discussNote ? ' DISCUSS' : ''} ` +
-      `tools=${allowTools ? (toolPolicy.toolset === 'all' ? 'on' : toolPolicy.toolset) : `off (${isCreationTurn ? 'creation' : 'skills pre-loaded'})`} ` +
+      `mode=${useByok ? 'byok' : 'platform'}${isFirstBuildTurn ? ' CREATION' : ''}${discussNote ? ' DISCUSS' : ''} ` +
+      `tools=${allowTools ? (toolPolicy.toolset === 'all' ? 'on' : toolPolicy.toolset) : `off (${isFirstBuildTurn ? 'creation' : 'skills pre-loaded'})`} ` +
       `effort=${effort ?? 'default'}`,
   );
 
@@ -1680,7 +1727,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
            * never built and the user paid for a description of a game. Plan turns are excluded by
            * construction (they are prose by guarantee, §4.2.9) and so are ordinary edits.
            */
-          requiresAction: isCreationTurn && !discussNote,
+          requiresAction: isFirstBuildTurn && !discussNote,
         })
       ) {
         unproductiveRescue = true;
@@ -1766,18 +1813,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         byok: useByok,
 
         /*
-         * FLAT creation pricing (§4.6, `creationFlatCredits`): a COMPLETED creation charges exactly
-         * the flat price (a failed one too — the auto-refund below hands it straight back, same as
-         * today); a STOPPED creation instead CAPS the cost-derived charge at the flat price — §4.12
-         * bills what was consumed, and the advertised price is the ceiling, so a user never pays more
-         * than the flat price for less than a creation. `creationFlatCredits` is 0 for non-creation
-         * turns, BYOK, and when the operator disabled flat pricing — all byte-identical to before.
+         * NO `flatCredits`, NO `maxCredits` — every turn settles cost-derived, including the first
+         * build (§4.4a, 2026-07-29). The flat price it used to carry moved to project REGISTRATION,
+         * where it is charged once under its own ledger reason (`project_create`) before any
+         * generation exists. `decideCredits` keeps both levers, pure and tested, with no caller here:
+         * ceasing to pass them is the pricing decision, deleting them would throw the capability away.
          */
-        ...(creationFlatCredits > 0
-          ? request.abortSignal?.aborted
-            ? { maxCredits: creationFlatCredits }
-            : { flatCredits: creationFlatCredits }
-          : {}),
         context: request.context,
       });
 
@@ -1938,7 +1979,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * The turn's identity for the liveness panel — facts, in the same precedence the effort policy
      * uses: a repair is a repair even on a creation, and plan mode outranks an ordinary edit.
      */
-    statusKind: isRepair ? 'repair' : isCreationTurn ? 'creation' : discussNote ? 'plan' : 'edit',
+    statusKind: statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: Boolean(discussNote) }),
     toolContext,
     usage: usagePromise,
     settlement: settlementPromise,

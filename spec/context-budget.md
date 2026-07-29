@@ -941,8 +941,12 @@ cacheable segment, with the per-project bytes after it. That would genuinely shr
 source — but the 4-breakpoint budget is fully spent (`MAX_CACHE_BREAKPOINTS`), the append-only rules
 (`selectStickyBlocks`, `stickyLoadedSkills`) all bind on the ordering, and a cache-shape change costs
 ~8× one prefix in warmup writes (§"QUANTIFIED") — so this is a measured redesign, never a quick flip.
-Until then the variance is absorbed by the **flat creation price** (`spec/billing.md`,
-`CREATION_FLAT_CREDITS`) and the average cost trimmed by the **base-prompt cache warmer**
+⚠️ **Updated 2026-07-29 (§4.4a): the flat creation price that used to absorb this variance is RETIRED**
+(`CREATION_FLAT_CREDITS` is refused; the flat charge moved to project registration, which prices
+clone/install/serve work rather than tokens and absorbs nothing about cache warmth). The build turn now
+bills cost-derived, so **the cache warmer is the only thing standing between a cold prefix and the
+user's bill** — which raises the value of this deferred redesign rather than lowering it. Average cost
+is trimmed by the **base-prompt cache warmer**
 (`prompt/cache-warmer.ts` — the one block that IS byte-identical across all users, kept warm on an
 interval + re-warmed on prompt promotion).
 

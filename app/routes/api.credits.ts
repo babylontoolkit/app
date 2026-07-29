@@ -7,7 +7,7 @@
 import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { getLedger } from '~/lib/.server/billing/ledger';
-import { getBillingConfig } from '~/lib/.server/billing/rates';
+import { getBillingConfigSafe } from '~/lib/.server/billing/rates';
 import {
   CREDIT_PACKS,
   SUBSCRIPTION_PLANS,
@@ -20,7 +20,15 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   try {
     const user = await requireUser(request, context);
     const ledger = getLedger(context);
-    const config = getBillingConfig(context);
+
+    /*
+     * A READ path: the balance and the ledger history are what this route exists for, and neither
+     * needs the pricing configuration. A misconfigured price variable (`getBillingConfig` refuses a
+     * retired `CREATION_FLAT_CREDITS`, §4.4a) must not blank the page that shows a user where their
+     * credits went — `enforced` degrades to the conservative `true` exactly as it does in `/api/me`.
+     * Spending paths keep calling `getBillingConfig` and keep throwing.
+     */
+    const config = getBillingConfigSafe(context);
 
     /*
      * The subscription lookup lives HERE, not in `/api/me`, because it is a Stripe API call and `/api/me`
@@ -36,7 +44,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
     return json({
       balance,
-      enforced: config.enforced,
+      enforced: config?.enforced ?? true,
       purchasable: isStripeConfigured(context),
       packs: CREDIT_PACKS.filter((p) => p.isActive),
       plans: SUBSCRIPTION_PLANS.filter((p) => p.isActive),

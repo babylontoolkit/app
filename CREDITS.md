@@ -130,8 +130,8 @@ hundreds (kling-3.0 pro) — debited up-front at the exact price shown on the Ge
 
 The 800-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~3.5× a measured KIE creation at
 margin 4.0 (guarantees one free game + iteration), and deliberately BELOW the 1,200-credit premium
-minimum, so a fresh account cannot burn its grant on the 2× model. Premium is also **edit-only**: creations always run the standard streaming model
-(`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a creation-sized
+minimum, so a fresh account cannot burn its grant on the 2× model. Premium is also **edit-only**: the first build turn always runs the standard streaming model
+(`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a build-sized
 artifact before the gateway timeout).
 
 > **A deploy costs money.** Tool schemas and the base prompt live *inside* the cached prefix. Change
@@ -139,31 +139,42 @@ artifact before the gateway timeout).
 > 2×. Measured: $0.51 for a one-sentence answer right after a schema edit, $0.22 for the identical
 > prompt immediately after. A post-deploy cost spike is expected, not a regression.
 
-### Creation pricing is FLAT (2026-07-28)
+### Creating a project is FLAT; every TURN is cost-derived (2026-07-29)
 
-The formula above still computes every turn's TRUE cost, but the **creation turn charges a flat
-`CREATION_FLAT_CREDITS` (default 500)** instead. Why: creation cost is dominated by prompt-cache luck —
-the same creation measured **54 credits warm vs 430–633 cold**, a 12× spread the user can neither see
-nor influence, which made "what does a game cost?" unanswerable. Now it is one sentence: **creating a
-game costs 500 credits.** The platform absorbs the variance (that is what `CREDIT_MARGIN` is for);
-`generations.raw_cost_usd` still records the true cost, so the Admin usage report shows realized margin
-per creation. Operator notes:
+Creating a project no longer runs a generation. **New Project** clones the pinned starter template,
+installs it and serves it — so there is no creation TURN to price, and the flat charge moved to
+project **registration**: `PROJECT_CREATE_CREDITS` (default **150**), debited once under ledger reason
+`project_create`, before anything is provisioned. The build turn the user sends afterwards is an
+ordinary turn, billed by the formula above like any other.
 
-- **`CREATION_FLAT_CREDITS=0` disables it** (back to cost-proportional). Negative/garbage values are
-  ignored in favor of the default.
-- A **Stop** mid-creation charges `min(actual, flat)` — never more than the advertised price for less
-  than a creation. A **failed** creation refunds in full, as ever.
-- The pre-flight gate refuses a creation when the balance is below the flat price (a clear 402 naming
-  both numbers) instead of allowing a deep negative. Ordinary turns still only need a positive balance.
-- The ledger note carries `— flat creation price` so a 500-credit debit beside a $0.20 raw cost reads
-  as pricing, not a mis-bill.
-- Two companions shrink the platform's own average cost under the flat price: the **base-prompt cache
-  warmer** (`CACHE_WARMER_*` — keeps the byte-identical-for-everyone prompt block reading at 0.1×
-  instead of writing at 2×; pennies/day, platform-paid, no ledger rows) and, later, the measured
-  shared-starter prefix restructure (`spec/context-budget.md` §"Levers that are NOT built").
-- Re-check this number when `CREDIT_MARGIN`, the provider, or the model changes — flat price and
-  margin are one decision in two knobs: the flat price is denominated in credits, so a margin change
-  moves the USD the platform keeps per creation without touching this file.
+Why flat at all, and why only here: creation cost used to be dominated by prompt-cache luck — the same
+creation measured **54 credits warm vs 430–633 cold**, a 12× spread the user could neither see nor
+influence. Attaching a single predictable price to the one moment the user actually clicks a button
+answers "what does starting a game cost?" in one sentence, without pretending we can predict what any
+particular turn will cost. Operator notes:
+
+- **`PROJECT_CREATE_CREDITS=0` makes creating a project free.** Negative or garbage values are ignored
+  in favor of the default.
+- The charge is decided **before** the project row, the VM or the template fetch — so a refusal (402,
+  naming both the price and the balance) leaves nothing half-made. `project_create` is deliberately
+  absent from `mayGoNegative`: a debit taken before the spend it pays for must refuse, never overdraw.
+- **BYOK and unmetered mode create for free**, and no zero-value ledger row is written — a `0` entry is
+  noise in an audit trail, not evidence.
+- Deleting a project that never completed a generation **refunds** the charge.
+- Premium is still **edit-only**: the first build turn always runs the standard streaming model
+  (`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a build-sized artifact
+  before the gateway timeout).
+- **`CREATION_FLAT_CREDITS` is RETIRED and REFUSED.** It priced the creation TURN, which no longer
+  exists. Leaving it set is a pricing intent nothing honours, so the platform refuses to boot with it
+  and names its replacement — the same posture as the retired `KIE_*_DOLLARS` vars, and for the same
+  reason: a price variable nothing reads is a mis-bill waiting to be believed. **`=0` throws too** —
+  it used to mean "creations are free", and under the replacement they are charged, so silently
+  accepting it would let an operator keep believing something that stopped being true.
+- The **base-prompt cache warmer** (`CACHE_WARMER_*`) still shrinks the platform's average cost per
+  build: it keeps the byte-identical-for-everyone prompt block reading at 0.1× instead of writing at
+  2×. Pennies/day, platform-paid, no ledger rows.
+- `generations.raw_cost_usd` records the true cost of every turn, so the Admin usage report still shows
+  realized margin — flat price and margin remain one decision in two knobs.
 
 ## Sandbox compute — the margin fold-in (2026-07-27, PLACEHOLDER)
 
@@ -258,7 +269,8 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | `SANDBOX_VM_USD_PER_HOUR` | *derived from `CODESANDBOX_VM_TIER`* | MEASURED list price of the configured VM tier (**default Nano `0.149`**, Pico `0.074`; larger tiers derived at ~$0.0745/CPU-hour, an unknown name priced at the most expensive measured tier). An OPTIONAL override for a negotiated or changed rate — leave it unset so raising the tier raises the price. "Raise it with the tier" was a comment, and a comment cannot fail — see "Sandbox compute" |
 | `SANDBOX_EST_VM_HOURS_PER_KCREDIT` | `8.33` | The ESTIMATE: VM-hours dragged along by 1,000 billed credits (~120 credits per active build-hour, inverted). Replaced by measurement once the Admin VM-hours report has data |
 | `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-fable-5` / `1200` | The 2× premium tier: a selector + the balance a user must HOLD to unlock it (edit turns only) |
-| `CREATION_FLAT_CREDITS` | `500` | Flat price of a creation turn (`0` disables → cost-proportional). Kills the 54-vs-633 cache-luck spread for the user; true cost still recorded. See "Creation pricing is FLAT" |
+| `PROJECT_CREATE_CREDITS` | `150` | Flat price of creating a project, charged at registration before anything is provisioned (`0` makes it free). Every generation turn — including the first build — bills cost-derived. See "Creating a project is FLAT" |
+| ~~`CREATION_FLAT_CREDITS`~~ | *retired* | **REFUSED if set** (including `0`), naming `PROJECT_CREATE_CREDITS`. There is no creation turn to flat-price any more |
 | `CACHE_WARMER_ENABLED` | `true` | Base-prompt cache warmer (KIE only): keeps the shared prompt block warm so generations read at 0.1× instead of writing at 2×. Platform-paid, no ledger rows |
 | `CACHE_WARMER_INTERVAL_MINUTES` | `45` | Warm cycle cadence; must stay under the 60m cache TTL (values >55 or <1 are ignored) |
 | `CACHE_WARMER_FANOUT` | `6` | Requests per cycle — KIE warms per BACKEND (~4–5 measured behind their balancer) |

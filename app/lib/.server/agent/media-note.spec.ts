@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { mediaProtocolNote } from './media-note';
 
-const base = { hasMediaTools: true, isCreationTurn: false };
+const base = { hasMediaTools: true, isFirstBuildTurn: false };
 
 describe('mediaProtocolNote', () => {
   it('is absent when the turn has no media tools — never advertise a capability that is not offered', () => {
@@ -16,8 +16,8 @@ describe('mediaProtocolNote', () => {
   });
 
   /* Creation carries its own richer, art-directed copy; two copies pay twice and can disagree. */
-  it('is absent on a creation turn', () => {
-    expect(mediaProtocolNote({ ...base, isCreationTurn: true })).toBeNull();
+  it('is absent on a first build turn', () => {
+    expect(mediaProtocolNote({ ...base, isFirstBuildTurn: true })).toBeNull();
   });
 
   it('is present on an ordinary or /slash media turn — the case that had NO protocol at all', () => {

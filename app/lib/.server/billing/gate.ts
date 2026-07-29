@@ -42,11 +42,17 @@ export interface CreditGateInput {
   byok?: boolean;
 
   /**
-   * Require at least this many credits instead of merely "more than zero". Set by the proxy for
-   * FLAT-PRICED creation turns (§4.6, `creationFlatCredits`): when the price of the turn is known up
-   * front, letting a 10-credit balance start a 500-credit creation is not the bounded one-generation
-   * overshoot the gate's design accepts — it is a knowable deep negative, refused honestly with the
-   * price in the message. Ordinary turns never set it (their cost is unknowable pre-flight).
+   * Require at least this many credits instead of merely "more than zero".
+   *
+   * ⚠️ RETAINED, BUT NOTHING SETS IT (§4.4a, 2026-07-29). It existed for FLAT-PRICED creation turns:
+   * when the price of a turn is known up front, letting a 10-credit balance start a 500-credit
+   * creation is not the bounded one-generation overshoot the gate's design accepts — it is a knowable
+   * deep negative. There is no such turn any more (the flat charge moved ahead of the generation, to
+   * project registration under `decideProjectCreateCharge`), and `proxy.ts` passes no minimum: no
+   * turn's cost is knowable pre-flight. Kept because it is a tested pure lever an operator could want
+   * back; pinned uncalled by `creation-flat.spec.ts`. ⚠️ Its refusal message still says "Creating a
+   * new project costs N credits" — copy written for the charge that moved. Re-enable this for
+   * anything else and the wording has to move with it.
    */
   minimumCredits?: number;
 
@@ -116,19 +122,25 @@ export interface SettleInput {
   byok?: boolean;
 
   /**
-   * Charge EXACTLY this many credits instead of the cost-derived amount — the FLAT creation price
-   * (§4.6, `creationFlatCredits`). `rawCostUsd` is still computed and recorded unchanged, so the Admin
-   * usage report keeps watching realized margin (flat revenue vs true cost) per creation. Ignored for
-   * BYOK (their key paid) and for a generation that consumed nothing (a nothing-generation must stay
-   * free — flat pricing charges for a creation, not for an instant failure).
+   * Charge EXACTLY this many credits instead of the cost-derived amount.
+   *
+   * ⚠️ RETAINED, BUT NOTHING PASSES IT (§4.4a, 2026-07-29) — this was the FLAT creation price;
+   * `proxy.ts` now settles every turn cost-derived. `rawCostUsd` is still computed and recorded
+   * unchanged whichever way this goes, so the Admin usage report keeps watching realized margin.
+   * Ignored for BYOK (their key paid) and for a generation that consumed nothing (a nothing-generation
+   * must stay free — a flat price charges for work, not for an instant failure). Pinned uncalled, and
+   * pinned CORRECT, by `creation-flat.spec.ts`.
    */
   flatCredits?: number;
 
   /**
-   * CAP the cost-derived charge — set for a STOPPED creation turn: §4.12 says bill what was actually
-   * consumed, and the flat price is the advertised ceiling, so a Stop charges min(consumed, flat). A
-   * user must never pay more than the flat price for less than a creation. Mutually exclusive with
-   * `flatCredits` by construction at the call site; if both arrive, the flat price wins.
+   * CAP the cost-derived charge.
+   *
+   * ⚠️ RETAINED, BUT NOTHING PASSES IT (§4.4a, 2026-07-29) — it was set for a STOPPED creation turn:
+   * §4.12 says bill what was actually consumed, and the flat price was the advertised ceiling, so a
+   * Stop charged min(consumed, flat). With no flat price there is no advertised ceiling to hold a Stop
+   * to, and a Stop simply bills what it consumed. Mutually exclusive with `flatCredits` by
+   * construction at any call site; if both arrive, the flat price wins.
    */
   maxCredits?: number;
 

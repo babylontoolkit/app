@@ -65,6 +65,9 @@ beforeEach(async () => {
     'UNITY_LICENSE_CREDITS_INDIE',
     'UNITY_LICENSE_CREDITS_SMALLBUSINESS',
     'UNITY_LICENSE_CREDITS_PREMIUMCONTENT',
+
+    /* Retired (§4.4a) — `getBillingConfig` THROWS when it is set, killing the license charge path. */
+    'CREATION_FLAT_CREDITS',
   ]) {
     vi.stubEnv(key, undefined as unknown as string);
   }

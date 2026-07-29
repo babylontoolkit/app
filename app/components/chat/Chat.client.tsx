@@ -6,9 +6,9 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
-import { createProject, deleteProject, getRepoStatus, mintServerChatId } from '~/lib/persistence/projects';
+import { ApiError, createProject, deleteProject, getRepoStatus, mintServerChatId } from '~/lib/persistence/projects';
 import { chatStore, creationTurnStore } from '~/lib/stores/chat';
-import { CREATION_BRIEF_MARKER } from '~/types/creation';
+import { isCreationTurn } from '~/lib/chat/creation-turn';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
 import { applySettlement, canUsePremium, sessionStore } from '~/lib/stores/session';
@@ -39,10 +39,12 @@ import { onSandboxFailure, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import { asCreationFailure } from '~/lib/registry/creation-errors';
 import { waitForMountVisible } from '~/lib/registry/mount';
 import { settleAfterCreation } from '~/lib/registry/settle';
+import { awaitStarterRunning, isInstallFinished } from '~/lib/registry/starter-ready';
 import { waitForActionsSettled } from '~/lib/runtime/actions-settled';
 import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registry/match';
 import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
 import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
+import { enterNewProjectMode, exitNewProjectMode, hydrateNewProjectMode } from '~/lib/stores/new-project-mode';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
 import { trackMediaTask } from '~/lib/media/tasks';
 import { streamActivitySize } from '~/lib/chat/stream-activity';
@@ -306,6 +308,20 @@ export const ChatImpl = memo(
       if (!activeProjectId) {
         setChatMode('build');
       }
+    }, [activeProjectId]);
+
+    /*
+     * NEW PROJECT MODE follows the OPEN project, and the `null` write is the load-bearing half (§4.4a).
+     *
+     * "New project" and a dashboard Open are SPA navigates that do not remount this component, and the
+     * mode store is module-level — so without a hydrate on every change of project, a mode entered for
+     * one project would still be set when the user opens another, and the banner plus the hidden
+     * creation brief would follow them into a game they had already built. That is the inherited-state
+     * class of bug §4.5.6 records twice; here the fix is one line, run for every project including the
+     * ones that were never in the mode.
+     */
+    useEffect(() => {
+      hydrateNewProjectMode(activeProjectId);
     }, [activeProjectId]);
 
     const mcpSettings = useMCPStore((state) => state.settings);
@@ -839,13 +855,7 @@ export const ChatImpl = memo(
      * because its first message is an edit.
      */
     useEffect(() => {
-      if (!activeProjectId && messages.length === 0) {
-        creationTurnStore.set(true);
-        return;
-      }
-
-      const lastUser = [...messages].reverse().find((message) => message.role === 'user');
-      creationTurnStore.set(typeof lastUser?.content === 'string' && lastUser.content.includes(CREATION_BRIEF_MARKER));
+      creationTurnStore.set(isCreationTurn({ activeProjectId, messages }));
     }, [messages, activeProjectId]);
 
     /*
@@ -1102,24 +1112,30 @@ export const ChatImpl = memo(
      *   No model is contacted, so nothing a model does can influence whether the user ends up with a
      *   project. When this phase returns, the project EXISTS and that fact is settled.
      *
-     *   **Phase 2 — POST-CREATE. The AI carries out the brief:** the landing page and chrome, any
-     *   generated art, and the user's actual request. Every failure here is a bad STATE of a project
-     *   that exists — a dead image render, a generation that errors mid-stream, a model that writes
-     *   nonsense — and every one of them is one prompt away from fixed. So phase 2 is wrapped in its
-     *   own boundary and **still reports success**: the project is real, it is mounted, it is
-     *   installing and running, and the user can keep working on it.
+     *   **Phase 2 — POST-CREATE. Hand the finished project over to the user.** Commit the setup
+     *   artifact (whose actions run `npm install` and `npm run dev`), wait for the tree to settle, and
+     *   carry the user's prompt into the chat textbox. Every failure here is a bad STATE of a project
+     *   that exists, and every one is one prompt away from fixed — so phase 2 is wrapped in its own
+     *   boundary and **still reports success**: the project is real, it is mounted, it is installing
+     *   and running, and the user can keep working on it.
      *
-     * This is why the "🎮 Your game is ready" toast is NOT fired here. It belongs to FINAL COMPLETE —
-     * `onFinish`, once the brief has actually been carried out (see `creationCompleteRef`). Phase 1 is
-     * a guarantee, not a milestone worth announcing.
+     * 🔴 **NEITHER PHASE CONTACTS A MODEL (owner rule, 2026-07-29).** Creation is a clone: fetch the
+     * starter, mount it, install it, run it, show the stock home page. It used to end by firing the
+     * game build automatically — one `reload()` call, the most expensive generation in the product,
+     * with the user watching a splash. Now the prompt goes into the textbox and the user sends it when
+     * they are ready, against a project that is already running. *"Nothing else should be able to stop
+     * the project from getting created."*
+     *
+     * This is why the "🎮 Your game is ready" toast is not fired here — there is no game yet. Phase 1 is
+     * a guarantee, not a milestone worth announcing, and phase 2 hands over a starter, not a game.
      *
      * The failure the split exists to kill: one `catch` around both phases told a user whose project
      * had mounted perfectly that we "could not create the project from the starter template", because
      * an image render 500'd. Wrong message, and it makes a recoverable situation read as a total loss.
      *
-     * When there is no prompt (a card click), the chat is empty: the model builds the landing page and
-     * stops. `visiblePrompt` is what the user actually typed — the wizard's compiled text is hidden
-     * behind its summary card, per §4.7.
+     * `visiblePrompt` is what the user actually typed — the wizard's compiled text is hidden behind its
+     * summary card, per §4.7 — and it is what belongs in the textbox. A card click types nothing, so
+     * the box is left empty.
      */
     const runStartProject = async (options: {
       entry: GameRegistryEntry;
@@ -1199,6 +1215,32 @@ export const ChatImpl = memo(
         projectId.set(undefined);
         logger.error(`Could not register the project with the server: ${(error as Error).message}`);
 
+        /*
+         * 🔴 A REFUSAL IS NOT AN OUTAGE, and the difference decides whether creation may continue.
+         *
+         * The fallback below exists for §1.3 principle 0 — an unreachable server must not stop someone
+         * building — and it is correct for a 500 or a dropped connection. But a 402 is the platform
+         * deliberately declining (the flat creation charge, §4.4a): degrading past it hands a user with
+         * no credits a fully working project for free on the WebContainer provider, and tells them the
+         * server was unreachable, which is false. Both halves are wrong, and neither throws.
+         *
+         * So a 402 stops creation on EVERY provider, and it is reported as what it is — the server's own
+         * message names the price and the balance, so it is the whole alert rather than a "Details:" tail
+         * under a headline blaming infrastructure.
+         */
+        if (error instanceof ApiError && error.statusCode === 402) {
+          toast.error(error.message);
+          setLlmErrorAlert({
+            type: 'error',
+            title: 'Not enough credits to start a project',
+            description: error.message,
+            errorType: 'quota',
+          });
+          setFakeLoading(false);
+
+          return false;
+        }
+
         if (SANDBOX_REQUIRES_PROJECT) {
           const message = 'We could not create your project on the server, so there is no workspace to build in.';
           toast.error(message);
@@ -1270,7 +1312,14 @@ export const ChatImpl = memo(
         return false;
       }
 
-      const { assistantMessage, userMessage, className, mustBeVisible } = created;
+      /*
+       * `created.userMessage` — the machine-written creation brief — is no longer a MESSAGE. It is
+       * carried in New Project mode and appended, hidden, to the user's own first prompt when they send
+       * it. It is still built HERE, at creation, because this is where its facts are true: the class that
+       * was actually scaffolded, the images actually on disk, the entry actually seeded. Rebuilding it at
+       * send time from whatever the store then holds is how a brief comes to describe a different project.
+       */
+      const { assistantMessage, userMessage: creationBrief, className, mustBeVisible } = created;
 
       /*
        * From here on the project EXISTS in the sandbox. Everything that follows is best-effort by
@@ -1281,65 +1330,64 @@ export const ChatImpl = memo(
         // The rest of the splash's story: the mount-visibility wait below.
         bootProgress.set({ step: 'creating-finalize' });
 
-        setProjectSeed({ entry, className, title, prompt, matched });
-
-        const shown = visiblePrompt ?? prompt;
-        const stamp = new Date().getTime();
-
-        const messages: Message[] = [];
-
-        if (shown) {
-          const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${shown}`;
-          messages.push({
-            id: `1-${stamp}`,
-            role: 'user',
-            content: userMessageText,
-            parts: createMessageParts(userMessageText, imageDataList),
-          });
-        }
-
-        messages.push(
-          { id: `2-${stamp}`, role: 'assistant', content: assistantMessage },
-          {
-            id: `3-${stamp}`,
-            role: 'user',
-            content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userMessage}`,
-            annotations: ['hidden'],
-          },
-        );
-
-        setMessages(messages);
-
-        const reloadOptions =
-          uploadedFiles.length > 0 ? { experimental_attachments: await filesToAttachments(uploadedFiles) } : undefined;
+        setProjectSeed({ entry, className, title, prompt, visiblePrompt, matched });
 
         /*
-         * 🔴 THE LAST THING BEFORE THE MOST EXPENSIVE GENERATION IN THE PRODUCT. Do not move it, and do
-         * not move anything that sets state below it.
+         * The project exists and has never been built in — enter New Project mode, carrying the brief the
+         * user's first message will ride in on. Done BEFORE the waits below so a user who reloads mid-wait
+         * still comes back to a project that knows what it is.
+         */
+        enterNewProjectMode({ projectId: registeredProjectId ?? '', brief: creationBrief });
+
+        /*
+         * 🔴 ONE MESSAGE, AND IT IS NOT THE USER'S (owner rule, 2026-07-29 — creation is a clone).
          *
-         * Two things have to be true before the model is worth paying for, and neither was:
+         * Creation used to commit three messages and then fire a generation: the user's visible prompt
+         * (`1-`), this setup artifact (`2-`), and the hidden creation brief (`3-`). Two of those existed
+         * only to feed a model that no longer runs here. What remains is the artifact — and it is doing
+         * three jobs, none of them decorative:
          *
-         *   1. **The project must be VISIBLE, not merely written.** The writes above are awaited, so the
-         *      bytes are on disk — but the model reads `workbenchStore.files`, which a watcher fills
-         *      asynchronously. Measured: the request fired at 5405ms, the store filled at 5531ms, and
-         *      the model was asked to write a racing game having been shown SEVEN files, none of them
-         *      source. It told the owner so — "I can't see its source" — and we read that as caution.
+         *   1. **It is what installs and runs the project.** Its `shell`/`start` actions are executed by
+         *      the message parser's action runner, entirely independently of any generation. `npm install`
+         *      and `npm run dev` have always been driven from here, never by the model.
+         *   2. **It mints the chat's identity.** `description` derives from `firstArtifact?.title ??
+         *      summarizeRequest(firstUserMessage)` and the artifact carries the project title — so the
+         *      chat is listed in the sidebar with no user message present. A chat needs BOTH a `urlId`
+         *      and a `description` to be visible at all; drop this message and a brand-new project is
+         *      invisible until the user's first send.
+         *   3. **It is the user's evidence the project exists** — an empty chat beside a running preview
+         *      reads as a failure.
          *
-         *   2. **`projectId` must have reached a COMMITTED render.** The AI SDK refreshes its request
-         *      body from a `useEffect` (`extraMetadataRef`), so it only ever sends values from a render
-         *      that has committed. `createProject` sets the atom — it now runs at the TOP of phase 1,
-         *      because a server-backed sandbox cannot be booted for a project that does not exist yet,
-         *      which puts several awaits between the set and here. That is a happy accident, not the
-         *      guarantee: originally the two sat in the same synchronous block as `reload()` and the
-         *      body carried `projectId: undefined` on every creation —
-         *      the server's ownership check and its per-project attribution both got nothing. Fixing
-         *      only (1) left this one standing, silently: the files came through and the id did not.
+         * The user's own words are not committed here at all: they go into the TEXTBOX, for the user to
+         * edit and send themselves. The brief rides along hidden on that send. So the first user message
+         * in the transcript is one the user actually sent — which is more honest than what it replaced,
+         * where the never-dropped "original brief" (`history.ts`) was a message they never wrote.
+         */
+        setMessages([{ id: `2-${new Date().getTime()}`, role: 'assistant', content: assistantMessage }]);
+
+        /*
+         * 🔴 THE WAITS STAY, AND THEY ARE NOW FOR THE USER RATHER THAN FOR THE MODEL.
          *
-         * Awaiting here fixes both, because it yields — the store update and the `projectId.set` above
-         * both land in a commit before `reload()` reads the ref. The wait stays HERE, at the end of the
-         * caller's sequence, rather than inside `createProjectFromRegistry`: that function is not the
-         * last thing that sets state the request needs, and "one wait, after everything" is the rule
-         * that made both halves true at once.
+         * These two waits were placed here to protect the generation that used to fire on the next line:
+         * the model reads `workbenchStore.files`, which a watcher fills ASYNCHRONOUSLY, and it was once
+         * measured being asked to write a racing game having been shown SEVEN files of a 78-file tree,
+         * none of them source (it said so — "I can't see its source" — and that was read as caution
+         * rather than as the bug report it was). The second half was `projectId`: the AI SDK refreshes
+         * its request body from a committed render, so an unyielded creation posted `projectId:
+         * undefined` and the server's ownership check and per-project attribution both got nothing.
+         *
+         * No generation fires here any more, so BOTH of those specific races are gone. Keeping the waits
+         * is not superstition:
+         *
+         *   - **The user is about to look at this tree.** The next thing they see is a file explorer and
+         *     a preview of their new project. Coming down while the watcher is still draining shows them
+         *     a half-populated project and calls it created.
+         *   - **A mount tail leaks into whatever reads the store next** — the install/dev actions, the
+         *     first checkpoint serialize, the first build turn. Removing a settle wait is how that tail
+         *     becomes somebody else's intermittent bug.
+         *   - **`projectId` still has to reach a committed render before the user's first send**, and
+         *     yielding here is what guarantees it did — the send is now minutes later rather than
+         *     microseconds, which makes it safe, not unnecessary.
          */
         await waitForMountVisible(mustBeVisible);
 
@@ -1365,20 +1413,68 @@ export const ChatImpl = memo(
 
         logger.info(
           `Creation settled after ${settled.elapsedMs}ms with ${settled.finalCount} files ` +
-            `(${settled.quiesced ? 'quiesced' : 'ceiling reached'}) — starting the build`,
+            `(${settled.quiesced ? 'quiesced' : 'ceiling reached'}) — installing`,
         );
 
-        // This turn IS the creation build — onFinish celebrates it once (see creationCompleteRef).
-        creationCompleteRef.current = true;
+        /*
+         * 🔴 A PROJECT THAT IS NOT RUNNING IS NOT CREATED (owner rule, 2026-07-29).
+         *
+         * The success condition is *"npm install + npm run dev and showing the starter app template basic
+         * home page"* — so the splash covers those two steps rather than coming down while they run in a
+         * terminal nobody is looking at. It could get away with that before only because a generation
+         * started immediately and gave the user something else to watch.
+         *
+         * The work itself is unchanged and is NOT driven from here: the setup artifact's `shell` and
+         * `start` actions were handed to the action runner when the message was committed above. This
+         * only WATCHES them, and both waits are bounded — a ceiling reached is normal, silent, and
+         * dismisses the splash on a project that keeps installing behind it (§1.3 principle 0).
+         */
+        const running = await awaitStarterRunning({
+          /*
+           * What counts as "installed" is a decision, and it lives in `starter-ready.ts` where it is tested.
+           *
+           * ⚠️ `firstArtifact` is `artifactIdList[0]` — the first artifact of the TAB, not of this project.
+           * A second creation inside one page load would read the previous project's already-complete
+           * shell action and skip the install narration (the wait would end immediately; nothing breaks,
+           * the splash just stops describing the install). Every route into creation forces a full page
+           * load today (§T19), which is the same assumption the chat's `description` derivation already
+           * rests on — but if that ever stops being true, this reads the wrong artifact.
+           */
+          installComplete: () =>
+            isInstallFinished(Object.values(workbenchStore.firstArtifact?.runner.actions.get() ?? {})),
+          runningPreviews: () => workbenchStore.previews.get().length,
+          wait: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+          onStage: (stage) => bootProgress.set({ step: stage === 'install' ? 'creating-install' : 'creating-serve' }),
+        });
 
-        reload(reloadOptions);
+        logger.info(
+          `Starter ${running.serving ? 'is serving' : 'has not opened a port yet'} after ${running.elapsedMs}ms ` +
+            `(install ${running.installed ? 'finished' : 'still running'})`,
+        );
 
+        /*
+         * 🔴 CREATION ENDS HERE. IT DOES NOT BUILD THE GAME.
+         *
+         * `reload()` used to be the next line, and that ONE line was the entire game build — the most
+         * expensive generation in the product, fired automatically at the end of a clone. It is gone.
+         * A New Project is now exactly what the name says: fetch the starter, mount it, install it, run
+         * it. Nothing a model does can decide whether the user ends up with a project, because no model
+         * is contacted at all. The user's prompt is carried into the textbox instead, for them to edit
+         * and send when they are ready.
+         *
+         * Two deletions here that are easy to re-add by reflex, both of which would be wrong:
+         *
+         *   - **`creationCompleteRef` is NOT armed.** It fires "🎮 Your game is ready"; there is no game
+         *     yet. Arming it here would celebrate an untouched starter. It belongs to the first build
+         *     turn.
+         *   - **The textarea is NOT blurred, and the attachments are NOT cleared.** Both existed because
+         *     the send had already happened. It has not. Blurring would take the caret out of the box we
+         *     are about to prefill, and clearing `uploadedFiles`/`imageDataList` would silently destroy
+         *     images the user picked before pressing New Project — they now ride the build turn instead.
+         */
         clearDraftPrompt();
-        setUploadedFiles([]);
-        setImageDataList([]);
         setVaguePrompt(null);
         resetEnhancer();
-        textareaRef.current?.blur();
         setFakeLoading(false);
 
         return true;
@@ -1392,7 +1488,7 @@ export const ChatImpl = memo(
          * box is usable immediately; nothing is unwound.
          */
         logger.error('Post-create failed — the project exists and is usable', error);
-        toast.warn('Your project was created, but the design pass did not run. Ask me to build it and I will retry.');
+        toast.warn('Your project was created, but the last setup step did not finish. It is safe to keep working.');
         setFakeLoading(false);
 
         return true;
@@ -1678,6 +1774,25 @@ export const ChatImpl = memo(
         textareaRef.current?.blur();
 
         return;
+      }
+
+      /*
+       * 🔴 LEAVE NEW PROJECT MODE ON SEND, AND ONLY HERE (§4.4a).
+       *
+       * Placement is the whole rule, in both directions:
+       *
+       *   - **After the client-command interceptions above**, because `/context` or `/effort` on a
+       *     freshly created project is an ordinary thing to type and posts nothing. Clearing at the top
+       *     of the handler would silently spend the mode — and with it the creation brief — on a command
+       *     that was never a build.
+       *   - **Before the post below**, because a mode that outlives its own send is a mode a second,
+       *     fast send reads again.
+       *
+       * And on SEND rather than on finish: a build that fails is one the user retries, and the retry must
+       * carry the brief. The brief is a fact about the first message, not about the first one that worked.
+       */
+      if (activeProjectId) {
+        exitNewProjectMode(activeProjectId);
       }
 
       if (error != null) {

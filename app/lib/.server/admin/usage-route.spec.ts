@@ -64,12 +64,23 @@ beforeEach(() => {
    * machine. Empty means "not configured", which `getProviderBalance` reports without a network call.
    */
   vi.stubEnv('KIE_API_KEY', '');
+
+  /*
+   * ⚠️ Same trap, retired variable: the report reaches `getBillingConfig`, which REFUSES
+   * `CREATION_FLAT_CREDITS` (§4.4a). An operator still carrying it in `.env.local` gets a
+   * `NotConfiguredError` out of every admin-usage assertion instead of a report.
+   */
+  vi.stubEnv('CREATION_FLAT_CREDITS', undefined as unknown as string);
   resetProviderBalanceCache();
 
   // No FS fallback: a real store would read and write the repo's own `.data/`.
   setGenerationStore({
     async upsert() {
       /* The route only lists. */
+    },
+    async hasBilledGeneration() {
+      /* The route never asks — that is the project-delete refund path (§4.4a). */
+      return false;
     },
     async list() {
       return [] as GenerationRecord[];
@@ -150,6 +161,32 @@ describe('the VM section', () => {
     const body = await usageJson();
 
     expect(body.vm).toMatchObject({ marks: 0, vmHours: 0, running: 0, users: 0 });
+  });
+});
+
+/**
+ * THE DASHBOARD MUST SURVIVE THE MISCONFIGURATION IT IS OPENED TO DIAGNOSE (§4.4a, 2026-07-29).
+ *
+ * `beforeEach` above scrubs `CREATION_FLAT_CREDITS` so the other assertions are not poisoned by a
+ * developer's `.env.local` — which is correct, and which is also how this hid: the route reached
+ * `getBillingConfig` through `getProviderBalance`, that call REFUSES the retired variable, and the
+ * scrub meant no test ever ran the route with it set. An operator whose env still carried it got a
+ * 500 from the one surface that would have told them why their billing looked wrong.
+ *
+ * The fix is in `provider-balance.ts` (`getBillingConfigSafe`), which restores the "never throws"
+ * claim this route relies on IN A COMMENT — it wraps the VM store and deliberately does not wrap the
+ * balance. This test is what keeps that comment true.
+ */
+describe('a retired price variable does not 500 the dashboard', () => {
+  it('renders the whole report with CREATION_FLAT_CREDITS still set', async () => {
+    vi.stubEnv('CREATION_FLAT_CREDITS', '500');
+
+    const response = await usage();
+    const body = (await response.json()) as UsageBody;
+
+    expect(response.status).toBe(200);
+    expect(body.report).toBeTruthy();
+    expect(body.providerBalance).toBeTruthy();
   });
 });
 

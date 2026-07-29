@@ -39,16 +39,32 @@ const logger = createScopedLogger('ledger');
  * the gate for — so like `generation` it may go negative (refusing it mid-generation only loses the
  * audit trail; the vendor was already paid). Not anchored to a generations row (generation_id null).
  */
-export type LedgerReason =
-  | 'grant'
-  | 'purchase'
-  | 'generation'
-  | 'media'
-  | 'search'
-  | 'license'
-  | 'refund'
-  | 'promo'
-  | 'adjustment';
+/**
+ * `project_create` (migration 0015): the flat charge for creating a New Project (§4.4a). Like `media`
+ * and `license` — and UNLIKE `search` — it is debited BEFORE anything is provisioned (no project row, no
+ * VM, no template fetch), so an insufficient balance REFUSES rather than overdrawing; it is absent from
+ * `mayGoNegative` below. Not anchored to a generations row (creation runs no generation at all).
+ */
+/**
+ * The runtime inventory. The union is DERIVED from it rather than declared beside it, so a reason cannot
+ * exist in the type and be invisible to the tests that check the type against the SQL `CHECK` constraint
+ * (`ledger-sql.spec.ts`) — the three lockstep places (union, `mayGoNegative`, SQL) drifting apart is a
+ * mis-bill that throws nothing.
+ */
+export const LEDGER_REASONS = [
+  'grant',
+  'purchase',
+  'generation',
+  'media',
+  'search',
+  'license',
+  'project_create',
+  'refund',
+  'promo',
+  'adjustment',
+] as const;
+
+export type LedgerReason = (typeof LEDGER_REASONS)[number];
 
 export interface LedgerEntry {
   id: string;
@@ -91,6 +107,30 @@ export class DuplicatePaymentError extends Error {
   }
 }
 
+/**
+ * A project-create refund that has already been paid (migration 0015's partial unique index).
+ *
+ * Like `DuplicateGrantError`, this is the SUCCESS path for its caller — the user has their credits back
+ * — and it exists so the guarantee is STRUCTURAL rather than a read-then-write check a second tab or a
+ * double-clicked Delete sails straight through.
+ */
+export class DuplicateRefundError extends Error {
+  constructor(note: string) {
+    super(`A refund for ${note} has already been issued.`);
+    this.name = 'DuplicateRefundError';
+  }
+}
+
+/**
+ * Notes whose refund may happen at most once, matching migration 0015's partial index predicate.
+ *
+ * Narrow on purpose: every other refund note repeats legitimately (one user sees "Generation failed"
+ * many times), so widening this rejects refunds users are owed.
+ */
+export function isSingleRefundNote(reason: LedgerReason, note?: string): boolean {
+  return reason === 'refund' && typeof note === 'string' && note.startsWith('project_create:');
+}
+
 export interface Ledger {
   /** Append a row, deriving `balanceAfter`. Throws on a duplicate grant or a replayed payment. */
   append(entry: NewLedgerEntry): Promise<LedgerEntry>;
@@ -117,6 +157,17 @@ export interface Ledger {
 
   /** Has this user ever been granted? Cheap check for the UI; the index is the real guard. */
   hasGrant(userId: string): Promise<boolean>;
+
+  /**
+   * Every row of this user's carrying the given audit `note`, oldest first.
+   *
+   * Exists for the `project_create` charge/refund pair (migration 0015), which has NO generation to
+   * anchor to — the note is its only link to the project it paid for. An exact lookup rather than a
+   * paged `list()` scan on purpose: a heavy user's charge falls off the end of any page window, and the
+   * refund would then silently not happen for exactly the users with the most history. It is also what
+   * makes the double-refund check exact ("is there already a refund carrying this note?").
+   */
+  listByNote(userId: string, note: string): Promise<LedgerEntry[]>;
 }
 
 function newId(): string {
@@ -139,6 +190,10 @@ function mayGoNegative(reason: LedgerReason): boolean {
   /*
    * 'search' joins them: it is debited mid-generation after the vendor was already paid, so it cannot
    * be refused without eating the cost AND losing the audit trail (migration 0010).
+   *
+   * 🔴 'media', 'license' and 'project_create' are deliberately ABSENT: each debits BEFORE the spend it
+   * pays for, so each must refuse rather than overdraw. Adding one here silently converts a refusal into
+   * free work on the platform's bill.
    */
   return reason === 'generation' || reason === 'adjustment' || reason === 'search';
 }
@@ -204,6 +259,18 @@ export class FsLedger implements Ledger {
         throw new DuplicatePaymentError(entry.paymentRef);
       }
 
+      /*
+       * Mirrors migration 0015's partial unique index. INSIDE `_serialize`, which is what makes it a
+       * real guarantee rather than the read-then-write check it would be at a call site: local mode is
+       * single-process, so the mutex is this backend's equivalent of the index.
+       */
+      if (
+        isSingleRefundNote(entry.reason, entry.note) &&
+        rows.some((r) => r.note === entry.note && r.reason === 'refund')
+      ) {
+        throw new DuplicateRefundError(entry.note!);
+      }
+
       const previous = rows.length ? rows[rows.length - 1].balanceAfter : 0;
       const balanceAfter = previous + entry.delta;
 
@@ -234,6 +301,10 @@ export class FsLedger implements Ledger {
 
   async hasGrant(userId: string): Promise<boolean> {
     return (await this._read(userId)).some((r) => r.reason === 'grant');
+  }
+
+  async listByNote(userId: string, note: string): Promise<LedgerEntry[]> {
+    return (await this._read(userId)).filter((r) => r.note === note);
   }
 
   async listByReason(reason: LedgerReason, limit = 100, offset = 0): Promise<LedgerEntry[]> {
@@ -331,6 +402,10 @@ export class SupabaseLedger implements Ledger {
           throw new DuplicateGrantError();
         }
 
+        if (isSingleRefundNote(entry.reason, entry.note)) {
+          throw new DuplicateRefundError(entry.note!);
+        }
+
         if (entry.paymentRef) {
           throw new DuplicatePaymentError(entry.paymentRef);
         }
@@ -389,6 +464,28 @@ export class SupabaseLedger implements Ledger {
       .maybeSingle();
 
     return Boolean(data);
+  }
+
+  async listByNote(userId: string, note: string): Promise<LedgerEntry[]> {
+    const db = await this._db();
+
+    const { data, error } = await db
+      .from('credit_ledger')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('note', note)
+      .order('seq', { ascending: true });
+
+    /*
+     * THROW rather than return empty. The caller decides whether a row exists AND whether one has
+     * already been refunded, so an outage answering "no rows" would both skip a legitimate refund and
+     * — worse — report "not yet refunded" for one that was.
+     */
+    if (error) {
+      throw new Error(`Ledger note lookup failed: ${error.message}`);
+    }
+
+    return (data ?? []).map(rowToEntry);
   }
 
   async listByReason(reason: LedgerReason, limit = 100, offset = 0): Promise<LedgerEntry[]> {

@@ -50,10 +50,13 @@ remembers; it has to be a rule with a guard behind it, which is what this spec i
 Primary: **every request that reaches KIE** — LLM generations (`/api/agent`, incl. repairs, forced
 continuations, the unproductive rescue, premium tier), the enhancer (`/api/enhancer`), and media
 renders (§4.16, both stages of a cut-out). Binding equally: every other ledger debit — the full
-`LedgerReason` set is `grant | purchase | generation | media | search | license | refund | promo |
-adjustment` (`billing/ledger.ts`), and the debiting members (`generation`, `media`, `search`,
-`license`) all carry this contract. `search` debits AFTER the vendor returned and may go negative by
-design — that is a documented posture, not a silent failure.
+`LedgerReason` set is `grant | purchase | generation | media | search | license | project_create |
+refund | promo | adjustment` (`billing/ledger.ts`), and the debiting members (`generation`, `media`,
+`search`, `license`, `project_create`) all carry this contract. `search` debits AFTER the vendor
+returned and may go negative by design — that is a documented posture, not a silent failure.
+`project_create` (migration 0015) is the opposite posture: it debits BEFORE anything is provisioned,
+so it refuses rather than overdraws, and its refund path is the deletion of a project that never
+completed a generation.
 
 ## The core rule: four terminal states, and no fifth
 

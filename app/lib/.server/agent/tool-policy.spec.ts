@@ -10,11 +10,11 @@ import { describe, expect, it } from 'vitest';
 import { CREATION_MEDIA_STEPS, toolPolicyForTurn } from './tool-policy';
 import { MAX_TOOL_ROUNDS } from './tools';
 
-const base = { isCreationTurn: false, hasMcpTools: false, hasMediaTools: false, preloadedCount: 0, isSlash: false };
+const base = { isFirstBuildTurn: false, hasMcpTools: false, hasMediaTools: false, preloadedCount: 0, isSlash: false };
 
-describe('toolPolicyForTurn — creation turns', () => {
+describe('toolPolicyForTurn — first build turns', () => {
   it('opens a MEDIA-ONLY loop with a small cap when media tools exist (§4.16 design art)', () => {
-    expect(toolPolicyForTurn({ ...base, isCreationTurn: true, hasMediaTools: true })).toEqual({
+    expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true })).toEqual({
       allowTools: true,
       toolset: 'media-only',
       maxSteps: CREATION_MEDIA_STEPS,
@@ -22,7 +22,7 @@ describe('toolPolicyForTurn — creation turns', () => {
   });
 
   it('keeps the historic one-shot when the platform cannot render (no KIE key / no project)', () => {
-    expect(toolPolicyForTurn({ ...base, isCreationTurn: true })).toEqual({
+    expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true })).toEqual({
       allowTools: false,
       toolset: 'all',
       maxSteps: 1,
@@ -34,11 +34,11 @@ describe('toolPolicyForTurn — creation turns', () => {
    * one-shot fix removed (§4.2.8: 29,173 redrafted output tokens to load ONE skill). MCP presence must
    * not widen the set either: the creation brief routes design art, nothing else.
    */
-  it('never offers the full toolset on a creation turn, even with MCP tools present', () => {
-    const policy = toolPolicyForTurn({ ...base, isCreationTurn: true, hasMediaTools: true, hasMcpTools: true });
+  it('never offers the full toolset on a first build turn, even with MCP tools present', () => {
+    const policy = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true, hasMcpTools: true });
     expect(policy.toolset).toBe('media-only');
 
-    const noMedia = toolPolicyForTurn({ ...base, isCreationTurn: true, hasMcpTools: true });
+    const noMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true });
     expect(noMedia.allowTools).toBe(false);
   });
 
@@ -106,7 +106,7 @@ describe('toolPolicyForTurn — ordinary turns: the skill tools are ALWAYS offer
         for (const preloadedCount of [0, 1, 2]) {
           for (const isSlash of [false, true]) {
             const policy = toolPolicyForTurn({
-              isCreationTurn: false,
+              isFirstBuildTurn: false,
               hasMcpTools,
               hasMediaTools,
               preloadedCount,
@@ -133,16 +133,16 @@ describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (�
    * Creation is the one-shot that writes the whole game (§4.2.8). Offering editor tools there re-opens
    * the six-round pathology AND points the model at a Unity project it was not asked to touch.
    */
-  it('never offers Unity/MCP tools on a creation turn', () => {
+  it('never offers Unity/MCP tools on a first build turn', () => {
     /*
      * Two shapes express "not offered", and the property is the CONJUNCTION — `toolset` is meaningless
      * when `allowTools` is false, so asserting the field alone would pass on a policy that offered them.
      */
-    const noMedia = toolPolicyForTurn({ ...base, isCreationTurn: true, hasMcpTools: true });
+    const noMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true });
     expect(noMedia.allowTools).toBe(false);
     expect(noMedia.maxSteps).toBe(1);
 
-    expect(toolPolicyForTurn({ ...base, isCreationTurn: true, hasMcpTools: true, hasMediaTools: true })).toEqual({
+    expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true, hasMediaTools: true })).toEqual({
       allowTools: true,
       toolset: 'media-only',
       maxSteps: CREATION_MEDIA_STEPS,
@@ -203,8 +203,8 @@ describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET,
    * The caller guarantees isDiscussTurn is creation-guarded (`discussModeNote` returns null on a
    * creation turn) — but if both flags ever arrive, creation MUST win: the user asked for a game.
    */
-  it('creation outranks discuss if both flags are ever set', () => {
-    const policy = toolPolicyForTurn({ ...base, isCreationTurn: true, isDiscussTurn: true, hasMediaTools: true });
+  it('the first build turn outranks discuss if both flags are ever set', () => {
+    const policy = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, isDiscussTurn: true, hasMediaTools: true });
     expect(policy.toolset).toBe('media-only');
   });
 });

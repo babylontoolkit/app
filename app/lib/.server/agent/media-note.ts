@@ -43,11 +43,11 @@ export interface MediaNoteInput {
   hasMediaTools: boolean;
 
   /** The creation brief owns its own, richer copy of these rules. */
-  isCreationTurn: boolean;
+  isFirstBuildTurn: boolean;
 }
 
 export function mediaProtocolNote(input: MediaNoteInput): string | null {
-  if (!input.hasMediaTools || input.isCreationTurn) {
+  if (!input.hasMediaTools || input.isFirstBuildTurn) {
     return null;
   }
 

@@ -12,8 +12,14 @@
  * WHAT IT CANNOT DO — and do not "extend" it to try: the rest of the creation prefix (routed doc
  * blocks keyed on the user's brief wording, the ~110k file context containing the project-title-named
  * scaffold class, the project CLAUDE.md) is per-project BYTES that do not exist until the project
- * does. There is nothing to warm. The user-facing fix for that variance is the FLAT creation price
- * (`creationFlatCredits`, §4.6), not this module.
+ * does. There is nothing to warm.
+ *
+ * ⚠️ That variance no longer has a user-facing absorber. It used to be the FLAT creation price
+ * (`creationFlatCredits`), RETIRED 2026-07-29 (§4.4a): New Project runs no generation at all now, so
+ * there is no creation turn to flat-price, and the first BUILD turn bills cost-derived like any
+ * other. The flat charge that remains (`PROJECT_CREATE_CREDITS`) prices the clone/install/serve work,
+ * not tokens — it absorbs nothing about cache warmth. This module is therefore the ONLY thing
+ * standing between a cold prefix and the user's bill, which raises its value rather than lowering it.
  *
  * MONEY SHAPE (platform ops spend — deliberately NO `generations` row, NO ledger entry, NO user):
  *   - steady state: `fanout` cache READS at 0.1x per cycle ≈ cents per day;
