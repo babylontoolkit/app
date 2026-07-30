@@ -7,6 +7,7 @@
  * variant.
  */
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_MODEL } from '~/utils/constants';
 import {
   findMediaModel,
   lookupMediaPrice,
@@ -22,7 +23,14 @@ function validList(): MarketPriceList {
     schemaVersion: 1,
     capturedAt: '2026-07-18',
     source: 'test',
-    llm: { 'claude-opus-5': { inputPerMTok: 2, outputPerMTok: 10 } },
+
+    /*
+     * Keyed off DEFAULT_MODEL, not a literal: the wall under test is "the list must price the
+     * PLATFORM DEFAULT", so hardcoding a model id here makes every one of these tests fail the day
+     * the default moves — which is exactly what happened on 2026-07-30. The fixture should track the
+     * rule, not a snapshot of it.
+     */
+    llm: { [DEFAULT_MODEL]: { inputPerMTok: 2, outputPerMTok: 10 } },
     media: {
       'nano-banana-2': {
         kind: 'image',
@@ -88,7 +96,7 @@ describe('validation — the promotion wall', () => {
     'rejects an LLM price it cannot trust: %s',
     (bad) => {
       const list = validList();
-      list.llm['claude-opus-5'] = { inputPerMTok: bad as number, outputPerMTok: 10 };
+      list.llm[DEFAULT_MODEL] = { inputPerMTok: bad as number, outputPerMTok: 10 };
       expect(errorsOf(list).join()).toMatch(/inputPerMTok/);
     },
   );
@@ -104,7 +112,7 @@ describe('validation — the promotion wall', () => {
    */
   it('rejects quoted cache rates on an llm row', () => {
     const list = validList();
-    (list.llm['claude-opus-5'] as unknown as Record<string, number>).cacheReadPerMTok = 0.2;
+    (list.llm[DEFAULT_MODEL] as unknown as Record<string, number>).cacheReadPerMTok = 0.2;
     expect(errorsOf(list).join()).toMatch(/cache rates derive/i);
   });
 
@@ -143,7 +151,7 @@ describe('validation — the promotion wall', () => {
 
   it('collects EVERY error at once, not just the first', () => {
     const list = validList();
-    list.llm['claude-opus-5'] = { inputPerMTok: 0, outputPerMTok: 0 };
+    list.llm[DEFAULT_MODEL] = { inputPerMTok: 0, outputPerMTok: 0 };
     list.media['nano-banana-2'].variants[0].usd = -1;
     expect(errorsOf(list).length).toBeGreaterThanOrEqual(3);
   });

@@ -29,6 +29,7 @@ import {
 } from './provider';
 import { classifyFetchedBlob } from './fetch-decode';
 import { runBounded, withRetry } from './bounded-queue';
+import { GITHUB_API_VERSION, GITHUB_API_VERSION_HEADER } from '~/lib/.server/github-api-version';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('git.github');
@@ -140,6 +141,28 @@ export function isEmptyRepository(error: unknown): boolean {
   return error instanceof GitProviderError && error.status === 409;
 }
 
+/**
+ * An Octokit that pins the REST API version on every call it makes (`github-api-version.ts`).
+ *
+ * 🔴 A request HOOK, not a constructor option. `@octokit/core` builds its default headers from a fixed
+ * list (`userAgent`, `timeZone`, `previews`) and **silently ignores an arbitrary `headers` option** —
+ * so `new Octokit({ headers: { 'x-github-api-version': … } })` type-checks, reads as correct in review,
+ * and sends nothing. The hook is the same seam `auth` wraps, so it covers every `octokit.*` method,
+ * including any this file starts calling later.
+ *
+ * Spreading rather than replacing `options.headers` is load-bearing: Octokit has already put `accept`,
+ * `user-agent` and the credential there, and clobbering the bag would 401 every request.
+ */
+function pinnedOctokit(token: string): Octokit {
+  const octokit = new Octokit({ auth: token });
+
+  octokit.hook.before('request', (options) => {
+    options.headers = { ...options.headers, [GITHUB_API_VERSION_HEADER]: GITHUB_API_VERSION };
+  });
+
+  return octokit;
+}
+
 async function mapErrors<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
@@ -153,8 +176,14 @@ export class GitHubProvider implements GitProvider {
 
   private readonly _octokit: Octokit;
 
+  /**
+   * `octokit` is a TEST SEAM — production always takes the `pinnedOctokit` branch (`resolve.ts` is the
+   * only producer, and it passes a token alone). The injected double is a hand-rolled partial that
+   * models GitHub's *behaviour*, not Octokit's internals, so it carries no `hook`; the version pin is
+   * proven against the REAL client in `github-api-version.spec.ts` instead of being faked here.
+   */
   constructor(token: string, octokit?: Octokit) {
-    this._octokit = octokit ?? new Octokit({ auth: token });
+    this._octokit = octokit ?? pinnedOctokit(token);
   }
 
   async getCurrentUser(): Promise<{ login: string }> {
@@ -352,7 +381,11 @@ export class GitHubProvider implements GitProvider {
       });
     }
 
-    const blobs = mapToTreeBlobs(files);
+    const blobs = mapToTreeBlobs(files, (path) =>
+      logger.warn(
+        `Dropped "${path}" from the push: the map calls it a file, but it has children (see mapToTreeBlobs).`,
+      ),
+    );
 
     const tree = await runBounded(
       blobs,

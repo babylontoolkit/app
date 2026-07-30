@@ -164,6 +164,28 @@ export const KIE_MODELS: ModelInfo[] = [
   },
 
   /*
+   * Listed 2026-07-30. NOT the default — it was tried and rejected: KIE answers it with
+   * `HTTP 500 "Network error"` on **77% of requests** (7 ok / 30, against Opus 5's 21/22 on an
+   * interleaved control). The full measurement, and the money case that makes it worth retrying, live
+   * on `DEFAULT_MODEL` in `utils/constants.ts`.
+   *
+   * It is listed anyway, and that is the point: with the row here and its price already baked, the day
+   * KIE fixes their side the switch is `LLM_MODEL=claude-sonnet-5` and nothing else — no rebuild
+   * (§4.2a). Being priced but UNLISTED is survivable for an operator override (`kieEnvModel` below
+   * synthesises a `ModelInfo` from `LLM_MODEL`) and not survivable as a bare default: with no env var
+   * there is nothing to synthesise, so `stream-text.ts` falls through to `modelsList[0]` on the
+   * enhancer path while `settleGeneration` charges the configured model's rates — wrong model, wrong
+   * price, no error, on the one configuration nobody runs locally.
+   */
+  {
+    name: 'claude-sonnet-5',
+    label: 'Claude Sonnet 5 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+
+  /*
    * The PREMIUM tier (§4.6.1). Listed AND priced (`KIE_MODEL_RATES['claude-fable-5']`, and the
    * `providerRates` premium injection): it is the strongest model KIE serves whose thinking text their
    * adapter returns (224/223 chars, vs 4-8's 0), at 2x the price. The proxy hands it straight to

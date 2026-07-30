@@ -11,6 +11,7 @@
  */
 import JSZip from 'jszip';
 import { base64ToBytes, isBinaryPath } from '~/lib/binary/binary-files';
+import { withGitHubApiVersion } from '~/lib/.server/github-api-version';
 import type { TemplateFile } from '~/types/template';
 
 const GITHUB_API = 'https://api.github.com';
@@ -44,11 +45,15 @@ export function resolveGitHubToken(token?: string): string | undefined {
 }
 
 function headers(githubToken?: string): Record<string, string> {
-  return {
+  /*
+   * The version pin (`github-api-version.ts`) — an unversioned call rides a dated default that 410s
+   * after its sunset, and this is the path a new project is created on.
+   */
+  return withGitHubApiVersion({
     Accept: 'application/vnd.github.v3+json',
     'User-Agent': 'bolt.diy-app',
     ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
-  };
+  });
 }
 
 export interface ResolvedRef {

@@ -328,8 +328,25 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
     premium = undefined;
   }
 
+  /**
+   * 🔴 **FILL A GAP, NEVER OVERWRITE A PROVIDER'S OWN ROW** (found 2026-07-30 while re-pricing the
+   * platform model). This shipped as `{ ...table, [premium.model]: premium.rates }` — an unconditional
+   * overwrite — and `premium.rates` come from the active MARKETPLACE list, which is KIE-shaped. So the
+   * moment `PREMIUM_MODEL` names a model Anthropic also prices natively, Anthropic's row was replaced
+   * by KIE's:
+   *
+   *     PREMIUM_MODEL=claude-opus-5 → Anthropic claude-opus-5 billed at $2/$10 (KIE) instead of $5/$25
+   *
+   * A cold build turn measured **231 credits instead of 576** — we would eat 60% of the cost of every
+   * premium generation, silently, with the credit count going DOWN so it reads as a cheaper turn.
+   *
+   * It was invisible because the default `PREMIUM_MODEL` is `claude-fable-5`, which Anthropic bakes NO
+   * row for — the exact case the injection was written for, where filling and overwriting are the same
+   * thing. It stays idempotent on KIE, whose table derives from that same list. A provider that prices
+   * a model itself is the authority on what it charges.
+   */
   const withPremium = (table: Record<string, ModelRates>): Record<string, ModelRates> =>
-    premium ? { ...table, [premium.model]: premium.rates } : table;
+    premium && !table[premium.model] ? { ...table, [premium.model]: premium.rates } : table;
 
   return {
     Anthropic: withPremium(MODEL_RATES),
@@ -467,8 +484,21 @@ function refuseRetiredCreationPriceEnv(context?: unknown): void {
   }
 }
 
-/** See `BillingConfig.projectCreateCredits`. Env-tunable (`PROJECT_CREATE_CREDITS`), no deploy needed. */
-export const DEFAULT_PROJECT_CREATE_CREDITS = 150;
+/**
+ * See `BillingConfig.projectCreateCredits`. Env-tunable (`PROJECT_CREATE_CREDITS`), no deploy needed.
+ *
+ * **100 since 2026-07-30 (owner decision), down from 150.** It prices the clone/install/serve work of
+ * standing a project up — no model is contacted (§4.4a) — and it is charged identically however the
+ * project arrives, because every door goes through the same `POST /api/projects`: a typed prompt
+ * (`Chat.client.tsx`) and an import (`registry/import-project.ts`) both call `createProject`, so
+ * "prompt or import" is one code path, not two prices that have to be kept in step.
+ *
+ * ⚠️ **`/api/remix` is the one project-creating door this does NOT price** — it calls `projects.create`
+ * directly, with no quote and no debit, so a remix stands up a project and a VM for free. That is
+ * either a growth loop worth paying for or an arbitrage; it is flagged rather than silently changed,
+ * because charging strangers to remix a public game is a funnel decision (§4.8), not a billing bug.
+ */
+export const DEFAULT_PROJECT_CREATE_CREDITS = 100;
 
 /**
  * `PROJECT_CREATE_CREDITS`, validated with the same posture as `creationFlatCredits` above: `0` is a real
@@ -508,21 +538,34 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      * WRITES that nothing read back, because `selectOnDemandBlocks` re-routes per message and churns
      * the prefix. See CLAUDE.md "THE BIGGEST OPEN NUMBER". Budget ~466, not ~41.
      *
-     * ⚠️ **THIS NUMBER IS COUPLED TO THE PLATFORM PROVIDER — they are one decision in two files.**
+     * ⚠️ **THIS NUMBER IS COUPLED TO THE PLATFORM MODEL AND PROVIDER — one decision in three files.**
      * Credits are cost-proportional, so the grant's real purchasing power moves with what we pay per
-     * token. The default is 800 at `CREDIT_MARGIN = 4.0`: generous on KIE, still broken on Anthropic.
-     * `grantHeadroom()` is the guard and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — never tune one
-     * without re-running it (margin, provider, AND grant are one decision in three places):
-     *   - **KIE (the default, ~0.4x rates): 800** ≈ 2.8x a cold build turn at margin 4.0 once the flat
-     *     `PROJECT_CREATE_CREDITS` is subtracted (~231 credits a build;
-     *     live creations at margin 3.34 measured 211–248, ~1.2x more under 4.0). 800 buys the prototype
-     *     plus real room to iterate — the whole funnel: hook them on the first prompt, then convert.
-     *   - **Anthropic: would need ~1,200+.** A cold creation there is ~576 credits at margin 4.0, so an
-     *     800 grant is only ~1.4x — under the 1.5x floor: the first free prompt plus one edit exhausts
-     *     it and lands the user negative (the gate runs ONCE, before the model, settlement can never
-     *     refuse, §4.2.1), killing the exact moment the funnel is built on, silently.
+     * token. `grantHeadroom()` is the guard and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — never
+     * tune one without re-running it (margin, provider, model AND grant move together).
+     *
+     * **1000 since 2026-07-30 (owner decision), up from 800**, taken together with the model moving to
+     * `claude-sonnet-5` and `PROJECT_CREATE_CREDITS` dropping to 100. Headroom at margin 4.0, computed
+     * through `grantHeadroom` rather than asserted here:
+     *
+     * | provider  | model    | cold build | headroom (1000 − 100) |
+     * |-----------|----------|------------|-----------------------|
+     * | KIE       | sonnet-5 | ~98 cr     | **9.18x**             |
+     * | KIE       | opus-5   | ~231 cr    | 3.90x                 |
+     * | Anthropic | sonnet-5 | ~346 cr    | 2.60x                 |
+     * | Anthropic | opus-5   | ~576 cr    | 1.56x                 |
+     *
+     * Every combination now clears the 1.5x floor — including Anthropic + Opus 5, which the previous
+     * 800/150 pairing did not survive at the model prices in force. That is the point of raising the
+     * grant while lowering the creation charge: the failure this guard exists to prevent is a new user
+     * whose first free prompt plus one edit exhausts the grant and lands them negative (the gate runs
+     * ONCE, before the model; settlement can never refuse, §4.2.1), silently killing the exact moment
+     * the funnel is built on.
+     *
+     * ⚠️ The grant is PURE COST — it buys real model spend on our key with no revenue behind it — so
+     * raising it is only affordable because the model move made a build turn ~2.7x cheaper. Do not
+     * carry the 1000 forward onto a more expensive default without re-running the table above.
      */
-    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 800),
+    signupGrantCredits: envNumber(context, 'SIGNUP_GRANT_CREDITS', 1000),
     grantsEnabled: envFlag(context, 'GRANTS_ENABLED', true),
 
     /* Retired — see the field's doc comment. Always 0; the env var that set it is refused above. */

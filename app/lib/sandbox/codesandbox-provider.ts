@@ -37,6 +37,7 @@ import {
   isMissingPathError,
   needsContent,
   normalizeWatchEventPaths,
+  readFileErrorEnvelope,
   resolveInWorkdir,
   toShellCommand,
   toWorkspaceRelative,
@@ -810,6 +811,53 @@ async function ensureOscBashrc(client: SandboxClient): Promise<boolean> {
 }
 
 /**
+ * Is this watched path a file (and what are its bytes), or a directory?
+ *
+ * 🔴 **A read that SUCCEEDS is not proof of a file on this provider** — see
+ * {@link readFileErrorEnvelope}. `client.fs.readFile` on a directory resolves with the SDK's error
+ * envelope as content, so the previous version of this code (a bare `try`/`catch` around the read)
+ * recorded every directory a generation created as a 117-byte JSON file. That broke GitHub sync
+ * outright: git refuses a tree holding a blob at `public/assets` alongside `public/assets/generated/…`,
+ * so the repo was created and not one file landed (`GitRPC::BadObjectState`, live 2026-07-30).
+ *
+ * The fast path is unchanged and still ONE round trip — `fs` is a network call here and the 3,600/hr
+ * budget is real, so an unconditional `stat` on every add/change would double the cost of a
+ * generation's writes. `stat` runs only when the bytes LOOK like an envelope, which is a directory
+ * event or (vanishingly) a real file whose whole content is that JSON. Confirming rather than
+ * trusting the sniff is what keeps the second case's content.
+ *
+ * A `stat` that throws falls back to `isDirectory: true`, preserving the original safe direction: a
+ * path we cannot classify is reported as structural, which `FilesStore` handles without writing an
+ * empty file entry — the failure direction that loses content.
+ */
+async function classifyWatchPath(
+  client: SandboxClient,
+  path: string,
+): Promise<{ isDirectory: boolean; buffer?: Uint8Array }> {
+  let buffer: Uint8Array;
+
+  try {
+    buffer = await client.fs.readFile(path);
+  } catch {
+    /*
+     * The throwing (agent) client's answer, and also a path deleted between the event and the read.
+     * Both are reported as a directory event for the reason above.
+     */
+    return { isDirectory: true };
+  }
+
+  if (readFileErrorEnvelope(buffer) === null) {
+    return { isDirectory: false, buffer };
+  }
+
+  try {
+    return (await client.fs.stat(path)).type === 'directory' ? { isDirectory: true } : { isDirectory: false, buffer };
+  } catch {
+    return { isDirectory: true };
+  }
+}
+
+/**
  * Bridge `fs.watch` (async, content-free) onto `watchPaths` (sync-returning, content-carrying).
  *
  * Two impedance mismatches at once, and both fail quietly if fudged:
@@ -856,17 +904,7 @@ function startWatch(
         if (options.includeContent && needsContent(event)) {
           await Promise.all(
             event.paths.map(async (path) => {
-              try {
-                enriched.set(path, { isDirectory: false, buffer: await client.fs.readFile(path) });
-              } catch {
-                /*
-                 * A read fails for two reasons that look identical from here: the path is a
-                 * directory, or it was deleted between the event and the read. Both are reported as
-                 * a directory event, which `FilesStore` treats as structural rather than writing an
-                 * empty file entry — the failure direction that loses content.
-                 */
-                enriched.set(path, { isDirectory: true });
-              }
+              enriched.set(path, await classifyWatchPath(client, path));
             }),
           );
         }

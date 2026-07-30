@@ -26,6 +26,7 @@ import {
   isMissingPathError,
   needsContent,
   normalizeWatchEventPaths,
+  readFileErrorEnvelope,
   resolveInWorkdir,
   SandboxPathError,
   toShellCommand,
@@ -367,6 +368,146 @@ describe('classifying "that path is a directory" (T17a)', () => {
     expect(isDirectoryPathError(undefined)).toBe(false);
     expect(isDirectoryPathError(null)).toBe(false);
     expect(isDirectoryPathError('IsADirectory')).toBe(true);
+  });
+});
+
+/**
+ * 🔴 The defect that broke GitHub sync for every project (live 2026-07-30).
+ *
+ * `client.fs.readFile` on a DIRECTORY resolves with the SDK's error envelope as the file's bytes
+ * instead of rejecting, so the watch classifier — which inferred "directory" from a read that FAILS —
+ * recorded every directory a generation created as a 117-byte JSON file. A git tree cannot hold a blob
+ * at `public/assets` and a blob at `public/assets/generated/hero.jpg`, so GitHub refused the whole
+ * push with `422 GitRPC::BadObjectState`: repo created, blobs uploaded, nothing landed.
+ */
+describe('the SDK error envelope returned AS file content', () => {
+  const bytesOf = (text: string) => new TextEncoder().encode(text);
+
+  // Byte-for-byte what a real directory read returned, trailing CRLF included.
+  const REAL_DIRECTORY_PAYLOAD =
+    '{"type":"error","params":{"errno":21,"message":"Os { code: 21, kind: IsADirectory, message: \\"Is a directory\\" }"}}\r\n';
+
+  it('recognises the measured payload and reports it as an errno-21 message', () => {
+    const message = readFileErrorEnvelope(bytesOf(REAL_DIRECTORY_PAYLOAD));
+
+    expect(message).not.toBeNull();
+
+    // Shaped for the classifiers that already exist, so "errno 21 means directory" is defined once.
+    expect(isDirectoryPathError(new Error(message!))).toBe(true);
+  });
+
+  it('recognises the throwing client’s own field names too', () => {
+    expect(readFileErrorEnvelope(bytesOf('{"type":"error","error":"Failed to read file","errno":2}'))).toMatch(/^2: /);
+  });
+
+  it('leaves ORDINARY file content alone — including JSON', () => {
+    // Every false positive here discards a real file's bytes, so these are the load-bearing controls.
+    expect(readFileErrorEnvelope(bytesOf('{"name":"my-game","type":"module"}'))).toBeNull();
+    expect(readFileErrorEnvelope(bytesOf('export const x = 1;'))).toBeNull();
+    expect(readFileErrorEnvelope(bytesOf('{"type":"error"}'))).toBeNull(); // no errno, no message
+    expect(readFileErrorEnvelope(bytesOf('not json at all'))).toBeNull();
+    expect(readFileErrorEnvelope(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBeNull(); // a PNG header
+    expect(readFileErrorEnvelope(new Uint8Array())).toBeNull();
+    expect(readFileErrorEnvelope(undefined)).toBeNull();
+  });
+
+  it('never decodes a large file to answer the question', () => {
+    // The sniff is bounded, so a 5MB texture costs a length check and nothing else.
+    expect(readFileErrorEnvelope(bytesOf(`{"type":"error",${'"x":1,'.repeat(500)}"errno":21}`))).toBeNull();
+  });
+
+  describe('the watch classifier', () => {
+    function clientWith(fs: Partial<Record<string, unknown>>) {
+      return {
+        workspacePath: WD,
+        fs: {
+          readFile: vi.fn(async () => new Uint8Array([1])),
+          stat: vi.fn(async () => ({ type: 'file' as const })),
+          watch: vi.fn(async () => ({ dispose: vi.fn(), onEvent: vi.fn() })),
+          ...fs,
+        },
+        ports: {
+          onDidPortOpen: vi.fn(() => ({ dispose: vi.fn() })),
+          onDidPortClose: vi.fn(() => ({ dispose: vi.fn() })),
+          getAll: vi.fn(async () => []),
+        },
+        commands: { runBackground: vi.fn(), run: vi.fn(async () => '/root') },
+        terminals: { create: vi.fn() },
+      };
+    }
+
+    /** Drive the real adapter: register a watch, fire one event, collect what the seam emitted. */
+    async function watchOnce(client: ReturnType<typeof clientWith>, path: string): Promise<SandboxWatchEvent[]> {
+      let emit: ((event: CodeSandboxWatchEvent) => void | Promise<void>) | undefined;
+      client.fs.watch = vi.fn(async () => ({ dispose: vi.fn(), onEvent: (fn: never) => (emit = fn) })) as never;
+
+      const seen: SandboxWatchEvent[] = [];
+      createCodeSandboxProvider(client as never).watchPaths({ include: [], includeContent: true }, (events) =>
+        seen.push(...events),
+      );
+
+      await vi.waitFor(() => expect(emit).toBeDefined());
+      await emit!({ paths: [path], type: 'add' });
+      await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
+
+      return seen;
+    }
+
+    it('reports a directory as add_dir even though the read SUCCEEDED', async () => {
+      const client = clientWith({
+        readFile: vi.fn(async () => bytesOf(REAL_DIRECTORY_PAYLOAD)),
+        stat: vi.fn(async () => ({ type: 'directory' as const })),
+      });
+
+      expect(await watchOnce(client, `${WD}/src/scripts/player`)).toEqual([
+        { type: 'add_dir', path: `${WD}/src/scripts/player` },
+      ]);
+    });
+
+    /**
+     * The CONTROL for the sniff. A real file whose whole content is that JSON must KEEP its bytes —
+     * classifying on the payload alone would silently delete it from the project.
+     */
+    it('keeps the content when stat says it really is a file', async () => {
+      const client = clientWith({
+        readFile: vi.fn(async () => bytesOf(REAL_DIRECTORY_PAYLOAD)),
+        stat: vi.fn(async () => ({ type: 'file' as const })),
+      });
+
+      const [event] = await watchOnce(client, `${WD}/fixture.json`);
+
+      expect(event.type).toBe('add_file');
+      expect(event.buffer).toEqual(bytesOf(REAL_DIRECTORY_PAYLOAD));
+    });
+
+    it('costs ONE round trip for an ordinary file — fs is a network call on this provider', async () => {
+      const client = clientWith({});
+      const [event] = await watchOnce(client, `${WD}/src/Game.ts`);
+
+      expect(event.type).toBe('add_file');
+      expect(client.fs.stat).not.toHaveBeenCalled();
+    });
+
+    it('still treats a read that THROWS as structural (the agent client, and a deleted path)', async () => {
+      const client = clientWith({
+        readFile: vi.fn(async () => {
+          throw new Error('21: Os { code: 21, kind: IsADirectory, message: "Is a directory" }');
+        }),
+      });
+
+      expect((await watchOnce(client, `${WD}/src/scripts`))[0].type).toBe('add_dir');
+    });
+
+    it('falls back to structural when stat itself fails', async () => {
+      const client = clientWith({
+        readFile: vi.fn(async () => bytesOf(REAL_DIRECTORY_PAYLOAD)),
+        stat: vi.fn(async () => {
+          throw new Error('null: Sandbox not found');
+        }),
+      });
+
+      expect((await watchOnce(client, `${WD}/src/scripts`))[0].type).toBe('add_dir');
+    });
   });
 });
 

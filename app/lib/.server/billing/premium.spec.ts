@@ -72,7 +72,7 @@ describe('decidePremium — the eligibility rule', () => {
   });
 
   it('declines premium below the threshold — this is what protects the free grant', () => {
-    // Same shape as production: a fresh 800-credit grant sits below the 1200 default, so a new account cannot pick premium.
+    // Same shape as production: a fresh 1000-credit grant sits below the 1200 default, so a new account cannot pick premium.
     expect(decidePremium({ requested: true, balance: 500, minimumCredits: min })).toEqual({
       usePremium: false,
       reason: 'below_minimum',

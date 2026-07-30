@@ -28,7 +28,20 @@ const env = Object.fromEntries(
 );
 
 const KEY = env.KIE_API_KEY;
-const MODEL = env.LLM_MODEL || env.KIE_DEFAULT_MODEL || 'claude-opus-5';
+
+/*
+ * `PROBE_MODEL=<id>` overrides the configured model, and it is the whole reason this probe can
+ * produce a trustworthy answer rather than a plausible one (added 2026-07-30).
+ *
+ * A probe that can only ever read `.env.local` can only ever measure ONE model, so every result it
+ * gives is uncontrolled — and this file's own header records what that costs: a six-request run was
+ * read as "KIE randomly drops ~1/3 of cache entries" and came within one env var of buying a 2.5x
+ * more expensive provider to fix a defect that did not exist. The first run under the new
+ * `claude-sonnet-5` default hit `HTTP 500` on 7 of 8 requests, which reads exactly like "the new
+ * model is broken" until the identical run on the OLD model does the same thing and reveals a
+ * provider-wide blip. The control is what makes a rate mean anything.
+ */
+const MODEL = process.env.PROBE_MODEL?.trim() || env.LLM_MODEL || env.KIE_DEFAULT_MODEL || 'claude-sonnet-5';
 const BASE = 'https://api.kie.ai/claude/v1';
 
 if (!KEY) {

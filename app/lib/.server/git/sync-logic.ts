@@ -90,7 +90,7 @@ export interface TreeBlob {
  * The `.env` family is EXCLUDED — it is gitignored in the project and must never be pushed (§4.14
  * secrets, §5). This is the push-side counterpart to the publish secret scan.
  */
-export function mapToTreeBlobs(files: SerializedFileMap): TreeBlob[] {
+export function mapToTreeBlobs(files: SerializedFileMap, onDropped?: (path: string) => void): TreeBlob[] {
   const blobs: TreeBlob[] = [];
 
   for (const [rawPath, dirent] of Object.entries(files)) {
@@ -111,7 +111,62 @@ export function mapToTreeBlobs(files: SerializedFileMap): TreeBlob[] {
     });
   }
 
-  return blobs.sort((a, b) => a.path.localeCompare(b.path));
+  return dropDirectoryBlobs(blobs, onDropped).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * Drop any blob whose path is also a DIRECTORY in the same push — the one tree git cannot represent.
+ *
+ * 🔴 **This is the wall that stands between a poisoned file map and a save that silently does
+ * nothing** (live 2026-07-30). The CodeSandbox adapter classified newly-created directories as files
+ * (`readFileErrorEnvelope` records why), so the map held a "file" at `public/assets` *and* real files
+ * at `public/assets/generated/…`. A git tree entry is a blob or a tree, never both, and GitHub refuses
+ * the WHOLE request:
+ *
+ *     422 GitRPC::BadObjectState
+ *
+ * — which is what the user saw, after the repo had been created and every blob uploaded. Nothing
+ * partial lands, so the symptom is the worst possible shape: a repository that exists, is empty, and
+ * is now LINKED to the project.
+ *
+ * The adapter bug is fixed at its source; this exists because the map is not ours alone. It arrives
+ * from a browser body, it can be restored from a checkpoint or a working copy written days ago by a
+ * different provider, and a repo written from a broken map keeps its damage on every later round trip
+ * (the reasoning behind `normalizeRepoFileMap`). One malformed entry must not be able to make Save do
+ * nothing forever.
+ *
+ * **Dropping is provably lossless, which is why it is not a refusal.** A path with children is a
+ * directory — that is not a judgement call, and the "file" at that path cannot be a real file the user
+ * wrote. Refusing the push instead would trade a corrupt entry for a project that can never be saved
+ * at all, and §4.5.4b makes the repo the only permanent copy. The drop is REPORTED (`onDropped`) for
+ * the same reason `depositRemixSeed` reports: a best-effort correction that cannot fail the request
+ * must still say what it did.
+ */
+function dropDirectoryBlobs(blobs: TreeBlob[], onDropped?: (path: string) => void): TreeBlob[] {
+  const directories = new Set<string>();
+
+  for (const { path } of blobs) {
+    const segments = path.split('/');
+
+    // Every ancestor of a blob is a directory, by definition of the path having children.
+    for (let i = 1; i < segments.length; i++) {
+      directories.add(segments.slice(0, i).join('/'));
+    }
+  }
+
+  if (directories.size === 0) {
+    return blobs;
+  }
+
+  return blobs.filter((blob) => {
+    if (!directories.has(blob.path)) {
+      return true;
+    }
+
+    onDropped?.(blob.path);
+
+    return false;
+  });
 }
 
 /**

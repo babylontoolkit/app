@@ -90,6 +90,62 @@ describe('tree blobs — byte-faithful, secret-free', () => {
     expect(mapToTreeBlobs(files).some((b) => b.path === '.env')).toBe(false);
   });
 
+  /**
+   * 🔴 The tree git CANNOT represent, and the one that killed Save outright (live 2026-07-30).
+   *
+   * The CodeSandbox adapter recorded newly-created directories as FILES (`readFileErrorEnvelope`), so
+   * the map held a "file" at `public/assets` beside real files under it. GitHub rejects the whole
+   * request with `422 GitRPC::BadObjectState` — verified against real github.com with exactly this
+   * two-entry shape — after the repo has been created and every blob uploaded. The user is left with
+   * an empty repository that the project is now linked to.
+   */
+  describe('a path that is also a directory', () => {
+    const poisoned: SerializedFileMap = {
+      '/project/workspace/public/assets': { type: 'file', content: '{"type":"error"}', isBinary: false },
+      '/project/workspace/public/assets/generated/hero.jpg': { type: 'file', content: 'AAAA', isBinary: true },
+      '/project/workspace/src/scripts/player': { type: 'file', content: '{"type":"error"}', isBinary: false },
+      '/project/workspace/src/scripts/player/Controller.ts': { type: 'file', content: 'x', isBinary: false },
+      '/project/workspace/src/Game.ts': { type: 'file', content: 'y', isBinary: false },
+    };
+
+    it('drops the blob whose path has children — it cannot be a real file', () => {
+      expect(mapToTreeBlobs(poisoned).map((b) => b.path)).toEqual([
+        'public/assets/generated/hero.jpg',
+        'src/Game.ts',
+        'src/scripts/player/Controller.ts',
+      ]);
+    });
+
+    it('REPORTS every drop — a silent correction is how a poisoned map goes unnoticed', () => {
+      const dropped: string[] = [];
+      mapToTreeBlobs(poisoned, (path) => dropped.push(path));
+
+      expect(dropped.sort()).toEqual(['public/assets', 'src/scripts/player']);
+    });
+
+    /**
+     * The CONTROL. Without it this whole rule passes with the filter inverted, or with every blob
+     * dropped — a push that lands nothing is exactly the failure being fixed.
+     */
+    it('leaves an ordinary tree untouched and reports nothing', () => {
+      const dropped: string[] = [];
+      const blobs = mapToTreeBlobs(files, (path) => dropped.push(path));
+
+      expect(blobs.map((b) => b.path)).toEqual(['public/car.glb', 'src/Game.ts']);
+      expect(dropped).toEqual([]);
+    });
+
+    it('does not confuse a shared PREFIX for a parent directory', () => {
+      const siblings: SerializedFileMap = {
+        '/home/project/src/Game': { type: 'file', content: 'a', isBinary: false },
+        '/home/project/src/GameMode.ts': { type: 'file', content: 'b', isBinary: false },
+      };
+
+      // `src/Game` is a prefix of `src/GameMode.ts` as a STRING, but it is not a path ancestor.
+      expect(mapToTreeBlobs(siblings).map((b) => b.path)).toEqual(['src/Game', 'src/GameMode.ts']);
+    });
+  });
+
   it('normalises a workdir path to repo-relative', () => {
     expect(toRepoRelativePath('/home/project/src/Game.ts')).toBe('src/Game.ts');
     expect(toRepoRelativePath('home/project/src/Game.ts')).toBe('src/Game.ts');

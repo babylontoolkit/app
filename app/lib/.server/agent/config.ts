@@ -31,8 +31,13 @@ export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
  * provider's rates set what a credit BUYS — which means this value and `SIGNUP_GRANT_CREDITS` are one
  * decision in two files. `grantHeadroom()` + `billing.spec.ts` assert they agree; flip both or neither:
  *
- *   KIE       -> SIGNUP_GRANT_CREDITS 500   (a cold creation is ~192–248 credits; ~2.0–2.6x headroom)
- *   Anthropic -> SIGNUP_GRANT_CREDITS 1000  (a cold creation is ~481–579; 500 would go NEGATIVE)
+ * Re-measured 2026-07-30 on the current default (`claude-opus-5`, margin 4.0, creation charge 100):
+ *
+ *   KIE       -> SIGNUP_GRANT_CREDITS 1000  (a cold build turn is ~231 credits; 3.90x headroom)
+ *   Anthropic -> SIGNUP_GRANT_CREDITS 1000  (a cold build turn is ~576 credits; 1.56x headroom)
+ *
+ * The grant now clears the 1.5x floor on BOTH providers, which the 800/150 pairing did not: on
+ * Anthropic + Opus 5 it measured 1.13x. See `rates.ts` `signupGrantCredits` for the full table.
  *
  * MEASURED on two live creations (2026-07-17): 248 credits / $0.7412 and 211 / $0.6292 on KIE, against
  * ~579 / ~$1.7314 and ~485 / ~$1.4515 for the same tokens on Anthropic — **~2.3x cheaper**. Verified
@@ -107,6 +112,10 @@ export const PLATFORM_MODEL = DEFAULT_MODEL;
  *
  * 2026-07-27: both defaults are `claude-opus-5` via `DEFAULT_MODEL` — same KIE price as 4-8 ($2/$10),
  * probe-verified honest cache accounting, thinking text still empty (the heartbeat carries the UX).
+ *
+ * 2026-07-30: `claude-sonnet-5` was measured as a replacement (2.73x cheaper on 62 real generations)
+ * and REJECTED — KIE 500s on 77% of requests for it. See `utils/constants.ts`; the switch is one env
+ * var the day that clears.
  */
 export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = {
   Anthropic: DEFAULT_MODEL,

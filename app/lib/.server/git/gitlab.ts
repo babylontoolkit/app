@@ -347,7 +347,11 @@ export class GitLabProvider implements GitProvider {
       throw new GitProviderError({ kind: 'not-found', message: `Branch "${ref.branch}" does not exist.` });
     }
 
-    const blobs = mapToTreeBlobs(files);
+    const blobs = mapToTreeBlobs(files, (path) =>
+      logger.warn(
+        `Dropped "${path}" from the push: the map calls it a file, but it has children (see mapToTreeBlobs).`,
+      ),
+    );
     const localPaths = new Set(blobs.map((blob) => blob.path));
 
     /*

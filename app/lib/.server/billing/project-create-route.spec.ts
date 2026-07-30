@@ -68,7 +68,7 @@ const SCRUBBED_ENV = [
   'CREATION_FLAT_CREDITS',
 ] as const;
 
-const PRICE = 150;
+const PRICE = 100;
 
 let tmp: string;
 let ledger: FsLedger;

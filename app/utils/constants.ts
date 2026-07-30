@@ -39,7 +39,53 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * set. `LLM_MODEL` overrides it at runtime (validated against the rate tables — see
  * `agent/config.ts`); this is what a bare `docker run` with an empty environment gets.
  *
- * ## `claude-opus-5` since 2026-07-27 (owner decision), at Opus 4.8's exact KIE price ($2/$10)
+ * ## 🔴 `claude-sonnet-5` was ATTEMPTED on 2026-07-30 and REJECTED — it is 77% broken on KIE
+ *
+ * The money case was excellent and is worth keeping, because the day KIE fixes their side this is a
+ * ONE-VARIABLE change. Opus 5 was costing 450–500 credits on edits that felt small, and the platform's
+ * own generation log agreed: across 19 real Opus 5 generations the median was **435 credits**, p90
+ * **913**, max **1,095**. Re-pricing those exact token vectors on Sonnet 5's KIE rates ($0.85/$4.275
+ * against Opus 5's $2/$10):
+ *
+ * | model      | median | p90 | max   | 62 real generations |
+ * |------------|--------|-----|-------|---------------------|
+ * | opus-5     | 435    | 913 | 1,095 | 20,463 cr / $46.84  |
+ * | sonnet-5   | 185    | 245 |   322 |  7,489 cr / $18.65  |
+ *
+ * **2.73x cheaper for the same work**, with the tail compressing hardest (p90 falls 3.7x, because the
+ * spikes are cache WRITES billed at 2x and Sonnet scales every one of them down).
+ *
+ * 🔴 **And it does not matter, because KIE cannot serve it.** Measured against the live API with an
+ * INTERLEAVED control — same key, same request shape, same minute, alternating models so a provider
+ * blip cannot masquerade as a model fault:
+ *
+ * | model      | ok     | HTTP 500 | rate |
+ * |------------|--------|----------|------|
+ * | sonnet-5   |  7 /30 |       23 | 77%  |
+ * | opus-5     | 21 /22 |        1 |  5%  |
+ *
+ * `{"type":"api_error","message":"Network error, please try again later."}`, in ~1.9s — too fast to be
+ * a timeout, and reproduced at `max_tokens: 1` and at a realistic 300-token request alike. Our
+ * `MAX_PROVIDER_RETRY_ATTEMPTS = 3` does not rescue it: 0.77³ still leaves ~46% of generations dead.
+ * Opus 5's single failure is the ordinary KIE flakiness that retry policy exists for.
+ *
+ * A cheaper model that fails three generations in four is not cheaper. **Re-run
+ * `PROBE_MODEL=claude-sonnet-5 node scripts/cache-probe.mjs` before believing this is still true** —
+ * it is a vendor fault, so it can be fixed without anyone telling us, and the switch is then just
+ * `LLM_MODEL=claude-sonnet-5` (no rebuild — §4.2a).
+ *
+ * ✅ Everything else needed for that switch is already DONE and shipped: Sonnet 5 is priced in the
+ * baked Marketplace list, and it is now LISTED in `KIE_MODELS`. The listing is not cosmetic — it was
+ * priced but unlisted, which is survivable for an operator override (`kieEnvModel` synthesises a
+ * `ModelInfo` from `LLM_MODEL`) and NOT survivable as a bare default: with no env var there is nothing
+ * to synthesise, so the enhancer path would fall through to `modelsList[0]` while settlement charged
+ * Sonnet's rates — the exact mis-bill this file's closing warning names.
+ *
+ * ⚠️ Its cache accounting was checked and is HONEST (a 5,404-token write reported on a cold request, a
+ * clean 5,420-token READ on a warm one), so if the 500s clear it qualifies on the criterion that
+ * disqualified 4-7 and fable-5. The blocker is availability, nothing else.
+ *
+ * ## `claude-opus-5` since 2026-07-27, at Opus 4.8's exact KIE price ($2/$10)
  *
  * The swap was gated on re-verifying the TWO properties that made 4-8 the default, both probed live
  * against KIE on 2026-07-27:

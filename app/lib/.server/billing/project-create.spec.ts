@@ -60,11 +60,11 @@ afterEach(() => {
 });
 
 describe('projectCreateCredits config (PROJECT_CREATE_CREDITS)', () => {
-  it('defaults to 150 — the owner-decided mid-band of the 100–200 range', () => {
-    expect(DEFAULT_PROJECT_CREATE_CREDITS).toBe(150);
+  it('defaults to 100 — the owner-decided price of standing a project up (2026-07-30)', () => {
+    expect(DEFAULT_PROJECT_CREATE_CREDITS).toBe(100);
 
     // Named literally as well as by constant, so moving the default has to walk past this line.
-    expect(getBillingConfig().projectCreateCredits).toBe(150);
+    expect(getBillingConfig().projectCreateCredits).toBe(100);
   });
 
   /* `0` is a REAL value, not "unset": the operator switch that makes project creation free. */

@@ -8,6 +8,7 @@
  * failing a build over a credential we did not actually need. (`.env.local` ships with placeholder
  * GitHub tokens; without this, a fresh checkout could not doc-sync at all.)
  */
+import { withGitHubApiVersion } from '~/lib/.server/github-api-version';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('github-sync');
@@ -15,9 +16,15 @@ const logger = createScopedLogger('github-sync');
 let warnedAboutToken = false;
 
 export async function githubFetch(url: string, accept: string, token?: string): Promise<Response> {
+  /*
+   * The version pin rides on both the authenticated and the anonymous attempt — an unversioned
+   * request does not get "the latest", it gets a dated default that answers 410 after its sunset
+   * (`github-api-version.ts`). `raw.githubusercontent.com` ignores the header, which is why it can be
+   * applied here rather than at each call site.
+   */
   const request = (auth?: string) =>
     fetch(url, {
-      headers: auth ? { accept, authorization: `Bearer ${auth}` } : { accept },
+      headers: withGitHubApiVersion(auth ? { accept, authorization: `Bearer ${auth}` } : { accept }),
     });
 
   let response = await request(token);

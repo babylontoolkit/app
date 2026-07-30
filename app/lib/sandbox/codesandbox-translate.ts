@@ -163,6 +163,84 @@ export function isDirectoryPathError(error: unknown): boolean {
 }
 
 /**
+ * Did this "successful" read actually hand back CodeSandbox's ERROR ENVELOPE as the file's bytes?
+ *
+ * 🔴 **`client.fs.readFile` on a DIRECTORY resolves — it does not reject** (MEASURED live 2026-07-30
+ * against `/project/workspace/src/scripts/player`). The bytes are:
+ *
+ *     {"type":"error","params":{"errno":21,"message":"Os { code: 21, kind: IsADirectory, message: "Is a directory" }"}}
+ *
+ * The SDK has two clients and only one of them throws: the agent (WebSocket) client turns
+ * `{type:'error'}` into `new Error(\`${errno}: ${error}\`)`, while the REST-backed client returns the
+ * server's 200 body as content. So {@link translateWatchEvent}'s classifier — which infers "directory"
+ * from a read that FAILS — saw a successful read and classified every newly-created directory as a
+ * FILE holding 117 bytes of JSON.
+ *
+ * Nothing threw, and the damage was downstream of everything that could have noticed:
+ *
+ *   - **GitHub sync died** with `GitRPC::BadObjectState` (reported live). A git tree cannot hold a
+ *     blob at `public/assets` AND a blob at `public/assets/generated/hero.jpg`; GitHub refuses the
+ *     whole tree, so the repo was created, every blob uploaded, and NOT ONE FILE landed.
+ *   - The model was shown those entries as project files, and a checkpoint restore tried to write a
+ *     file over a live directory (the `EISDIR` T17a already had to survive).
+ *
+ * Only directories created DURING a session were affected — `refreshFiles`' walk classifies via
+ * `readdir`'s own `type`, so a project's original tree is correct and only what a generation made
+ * (`public/assets`, `src/scripts/player`) was poisoned. That is why this looked intermittent.
+ *
+ * The check is bounded (`ENVELOPE_SNIFF_BYTES`) so a 5MB PNG is never decoded to answer it, and it
+ * returns a message string shaped for {@link isDirectoryPathError}/{@link isMissingPathError} — the
+ * classifiers that already exist for the throwing client — so there is ONE definition of "errno 21
+ * means directory" rather than a second copy here.
+ *
+ * ⚠️ A payload match is SUSPICION, never a verdict: a real project file may legitimately contain this
+ * JSON. The caller confirms with `stat` before discarding content (see `classifyWatchPath`).
+ */
+const ENVELOPE_SNIFF_BYTES = 512;
+
+export function readFileErrorEnvelope(buffer: Uint8Array | undefined): string | null {
+  if (!buffer || buffer.byteLength === 0 || buffer.byteLength > ENVELOPE_SNIFF_BYTES) {
+    return null;
+  }
+
+  // `{` is the only first byte an envelope can have — cheapest possible reject for ordinary content.
+  if (buffer[0] !== 0x7b) {
+    return null;
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(buffer));
+  } catch {
+    return null;
+  }
+
+  const envelope = parsed as { type?: unknown; error?: unknown; errno?: unknown; params?: unknown } | null;
+
+  if (!envelope || typeof envelope !== 'object' || envelope.type !== 'error') {
+    return null;
+  }
+
+  const params = (envelope.params ?? {}) as { errno?: unknown; message?: unknown; error?: unknown };
+  const errno =
+    typeof params.errno === 'number' ? params.errno : typeof envelope.errno === 'number' ? envelope.errno : null;
+  const message = [params.message, params.error, envelope.error].find((value) => typeof value === 'string') as
+    | string
+    | undefined;
+
+  if (errno === null && message === undefined) {
+    return null;
+  }
+
+  /*
+   * `${errno}: ${message}` is the throwing client's own format, so `isDirectoryPathError`'s `^21:\s`
+   * and `isMissingPathError`'s `^2:\s` prefix checks apply unchanged to both clients.
+   */
+  return errno === null ? (message ?? '') : `${errno}: ${message ?? ''}`;
+}
+
+/**
  * Turn a seam path into the workspace-RELATIVE form `batchWrite` requires.
  *
  * Deliberately a separate function from {@link resolveInWorkdir} rather than a flag on it: the two
