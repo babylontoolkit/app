@@ -1,6 +1,6 @@
 # spec/wizard-config.md — Guided Tour Wizard (governs SPEC §4.7)
 
-The wizard is data-driven: `app/config/wizard.json` (versioned in git; editable without code changes). Steps: game type → vibe → mechanics → twist → compiled first message.
+The wizard is data-driven: `app/config/wizard.json` (versioned in git; editable without code changes). Steps: game type → vibe → mechanics → twist → a compiled prompt. Since 2026-07-29 (SPEC §4.4a) that prompt is **prefilled, not fired**: the wizard's last act is a created, installed, running project with text in the chat box, and the user's send is the build.
 
 ## Config schema (informal)
 
@@ -78,15 +78,17 @@ Sunset Arcade · Neon Night · Low-Poly Daylight · Moody Fog — each mapping t
 
 ## Compile algorithm
 
-1. Create project from the universal starter; wire the registry entry's GameMode + optional sceneUrl.
-2. First user message = `compiled.preamble` + vibe fragment + selected mechanics fragments (as a numbered task list) + wrapped twist (if any).
-3. Show the user a friendly summary card ("<Genre> · <Vibe> · <Mechanics> · '<twist>'"); the raw compiled prompt is hidden but stored on the message row for debugging.
-4. Drop into the builder with generation already streaming. Target: first playable change < 90s from wizard completion (measure as an analytics event).
+> ⚠️ **Revised 2026-07-29 (SPEC §4.4a — creation is a clone).** The wizard no longer produces a message that is *sent*; it produces a project that is *running* and text sitting in the chat textbox. Steps 1 and 2 are unchanged as compilation; steps 3 and 4 changed. Step 2's output no longer travels as the visible message — it rides HIDDEN with the creation brief (see step 3).
+
+1. Create project from the universal starter; wire the registry entry's GameMode + optional sceneUrl, install dependencies and start the dev server. **No model is contacted** — the wizard's four steps decide what to clone and what to prefill, nothing more.
+2. Compile the prompt = `compiled.preamble` + vibe fragment + selected mechanics fragments (as a numbered task list) + wrapped twist (if any). `compileWizardPrompt(selection)`; it is seeded onto `projectSeedStore.prompt`.
+3. Show the user a friendly summary ("<Genre> · <Vibe> · <Mechanics> · '<twist>'", `summarizeSelection`). ⚠️ **It is the SUMMARY, not the compiled prompt, that is carried into the textbox** — `draftTextForSeed` prefers the seed's `visiblePrompt`, a rule written for Path A (where the visible string is the user's own typing) and inherited here. **The compiled fragments therefore ride HIDDEN, appended to the creation brief** under a *"The user's guided-tour selections"* heading (`Chat.client.tsx`, pinned by `new-project-mode-wiring.spec.tsx`) — machine-written text travels the way machine-written text travels here, subordinate to whatever the user actually sends. That was briefly a flagged product call and it is now BUILT; the alternative — swapping the preference so the box holds the compiled text — stays rejected, because it puts a wall of machine-composed task list in a box the user is expected to read and edit.
+4. Drop into the builder with the **stock starter running** and that text in the box, in New Project mode. Sending it is the build turn, and it carries the hidden creation brief (§4.4a). Target: **< 90s from wizard completion to a running starter** — restated deliberately, because first-playable now sits behind a user decision plus a per-token generation and is no longer a number the platform alone controls. Measure the two separately.
 
 ## Rules
 
-- Fragments must reference known Toolkit patterns (ideally ones covered by training examples or skills) — the wizard's whole point is keeping first generations on well-trodden paths.
-- A mechanic that consistently produces broken first passes gets fixed or pulled from config — check the analytics funnel (wizard completion → first-generation success rate per mechanic).
+- Fragments must reference known Toolkit patterns (ideally ones covered by training examples or skills) — the wizard's whole point is keeping first builds on well-trodden paths. The fragments reach the model on the hidden half of the first build turn (step 3), so this binds as written.
+- A mechanic that consistently produces broken first passes gets fixed or pulled from config — check the analytics funnel (wizard completion → first-build success rate per mechanic). ⚠️ That join is not currently measurable: the funnel has no event between `project_created` and `generation_started` (SPEC §5A), so wizard completion cannot be tied to the build turn it prefilled.
 - Config is validated at boot (ids unique, registryIds exist in game_registry, fragments non-empty); invalid config falls back to last-known-good and alerts.
 - Copy tone: for non-developers; no jargon on cards.
 - Items marked *(skill backlog)* above must gain a skill or training example in the content repos before or shortly after the mechanic ships — a checked box that generates broken code is worse than no box.

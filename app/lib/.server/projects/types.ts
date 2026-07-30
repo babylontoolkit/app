@@ -10,6 +10,19 @@
  */
 import type { GitProviderId } from '~/lib/.server/git/provider';
 
+/**
+ * What an unbuilt project still owes its owner: the brief that will ride hidden on their first build
+ * turn, and the words they typed. Capped on the way in (`api.projects.$projectId.ts`) — it arrives in a
+ * browser body and it reaches the model, so an unbounded one is an unbounded per-turn bill (§4.2.8).
+ */
+export interface CreationHandoff {
+  /** The machine-written brief. Must contain `CREATION_BRIEF_MARKER` or ten server protections switch off. */
+  brief: string;
+
+  /** The user's own words. Absent on the card path — there were none, and inventing some is worse. */
+  userPrompt?: string;
+}
+
 export interface Project {
   id: string;
   userId: string;
@@ -113,6 +126,20 @@ export interface Project {
    * identity against. `undefined` = no VM has been created for this project yet.
    */
   sandboxId?: string;
+
+  /**
+   * The creation → build handoff for a project that has never been built (§4.4a, migration 0016).
+   *
+   * 🔴 **A FACT ABOUT THE PROJECT, NOT ABOUT ONE BROWSER.** It shipped in `localStorage`, which made the
+   * handoff card and — far worse — the hidden creation brief a property of the device that happened to
+   * create the project. Open an unbuilt project on a second machine and the first build turn went out
+   * with NO brief: no play contract, no scaffolded class name, no list of the images actually on disk.
+   * The build still ran and was simply worse, with nothing reporting why (§4.2.8's silent failure mode).
+   *
+   * 🔴 **NULL IS THE END STATE, and it is set when the first build turn is SENT** — never when it
+   * succeeds, because a failed build is one the user retries and the retry must still carry the brief.
+   */
+  creationHandoff?: CreationHandoff;
 
   createdAt: string;
   updatedAt: string;

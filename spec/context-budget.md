@@ -24,14 +24,20 @@
 > 1. **Pre-load the skills a request obviously needs** into the CACHED prefix (`preload-skills.ts`).
 >    Cache reads bill at 0.1x, so the context is nearly free — and there are no round trips to redraft
 >    around.
-> 2. **A creation turn runs with NO skill/MCP tools at all** (`CREATION_BRIEF_MARKER` → media-only or
->    nothing, `agent/tool-policy.ts`). The brief IS the workflow; there is nothing to look up. The
->    system prompt already said "never load a skill on a project-creation turn" **and the model ignored
->    it four times** — so the capability is removed rather than discouraged. Instructions are not a
->    control. **The one exception (2026-07-18, §4.16): when media tools exist, creation runs a
+> 2. **The brief-carrying turn runs with NO skill/MCP tools at all** (`CREATION_BRIEF_MARKER` →
+>    media-only or nothing, `agent/tool-policy.ts`). The brief IS the workflow; there is nothing to look
+>    up. The system prompt already said "never load a skill on a project-creation turn" **and the model
+>    ignored it four times** — so the capability is removed rather than discouraged. Instructions are not
+>    a control. **The one exception (2026-07-18, §4.16): when media tools exist it runs a
 >    MEDIA-ONLY loop** (`CREATION_MEDIA_STEPS = 3`: one parallel round of `generate_*` calls for the
 >    design art + the answer + slack) — skill tools are still never offered, so the six-round pathology
 >    stays dead; extra rounds re-read the cached prefix at 0.1×.
+>
+>    ⚠️ **Naming, 2026-07-29 (SPEC §4.4a):** this turn is now `isFirstBuildTurn` and the USER sends it —
+>    creation clones, installs and serves the starter without contacting a model at all. Nothing in this
+>    entry's mechanics or its measurements changed; the flag was renamed because it drives ten
+>    behavioural decisions and, since the same date, zero pricing ones. Everything below that says
+>    "creation turn" means the first build turn unless it is dated before then and describing the clone.
 >
 > | "make me a kart racer" | Before | After |
 > |---|---|---|
@@ -323,14 +329,16 @@ Every one of these came out of a measured failure, and each is a whole wasted ge
 - **`MAX_SKILL_LOADS = 2`** — a budget on skill BODIES, enforced in `execute`, replacing both
   `MAX_PRELOADED` and "withdraw the tool". Each body is 15–25KB of prefix on every subsequent step, so
   an unbounded budget is an unbounded bill; past the cap the tool refuses and names what is loaded.
-- **A creation turn inlines exactly TWO skills (`bt-landing`, `bt-design`) and gets no skill tools.**
-  A constant, not routing: its brief is machine-written and was authored against those two. Feeding that
-  brief to a matcher is what dragged in `bt-prototype` for an already-scaffolded project.
+- **The FIRST BUILD TURN inlines exactly TWO skills (`bt-landing`, `bt-design`) and gets no skill tools.**
+  A constant (`CREATION_SKILLS` in `preload-skills.ts`), not routing: its brief is machine-written and was
+  authored against those two. Feeding that brief to a matcher is what dragged in `bt-prototype` for an
+  already-scaffolded project. (Named "the creation turn" until 2026-07-29; it is the same marker-carrying
+  turn, now sent by the user — creation itself contacts no model and inlines nothing, SPEC §4.4a.)
 - **The index tells the model to load BEFORE it writes.** A `load_skill` call is ~50 tokens; the
   29,173-token measurement was redrafting between rounds. Loading is cheap, interleaving is not.
 - **A tool round re-processes the whole prefix** (~151k tokens: 0.1× warm, 2× WRITE on a cold KIE
   backend). That is the real unit cost of progressive disclosure here, and the reason the budget is 2.
-- **The inlined block still omits bundled resource paths** on the creation turn, where there is no tool
+- **The inlined block still omits bundled resource paths** on the first build turn, where there is no tool
   to open them. On an ordinary turn `load_skill` returns them, because the tool exists.
 
 ### 5. Cache-stability guards (a busted cache is a silent 10× on the prefix)
@@ -402,7 +410,8 @@ instead of an unwanted artifact rewrite. And per the "instructions are not a con
 prose is backed by capability removal: the tool policy strips media (a debit) and MCP (sandbox
 mutation) on plan turns (`toolset: 'skills-only'`), and the route writes the `NO_REPLAY` message
 annotation BEFORE the text streams so the client's render-only parser handles the whole message — a
-disobedient `<boltAction>` displays and cannot execute. The creation turn ignores the toggle entirely.
+disobedient `<boltAction>` displays and cannot execute. The first build turn ignores the toggle entirely
+(`discussModeNote` returns null when `isFirstBuildTurn` — a marker-carrying turn is never a plan turn).
 
 ### 10. The context bill is USER-VISIBLE: `/context` + the health dot (§4.5.6, 2026-07-18)
 
@@ -995,7 +1004,7 @@ starting points for the history window above — but they are starting points, n
 | Watcher (keeps the lockfile IN the project) | `app/lib/stores/files.ts` → `watchPaths` |
 | Body-strip before POST (keeps it OUT of the wire) | `app/components/chat/Chat.client.tsx` → `agentFiles` |
 | Tool-set design (rounds, batching, forced answer, `toolChoice`) | `app/lib/.server/agent/tools.ts` |
-| Skill-load budget (`MAX_SKILL_LOADS`; creation inlines 2, tools off) | `app/lib/.server/agent/tools.ts`, `agent/preload-skills.ts` |
+| Skill-load budget (`MAX_SKILL_LOADS`; the first build turn inlines 2, tools off) | `app/lib/.server/agent/tools.ts`, `agent/preload-skills.ts` |
 | Carried skills, append-only (`MAX_STICKY_SKILLS`) | `app/lib/.server/agent/preload-skills.ts` |
 | Cache-warmup probe (never diagnose the cache from live turns) | `scripts/cache-probe.mjs` |
 | Effort policy (escalate-only) | `app/lib/.server/agent/effort-policy.ts` |
@@ -1006,7 +1015,27 @@ starting points for the history window above — but they are starting points, n
 
 ## How to re-measure (do this on any change to the above)
 
-1. Run one creation in the browser, DevTools open.
-2. Grab the `POST /api/agent` response stream; the `8:` annotation lines carry `usage` and `agentMeta`.
-3. Compare `promptTokens` (this is the **uncached** count — Anthropic reports cached input separately) + `cacheCreationTokens` + `cacheReadTokens`.
-4. A creation that costs more than ~150k **total input tokens** is a regression. Find what got inlined.
+> ⚠️ **Rewritten 2026-07-29 (SPEC §4.4a).** The old step 1 was *"run one creation in the browser"* and
+> step 2 grabbed its `POST /api/agent` stream. **Creation issues no `/api/agent` request at all** — it
+> clones, installs and serves the starter without contacting a model — so that procedure could not be
+> run, and following it would produce no request to inspect (which reads as a broken DevTools filter,
+> not as a stale document). The turn it was measuring still exists: it is the **first build turn**, and
+> the measurement is otherwise unchanged, including the ~150k threshold, which was always a property of
+> the marker-carrying prompt rather than of the moment it fired.
+
+1. Create a project in the browser (any §4.4a path), then **wait for New Project mode** — the starter
+   running, the banner up, the prompt sitting in the textbox. Nothing has been billed to the model yet;
+   the flat `PROJECT_CREATE_CREDITS` charge is not a token cost and does not appear in any of the numbers
+   below.
+2. Open DevTools, then **send** that prompt. That send is the first build turn and it is the request you
+   want: exactly one `POST /api/agent`, carrying the user's visible message plus the hidden brief.
+3. Grab its response stream; the `8:` annotation lines carry `usage` and `agentMeta`. (Sanity-check that
+   you have the right request before reading anything off it: the server log line for this turn reads
+   `mode=… CREATION` and `tools=off (creation)` or `tools=media-only` — an ordinary edit turn shows
+   neither, and measuring one of those against the threshold below will always look like a huge win.)
+4. Compare `promptTokens` (this is the **uncached** count — Anthropic reports cached input separately) + `cacheCreationTokens` + `cacheReadTokens`.
+5. A first build turn that costs more than ~150k **total input tokens** is a regression. Find what got inlined.
+6. For the clone half — which now has its own cost and its own failure modes — measure it separately:
+   it is bounded by the mount, `waitForMountVisible`, `settleAfterCreation`, `npm install` and the dev
+   server, and none of those spend tokens. A creation that got slower is a sandbox/FS question, never a
+   context one; do not go looking for it in this document.

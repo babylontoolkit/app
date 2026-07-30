@@ -7,7 +7,13 @@
  * mid-rebuild. Every rule below is one way that message can be wrong again.
  */
 import { describe, expect, it } from 'vitest';
-import { actionsSettled, isActionSettled, pendingActionCount, waitForActionsSettled } from './actions-settled';
+import {
+  actionsSettled,
+  isActionSettled,
+  pendingActionCount,
+  settleableStatuses,
+  waitForActionsSettled,
+} from './actions-settled';
 
 function fakeClock() {
   let t = 0;
@@ -18,6 +24,86 @@ function fakeClock() {
     },
   };
 }
+
+/**
+ * 🔴 THE DEV SERVER IS NOT AN UNFINISHED FILE WRITE.
+ *
+ * A `start` action (`npm run dev`) never exits, so the runner leaves it `running` for the whole session,
+ * and artifacts are never removed from the workbench store. Once creation stopped firing the build
+ * (§4.4a), every later turn's `onFinish` therefore read a tab that still held the creation setup
+ * artifact — so "has this turn settled?" was permanently NO. The game-ready message could never fire,
+ * and 120s later the honest "still writing 1 file(s)" variant fired instead, about a dev server that was
+ * serving perfectly. The message that exists to avoid over-claiming would have become the only message
+ * the product ever showed, permanently, and wrong.
+ *
+ * These tests are the difference between "the rule is written down" and "the rule is enforced" — and the
+ * shape of the mistake matters: excluding a long-lived action is not a loosening, because a `start`
+ * reaching a terminal state means the server DIED.
+ */
+describe('settleableStatuses', () => {
+  it('drops a running `start` — a live dev server is success, not work in flight', () => {
+    expect(settleableStatuses([{ type: 'start', status: 'running' }])).toEqual([]);
+  });
+
+  /** The whole point of the filter: a turn whose own writes are done is DONE, dev server or not. */
+  it('makes the real tab settle — creation setup artifact plus a finished write', () => {
+    const statuses = settleableStatuses([
+      { type: 'shell', status: 'complete' },
+      { type: 'start', status: 'running' },
+      { type: 'file', status: 'complete' },
+    ]);
+
+    expect(statuses).toEqual(['complete', 'complete']);
+    expect(actionsSettled(statuses)).toBe(true);
+  });
+
+  /**
+   * 🔴 THE CONTROL. Filtering by TYPE, not by "things that never finish": a `shell` or a `file` still in
+   * flight is exactly what the wait exists for, and a filter that swallowed those would restore the
+   * original 2026-07-27 bug — announcing a finished game mid-write — while looking like this fix.
+   */
+  it('keeps a running shell and a running file — those really are in flight', () => {
+    const statuses = settleableStatuses([
+      { type: 'shell', status: 'running' },
+      { type: 'file', status: 'pending' },
+      { type: 'start', status: 'running' },
+    ]);
+
+    expect(statuses).toEqual(['running', 'pending']);
+    expect(actionsSettled(statuses)).toBe(false);
+    expect(pendingActionCount(statuses)).toBe(2);
+  });
+
+  /**
+   * A terminal `start` is dropped too, and deliberately: it means the server exited, which is a preview
+   * problem the alert system reports — never a reason to hold up (or fail) the completion message.
+   */
+  it('drops a `start` whatever its status, terminal included', () => {
+    for (const status of ['complete', 'failed', 'aborted', 'pending'] as const) {
+      expect(settleableStatuses([{ type: 'start', status }])).toEqual([]);
+    }
+  });
+
+  it('an empty list stays empty — a prose-only turn queues nothing', () => {
+    expect(settleableStatuses([])).toEqual([]);
+    expect(actionsSettled(settleableStatuses([]))).toBe(true);
+  });
+
+  /** Mixed, in order, with the count the "still writing N file(s)" message quotes. */
+  it('a mid-write build counts its writes and never the dev server', () => {
+    const statuses = settleableStatuses([
+      { type: 'shell', status: 'complete' },
+      { type: 'start', status: 'running' },
+      { type: 'file', status: 'complete' },
+      { type: 'file', status: 'running' },
+      { type: 'file', status: 'pending' },
+      { type: 'start', status: 'running' },
+    ]);
+
+    expect(statuses).toEqual(['complete', 'complete', 'running', 'pending']);
+    expect(pendingActionCount(statuses)).toBe(2);
+  });
+});
 
 describe('actionsSettled', () => {
   it('is false while any action is still pending or running — the reported bug', () => {

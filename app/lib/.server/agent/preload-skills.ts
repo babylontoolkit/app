@@ -120,6 +120,35 @@ export function stickyLoadedSkills(messages: Array<{ annotations?: unknown }>): 
   return seen.slice(0, MAX_STICKY_SKILLS);
 }
 
+/**
+ * Which carried skills does THIS turn get? — `stickyLoadedSkills` plus the two exclusions (§4.4a, T13).
+ *
+ * Extracted from an inline ternary in `proxy.ts` for one reason: the first-build SUPPRESSION was the
+ * only one of the ten first-build protections with no behavioural test. `stickyLoadedSkills` is
+ * flag-blind by design (it answers "what has this conversation loaded"), so the rule — *a first build
+ * carries nothing forward* — lived nowhere a test could call it, and a source scan can only prove that
+ * a ternary is present, never that it decides correctly. Pure, so both branches are now assertable.
+ *
+ * Two exclusions, and they are different in kind:
+ *
+ *   - **first build** carries NOTHING. It has its own fixed pair (`bt-landing` + `bt-design`) and no
+ *     skill tools, and its prefix is the one that is byte-identical across every user — letting a
+ *     remixed conversation's skills ride into it is a 2x cache WRITE on the largest turn in the product.
+ *   - **the invoked skill** is dropped because `/bt-plan` inlines `bt-plan`'s body already; carrying it
+ *     as well pays for the same bytes twice in one prompt.
+ */
+export function carriedSkillNames(input: {
+  isFirstBuildTurn: boolean;
+  messages: Array<{ annotations?: unknown }>;
+  invokedSkillName?: string;
+}): string[] {
+  if (input.isFirstBuildTurn) {
+    return [];
+  }
+
+  return stickyLoadedSkills(input.messages).filter((name) => name !== input.invokedSkillName);
+}
+
 /** Load the bodies for an already-decided list of skill names, skipping any that are no longer synced. */
 export async function loadSkillBodies(names: string[]): Promise<PreloadedSkill[]> {
   if (names.length === 0) {

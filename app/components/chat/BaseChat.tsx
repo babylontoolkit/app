@@ -21,6 +21,7 @@ import type { ProviderInfo } from '~/types/model';
 import { GameRegistryCards } from './GameRegistryCards';
 import { StartedFromChip } from './StartedFromChip';
 import { NewChatIntro } from './NewChatIntro';
+import { CreationHandoffCard } from './CreationHandoffCard';
 import { VaguePromptOffer } from './VaguePromptOffer';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import type { WizardSelection } from '~/lib/registry/wizard';
@@ -99,6 +100,11 @@ interface BaseChatProps {
   onVagueChoice?: (choice: 'tour' | 'blank') => void;
   onReseed?: (entry: GameRegistryEntry) => void;
   canReseed?: boolean;
+
+  // The creation → build handoff card (§4.4a). Its three actions all live in `Chat.client`.
+  onCreationBuild?: (prompt: string) => void;
+  onCreationEdit?: (prompt: string) => void;
+  onCreationDismiss?: (prompt: string) => void;
 }
 
 export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
@@ -156,6 +162,9 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       onVagueChoice,
       onReseed,
       canReseed = false,
+      onCreationBuild,
+      onCreationEdit,
+      onCreationDismiss,
     },
     ref,
   ) => {
@@ -387,14 +396,39 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                 </p>
               </div>
             )}
+            {/*
+             * `pt-[var(--panel-top-gap)]`, not `pt-6`: the workbench panel is placed at that same gap
+             * below the header, so the first thing in this column — the handoff card, the new-chat
+             * intro, the first message — starts on the same line as the workspace beside it.
+             */}
             <StickToBottom
-              className={classNames('pt-6 px-2 sm:px-6 relative', {
+              className={classNames('pt-[var(--panel-top-gap)] px-2 sm:px-6 relative', {
                 'h-full flex flex-col modern-scrollbar': chatStarted,
               })}
               resize="smooth"
               initial="smooth"
             >
               <StickToBottom.Content className="flex flex-col gap-4 relative ">
+                {/*
+                 * New Project mode (§4.4a): the project exists and runs, and the next message is the one
+                 * that builds the game. FIRST in the column, so its top edge lands on the same line as
+                 * the workspace panel beside it (`--panel-top-gap`) — it is the primary thing on screen
+                 * at that moment, and the seed chip below it is a footnote about where the project came
+                 * from. It stays in flow rather than covering anything: hiding the workbench and the
+                 * running starter at the exact moment we want the user to see them would be the opposite
+                 * of connected. It gates itself on the mode, so it costs an ordinary project nothing.
+                 */}
+                {chatStarted && (
+                  <ClientOnly>
+                    {() => (
+                      <CreationHandoffCard
+                        onBuild={onCreationBuild}
+                        onEdit={onCreationEdit}
+                        onDismiss={onCreationDismiss}
+                      />
+                    )}
+                  </ClientOnly>
+                )}
                 {chatStarted && (
                   <div className="max-w-chat mx-auto w-full">
                     <StartedFromChip onReseed={onReseed} canChange={canReseed} />

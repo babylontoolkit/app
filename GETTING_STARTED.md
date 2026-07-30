@@ -107,6 +107,28 @@ Verify: type "make me a kart racer" → project seeded from Racing → landing p
 Play launches the project's own GameMode.
 ```
 
+> ⚠️ **The brief above is kept verbatim as the prompt that BUILT Stage 2; two of its statements no longer
+> describe the shipped product, and its verification steps now fail on a correct implementation.**
+> Superseded 2026-07-29 by SPEC §4.4a (creation is a clone):
+>
+> - **"typed prompt SEEDS a registry entry and RUNS IMMEDIATELY"** — the seeding still happens and still
+>   beats the wizard, but nothing runs. Creation clones the pinned starter, scaffolds the §4.4b class,
+>   runs `npm install` + `npm run dev`, and stops with the stock starter page live. **No model is
+>   contacted.** The prompt is carried back into the chat textbox, byte-exact and focused, for the user
+>   to edit; their send is the first build turn.
+> - **"§4.4c landing page TOTAL rewrite"** — still total when it happens, but it happens on that first
+>   build turn, and it is now conditional: the hidden brief states a default (a game/experience request
+>   gets the full `bt-landing` pass) and an exception (a narrow request gets only what was asked), and
+>   the MODEL decides from the request. There is no keyword table in this repo and one must never be
+>   added (a source-scan spec fails it).
+>
+> **Verify (current):** type "make me a kart racer" → the project is created, seeded from Racing, and the
+> preview shows the **STOCK starter home page** with the prompt waiting in the textbox and the New
+> Project banner up — a themed landing page at this point is a REGRESSION, not a pass. Then press send:
+> the landing page is themed, the chrome in `src/custom/**` is redesigned, and Play launches the
+> project's own GameMode. Two charges, not one: a flat `PROJECT_CREATE_CREDITS` at creation and a
+> per-token bill on the build.
+
 ### Stage 3 — Users, persistence, money - DONE
 ```
 Continue per CLAUDE.md/SPEC.md.

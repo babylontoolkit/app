@@ -198,6 +198,33 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   `credit_ledger.generation_id` FK, the refund path, and the admin per-model cost breakdown all work
   unchanged. Quote and debit share ONE code path (`quoteMediaRequest`), so the price on the Generate
   button is the price in the ledger. Pinned by `media.spec.ts` + `ledger-sql.spec.ts`.
+- **Project-creation debits (§4.4a, migration 0015) are the `'media'` shape, and the reason they exist
+  is that there is no longer a creation TURN to price.** Ledger reason `'project_create'`, a flat
+  `PROJECT_CREATE_CREDITS` (default 150, `0` disables and writes no row at all — a zero-value entry is
+  noise, not an audit trail), **QUOTED before the project row exists and DEBITED after it**, in `POST /api/projects`
+  (`quoteProjectCreate` → 402 → `store.create` → `debitProjectCreate`) — the refusal must leave no row
+  behind, and the debit's audit note is the project id, which does not exist until the row does. Never
+  allowed to go negative (absent from `mayGoNegative`; enforced +
+  insufficient → **402 naming the price and the balance, with ZERO project rows and ZERO ledger rows
+  written**). The posture follows the same reasoning as `'media'` vs `'search'`: it debits before
+  anything is provisioned, so it must REFUSE rather than overdraw — the opposite of `'generation'`,
+  whose overdraft allowance exists only because settlement runs after the spend has happened.
+  Not anchored to a `generations` row (generation_id null, like `'grant'`/`'license'`). The new balance
+  rides back on the response so the client can settle it without a second round trip — the enhancer's
+  drifted-balance defect is the precedent: a settled charge the UI cannot see reads as a leak. A debit that throws AFTER the row exists (a concurrent
+  creation drained the balance between quote and debit) **rolls the project back and returns a
+  retryable 402** — an unpaid project is worse than a refused one, because nothing downstream would
+  ever notice it — and the rollback is reported by its RESULT, with an `UNPAID PROJECT` error log if
+  even that fails (never a `catch` that logs success). Refund
+  lives on the **server DELETE path**, when a project is deleted having never had a completed
+  generation — that is the observable definition of "creation did not deliver", and it correctly
+  declines to refund someone who built a game and then deleted it. It is deliberately NOT hung off
+  `rollbackRegisteredProject`, which is fire-and-forget and never rejects: a refund there is a refund
+  that can silently not happen. ⚠️ This is the ONE thing permitted to stop a project being created
+  (§4.4a's "nothing else should be able to stop the project from getting created"), and it is allowed
+  because it refuses BEFORE anything is provisioned — a clean, described 402 leaves nothing half-made,
+  which is categorically different from a mid-creation failure. Pinned by `project-create.spec.ts` +
+  the route specs + `ledger-sql.spec.ts`.
 - **Unity license debits (§4.18, migration 0012) are a FLAT charge, like `'media'` and unlike `'generation'`**:
   ledger reason `'license'`, taken BEFORE the license is issued at a fixed per-tier credit price (the
   ladder in `unity-license-pricing.ts`), **never allowed to go negative** (enforced+insufficient → 402,
@@ -387,7 +414,7 @@ what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the lic
 
 ## Verified end-to-end (2026-07, local mode)
 
-- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **800** since the KIE move + the 4.0 margin reprice (2026-07-18) — ~3.5× a measured KIE creation at margin 4.0, and deliberately below the 1,200-credit premium minimum (`DEFAULT_PREMIUM_MINIMUM_CREDITS`) so a fresh grant cannot buy the 2× model).
+- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **800** since the KIE move + the 4.0 margin reprice (2026-07-18) — ~2.8× a measured KIE build turn at margin 4.0 once the flat `PROJECT_CREATE_CREDITS` charge is subtracted (§4.4a), and deliberately below the 1,200-credit premium minimum (`DEFAULT_PREMIUM_MINIMUM_CREDITS`) so a fresh grant cannot buy the 2× model).
 - A live generation settled against real usage: `generation −7 → 993` (raw cost $0.0184,
   `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
 - The `generations` record attributes the charge to a user, a model, and its four token classes.

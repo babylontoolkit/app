@@ -38,12 +38,18 @@ Models emit degenerate tool calls; they always will. The defect is not the model
 
 ### WHO CHOOSES A SKILL: the model, from the descriptions (rewritten 2026-07-26)
 
-**The rule.** Every turn except creation offers `load_skill`, and the model selects from the index of
-`name — description` that `buildSkillsIndex` bakes into the cached prompt. That is the agentskills.io
-contract, it is how Claude Code behaves, and it is the only version of this subsystem that is a *skill
-system* rather than a prompt library with extra steps. **The creation turn is the sole exception**: its
-brief is machine-written against two named skills (`bt-landing` + `bt-design`), so they are inlined and
-skill tools are off — one mechanism per turn, never two.
+**The rule.** Every turn except the first build turn offers `load_skill`, and the model selects from the
+index of `name — description` that `buildSkillsIndex` bakes into the cached prompt. That is the
+agentskills.io contract, it is how Claude Code behaves, and it is the only version of this subsystem that
+is a *skill system* rather than a prompt library with extra steps. **The FIRST BUILD TURN is the sole
+exception**: its brief is machine-written against two named skills (`bt-landing` + `bt-design`), so they
+are inlined and skill tools are off — one mechanism per turn, never two.
+
+⚠️ **Called "the creation turn" until 2026-07-29 (SPEC §4.4a).** Project creation no longer contacts a
+model at all — it clones, installs and serves the starter — so the exception now attaches to the message
+the *user* sends out of New Project mode, identified exactly as before by `CREATION_BRIEF_MARKER`
+(`isFirstBuildTurn`). Nothing about the exception's mechanics or its measurements changed; a reader
+looking for "the creation turn" in this document should read "the first build turn" throughout.
 
 **What was there before, and why it had to go.** A `Record<string, string[]>` of substrings, hardcoded
 in *this* repo, matched against the user's text; whatever it picked was inlined, and `load_skill` was
@@ -134,7 +140,8 @@ credits). That is the reason the budget is a hard ceiling of 2 rather than a sug
 Offering the tool **while a skill was already inlined** and telling the model not to use it is a trap,
 not a redundancy — measured three times:
 
-- **Creation turn, tools available.** Prompt said "never load a skill on a creation turn"; the model called `load_skill` four times anyway. Removing the tools took the build from **468s → 114s**. *(Creation still runs this way.)*
+- **Creation turn, tools available.** Prompt said "never load a skill on a creation turn"; the model called `load_skill` four times anyway. Removing the tools took the build from **468s → 114s**. *(The first build turn still runs this way —
+  it is the same marker-carrying turn, sent by the user since 2026-07-29 rather than fired by creation.)*
 - **Edit turn, tools available.** `bt-design` pre-loaded under a heading reading *"ALREADY LOADED — do NOT call load_skill"*; the model called `load_skill('bt-design')` **five times in a row**, each answered "already loaded, proceed with the task". Six rounds, ~11,000 output tokens, two minutes — then an **empty response**. Charged 405 credits. *(The already-loaded guard now answers in one sentence, and nothing is inlined on an ordinary turn.)*
 - **Edit turn, only `read_skill_resource` available.** It thrashed on *that* instead: six rounds, 160s, empty response again. **The trap is the tool, not which tool** — and the trap is specifically a tool offered against inlined content that says not to use it.
 

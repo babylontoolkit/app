@@ -255,6 +255,32 @@ describe('the migrations', () => {
   });
 
   /*
+   * Migration 0016: the creation handoff (§4.4a). The brief that rides hidden on the first build turn
+   * is a fact about the PROJECT, not about the browser that created it — it lived in `localStorage`,
+   * so an unbuilt project opened on a second machine sent its first build turn with no brief at all
+   * and simply built worse, with nothing throwing (§4.2.8's silent failure mode).
+   *
+   * jsonb rather than two text columns: the handoff is one object that is written and cleared whole,
+   * and `{brief, userPrompt}` is the shape both the route and `rowToProject` already speak.
+   */
+  it('adds creation_handoff to projects as a nullable jsonb column (§4.4a)', async () => {
+    const { rows } = await db.query<{ column_name: string; data_type: string; is_nullable: string }>(
+      `select column_name, data_type, is_nullable from information_schema.columns
+       where table_schema = 'public' and table_name = 'projects'`,
+    );
+    const column = rows.find((r) => r.column_name === 'creation_handoff');
+
+    expect(column, 'creation_handoff must exist on projects').toBeTruthy();
+    expect(column?.data_type).toBe('jsonb');
+
+    /*
+     * 🔴 NULL is the END STATE, not merely the initial one: the handoff is cleared when the first
+     * build turn is SENT. A NOT NULL column could not express "this project has been built".
+     */
+    expect(column?.is_nullable).toBe('YES');
+  });
+
+  /*
    * Migration 0012: the Unity license unlock records (§4.18). "Once per project+tier, re-download free"
    * is a UNIQUE index on (user, unity project, tier) — the real idempotency guard, not an app check —
    * and the table is RLS-protected (owner read only; writes are service-role, like the credit ledger).

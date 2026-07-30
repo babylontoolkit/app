@@ -44,6 +44,39 @@ export interface NewProjectMode {
    * media-only tool loop, `requiresAction`, the liveness copy) hang off that one string.
    */
   brief: string;
+
+  /**
+   * The user's OWN words — what they typed on the landing page, or the wizard's short summary.
+   *
+   * 🔴 **Persisted here because nothing else persists it.** It used to live only in `projectSeedStore`
+   * (in-memory, gone on reload) with the `cachedPrompt` cookie quietly covering the gap — and that
+   * cookie is exactly what made the prompt reappear in the chat box like leftover state, and what
+   * leaked it onto the NEXT visit to the landing page. The handoff card shows these words and its
+   * actions send or edit them, so a reload mid-decision must not lose the one prompt in the product
+   * the user did not just type and cannot retype from memory.
+   *
+   * Absent on the card path with an empty box: there were no words, and inventing some would put the
+   * machine's phrasing in the user's mouth.
+   */
+  userPrompt?: string;
+
+  /**
+   * Has the user closed the handoff card (the `X`, or one of its actions) IN THIS SESSION?
+   *
+   * 🔴 **Dismissing the CARD is not leaving the MODE.** The hidden brief must still ride on whatever
+   * they send next — drop it and the play contract, the scaffolded class name and the on-disk image
+   * list vanish from the most expensive turn in the product, silently. So this hides one panel and
+   * nothing else; only a SEND clears the mode.
+   *
+   * 🔴 **AND IT IS NOT PERSISTED (owner, 2026-07-29).** It was, and that was wrong: until the first
+   * build, this card IS the state of the project — one action outstanding, and nothing else on screen
+   * says so. A dismissal that outlives a reload is right for a NAG, and this is not one, because it
+   * ends by itself the moment the user builds. So the card comes back on reload and on any device
+   * until there has actually been a build, and `X` means "hide it for now" rather than "never again".
+   *
+   * Deliberately absent from the persisted record and never read back by `readNewProjectMode`.
+   */
+  handoffDismissed?: boolean;
 }
 
 /**
@@ -102,7 +135,20 @@ export function readNewProjectMode(
       return null;
     }
 
-    return { projectId, brief: parsed.brief };
+    /*
+     * Rebuilt field by field, never spread. A spread carries whatever a future version of this record
+     * happens to hold — including a field written by a NEWER build of the app in another tab — into
+     * code that has no idea what it means. Both optionals are validated to their own type so a corrupt
+     * `userPrompt` degrades to "no words" rather than putting `[object Object]` in the chat box.
+     *
+     * `handoffDismissed` is NOT read back — it is a session fact, so a reload deliberately reopens the
+     * card on a project that has still never been built (see its doc comment).
+     */
+    return {
+      projectId,
+      brief: parsed.brief,
+      userPrompt: typeof parsed.userPrompt === 'string' ? parsed.userPrompt : undefined,
+    };
   } catch {
     /*
      * Swallowed on purpose. A banner and a hidden brief are not worth an exception on the mount path,
@@ -135,6 +181,33 @@ export function enterNewProjectMode(mode: NewProjectMode, storage: ModeStorage |
      * mode for this session, so the user gets the banner and the brief; only surviving a reload is lost.
      */
   }
+}
+
+/**
+ * Close the handoff card — the `X`, or any of its actions once they have done their work.
+ *
+ * 🔴 **This is NOT `exitNewProjectMode`, and the difference is the whole point.** Closing the card
+ * hides one panel; the mode lives on, so the hidden brief still rides on whatever the user sends next.
+ * Collapsing the two would mean that clicking `X` — the most casual gesture on the screen — silently
+ * stripped the play contract, the scaffolded class name and the on-disk image list out of the first
+ * build turn. The output would simply be worse, with nothing anywhere reporting why.
+ *
+ * A no-op when the project is not the one in the mode: same scoping rule as everywhere else here, so a
+ * stale card in a background tab cannot dismiss the card of the project actually open.
+ */
+export function dismissCreationHandoff(projectId: string): void {
+  const mode = newProjectModeStore.get();
+
+  if (!mode || mode.projectId !== projectId) {
+    return;
+  }
+
+  /*
+   * IN MEMORY ONLY — nothing is written back. The card reappearing after a reload is the intended
+   * behaviour, not a failure to persist: until the project has been built there is exactly one action
+   * outstanding, and hiding it for good would leave an unbuilt project with nothing saying so.
+   */
+  newProjectModeStore.set({ ...mode, handoffDismissed: true });
 }
 
 /**

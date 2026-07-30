@@ -20,9 +20,32 @@ export interface CreationTurnInput {
   /** The mounted project, if any. Absent means the next send CREATES one. */
   activeProjectId?: string;
   messages: Pick<Message, 'role' | 'content'>[];
+
+  /**
+   * NEW PROJECT MODE for the open project, if any (`newProjectModeStore`).
+   *
+   * 🔴 The window this closes (§4.4a, T13). Under project-first creation the brief is appended at SEND,
+   * so while the user sits editing the carried prompt there is NO message carrying
+   * `CREATION_BRIEF_MARKER` yet — and that window is the WHOLE of New Project mode, which is exactly
+   * when the next send is the first build. Keying only on the marker unlocked the premium pill for the
+   * entire time the user was looking at it, then locked it again the instant they pressed send.
+   *
+   * Scoped to the open project here rather than at the call site: a mode belonging to another project
+   * must never lock this one, and a scoping rule inlined in a `useEffect` is a rule nothing can test.
+   */
+  newProjectMode?: { projectId: string } | null;
 }
 
-export function isCreationTurn({ activeProjectId, messages }: CreationTurnInput): boolean {
+export function isCreationTurn({ activeProjectId, messages, newProjectMode }: CreationTurnInput): boolean {
+  /*
+   * The project exists and runs, and nothing has been built in it yet: the next send IS the first build,
+   * whatever is in the box. The empty `projectId` case is the unregistered-project fallback — that mode
+   * has no id to scope by and belongs to whatever is open (`enterNewProjectMode`).
+   */
+  if (newProjectMode && (!newProjectMode.projectId || newProjectMode.projectId === activeProjectId)) {
+    return true;
+  }
+
   /*
    * The landing page, or a chat with no project: the next message creates the project, so the turn
    * the user is about to send IS the first build even though nothing carries a brief yet.

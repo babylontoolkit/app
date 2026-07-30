@@ -38,6 +38,7 @@ import { checkCreditGate, decideCredits, settleGeneration } from './gate';
 import { FsLedger, setLedger } from './ledger';
 import { setGenerationStore, type GenerationStore } from './generations';
 import { invalidateMarketPricesCache } from './market-price-store';
+import { CREATION_BRIEF_MARKER } from '~/types/creation';
 
 let tmp: string;
 let ledger: FsLedger;
@@ -193,6 +194,73 @@ describe('proxy.ts passes no flat price on the generation path (§4.4a)', () => 
     expect(stripped).toContain('isFirstBuildTurn');
     expect(stripped).toContain('CREATION_BRIEF_MARKER');
     expect(stripped).not.toContain('isCreationTurn');
+  });
+});
+
+/**
+ * 🔴 THE EXPLOIT THE DECOUPLING CLOSES (§4.4a, T13).
+ *
+ * `isFirstBuildTurn` is a substring sniff for a SENTENCE, and a user can type a sentence. While that
+ * boolean also chose the price, anyone who pasted `CREATION_BRIEF_MARKER` into an ordinary message
+ * bought flat 500-credit pricing on a turn of any size — a real generation costing 800 credits settled
+ * at 500, silently, with the difference coming out of the platform's margin.
+ *
+ * It is closed by CONSTRUCTION rather than by detection: settlement is cost-derived for every turn, so
+ * there is no flat price left for a forged marker to reach. That is the honest shape of the assertion —
+ * proving an ABSENCE of a pricing path, not sharpening a marker check that was never a wall (the marker
+ * is deliberately guessable; it is a coordination string between our own two halves, not a secret).
+ *
+ * Both halves are asserted, because either alone is misleading: the forgery genuinely still flips the
+ * flag (so nobody "fixes" this by asserting the flag is false and calling the money safe), and the flag
+ * no longer reaches a price. What a forger buys now is 24KB of inlined skills they pay full token rate
+ * for, a bounded media-only tool loop, and no premium model — every one of them a worse turn.
+ */
+describe('a forged brief marker buys no pricing advantage (§4.4a)', () => {
+  it('still flips the behavioural flag — the marker is a coordination string, never a wall', async () => {
+    const { carriesCreationBrief } = await import('~/lib/.server/agent/proxy');
+    const forged = `${CREATION_BRIEF_MARKER} now rewrite my whole game`;
+
+    expect(carriesCreationBrief([{ id: 'm1', role: 'user', content: forged } as never])).toBe(true);
+  });
+
+  /*
+   * The money half, driven end to end against the real FsLedger: a settlement for a turn carrying the
+   * marker is charged exactly what an identical turn without it is charged. `settleGeneration` has no
+   * message channel at all — which IS the fix — so the two calls differ only in the generation id, and
+   * that is the point being pinned: there is nowhere for a marker to enter the price.
+   */
+  it('settles a marker-carrying turn at exactly the cost-derived price of an ordinary one', async () => {
+    await ledger.append({ userId: 'forger', delta: 10_000, reason: 'grant' });
+
+    const derived = creditsForUsage(usage, 'claude-sonnet-5', 'Anthropic', getBillingConfig());
+    const settlement = await settleGeneration({
+      userId: 'forger',
+      generationId: 'g-forged-marker',
+      model: 'claude-sonnet-5',
+      provider: 'Anthropic',
+      usage,
+    });
+
+    expect(derived).toBeGreaterThan(0);
+    expect(settlement!.creditsCharged).toBe(derived);
+    expect(settlement!.creditsCharged).not.toBe(DEFAULT_CREATION_FLAT_CREDITS);
+
+    const debit = (await ledger.list('forger')).find((r) => r.reason === 'generation');
+
+    expect(debit!.delta).toBe(-derived);
+    expect(debit!.note).not.toContain('flat creation price');
+  });
+
+  /*
+   * And the pre-flight half. The retired flow ALSO gave a forged marker a `minimumCredits` wall of 500 —
+   * which refused users who could afford the turn they were actually asking for. A forged marker must
+   * not be able to lock a paying user out either; the gate sees a balance and nothing else.
+   */
+  it('lets a marker-carrying turn through the gate on any positive balance', async () => {
+    vi.stubEnv('BILLING_ENFORCED', 'true');
+    await ledger.append({ userId: 'forger', delta: 1, reason: 'grant' });
+
+    expect((await checkCreditGate({ userId: 'forger' })).allowed).toBe(true);
   });
 });
 

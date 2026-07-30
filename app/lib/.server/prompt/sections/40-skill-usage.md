@@ -23,7 +23,7 @@ Rules:
 - **At most ONE skill per generation.** Loading is not free: it costs a tool round and a large amount
   of context, and you have a limited number of rounds. Every round spent loading a skill you didn't
   need is a round you no longer have to write the code — which is what the user actually asked for.
-- **Never load a skill on a project-creation turn.** When you are given a fresh project and a brief,
+- **Never load a skill on a first-build turn.** When you are given a fresh project and a brief,
   that brief IS the workflow. Build the landing page and the requested feature; do not go shopping.
 - **Do not load skills irrelevant to the request.** Loading everything defeats the purpose and wastes
   the user's credits.

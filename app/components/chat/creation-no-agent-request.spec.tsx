@@ -173,6 +173,13 @@ vi.mock('./BaseChat', () => ({
       <button type="button" onClick={() => void props.sendMessage({} as React.UIEvent, 'add a boost pad')}>
         send
       </button>
+      {/*
+       * The committed messages, ids only. The creation checkpoint is passed the setup artifact's id, and
+       * asserting that id against `/^2-\d+$/` alone would pass just as well for a second `2-` minted next
+       * to the real one — which is the way this can be wrong and still look right. Reading the ids the
+       * component actually committed makes the assertion an EQUALITY.
+       */}
+      <div data-testid="message-ids">{props.messages.map((message: any) => message.id).join(',')}</div>
     </div>
   ),
 }));
@@ -191,6 +198,15 @@ const agentRequests = () => wire.filter((call) => call.includes('/api/agent'));
 beforeEach(() => {
   vi.clearAllMocks();
   wire = [];
+
+  /*
+   * `useChat`'s `initialInput` is seeded from this cookie, and the jar survives `cleanup()`. Left over
+   * from a previous test it would put words in the box that this file never typed — and a card click
+   * with a non-empty box is now a DIFFERENT path (it carries them), so the leak would silently change
+   * which behaviour every test here drives.
+   */
+  Cookies.remove(PROMPT_COOKIE_KEY);
+
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: any, init?: any) => {
@@ -218,18 +234,28 @@ beforeEach(() => {
   bootProgress.set({ step: 'idle' });
   workbench.previews.set([]);
   workbench.firstArtifact.runner.actions.set({});
+  checkpointProject = vi.fn(async (_messageId: string) => undefined);
 });
 
 afterEach(() => cleanup());
 
 const noop = vi.fn();
 
+/**
+ * 🔴 THE END MARKER, AND THE FEATURE.
+ *
+ * This is both the last statement of `runStartProject`'s success tail (so a call proves creation did not
+ * fall into the catch branch — the job the now-carried prompt cookie used to do here) and the thing the
+ * checkpoint tests below are about. One spy, declared per test in `beforeEach`.
+ */
+let checkpointProject = vi.fn(async (_messageId: string) => undefined as void | undefined);
+
 function mountChat() {
   render(
     <ChatImpl
       initialMessages={[]}
       storeMessageHistory={async () => undefined}
-      checkpointProject={async () => undefined}
+      checkpointProject={checkpointProject}
       importChat={async () => undefined}
       exportChat={noop}
       startFreshChat={noop}
@@ -250,20 +276,24 @@ async function click(label: string) {
 
 describe('a creation contacts no model at all', () => {
   it('drives ZERO /api/agent requests', async () => {
-    /*
-     * 🔴 The end marker. `reload()` was the LAST thing `runStartProject` did, so a creation that fell
-     * into the catch branch would never have reached it — and a zero read off a half-run creation is
-     * the quiet way this assertion stops meaning anything. `clearDraftPrompt` (which removes this
-     * cookie) is in the success tail only, two lines from where `reload()` used to be.
-     */
-    Cookies.set(PROMPT_COOKIE_KEY, 'a kart racer with boost pads');
-
     mountChat();
     await click('new project');
 
     expect(seams.createProjectFromRegistry).toHaveBeenCalledTimes(1);
     expect(seams.settleAfterCreation).toHaveBeenCalledTimes(1);
-    expect(Cookies.get(PROMPT_COOKIE_KEY)).toBeUndefined();
+
+    /*
+     * 🔴 The end marker. `reload()` was the LAST thing `runStartProject` did, so a creation that fell
+     * into the catch branch would never have reached it — and a zero read off a half-run creation is
+     * the quiet way this assertion stops meaning anything.
+     *
+     * It used to be "the prompt cookie was cleared", which stopped being an end marker the moment the
+     * card path started CARRYING what the user typed: `applyCreationDraft` clears the cookie and then
+     * writes the carried prompt straight back into it, so a completed creation now leaves it SET. The
+     * creation checkpoint is the honest replacement — it is literally the last statement before
+     * `return true`, exactly where `reload()` was.
+     */
+    expect(checkpointProject).toHaveBeenCalledTimes(1);
 
     expect(agentRequests()).toEqual([]);
   });
@@ -314,13 +344,12 @@ describe('a creation contacts no model at all', () => {
    */
   it('finishes creation and dismisses the splash even when nothing ever serves', async () => {
     seams.awaitStarterRunning.mockResolvedValue({ installed: false, serving: false, elapsedMs: 240_000 });
-    Cookies.set(PROMPT_COOKIE_KEY, 'a kart racer with boost pads');
 
     mountChat();
     await click('new project');
 
-    /* Reached the success tail (`clearDraftPrompt`), not the catch branch. */
-    expect(Cookies.get(PROMPT_COOKIE_KEY)).toBeUndefined();
+    /* Reached the success tail (its last statement, the creation checkpoint), not the catch branch. */
+    expect(checkpointProject).toHaveBeenCalledTimes(1);
 
     /* Splash down — `startProject`'s `finally` owns this on every exit. */
     expect(bootProgress.get()).toEqual({ step: 'idle' });
@@ -386,6 +415,60 @@ describe('a creation contacts no model at all', () => {
     expect(runningPreviews()).toBe(0);
     workbench.previews.set([{ port: 5173 }]);
     expect(runningPreviews()).toBe(1);
+  });
+
+  /**
+   * 🔴 A CREATED PROJECT UPLOADS ITS CONVERSATION — nothing else will (found live, 2026-07-29).
+   *
+   * The server copy of a chat is written by `checkpointProject` at the END of a generation, and creation
+   * no longer runs one (T5). So a created-but-not-yet-built project uploaded NOTHING: `/api/chats`
+   * returned `[]` and the sidebar read "No previous conversations" beside the open chat. Nothing threw —
+   * the old flow uploaded the transcript as a SIDE EFFECT of the generation it fired, a dependency
+   * nobody had written down, so deleting the generation deleted the upload with it.
+   *
+   * Which makes the id the whole assertion: a checkpoint against the wrong message id is a checkpoint
+   * that runs, succeeds, and stores the wrong thing.
+   */
+  describe('creation checkpoints the fresh project', () => {
+    it('exactly once, with the setup artifact’s message id', async () => {
+      mountChat();
+      await click('new project');
+
+      expect(checkpointProject).toHaveBeenCalledTimes(1);
+
+      const [id] = checkpointProject.mock.calls[0];
+
+      /* The id of the ONE message creation committed — read back off the render, not pattern-matched. */
+      expect(screen.getByTestId('message-ids').textContent).toBe(id);
+      expect(id).toMatch(/^2-\d+$/);
+    });
+
+    /**
+     * 🔴 FIRE-AND-FORGET MEANS THE NET NEVER TAKES DOWN THE THING IT PROTECTS.
+     *
+     * The project is mounted, installed and serving by the time this runs; a failed upload is a chat
+     * that is missing from the sidebar until the first build turn, which is precisely the state that
+     * existed before the fix. Letting the rejection escape would instead send a perfectly good creation
+     * into the catch branch and tell the user their setup did not finish — and an unawaited rejection in
+     * jsdom surfaces as an unhandled error, i.e. loudly wrong for a strictly better outcome.
+     */
+    it('a REJECTED checkpoint does not fail the creation or strand the splash', async () => {
+      checkpointProject = vi.fn(async () => {
+        throw new Error('the working copy could not be uploaded');
+      });
+
+      mountChat();
+      await click('new project');
+
+      expect(checkpointProject).toHaveBeenCalledTimes(1);
+
+      /* The success tail still ran to the end: the mode was entered and the splash came down. */
+      expect(bootProgress.get()).toEqual({ step: 'idle' });
+
+      /* And the project is still there — no rollback, no error alert, no second attempt. */
+      expect(seams.createProjectFromRegistry).toHaveBeenCalledTimes(1);
+      expect(agentRequests()).toEqual([]);
+    });
   });
 
   it('CONTROL — the double CAN see a generation: the user’s own send posts /api/agent', async () => {

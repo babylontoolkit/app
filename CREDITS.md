@@ -128,7 +128,7 @@ current `CREDIT_MARGIN = 4.0` every figure below is ~1.2× higher: a full playab
 task** (§4.16): a 2K image is ~24 credits at 4.0, a video clip runs from ~60 (veo3_lite) into the
 hundreds (kling-3.0 pro) — debited up-front at the exact price shown on the Generate button.
 
-The 800-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~3.5× a measured KIE creation at
+The 800-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~2.8× a measured KIE build turn at
 margin 4.0 (guarantees one free game + iteration), and deliberately BELOW the 1,200-credit premium
 minimum, so a fresh account cannot burn its grant on the 2× model. Premium is also **edit-only**: the first build turn always runs the standard streaming model
 (`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a build-sized
@@ -262,7 +262,7 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | Var | Default | What it does |
 |---|---|---|
 | `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone (premium threshold + media 402 still bind) |
-| `SIGNUP_GRANT_CREDITS` | `800` | Starter credits, once per user (~3.5× a KIE creation at margin 4.0; below the premium minimum on purpose) |
+| `SIGNUP_GRANT_CREDITS` | `800` | Starter credits, once per user (~2.8× a KIE build turn at margin 4.0 **after** the flat `PROJECT_CREATE_CREDITS` charge comes off the top; below the premium minimum on purpose) |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
 | `CREDIT_MARGIN` | `4.0` | Multiplier over raw LLM+media cost (~75% GM target; realized ~72–75% LLM-only, **~58–63% effective while sandbox compute rides unmetered on the Nano default tier** — see "Sandbox compute"). **4.0 is a DECISION, not a placeholder (owner, 2026-07-28)** — every pack and plan clears `MIN_PACK_MARGIN` at it, and raising it is a price increase to customers, so it is management's call and env/SSM-configurable. The "~`8.0` restores ~75%" figure in that section is arithmetic, NOT a plan — and it is only true if `SANDBOX_EST_VM_HOURS_PER_KCREDIT` is rescaled alongside it. |

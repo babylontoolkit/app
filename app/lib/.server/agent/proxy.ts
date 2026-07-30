@@ -66,7 +66,7 @@ import {
   type HistorySize,
 } from '~/lib/.server/llm/history';
 import { envNumber } from '~/lib/.server/env';
-import { buildPreloadedSkillBlock, loadSkillBodies, preloadSkills, stickyLoadedSkills } from './preload-skills';
+import { buildPreloadedSkillBlock, carriedSkillNames, loadSkillBodies, preloadSkills } from './preload-skills';
 import { buildProjectNotes, type GameBackendState } from './project-notes';
 import { discussModeNote } from './discuss-note';
 import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
@@ -791,7 +791,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * must only ever GROW, or the prefix rewrites itself at 2x on the turn the window slides. Creation is
    * excluded because it has its own fixed pair and no tools. See `stickyLoadedSkills`.
    */
-  const carriedNames = isFirstBuildTurn ? [] : stickyLoadedSkills(messages).filter((name) => name !== slash?.skillName);
+  const carriedNames = carriedSkillNames({ isFirstBuildTurn, messages, invokedSkillName: slash?.skillName });
   const carried = await loadSkillBodies(carriedNames);
 
   /*

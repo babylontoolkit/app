@@ -310,6 +310,115 @@ describe('SupabaseProjectStore maps sandboxId in both directions', () => {
   });
 });
 
+/**
+ * The creation handoff (§4.4a, migration 0016) — `{brief, userPrompt}`, the only OBJECT-valued field
+ * on the row, which is what makes it worth its own round trip here.
+ *
+ * A dropped mapping is not a lost setting: the brief carries `CREATION_BRIEF_MARKER`, and without it
+ * ten server-side protections switch off on the first build turn. The build still runs and is simply
+ * worse, with nothing throwing and the token count going DOWN — the exact §4.2.8 failure that made this
+ * a column instead of a `localStorage` key in the first place.
+ */
+describe('FsProjectStore round-trips creationHandoff', () => {
+  let tmp: string;
+
+  const HANDOFF = { brief: 'Build the game.\n<!-- creation-brief -->', userPrompt: 'a kart racer' };
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'store-spec-handoff-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('survives create → get through a fresh store instance, nested fields and all', async () => {
+    const store = new FsProjectStore(tmp);
+    const created = await store.create({
+      userId: 'user-1',
+      name: 'Kart Racer',
+      templateId: 'racing',
+      creationHandoff: HANDOFF,
+    });
+
+    // A separate instance proves it survived the write to disk, not just the in-memory object.
+    expect((await new FsProjectStore(tmp).get(created.id))?.creationHandoff).toEqual(HANDOFF);
+  });
+
+  it('clears on update — the end state, set when the first build turn is SENT', async () => {
+    const store = new FsProjectStore(tmp);
+    const created = await store.create({
+      userId: 'user-1',
+      name: 'Kart Racer',
+      templateId: 'racing',
+      creationHandoff: HANDOFF,
+    });
+
+    const cleared = await store.update(created.id, { creationHandoff: undefined });
+    expect(cleared.creationHandoff).toBeUndefined();
+    expect((await new FsProjectStore(tmp).get(created.id))?.creationHandoff).toBeUndefined();
+  });
+});
+
+describe('SupabaseProjectStore maps creationHandoff in both directions', () => {
+  const HANDOFF = { brief: 'Build the game.\n<!-- creation-brief -->', userPrompt: 'a kart racer' };
+
+  beforeEach(() => {
+    captured = {};
+    returnRow = {};
+  });
+
+  it('projectToRow emits creation_handoff on create (camelCase → snake_case)', async () => {
+    returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Kart Racer', created_at: 'now', updated_at: 'now' };
+
+    await new SupabaseProjectStore().create({
+      userId: 'user-1',
+      name: 'Kart Racer',
+      templateId: 'racing',
+      creationHandoff: HANDOFF,
+    });
+
+    expect(captured.insert).toHaveProperty('creation_handoff', HANDOFF);
+  });
+
+  it('rowToProject maps creation_handoff back (snake_case → camelCase)', async () => {
+    returnRow = {
+      id: 'prj_1',
+      user_id: 'user-1',
+      name: 'Kart Racer',
+      creation_handoff: HANDOFF,
+      created_at: 'now',
+      updated_at: 'now',
+    };
+
+    expect((await new SupabaseProjectStore().get('prj_1'))?.creationHandoff).toEqual(HANDOFF);
+  });
+
+  it('a project that has already been built reads back with no handoff', async () => {
+    returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Built', created_at: 'now', updated_at: 'now' };
+
+    expect((await new SupabaseProjectStore().get('prj_1'))?.creationHandoff).toBeUndefined();
+  });
+
+  it('clearing it emits null so the DB column is actually nulled', async () => {
+    returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Kart Racer', created_at: 'now', updated_at: 'now' };
+
+    await new SupabaseProjectStore().update('prj_1', { creationHandoff: undefined });
+    expect(captured.update).toHaveProperty('creation_handoff', null);
+  });
+
+  it('a patch that does not mention it leaves the column alone', async () => {
+    /*
+     * Key-presence-driven, and load-bearing: a rename or a publish must never wipe the brief out from
+     * under an unbuilt project, which would silently downgrade its first build turn.
+     */
+    returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Renamed', created_at: 'now', updated_at: 'now' };
+
+    await new SupabaseProjectStore().update('prj_1', { name: 'Renamed' });
+    expect(captured.update).not.toHaveProperty('creation_handoff');
+  });
+});
+
 describe('the client wire type', () => {
   /**
    * `sandboxId` is not part of the wire CONTRACT (§4.5.3, §5): the client supplies a PROJECT id it

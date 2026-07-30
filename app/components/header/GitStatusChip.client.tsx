@@ -36,29 +36,17 @@ import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { classNames } from '~/utils/classNames';
-import { projectId as projectIdStore, repoStatus, unsavedWork, requestSave, startGitConnect } from '~/lib/persistence';
-import { saveState } from '~/lib/persistence/save-queue';
-import { describeSaveStatus, type SaveTone } from '~/lib/persistence/save-status';
+import { repoStatus } from '~/lib/persistence';
+import { type SaveTone } from '~/lib/persistence/save-status';
+import { PROVIDER_LABEL, useSaveProject, type GitProvider } from '~/lib/persistence/useSaveProject';
 import { GitHubSyncDialog } from '~/components/github/GitHubSyncButton';
 import { TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
-
-type GitProvider = 'github' | 'gitlab';
-
-const PROVIDER_LABEL: Record<GitProvider, string> = { github: 'GitHub', gitlab: 'GitLab' };
 
 /** Where a linked project's code actually is, so "Open on GitHub" can be a real link. */
 const PROVIDER_ORIGIN: Record<GitProvider, string> = {
   github: 'https://github.com',
   gitlab: 'https://gitlab.com',
 };
-
-function providerFromReturn(): GitProvider {
-  if (typeof window === 'undefined') {
-    return 'github';
-  }
-
-  return new URLSearchParams(window.location.search).get('provider') === 'gitlab' ? 'gitlab' : 'github';
-}
 
 /*
  * Tone drives the chip's colour and nothing else.
@@ -84,45 +72,29 @@ const TONE_ICONS: Record<SaveTone, string> = {
 };
 
 export function GitStatusChip() {
-  const activeProjectId = useStore(projectIdStore);
   const repo = useStore(repoStatus);
-  const unsaved = useStore(unsavedWork);
-  const state = useStore(saveState);
 
-  const [chosenProvider, setChosenProvider] = useState<GitProvider>(providerFromReturn);
+  /*
+   * Provider resolution, the tested view and the save call all come from `useSaveProject` — the creation
+   * handoff card offers the same action, and two surfaces answering "where does my game live?"
+   * independently is exactly how the header ended up with two adjacent buttons both labelled "Sync".
+   */
+  const {
+    projectId: activeProjectId,
+    view,
+    provider: providerToUse,
+    providerName,
+    hasChoice,
+    configured,
+    chooseProvider,
+    run: runAction,
+  } = useSaveProject();
+
   const [dialogOpen, setDialogOpen] = useState(false);
 
   if (!activeProjectId) {
     return null;
   }
-
-  /*
-   * A brand-new project can be saved to more than one account when the deployment has both providers
-   * configured. Offer the choice ONLY while unlinked and only when there IS a choice — once linked, the
-   * project's own provider is authoritative. Without this, GitLab is unreachable: every action silently
-   * defaults to GitHub.
-   */
-  const configured = (repo?.configuredProviders ?? []) as GitProvider[];
-  const hasChoice = !repo?.linked && configured.length > 1;
-
-  /*
-   * The provider every label and action must agree on: the project's own once linked, otherwise the one
-   * the user picked. Computed BEFORE the view so the copy names the right account.
-   */
-  const providerToUse: GitProvider = repo?.provider ?? (hasChoice ? chosenProvider : (configured[0] ?? 'github'));
-
-  const view = describeSaveStatus({ repo, unsavedWork: unsaved, saveState: state, chosenProvider: providerToUse });
-  const providerName = PROVIDER_LABEL[providerToUse];
-
-  const runAction = () => {
-    if (view.action === 'reconnect') {
-      startGitConnect(providerToUse);
-      return;
-    }
-
-    // `save` and `retry` are the same call. The distinction is what the user is told, not what we do.
-    void requestSave(activeProjectId, providerToUse);
-  };
 
   return (
     <>
@@ -203,15 +175,12 @@ export function GitStatusChip() {
                 <DropdownMenu.Label className="px-3 py-1 text-[11px] uppercase tracking-wide text-bolt-elements-textTertiary">
                   Create the repository on
                 </DropdownMenu.Label>
-                <DropdownMenu.RadioGroup
-                  value={chosenProvider}
-                  onValueChange={(v) => setChosenProvider(v as GitProvider)}
-                >
+                <DropdownMenu.RadioGroup value={providerToUse} onValueChange={(v) => chooseProvider(v as GitProvider)}>
                   {configured.map((p) => (
                     <DropdownMenu.RadioItem key={p} value={p} className={TOOLBAR_MENU_ITEM}>
                       <div
                         className={classNames(
-                          chosenProvider === p ? 'i-ph:radio-button-fill text-accent-500' : 'i-ph:circle opacity-50',
+                          providerToUse === p ? 'i-ph:radio-button-fill text-accent-500' : 'i-ph:circle opacity-50',
                         )}
                       />
                       <span>{PROVIDER_LABEL[p]}</span>

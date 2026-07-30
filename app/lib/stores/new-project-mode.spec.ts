@@ -103,7 +103,16 @@ describe('reading a stored mode', () => {
     const storage = memoryStorage();
     enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
 
-    expect(readNewProjectMode('proj_a', storage)).toEqual({ projectId: 'proj_a', brief: BRIEF });
+    /*
+     * The full shape, not a subset: the record is rebuilt field by field on read (never spread), and
+     * `handoffDismissed` is deliberately NOT among the fields — it is a session fact, so a reload
+     * reopens the card on a project that has still never been built (§4.4a).
+     */
+    expect(readNewProjectMode('proj_a', storage)).toEqual({
+      projectId: 'proj_a',
+      brief: BRIEF,
+      userPrompt: undefined,
+    });
   });
 
   it('returns null for a project with no record', () => {
@@ -172,8 +181,10 @@ describe('surviving a reload', () => {
 
     newProjectModeStore.set(null); // the reload
 
-    expect(hydrateNewProjectMode('proj_a', storage)).toEqual({ projectId: 'proj_a', brief: BRIEF });
-    expect(newProjectModeStore.get()).toEqual({ projectId: 'proj_a', brief: BRIEF });
+    const rehydrated = { projectId: 'proj_a', brief: BRIEF, userPrompt: undefined };
+
+    expect(hydrateNewProjectMode('proj_a', storage)).toEqual(rehydrated);
+    expect(newProjectModeStore.get()).toEqual(rehydrated);
   });
 
   it('a project whose mode was cleared before the reload comes back with nothing', () => {

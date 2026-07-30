@@ -6,7 +6,15 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
-import { ApiError, createProject, deleteProject, getRepoStatus, mintServerChatId } from '~/lib/persistence/projects';
+import {
+  ApiError,
+  createProject,
+  deleteProject,
+  getProject,
+  getRepoStatus,
+  mintServerChatId,
+  saveCreationHandoff,
+} from '~/lib/persistence/projects';
 import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { isCreationTurn } from '~/lib/chat/creation-turn';
 import { workbenchStore } from '~/lib/stores/workbench';
@@ -27,6 +35,9 @@ import { useSettings } from '~/lib/hooks/useSettings';
 import type { ProviderInfo } from '~/types/model';
 import { useSearchParams } from '@remix-run/react';
 import { parseClientCommand } from '~/lib/chat/client-commands';
+import { applyCreationDraft, draftTextForSeed } from '~/lib/chat/new-project-draft';
+import { briefFromRegistryEntry } from '~/lib/chat/creation-handoff';
+import { composeNewProjectTurn } from '~/lib/chat/new-project-send';
 import { contextPanelOpen, resetContextStats, updateContextStats } from '~/lib/stores/context-stats';
 import { baseEffortStore, effortPanelOpen } from '~/lib/stores/effort';
 import { chatResetRequest } from '~/lib/stores/chat-reset';
@@ -40,11 +51,16 @@ import { asCreationFailure } from '~/lib/registry/creation-errors';
 import { waitForMountVisible } from '~/lib/registry/mount';
 import { settleAfterCreation } from '~/lib/registry/settle';
 import { awaitStarterRunning, isInstallFinished } from '~/lib/registry/starter-ready';
-import { waitForActionsSettled } from '~/lib/runtime/actions-settled';
+import { settleableStatuses, waitForActionsSettled } from '~/lib/runtime/actions-settled';
 import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registry/match';
 import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
 import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
-import { enterNewProjectMode, exitNewProjectMode, hydrateNewProjectMode } from '~/lib/stores/new-project-mode';
+import {
+  enterNewProjectMode,
+  exitNewProjectMode,
+  hydrateNewProjectMode,
+  newProjectModeStore,
+} from '~/lib/stores/new-project-mode';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
 import { trackMediaTask } from '~/lib/media/tasks';
 import { streamActivitySize } from '~/lib/chat/stream-activity';
@@ -321,7 +337,34 @@ export const ChatImpl = memo(
      * ones that were never in the mode.
      */
     useEffect(() => {
-      hydrateNewProjectMode(activeProjectId);
+      const local = hydrateNewProjectMode(activeProjectId);
+
+      /*
+       * 🔴 THE ROW IS THE SOURCE, `localStorage` IS THE CACHE (migration 0016).
+       *
+       * A project created on another device — or in a browser whose storage was cleared — has no local
+       * mode, and until this existed that meant no handoff card AND a first build turn carrying no
+       * creation brief at all. The local read stays FIRST and synchronous so the common case still
+       * paints without a round trip; this only fills a gap, and it re-checks the project id on arrival
+       * because an SPA navigate can land on a different project while the request is in flight.
+       */
+      if (!activeProjectId || local) {
+        return;
+      }
+
+      getProject(activeProjectId)
+        .then((project) => {
+          const handoff = (project as { creationHandoff?: { brief: string; userPrompt?: string } }).creationHandoff;
+
+          if (!handoff?.brief || projectId.get() !== activeProjectId || newProjectModeStore.get()) {
+            return;
+          }
+
+          enterNewProjectMode({ projectId: activeProjectId, brief: handoff.brief, userPrompt: handoff.userPrompt });
+        })
+        .catch((error) => {
+          logger.warn('Could not read the creation handoff for this project', error);
+        });
     }, [activeProjectId]);
 
     const mcpSettings = useMCPStore((state) => state.settings);
@@ -513,8 +556,13 @@ export const ChatImpl = memo(
            */
           void waitForActionsSettled({
             readStatuses: () =>
-              Object.values(workbenchStore.artifacts.get()).flatMap((artifact) =>
-                Object.values(artifact.runner.actions.get()).map((action) => action.status),
+              settleableStatuses(
+                Object.values(workbenchStore.artifacts.get()).flatMap((artifact) =>
+                  Object.values(artifact.runner.actions.get()).map((action) => ({
+                    type: action.type,
+                    status: action.status,
+                  })),
+                ),
               ),
           }).then((result) => {
             if (result.settled) {
@@ -853,10 +901,19 @@ export const ChatImpl = memo(
      *    a failed creation awaiting retry, or a fresh project before the user's first edit).
      * A new chat on an EXISTING project has `activeProjectId` and no brief — premium stays available,
      * because its first message is an edit.
+     *
+     * 🔴 And NEW PROJECT MODE, which is the third state and the one the marker alone cannot see (§4.4a):
+     * the brief is appended at SEND, so for the whole time the user is editing the carried prompt there
+     * is no message carrying it yet. Keyed on the marker alone the pill sat UNLOCKED for exactly that
+     * window and re-locked on send. (The server was never wrong — `decidePremium` re-derives from the
+     * request it receives — so this only ever offered a toggle the server declines. It is still a lie
+     * to the user about the model their next build will run.)
      */
+    const openNewProjectMode = useStore(newProjectModeStore);
+
     useEffect(() => {
-      creationTurnStore.set(isCreationTurn({ activeProjectId, messages }));
-    }, [messages, activeProjectId]);
+      creationTurnStore.set(isCreationTurn({ activeProjectId, messages, newProjectMode: openNewProjectMode }));
+    }, [messages, activeProjectId, openNewProjectMode]);
 
     /*
      * Stall watchdog — never leave the user on the three-dot spinner (`isLoading || fakeLoading`) with
@@ -923,6 +980,16 @@ export const ChatImpl = memo(
       stop();
       chatStore.setKey('aborted', true);
       workbenchStore.abortAllActions();
+
+      /*
+       * A stopped build produced no game, and `onFinish` never runs for it — so the armed celebration
+       * would sit there and fire on whatever ordinary turn ended next ("what files are there?" →
+       * "🎮 Your game is ready"). Disarming here also covers `/clear` and the ⋯ reset, both of which
+       * abort an in-flight generation first. A stopped build simply gets no celebration — the user
+       * stopped it, so there is nothing to congratulate them on, and the toast is not what tells them
+       * the project exists (creation already did that).
+       */
+      creationCompleteRef.current = false;
 
       logStore.logProvider('Chat response aborted', {
         component: 'Chat',
@@ -1261,7 +1328,7 @@ export const ChatImpl = memo(
       let created: Awaited<ReturnType<typeof createProjectFromRegistry>>;
 
       try {
-        created = await createProjectFromRegistry({ entry, title, prompt, projectId: registeredProjectId });
+        created = await createProjectFromRegistry({ entry, title, projectId: registeredProjectId });
       } catch (error) {
         /*
          * The only genuinely fatal outcome: the starter never arrived, or it did not land on disk.
@@ -1337,7 +1404,52 @@ export const ChatImpl = memo(
          * user's first message will ride in on. Done BEFORE the waits below so a user who reloads mid-wait
          * still comes back to a project that knows what it is.
          */
-        enterNewProjectMode({ projectId: registeredProjectId ?? '', brief: creationBrief });
+        /*
+         * 🔴 THE WIZARD'S COMPILED SELECTIONS RIDE WITH THE BRIEF, OR THEY REACH NOBODY (§4.7).
+         *
+         * On the wizard path `prompt` is the compiled brief (genre + vibe + every mechanic checkbox +
+         * the twist) and `visiblePrompt` is the short friendly summary shown in its place. The textbox
+         * carries the SUMMARY — correct, because a textbox holds words the user can read and edit, not
+         * a machine-composed task list. But that left the compiled text with nowhere to go: four wizard
+         * steps of explicit choices would have been silently dropped on the one path built for users who
+         * do not know what to type. It is machine-written, so it travels the way machine-written text
+         * travels here — hidden, appended to the brief, subordinate to whatever the user actually sends
+         * (the brief already states that the user's message wins).
+         */
+        const wizardSelections =
+          prompt && visiblePrompt && prompt !== visiblePrompt
+            ? `\n\n**The user's guided-tour selections** (they chose these in the wizard; their message above still wins if it disagrees):\n\n> ${prompt}`
+            : '';
+
+        /*
+         * 🔴 THE USER'S OWN WORDS ARE PERSISTED HERE, BECAUSE NOTHING ELSE PERSISTS THEM.
+         *
+         * They used to live only in the in-memory `projectSeedStore` with the `cachedPrompt` cookie
+         * quietly covering the gap — and that cookie is exactly what made the prompt reappear in the
+         * chat box like leftover state, and what leaked it onto the NEXT visit to the landing page. The
+         * handoff card shows these words and its actions send or edit them, so a reload mid-decision
+         * must not lose the one prompt in the product the user did not just type.
+         */
+        const handoff = {
+          brief: `${creationBrief}${wizardSelections}`,
+          userPrompt: draftTextForSeed({ prompt, visiblePrompt }) || undefined,
+        };
+
+        enterNewProjectMode({ projectId: registeredProjectId ?? '', ...handoff });
+
+        /*
+         * 🔴 AND ON THE PROJECT ROW, because the brief is a fact about the PROJECT (migration 0016).
+         * Held only in this browser it was a fact about a DEVICE: an unbuilt project opened elsewhere
+         * sent its first build turn with no play contract, no scaffolded class name and no list of the
+         * images on disk — a worse build, silently. Fire-and-forget for the same reason the checkpoint
+         * below is: the project exists and runs, and the safety net must not take it down. An
+         * unregistered project has no row to write to.
+         */
+        if (registeredProjectId) {
+          void saveCreationHandoff(registeredProjectId, handoff).catch((error) => {
+            logger.error('Could not store the creation handoff on the project', error);
+          });
+        }
 
         /*
          * 🔴 ONE MESSAGE, AND IT IS NOT THE USER'S (owner rule, 2026-07-29 — creation is a clone).
@@ -1363,7 +1475,8 @@ export const ChatImpl = memo(
          * in the transcript is one the user actually sent — which is more honest than what it replaced,
          * where the never-dropped "original brief" (`history.ts`) was a message they never wrote.
          */
-        setMessages([{ id: `2-${new Date().getTime()}`, role: 'assistant', content: assistantMessage }]);
+        const setupMessageId = `2-${new Date().getTime()}`;
+        setMessages([{ id: setupMessageId, role: 'assistant', content: assistantMessage }]);
 
         /*
          * 🔴 THE WAITS STAY, AND THEY ARE NOW FOR THE USER RATHER THAN FOR THE MODEL.
@@ -1468,14 +1581,60 @@ export const ChatImpl = memo(
          *     yet. Arming it here would celebrate an untouched starter. It belongs to the first build
          *     turn.
          *   - **The textarea is NOT blurred, and the attachments are NOT cleared.** Both existed because
-         *     the send had already happened. It has not. Blurring would take the caret out of the box we
-         *     are about to prefill, and clearing `uploadedFiles`/`imageDataList` would silently destroy
+         *     the send had already happened. It has not. Blurring would fight the handoff card's Edit
+         *     action for the caret, and clearing `uploadedFiles`/`imageDataList` would silently destroy
          *     images the user picked before pressing New Project — they now ride the build turn instead.
          */
+        /*
+         * 🔴 THE BOX IS LEFT EMPTY — THE PROMPT GOES TO THE CARD (owner, 2026-07-29).
+         *
+         * This used to prefill the textbox with the user's words and write them back to the
+         * `cachedPrompt` cookie. Both are gone. Text arriving in a box nobody typed into reads as
+         * leftover state rather than as the next step (*"it kind of feels disconnected to the initial
+         * project creation process"*), and the cookie leaked the prompt onto the NEXT visit to the
+         * landing page. The words are carried on the mode (`userPrompt`, above), shown by
+         * `CreationHandoffCard`, and reach the box only if the user presses Edit or X.
+         *
+         * `clearDraftPrompt()` still runs, and it is not a leftover: the landing-page draft is still
+         * sitting in the input and in a cookie, plus a debounced write that fires up to a second later
+         * — so clearing it here is the only thing that stops the old text being in the box behind the
+         * card.
+         */
         clearDraftPrompt();
+
         setVaguePrompt(null);
         resetEnhancer();
         setFakeLoading(false);
+
+        /*
+         * 🔴 NO SUCCESS TOAST. The card IS the surface for "your project is ready", and it says so in
+         * its heading — a toast repeating it would be a second, shorter-lived copy of the same sentence
+         * competing with the thing the user is supposed to read and act on. The "🎮 Your game is ready"
+         * celebration is a different moment entirely and belongs to the first build turn (armed in
+         * `sendMessage`); firing anything like it here would congratulate the user on an untouched
+         * template.
+         */
+
+        /*
+         * 🔴 CHECKPOINT THE FRESH PROJECT — nothing else will (found live, 2026-07-29).
+         *
+         * The server copy of a conversation is written by `checkpointProject` at the END of a
+         * generation, and creation no longer runs one. So a created-but-not-yet-built project uploaded
+         * NOTHING: `/api/chats` returned `[]`, the sidebar read "No previous conversations" next to an
+         * open chat, and the dashboard card said "No chats yet" — on a device that was looking straight
+         * at the project. §4.5.6's rule is that the sidebar lists the ACCOUNT's chats, so a project
+         * created on a laptop simply did not exist on the desktop until its first build landed.
+         *
+         * The old flow hid this: creation ended by firing a generation, and that generation's
+         * checkpoint uploaded the transcript as a side effect. Removing the generation removed the
+         * upload with it — a dependency nobody had written down.
+         *
+         * Fire-and-forget with the same posture as the post-generation call: this is the safety net,
+         * and a net that fails must never take the thing it was protecting down with it.
+         */
+        void checkpointProject(setupMessageId).catch((error) => {
+          logger.error('Could not checkpoint the freshly created project', error);
+        });
 
         return true;
       } catch (error) {
@@ -1512,9 +1671,46 @@ export const ChatImpl = memo(
 
     /** §4.4a Path B — a picked card is explicit input: create it and go. No wizard. */
     const handleSelectEntry = async (entry: GameRegistryEntry) => {
+      /*
+       * 🔴 A CARD IS A GENRE CHOICE, NOT A REASON TO THROW THE USER'S WORDS AWAY (fixed 2026-07-29,
+       * reported live).
+       *
+       * The landing page offers a textbox AND a row of genre cards, so "type what you want, then click
+       * the genre you meant" is an obvious thing to do — and it silently discarded the typing: this
+       * handler never read `input`. The project came out named after the CARD ("Arcade Racing"), the
+       * carried prompt was empty because there was no prompt to carry, and the user was left looking at
+       * a New Project banner telling them to edit a prompt that had just been deleted.
+       *
+       * Both inputs are explicit, so both are honoured — §4.4a's precedence rule is about explicit input
+       * beating INFERENCE, and nothing here is inferred: the card picks the entry (better than keyword
+       * seeding could), the typed words are the brief (and the project title). Empty box → the card path
+       * exactly as before.
+       */
+      const typed = input.trim();
+
       runAnimation();
       setFakeLoading(true);
-      await startProject({ entry });
+
+      /*
+       * 🔴 A CARD WITH AN EMPTY BOX STILL CARRIES A BRIEF (owner, 2026-07-29, reported live).
+       *
+       * It used to carry nothing, so the handoff card offered *Describe your game* — asking the user to
+       * type out the genre they had just picked from a menu, which defeats the quick-pick row entirely.
+       * The card's own title and copy are the offer they accepted, so those are the brief.
+       *
+       * ⚠️ It rides on `visiblePrompt`, NOT `prompt`, and the distinction is load-bearing in two places
+       * one line apart in `runStartProject`: `prompt` derives the project TITLE (so passing it here
+       * would rename "Arcade Racing" to something squeezed out of the card's marketing copy), and
+       * `prompt && visiblePrompt && prompt !== visiblePrompt` is what appends the WIZARD's compiled
+       * selections to the brief (so passing both would staple this text into the hidden brief as if the
+       * user had walked the guided tour). With `prompt` undefined the title stays the card's, no wizard
+       * block is emitted, and `draftTextForSeed` still resolves the carried words to this text.
+       *
+       * The fallback row returns `undefined` on purpose — see `briefFromRegistryEntry`.
+       */
+      await startProject(
+        typed.length > 0 ? { entry, prompt: typed } : { entry, visiblePrompt: briefFromRegistryEntry(entry) },
+      );
     };
 
     /** §4.4a Path C — the wizard's four steps compile to the first message (§4.7). */
@@ -1583,6 +1779,77 @@ export const ChatImpl = memo(
     };
 
     /**
+     * Move the handoff card's text into the chat box (§4.4a).
+     *
+     * The ordering hazard — clear first, because the pending debounced cookie write fires up to a
+     * second LATER and would resurrect the old draft — lives in `applyCreationDraft`, which is why
+     * both call sites go through it rather than writing three statements each.
+     *
+     * `focus` is the whole difference between the actions: **Edit brief** and **Describe your game**
+     * are requests to type, so the caret goes to the box; the card's **X** is not, so it does not.
+     */
+    const fillChatBox = (text: string, options: { focus: boolean }) => {
+      applyCreationDraft(
+        text,
+        {
+          clearDraft: clearDraftPrompt,
+          applyDraft: (value) => {
+            /*
+             * Through the same synthetic-event convention the web-search insert uses, so the value lands
+             * in `useChat`'s input state exactly as typing would.
+             *
+             * 🔴 AND IT IS PERSISTED, BECAUSE FROM HERE ON IT IS AN ORDINARY DRAFT (found live).
+             *
+             * Both actions that land here also CLOSE the card, and that dismissal is persisted — so
+             * without this write the sequence "press Edit, get distracted, reload" came back to a
+             * dismissed card AND an empty box, with the words still sitting on the mode where nothing
+             * surfaces them. Silently unreachable, and it is the one prompt in the product the user did
+             * not just type and cannot retype from memory.
+             *
+             * This is NOT the cookie write that was removed from creation. That one fired without the
+             * user asking, which is what leaked one project's prompt onto the next visit to the landing
+             * page; this one is the user having taken the text into their box, where the debounced write
+             * would have persisted it anyway had they typed it themselves. Written directly rather than
+             * debounced: a reload inside the debounce window is exactly the case being fixed.
+             */
+            handleInputChange({ target: { value } } as React.ChangeEvent<HTMLTextAreaElement>);
+            Cookies.set(PROMPT_COOKIE_KEY, value.trim(), { expires: 30 });
+          },
+          focusDraft: (caret) => {
+            /*
+             * Deferred a tick: the textarea is CONTROLLED, so its DOM value is still the old one until
+             * React commits the state written above, and a `setSelectionRange` against a shorter value
+             * clamps — the caret would land in the middle of the prompt instead of at its end.
+             */
+            setTimeout(() => {
+              const textarea = textareaRef.current;
+
+              if (!textarea) {
+                return;
+              }
+
+              textarea.focus();
+              textarea.setSelectionRange(caret, caret);
+            }, 0);
+          },
+        },
+        options,
+      );
+    };
+
+    /**
+     * **Build my game** — the first build turn, sent from the card.
+     *
+     * 🔴 Goes through the ORDINARY `sendMessage`, never a second send path. Ten behavioural protections
+     * hang off that function recognising a first build turn (the hidden brief, the mode clear, the
+     * premium lock, the celebration arming, the attachment handling); a private "just post it" shortcut
+     * here would have every one of them silently absent, on the most expensive turn in the product.
+     */
+    const handleCreationBuild = (prompt: string) => {
+      void sendMessage({} as React.UIEvent, prompt);
+    };
+
+    /**
      * "New chat, same game" — IN PLACE (§4.5.6, §4.2.9, `chat-reset.ts`).
      *
      * Clears the CONVERSATION and nothing else. The project stays mounted exactly as it is: files,
@@ -1608,6 +1875,12 @@ export const ChatImpl = memo(
       // A user-initiated reset ends any repair chain in progress (§4.2.7), for the same reason a typed message does.
       repairAttemptRef.current = 0;
       repairWatch.current = null;
+
+      /*
+       * And it ends any pending celebration: `abort()` above only runs while a generation is streaming,
+       * so a build that died on `onError` would leave the ref armed for the fresh chat to fire.
+       */
+      creationCompleteRef.current = false;
 
       // Identity, history and the URL — the half that lives in `useChatHistory`.
       startFreshChat();
@@ -1791,49 +2064,144 @@ export const ChatImpl = memo(
        * And on SEND rather than on finish: a build that fails is one the user retries, and the retry must
        * carry the brief. The brief is a fact about the first message, not about the first one that worked.
        */
-      if (activeProjectId) {
-        exitNewProjectMode(activeProjectId);
+      /*
+       * ⚠️ Whether the mode is OURS is the mode's question, not `activeProjectId`'s — and gating on a
+       * truthy project id gets the degraded path exactly backwards. When registration failed there is no
+       * project id at all, and the mode is stored under an empty one (`enterNewProjectMode`) because it
+       * belongs to whatever is open. Reading it only `if (activeProjectId)` therefore meant that on the
+       * one path that already lost something, the brief was never appended (so all ten server
+       * protections stayed off) and the mode was never cleared (so the premium pill stayed locked for
+       * the rest of the session on a project that had since been built). Same rule as `isCreationTurn`'s,
+       * written once in each place it is asked.
+       */
+      const storedMode = newProjectModeStore.get();
+      const newProjectMode =
+        storedMode && (!storedMode.projectId || storedMode.projectId === activeProjectId) ? storedMode : null;
+      const creationBrief = newProjectMode?.brief;
+
+      if (newProjectMode) {
+        exitNewProjectMode(newProjectMode.projectId);
+
+        /*
+         * And on the row: the handoff ends when the build turn is SENT, so the card cannot come back on
+         * another device offering to build a game that is already being built. Cleared here rather than
+         * on success because a failed build is one the user retries — and the retry reads the LOCAL
+         * mode, which this send has already consumed.
+         */
+        if (newProjectMode.projectId) {
+          void saveCreationHandoff(newProjectMode.projectId, null).catch((error) => {
+            logger.error('Could not clear the creation handoff', error);
+          });
+        }
       }
 
+      /*
+       * 🔴 THE GAME-READY CELEBRATION BELONGS TO THIS TURN, NOT TO CREATION (§4.4a).
+       *
+       * `creationCompleteRef` fires "🎮 Your game is ready — open Preview to play it." once per project.
+       * It used to be armed at the end of creation, one line above the `reload()` that was the build —
+       * true then, and false in both directions now: creation finishes with an untouched starter (there
+       * is no game to be ready), and the turn that DOES produce the game would never announce it.
+       *
+       * Armed on the SEND, for the same reason the mode is cleared on the send rather than on success: a
+       * build that fails is one the user retries, and the retry is still the turn that first produces a
+       * game. The consumer clears the ref when it fires, so a retry after a failure celebrates once.
+       */
+      if (creationBrief) {
+        creationCompleteRef.current = true;
+      }
+
+      /*
+       * A failed turn's message is dropped before the retry is posted. Captured as a value because the
+       * first-build path below commits its own `setMessages` from this same render closure: reading the
+       * untruncated `messages` there would silently re-add the message this line just removed. The
+       * ordinary `append` path does not have the problem (it reads the SDK's live ref), and that
+       * divergence between two paths that look identical is exactly the kind that survives review.
+       */
+      const priorMessages = error != null ? messages.slice(0, -1) : messages;
+
       if (error != null) {
-        setMessages(messages.slice(0, -1));
+        setMessages(priorMessages);
       }
 
       const modifiedFiles = workbenchStore.getModifiedFiles();
 
       chatStore.setKey('aborted', false);
 
-      if (modifiedFiles !== undefined) {
-        const userUpdateArtifact = filesToArtifacts(modifiedFiles, `${Date.now()}`);
-        const messageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userUpdateArtifact}${finalMessageContent}`;
-
+      /**
+       * Post the turn.
+       *
+       * Ordinarily one `append`. On the FIRST BUILD TURN it is the user's message plus the hidden
+       * creation brief — two messages, so the transcript shows only the user's words while the model
+       * still receives the play contract, the scaffolded class name and the images on disk. `append`
+       * cannot do that (each call is its own request), so that path commits both messages and calls
+       * `reload()` once — the same shape creation itself used before the build moved off it.
+       */
+      const postTurn = async (messageText: string) => {
         const attachmentOptions =
           uploadedFiles.length > 0 ? { experimental_attachments: await filesToAttachments(uploadedFiles) } : undefined;
 
-        append(
-          {
-            role: 'user',
-            content: messageText,
-            parts: createMessageParts(messageText, imageDataList),
-          },
-          attachmentOptions,
+        if (!creationBrief) {
+          append(
+            {
+              role: 'user',
+              content: messageText,
+              parts: createMessageParts(messageText, imageDataList),
+            },
+            attachmentOptions,
+          );
+
+          return;
+        }
+
+        const stamp = new Date().getTime();
+        const composed = composeNewProjectTurn({
+          userText: messageText,
+
+          /*
+           * The same `[Model: …]\n\n[Provider: …]` envelope every user message carries — the server
+           * strips it per message, so a brief without it would arrive with its first line still
+           * attached to the marker sniff's input.
+           */
+          brief: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${creationBrief}`,
+        });
+
+        setMessages([
+          ...priorMessages,
+          ...composed.map((message, index) => ({
+            id: `${stamp}-${index}`,
+            role: 'user' as const,
+            content: message.content,
+            parts: message.annotations ? undefined : createMessageParts(message.content, imageDataList),
+            annotations: message.annotations,
+
+            /*
+             * 🔴 ATTACHMENTS RIDE ON THE MESSAGE, NEVER ON `reload()`.
+             *
+             * `useChat`'s `reload` destructures only `{data, headers, body}` — it drops
+             * `experimental_attachments` on the floor, silently. And the image cannot travel in `parts`
+             * either: `convertToCoreMessages` keeps only TEXT parts of a user message, discarding file
+             * parts. So a reference image attached to "build my game like this" — the archetypal first
+             * build message — reached nothing at all, on the most expensive turn in the product, with
+             * nothing thrown. It goes on the visible user message, which is where the failed-creation
+             * fallback above already puts it and where the SDK actually reads it from.
+             */
+            experimental_attachments: message.annotations ? undefined : attachmentOptions?.experimental_attachments,
+          })),
+        ]);
+
+        reload();
+      };
+
+      if (modifiedFiles !== undefined) {
+        const userUpdateArtifact = filesToArtifacts(modifiedFiles, `${Date.now()}`);
+        await postTurn(
+          `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userUpdateArtifact}${finalMessageContent}`,
         );
 
         workbenchStore.resetAllFileModifications();
       } else {
-        const messageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
-
-        const attachmentOptions =
-          uploadedFiles.length > 0 ? { experimental_attachments: await filesToAttachments(uploadedFiles) } : undefined;
-
-        append(
-          {
-            role: 'user',
-            content: messageText,
-            parts: createMessageParts(messageText, imageDataList),
-          },
-          attachmentOptions,
-        );
+        await postTurn(`[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`);
       }
 
       clearDraftPrompt();
@@ -1906,6 +2274,9 @@ export const ChatImpl = memo(
         onVagueChoice={handleVagueChoice}
         onReseed={handleReseed}
         canReseed={!isLoading && !fakeLoading && messages.length <= 3}
+        onCreationBuild={handleCreationBuild}
+        onCreationEdit={(prompt) => fillChatBox(prompt, { focus: true })}
+        onCreationDismiss={(prompt) => fillChatBox(prompt, { focus: false })}
         model={model}
         setModel={handleModelChange}
         provider={provider}

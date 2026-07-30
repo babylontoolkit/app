@@ -20,15 +20,28 @@
  */
 import { useStore } from '@nanostores/react';
 import { projectId } from '~/lib/persistence/useChatHistory';
+import { newProjectModeStore } from '~/lib/stores/new-project-mode';
 
 export function NewChatIntro() {
   const pid = useStore(projectId);
+  const newProjectMode = useStore(newProjectModeStore);
 
   /*
    * No project means this is the landing page, which has its own intro. This component is only ever the
    * answer to "you are in a game, and this conversation is new".
    */
   if (!pid) {
+    return null;
+  }
+
+  /*
+   * A project that has never been built has `CreationHandoffCard` instead, and the two must not stack.
+   * Reachable: create a project, don't send, then ⋯ "New chat" — the conversation empties (so this
+   * fires) while the mode is still set (§4.4a). Both panels would then explain the same screen in
+   * contradictory terms — this one promises "your files are untouched, the game is already built",
+   * which is exactly what a project in New Project mode is not.
+   */
+  if (newProjectMode?.projectId === pid) {
     return null;
   }
 

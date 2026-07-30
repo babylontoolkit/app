@@ -513,7 +513,8 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      * token. The default is 800 at `CREDIT_MARGIN = 4.0`: generous on KIE, still broken on Anthropic.
      * `grantHeadroom()` is the guard and `billing.spec.ts` asserts `MIN_GRANT_HEADROOM` — never tune one
      * without re-running it (margin, provider, AND grant are one decision in three places):
-     *   - **KIE (the default, ~0.4x rates): 800** ≈ 3.5x a cold creation at margin 4.0 (~231 credits;
+     *   - **KIE (the default, ~0.4x rates): 800** ≈ 2.8x a cold build turn at margin 4.0 once the flat
+     *     `PROJECT_CREATE_CREDITS` is subtracted (~231 credits a build;
      *     live creations at margin 3.34 measured 211–248, ~1.2x more under 4.0). 800 buys the prototype
      *     plus real room to iterate — the whole funnel: hook them on the first prompt, then convert.
      *   - **Anthropic: would need ~1,200+.** A cold creation there is ~576 credits at margin 4.0, so an
@@ -638,15 +639,23 @@ export const COLD_CREATION_USAGE: TokenUsage = {
  * ⚠️ **The grant size and the provider are ONE number split across two files** — the same shape of bug
  * as `packMargin()` (a pack's price and `CREDIT_MARGIN` disagreeing, silently, at ~19% a generation).
  * A grant is denominated in credits, credits are cost-proportional, and cost depends on the provider —
- * so `SIGNUP_GRANT_CREDITS = 800` at margin 4.0 is comfortable on KIE (~231 credits a creation, ~3.5x
+ * so `SIGNUP_GRANT_CREDITS = 800` at margin 4.0 is comfortable on KIE (~231 credits a build turn, ~2.8x
  * headroom) and BROKEN on Anthropic (~576, i.e. ~1.4x: below the 1.5x floor — the first prompt plus an
  * edit exhausts the grant and lands the user negative, with nothing left to iterate).
  *
  * That failure would be silent and would land on the ONE moment the funnel depends on — a new user's
  * first prototype. `billing.spec.ts` asserts this floor so the two numbers cannot drift apart.
+ *
+ * 🔴 **THE CREATION CHARGE COMES OFF THE TOP (2026-07-29, §4.4a).** Since creation and the build became
+ * two steps, a new user pays `projectCreateCredits` before their first build turn has begun — so the
+ * grant that reaches the model is `grant - projectCreateCredits`, and a headroom computed from the raw
+ * grant overstates it by exactly that much. This is the `packMargin()` shape a third time: a number that
+ * is only correct RELATIVE to another number, with nothing relating them. Left unrelated, raising the
+ * creation price would silently eat the free grant's iteration room while every assertion stayed green.
  */
 export function grantHeadroom(config: BillingConfig, model: string, provider: string, context?: unknown): number {
-  return config.signupGrantCredits / creditsForUsage(COLD_CREATION_USAGE, model, provider, config, context);
+  const forBuilding = Math.max(0, config.signupGrantCredits - config.projectCreateCredits);
+  return forBuilding / creditsForUsage(COLD_CREATION_USAGE, model, provider, config, context);
 }
 
 /**

@@ -219,6 +219,7 @@ function rowToProject(row: Record<string, any>): Project {
     gameBackendRef: row.game_backend_ref ?? undefined,
     linkedUnityProjectId: row.linked_unity_project_id ?? undefined,
     sandboxId: row.sandbox_id ?? undefined,
+    creationHandoff: row.creation_handoff ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -246,6 +247,7 @@ function projectToRow(project: Partial<Project>): Record<string, any> {
     gameBackendRef: 'game_backend_ref',
     linkedUnityProjectId: 'linked_unity_project_id',
     sandboxId: 'sandbox_id',
+    creationHandoff: 'creation_handoff',
     autoPush: 'auto_push',
   };
 

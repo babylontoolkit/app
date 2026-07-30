@@ -10,8 +10,31 @@ import { isAllowedShellCommand } from './shell-allowlist';
 import { buildSpawnArgs } from './build-command';
 import { EditBlockError, applyEditBlocks, parseEditBlocks } from './edit-blocks';
 import { isBinaryPath } from '~/lib/binary/binary-files';
+import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 
 const logger = createScopedLogger('ActionRunner');
+
+/**
+ * The path an action names, in the form the sandbox FS accepts.
+ *
+ * 🔴 **NOT `nodePath.relative(workdir, action.filePath)`, which is what this was.** A model emits
+ * `filePath="SPEC.md"` — project-relative, always, that is the artifact format — and `path.relative`
+ * RESOLVES both arguments against the process cwd first. In the browser that cwd is `/`, so
+ * `relative('/project/workspace', 'SPEC.md')` is **`../../SPEC.md`**: a traversal out of the project,
+ * which `resolveInWorkdir` correctly refuses. Measured live on a real generation.
+ *
+ * `type="file"` survived it by accident — `workbenchStore._runAction` joins the workdir itself and
+ * routes the real write through `FilesStore.saveFile`, so the runner's own broken write threw into a
+ * `catch` that only logged. `type="edit"` has no such second path, so **every edit action has always
+ * failed**, on every provider (`/home/project` traverses exactly the same way).
+ *
+ * `toProjectRelativePath` is idempotent and root-aware: it strips a sandbox root when there is one and
+ * leaves an already-relative path alone, so it is correct for both forms and for a map key written
+ * under the OTHER provider's root. One rule, one place — the rule `sandbox-paths.ts` exists to hold.
+ */
+function sandboxRelativePath(filePath: string): string {
+  return toProjectRelativePath(filePath);
+}
 
 export type ActionStatus = 'pending' | 'running' | 'complete' | 'aborted' | 'failed';
 
@@ -283,10 +306,18 @@ export class ActionRunner {
         this.#updateAction(actionId, { status: 'failed', error: error.message });
         logger.error(`[edit]:Could not apply edit\n\n`, error);
 
+        /*
+         * 🔴 The description is the error's OWN first line, not a fixed sentence. It was hardcoded to
+         * "A search/replace block did not match the file" — true for the common case and false for
+         * every other `EditBlockError` (a malformed block, a binary target, an unreadable path). Live,
+         * a PATH failure was presented to the owner as a failed text match, sending the investigation
+         * at the model's search blocks when the model had done nothing wrong. A fixed description on a
+         * variable failure is a false claim with a UI around it.
+         */
         this.onAlert?.({
           type: 'error',
           title: 'Edit could not be applied',
-          description: 'A search/replace block did not match the file. Nothing was changed.',
+          description: `${error.message.split('\n')[0]} Nothing was changed.`,
           content: error.message,
         });
 
@@ -425,7 +456,7 @@ export class ActionRunner {
     }
 
     const sandbox = await this.#sandbox;
-    const relativePath = nodePath.relative(sandbox.workdir, action.filePath);
+    const relativePath = sandboxRelativePath(action.filePath);
     const folder = nodePath.dirname(relativePath);
 
     let existed = false;
@@ -447,7 +478,7 @@ export class ActionRunner {
     }
 
     const sandbox = await this.#sandbox;
-    const relativePath = nodePath.relative(sandbox.workdir, action.filePath);
+    const relativePath = sandboxRelativePath(action.filePath);
 
     let folder = nodePath.dirname(relativePath);
 
@@ -463,15 +494,22 @@ export class ActionRunner {
       }
     }
 
-    try {
-      await sandbox.fs.writeFile(relativePath, action.content);
+    /*
+     * 🔴 A FAILED WRITE IS A FAILED ACTION. This used to `catch (error) { logger.error(...) }` and fall
+     * through, so the action reported `complete` having written nothing — and that is precisely what
+     * hid the path bug above for the whole life of `type="edit"`: the runner's own write threw
+     * `SandboxPathError` on EVERY file action, silently, while `workbenchStore._runAction`'s separate
+     * `saveFile(fullPath)` call quietly did the real write with a correctly-joined path. The feature
+     * looked fine because a second code path was carrying it.
+     *
+     * Rethrowing hands it to `#executeAction`'s handler, which marks the action failed and surfaces it
+     * (`spec/fail-loud.md`): a write the user paid for that did not land must never read as success.
+     */
+    await sandbox.fs.writeFile(relativePath, action.content);
 
-      // Write-through to the file map — see #onFileWritten. Only after a write that SUCCEEDED.
-      this.#onFileWritten?.(action.filePath, action.content);
-      logger.debug(`File written ${relativePath}`);
-    } catch (error) {
-      logger.error('Failed to write file\n\n', error);
-    }
+    // Write-through to the file map — see #onFileWritten. Only after a write that SUCCEEDED.
+    this.#onFileWritten?.(action.filePath, action.content);
+    logger.debug(`File written ${relativePath}`);
   }
 
   /**
@@ -503,16 +541,31 @@ export class ActionRunner {
     }
 
     const sandbox = await this.#sandbox;
-    const relativePath = nodePath.relative(sandbox.workdir, action.filePath);
+    const relativePath = sandboxRelativePath(action.filePath);
 
     let source: string;
 
     try {
       source = await sandbox.fs.readFile(relativePath, 'utf-8');
-    } catch {
-      throw new EditBlockError(
-        `${action.filePath} does not exist, so there is nothing to edit. Create it with \`type="file"\` instead.`,
-      );
+    } catch (error) {
+      /*
+       * 🔴 A BARE `catch` HERE TOLD THE USER — AND THE MODEL — A LIE. Every read failure was reported
+       * as "the file does not exist", so when the path itself was malformed (see `sandboxRelativePath`)
+       * the message named the wrong cause AND prescribed the wrong fix: "create it with `type=file`",
+       * i.e. overwrite a file that is sitting right there. The model would have done it.
+       *
+       * Only a genuine miss earns that message; anything else is reported verbatim, because an error we
+       * cannot classify is exactly the one whose text we must not replace with a guess.
+       */
+      const message = error instanceof Error ? error.message : String(error);
+
+      if (/\bENOENT\b|not found|no such file|does not exist/i.test(message)) {
+        throw new EditBlockError(
+          `${action.filePath} does not exist, so there is nothing to edit. Create it with \`type="file"\` instead.`,
+        );
+      }
+
+      throw new EditBlockError(`Could not read ${action.filePath} to edit it: ${message}`);
     }
 
     // Both of these throw rather than return partial work, so a failed patch never reaches disk.

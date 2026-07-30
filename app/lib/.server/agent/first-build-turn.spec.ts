@@ -55,7 +55,7 @@ vi.mock('~/lib/.server/skills/store', () => ({
 }));
 
 const { carriesCreationBrief, statusKindFor } = await import('./proxy');
-const { preloadSkills, stickyLoadedSkills } = await import('./preload-skills');
+const { carriedSkillNames, preloadSkills, stickyLoadedSkills } = await import('./preload-skills');
 const { createSkillTools } = await import('./tools');
 
 let seq = 0;
@@ -197,18 +197,42 @@ describe('consumer 2 — a first build carries NO sticky skills forward', () => 
 
   /*
    * `stickyLoadedSkills` itself is flag-blind by design — it answers "what has this conversation
-   * loaded". The SUPPRESSION is the ternary in the proxy, so the pair here is: the function really
-   * does return something worth suppressing, and the proxy really does suppress it.
+   * loaded", and the SUPPRESSION was an inline ternary in the proxy, which meant this was the ONE
+   * protection of the ten with no behavioural test: a scan can prove a ternary is present, never that
+   * it decides correctly. `carriedSkillNames` is that ternary, extracted pure (behaviour-preserving),
+   * so both branches are now driven rather than read.
    */
   it('has something to suppress — the carried set is non-empty for a real conversation', () => {
     expect(stickyLoadedSkills([turn('bt-plan')] as never)).toEqual(['bt-plan']);
   });
 
-  it('is wired: the first-build branch yields the EMPTY set, the other branch reads the conversation', () => {
+  it('FIRES on a first build: the carried set is EMPTY however much the conversation loaded', () => {
+    const conversation = [turn('bt-plan'), turn('bt-spec'), turn('bt-design')] as never;
+
+    expect(carriedSkillNames({ isFirstBuildTurn: true, messages: conversation })).toEqual([]);
+  });
+
+  it('does NOT fire on an ordinary turn — the conversation keeps its skills, in first-seen order', () => {
+    const conversation = [turn('bt-plan'), turn('bt-design')] as never;
+
+    expect(carriedSkillNames({ isFirstBuildTurn: false, messages: conversation })).toEqual(['bt-plan', 'bt-design']);
+  });
+
+  /* The second exclusion, unrelated to the flag: `/bt-plan` already inlines that body verbatim. */
+  it('drops the INVOKED skill on an ordinary turn, so its body is never paid for twice', () => {
+    const conversation = [turn('bt-plan'), turn('bt-design')] as never;
+
+    expect(carriedSkillNames({ isFirstBuildTurn: false, messages: conversation, invokedSkillName: 'bt-plan' })).toEqual(
+      ['bt-design'],
+    );
+  });
+
+  it('is wired to the first-build flag and to the invoked skill', () => {
     const carried = statement(proxy, 'carriedNames');
 
-    expect(carried).toContain('isFirstBuildTurn ? []');
-    expect(carried).toContain('stickyLoadedSkills(messages)');
+    expect(carried).toContain('carriedSkillNames(');
+    expect(carried).toMatch(/[{,]\s*isFirstBuildTurn\s*[,}]/);
+    expect(carried).toContain('invokedSkillName: slash?.skillName');
   });
 });
 
@@ -337,13 +361,17 @@ describe('the four rule-tested consumers are still WIRED to the flag', () => {
  * component, so the rule ("premium is locked while the next turn is a first build") is split across a
  * derivation and a render.
  *
- * The derivation is now a pure module (`~/lib/chat/creation-turn`) and is asserted BEHAVIOURALLY
- * below — that is the part with rules in it. The two ends of the wire are asserted by a
- * comment-stripped source scan WITH CONTROLS, and this is stated plainly rather than implied: this
- * repo has no component-render harness (no jsdom/testing-library in the vitest setup), so rendering
- * `PremiumToggle` and reading its lock is not available here. The scan is therefore the honest
- * available assertion, not the lazy one — and it is scoped to the two specific expressions that
- * connect the store to the toggle, each proven to have been found.
+ * The derivation is now a pure module (`~/lib/chat/creation-turn`) and is asserted BEHAVIOURALLY below —
+ * that is the part with rules in it. The RENDERED lock lives in `PremiumToggle.spec.tsx`, which mounts
+ * the real component and reads the real lock; what remains here is the WIRE between them, asserted by a
+ * comment-stripped source scan with controls and scoped to the specific expressions that connect the
+ * store to the toggle.
+ *
+ * ⚠️ This comment previously justified scan-only coverage of `PremiumToggle` by asserting that "this repo
+ * has no component-render harness (no jsdom/testing-library in the vitest setup)". That was false —
+ * `@testing-library/react` and `jsdom` are dependencies and sibling specs render components — and it is
+ * recorded here rather than quietly deleted because it is the `shell-strip.ts` failure again: a false
+ * sentence in a doc comment is how a weak assertion survives review, since a comment cannot fail.
  */
 describe('consumer 6 — the premium pill locks on a first build', () => {
   const chatRaw = readFileSync(join(REPO, 'app/components/chat/Chat.client.tsx'), 'utf-8');
@@ -386,12 +414,79 @@ describe('consumer 6 — the premium pill locks on a first build', () => {
     expect(isCreationTurn({ activeProjectId: 'p1', messages: [] })).toBe(false);
   });
 
-  it('is wired: the chat writes the derived value into the store', () => {
-    expect(chat).toContain('creationTurnStore.set(isCreationTurn({ activeProjectId, messages }))');
+  /*
+   * NEW PROJECT MODE — the window the marker alone cannot see (§4.4a, T13).
+   *
+   * Under project-first creation the brief is appended AT SEND, so while the user edits the carried
+   * prompt there is no message carrying `CREATION_BRIEF_MARKER` yet. That window is the whole of New
+   * Project mode, and it is precisely when the next send is the first build: keyed on the marker alone
+   * the pill sat unlocked for exactly as long as the user was looking at it, then re-locked on send.
+   */
+  it('FIRES in New Project mode, before anything carries the brief', () => {
+    expect(isCreationTurn({ activeProjectId: 'p1', messages: [], newProjectMode: { projectId: 'p1' } })).toBe(true);
+  });
+
+  it('FIRES in New Project mode even with the carried prompt typed but unsent', () => {
+    // The transcript at this moment is creation's setup artifact alone — no user message at all.
+    const messages = [{ role: 'assistant' as const, content: '<boltArtifact id="project-setup">' }];
+
+    expect(isCreationTurn({ activeProjectId: 'p1', messages, newProjectMode: { projectId: 'p1' } })).toBe(true);
+  });
+
+  /*
+   * And UNLOCKS after. The mode is cleared on send (`exitNewProjectMode`) while the sent message carries
+   * the brief, so the marker takes over with no gap; once the user's first EDIT lands, both are false.
+   */
+  it('does NOT fire once the mode is cleared and the user has moved on to an edit', () => {
+    expect(isCreationTurn({ activeProjectId: 'p1', messages: [user(BRIEF), user(EDIT)], newProjectMode: null })).toBe(
+      false,
+    );
+  });
+
+  /*
+   * Scoped to the OPEN project. Module state survives an SPA navigate, so a mode left pointing at a
+   * previous project must not lock the premium pill on a project the user has already built.
+   */
+  it('does NOT fire for a mode belonging to a DIFFERENT project', () => {
+    expect(isCreationTurn({ activeProjectId: 'p2', messages: [user(EDIT)], newProjectMode: { projectId: 'p1' } })).toBe(
+      false,
+    );
+  });
+
+  /*
+   * The unregistered-project fallback (the WebContainer-only path, where the server could not be
+   * reached) has no id to scope by, and belongs to whatever is open. Asserted with the setup artifact
+   * present so the empty-conversation branch above cannot be what satisfies it — otherwise this test
+   * passes with the mode ignored entirely.
+   */
+  it('FIRES for an unregistered project whose mode carries no id', () => {
+    const messages = [{ role: 'assistant' as const, content: '<boltArtifact id="project-setup">' }];
+
+    expect(isCreationTurn({ messages, newProjectMode: { projectId: '' } })).toBe(true);
+    expect(isCreationTurn({ messages })).toBe(false);
+  });
+
+  it('is wired: the chat writes the derived value into the store, mode included', () => {
+    expect(chat).toContain(
+      'creationTurnStore.set(isCreationTurn({ activeProjectId, messages, newProjectMode: openNewProjectMode }))',
+    );
+    expect(chat).toContain('const openNewProjectMode = useStore(newProjectModeStore)');
   });
 
   it('is wired: the toggle reads the store and lets it BLOCK eligibility', () => {
     expect(toggle).toContain('useStore(creationTurnStore)');
     expect(toggle).toMatch(/const eligible = canUsePremium\(session\) && !creationTurn/);
+  });
+
+  /*
+   * The store's SECOND consumer, and under project-first creation it is more true than it ever was: the
+   * project is cloned, installed and RUNNING before a single token is spent, so a failed first build is
+   * unambiguously a failed build of an existing project. The raw provider message ("Server Error", a
+   * 402, a dead render) is accurate about the generation and completely wrong about the project, and
+   * "my game was never created" is the reasonable reading when nothing says otherwise.
+   */
+  it('is wired: a failed first build tells the user the project survived', () => {
+    expect(chat).toContain('creationTurnStore.get()');
+    expect(chat).toMatch(/Your project was still created from the starter template/);
   });
 });

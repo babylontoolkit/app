@@ -29,6 +29,40 @@ import type { ActionStatus } from './action-runner';
 /** Terminal = not going to change again. NOT the same as "succeeded" — see the module note. */
 const TERMINAL: ActionStatus[] = ['complete', 'failed', 'aborted'];
 
+/**
+ * 🔴 A DEV SERVER IS `running` FOREVER, AND THAT IS SUCCESS — NOT WORK IN FLIGHT.
+ *
+ * `start` actions launch a long-lived process: `#runStartAction` awaits `npm run dev`, which does not
+ * exit while the server lives, so the runner leaves the action `running` and never marks it terminal.
+ * Artifacts are never removed from the workbench either, so the setup artifact's dev server sits in the
+ * store for the whole session.
+ *
+ * That made "is this turn finished?" unanswerable the moment creation stopped firing the build (§4.4a):
+ * the first build turn's `onFinish` reads a tab that ALSO holds the creation artifact, so the wait could
+ * never settle — the game-ready message would never appear, and 120s later the honest "still writing N
+ * file(s)" variant would fire instead, counting the dev server as an unwritten file. A message designed
+ * to avoid claiming a build was done would have become the only message, permanently, and wrong.
+ *
+ * Excluding them is not a loosening: a `start` action reaching a terminal state means the server DIED.
+ */
+const LONG_LIVED_TYPES = new Set(['start']);
+
+/** One action as the waiter needs to see it — its kind decides whether its status means anything here. */
+export interface SettleableAction {
+  type: string;
+  status: ActionStatus;
+}
+
+/**
+ * The statuses that actually gate "finished", with the long-lived ones dropped.
+ *
+ * Exported and pure because the caller reads the workbench, and a filter written inline there is a rule
+ * nothing can test — which is exactly how the dev server came to be counted as an unfinished file write.
+ */
+export function settleableStatuses(actions: SettleableAction[]): ActionStatus[] {
+  return actions.filter((action) => !LONG_LIVED_TYPES.has(action.type)).map((action) => action.status);
+}
+
 export function isActionSettled(status: ActionStatus): boolean {
   return TERMINAL.includes(status);
 }

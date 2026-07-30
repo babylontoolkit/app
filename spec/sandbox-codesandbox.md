@@ -121,8 +121,15 @@ CodeSandbox resumes with the filesystem intact and is a plain HTTPS API callable
 >   4.6% headroom, swap behind it), build 9.19s, dist 25M, publish end-to-end 32s. A per-build
 >   `updateTier` bump is not needed today and IS worth pricing; the eroding variable is the user's
 >   own asset count.
-> - **Money:** the flat creation price charged exactly 500 (+media) on all three creations; a warm
->   creation ran 79.7s vs 205/247s cold; the cache warmer ran live (`6 sent, 6 reads, 0 writes`).
+> - **Money (as measured on 2026-07-28 — ⚠️ the 500 is a HISTORICAL reading, not a current price):**
+>   the then-live flat creation price (`CREATION_FLAT_CREDITS`, applied to the creation *generation*)
+>   charged exactly 500 (+media) on all three creations; a warm creation ran 79.7s vs 205/247s cold; the
+>   cache warmer ran live (`6 sent, 6 reads, 0 writes`). **That pricing model was RETIRED the next day**
+>   (2026-07-29, SPEC §4.4a): `CREATION_FLAT_CREDITS` is now refused if set, creation carries a flat
+>   `PROJECT_CREATE_CREDITS` (default **150**) at project registration for the clone/install/serve work,
+>   and the build turn bills cost-derived like any other turn. Do not read 500 as what a creation costs
+>   today, and do not compare a post-cutover creation charge against it — the two numbers price different
+>   work. The timing and cache-warmer figures are unaffected.
 > - 🔴 **Alias propagation lag (found by T17b's live drive): a fork 19s after promoting a freshly
 >   built alias got the PREVIOUS bytes.** Self-healed within minutes; a probe fork then confirmed the
 >   alias serves the new code. **Never trust the first fork right after a promote** — validate with a

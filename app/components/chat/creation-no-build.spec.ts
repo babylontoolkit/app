@@ -145,9 +145,37 @@ describe('acceptance 3 — one message, and it is not the user’s', () => {
     expect(body.match(/setMessages\(/g) ?? []).toHaveLength(1);
   });
 
+  /*
+   * 🔴 THE RULE, NOT THE PUNCTUATION — and this is the SECOND time a scan in this file has been pinned
+   * to the shape of an expression rather than to the rule it was protecting (the first was `brief:
+   * creationBrief`, see the comment further down).
+   *
+   * This assertion used to require the literal ``id: `2-${new Date().getTime()}` `` INSIDE the
+   * `setMessages` call. The id is now hoisted to a `setupMessageId` const because the creation
+   * checkpoint needs it too (T-fix 2026-07-29) — a change that keeps every word of the rule true and
+   * broke the test anyway. What matters is: exactly one message, role `assistant`, content
+   * `assistantMessage`, and its id is the `2-` artifact id. Where the id is minted is not the rule.
+   *
+   * So the id is read back through whatever binding `setMessages` was handed: a literal is checked
+   * directly, an identifier is resolved to its declaration. That survives a rename and a re-hoist, and
+   * still fails if the id stops being a `2-` one.
+   */
   it('commits a single ASSISTANT message, the `2-` setup artifact', () => {
-    expect(body).toMatch(/setMessages\(\[\{\s*id:\s*`2-\$\{new Date\(\)\.getTime\(\)\}`,\s*role:\s*'assistant',/);
-    expect(body).toContain('content: assistantMessage');
+    const call = body.match(/setMessages\(\[\{([^}]*)\}\]\)/);
+    expect(call).not.toBeNull();
+
+    const fields = call![1];
+
+    expect(fields).toMatch(/role:\s*'assistant'/);
+    expect(fields).toMatch(/content:\s*assistantMessage/);
+
+    const id = fields.match(/id:\s*([^,]+),/)?.[1].trim() ?? '';
+    expect(id).not.toBe('');
+
+    /* Either minted inline, or minted into a const that is handed over here. */
+    const mint = id.startsWith('`') ? id : (body.match(new RegExp(`const ${id}\\s*=\\s*(\`[^\`]*\`)`))?.[1] ?? '');
+
+    expect(mint).toMatch(/^`2-/);
   });
 
   /*
@@ -174,7 +202,14 @@ describe('acceptance 3 — one message, and it is not the user’s', () => {
    */
   it('carries the creation brief into New Project mode rather than committing it', () => {
     expect(body).toContain('enterNewProjectMode(');
-    expect(body).toMatch(/brief:\s*creationBrief/);
+
+    /*
+     * The brief must REACH the mode, in whatever composition the wizard path needs — it is
+     * `creationBrief` plus, on the guided-tour path, the compiled selections that would otherwise reach
+     * nobody (§4.7). Pinning the exact expression `brief: creationBrief` pinned a punctuation choice
+     * rather than the rule, and failed the moment a second machine-written fact was legitimately added.
+     */
+    expect(body).toMatch(/brief:\s*[^,\n]*creationBrief/);
 
     // The only `setMessages` here is the artifact one, and the brief is not in it (asserted above).
     expect(body).not.toMatch(/setMessages\([^)]*creationBrief/);
@@ -273,7 +308,7 @@ describe('acceptances 2 + 4 — the surviving artifact is what installs, runs, a
 
   it('the setup artifact hands `npm install` and `npm run dev` to the action runner', async () => {
     const { createProjectFromRegistry } = await import('~/lib/registry/create-project');
-    const created = await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer', prompt: 'make me a racer' });
+    const created = await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer' });
 
     const { actions } = runParser(created.assistantMessage);
 

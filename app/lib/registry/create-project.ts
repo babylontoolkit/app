@@ -141,13 +141,13 @@ function listAvailableImages(files: TemplateFile[]): string[] {
 /**
  * Create a project from a registry entry.
  *
- * `prompt` is the user's own words (Path A) or the wizard's compiled brief (Path C); on the card path
- * (Path B) there is none, and the model is told to build the landing page and stop.
+ * ⚠️ It takes NO prompt. Creation contacts no model, and the brief it returns deliberately carries no
+ * copy of the user's request — the user edits and sends that themselves (§4.4a, `new-project-mode.ts`).
+ * A `prompt` option here would be a field nothing reads, which is how a deleted system comes back.
  */
 export async function createProjectFromRegistry(options: {
   entry: GameRegistryEntry;
   title: string;
-  prompt?: string;
 
   /**
    * The platform project this creation belongs to, when the server registration succeeded.
@@ -158,7 +158,7 @@ export async function createProjectFromRegistry(options: {
    */
   projectId?: string;
 }): Promise<CreatedProject> {
-  const { entry, title, prompt, projectId } = options;
+  const { entry, title, projectId } = options;
 
   /*
    * The creation splash (`CreationSplash`) narrates these phases — set as each await is reached, so
@@ -327,7 +327,6 @@ export async function createProjectFromRegistry(options: {
       entry,
       title,
       className,
-      prompt,
       images: listAvailableImages(projectFiles),
       scaffolded: scaffolded !== null,
     }),
@@ -362,24 +361,40 @@ export async function createProjectFromRegistry(options: {
 }
 
 /**
- * The hidden first user message: what the model must know that it cannot see from the files alone.
+ * The hidden brief: what the model must know that it cannot see from the files alone.
  *
  * Kept short on purpose. The Hard Constraints (file zones, play contract, bundle integrity, the
  * landing-page rewrite rule) already live in the CACHED system prompt (§4.2) — repeating them here
  * would pay full input rates on every project creation to say what the model has already been told.
- * This message carries only the per-project FACTS: the class, the scene, the images, the request.
+ * This message carries only the per-project FACTS: the class, the scene, the images.
+ *
+ * 🔴 **IT DOES NOT CARRY THE USER'S REQUEST, AND MUST NOT.** Creation no longer sends anything to a
+ * model: this brief is stored with New Project mode and appended, hidden, to the first message the user
+ * actually sends — and the user is free to edit that message first, which is the entire point of
+ * carrying the prompt back to the textbox. A copy of the prompt as it stood at creation would therefore
+ * be a STALE second request sitting underneath the real one, and the model would be asked to build two
+ * different games in one turn with no way to know which is current.
+ *
+ * 🔴 **WHETHER TO DO THE LANDING/CHROME PASS IS THE MODEL'S CALL, MADE FROM THE REQUEST — never a
+ * keyword table here.** The owner asked for the system to "detect by the context of the prompt", and in
+ * this codebase that means an INSTRUCTION with a stated default, resolved by the model. The alternative
+ * has been tried and cost real money twice: the skills router was a hardcoded substring map where `'ui'`
+ * matched b-**ui**-ld, so "why is my build failing" inlined a 24KB design skill, while three synced
+ * skills were unroutable at all — *"what we have now I'd be better off making a prompt library… which
+ * defeats the whole point of skills"*. `effort-policy.ts` states the same rule for spend: decide by turn
+ * KIND, never by reading the prompt, because a prose classifier puts the model in charge of the bill.
+ * A `spec` test source-scans this path for exactly that regression.
  */
 function buildCreationBrief(options: {
   entry: GameRegistryEntry;
   title: string;
   className: string;
-  prompt?: string;
   images: string[];
 
   /** Did §4.4b's copy-rename-register actually run? When false the model must author the mode. */
   scaffolded: boolean;
 }): string {
-  const { entry, title, className, prompt, images, scaffolded } = options;
+  const { entry, title, className, images, scaffolded } = options;
 
   const play = entry.scene_url
     ? `navigate('/play', { gameMode: '${className}', sceneUrl: '${entry.scene_url}' })`
@@ -419,12 +434,14 @@ ${images.map((path) => `- ${path}`).join('\n')}
 - For art that must sit OVER something else — the logo/wordmark on the hero, an emblem, a sprite, a cut-out character — pass \`transparent: true\`. The art is rendered and then automatically cut out into a real RGBA PNG (a couple of extra credits). **Never write "transparent background", "no background" or "PNG with alpha" into the PROMPT itself**: the image generator has no alpha channel, so it paints a fake grey-and-white checkerboard into the picture instead, and that checkerboard is then baked into the shipped art forever. \`transparent: true\` is the ONLY thing that produces real transparency.
 
 **Your task now**
-1. Design the complete frontend shell for *${title}* by following the **bt-landing skill** (pre-loaded in your Skills) EXACTLY, using the facts above (GameMode class, play contract, images) as its Step-0 inputs: the landing page (\`src/pages/Home.tsx\` + \`Home.css\`, rewritten completely, full-page-width per the Layout law) AND the game chrome in \`src/custom/**\` (preloader, splash, overlay — redesigned to the same theme, never derived from the default splash, lightweight, wiring preserved). If the bt-landing skill is absent from your Skills, follow the same rules from the system prompt's "Layout law" and "Chrome rewrites" sections instead.
-2. ${
-    prompt
-      ? `Then build what the user asked for:\n\n> ${prompt}`
-      : `That is all for now — the user has not asked for anything else yet.`
-  }
+This project is a freshly cloned, stock starter template. It is installed and running, and **nothing in it has been designed or built yet** — the landing page, the splash, the preloader and the overlay are all still the untouched defaults.
+
+The user's own message above is the request. It is authoritative: build what it asks for, and where it disagrees with anything inferred at creation, it wins. Read it and decide which of these two it is:
+
+- **A game, an experience, or anything that implies a whole project** — this is the common case, and it is the DEFAULT whenever the request is not plainly narrow. Build what was asked for AND design the complete frontend shell for *${title}* by following the **bt-landing skill** (pre-loaded in your Skills) EXACTLY, using the facts above (GameMode class, play contract, images) as its Step-0 inputs: the landing page (\`src/pages/Home.tsx\` + \`Home.css\`, rewritten completely, full-page-width per the Layout law) AND the game chrome in \`src/custom/**\` (preloader, splash, overlay — redesigned to the same theme, never derived from the default splash, lightweight, wiring preserved). If the bt-landing skill is absent from your Skills, follow the same rules from the system prompt's "Layout law" and "Chrome rewrites" sections instead.
+- **A single narrow change** — something like *"just add a rotating cube"* or *"show me the FPS counter"*. Do only that, and leave the landing page and the chrome alone. A redesign nobody asked for is destructive, not generous.
+
+If the request above is empty or says nothing about what to build, treat it as the first case and build a complete, playable starting point for this genre.
 
 When you are done, suggest two or three concrete next steps (a new game mode, a menu, a mechanic).`;
 }
