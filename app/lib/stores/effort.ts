@@ -15,7 +15,7 @@
  *
  * ## It is a SESSION preference and it is NOT persisted — that is the point
  *
- * Unlike `premiumModelStore` (localStorage), this resets to `medium` on every reload. A raised floor
+ * Unlike `modelTierStore` (localStorage), this resets to `medium` on every reload. A raised floor
  * costs real money on every subsequent turn while producing no visible signal that it is on, so the
  * failure mode of persisting it is the worst kind: a user raises it once for one hard problem, forgets,
  * and quietly pays more for months. Making it session-scoped means the expensive state can never outlive

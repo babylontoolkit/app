@@ -48,7 +48,7 @@ remembers; it has to be a rule with a guard behind it, which is what this spec i
 ## Scope
 
 Primary: **every request that reaches KIE** — LLM generations (`/api/agent`, incl. repairs, forced
-continuations, the unproductive rescue, premium tier), the enhancer (`/api/enhancer`), and media
+continuations, the unproductive rescue, paid model tiers), the enhancer (`/api/enhancer`), and media
 renders (§4.16, both stages of a cut-out). Binding equally: every other ledger debit — the full
 `LedgerReason` set is `grant | purchase | generation | media | search | license | project_create |
 refund | promo | adjustment` (`billing/ledger.ts`), and the debiting members (`generation`, `media`,
@@ -84,7 +84,7 @@ regression hides *inside* the machinery built to catch the last one.
 
 1. **Four terminal states** (above). New debit path → say which states it can reach and how, in its
    doc comment, before it ships.
-2. **A degraded capability reports OFF, never ON** (`premiumSessionHint` precedent, §4.2a). Honest
+2. **A degraded capability reports OFF, never ON** (`modelTiersSessionHint` precedent, née `premiumSessionHint`, §4.2a/§4.6.1a — it reports per-rung `available` AND `serveable`, so "you cannot afford it" and "the operator has not configured it" stay distinguishable). Honest
    downgrade beats an advertised feature that hard-fails on use.
 3. **A best-effort step that cannot fail the request must still REPORT** (`remixBlockedReason`
    precedent, §4.5.4b). Keeping the request successful is right; keeping it *quiet* is the defect.
@@ -159,7 +159,7 @@ exactly 11 call sites, and every one is below. The KIE-reaching set is enumerate
 
 | Path | Gate | Settles | Failure handling |
 |---|---|---|---|
-| `agent/proxy.ts` (generation, repair, forced continuation, unproductive rescue, premium) | `checkCreditGate` once | `settleGeneration` in `finally` | zero-text → hard failure → auto-refund; abort → CHARGED AS CONSUMED |
+| `agent/proxy.ts` (generation, repair, forced continuation, unproductive rescue, paid model tiers) | `checkCreditGate` once | `settleGeneration` in `finally` | zero-text → hard failure → auto-refund; abort → CHARGED AS CONSUMED |
 | `routes/api.enhancer.ts` | `checkCreditGate` | `settleGeneration` on stream end | **FIXED in Stage A** — see defect 2 |
 | `media/kie-client.ts` `create` | debit precedes it | n/a (fixed price) | create throws → refund + anchor `failed` + 502 |
 | `media/kie-client.ts` `query` | n/a | n/a | flaky poll ≠ failure (stays pending); a reported failure refunds once |
@@ -209,7 +209,7 @@ category Stage A removed from the money paths.
 
 **Two things Stage A deliberately did NOT change**, both flagged for the owner rather than fixed:
 `web_search`'s after-the-fact debit stays sanctioned exactly as the Scope section describes; and
-`providerRates`' premium-injection swallow stays, because its alternative is taking settlement down.
+`providerRates`' per-rung injection swallow stays, because its alternative is taking settlement down. Since 2026-07-31 it swallows PER RUNG (§4.6.1a), so one broken selector cannot drop another rung's row.
 
 ## The four stages — ALL COMPLETE (A+B+C 2026-07-25, D 2026-07-26)
 

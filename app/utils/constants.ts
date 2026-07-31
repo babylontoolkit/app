@@ -39,13 +39,17 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * set. `LLM_MODEL` overrides it at runtime (validated against the rate tables — see
  * `agent/config.ts`); this is what a bare `docker run` with an empty environment gets.
  *
- * ## 🔴 `claude-sonnet-5` was ATTEMPTED on 2026-07-30 and REJECTED — it is 77% broken on KIE
+ * ## `claude-sonnet-5` — the STANDARD rung since 2026-07-31 (owner decision)
  *
- * The money case was excellent and is worth keeping, because the day KIE fixes their side this is a
- * ONE-VARIABLE change. Opus 5 was costing 450–500 credits on edits that felt small, and the platform's
- * own generation log agreed: across 19 real Opus 5 generations the median was **435 credits**, p90
- * **913**, max **1,095**. Re-pricing those exact token vectors on Sonnet 5's KIE rates ($0.85/$4.275
- * against Opus 5's $2/$10):
+ * The platform ships a three-class ladder (SPEC §4.6.1a): **Standard** (this constant) · **Premium**
+ * (`PREMIUM_MODEL`, Opus 5) · **SuperMax** (`SUPERMAX_MODEL`, Fable 5). This is the rung every
+ * generation runs on unless a user has deliberately bought their way up, so it is the one that decides
+ * whether ordinary editing is affordable.
+ *
+ * The money case is measured on the platform's own generation log, not a vendor sheet. Opus 5 was
+ * costing 450–500 credits on edits that felt small, and across 19 real Opus 5 generations the median
+ * was **435 credits**, p90 **913**, max **1,095**. Re-pricing those exact token vectors at Sonnet 5's
+ * KIE rates ($0.85/$4.275 against Opus 5's $2/$10):
  *
  * | model      | median | p90 | max   | 62 real generations |
  * |------------|--------|-----|-------|---------------------|
@@ -53,11 +57,14 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * | sonnet-5   | 185    | 245 |   322 |  7,489 cr / $18.65  |
  *
  * **2.73x cheaper for the same work**, with the tail compressing hardest (p90 falls 3.7x, because the
- * spikes are cache WRITES billed at 2x and Sonnet scales every one of them down).
+ * spikes are cache WRITES billed at 2x and Sonnet scales every one of them down). Anyone who wants the
+ * old behaviour now buys it a rung up, deliberately, instead of every user paying for it by default.
  *
- * 🔴 **And it does not matter, because KIE cannot serve it.** Measured against the live API with an
- * INTERLEAVED control — same key, same request shape, same minute, alternating models so a provider
- * blip cannot masquerade as a model fault:
+ * ## 🔴 The vendor risk this carries, and the one-variable escape hatch
+ *
+ * Sonnet 5 was tried once before — 2026-07-30 — and reverted the same day, because KIE could not serve
+ * it. Measured against the live API with an INTERLEAVED control (same key, same request shape, same
+ * minute, alternating models, so a provider blip cannot masquerade as a model fault):
  *
  * | model      | ok     | HTTP 500 | rate |
  * |------------|--------|----------|------|
@@ -66,26 +73,43 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  *
  * `{"type":"api_error","message":"Network error, please try again later."}`, in ~1.9s — too fast to be
  * a timeout, and reproduced at `max_tokens: 1` and at a realistic 300-token request alike. Our
- * `MAX_PROVIDER_RETRY_ATTEMPTS = 3` does not rescue it: 0.77³ still leaves ~46% of generations dead.
- * Opus 5's single failure is the ordinary KIE flakiness that retry policy exists for.
+ * `MAX_PROVIDER_RETRY_ATTEMPTS = 3` does not rescue that: 0.77³ still leaves ~46% of generations dead.
+ * Opus 5's single failure is the ordinary KIE flakiness the retry policy exists for.
  *
- * A cheaper model that fails three generations in four is not cheaper. **Re-run
- * `PROBE_MODEL=claude-sonnet-5 node scripts/cache-probe.mjs` before believing this is still true** —
- * it is a vendor fault, so it can be fixed without anyone telling us, and the switch is then just
- * `LLM_MODEL=claude-sonnet-5` (no rebuild — §4.2a).
+ * That is a VENDOR fault, which means it can clear — or come back — without anyone telling us. So:
+ * **re-probe before trusting either verdict**, and if the 500s return, the revert is
+ * `LLM_MODEL=claude-opus-5` — config only, no rebuild and no deploy of this file (§4.2a). That escape
+ * hatch is the only reason this constant is allowed to carry vendor risk at all; do not remove
+ * `LLM_MODEL`'s precedence over this value.
  *
- * ✅ Everything else needed for that switch is already DONE and shipped: Sonnet 5 is priced in the
- * baked Marketplace list, and it is now LISTED in `KIE_MODELS`. The listing is not cosmetic — it was
- * priced but unlisted, which is survivable for an operator override (`kieEnvModel` synthesises a
- * `ModelInfo` from `LLM_MODEL`) and NOT survivable as a bare default: with no env var there is nothing
- * to synthesise, so the enhancer path would fall through to `modelsList[0]` while settlement charged
- * Sonnet's rates — the exact mis-bill this file's closing warning names.
+ * 🔴 **RE-PROBED 2026-07-31, THE SAME DAY: IT GOT WORSE, AND THE ESCAPE HATCH IS CURRENTLY REQUIRED.**
+ * 136 live requests, interleaved and order-rotated, at `max_tokens` 1 and 300, `thinkingFlag` on and
+ * off — `node scripts/kie-model-health.mjs` reproduces it. **KIE served 2 of the 10 Claude models it
+ * PRICES**: `claude-opus-5` (22/22) and `claude-opus-4-8` (12/12), everything else at 0 successes —
+ * sonnet-5, sonnet-4-6 (2/18 in the first pass), sonnet-4-5, opus-4-7, opus-4-6, opus-4-5, haiku-4-5
+ * and fable-5, all `HTTP 500 "Network error"` in ~1.5s.
  *
- * ⚠️ Its cache accounting was checked and is HONEST (a 5,404-token write reported on a cold request, a
- * clean 5,420-token READ on a warm one), so if the 500s clear it qualifies on the criterion that
- * disqualified 4-7 and fable-5. The blocker is availability, nothing else.
+ * **Read it as a KIE catalogue outage, not a fact about Sonnet.** The 07-30 measurement looked like a
+ * Sonnet-5 fault because only Sonnet 5 and Opus 5 were in the sample; probing the whole catalogue
+ * shows the Opus 4-8/5 line standing and everything else down, including `claude-fable-5`, which had
+ * been serving as the premium model days earlier, and `claude-opus-4-7`, a former platform default.
+ * **A one-model probe cannot tell a model fault from an outage — probe the catalogue.**
  *
- * ## `claude-opus-5` since 2026-07-27, at Opus 4.8's exact KIE price ($2/$10)
+ * Consequences while it lasts: a deploy MUST set `LLM_MODEL=claude-opus-5` or every generation fails,
+ * and two of the three §4.6.1a rungs (Standard and SuperMax) cannot run. The value of this constant is
+ * a decision about where the platform sits when the provider is healthy; it is not a claim that the
+ * provider is healthy today. Owner decision 2026-07-31: keep it, wait for KIE. Re-probe before
+ * removing this note.
+ *
+ * ⚠️ Sonnet 5 clears the bar that disqualified 4-7 and fable-5 below: its cache accounting is HONEST
+ * (a 5,404-token write reported on a cold request, a clean 5,420-token READ on a warm one). It is also
+ * LISTED in `KIE_MODELS`, which is not cosmetic — priced-but-unlisted is survivable for an operator
+ * override (`kieEnvModel` synthesises a `ModelInfo` from `LLM_MODEL`) and NOT survivable as a bare
+ * default: with no env var there is nothing to synthesise, so the enhancer path would fall through to
+ * `modelsList[0]` while settlement charged Sonnet's rates — the mis-bill this file's closing warning
+ * names.
+ *
+ * ## `claude-opus-5` — the PREMIUM rung; the default from 2026-07-27 to 07-31, at KIE's $2/$10
  *
  * The swap was gated on re-verifying the TWO properties that made 4-8 the default, both probed live
  * against KIE on 2026-07-27:
@@ -139,7 +163,7 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * and LISTING it in `KIE_MODELS` (an unlisted default silently runs `modelsList[0]` on the enhancer
  * path while settlement charges the configured model's rates).
  */
-export const DEFAULT_MODEL = 'claude-opus-5';
+export const DEFAULT_MODEL = 'claude-sonnet-5';
 export const PROMPT_COOKIE_KEY = 'cachedPrompt';
 export const TOOL_EXECUTION_APPROVAL = {
   APPROVE: 'Yes, approved.',

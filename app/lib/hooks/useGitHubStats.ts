@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'react-toastify';
-import type { GitHubStats, GitHubConnection } from '~/types/GitHub';
+import type { GitHubStats, GitHubConnection, GitHubUserResponse } from '~/types/GitHub';
 import { gitHubApiService } from '~/lib/services/githubApiService';
 
 export interface UseGitHubStatsState {
@@ -15,6 +15,22 @@ export interface UseGitHubStatsOptions {
   autoFetch?: boolean;
   refreshInterval?: number; // in milliseconds
   cacheTimeout?: number; // in milliseconds
+
+  /**
+   * Fetch the repository LIST only, skipping per-repository detail.
+   *
+   * 🔴 Required by any caller that just needs to render a picker. `generateComprehensiveStats` issues
+   * roughly FIVE GitHub calls per repository (repo, branches, contributors, issues, pulls) on top of
+   * the paginated list. MEASURED live 2026-07-31 on this account: 563 repositories → ~2,800 requests,
+   * 848 of them still in flight when the "Loading repositories…" spinner was given up on, and enough
+   * to exhaust the 5,000/hour limit on a cold cache. The repo picker in `GitCloneButton` therefore
+   * never finished loading — "Import from GitHub just sits there" — while the Settings → GitHub tab
+   * (which wants the real stats and shows them incrementally) was fine.
+   *
+   * The list alone is 6 requests for the same 563 repositories, and the picker displays nothing that
+   * the detail pass adds.
+   */
+  reposOnly?: boolean;
 }
 
 export interface UseGitHubStatsReturn extends UseGitHubStatsState {
@@ -25,6 +41,39 @@ export interface UseGitHubStatsReturn extends UseGitHubStatsState {
 }
 
 const STATS_CACHE_KEY = 'github_stats_cache';
+
+/**
+ * The repository LIST, with the aggregate fields filled from the user object rather than from a
+ * per-repository crawl (see {@link UseGitHubStatsOptions.reposOnly}).
+ *
+ * The counts that genuinely need the crawl (stars, forks, branches, languages) are reported as 0
+ * rather than guessed — a picker shows none of them, and a wrong number is worse than an absent one.
+ */
+async function fetchRepositoryListOnly(
+  apiService: { getAllUserRepositories: () => Promise<any[]> },
+  user: GitHubUserResponse,
+): Promise<GitHubStats> {
+  const repos = await apiService.getAllUserRepositories();
+
+  return {
+    repos,
+    organizations: [],
+    recentActivity: [],
+    languages: {},
+    totalGists: user.public_gists || 0,
+    publicRepos: user.public_repos || 0,
+    privateRepos: repos.filter((repo) => repo.private).length,
+    stars: 0,
+    forks: 0,
+    totalStars: 0,
+    totalForks: 0,
+    followers: user.followers || 0,
+    publicGists: user.public_gists || 0,
+    privateGists: 0,
+    lastUpdated: new Date().toISOString(),
+  } as GitHubStats;
+}
+
 const DEFAULT_CACHE_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 
 export function useGitHubStats(
@@ -32,7 +81,7 @@ export function useGitHubStats(
   options: UseGitHubStatsOptions = {},
   isServerSide: boolean = false,
 ): UseGitHubStatsReturn {
-  const { autoFetch = false, refreshInterval, cacheTimeout = DEFAULT_CACHE_TIMEOUT } = options;
+  const { autoFetch = false, refreshInterval, cacheTimeout = DEFAULT_CACHE_TIMEOUT, reposOnly = false } = options;
 
   const [state, setState] = useState<UseGitHubStatsState>({
     stats: null,
@@ -188,7 +237,9 @@ export function useGitHubStats(
           throw new Error('GitHub API service not available');
         }
 
-        stats = await apiService.generateComprehensiveStats(connection.user);
+        stats = reposOnly
+          ? await fetchRepositoryListOnly(apiService, connection.user)
+          : await apiService.generateComprehensiveStats(connection.user);
       }
 
       const now = new Date();
@@ -205,13 +256,25 @@ export function useGitHubStats(
       // Cache the stats
       saveCachedStats(stats, connection.user.login);
 
-      // Update the connection object with stats if needed
+      /*
+       * 🔴 The CONNECTION carries no repository list. Measured live 2026-07-31 on an account with 563
+       * repositories: this write threw `QuotaExceededError` (localStorage is ~5MB and the stats blob is
+       * far bigger), and because it sits in the middle of the success path the throw landed in the
+       * catch below — so a fetch that had already succeeded, with the repositories in state and on
+       * screen, reported itself as a FAILURE and set `error`.
+       *
+       * `github_connection` exists to answer "who is signed in"; the stats have their own cache, which
+       * fails quietly on its own (`saveCachedStats` catches). Storing them twice bought nothing and
+       * cost the larger of the two accounts every fetch.
+       */
       if (connection.stats?.lastUpdated !== stats.lastUpdated) {
-        const updatedConnection = {
-          ...connection,
-          stats,
-        };
-        localStorage.setItem('github_connection', JSON.stringify(updatedConnection));
+        try {
+          const { stats: _ignored, ...connectionWithoutStats } = connection;
+          localStorage.setItem('github_connection', JSON.stringify(connectionWithoutStats));
+        } catch (error) {
+          // A connection we cannot persist is a re-login later, never a failed fetch now.
+          console.warn('Could not persist the GitHub connection:', error);
+        }
       }
 
       // Only show success toast for manual refreshes, not auto-fetches
@@ -237,7 +300,7 @@ export function useGitHubStats(
 
       throw error;
     }
-  }, [apiService, connection, saveCachedStats, isServerSide]);
+  }, [apiService, connection, saveCachedStats, isServerSide, reposOnly]);
 
   const refreshStats = useCallback(async () => {
     if (state.isRefreshing || state.isLoading) {

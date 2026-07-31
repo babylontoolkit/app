@@ -164,6 +164,70 @@ export class RootAbsoluteAssetError extends Error {
 }
 
 /**
+ * A build whose ROUTER is mounted at the literal vite base can never render at its share address.
+ *
+ * The sibling of {@link RootAbsoluteAssetError}, and strictly nastier: the assets all load with a 200,
+ * so the game publishes, serves, and shows a blank screen. FOUND LIVE 2026-07-31 by opening a
+ * published game instead of trusting the "Your game is live! 🎉" toast — the only trace was a console
+ * warning inside the iframe:
+ *
+ *   <Router basename="/./"> is not able to match the URL "/play/9tkrubxyra36/?embed=1"
+ *   because it does not start with the basename, so the <Router> won't render anything.
+ *
+ * Cause: `<BrowserRouter basename={import.meta.env.BASE_URL}>`. Shares build with `--base=./`
+ * (`SHARE_BUILD_COMMAND`, T17b — which is what makes the ASSETS work), so `BASE_URL` is the string
+ * `"./"`, and React Router normalises that to `/./`, which matches no URL anywhere. The current
+ * starter fixed this by resolving the mount point at runtime (`appBasename()`), so a project created
+ * from the pin is fine — but a project IMPORTED from a folder, or remixed from an old share, carries
+ * whatever `app.tsx` it arrived with and publishes a blank page with nothing reporting why.
+ *
+ * Refusing costs the user one message; the alternative is a public link that looks fine to them and is
+ * broken for everyone who opens it.
+ */
+export class UnmountableRouterBasenameError extends Error {
+  readonly statusCode = 422;
+  readonly isRetryable = false;
+
+  constructor(literals: string[]) {
+    super(
+      `This build would render a blank page at its share address: the router is mounted at ` +
+        `${literals.map((l) => `"${l}"`).join(', ')}, which matches no URL under /play/<id>/. ` +
+        `In src/app.tsx, replace <BrowserRouter basename={import.meta.env.BASE_URL}> with a basename ` +
+        `resolved at runtime:\n\n` +
+        `  function appBasename(): string {\n` +
+        `    return new URL(import.meta.env.BASE_URL, window.location.href).pathname;\n` +
+        `  }\n\n` +
+        `  <BrowserRouter basename={appBasename()}>\n\n` +
+        `Then publish again. (Projects created from the current starter already do this.)`,
+    );
+    this.name = 'UnmountableRouterBasenameError';
+  }
+}
+
+/**
+ * Router basenames baked into built JS that cannot match a prefixed share URL.
+ *
+ * MEASURED against a real broken publish: the minifier keeps the object key and the string literal
+ * intact (`basename:"./"` — object keys passed to `createElement` cannot be mangled), and the entry
+ * chunk contained exactly ONE such literal, the app's own. A project using `appBasename()` computes
+ * the value at runtime and therefore contains none, which is what makes this safe to refuse on.
+ *
+ * Only the relative forms are matched — `"./"`, `"."`, `"/./"`. A real absolute basename ("/", or a
+ * genuine prefix) is somebody's deliberate choice and none of our business.
+ */
+export function unmountableRouterBasenames(js: string): string[] {
+  const found: string[] = [];
+
+  for (const match of js.matchAll(/\bbasename\s*:\s*(["'])(\.\/?|\/\.\/?)\1/g)) {
+    if (!found.includes(match[2])) {
+      found.push(match[2]);
+    }
+  }
+
+  return found;
+}
+
+/**
  * The boot-breaking references ONLY: entry `<script src="/…">` and `<link rel="stylesheet|modulepreload"
  * href="/…">`. Deliberately narrow — a root-absolute favicon merely misses an icon, and refusing a
  * publish for it would be vetoing a working game. Protocol-relative (`//cdn…`) is not root-absolute.
@@ -319,6 +383,23 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
 
     if (refs.length > 0) {
       throw new RootAbsoluteAssetError(refs);
+    }
+  }
+
+  /*
+   * And the same question one layer in: the assets can all load and the ROUTER still refuse to mount
+   * (see UnmountableRouterBasenameError). Checked here, before any write, for the same reason — a
+   * blank game on a public URL is worse than a refused publish, and this one leaves no 404 to notice.
+   */
+  for (const [path, dirent] of entries) {
+    if (dirent.isBinary || !/\.js$/i.test(path)) {
+      continue;
+    }
+
+    const literals = unmountableRouterBasenames(dirent.content);
+
+    if (literals.length > 0) {
+      throw new UnmountableRouterBasenameError(literals);
     }
   }
 

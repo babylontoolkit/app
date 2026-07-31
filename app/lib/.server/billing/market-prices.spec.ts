@@ -70,14 +70,19 @@ describe('validation — the promotion wall', () => {
    * platform serves the BAKED list, which always prices the default). The premium tier can never
    * become the default's effective price through any path.
    *
-   * The default's id is pinned LITERALLY here on purpose: changing `DEFAULT_MODEL` must fail this
-   * test and force the pins (and the baked row) to move with it.
+   * ⚠️ This used to pin the default's id LITERALLY, on the theory that changing `DEFAULT_MODEL` should
+   * fail here and force the pins to move with it. Reversed 2026-07-31: the property under test is "the
+   * refusal NAMES the model we would otherwise mis-bill", and the literal made this test fail for a
+   * reason that had nothing to do with the wall the moment the platform changed rungs. The wall itself
+   * is still guarded — mutation-verified, neutering it empties the error array and the `toContain`
+   * fails on `''`. Which model is the default is pinned in `model-tiers.spec.ts`, where it belongs.
    */
   it('refuses a list that does not price the platform default — the premium tier must never fall through', () => {
     const list = validList();
     list.llm = { 'claude-opus-4-8': { inputPerMTok: 2, outputPerMTok: 10 } }; // priced, but NOT the default
 
-    expect(errorsOf(list).join()).toMatch(/claude-opus-5/);
+    // Against the constant, never a literal — see the sibling note in `market-price-store.spec.ts`.
+    expect(errorsOf(list).join()).toContain(DEFAULT_MODEL);
   });
 
   it.each([[null], ['a string'], [42], [[]]])('rejects a non-object list: %s', (bad) => {

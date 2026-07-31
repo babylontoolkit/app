@@ -1,4 +1,4 @@
-import { atom, map } from 'nanostores';
+import { atom, computed, map } from 'nanostores';
 import { PROVIDER_LIST } from '~/utils/constants';
 import type { IProviderConfig } from '~/types/model';
 import type { TabVisibilityConfig, TabWindowConfig, UserTabConfig } from '~/components/@settings/core/types';
@@ -248,6 +248,19 @@ const updateAutoEnabledTracking = (providerName: string, isEnabled: boolean) => 
   }
 };
 
+/**
+ * The rungs of the MODEL TIER LADDER (§4.6.1a), cheapest first.
+ *
+ * Declared here rather than imported from `~/lib/.server/billing/model-tiers` because this module ships
+ * in the CLIENT bundle and nothing under `.server/` may. The server is the authority — it re-derives
+ * the rung on every generation and refuses anything it does not recognise — so the only cost of the two
+ * lists disagreeing is that this browser asks for a rung the server declines to Standard, which is the
+ * safe direction and exactly what an out-of-date tab already does.
+ */
+export const MODEL_TIER_IDS = ['standard', 'premium', 'supermax'] as const;
+
+export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
+
 export const isDebugMode = atom(false);
 
 // Define keys for localStorage
@@ -259,8 +272,17 @@ const SETTINGS_KEYS = {
   PROMPT_ID: 'promptId',
   DEVELOPER_MODE: 'isDeveloperMode',
 
-  /** The user's opt-in to the PREMIUM model tier (§4.6.1). Off by default — premium costs ~2x. */
+  /**
+   * @deprecated The pre-ladder boolean (§4.6.1). READ ONLY, for the one-time migration below.
+   *
+   * Never written any more. It survives because a browser that holds `true` here belongs to a user who
+   * opted into premium and paid for it — dropping the key silently downgrades every existing premium
+   * user to Standard, with nothing on screen saying their preference changed.
+   */
   PREMIUM_MODEL: 'premiumModelEnabled',
+
+  /** The user's chosen rung of the MODEL TIER LADDER (§4.6.1a). `'standard'` unless they pick up. */
+  MODEL_TIER: 'modelTier',
 } as const;
 
 // Initialize settings from localStorage or defaults
@@ -291,10 +313,66 @@ const getInitialSettings = () => {
     promptId: isBrowser ? localStorage.getItem(SETTINGS_KEYS.PROMPT_ID) || 'default' : 'default',
     developerMode: getStoredBoolean(SETTINGS_KEYS.DEVELOPER_MODE, false),
 
-    // Default OFF: premium is opt-in and burns credits ~2x faster (§4.6.1).
-    premiumModel: getStoredBoolean(SETTINGS_KEYS.PREMIUM_MODEL, false),
+    // Default STANDARD: every paid rung is opt-in and burns credits several times faster (§4.6.1a).
+    modelTier: getStoredModelTier(),
   };
 };
+
+/**
+ * The stored rung, MIGRATING the pre-ladder boolean on first read.
+ *
+ * Three rules, and each one fails silently in a different direction:
+ *
+ *  - **Migrate `premiumModelEnabled === true` → `'premium'`.** Without it every user who had premium
+ *    switched on is downgraded to Standard the moment they load the new bundle, and the only signal is
+ *    a pill quietly naming a cheaper model. The old key is READ, never written — the new key is the
+ *    only writer from here on, so the two can never disagree about what the user chose.
+ *  - **Refuse anything unrecognised, DOWNWARD.** This value comes out of `localStorage`, which a user
+ *    can hand-edit and any extension can write. It is the same rule as `parseUserEffort` and
+ *    `resolveTierId`: never clamp UP, because inventing a more expensive rung than the user asked for
+ *    is the direction that costs them money. (The server re-derives regardless — this only decides what
+ *    we ask for.)
+ *  - **Never throw ON A VALUE.** A malformed value is a locked-out builder if it escapes, so a parse
+ *    failure is just another unrecognised value. ⚠️ Note the precise claim: `localStorage.getItem`
+ *    itself can throw where storage is unavailable (Safari private mode, storage disabled by policy),
+ *    and that is NOT guarded here — nor anywhere else in this module, which reads the same way in
+ *    `getStoredBoolean` and every `update*` helper. Pre-existing and out of this rule's scope; stated
+ *    rather than implied, because "never throws" written next to a `getItem` call reads as a promise
+ *    the code does not make.
+ */
+function getStoredModelTier(): ModelTierId {
+  if (!isBrowser) {
+    return 'standard';
+  }
+
+  const stored = localStorage.getItem(SETTINGS_KEYS.MODEL_TIER);
+
+  if (stored !== null) {
+    /*
+     * Accept both the bare string and a JSON-quoted one. `updateModelTier` writes the bare form, but a
+     * hand-edited key or an older experiment may hold `"premium"` — and refusing a value the user
+     * plainly meant, in favour of the cheap default, is a silent downgrade rather than a safe one.
+     */
+    const unquoted = stored.startsWith('"') ? safeParse(stored) : stored;
+
+    return isModelTierId(unquoted) ? unquoted : 'standard';
+  }
+
+  // No new key: this browser predates the ladder. Carry the old opt-in over, once.
+  return safeParse(localStorage.getItem(SETTINGS_KEYS.PREMIUM_MODEL) ?? '') === true ? 'premium' : 'standard';
+}
+
+function safeParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+function isModelTierId(value: unknown): value is ModelTierId {
+  return typeof value === 'string' && (MODEL_TIER_IDS as readonly string[]).includes(value);
+}
 
 // Initialize stores with persisted values
 const initialSettings = getInitialSettings();
@@ -306,11 +384,22 @@ export const isEventLogsEnabled = atom<boolean>(initialSettings.eventLogs);
 export const promptStore = atom<string>(initialSettings.promptId);
 
 /**
- * The user's opt-in to the PREMIUM model tier (§4.6.1). A rendering/request preference only — the
- * server re-derives eligibility every generation (`decidePremium`), so a `true` here never grants
- * premium to a user below the credits threshold.
+ * The user's chosen rung of the MODEL TIER LADDER (§4.6.1a).
+ *
+ * A rendering/request preference only — the server re-derives eligibility every generation
+ * (`decideModelTier`), so a value here never grants a rung to a user below its credits threshold, and
+ * an unrecognised one can never select a rung at all.
  */
-export const premiumModelStore = atom<boolean>(initialSettings.premiumModel);
+export const modelTierStore = atom<ModelTierId>(initialSettings.modelTier);
+
+/**
+ * @deprecated Use `modelTierStore`. A read-only VIEW, kept for `Chat.client.tsx`'s send path (T12).
+ *
+ * Derived rather than stored, so there is exactly one source of truth for which rung is selected. Two
+ * independent stores answering "what did the user pick?" is the two-writers drift this codebase keeps
+ * rediscovering — and here it would show up as a pill and a picker disagreeing.
+ */
+export const premiumModelStore = computed(modelTierStore, (tier) => tier === 'premium');
 
 // Helper functions to update settings with persistence
 export const updateLatestBranch = (enabled: boolean) => {
@@ -333,9 +422,18 @@ export const updateEventLogs = (enabled: boolean) => {
   localStorage.setItem(SETTINGS_KEYS.EVENT_LOGS, JSON.stringify(enabled));
 };
 
+/**
+ * Persist the chosen rung. Writes the NEW key only — the old boolean is read once and never written,
+ * so a migrated browser cannot end up with two keys disagreeing about what the user picked.
+ */
+export const updateModelTier = (tier: ModelTierId) => {
+  modelTierStore.set(tier);
+  localStorage.setItem(SETTINGS_KEYS.MODEL_TIER, tier);
+};
+
+/** @deprecated Use `updateModelTier`. No callers remain in app code; kept for the wire alias (T12). */
 export const updatePremiumModel = (enabled: boolean) => {
-  premiumModelStore.set(enabled);
-  localStorage.setItem(SETTINGS_KEYS.PREMIUM_MODEL, JSON.stringify(enabled));
+  updateModelTier(enabled ? 'premium' : 'standard');
 };
 
 export const updatePromptId = (id: string) => {

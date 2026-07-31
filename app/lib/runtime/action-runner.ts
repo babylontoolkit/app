@@ -8,6 +8,7 @@ import type { ActionCallbackData } from './message-parser';
 import type { BoltShell } from '~/utils/shell';
 import { isAllowedShellCommand } from './shell-allowlist';
 import { buildSpawnArgs } from './build-command';
+import { BUILD_STALL_MESSAGE, BUILD_STALL_POLL_MS, isBuildStalled } from './build-stall';
 import { EditBlockError, applyEditBlocks, parseEditBlocks } from './edit-blocks';
 import { isBinaryPath } from '~/lib/binary/binary-files';
 import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
@@ -116,7 +117,13 @@ export class ActionRunner {
    * captures a stale prefix of the generation and a later mount restores it over the real files.
    */
   #onFileWritten?: (absoluteFilePath: string, content: string) => void;
-  buildOutput?: { path: string; exitCode: number; output: string };
+
+  /**
+   * `stalledReason` is set ONLY when the build never answered (see `build-stall.ts`). Callers report
+   * it verbatim instead of their own "the project failed to build", which would send the user to the
+   * editor to look for a compile error that does not exist.
+   */
+  buildOutput?: { path: string; exitCode: number; output: string; stalledReason?: string };
 
   constructor(
     sandboxPromise: Promise<SandboxProvider>,
@@ -640,15 +647,39 @@ export class ActionRunner {
     const buildProcess = await sandbox.spawn('npm', buildSpawnArgs(action.content));
 
     let output = '';
+    let lastOutputAt = Date.now();
     const outputPromise = buildProcess.output.pipeTo(
       new WritableStream({
         write(data) {
           output += data;
+          lastOutputAt = Date.now();
         },
       }),
     );
 
-    const exitCode = await buildProcess.exit;
+    const exitCode = await awaitBuildExit(
+      buildProcess,
+      () => lastOutputAt,
+      () => {
+        /*
+         * Record the reason BEFORE throwing: the throw marks the action `failed` (which is what stops a
+         * hung build from blocking every later publish), and this is the only place that knows the
+         * difference between "your code does not compile" and "the sandbox never answered".
+         */
+        this.buildOutput = { path: '', exitCode: 1, output, stalledReason: BUILD_STALL_MESSAGE };
+
+        this.onDeployAlert?.({
+          type: 'error',
+          title: 'Build stopped responding',
+          description: BUILD_STALL_MESSAGE,
+          content: output || 'The build produced no output.',
+          stage: 'building',
+          buildStatus: 'failed',
+          deployStatus: 'pending',
+          source: 'netlify',
+        });
+      },
+    );
     await outputPromise.catch(() => {
       // Ignore output piping errors; we still have whatever was captured
     });
@@ -1001,5 +1032,54 @@ export class ActionRunner {
       title: `Command Failed (exit code: ${exitCode})`,
       details: `Command: ${trimmedCommand}\n\nOutput: ${output || 'No output available'}${suggestion}`,
     };
+  }
+}
+
+/**
+ * Await a build's exit, but refuse to wait forever on a sandbox that has gone silent.
+ *
+ * See `build-stall.ts` for why this exists — in short, an unbounded await here does not merely hang
+ * one press: it leaves the action `running`, which makes the publish-readiness guard refuse every
+ * subsequent Share and Deploy for the rest of the session.
+ *
+ * The process is killed before throwing so a command that later wakes up cannot write into a `dist/`
+ * the user has already been told is not coming.
+ */
+async function awaitBuildExit(
+  buildProcess: { exit: Promise<number>; kill: () => void },
+  lastOutputAt: () => number,
+  onStall: () => void,
+): Promise<number> {
+  let settled = false;
+  const exit = buildProcess.exit.then((code) => {
+    settled = true;
+    return code;
+  });
+
+  for (;;) {
+    const raced = await Promise.race([
+      exit,
+      new Promise<'tick'>((resolve) => setTimeout(() => resolve('tick'), BUILD_STALL_POLL_MS)),
+    ]);
+
+    if (raced !== 'tick') {
+      return raced;
+    }
+
+    if (settled) {
+      return exit;
+    }
+
+    if (isBuildStalled(Date.now(), lastOutputAt())) {
+      try {
+        buildProcess.kill();
+      } catch {
+        // A process that cannot be killed is still one we refuse to keep waiting on.
+      }
+
+      onStall();
+
+      throw new Error(BUILD_STALL_MESSAGE);
+    }
   }
 }

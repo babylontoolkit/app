@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 import { bootedProjectId, requireBootedSandbox, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import type { SandboxProvider } from '~/lib/sandbox';
 import { NO_ROLLBACK, openImportWorkspace } from '~/lib/registry/import-project';
+import { clearWorkspace } from '~/lib/registry/clear-workspace';
 import git, { type GitAuth, type PromiseFsClient } from 'isomorphic-git';
 import http from 'isomorphic-git/http/web';
 import Cookies from 'js-cookie';
@@ -99,18 +100,40 @@ export function useGit() {
        */
       let rollback = NO_ROLLBACK;
 
+      /*
+       * Did THIS call register the workspace? It decides whether the tree may be cleared below, so it
+       * is tracked explicitly rather than inferred from `rollback !== NO_ROLLBACK` — a later edit that
+       * changed how rollback is assigned would silently re-point a destructive operation.
+       */
+      let ownsWorkspace = false;
+
       if (!activeSandbox || !activeFs) {
         const workspace = await openImportWorkspace({ name: repoNameOf(url) });
         activeSandbox = workspace.sandbox;
         activeFs = getFs(workspace.sandbox, fileData);
         workspaceProjectId = workspace.projectId;
         rollback = workspace.rollback;
+        ownsWorkspace = Boolean(workspace.projectId);
 
         setSandbox(activeSandbox);
         setFs(activeFs);
       }
 
       fileData.current = {};
+
+      /*
+       * 🔴 A clone needs an EMPTY directory, and on a server sandbox the workspace it was just handed
+       * is a fork of the starter template — files, node_modules and the starter's own `.git`. Measured
+       * live: `git.clone` died on `AlreadyExistsError: Failed to create remote at origin because it
+       * already exists`, so "Clone a repo" from the landing page failed 100% of the time on this
+       * provider. `clear-workspace.ts` explains why only `.git` is not enough.
+       *
+       * Guarded by `ownsWorkspace`: a clone started from INSIDE an open project writes into that
+       * project, and clearing there would delete the user's game.
+       */
+      if (ownsWorkspace) {
+        await clearWorkspace(activeSandbox, { owned: true });
+      }
 
       let branch: string | undefined;
       let baseUrl = url;

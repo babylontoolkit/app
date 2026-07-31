@@ -7,7 +7,9 @@
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
-import { getPremiumTier, kieDefaultModel, providerRates } from '~/lib/.server/billing/rates';
+import { getModelTier, kieDefaultModel, providerRates } from '~/lib/.server/billing/rates';
+import { EXTENDED_MODELS_ENV_KEY, extendedModelsEnabled } from '~/lib/.server/billing/extended-models';
+import { paidModelTierDefinition, type PaidModelTierId } from '~/lib/.server/billing/model-tiers';
 
 /** Re-exported: this was the original home of the error, and several routes import it from here. */
 export { NotConfiguredError };
@@ -31,13 +33,20 @@ export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
  * provider's rates set what a credit BUYS — which means this value and `SIGNUP_GRANT_CREDITS` are one
  * decision in two files. `grantHeadroom()` + `billing.spec.ts` assert they agree; flip both or neither:
  *
- * Re-measured 2026-07-30 on the current default (`claude-opus-5`, margin 4.0, creation charge 100):
+ * Measured 2026-07-30 on what was THEN the default (`claude-opus-5`, margin 4.0, creation charge 100):
  *
  *   KIE       -> SIGNUP_GRANT_CREDITS 1000  (a cold build turn is ~231 credits; 3.90x headroom)
  *   Anthropic -> SIGNUP_GRANT_CREDITS 1000  (a cold build turn is ~576 credits; 1.56x headroom)
  *
- * The grant now clears the 1.5x floor on BOTH providers, which the 800/150 pairing did not: on
- * Anthropic + Opus 5 it measured 1.13x. See `rates.ts` `signupGrantCredits` for the full table.
+ * The grant cleared the 1.5x floor on BOTH providers at those numbers, which the 800/150 pairing did
+ * not: on Anthropic + Opus 5 it measured 1.13x. See `rates.ts` `signupGrantCredits` for the full table.
+ *
+ * ⚠️ **Those are OPUS 5 figures and the Standard rung moved to `claude-sonnet-5` on 2026-07-31.**
+ * Sonnet is ~2.73x cheaper, so real headroom is now comfortably HIGHER than the rows above on both
+ * providers — the floor is cleared by a wider margin, not a narrower one, which is why the grant was
+ * not re-tuned with the model. `grantHeadroom()` computes it from the LIVE default, so the assertion
+ * in `billing.spec.ts` is the authority here and this table is history. Re-run it before changing the
+ * grant; do not read these two lines as current.
  *
  * MEASURED on two live creations (2026-07-17): 248 credits / $0.7412 and 211 / $0.6292 on KIE, against
  * ~579 / ~$1.7314 and ~485 / ~$1.4515 for the same tokens on Anthropic — **~2.3x cheaper**. Verified
@@ -46,7 +55,7 @@ export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
  * $0.021800 exactly. The ledger is provably correct against their charges, not merely self-consistent.
  *
  * 🔴 **The accepted cost: no KIE Claude model returns thinking text** (adapter-wide since 2026-07-24;
- * re-confirmed for the current default `claude-opus-5` on 2026-07-27 — see `kie-wire.ts`). We pay full
+ * re-confirmed for `claude-opus-5` on 2026-07-27 — see `kie-wire.ts`). We pay full
  * output rate for reasoning we cannot show: measured ~27% of output and ~55s of the 205s on a
  * platformer creation. Chosen knowingly on 2026-07-17 as a `for now`; the §4.2a liveness heartbeat
  * carries the UX until KIE fixes their adapter.
@@ -110,12 +119,15 @@ export const PLATFORM_MODEL = DEFAULT_MODEL;
  * it up front on every single turn including trivial ones. Since 2026-07-24 the missing thinking text
  * is adapter-wide anyway (kie-wire.ts), so the table above is history rather than a live comparison.
  *
- * 2026-07-27: both defaults are `claude-opus-5` via `DEFAULT_MODEL` — same KIE price as 4-8 ($2/$10),
- * probe-verified honest cache accounting, thinking text still empty (the heartbeat carries the UX).
+ * 2026-07-27: both defaults became `claude-opus-5` via `DEFAULT_MODEL` — same KIE price as 4-8
+ * ($2/$10), probe-verified honest cache accounting, thinking text still empty (the heartbeat carries
+ * the UX).
  *
- * 2026-07-30: `claude-sonnet-5` was measured as a replacement (2.73x cheaper on 62 real generations)
- * and REJECTED — KIE 500s on 77% of requests for it. See `utils/constants.ts`; the switch is one env
- * var the day that clears.
+ * 2026-07-31: both defaults are **`claude-sonnet-5`** — the Standard rung of the three-class ladder
+ * (§4.6.1a), 2.73x cheaper on 62 real generations, with Opus 5 moved up to the Premium rung. It
+ * carries a known vendor risk (KIE 500'd 77% of Sonnet 5 requests when it was measured on 2026-07-30,
+ * which is why an earlier attempt was reverted); the owner shipped it on the strength of the
+ * config-only revert `LLM_MODEL=claude-opus-5`. Full measurement in `utils/constants.ts`.
  */
 export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = {
   Anthropic: DEFAULT_MODEL,
@@ -160,31 +172,67 @@ export function getPlatformModel(context?: unknown): string {
 }
 
 /**
- * The PREMIUM model on the active provider — the higher-cost tier a user may opt into (§4.6.1).
+ * A PAID RUNG's model on the active provider — the higher-cost tiers a user may opt into (§4.6.1a).
  *
  * Validated against `providerRates` exactly like `getPlatformModel`, for the same reason: a model we
- * cannot price is a model we cannot bill. The premium row is injected into every provider's table by
- * `providerRates` (from `PREMIUM_*_DOLLARS`), so this validation is normally satisfied by construction —
- * it exists to catch the one real failure it cannot: a `PREMIUM_MODEL` the active provider cannot serve.
+ * cannot price is a model we cannot bill. Each rung's row is injected into every provider's table by
+ * `providerRates` (from the ACTIVE Marketplace price list), so this validation is normally satisfied by
+ * construction — it exists to catch the one real failure it cannot: a rung's selector naming a model the
+ * active provider cannot serve.
  *
- * The proxy calls this ONLY after `decidePremium` has authorized the choice; it is the model half of the
- * decision, kept beside `getPlatformModel` so all model resolution lives in one file.
+ * The proxy calls this ONLY after `decideModelTier` has authorized the choice; it is the model half of
+ * the decision, kept beside `getPlatformModel` so all model resolution lives in one file.
  */
-export function getPremiumModel(context?: unknown): string {
+export function getTierModel(id: PaidModelTierId, context?: unknown): string {
+  /*
+   * 🔴 The SECOND wall behind `ENABLE_EXTENDED_MODELS` (§4.5.3's pattern applied to a money path).
+   * `getModelTiers` already drops the paid rungs from the ladder, so `decideModelTier` cannot authorize
+   * one and this is unreachable today — which is exactly why it is here. The first wall is a filter on a
+   * list, and a future caller that assembles its own ladder, or resolves a model before the decision,
+   * would sail past it and bill an expensive model on a deploy that switched them off.
+   *
+   * It THROWS rather than degrading to the standard model: nothing should be asking, so an answer would
+   * be a wrong answer given quietly. `NotConfiguredError` names the flag, because an operator seeing
+   * this has one thing to change and it is not the selector.
+   */
+  if (!extendedModelsEnabled(context)) {
+    throw new NotConfiguredError(
+      `the ${id} model tier while ${EXTENDED_MODELS_ENV_KEY} is not "true"`,
+      `This deploy serves the standard model only. Set ${EXTENDED_MODELS_ENV_KEY}=true to offer the ` +
+        'Premium and SuperMax classes again.',
+    );
+  }
+
   const provider = getPlatformProvider(context);
-  const { model } = getPremiumTier(context);
+  const { model, label } = getModelTier(id, context);
+  const { modelEnvKey } = paidModelTierDefinition(id);
   const priced = providerRates(context)[provider] ?? {};
 
   if (!priced[model]) {
+    /*
+     * ⚠️ This message used to say "Set PREMIUM_INPUT_DOLLARS and PREMIUM_OUTPUT_DOLLARS" — vars that
+     * have been RETIRED and are refused at config time since 2026-07-18. An error that instructs the
+     * operator to set a variable the platform will reject is worse than no error at all, and it
+     * survived because nothing tests the text of a failure path. Prices live in the Admin panel.
+     *
+     * It names the rung's OWN env key rather than a hardcoded `PREMIUM_MODEL`, because with three
+     * rungs the wrong variable name sends an operator to fix a setting that was never broken.
+     */
     throw new NotConfiguredError(
-      `PREMIUM_MODEL="${model}" on provider ${provider}`,
-      `We have no rates for it, so we cannot bill it. Set PREMIUM_INPUT_DOLLARS and PREMIUM_OUTPUT_DOLLARS. Priced models: ${
-        Object.keys(priced).join(', ') || '(none)'
-      }.`,
+      `${modelEnvKey}="${model}" (the ${label} tier) on provider ${provider}`,
+      'We have no rates for it, so we cannot bill it. Add its row (input + output USD per million tokens) ' +
+        `in Settings → Admin → Marketplace prices, then promote. Priced models on ${provider}: ${
+          Object.keys(priced).join(', ') || '(none)'
+        }.`,
     );
   }
 
   return model;
+}
+
+/** @deprecated Use `getTierModel('premium', …)`. One implementation, so the rungs cannot drift. */
+export function getPremiumModel(context?: unknown): string {
+  return getTierModel('premium', context);
 }
 
 /**

@@ -19,8 +19,8 @@ import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { isCreationTurn } from '~/lib/chat/creation-turn';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
-import { applySettlement, canUsePremium, sessionStore } from '~/lib/stores/session';
-import { premiumModelStore } from '~/lib/stores/settings';
+import { applySettlement, canUseTier, sessionStore } from '~/lib/stores/session';
+import { modelTierStore } from '~/lib/stores/settings';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROMPT_COOKIE_KEY, PROVIDER_LIST } from '~/utils/constants';
 import { cubicEasingFn } from '~/utils/easings';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
@@ -245,13 +245,21 @@ export const ChatImpl = memo(
     const activeServerChatId = useStore(chatMetadata)?.serverChatId;
 
     /*
-     * The PREMIUM tier (§4.6.1): the user's opt-in AND live eligibility. We send `premium: true` only
-     * when both hold, so an ineligible user never triggers the server's "declined" notice. The server
-     * re-derives eligibility regardless — this is a request, never authorization.
+     * The MODEL TIER (§4.6.1a): the user's stored choice, NARROWED by live eligibility.
+     *
+     * We send the rung only when the user could actually have it, so an ineligible user never triggers
+     * the server's "declined" notice for a rung they are not really asking for right now. This is the
+     * client's own honest guess and nothing more — the server re-derives with `decideModelTier` on
+     * every generation, so a stale or tampered value here can only ever ask for something that is then
+     * declined DOWN to Standard.
+     *
+     * ⚠️ It is a render capture (`useStore`), which is what makes it correct on every send path: the
+     * `useChat` body, the auto-repair `append`, and `reload()` all read the value React last committed.
+     * A ref updated outside render would be the `projectId: undefined` bug again in the other direction.
      */
-    const premiumEnabled = useStore(premiumModelStore);
+    const selectedTier = useStore(modelTierStore);
     const session = useStore(sessionStore);
-    const premiumRequested = premiumEnabled && canUsePremium(session);
+    const tierRequested = canUseTier(session, selectedTier) ? selectedTier : 'standard';
 
     /*
      * The session's thinking-effort floor (§4.2.9), set by `/effort`. Session-scoped by design — it resets
@@ -511,8 +519,17 @@ export const ChatImpl = memo(
         assetNotes,
         maxLLMSteps: mcpSettings.maxLLMSteps,
 
-        /* The premium-model opt-in (§4.6.1) — a boolean the server maps to the one configured premium model. */
-        premium: premiumRequested,
+        /*
+         * The chosen rung of the model tier ladder (§4.6.1a) — an enum id the server maps to THAT rung's
+         * operator-configured model, never a free-form model string (§4.2a).
+         *
+         * This rides in the `useChat` body, which is the base for EVERY send path: the composer, the
+         * auto-repair `append` (whose per-call `body` extends rather than replaces this one), and
+         * `reload()`. That is deliberate — a tier threaded onto only the main path would silently
+         * downgrade every repair turn, and a repair is exactly when a user most wants the model they
+         * chose.
+         */
+        tier: tierRequested,
 
         /*
          * The session's base thinking effort (§4.2.9) — `medium` (default) or `high`. A FLOOR, not a cap:

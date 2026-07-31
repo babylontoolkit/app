@@ -595,6 +595,23 @@ async function spawnBackground(
 ): Promise<SandboxProcess> {
   const command = await client.commands.runBackground(line, opts);
 
+  /*
+   * `open()` subscribes this client to the command's shell and returns whatever it has already
+   * printed. `onOutput` alone misses everything emitted between `runBackground` resolving and the
+   * listener being attached — small for `echo`, and exactly the first lines of a build, which is where
+   * a build error lives.
+   *
+   * ⚠️ Best-effort ON PURPOSE, and the failure is normal: a command that finished in that same window
+   * answers `Shell with id … is not active` (MEASURED). `waitUntilComplete()` still resolves correctly
+   * for it, so an open() failure must never become a failed build.
+   *
+   * ⚠️ This is NOT what fixed the hanging Share — measured 2026-07-31, `runBackground` +
+   * `waitUntilComplete` settles fine without it on a warm VM. The hang (no output, `RUNNING` forever,
+   * reproduced twice on a freshly-resumed VM) is vendor-side and is handled where it does damage, by
+   * `build-stall.ts`. Do not read this call as a guarantee that a background command will ever finish.
+   */
+  const buffered = await Promise.resolve(command.open?.()).catch(() => undefined);
+
   let push: ((chunk: string) => void) | undefined;
   let close: (() => void) | undefined;
 
@@ -613,6 +630,16 @@ async function spawnBackground(
   });
 
   if (wantOutput) {
+    /*
+     * Whatever the command printed before we subscribed comes back from `open()`. Replaying it first
+     * keeps the build log complete — a failed build's error message is usually in the first bytes,
+     * and reporting "the project failed to build" with an empty log is the failure this whole path
+     * exists to explain.
+     */
+    if (buffered) {
+      push?.(buffered);
+    }
+
     command.onOutput((chunk) => push?.(chunk));
   }
 

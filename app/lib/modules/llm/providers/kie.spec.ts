@@ -15,6 +15,8 @@ import { streamText } from 'ai';
 import { describe, expect, it } from 'vitest';
 import { thinkingFetch } from '~/lib/modules/llm/capabilities';
 import { kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
+import { DEFAULT_MODEL } from '~/utils/constants';
+import { DEFAULT_PREMIUM_MODEL, DEFAULT_SUPERMAX_MODEL } from '~/lib/.server/billing/model-tiers'; // pure data, zero imports — safe from a spec
 
 /** A minimal Anthropic SSE stream — enough for `streamText` to consume without erroring. */
 function sseResponse(): Response {
@@ -154,15 +156,20 @@ describe('the KIE wire format', () => {
   });
 
   /*
-   * The default moved to Opus 5 on 2026-07-27 (same price, same honest cache accounting, same missing
-   * thinking text — probe-verified, see kie-wire.ts). It MUST be listed, not merely priced: an
-   * unlisted default silently runs `modelsList[0]` on the enhancer path while settlement charges the
-   * configured model's rates.
+   * Every rung of the model tier ladder MUST be listed, not merely priced: an unlisted model silently
+   * runs `modelsList[0]` on the enhancer path while settlement charges the configured model's rates.
+   *
+   * Asserted against the constants rather than literals, and over the whole ladder rather than one
+   * model — the previous version named `claude-opus-5` in its TITLE as "the platform default since
+   * 2026-07-27", which went stale on 07-31 when Sonnet 5 took the rung and Opus 5 became Premium.
+   * A test title is a claim like any other.
    */
-  it('offers claude-opus-5, the platform default since 2026-07-27', () => {
+  it('offers every model tier rung — Standard, Premium and SuperMax', () => {
     const names = KIE_MODELS.map((m) => m.name);
 
-    expect(names).toContain('claude-opus-5');
+    expect(names).toContain(DEFAULT_MODEL);
+    expect(names).toContain(DEFAULT_PREMIUM_MODEL);
+    expect(names).toContain(DEFAULT_SUPERMAX_MODEL);
   });
 
   /*

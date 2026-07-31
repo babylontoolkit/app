@@ -16,9 +16,17 @@
  * | output         | 5x (model-specific)    | what the model writes                                  |
  */
 import { env, envFlag, envNumber, NotConfiguredError } from '~/lib/.server/env';
+import { extendedModelsEnabled } from './extended-models';
 import type { MarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { activeMarketPrices } from './market-price-store';
+import {
+  PAID_MODEL_TIERS,
+  STANDARD_TIER_LABEL,
+  paidModelTierDefinition,
+  type ModelTierId,
+  type PaidModelTierId,
+} from './model-tiers';
 
 /** USD per million tokens, per model. Verified against Anthropic's published pricing (2026-07). */
 export interface ModelRates {
@@ -243,62 +251,199 @@ export function kieRates(context?: unknown): Record<string, ModelRates> {
 }
 
 /**
- * The PREMIUM model tier (SPEC §4.6.1) — an opt-in, higher-cost model a user may choose ONCE they hold
- * enough credits to afford it, gated so a fresh signup grant cannot be burned on it out the gate.
+ * The MODEL TIER LADDER (SPEC §4.6.1a) — the paid rungs above the platform model, resolved and priced.
+ *
+ * The ladder's shape lives in `model-tiers.ts` (data only, no imports); this is where a rung meets the
+ * environment and the ACTIVE Marketplace price list. A user may choose a paid rung ONCE they hold
+ * enough credits to afford it, which is what stops a fresh signup grant being burned on the expensive
+ * models out the gate.
  *
  * ## How this is different from the platform model, and why it is allowed to be a user choice
  *
  * The platform model is an OPERATOR config, never a user choice (§4.2a) — and that rule stands. The
- * premium tier does not break it: it is a choice between exactly TWO operator-configured, operator-priced
- * models, not BYOK and not a free-form model string. The client sends a BOOLEAN; the server maps it to
- * THIS model at THIS price. A client can never name an arbitrary (unpriced, expensive) model — the only
- * two reachable models are the platform default and this one.
+ * ladder does not break it: it is a choice among a FIXED set of operator-configured, operator-priced
+ * models, not BYOK and not a free-form model string. The client sends a tier ID; the server maps it to
+ * THAT rung's model at THAT rung's price. A client can never name an arbitrary (unpriced, expensive)
+ * model — the only reachable models are the platform default and the configured rungs.
  *
- * ## Model and price are ONE fact — and the price now lives in the marketplace list (2026-07-18)
+ * ## Model and price are ONE fact — and the price lives in the marketplace list (2026-07-18)
  *
- * `PREMIUM_MODEL` names it; the ACTIVE price list prices it (`PREMIUM_*_DOLLARS` are RETIRED — setting
- * them is refused with directions to the Admin panel). The baked list carries Fable 5 at the measured
- * $4/$20, so the tier works with no env and no promotion at all. A `PREMIUM_MODEL` the active list does
- * not price is refused — the same "selector without a row" rule as `kieDefaultModel`.
+ * A rung's env var names its model; the ACTIVE price list prices it (`PREMIUM_*_DOLLARS` are RETIRED —
+ * setting them is refused with directions to the Admin panel). The baked list carries every default
+ * rung, so the ladder works with no env and no promotion at all. A selector the active list does not
+ * price is refused — the same "selector without a row" rule as `kieDefaultModel`.
  *
- * ⚠️ **ONE premium price for whichever provider is active** — the list row states what the premium model
+ * ⚠️ **ONE price per rung for whichever provider is active** — the list row states what that model
  * costs on the provider the platform runs. On Anthropic, `claude-fable-5` has no `MODEL_RATES` row at
- * all — the `providerRates` injection is the ONLY thing that prices it there.
+ * all, so the `providerRates` injection is the ONLY thing that prices it there. ⚠️ That injection
+ * FILLS A GAP and never overwrites: a rung may now name a model Anthropic prices natively.
  *
- * ⚠️ `PREMIUM_MINIMUM_CREDITS` stays env (`envNumber`): it is a credit THRESHOLD, not a price, so a
- * fallback is correct — unlike a price, where a fallback is catastrophic.
+ * ⚠️ The thresholds stay env (`envNumber`): a credit THRESHOLD may have a fallback — unlike a price,
+ * where a fallback is catastrophic.
  */
-export const DEFAULT_PREMIUM_MODEL = 'claude-fable-5';
-export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
+export {
+  DEFAULT_PREMIUM_MINIMUM_CREDITS,
+  DEFAULT_PREMIUM_MODEL,
+  DEFAULT_SUPERMAX_MINIMUM_CREDITS,
+  DEFAULT_SUPERMAX_MODEL,
+} from './model-tiers';
 
-export interface PremiumTier {
+/** A paid rung, fully resolved: which model it runs, what that costs, and what it takes to unlock. */
+export interface ModelTier {
+  id: PaidModelTierId;
+
+  /** The user-facing name (`Premium`, `SuperMax`) — from the tier table, never re-typed. */
+  label: string;
+
   /** The model id, e.g. `claude-fable-5`. Reachable on any provider via the `providerRates` injection. */
   model: string;
 
   /** Its full rate row, from the active price list (cache derived). */
   rates: ModelRates;
 
-  /** Credits a user must HOLD before premium unlocks — protects the free signup grant (§4.6.1). */
+  /** Credits a user must HOLD before this rung unlocks — protects the free signup grant (§4.6.1). */
   minimumCredits: number;
+
+  /** Never runs on the first build turn — see `firstBuildLocked` in `model-tiers.ts` for the evidence. */
+  firstBuildLocked: boolean;
 }
 
-export function getPremiumTier(context?: unknown): PremiumTier {
+/**
+ * Resolve one paid rung against the environment and the ACTIVE price list.
+ *
+ * Throws `NotConfiguredError` when the tier's selector names a model the list cannot price. That is
+ * the correct behaviour at a DECISION point (a loud config error before any spend) and the wrong one
+ * where a read must degrade — `/api/me` and `providerRates` both catch it, and `getModelTiers` below
+ * exists so a caller that must not throw does not have to write that try/catch itself.
+ */
+export function getModelTier(id: PaidModelTierId, context?: unknown): ModelTier {
   refuseRetiredPriceEnv(context);
 
-  const model = env(context, 'PREMIUM_MODEL')?.trim() || DEFAULT_PREMIUM_MODEL;
-  const minimumCredits = envNumber(context, 'PREMIUM_MINIMUM_CREDITS', DEFAULT_PREMIUM_MINIMUM_CREDITS);
+  const definition = paidModelTierDefinition(id);
+  const model = env(context, definition.modelEnvKey)?.trim() || definition.defaultModel;
+  const minimumCredits = envNumber(context, definition.minimumEnvKey, definition.defaultMinimumCredits);
   const row = activeMarketPrices().llm[model];
 
   if (!row) {
+    const priced = Object.keys(activeMarketPrices().llm).join(', ') || '(none)';
+
     throw new NotConfiguredError(
-      `PREMIUM_MODEL="${model}"`,
-      'The Marketplace price list has no row for it, so we cannot bill it. Add its row (input + output USD ' +
-        'per million tokens) in Settings → Admin → Marketplace prices, then promote — or unset PREMIUM_MODEL ' +
-        `to use the default (${DEFAULT_PREMIUM_MODEL}).`,
+      `${definition.modelEnvKey}="${model}"`,
+      'The Marketplace price list has no row for it, so we cannot bill it — and an unpriced model does not ' +
+        'bill as free, it bills at the most expensive model we know of. Add its row (input + output USD per ' +
+        `million tokens) in Settings → Admin → Marketplace prices, then promote — or unset ${definition.modelEnvKey} ` +
+        `to use the default (${definition.defaultModel}). Priced models: ${priced}.`,
     );
   }
 
-  return { model, rates: ratesFromBase(row.inputPerMTok, row.outputPerMTok), minimumCredits };
+  return {
+    id: definition.id,
+    label: definition.label,
+    model,
+    rates: ratesFromBase(row.inputPerMTok, row.outputPerMTok),
+    minimumCredits,
+    firstBuildLocked: definition.firstBuildLocked,
+  };
+}
+
+/** One rung as reported to a caller that may not throw — the whole ladder, misconfiguration included. */
+export interface ModelTierStatus {
+  id: ModelTierId;
+  label: string;
+
+  /** The model this rung would run. On a misconfigured rung this is the in-code DEFAULT, not the selector. */
+  model: string;
+
+  /** Zero for `standard` — the free rung has no threshold. */
+  minimumCredits: number;
+
+  firstBuildLocked: boolean;
+
+  /**
+   * Can this rung actually be served right now? False when its selector cannot be priced.
+   *
+   * 🔴 A misconfigured rung reports `false`, never `true` on the baked default's behalf. Reporting a
+   * capability as available when `getModelTier` would refuse it renders an enabled control that
+   * hard-fails on use — the 2026-07-25 `premiumSessionHint` lesson. Degrading to "off" is honest.
+   */
+  serveable: boolean;
+
+  /** Operator-facing reason, present iff `!serveable`. Never shown to an end user. */
+  reason?: string;
+}
+
+/**
+ * The whole ladder, resolved, NEVER throwing.
+ *
+ * `standardModel` is a parameter rather than something this function resolves, and that is structural:
+ * the platform model is `getPlatformModel`'s to state (`agent/config.ts`), and this file must not
+ * import that module — the cycle documented at `mostExpensive` below. Its callers already hold the
+ * standard model, guarded, for exactly this reason.
+ */
+export function getModelTiers(standardModel: string, context?: unknown): ModelTierStatus[] {
+  const standard: ModelTierStatus = {
+    id: 'standard',
+    label: STANDARD_TIER_LABEL,
+    model: standardModel,
+    minimumCredits: 0,
+    firstBuildLocked: false,
+    serveable: true,
+  };
+
+  /*
+   * 🔴 `ENABLE_EXTENDED_MODELS=false` → the ladder IS the standard rung, and every downstream rule
+   * follows from that single fact rather than from a second code path (see `extended-models.ts`).
+   * `decideModelTier` already resolves a rung it cannot find DOWN to standard, `/api/me` reports one
+   * option so the picker has nothing to open, and `getTierModel` refuses independently.
+   *
+   * Returning them as `serveable: false` instead would be wrong in a way that matters: that state means
+   * "misconfigured — an operator must fix something", and it renders a LOCKED row, i.e. the UI keeps
+   * advertising classes this deploy has deliberately withdrawn.
+   */
+  if (!extendedModelsEnabled(context)) {
+    return [standard];
+  }
+
+  const paid = PAID_MODEL_TIERS.map((definition): ModelTierStatus => {
+    try {
+      const tier = getModelTier(definition.id, context);
+
+      return {
+        id: tier.id,
+        label: tier.label,
+        model: tier.model,
+        minimumCredits: tier.minimumCredits,
+        firstBuildLocked: tier.firstBuildLocked,
+        serveable: true,
+      };
+    } catch (error) {
+      /*
+       * The threshold is still readable — `envNumber` cannot throw — so the locked rung can still
+       * state what it WOULD cost to unlock. Only the model half is in doubt, and that reports as the
+       * in-code default rather than the unpriceable selector: naming a model we refuse to bill would
+       * put a model the platform will not run in front of the user.
+       */
+      return {
+        id: definition.id,
+        label: definition.label,
+        model: definition.defaultModel,
+        minimumCredits: envNumber(context, definition.minimumEnvKey, definition.defaultMinimumCredits),
+        firstBuildLocked: definition.firstBuildLocked,
+        serveable: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
+  return [standard, ...paid];
+}
+
+/** @deprecated Use `ModelTier`. Kept so existing premium-only callers keep their type name. */
+export type PremiumTier = ModelTier;
+
+/** The premium rung, by its old name. One implementation, so premium and SuperMax cannot drift. */
+export function getPremiumTier(context?: unknown): ModelTier {
+  return getModelTier('premium', context);
 }
 
 /**
@@ -307,50 +452,55 @@ export function getPremiumTier(context?: unknown): PremiumTier {
  * A FUNCTION, not a constant, since 2026-07-17: KIE's row is the operator's to state (`kieRates`), and
  * a module-level constant would freeze whatever the environment held at import time.
  *
- * The premium model is injected into EVERY provider's table so it is priceable no matter who serves it
- * (§4.6.1). This is what makes `claude-fable-5` billable on Anthropic, which bakes no row for it — and
- * it is idempotent on KIE, where the default premium price matches the baked row exactly.
+ * EVERY paid rung of the model tier ladder is injected into EVERY provider's table so it is priceable
+ * no matter who serves it (§4.6.1a). This is what makes `claude-fable-5` billable on Anthropic, which
+ * bakes no row for it — and it is idempotent on KIE, whose table derives from the same price list.
  */
 export function providerRates(context?: unknown): Record<string, Record<string, ModelRates>> {
   /*
-   * The premium injection must not be able to take SETTLEMENT down. `getPremiumTier` throws when the
-   * active list has no row for `PREMIUM_MODEL` — correct at the premium DECISION (a loud config error
+   * The ladder injection must not be able to take SETTLEMENT down. `getModelTier` throws when the
+   * active list has no row for a rung's selector — correct at the tier DECISION (a loud config error
    * before any spend), and wrong here, where this table also prices in-flight settlement, which can
-   * never refuse (§4.6). An unpriceable premium tier therefore skips injection: a premium generation
-   * mid-flight settles through `ratesFor`'s most-expensive fallback — over-charging ourselves, the
-   * safe direction — while new premium requests are refused loudly by `getPremiumModel`.
+   * never refuse (§4.6). An unpriceable rung therefore skips ITS OWN injection and leaves the others
+   * standing: a generation on it mid-flight settles through `ratesFor`'s most-expensive fallback —
+   * over-charging ourselves, the safe direction — while new requests for it are refused loudly by
+   * `getTierModel`.
    */
-  let premium: PremiumTier | undefined;
-
-  try {
-    premium = getPremiumTier(context);
-  } catch {
-    premium = undefined;
-  }
+  const tiers = PAID_MODEL_TIERS.flatMap((definition) => {
+    try {
+      return [getModelTier(definition.id, context)];
+    } catch {
+      return [];
+    }
+  });
 
   /**
    * 🔴 **FILL A GAP, NEVER OVERWRITE A PROVIDER'S OWN ROW** (found 2026-07-30 while re-pricing the
    * platform model). This shipped as `{ ...table, [premium.model]: premium.rates }` — an unconditional
-   * overwrite — and `premium.rates` come from the active MARKETPLACE list, which is KIE-shaped. So the
-   * moment `PREMIUM_MODEL` names a model Anthropic also prices natively, Anthropic's row was replaced
-   * by KIE's:
+   * overwrite — and a rung's rates come from the active MARKETPLACE list, which is KIE-shaped. So the
+   * moment a rung names a model Anthropic also prices natively, Anthropic's row was replaced by KIE's:
    *
    *     PREMIUM_MODEL=claude-opus-5 → Anthropic claude-opus-5 billed at $2/$10 (KIE) instead of $5/$25
    *
    * A cold build turn measured **231 credits instead of 576** — we would eat 60% of the cost of every
    * premium generation, silently, with the credit count going DOWN so it reads as a cheaper turn.
    *
-   * It was invisible because the default `PREMIUM_MODEL` is `claude-fable-5`, which Anthropic bakes NO
-   * row for — the exact case the injection was written for, where filling and overwriting are the same
-   * thing. It stays idempotent on KIE, whose table derives from that same list. A provider that prices
-   * a model itself is the authority on what it charges.
+   * ⚠️ It was invisible only while the default `PREMIUM_MODEL` was `claude-fable-5`, which Anthropic
+   * bakes NO row for — the case where filling and overwriting are the same thing. **That safe case is
+   * over**: the premium rung now defaults to `claude-opus-5`, which Anthropic prices natively at
+   * $5/$25, so the guard below is the ONLY thing standing between this table and the 231-vs-576
+   * regression. SuperMax (`claude-fable-5`) is still gap-filled on Anthropic and idempotent on KIE.
+   * A provider that prices a model itself is the authority on what it charges.
    */
-  const withPremium = (table: Record<string, ModelRates>): Record<string, ModelRates> =>
-    premium && !table[premium.model] ? { ...table, [premium.model]: premium.rates } : table;
+  const withTiers = (table: Record<string, ModelRates>): Record<string, ModelRates> =>
+    tiers.reduce(
+      (acc, tier) => (acc[tier.model] ? acc : { ...acc, [tier.model]: tier.rates }),
+      table as Record<string, ModelRates>,
+    );
 
   return {
-    Anthropic: withPremium(MODEL_RATES),
-    KIE: withPremium(kieRates(context)),
+    Anthropic: withTiers(MODEL_RATES),
+    KIE: withTiers(kieRates(context)),
   };
 }
 
@@ -682,8 +832,9 @@ export const COLD_CREATION_USAGE: TokenUsage = {
  * ⚠️ **The grant size and the provider are ONE number split across two files** — the same shape of bug
  * as `packMargin()` (a pack's price and `CREDIT_MARGIN` disagreeing, silently, at ~19% a generation).
  * A grant is denominated in credits, credits are cost-proportional, and cost depends on the provider —
- * so `SIGNUP_GRANT_CREDITS = 800` at margin 4.0 is comfortable on KIE (~231 credits a build turn, ~2.8x
- * headroom) and BROKEN on Anthropic (~576, i.e. ~1.4x: below the 1.5x floor — the first prompt plus an
+ * so `SIGNUP_GRANT_CREDITS = 1000` at margin 4.0 is comfortable on KIE (~231 credits a build turn, ~3.7x
+ * headroom — ⚠️ that build-turn figure is an OPUS-era measurement and has not been re-derived for the
+ * `claude-sonnet-5` default, which is ~2.35x cheaper on KIE, so the real headroom is UNDERSTATED here) and BROKEN on Anthropic (~576, i.e. ~1.4x: below the 1.5x floor — the first prompt plus an
  * edit exhausts the grant and lands the user negative, with nothing left to iterate).
  *
  * That failure would be silent and would land on the ONE moment the funnel depends on — a new user's

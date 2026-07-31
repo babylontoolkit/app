@@ -126,12 +126,22 @@ export function kieFetch(baseFetch: typeof fetch = fetch): typeof fetch {
  * accounting (probe-verified), same missing thinking text. The trade above carries over unchanged
  * to the new default; 4-8 stays listed as a selectable prior default.
  */
+/*
+ * 🔴 EVERY RUNG OF THE MODEL TIER LADDER MUST BE LISTED HERE, not merely priced (SPEC §4.6.1a).
+ *
+ * `stream-text.ts` falls back to `modelsList[0]` for a model it cannot find, so an unlisted rung would
+ * silently run a DIFFERENT model than the one settlement charges for — wrong model, wrong price, no
+ * error. That is survivable for an operator override (`kieEnvModel` below synthesises a `ModelInfo`
+ * from `LLM_MODEL`) and NOT survivable for an in-code default, where there is no env var to synthesise
+ * from. The three rungs today: `claude-sonnet-5` (Standard), `claude-opus-5` (Premium),
+ * `claude-fable-5` (SuperMax). Pinned by `model-tiers.spec.ts`.
+ *
+ * ⚠️ Ordering is NOT meaningful except for index 0, which is the fallback above. Do not read the first
+ * entry as "the default" — this comment used to sit on `claude-opus-4-7` and read exactly that way,
+ * long after 4-7 stopped being the default.
+ */
 export const KIE_MODELS: ModelInfo[] = [
-  /*
-   * The platform default (`DEFAULT_MODEL`). It MUST be listed here, not merely priced: `stream-text.ts`
-   * falls back to `modelsList[0]` for a model it cannot find, so an unlisted default would silently run
-   * a different model than the one settlement charges for. See `kieEnvModel` below.
-   */
+  /* A selectable prior default. Never removed silently — see the exit note above. */
   {
     name: 'claude-opus-4-7',
     label: 'Claude Opus 4.7 (KIE)',
@@ -148,12 +158,13 @@ export const KIE_MODELS: ModelInfo[] = [
   },
 
   /*
-   * THE PLATFORM DEFAULT since 2026-07-27 (`DEFAULT_MODEL`), at 4-8's exact KIE price ($2/$10 —
-   * baked-market-prices.ts). Probe-verified same day: cache accounting reports honestly like 4-8
-   * (5,419-token write reported cold, 5,419-token read warm), and thinking text is empty like every
-   * KIE model since the 2026-07-24 regression (see the re-measure table above) — the heartbeat
-   * carries the UX. Listed here for the same reason as the others: an unlisted default silently runs
-   * `modelsList[0]` on the enhancer path while settlement charges the configured model's rates.
+   * The PREMIUM rung (`DEFAULT_PREMIUM_MODEL`) since 2026-07-31; THE PLATFORM DEFAULT before that,
+   * from 2026-07-27, at 4-8's exact KIE price ($2/$10 — baked-market-prices.ts). Probe-verified on
+   * 07-27: cache accounting reports honestly like 4-8 (5,419-token write reported cold, 5,419-token
+   * read warm), and thinking text is empty like every KIE model since the 2026-07-24 regression (see
+   * the re-measure table above) — the heartbeat carries the UX. It is also the standing revert target
+   * for the Standard rung (`LLM_MODEL=claude-opus-5`), so it must stay listed and priced regardless of
+   * which rung it currently occupies.
    */
   {
     name: 'claude-opus-5',
@@ -164,18 +175,15 @@ export const KIE_MODELS: ModelInfo[] = [
   },
 
   /*
-   * Listed 2026-07-30. NOT the default — it was tried and rejected: KIE answers it with
-   * `HTTP 500 "Network error"` on **77% of requests** (7 ok / 30, against Opus 5's 21/22 on an
-   * interleaved control). The full measurement, and the money case that makes it worth retrying, live
-   * on `DEFAULT_MODEL` in `utils/constants.ts`.
+   * THE PLATFORM DEFAULT (`DEFAULT_MODEL`) — the Standard rung — since 2026-07-31. Listed 2026-07-30,
+   * one day before it took the slot, which is why the listing rule above exists in the first place.
    *
-   * It is listed anyway, and that is the point: with the row here and its price already baked, the day
-   * KIE fixes their side the switch is `LLM_MODEL=claude-sonnet-5` and nothing else — no rebuild
-   * (§4.2a). Being priced but UNLISTED is survivable for an operator override (`kieEnvModel` below
-   * synthesises a `ModelInfo` from `LLM_MODEL`) and not survivable as a bare default: with no env var
-   * there is nothing to synthesise, so `stream-text.ts` falls through to `modelsList[0]` on the
-   * enhancer path while `settleGeneration` charges the configured model's rates — wrong model, wrong
-   * price, no error, on the one configuration nobody runs locally.
+   * ⚠️ It carries a KNOWN VENDOR RISK: on 2026-07-30 KIE answered it with `HTTP 500 "Network error"`
+   * on **77% of requests** (7 ok / 30, against Opus 5's 21/22 on an interleaved control), which is why
+   * it was reverted that day. The owner shipped it anyway on 07-31 for a measured 2.73x cost saving,
+   * on the strength of the config-only revert (`LLM_MODEL=claude-opus-5`). Full measurement and the
+   * money case live on `DEFAULT_MODEL` in `utils/constants.ts`; re-probe before trusting either
+   * verdict, because a vendor fault can clear or return with nobody telling us.
    */
   {
     name: 'claude-sonnet-5',
@@ -186,15 +194,75 @@ export const KIE_MODELS: ModelInfo[] = [
   },
 
   /*
-   * The PREMIUM tier (§4.6.1). Listed AND priced (`KIE_MODEL_RATES['claude-fable-5']`, and the
-   * `providerRates` premium injection): it is the strongest model KIE serves whose thinking text their
-   * adapter returns (224/223 chars, vs 4-8's 0), at 2x the price. The proxy hands it straight to
-   * `getModelInstance`, so it runs as itself; listing it here keeps the enhancer's `modelsList[0]`
+   * The SUPERMAX rung (`DEFAULT_SUPERMAX_MODEL`, §4.6.1a) — the top of the ladder since 2026-07-31;
+   * the default PREMIUM model before that. Listed AND priced (`KIE_MODEL_RATES['claude-fable-5']`,
+   * plus the `providerRates` tier injection): it is the strongest model KIE serves whose thinking text
+   * their adapter returns (224/223 chars, vs 4-8's 0), at 2x Opus's price. The proxy hands it straight
+   * to `getModelInstance`, so it runs as itself; listing it here keeps the enhancer's `modelsList[0]`
    * fallback from ever standing in for it, and lets the Pro model selector show it.
+   *
+   * ⚠️ `label` is RENDERED (the Pro model selector), so the tier word in it is a live claim, not a
+   * comment — it read "· Premium" for a day after Fable 5 moved up a rung, disagreeing with
+   * `PAID_MODEL_TIERS[1].label`. It is the only label in this array carrying a tier word; if the rungs
+   * move again, move it too or drop the word.
    */
   {
     name: 'claude-fable-5',
-    label: 'Claude Fable 5 (KIE · Premium)',
+    label: 'Claude Fable 5 (KIE · SuperMax)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+
+  /*
+   * 🔴 THE REST OF KIE'S CLAUDE CATALOGUE — listed 2026-07-31 to close a LATENT MIS-BILL.
+   *
+   * `claude-opus-4-6` and `claude-haiku-4-5` had been PRICED (baked list) but NOT LISTED here for
+   * weeks. That combination is the exact trap the comment at the top of this array describes, and it
+   * is worse than being unpriced: `getPlatformModel` ACCEPTS the selector (it validates against the
+   * price table, and the row exists), so `LLM_MODEL=claude-opus-4-6` looks configured and generations
+   * run — while `stream-text.ts`'s enhancer path cannot find the id, falls through to `modelsList[0]`
+   * (`claude-opus-4-7`), and runs a DIFFERENT model than the one settlement charges for. Wrong model,
+   * right price, no error. Being unpriced fails loudly; being priced-but-unlisted fails silently.
+   *
+   * `claude-sonnet-4-6`, `claude-sonnet-4-5` and `claude-opus-4-5` were added to the price list the
+   * same day (KIE serves them; an operator setting one got a hard refusal because the row was simply
+   * missing), and they are listed here in the same edit so the pair can never drift apart again.
+   *
+   * The invariant — every priced Claude row is listed, and every listed row is priced — is pinned in
+   * `model-tiers.spec.ts`. Add a row in one place and the test names the other.
+   */
+  {
+    name: 'claude-opus-4-6',
+    label: 'Claude Opus 4.6 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'claude-opus-4-5',
+    label: 'Claude Opus 4.5 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'claude-sonnet-4-6',
+    label: 'Claude Sonnet 4.6 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'claude-sonnet-4-5',
+    label: 'Claude Sonnet 4.5 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'claude-haiku-4-5',
+    label: 'Claude Haiku 4.5 (KIE)',
     provider: 'KIE',
     maxTokenAllowed: 1_000_000,
     maxCompletionTokens: 128_000,

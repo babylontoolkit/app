@@ -16,6 +16,12 @@
  * (rates.ts history): Opus 4.8 $2/$10, Opus 4.7 $1.425/$7.15, Fable 5 $4/$20 — feed and measurement
  * agree to the cent, which is the only reason both are trusted.
  *
+ * Re-fetched 2026-07-31 (filter `modelDescription: "claude"`, 20 rows = 10 models x input/output).
+ * Every one of the seven rows already baked came back IDENTICAL to the cent, which is what makes the
+ * three rows added that day trustworthy on the feed's word alone. KIE serves ten Claude models; the
+ * list now carries all ten, so an operator can point `LLM_MODEL` at any of them without an admin
+ * promotion first.
+ *
  * Ordinary price maintenance is NOT an edit to this file: the operator updates the ACTIVE list from
  * the Admin panel (fetch feed → adjust → promote), versioned with rollback, no deploy. Re-bake this
  * file only when the baked fallback itself has drifted far enough to matter (a new default model, a
@@ -40,7 +46,7 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
   schemaVersion: 1,
 
   /** When the feed was captured. The ACTIVE list carries its own capturedAt. */
-  capturedAt: '2026-07-18',
+  capturedAt: '2026-07-31',
   source: 'api.kie.ai/client/v1/model-pricing (public feed), cross-checked against measured rates',
 
   /**
@@ -52,7 +58,9 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
    */
   llm: {
     /*
-     * THE PLATFORM DEFAULT since 2026-07-27 (superseding claude-opus-4-8 below). KIE serves it at
+     * The PREMIUM rung (`DEFAULT_PREMIUM_MODEL`) since 2026-07-31; the PLATFORM DEFAULT from
+     * 2026-07-27 until then (superseding claude-opus-4-8 below), and still the config-only revert
+     * target for the Standard rung. KIE serves it at
      * exactly 4-8's rates — owner-confirmed and probe-verified 2026-07-27 against KIE's own usage
      * numbers: the cold request reported a 5,419-token 1h cache WRITE and warm ones a 5,419-token
      * cache READ, so it settles like 4-8, not like the 4-7/fable rows (which report 0 write tokens
@@ -80,16 +88,43 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
     'claude-opus-4-6': { inputPerMTok: 1.425, outputPerMTok: 7.15 },
 
     /*
-     * THE DEFAULT PREMIUM TIER (§4.6.1). 2x Opus 4.8 on KIE, not cheaper — it is premium because it
+     * THE DEFAULT SUPERMAX RUNG (`DEFAULT_SUPERMAX_MODEL`, §4.6.1a) — the top of the ladder since
+     * 2026-07-31; the default PREMIUM model before that. 2x Opus 4.8 on KIE, not cheaper — it is
+     * the top rung because it
      * is the strongest model KIE serves whose thinking text their adapter returns. MEASURED against
      * KIE's own `credits_consumed` (2026-07-17): a four-point input sweep converges on $4.006 and an
      * output probe on $19.99, with Opus 4.8 as the control reproducing its published $2/$10 exactly.
      */
     'claude-fable-5': { inputPerMTok: 4.0, outputPerMTok: 20.0 },
 
-    /* Feed rows (2026-07-18) — selectable, not defaults. Sonnet 5 is ~0.283x of Anthropic list. */
+    /*
+     * THE PLATFORM DEFAULT (`DEFAULT_MODEL`) — the Standard rung — since 2026-07-31. Row captured from
+     * the feed 2026-07-18, ~0.283x of Anthropic's list. Every promoted price list MUST carry a row for
+     * whatever `DEFAULT_MODEL` names (`validateMarketPriceList`), because an unpriced default bills at
+     * the most-expensive row instead — which is now the SuperMax rung, 4.7x this.
+     */
     'claude-sonnet-5': { inputPerMTok: 0.85, outputPerMTok: 4.275 },
+
+    /* A feed row (2026-07-18) — priced and selectable, but no rung uses it. */
     'claude-haiku-4-5': { inputPerMTok: 0.275, outputPerMTok: 1.425 },
+
+    /*
+     * The rest of KIE's Claude catalogue, re-fetched 2026-07-31. Added because the operator could set
+     * `LLM_MODEL` to a model KIE genuinely serves and have every generation REFUSED at config time
+     * (`claude-sonnet-4-6` did exactly that) — the var was honoured, the price row simply did not
+     * exist, and the refusal named the Admin panel rather than the real problem. A selector for a
+     * model our own provider sells should not require an admin promotion first.
+     *
+     * With these, the baked list covers all TEN Claude models on KIE's feed. Sonnet 4-6 and 4-5 price
+     * identically to Sonnet 5; Opus 4-5 matches 4-6/4-7. ⚠️ Priced but NOT measured against
+     * `credits_consumed` the way 4-8/4-7/fable-5 were — the feed is one source, and it is trustworthy
+     * here only because the same fetch reproduced all seven pre-existing rows to the cent. Before
+     * making any of these a default rung, measure its cache accounting: 4-7 and fable-5 report ZERO
+     * cache-write tokens while being charged 2x, which is what disqualified them (rates.ts).
+     */
+    'claude-sonnet-4-6': { inputPerMTok: 0.85, outputPerMTok: 4.275 },
+    'claude-sonnet-4-5': { inputPerMTok: 0.85, outputPerMTok: 4.275 },
+    'claude-opus-4-5': { inputPerMTok: 1.425, outputPerMTok: 7.15 },
   },
 
   /**

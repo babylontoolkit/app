@@ -32,6 +32,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PROJECT_CREATE_CREDITS, getBillingConfig } from './rates';
 import { decideProjectCreateCharge, type ProjectCreateChargeInput } from './project-create';
+import { ENV_EXAMPLE_FILENAME, envExampleAssignments } from './env-example';
 
 /**
  * The full chain that can reach `getBillingConfig().projectCreateCredits`. `BILLING_ENFORCED` rides
@@ -250,10 +251,14 @@ describe('decideProjectCreateCharge', () => {
  * was once assigned twice with different values in this very file and handed out the wrong grant to
  * anyone who copied it — the file now carries a prose warning about that, and a prose warning cannot
  * fail. This is the mechanism that replaced it, for this variable.
+ *
+ * The counting itself lives in `env-example.ts` so that this pin and the §4.6.1a model-tier-ladder pin
+ * (`model-tiers.spec.ts`) share ONE definition of "assigns this key" — two counters that disagree fail
+ * in the safe-looking direction, reporting no duplicates forever.
  */
 describe('.env.example documents PROJECT_CREATE_CREDITS exactly once', () => {
-  const example = readFileSync(path.join(process.cwd(), '.env.example'), 'utf8');
-  const assignments = example.split('\n').filter((line) => /^\s*(?:#\s*)?PROJECT_CREATE_CREDITS\s*=/.test(line));
+  const example = readFileSync(path.join(process.cwd(), ENV_EXAMPLE_FILENAME), 'utf8');
+  const assignments = envExampleAssignments(example, 'PROJECT_CREATE_CREDITS');
 
   it('assigns it on exactly one line (commented-out duplicates count — they get uncommented)', () => {
     expect(assignments).toHaveLength(1);

@@ -31,9 +31,10 @@ Turning enforcement on is a single flag:
 BILLING_ENFORCED=true    # .env.local
 ```
 
-**Two things enforcement does NOT change (2026-07-18):** the **premium model threshold** binds on the
-balance either way (settlement debits regardless, so a 320-credit balance cannot switch on the 2×
-model even unmetered — a deploy that wants free premium sets `PREMIUM_MINIMUM_CREDITS=0` explicitly),
+**Two things enforcement does NOT change (2026-07-18):** the **paid-tier thresholds** bind on the
+balance either way (settlement debits regardless, so a 320-credit balance cannot switch on an
+expensive rung even unmetered — a deploy that wants a free paid rung sets that rung's
+`PREMIUM_MINIMUM_CREDITS=0` / `SUPERMAX_MINIMUM_CREDITS=0` explicitly),
 and **media generation debits** (§4.16) are taken up-front either way and refuse at 402 rather than
 overdraw — the `media` ledger reason may never go negative.
 
@@ -117,8 +118,9 @@ raw_cost = in·inputRate + cache_read·(0.1×inputRate) + cache_write·(2×input
 credits  = ceil(raw_cost / CREDIT_UNIT_COST_USD × CREDIT_MARGIN)
 ```
 
-Current baked rates (per MTok, KIE): Opus 5 (the default since 2026-07-27, at its predecessor
-Opus 4.8's exact price) **$2 / $10**; Fable 5 (the premium tier) **$4 / $20**. Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
+Current baked rates (per MTok, KIE), by SPEC §4.6.1a rung: Sonnet 5 (**Standard** — the platform
+default since 2026-07-31) **$0.85 / $4.275**; Opus 5 (**Premium** — the default 2026-07-27 →
+2026-07-31, at its predecessor Opus 4.8's exact price) **$2 / $10**; Fable 5 (**SuperMax**) **$4 / $20**. Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
 §4.2.8; assuming the 1.25× headline number under-charges every generation and nothing throws).
 
 Measured on KIE (2026-07-16/17, `spec/context-budget.md` §MEASURED) **at the old margin 3.34** — at the
@@ -128,11 +130,13 @@ current `CREDIT_MARGIN = 4.0` every figure below is ~1.2× higher: a full playab
 task** (§4.16): a 2K image is ~24 credits at 4.0, a video clip runs from ~60 (veo3_lite) into the
 hundreds (kling-3.0 pro) — debited up-front at the exact price shown on the Generate button.
 
-The 800-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~2.8× a measured KIE build turn at
-margin 4.0 (guarantees one free game + iteration), and deliberately BELOW the 1,200-credit premium
-minimum, so a fresh account cannot burn its grant on the 2× model. Premium is also **edit-only**: the first build turn always runs the standard streaming model
-(`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a build-sized
-artifact before the gateway timeout).
+The 1000-credit signup grant (`SIGNUP_GRANT_CREDITS` default) is ~3.7× a measured KIE build turn at
+margin 4.0 (guarantees one free game + iteration), and deliberately BELOW both shipped tier
+thresholds (1500/1500), so a fresh account cannot burn its grant on a paid rung. Every paid rung is
+also **edit-only**: the first build turn always runs the platform default
+(`decideModelTier` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a build-sized
+artifact before the gateway timeout, and the lock was generalized to the whole ladder because the
+first build is the largest artifact in the product).
 
 > **A deploy costs money.** Tool schemas and the base prompt live *inside* the cached prefix. Change
 > either and every user's cache entry is invalidated, so the next generation pays a full cache write at
@@ -161,9 +165,9 @@ particular turn will cost. Operator notes:
 - **BYOK and unmetered mode create for free**, and no zero-value ledger row is written — a `0` entry is
   noise in an audit trail, not evidence.
 - Deleting a project that never completed a generation **refunds** the charge.
-- Premium is still **edit-only**: the first build turn always runs the standard streaming model
-  (`decidePremium` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a build-sized artifact
-  before the gateway timeout).
+- Every paid rung is still **edit-only**: the first build turn always runs the platform default
+  (`decideModelTier` `reason: 'creation_turn'` — KIE-buffered Fable 5 cannot flush a build-sized artifact
+  before the gateway timeout; `firstBuildLocked` is per-rung data, so all of them are locked today).
 - **`CREATION_FLAT_CREDITS` is RETIRED and REFUSED.** It priced the creation TURN, which no longer
   exists. Leaving it set is a pricing intent nothing honours, so the platform refuses to boot with it
   and names its replacement — the same posture as the retired `KIE_*_DOLLARS` vars, and for the same
@@ -261,14 +265,16 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 
 | Var | Default | What it does |
 |---|---|---|
-| `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone (premium threshold + media 402 still bind) |
-| `SIGNUP_GRANT_CREDITS` | `800` | Starter credits, once per user (~2.8× a KIE build turn at margin 4.0 **after** the flat `PROJECT_CREATE_CREDITS` charge comes off the top; below the premium minimum on purpose) |
+| `BILLING_ENFORCED` | `false` | `false` = record usage but never block anyone (paid-tier thresholds + media 402 still bind) |
+| `SIGNUP_GRANT_CREDITS` | `1000` | Starter credits, once per user (~3.7× a KIE build turn at margin 4.0 **after** the flat `PROJECT_CREATE_CREDITS` charge comes off the top; below **both** paid-tier minimums on purpose) |
 | `GRANTS_ENABLED` | `true` | Turn the signup grant off entirely |
 | `CREDIT_UNIT_COST_USD` | `0.01` | What one credit represents in raw model spend |
 | `CREDIT_MARGIN` | `4.0` | Multiplier over raw LLM+media cost (~75% GM target; realized ~72–75% LLM-only, **~58–63% effective while sandbox compute rides unmetered on the Nano default tier** — see "Sandbox compute"). **4.0 is a DECISION, not a placeholder (owner, 2026-07-28)** — every pack and plan clears `MIN_PACK_MARGIN` at it, and raising it is a price increase to customers, so it is management's call and env/SSM-configurable. The "~`8.0` restores ~75%" figure in that section is arithmetic, NOT a plan — and it is only true if `SANDBOX_EST_VM_HOURS_PER_KCREDIT` is rescaled alongside it. |
 | `SANDBOX_VM_USD_PER_HOUR` | *derived from `CODESANDBOX_VM_TIER`* | MEASURED list price of the configured VM tier (**default Nano `0.149`**, Pico `0.074`; larger tiers derived at ~$0.0745/CPU-hour, an unknown name priced at the most expensive measured tier). An OPTIONAL override for a negotiated or changed rate — leave it unset so raising the tier raises the price. "Raise it with the tier" was a comment, and a comment cannot fail — see "Sandbox compute" |
 | `SANDBOX_EST_VM_HOURS_PER_KCREDIT` | `8.33` | The ESTIMATE: VM-hours dragged along by 1,000 billed credits (~120 credits per active build-hour, inverted). Replaced by measurement once the Admin VM-hours report has data |
-| `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-fable-5` / `1200` | The 2× premium tier: a selector + the balance a user must HOLD to unlock it (edit turns only) |
+| `LLM_MODEL` | *`DEFAULT_MODEL`, `claude-sonnet-5`* | §4.6.1a **Standard** rung — the platform default. Always usable, no threshold |
+| `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-opus-5` / `1200` *(`.env.example` ships `1500`)* | §4.6.1a **Premium** rung: a selector the ACTIVE price list must price + the balance a user must HOLD to unlock it (edit turns only) |
+| `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` | `claude-fable-5` / `1500` | §4.6.1a **SuperMax** rung, same rules. An unrecognised, unpriceable or unaffordable rung resolves DOWN to Standard — never up |
 | `PROJECT_CREATE_CREDITS` | `150` | Flat price of creating a project, charged at registration before anything is provisioned (`0` makes it free). Every generation turn — including the first build — bills cost-derived. See "Creating a project is FLAT" |
 | ~~`CREATION_FLAT_CREDITS`~~ | *retired* | **REFUSED if set** (including `0`), naming `PROJECT_CREATE_CREDITS`. There is no creation turn to flat-price any more |
 | `CACHE_WARMER_ENABLED` | `true` | Base-prompt cache warmer (KIE only): keeps the shared prompt block warm so generations read at 0.1× instead of writing at 2×. Platform-paid, no ledger rows |
@@ -305,9 +311,11 @@ Stripe session id; subscription grants fire ONLY on `invoice.paid`.
 
 | Thing | File |
 |---|---|
-| Rate table, config, premium tier | `app/lib/.server/billing/rates.ts` |
+| Rate table, config, tier resolution (`getModelTier`/`getModelTiers`) | `app/lib/.server/billing/rates.ts` |
+| The tier ladder's shape (zero-import: ids, labels, in-code defaults) | `app/lib/.server/billing/model-tiers.ts` |
+| Tier picker + pill (client) | `app/components/chat/ModelTierPanel.tsx`, `ModelTierPill.tsx`, `app/lib/stores/model-tier.ts` |
 | Marketplace price list (baked + versioned store) | `app/lib/.server/billing/{baked-market-prices,market-prices,market-price-store}.ts` |
-| Premium eligibility (`decidePremium`) | `app/lib/.server/billing/premium.ts` |
+| Tier eligibility (`decideModelTier`) + the `/api/me` hint (`modelTiersSessionHint`) | `app/lib/.server/billing/premium.ts` |
 | Ledger (FS + Supabase) | `app/lib/.server/billing/ledger.ts` |
 | Gate, settlement, auto-refund | `app/lib/.server/billing/gate.ts` |
 | Media debit/refund (§4.16) | `app/lib/.server/media/service.ts` |

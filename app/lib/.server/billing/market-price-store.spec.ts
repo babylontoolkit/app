@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
+import { DEFAULT_MODEL } from '~/utils/constants';
 import {
   activeMarketPrices,
   activeMarketPriceVersionId,
@@ -92,7 +93,13 @@ describe('promotion', () => {
     const result = await promoteMarketPrices(store, missingDefault);
 
     expect(result.ok).toBe(false);
-    expect(result.ok ? '' : result.errors.join('; ')).toMatch(/claude-opus-5/);
+
+    /*
+     * Asserted against DEFAULT_MODEL, not a literal: the property is "the refusal names the model we
+     * would otherwise mis-bill", and hard-coding today's default made this fail the day the platform
+     * moved rungs (Opus 5 → Sonnet 5, 2026-07-31) for a reason that had nothing to do with the wall.
+     */
+    expect(result.ok ? '' : result.errors.join('; ')).toContain(DEFAULT_MODEL);
     expect(activeMarketPrices()).toBe(BAKED_MARKET_PRICES);
   });
 

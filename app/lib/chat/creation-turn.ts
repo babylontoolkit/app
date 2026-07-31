@@ -3,7 +3,7 @@
  *
  * The server derives its own answer from the request it receives (`proxy.ts`); this one decides what
  * the USER is shown before anything is sent, and its single consumer is the premium pill's lock
- * (`PremiumToggle` — premium is EDIT-ONLY, because a first build on KIE-buffered Fable 5 dies at the
+ * (`ModelTierPill` — every paid rung is EDIT-ONLY, because a first build on a buffered model dies at the
  * gateway timeout before its artifact can flush). Authority stays server-side: `decidePremium`
  * re-derives eligibility on every generation, so a wrong answer here only ever offers a toggle the
  * server declines — it can never buy premium.

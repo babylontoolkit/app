@@ -20,11 +20,11 @@ exists for *skill* versions; that is unrelated.
 
 | Model | ID | Context (`maxTokenAllowed`) | Output (`maxCompletionTokens`) |
 |---|---|---|---|
-| Claude Sonnet 5 | `claude-sonnet-5` | 1_000_000 | 128_000 |
+| Claude Sonnet 5 (**platform default since 2026-07-31**; SPEC §4.6.1a **Standard** rung) | `claude-sonnet-5` | 1_000_000 | 128_000 |
 | Claude Haiku 4.5 | `claude-haiku-4-5` | 200_000 | **64_000** |
 | Claude Opus 4.8 | `claude-opus-4-8` | 1_000_000 | 128_000 |
-| Claude Opus 5 (default since 2026-07-27) | `claude-opus-5` | 1_000_000 | 128_000 |
-| Claude Fable 5 | `claude-fable-5` | 1_000_000 | 128_000 |
+| Claude Opus 5 (§4.6.1a **Premium** rung; platform default 2026-07-27 → 2026-07-31) | `claude-opus-5` | 1_000_000 | 128_000 |
+| Claude Fable 5 (§4.6.1a **SuperMax** rung — opt-in, threshold-gated, never a default) | `claude-fable-5` | 1_000_000 | 128_000 |
 
 ⚠️ **Haiku is the exception**: 200k context and a **64k** output cap, not 128k. Copying another
 row's numbers over Haiku asks for more output than the model allows, which is a hard 400.
@@ -43,7 +43,7 @@ documentation, tests, or defense-in-depth.
 |---|---|---|
 | `app/lib/modules/llm/providers/anthropic.ts` | ✅ | `staticModels` (table above); fix `getDynamicModels`; compose both wrappers in `getModelInstance`; drop the obsolete `output-128k-2025-02-19` beta header |
 | `app/lib/modules/llm/capabilities.ts` | ✅ | **new** — `supportsSamplingParams`, `stripSamplingParams`, `dropOrphanReasoningSignatures` |
-| `app/utils/constants.ts` | ✅ | `DEFAULT_MODEL = 'claude-opus-5'` (since 2026-07-27; same KIE price as its predecessor `claude-opus-4-8`, which superseded `claude-sonnet-5`, and originally the retired `claude-3-5-sonnet-latest`, which matched no `staticModels` entry) — the strongest coding model, this being a game-coding product |
+| `app/utils/constants.ts` | ✅ | `DEFAULT_MODEL = 'claude-sonnet-5'` (owner decision 2026-07-31, superseding `claude-opus-5`, which had superseded `claude-opus-4-8`, itself succeeding an earlier `claude-sonnet-5`; upstream's original `claude-3-5-sonnet-latest` was retired and matched no `staticModels` entry). The strongest models did not go away — they became the **Premium** (`claude-opus-5`) and **SuperMax** (`claude-fable-5`) rungs of the SPEC §4.6.1a ladder, reached by a tier id rather than by being everyone's default. ⚠️ This row asserted `claude-opus-5` until 2026-07-31 and recorded the lineage BACKWARDS; it is the row a rebuilder copies literally, so keep the value and the direction in sync with `constants.ts` |
 | `package.json` + `pnpm-lock.yaml` | ✅ | `@ai-sdk/anthropic` `0.0.39` → `^1.2.12` (§3.2) |
 | `app/lib/modules/llm/providers/anthropic.spec.ts` | — | **new** — regression tests for §3.1 and §3.3. Not required to run, required to trust (§4) |
 | `app/routes/api.llmcall.ts` | ⚪️ | Gates `temperature` behind `supportsSamplingParams()`. **Redundant** — the provider-level strip already covers every call path. Kept as defense in depth; safe to skip on a rebuild |

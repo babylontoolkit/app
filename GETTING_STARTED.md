@@ -82,10 +82,12 @@ runtime GitHub dependency) → §4.2 server agent proxy (platform-as-provider en
 loop; self-healing repair turns; usage recording) with the ANTHROPIC key read from config
 ("not configured" state when absent) → §4.11 skills sync + /slash invocation with
 autocomplete.
-Also: §4.2a Anthropic provider hardening — current model IDs (claude-opus-5 default,
-haiku-4-5 at 64k output, sonnet-5, fable-5), @ai-sdk/anthropic ^1.2.12, stripSamplingParams
+Also: §4.2a Anthropic provider hardening — current model IDs (claude-sonnet-5 default =
+§4.6.1a Standard, opus-5 = Premium, fable-5 = SuperMax, haiku-4-5 at 64k output), @ai-sdk/anthropic ^1.2.12, stripSamplingParams
 + dropOrphanReasoningSignatures, capabilities.ts OUTSIDE .server, anthropic.spec.ts tests.
-Model comes from the DEFAULT_MODEL constant (app/utils/constants.ts) — never a UI choice.
+Model comes from the DEFAULT_MODEL constant (app/utils/constants.ts) / LLM_MODEL — never a free-form UI
+  choice. A credits user may pick a CLASS (Standard/Premium/SuperMax, SPEC §4.6.1a): the client sends
+  an enum tier id the server maps through operator-configured selectors, never a model string.
 Dev path: PRO_FEATURES_ENABLED=true + my own key in .env.local. Verify: /bt-spec <task> loads
 the skill and produces its workflow output.
 ```
@@ -139,9 +141,12 @@ S3 adapter AND local-filesystem fallback when S3_* unset) → §4.12 stop / chec
 unreachable) + Pro-gated BYOK.
 CRITICAL: PRO_FEATURES_ENABLED defaults to FALSE — credits-only, Lovable-style. With it false,
 the provider picker / model selector / API-key fields DO NOT RENDER for anyone; every generation
-uses DEFAULT_MODEL (app/utils/constants.ts). Only PRO_FEATURES_ENABLED=true reveals Pro/BYOK UI (then gated
+defaults to DEFAULT_MODEL (app/utils/constants.ts). The §4.6.1a tier picker is NOT that UI — it
+offers three operator-configured CLASSES, not a model string or a provider. Only PRO_FEATURES_ENABLED=true reveals Pro/BYOK UI (then gated
 per-user by the license service).
-Verify: default config = credits UI only, no model names anywhere; flag on = BYOK panel appears.
+Verify: default config = credits UI only, no provider picker and no free-form model field (the
+§4.6.1a class pill naming the running model is EXPECTED — the credits UI displays model names, it
+just offers none the user can type); flag on = BYOK panel appears.
 ```
 
 ### Stage 4 — The full product surface - DONE

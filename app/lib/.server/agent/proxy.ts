@@ -37,10 +37,15 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getPremiumTier } from '~/lib/.server/billing/rates';
+import { getModelTiers } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
-import { decidePremium, premiumDeclinedNotice } from '~/lib/.server/billing/premium';
-import { getPlatformConfig, getPlatformModel, getPremiumModel, NotConfiguredError, requirePlatformKey } from './config';
+import {
+  decideModelTier,
+  tierDeclinedNotice,
+  type ModelTierDecisionReason,
+  type ModelTierId,
+} from '~/lib/.server/billing/premium';
+import { getPlatformConfig, getPlatformModel, getTierModel, NotConfiguredError, requirePlatformKey } from './config';
 import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
 import { mediaProtocolNote } from './media-note';
@@ -200,9 +205,22 @@ export interface AgentRequest {
   model?: string;
 
   /**
-   * The user opted into the PREMIUM model tier for this generation (§4.6.1) — a persisted per-user
-   * preference the client sends. It is a REQUEST, never authorization: the server maps it to the one
-   * configured premium model and only honors it if `decidePremium` clears the credits threshold.
+   * The rung of the MODEL TIER LADDER the user picked for this generation (§4.6.1a) — a persisted
+   * per-user preference the client sends: `'standard' | 'premium' | 'supermax'`.
+   *
+   * It is a REQUEST, never authorization: the server maps the ID to THAT rung's operator-configured,
+   * operator-priced model and only honors it if `decideModelTier` clears the rung's threshold. Typed
+   * `string` because it arrives in a browser body — `decideModelTier` narrows it, resolving anything
+   * unrecognised DOWN to `standard` (never upward; inventing an expensive rung is the costly direction).
+   */
+  tier?: string;
+
+  /**
+   * @deprecated The pre-ladder boolean (§4.6.1), still accepted as an alias for `tier: 'premium'`.
+   *
+   * Kept because a browser holding the previous bundle keeps sending it across a deploy, and the failure
+   * of dropping it is silent: the user's premium preference simply stops being honored, they are served
+   * the standard model, and nothing anywhere says so. `tier` wins when both are present.
    */
   premium?: boolean;
 
@@ -272,6 +290,19 @@ export interface AgentGeneration {
 
   promptVersionId: string;
   model: string;
+
+  /**
+   * The rung of the model tier ladder that actually RAN, and why (§4.6.1a).
+   *
+   * Recorded alongside the model rather than inferred from it: the model string could tell you a tier
+   * only while every rung named a different model, which stops being true the moment an operator points
+   * two rungs at one id (ordinary during a migration) — and it could never distinguish "the user chose
+   * standard" from "the user chose SuperMax and was declined for credits". Both are the same model and
+   * very different facts about the ladder.
+   */
+  tier: ModelTierId;
+  tierReason: ModelTierDecisionReason;
+
   blocksLoaded: string[];
 
   /**
@@ -552,14 +583,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * 3. Model + key. Three ways the model is decided, in strict precedence:
    *
    *   a. BYOK (Pro) — the user's OWN key pays, so their explicit model choice is honored (§4.6.1).
-   *   b. Premium tier — a credits user who opted in AND holds `PREMIUM_MINIMUM_CREDITS` (§4.6.1). This
-   *      is the ONE user-facing model choice in credits mode: a boolean the server maps to the single
-   *      configured premium model, never a free-form model string. `decidePremium` is the authority.
+   *   b. A paid RUNG of the model tier ladder — a credits user who picked one AND holds its threshold
+   *      (§4.6.1a). This is the ONE user-facing model choice in credits mode: an enum tier ID the
+   *      server maps to that rung's configured model, never a free-form model string.
+   *      `decideModelTier` is the authority.
    *   c. The platform default — a FIXED, operator-configured model, no choices to make (§4.2a).
    *
-   * The premium threshold protects a new user's free grant: 500 granted < 1000 default minimum, so a
-   * fresh account cannot burn its grant on a 2x model before it has ever bought credits. It binds on
-   * the BALANCE regardless of `BILLING_ENFORCED` — settlement debits either way (see `premium.ts`).
+   * Each rung's threshold protects a new user's free grant: 1000 granted < 1200/1500 default minimums,
+   * so a fresh account cannot burn its grant on an expensive model before it has ever bought credits.
+   * It binds on the BALANCE regardless of `BILLING_ENFORCED` — settlement debits either way (see
+   * `premium.ts`).
    */
   const useByok = byok.allowed;
 
@@ -647,30 +680,76 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   });
 
   /*
-   * Resolved AFTER the gate on purpose: `getPremiumTier` throws while `PREMIUM_MODEL` names an
-   * unpriced model — the normal transient state mid-repricing — and an out-of-credits user should
-   * still get their 402, not the operator's config error.
+   * The MODEL TIER LADDER, resolved AFTER the gate on purpose: resolving a rung reads the active
+   * Marketplace price list and `getPlatformModel` throws while `LLM_MODEL` names an unpriced model —
+   * the normal transient state mid-repricing — and an out-of-credits user should still get their 402,
+   * not the operator's config error.
+   *
+   * ⚠️ This block used to call `getPremiumTier` UNCONDITIONALLY, which threw for every user on the
+   * platform the moment `PREMIUM_MODEL` named a model the active list could not price — including the
+   * overwhelming majority who had not asked for premium at all. `getModelTiers` never throws; a rung
+   * that cannot be priced comes back `serveable: false` and `decideModelTier` declines it to standard.
+   * One broken rung must never be able to stop the other two.
    */
-  const premiumTier = getPremiumTier(request.context);
+  const byokModel = useByok && request.model ? request.model : undefined;
 
-  const premium = decidePremium({
-    requested: Boolean(request.premium) && !useByok,
+  /*
+   * `getPlatformModel` is skipped entirely on the BYOK-with-a-model path, exactly as before: a Pro user
+   * paying with their own key must not be blocked by a platform model they are not going to run.
+   *
+   * ⚠️ It is otherwise called MORE often than before, and that is a deliberate divergence rather than
+   * an accident. The old code reached it only when premium was declined; now every non-BYOK turn
+   * resolves the standard model, including a granted Premium/SuperMax one — because the standard rung
+   * is the fallback for EVERY decline path, so a ladder that cannot name it is not a working ladder.
+   * The visible consequence: with an unpriced `LLM_MODEL`, a premium user who used to sail past the
+   * fault now gets the same loud `NotConfiguredError` everyone else already got. An unbillable standard
+   * model is a real config fault, and having it surface for some users and not others is how it stays
+   * unfixed.
+   */
+  const standardModel = byokModel ?? getPlatformModel(request.context);
+  const tiers = getModelTiers(standardModel, request.context);
+
+  /*
+   * A rung whose selector cannot be priced is reported ONCE, loudly, here — not left to be noticed.
+   *
+   * `getModelTiers` deliberately never throws (a broken rung must not take down the two that work, the
+   * 2026-07-25 `/api/me` lesson), and that trade has a cost this line pays back: the previous code's
+   * unconditional `getPremiumTier` was an outage, but it was also an unmissable ALARM. Without this,
+   * a misconfigured `SUPERMAX_MODEL` is invisible platform-wide until a user happens to pick that rung
+   * — and `ModelTierStatus.reason`, which explains exactly what the operator got wrong, would be
+   * computed and read by nothing. Degrading a capability quietly is honest to the USER and must never
+   * be quiet to the OPERATOR.
+   */
+  for (const broken of tiers.filter((row) => !row.serveable)) {
+    logger.warn(`Model tier "${broken.id}" cannot be served: ${broken.reason ?? 'unknown reason'}`);
+  }
+
+  /*
+   * `tier` wins over the legacy `premium` boolean; a client sending neither asks for standard. BYOK
+   * short-circuits to standard because the user's own key pays, so there is no platform rung to buy —
+   * `request.model` is already the honored choice on that path (§4.6.1).
+   */
+  const requestedTier = useByok ? 'standard' : (request.tier ?? (request.premium ? 'premium' : 'standard'));
+
+  const tierDecision = decideModelTier({
+    requested: requestedTier,
     balance: gate.mode === 'byok' ? 0 : gate.balance,
-    minimumCredits: premiumTier.minimumCredits,
+    tiers,
     isFirstBuildTurn,
   });
 
   const model =
-    useByok && request.model
-      ? request.model
-      : premium.usePremium
-        ? getPremiumModel(request.context)
-        : getPlatformModel(request.context);
+    byokModel ?? (tierDecision.tier === 'standard' ? standardModel : getTierModel(tierDecision.tier, request.context));
 
-  // A user who asked for premium but was short of the threshold gets told, softly — never blocked (§4.6.1).
-  const premiumNotice =
-    Boolean(request.premium) && !useByok && premium.reason === 'below_minimum'
-      ? premiumDeclinedNotice(premiumTier.minimumCredits)
+  /*
+   * A user who asked for a paid rung but was short of ITS threshold gets told, softly — never blocked
+   * (§4.6.1). The notice names the rung they actually asked for: a hardcoded "premium" would quote a
+   * SuperMax user the wrong threshold, which is worse than saying nothing.
+   */
+  const requestedRow = tiers.find((row) => row.id === requestedTier);
+  const tierNotice =
+    tierDecision.reason === 'below_minimum' && requestedRow
+      ? tierDeclinedNotice(requestedRow.label, requestedRow.minimumCredits)
       : undefined;
 
   if (!useByok) {
@@ -1187,8 +1266,18 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     effort,
   });
 
+  /*
+   * The rung is logged BESIDE the model, never left to be inferred from it (see `AgentGeneration.tier`).
+   * The reason rides along whenever it is not a plain standard turn, so a declined rung is visible in
+   * the log rather than looking identical to a user who never asked.
+   */
+  const tierLog =
+    tierDecision.tier === 'standard' && tierDecision.reason === 'standard_requested'
+      ? 'tier=standard'
+      : `tier=${tierDecision.tier}(${tierDecision.reason})`;
+
   logger.info(
-    `Generation: model=${model} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
+    `Generation: model=${model} ${tierLog} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
       `mode=${useByok ? 'byok' : 'platform'}${isFirstBuildTurn ? ' CREATION' : ''}${discussNote ? ' DISCUSS' : ''} ` +
       `tools=${allowTools ? (toolPolicy.toolset === 'all' ? 'on' : toolPolicy.toolset) : `off (${isFirstBuildTurn ? 'creation' : 'skills pre-loaded'})`} ` +
@@ -2010,6 +2099,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     generationId,
     promptVersionId: promptVersion.id,
     model,
+
+    /*
+     * The rung that actually RAN, plus why. Recorded because a tier used to be inferable only from the
+     * model string — which stops working the moment two rungs can name the same model (an operator
+     * pointing Standard and Premium at one id during a migration is ordinary), and which could never
+     * distinguish "ran standard" from "asked for SuperMax and was declined". A generation log that
+     * cannot answer which rung was billed cannot audit the ladder at all.
+     */
+    tier: tierDecision.tier,
+    tierReason: tierDecision.reason,
     blocksLoaded: blocks.map((b) => b.id),
     historyStats,
     discussMode: discussNote !== null,
@@ -2028,7 +2127,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     toolContext,
     usage: usagePromise,
     settlement: settlementPromise,
-    notice: byok.notice ?? premiumNotice,
+    notice: byok.notice ?? tierNotice,
     onMcpToolCall: (listener) => mcpListeners.push(listener),
     onMediaTask: (listener) => mediaListeners.push(listener),
   };

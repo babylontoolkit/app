@@ -26,7 +26,8 @@ import { McpTools } from './MCPTools';
 import { WebSearch } from './WebSearch.client';
 import { SkillAutocompleteMenu, useSkillAutocomplete } from './SkillAutocomplete';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
-import { PremiumToggle } from './PremiumToggle';
+import { ModelTierPanel } from './ModelTierPanel';
+import { ModelTierPill } from './ModelTierPill';
 import { useStore } from '@nanostores/react';
 import { projectId as projectIdStore } from '~/lib/persistence';
 
@@ -416,11 +417,17 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
              */}
             <EffortPanel />
             {/*
-             * The PREMIUM model toggle (§4.6.1) — a credits-mode control, deliberately NOT behind
-             * `byokUnlocked`. It self-gates: it renders only for credits users and only unlocks once the
-             * user holds `PREMIUM_MINIMUM_CREDITS`, so it never reveals a free-form model picker.
+             * The MODEL TIER picker (§4.6.1a) — a credits-mode control, deliberately NOT behind
+             * `byokUnlocked`. It self-gates: it renders only for credits users and offers only the
+             * operator-configured rungs, so it never reveals a free-form model picker.
+             *
+             * The PANEL sits beside the pill rather than inside it: its anchor must be a permanent flex
+             * child so opening the popup cannot shift the row (§4.1a), and the pill is a plain
+             * `IconButton` whose own box the absolutely-positioned popup would otherwise be measured
+             * against. Same arrangement as `EffortPanel` two lines up.
              */}
-            <PremiumToggle />
+            <ModelTierPanel />
+            <ModelTierPill />
             {/*
              * Also Pro-gated — and this one is easy to miss. When collapsed, this button RENDERS THE
              * MODEL NAME (`props.model`). Hiding the settings panel but leaving this toggle would put

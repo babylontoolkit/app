@@ -115,7 +115,13 @@ async function buildProject(): Promise<string> {
   const buildOutput = artifact.runner.buildOutput;
 
   if (!buildOutput || buildOutput.exitCode !== 0) {
-    throw new Error('The project failed to build. Fix the errors in the editor and try again.');
+    /*
+     * A stalled build is NOT a broken project (`build-stall.ts`), and saying so sends the user to the
+     * editor to hunt for a compile error they do not have. Report what actually happened.
+     */
+    throw new Error(
+      buildOutput?.stalledReason ?? 'The project failed to build. Fix the errors in the editor and try again.',
+    );
   }
 
   const container = await sandbox;

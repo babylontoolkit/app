@@ -12,7 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   COLD_CREATION_USAGE,
   creditsForUsage,
+  DEFAULT_PREMIUM_MODEL,
+  DEFAULT_SUPERMAX_MODEL,
   getBillingConfig,
+  getModelTier,
   grantHeadroom,
   kieDefaultModel,
   kieRates,
@@ -26,6 +29,7 @@ import {
   type BillingConfig,
   type TokenUsage,
 } from './rates';
+import { PAID_MODEL_TIERS } from './model-tiers';
 import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
@@ -94,6 +98,34 @@ const KIE_ENV = [
   'KIE_OUTPUT_DOLLARS',
   'KIE_CACHED_INPUT',
   'KIE_CACHED_WRITES',
+] as const;
+
+/**
+ * The SAME trap, for the MODEL TIER LADDER's selectors and thresholds (§4.6.1a).
+ *
+ * 🔴 THIS ONE WAS MEASURED FAILING, not reasoned about. With `SUPERMAX_MODEL=claude-opus-4-7` in the
+ * environment, the test at "validates against the CONFIGURED provider, not against models in general"
+ * FAILS: it proves the `LLM_MODEL` knob is safe by picking a model with a KIE feed row and deliberately
+ * NO Anthropic row — and `providerRates` now injects a row for whatever each paid rung names, so a
+ * developer whose SuperMax rung happened to point at that model made a genuinely-unpriced model
+ * priceable and `getPlatformModel` stopped throwing. On their machine only. CI green.
+ *
+ * It is dormant on the shipped defaults (opus-5 / fable-5 do not collide with the chosen id), which is
+ * exactly why it needs a scrub rather than luck: the assertion's correctness rested on which models an
+ * operator happened to have selected, and nothing said so.
+ *
+ * Own list rather than appended to `KIE_ENV`, for the reason the sandbox list below states — these are
+ * not KIE variables. The two RETIRED `PREMIUM_*_DOLLARS` vars moved here from `KIE_ENV` with them:
+ * splitting one family across two lists is how a list stops describing its own contents, and they are
+ * scrubbed for a sharper reason than the rest (`refuseRetiredPriceEnv` THROWS when they are set, so an
+ * operator who never cleaned up an old `.env.local` would see every rate assertion here die at config
+ * time rather than merely grade against the wrong number).
+ */
+const MODEL_TIER_ENV = [
+  'PREMIUM_MODEL',
+  'PREMIUM_MINIMUM_CREDITS',
+  'SUPERMAX_MODEL',
+  'SUPERMAX_MINIMUM_CREDITS',
   'PREMIUM_INPUT_DOLLARS',
   'PREMIUM_OUTPUT_DOLLARS',
 ] as const;
@@ -143,7 +175,7 @@ const SANDBOX_VM_ENV = [
 const CREATION_ENV = ['CREATION_FLAT_CREDITS'] as const;
 
 beforeEach(async () => {
-  for (const key of [...KIE_ENV, ...SANDBOX_VM_ENV, ...CREATION_ENV]) {
+  for (const key of [...KIE_ENV, ...MODEL_TIER_ENV, ...SANDBOX_VM_ENV, ...CREATION_ENV]) {
     vi.stubEnv(key, undefined as unknown as string);
   }
 
@@ -300,7 +332,7 @@ describe('rate table', () => {
        *
        * This asserted `providerRates()[provider][PLATFORM_MODEL]` while the platform model was one
        * constant shared by both. That coupling is wrong in principle even when the two happen to agree
-       * (as they do today — both default to `claude-opus-5`): a provider's default is a fact about
+       * (as they do today — both take `DEFAULT_MODEL`): a provider's default is a fact about
        * THAT provider's catalogue and pricing, and KIE lists rows Anthropic has never heard of
        * (`claude-opus-4-7`, `claude-fable-5` — see `NO_ANTHROPIC_ROW` below). Demanding every provider
        * price the OTHER provider's model is a question with no useful answer; what must hold is that
@@ -352,8 +384,9 @@ describe('KIE rates', () => {
    */
   it.each([
     /*
-     * The platform default since 2026-07-27 — KIE serves Opus 5 at 4-8's exact rates
-     * (owner-confirmed; cache accounting probe-verified the same day, see baked-market-prices.ts).
+     * The Premium rung since 2026-07-31, and the platform default from 2026-07-27 until then — KIE
+     * serves Opus 5 at 4-8's exact rates (owner-confirmed; cache accounting probe-verified the same
+     * day, see baked-market-prices.ts).
      */
     ['claude-opus-5', 2.0, 10.0],
     ['claude-opus-4-8', 2.0, 10.0],
@@ -362,20 +395,34 @@ describe('KIE rates', () => {
     ['claude-fable-5', 4.0, 20.0],
     ['claude-sonnet-5', 0.85, 4.275],
     ['claude-haiku-4-5', 0.275, 1.425],
+
+    /*
+     * Added 2026-07-31 from the same feed (filter `claude`, 20 rows = 10 models x input/output), when
+     * an operator set `LLM_MODEL=claude-sonnet-4-6` — a model KIE genuinely serves — and had every
+     * generation refused because no row existed. The fetch that produced these three reproduced all
+     * SEVEN rows above to the cent, which is the only reason the feed is trusted for them on its own;
+     * unlike 4-8/4-7/fable-5 they are not independently confirmed against `credits_consumed`.
+     */
+    ['claude-sonnet-4-6', 0.85, 4.275],
+    ['claude-sonnet-4-5', 0.85, 4.275],
+    ['claude-opus-4-5', 1.425, 7.15],
   ])('prices %s at $%s / $%s — the feed-confirmed numbers', (model, input, output) => {
     expect(KIE_MODEL_RATES[model].inputPerMTok).toBe(input);
     expect(KIE_MODEL_RATES[model].outputPerMTok).toBe(output);
   });
 
-  /* No row beyond the pinned seven can slip in unpinned — the "matches nothing" control. */
+  /* No row beyond the pinned ten can slip in unpinned — the "matches nothing" control. */
   it('pins EVERY baked KIE row (a new row must come with its own pin)', () => {
     expect(Object.keys(KIE_MODEL_RATES).sort()).toEqual([
       'claude-fable-5',
       'claude-haiku-4-5',
+      'claude-opus-4-5',
       'claude-opus-4-6',
       'claude-opus-4-7',
       'claude-opus-4-8',
       'claude-opus-5',
+      'claude-sonnet-4-5',
+      'claude-sonnet-4-6',
       'claude-sonnet-5',
     ]);
   });
@@ -545,6 +592,172 @@ describe('the KIE model selector + the marketplace price list', () => {
   });
 });
 
+/**
+ * The PAID TIER LADDER, injected into every provider's rate table (SPEC §4.6.1a).
+ *
+ * `providerRates` used to inject ONE model (the premium rung); it now walks the whole ladder
+ * (`PAID_MODEL_TIERS`). Both properties below fail SILENTLY — no throw, no failing build, just the
+ * wrong number of credits — and one of them fails in the direction that costs us 60% of every premium
+ * generation, with the credit count going DOWN so it reads as a cheaper turn.
+ *
+ * ⚠️ `env()` falls back to `process.env` and vitest loads `.env.local`, so an "empty" context is the
+ * DEVELOPER's ladder, not the in-code one (the `oauth.spec.ts` trap). The file-wide `MODEL_TIER_ENV`
+ * scrub now clears all four tier variables, so these tests start from the in-code defaults — and they
+ * still stub the ladder explicitly per case, because most of them are ABOUT a specific selector and a
+ * test that relies on a file-level scrub to express its own inputs reads as if it had none.
+ */
+describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
+  const TIER_ENV = ['PREMIUM_MODEL', 'PREMIUM_MINIMUM_CREDITS', 'SUPERMAX_MODEL', 'SUPERMAX_MINIMUM_CREDITS'] as const;
+
+  /** Scrub the whole ladder, then set only what a test is about. Never a partial stub. */
+  function stubTiers(vars: Partial<Record<(typeof TIER_ENV)[number], string>> = {}) {
+    for (const key of TIER_ENV) {
+      vi.stubEnv(key, (vars[key] ?? undefined) as unknown as string);
+    }
+  }
+
+  /*
+   * The generalisation itself: EVERY rung is injected, not just the first one. A loop that stopped at
+   * premium would leave SuperMax unpriced on Anthropic, where `ratesFor` bills it at the most expensive
+   * row it knows — silently, and in whichever direction that row happens to be wrong.
+   */
+  it('injects EVERY rung of the ladder into Anthropic, not just the first', () => {
+    stubTiers();
+
+    expect(DEFAULT_PREMIUM_MODEL, 'the two rungs must name different models or this proves nothing').not.toBe(
+      DEFAULT_SUPERMAX_MODEL,
+    );
+
+    const anthropic = providerRates({}).Anthropic;
+
+    for (const definition of PAID_MODEL_TIERS) {
+      expect(anthropic[definition.defaultModel], `${definition.id} rung is unpriced on Anthropic`).toBeDefined();
+    }
+  });
+
+  /*
+   * 🔴 FILL A GAP, NEVER OVERWRITE — the 231-vs-576 regression (`rates.ts`, 2026-07-30).
+   *
+   * A rung's rates come from the ACTIVE Marketplace list, which is KIE-shaped ($2/$10 for Opus 5). An
+   * unconditional `{ ...table, [tier.model]: tier.rates }` therefore replaces Anthropic's OWN $5/$25
+   * row with KIE's the moment a rung names a model Anthropic prices natively — and the premium rung now
+   * defaults to exactly such a model, so this guard is the only thing standing between the table and a
+   * 60% loss on every premium generation.
+   *
+   * Both rungs are pointed at natively-priced models so BOTH iterations of the reduce are covered: a
+   * fix applied to one rung and not the other would pass a single-rung assertion.
+   */
+  it('leaves a provider its OWN row for every rung it prices natively', () => {
+    stubTiers({ PREMIUM_MODEL: 'claude-opus-5', SUPERMAX_MODEL: 'claude-opus-4-8' });
+
+    const anthropic = providerRates({}).Anthropic;
+
+    expect(anthropic['claude-opus-5'], 'Anthropic list price, not the KIE list row').toEqual(
+      MODEL_RATES['claude-opus-5'],
+    );
+    expect(anthropic['claude-opus-5'].inputPerMTok).toBe(5);
+    expect(anthropic['claude-opus-4-8']).toEqual(MODEL_RATES['claude-opus-4-8']);
+    expect(anthropic['claude-opus-4-8'].outputPerMTok).toBe(25);
+
+    // Same ids, two providers, two correct prices. A provider that prices a model is the authority on it.
+    expect(ratesFor('claude-opus-5', 'Anthropic', {}).inputPerMTok).toBe(5);
+    expect(ratesFor('claude-opus-5', 'KIE', {}).inputPerMTok).toBe(2);
+  });
+
+  /* The other half of the same rule: where the provider bakes nothing, the injection is the price. */
+  it('fills the gap for a rung the provider bakes no row for', () => {
+    stubTiers();
+
+    expect(
+      MODEL_RATES['claude-fable-5'],
+      'Anthropic bakes no fable-5 row — the injection is its only price',
+    ).toBeUndefined();
+
+    expect(providerRates({}).Anthropic['claude-fable-5']).toEqual({
+      inputPerMTok: 4,
+      outputPerMTok: 20,
+      cacheReadPerMTok: 0.4,
+      cacheWritePerMTok: 8.0,
+    });
+  });
+
+  /*
+   * Both halves of the rule at once, on the EXACT configuration that ships (premium `claude-opus-5`,
+   * supermax `claude-fable-5`). The two tests above prove the rule with models chosen to isolate each
+   * half; this one proves it holds for the pair a deploy with no env actually gets, which is the only
+   * pair a regression would bill real money against.
+   */
+  it('prices the shipping default pair correctly on both providers', () => {
+    stubTiers();
+
+    expect([DEFAULT_PREMIUM_MODEL, DEFAULT_SUPERMAX_MODEL]).toEqual(['claude-opus-5', 'claude-fable-5']);
+
+    const { Anthropic: anthropic, KIE: kie } = providerRates({});
+
+    // Gap-fill must NOT overwrite: Anthropic prices Opus 5 itself at $5/$25, the list says $2/$10.
+    expect(anthropic['claude-opus-5'].inputPerMTok).toBe(5);
+    expect(anthropic['claude-opus-5'].outputPerMTok).toBe(25);
+
+    // Gap-fill MUST fill: Anthropic bakes no fable-5 row, so the injection is its only price.
+    expect(anthropic['claude-fable-5'].outputPerMTok).toBe(20);
+
+    // KIE states both itself; the ladder introduces no second opinion.
+    expect(kie['claude-opus-5'].inputPerMTok).toBe(2);
+    expect(kie['claude-fable-5'].outputPerMTok).toBe(20);
+  });
+
+  /*
+   * KIE derives from the same price list the ladder resolves against, so injecting the rungs there must
+   * be a no-op — the table is `kieRates()` and nothing more. A row that appeared here would mean the
+   * ladder had introduced a second opinion about a price KIE already states.
+   */
+  it('is idempotent on KIE — its table is kieRates() plus nothing', () => {
+    stubTiers();
+    expect(providerRates({}).KIE).toEqual(kieRates({}));
+  });
+
+  /*
+   * 🔴 AN UNPRICEABLE RUNG MUST NOT TAKE SETTLEMENT DOWN, AND MUST NOT TAKE THE OTHER RUNGS WITH IT.
+   *
+   * `getModelTier` throws for a selector the active list cannot price — correct at the tier DECISION
+   * (a loud config error before any spend) and wrong here, where this table also prices in-flight
+   * settlement, which can never refuse (§4.6). The skip is PER RUNG: a try/catch around the whole loop
+   * would silently drop every injection because one variable had a typo, so the assertion that matters
+   * is that the OTHER rung's row is still standing.
+   */
+  it('skips an unpriceable premium rung without throwing, leaving SuperMax priced', () => {
+    stubTiers({ PREMIUM_MODEL: 'gpt-5-6-sol' });
+
+    // Control: the selector really is unpriceable, so the skip below is not vacuous.
+    expect(() => getModelTier('premium', {})).toThrow(/Marketplace price list/);
+
+    expect(() => providerRates({})).not.toThrow();
+
+    const anthropic = providerRates({}).Anthropic;
+    expect(anthropic['gpt-5-6-sol'], 'an unpriced selector must never be injected').toBeUndefined();
+    expect(anthropic[DEFAULT_SUPERMAX_MODEL], 'the healthy rung is dropped with the broken one').toBeDefined();
+  });
+
+  /* The mirror image — a broken SuperMax must not unprice Premium. */
+  it('skips an unpriceable SuperMax rung without throwing, leaving Premium priced', () => {
+    stubTiers({ PREMIUM_MODEL: 'claude-fable-5', SUPERMAX_MODEL: 'gpt-5-6-sol' });
+
+    expect(() => getModelTier('supermax', {})).toThrow(/Marketplace price list/);
+    expect(() => providerRates({})).not.toThrow();
+
+    const anthropic = providerRates({}).Anthropic;
+    expect(anthropic['gpt-5-6-sol']).toBeUndefined();
+    expect(anthropic['claude-fable-5'], 'the healthy rung is dropped with the broken one').toBeDefined();
+
+    /*
+     * And a generation already in flight on the broken rung still settles — at the most expensive row we
+     * know of, i.e. over-charging ourselves, which is the safe direction every fallback in `rates.ts`
+     * takes. Never zero.
+     */
+    expect(ratesFor('gpt-5-6-sol', 'Anthropic', {}).outputPerMTok).toBeGreaterThan(0);
+  });
+});
+
 describe('the signup grant buys the hook', () => {
   /*
    * ⚠️ THE GRANT SIZE AND THE PLATFORM PROVIDER ARE ONE NUMBER IN TWO FILES.
@@ -627,10 +840,23 @@ describe('the platform model switch', () => {
     expect(getPlatformModel({})).toBe(PLATFORM_MODEL_BY_PROVIDER.Anthropic);
   });
 
+  /*
+   * ⚠️ The stubbed model MUST differ from `PLATFORM_MODEL_BY_PROVIDER.Anthropic`, or this test cannot
+   * tell "honoured" from "ignored" and passes with the override deleted. It stubbed `claude-sonnet-5`
+   * from 2026-07-18 — correct until 07-31, when Sonnet 5 BECAME the default and silently made the
+   * assertion vacuous (mutation-proven: removing the `env(context,'LLM_MODEL')` read failed 4 tests in
+   * this file and not this one). The override is the config-only revert hatch the Standard rung's
+   * vendor risk depends on, so it must stay positively asserted. Guarded below rather than re-stated.
+   */
   it('honours LLM_MODEL for a model the provider is priced for', () => {
+    const override = 'claude-opus-5';
+    expect(override, 'the override must differ from the default or this proves nothing').not.toBe(
+      PLATFORM_MODEL_BY_PROVIDER.Anthropic,
+    );
+
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
-    vi.stubEnv('LLM_MODEL', 'claude-sonnet-5');
-    expect(getPlatformModel({})).toBe('claude-sonnet-5');
+    vi.stubEnv('LLM_MODEL', override);
+    expect(getPlatformModel({})).toBe(override);
   });
 
   /*

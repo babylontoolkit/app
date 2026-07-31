@@ -22,10 +22,28 @@ export function GitHubRepositorySelector({ onClone, className }: GitHubRepositor
     stats,
     isLoading: isStatsLoading,
     refreshStats,
-  } = useGitHubStats(connection, {
-    autoFetch: true,
-    cacheTimeout: 30 * 60 * 1000, // 30 minutes
-  });
+  } = useGitHubStats(
+    connection,
+    {
+      autoFetch: true,
+      cacheTimeout: 30 * 60 * 1000, // 30 minutes
+
+      /*
+       * 🔴 A picker needs NAMES, not statistics. Without this the dialog crawled every repository on
+       * the account for branch/contributor/issue/PR counts it does not render — 563 repos ≈ 2,800
+       * GitHub calls — and simply never finished. See UseGitHubStatsOptions.reposOnly.
+       */
+      reposOnly: true,
+    },
+
+    /*
+     * The third argument was OMITTED here while both sibling call sites (GitHubTab, GitHubStats) pass
+     * it. It selects the server-side route for a connection whose token lives on the server rather
+     * than in this browser — without it such a connection can never load anything at all, silently,
+     * because the client-side branch has no token to use.
+     */
+    !connection?.token,
+  );
 
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<SortOption>('updated');

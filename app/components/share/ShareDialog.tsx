@@ -15,7 +15,7 @@
  * Uses the shared `~/components/ui/Dialog` primitive rather than the deploy family's hand-rolled Radix,
  * because this is a simple form, not a multi-step wizard.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import { Dialog, DialogRoot, DialogTitle, DialogDescription, DialogButton } from '~/components/ui/Dialog';
 import { useShareGame, type ShareOutcome } from './useShareGame';
@@ -57,6 +57,21 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
    * game, so re-opening the dialog shows nothing rather than a stale or invented claim.
    */
   const [remixBlockedReason, setRemixBlockedReason] = useState<string | undefined>();
+
+  /**
+   * Adopt a share id that arrives AFTER mount — `ShareButton` reads it from the project on open, and a
+   * `useState` initialiser only ever sees the first render's value.
+   *
+   * Deliberately one-way: it FILLS IN, and never clears. `undefined` here means "not known yet" far
+   * more often than it means "not shared", and letting it clear would wipe the link off a dialog the
+   * user just published from — the very bug this exists to fix, arriving from the other direction.
+   * Unpublishing clears it explicitly, and a re-open re-reads the truth from the server.
+   */
+  useEffect(() => {
+    if (existingShareId) {
+      setShareId(existingShareId);
+    }
+  }, [existingShareId]);
 
   const handleOutcome = (outcome: ShareOutcome) => {
     if (outcome.status === 'published') {

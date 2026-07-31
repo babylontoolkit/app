@@ -160,13 +160,19 @@ describe('proxy.ts passes no flat price on the generation path (§4.4a)', () => 
   });
 
   /*
-   * CONTROL for the scoping itself. `minimumCredits` IS still in proxy.ts — on the `decidePremium`
-   * call, which is a different decision entirely. If the extraction ever degenerated to "the whole
-   * file", this assertion and the gate assertion below could not both hold.
+   * CONTROL for the scoping itself. `minimumCredits` IS still in proxy.ts — on the declined-tier
+   * notice, which reads the requested rung's threshold, and which is a different decision entirely
+   * from anything the credit gate does. If the extraction ever degenerated to "the whole file", this
+   * assertion and the gate assertion below could not both hold.
+   *
+   * ⚠️ Updated with the code it guards (§4.6.1a, 2026-07-31): the proxy resolves a three-rung LADDER
+   * (`decideModelTier`) where it used to call `decidePremium`. Repointing the control is deliberate —
+   * the scan's job is to prove the extraction is scoped, and it can only do that by naming something
+   * that genuinely still exists.
    */
   it('CONTROL — the scoping is real: minimumCredits still appears elsewhere in the file', () => {
     expect(stripped).toContain('minimumCredits');
-    expect(stripped).toContain('decidePremium');
+    expect(stripped).toContain('decideModelTier');
   });
 
   /* CONTROL — the comment strip works, proven on the one name that survives ONLY in prose. */

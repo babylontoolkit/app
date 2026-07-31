@@ -56,10 +56,23 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     model?: string;
 
     /**
-     * The user opted into the PREMIUM model tier (§4.6.1). A boolean, not a model string: the server
-     * maps it to the single configured premium model and honors it only if the credits threshold is met.
-     * Sent by every client, ignored unless the user actually holds enough credits — it is a request,
-     * never authorization.
+     * The rung of the MODEL TIER LADDER the user picked (§4.6.1a): `'standard' | 'premium' | 'supermax'`.
+     *
+     * An enum tier ID, never a model string — the server maps it to THAT rung's operator-configured,
+     * operator-priced model, which is what keeps §4.2a's "model choice is config, never a user choice"
+     * true while still letting a user pick a class. Typed as a plain `string` on purpose: it is an
+     * untrusted browser value, and `decideModelTier` narrows it (resolving anything unrecognised DOWN
+     * to `standard`) rather than a cast that would let a typo through. Sent by every client, honored
+     * only if the user actually holds that rung's threshold — a request, never authorization.
+     */
+    tier?: string;
+
+    /**
+     * @deprecated The pre-ladder boolean (§4.6.1), still accepted as an alias for `tier: 'premium'`.
+     *
+     * Kept because a browser holding the previous bundle keeps sending it across a deploy, and the
+     * failure of dropping it is SILENT: the user's premium preference simply stops being honored and
+     * nothing anywhere says so. `tier` wins when both are present.
      */
     premium?: boolean;
 
@@ -162,6 +175,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       repairOf: body.repairOf,
       repairAttempt: body.repairAttempt,
       model: body.model,
+      tier: body.tier,
       premium: body.premium,
       effort: body.effort,
       chatMode: body.chatMode,
@@ -439,6 +453,17 @@ async function streamGeneration(
       generationId: generation.generationId,
       promptVersionId: generation.promptVersionId,
       model: generation.model,
+
+      /*
+       * The rung that actually RAN, and why — never the one that was requested (§4.6.1a). A declined
+       * SuperMax turn and a plain Standard turn run the same model and are very different facts, so a
+       * client reading only `model` cannot tell them apart; and once two rungs may name one model, the
+       * model string stops identifying a rung at all. This is what makes a SuperMax turn identifiable
+       * in the generation log and lets the composer pill name what was really billed.
+       */
+      tier: generation.tier,
+      tierReason: generation.tierReason,
+
       skillsLoaded: [...generation.toolContext.loaded],
       blocksLoaded: generation.blocksLoaded,
 

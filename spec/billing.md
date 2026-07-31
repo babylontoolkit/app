@@ -1,4 +1,4 @@
-# spec/billing.md — Credits, Stripe & Entitlements (governs SPEC §4.6, §4.6.1, §4.5.4)
+# spec/billing.md — Credits, Stripe & Entitlements (governs SPEC §4.6, §4.6.1, §4.6.1a, §4.5.4)
 
 > **Status: IMPLEMENTED and verified end-to-end (Stage 3, 2026-07).** The design below is what we
 > built, with four deliberate divergences recorded in *Divergences from the original design* at the
@@ -87,7 +87,7 @@ same `CREATION_BRIEF_MARKER` predicate the proxy already computes — never a se
 ONE number and the platform absorbs the variance; that is what the margin is for. Rules, each of which
 fails silently if broken:
 
-- The override lives INSIDE `settleGeneration` (`decideCredits`, pure + exported like `decidePremium` —
+- The override lives INSIDE `settleGeneration` (`decideCredits`, pure + exported like `decideModelTier` —
   it spends/waives money without the user asking), so the `generations` row, the ledger debit, the
   auto-refund, and the client `credits` annotation cannot disagree about the number.
 - `raw_cost_usd` is STILL the true token-derived cost — the Admin report watches realized margin
@@ -154,7 +154,7 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
 - **Baked fallback in code** (`billing/baked-market-prices.ts`) — captured from KIE's own public
   pricing feed (`POST api.kie.ai/client/v1/model-pricing/page`, 372 rows, 2026-07-18), which
   independently confirmed the measured LLM rates to the cent (4-8 $2/$10, 4-7 $1.425/$7.15, fable-5
-  $4/$20). `claude-opus-5` (the platform default since 2026-07-27) was added at 4-8's exact $2/$10 —
+  $4/$20). `claude-opus-5` (the §4.6.1a **Premium** rung; platform default 2026-07-27 → 2026-07-31) was added at 4-8's exact $2/$10 —
   owner-confirmed, with cache accounting probe-verified against KIE's own usage numbers the same day
   (writes and reads REPORTED, unlike the 4-7/fable rows that report 0 write while being charged).
   Billing can never find "no prices".
@@ -162,9 +162,10 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   refuses a list whose `llm` table lacks the `DEFAULT_MODEL` row — at PROMOTE and at LOAD
   (`loadVersion` re-validates stored bytes, so a legacy list missing the row fails to load and baked
   serves instead). Without this, an omitted default would bill every ordinary generation at the
-  most-expensive row's rates — the PREMIUM tier's, 2× the default's — silently. The premium tier can
-  never become the default's effective price through any path (`market-prices.spec.ts` +
-  `market-price-store.spec.ts` pin both doors).
+  most-expensive row's rates — the **SuperMax** rung's, and since the default moved to
+  `claude-sonnet-5` ($0.85/$4.275 baked on KIE) that is **~4.7×** the default rather than the 2× this
+  line said while Opus 5 was the default. A paid rung can never become the default's effective price
+  through any path (`market-prices.spec.ts` + `market-price-store.spec.ts` pin both doors).
 - **Admin-promoted active list** (`billing/market-price-store.ts`): immutable versions in the
   ObjectStore (`pricing/kie-market/versions/mp_*.json`) + an `active.json` pointer. Promote validates
   BEFORE writing (a refused list changes nothing, all errors reported at once); rollback only
@@ -177,8 +178,11 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
 - **The env price vars are RETIRED and REFUSED**: `KIE_INPUT_DOLLARS`, `KIE_OUTPUT_DOLLARS`,
   `KIE_CACHED_INPUT`, `KIE_CACHED_WRITES`, `PREMIUM_INPUT_DOLLARS`, `PREMIUM_OUTPUT_DOLLARS`.
   Setting any of them throws at config time with directions to the panel — a price var that nothing
-  reads is a mis-bill waiting to be believed. `KIE_DEFAULT_MODEL` and `PREMIUM_MODEL` survive as
-  SELECTORS, accepted only if the active list prices them (`kieDefaultModel`, `getPremiumTier`).
+  reads is a mis-bill waiting to be believed. `KIE_DEFAULT_MODEL`, `PREMIUM_MODEL` **and
+  `SUPERMAX_MODEL`** survive as SELECTORS, accepted only if the active list prices them in their own
+  right (`kieDefaultModel`, `getModelTier`/`getModelTiers` — SPEC §4.6.1a). A selector is never a
+  price: naming a model the active list cannot price is a `NotConfiguredError` pointing at the panel,
+  never a silent fallback to some other row's rates.
 - **Cache rates are never quoted in the list** — validation refuses the keys. They derive per row
   (0.1× read / 2.0× 1-hour write, measured on KIE), so a promoted reprice moves the whole row and a
   half-repriced row cannot be expressed.
@@ -235,23 +239,36 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   the unique index rejects gets its redundant debit refunded (`unity-license-service.ts`). The credit
   balance IS the Pro Tools entitlement (the credits-based replacement for the retired PayPal subscription).
   Pinned by `unity-license-service.spec.ts` + `ledger-sql.spec.ts`.
-- **`providerRates` premium injection is non-throwing**: a promoted list that unprices
-  `PREMIUM_MODEL` refuses NEW premium requests loudly (`getPremiumModel`) but must not take
-  settlement down — an in-flight premium generation settles via the most-expensive fallback.
-- **The premium threshold binds on the BALANCE, regardless of `BILLING_ENFORCED` (2026-07-18)**:
-  `decidePremium` no longer takes an enforcement flag. The retired "unmetered → premium freely
+- **🔴 `providerRates` injects EVERY paid rung, FILL-A-GAP AND NEVER OVERWRITE, non-throwing.** A
+  promoted list that unprices a rung's selector refuses NEW requests for that rung loudly
+  (`getTierModel`) but must not take settlement down — an in-flight generation settles via the
+  most-expensive fallback. Two properties, both silent when broken: **(a)** each rung is resolved in
+  its own try/catch, so one broken selector cannot drop another rung's row; **(b)** a provider that
+  prices a model NATIVELY is the authority and the injection only ever fills a hole. (b) became
+  load-bearing the moment Premium moved to `claude-opus-5`, which Anthropic prices itself — while
+  `PREMIUM_MODEL` was `claude-fable-5` (no Anthropic row) filling and overwriting were the same
+  operation, so an unconditional overwrite would have looked correct forever. Measured live
+  2026-07-31: Premium on Anthropic billed **$2.5414 = the native $5/$25 exactly**; the KIE-shaped
+  $2/$10 would have billed $1.0166 — **407 credits instead of 1,017**.
+- **A tier threshold binds on the BALANCE, regardless of `BILLING_ENFORCED` (2026-07-18)**:
+  `decideModelTier` takes no enforcement flag. The retired "unmetered → premium freely
   usable" bypass rested on a false premise — settlement debits the ledger whether or not the gate
-  may refuse, so a 320-credit user could switch on the 2× model and ride the balance negative with
-  nothing objecting (observed live). A deploy that wants free premium says `PREMIUM_MINIMUM_CREDITS=0`
-  explicitly. Pinned by a structural tripwire in `premium.spec.ts` (no enforcement input exists to
-  bypass with).
-- **A CREATION turn never runs premium (2026-07-18)**: `decidePremium({ isFirstBuildTurn: true })` →
-  `reason: 'creation_turn'`, whatever the balance. KIE serves Fable 5 with a BUFFERED answer
+  may refuse, so a 320-credit user could switch on an expensive rung and ride the balance negative with
+  nothing objecting (observed live). A deploy that wants a free paid rung says that rung's
+  `*_MINIMUM_CREDITS=0` explicitly. Pinned by a structural tripwire in `premium.spec.ts` (no
+  enforcement input exists to bypass with).
+- **A CREATION turn never runs a PAID RUNG (2026-07-18)**:
+  `decideModelTier({ isFirstBuildTurn: true })` → `reason: 'creation_turn'`, whatever the balance,
+  for every rung carrying `firstBuildLocked` (all of them today). KIE serves Fable 5 with a BUFFERED answer
   (accepted for edit-sized replies); a creation-sized artifact (~25k out tokens, 4–7 min decode)
   cannot flush before KIE's ~5-min gateway timeout — measured live: 307.8s of streamed reasoning,
-  0 text, `finish=error` at 449s. Creations run the standard streaming model; the premium preference
-  applies from the first edit turn. The composer pill mirrors this as a locked state
-  (`creationTurnStore`), same look as the under-threshold lock.
+  0 text, `finish=error` at 449s. The lock was GENERALIZED to the whole ladder rather than kept on
+  the rung that produced it: the first build is the largest artifact in the product, so the safe
+  assumption is that the next expensive model has the same problem until a live drive says otherwise.
+  Creations run the platform default; every paid rung unlocks from the first edit turn. `ModelTierPill`
+  mirrors this as a locked state (`creationTurnStore`), and the picker row states the creation reason
+  rather than a threshold — telling a funded user to "add credits" here would be a lie that costs
+  them money.
 
 Pinned by `market-prices.spec.ts` (validation + lookup + the baked list validates + the 21-credit
 worked example), `market-price-store.spec.ts` (promote/rollback/pointer/cache), and the rewritten
@@ -414,7 +431,7 @@ what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the lic
 
 ## Verified end-to-end (2026-07, local mode)
 
-- Signup grant fired **exactly once**: `grant +1000 → 1000` (the `SIGNUP_GRANT_CREDITS` default at the time of this verification; the default is **800** since the KIE move + the 4.0 margin reprice (2026-07-18) — ~2.8× a measured KIE build turn at margin 4.0 once the flat `PROJECT_CREATE_CREDITS` charge is subtracted (§4.4a), and deliberately below the 1,200-credit premium minimum (`DEFAULT_PREMIUM_MINIMUM_CREDITS`) so a fresh grant cannot buy the 2× model).
+- Signup grant fired **exactly once**: `grant +1000 → 1000` — which is also the LIVE `SIGNUP_GRANT_CREDITS` default (`rates.ts`; this line claimed 1000 was historical and 800 current until 2026-07-31, contradicting its own transcript one clause earlier). It sits deliberately below BOTH shipped tier thresholds (`.env.example` ships `PREMIUM_MINIMUM_CREDITS=1500` and `SUPERMAX_MINIMUM_CREDITS=1500`; the in-code defaults are 1200/1500), so a fresh grant cannot buy a paid rung — §4.6.1a.
 - A live generation settled against real usage: `generation −7 → 993` (raw cost $0.0184,
   `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
 - The `generations` record attributes the charge to a user, a model, and its four token classes.

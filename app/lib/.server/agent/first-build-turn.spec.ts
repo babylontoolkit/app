@@ -333,20 +333,24 @@ describe('consumer 5 — the liveness panel calls a first build a creation', () 
 /* ---------------------------------- 7. the four consumers whose RULES were already tested elsewhere */
 
 /**
- * `decidePremium`, `discussModeNote`, `toolPolicyForTurn` and `mediaProtocolNote` each have paired
+ * `decideModelTier`, `discussModeNote`, `toolPolicyForTurn` and `mediaProtocolNote` each have paired
  * true/false tests in their own specs — their RULES are proven. What was not proven is that the proxy
  * still HANDS them the flag, and the two are independent failures.
  *
  * Found by a verifier disconnecting all four in `proxy.ts` at once: `pnpm test` stayed fully green
  * (3397/3397). The rule tests cannot see it, because they call the pure functions directly. The most
- * expensive of the four is `decidePremium` — disconnected, the premium pill unlocks server-side on a
+ * expensive of the four is the TIER decision — disconnected, every paid rung unlocks server-side on a
  * first build, which is the measured KIE-gateway-timeout death (`premium.ts`) that the lock exists to
  * prevent, with nothing red anywhere.
+ *
+ * ⚠️ Repointed from `decidePremium` to `decideModelTier` with the code it guards (§4.6.1a,
+ * 2026-07-31): the proxy resolves a three-rung ladder now. The wiring being asserted is unchanged and
+ * the stake is HIGHER, not lower — there are three rungs to unlock by accident instead of one.
  *
  * Shorthand binding, never a substring — see the `statusKindFor` note above for why.
  */
 describe('the four rule-tested consumers are still WIRED to the flag', () => {
-  it.each(['decidePremium', 'discussModeNote', 'toolPolicyForTurn', 'mediaProtocolNote'])(
+  it.each(['decideModelTier', 'discussModeNote', 'toolPolicyForTurn', 'mediaProtocolNote'])(
     '%s receives isFirstBuildTurn from the proxy',
     (callee) => {
       expect(callArgs(proxy, callee)).toMatch(/[{,]\s*isFirstBuildTurn\s*[,}]/);
@@ -354,7 +358,7 @@ describe('the four rule-tested consumers are still WIRED to the flag', () => {
   );
 });
 
-/* -------------------------------------------- 6. the client premium lock (Chat.client / PremiumToggle) */
+/* -------------------------------------------- 6. the client tier lock (Chat.client / ModelTierPill) */
 
 /**
  * The CLIENT half. `creationTurnStore` is a nanostore written from one `useEffect` and read by one
@@ -362,31 +366,31 @@ describe('the four rule-tested consumers are still WIRED to the flag', () => {
  * derivation and a render.
  *
  * The derivation is now a pure module (`~/lib/chat/creation-turn`) and is asserted BEHAVIOURALLY below —
- * that is the part with rules in it. The RENDERED lock lives in `PremiumToggle.spec.tsx`, which mounts
+ * that is the part with rules in it. The RENDERED lock lives in `ModelTierPill.spec.tsx`, which mounts
  * the real component and reads the real lock; what remains here is the WIRE between them, asserted by a
  * comment-stripped source scan with controls and scoped to the specific expressions that connect the
  * store to the toggle.
  *
- * ⚠️ This comment previously justified scan-only coverage of `PremiumToggle` by asserting that "this repo
+ * ⚠️ This comment previously justified scan-only coverage of the pill by asserting that "this repo
  * has no component-render harness (no jsdom/testing-library in the vitest setup)". That was false —
  * `@testing-library/react` and `jsdom` are dependencies and sibling specs render components — and it is
  * recorded here rather than quietly deleted because it is the `shell-strip.ts` failure again: a false
  * sentence in a doc comment is how a weak assertion survives review, since a comment cannot fail.
  */
-describe('consumer 6 — the premium pill locks on a first build', () => {
+describe('consumer 6 — the model pill locks on a first build', () => {
   const chatRaw = readFileSync(join(REPO, 'app/components/chat/Chat.client.tsx'), 'utf-8');
-  const toggleRaw = readFileSync(join(REPO, 'app/components/chat/PremiumToggle.tsx'), 'utf-8');
+  const toggleRaw = readFileSync(join(REPO, 'app/components/chat/ModelTierPill.tsx'), 'utf-8');
   const strip = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   const chat = strip(chatRaw);
   const toggle = strip(toggleRaw);
 
   it('CONTROL — both components were read, and their comments are stripped', () => {
     expect(chat).toContain('export const Chat');
-    expect(toggle).toContain('export function PremiumToggle');
+    expect(toggle).toContain('export function ModelTierPill');
 
     // Both files describe the lock in prose; the prose must not be what satisfies the scans below.
-    expect(toggleRaw).toContain('Premium is EDIT-ONLY');
-    expect(strip(toggleRaw)).not.toContain('Premium is EDIT-ONLY');
+    expect(toggleRaw).toContain('mirroring `decideModelTier`');
+    expect(strip(toggleRaw)).not.toContain('mirroring `decideModelTier`');
   });
 
   it('FIRES on a first build: a conversation whose last user turn carries the brief', () => {
@@ -473,9 +477,30 @@ describe('consumer 6 — the premium pill locks on a first build', () => {
     expect(chat).toContain('const openNewProjectMode = useStore(newProjectModeStore)');
   });
 
-  it('is wired: the toggle reads the store and lets it BLOCK eligibility', () => {
+  /*
+   * ⚠️ Repointed from `PremiumToggle` to `ModelTierPill` with the code it guards (§4.6.1a, T11). The
+   * wiring asserted is unchanged and the stake is HIGHER: the expression now gates THREE rungs rather
+   * than one boolean, so a `creationTurn` that stopped reaching it would unlock every paid model on the
+   * largest artifact in the product.
+   */
+  it('is wired: the pill reads the store and lets it BLOCK eligibility', () => {
     expect(toggle).toContain('useStore(creationTurnStore)');
-    expect(toggle).toMatch(/const eligible = canUsePremium\(session\) && !creationTurn/);
+    expect(toggle).toMatch(
+      /const eligible = selected !== 'standard' && !creationTurn && canUseTier\(session, selected\)/,
+    );
+  });
+
+  /*
+   * The PANEL is the second renderer of the same rule, and it must not drift from the pill: a picker
+   * that let a user select SuperMax on a first build would leave the pill correctly showing Standard
+   * while the row it just accepted claims otherwise. Its lock decision is a named pure function so the
+   * two surfaces read one rule.
+   */
+  it('is wired: the picker panel applies the same first-build lock', () => {
+    const panel = strip(readFileSync(join(REPO, 'app/components/chat/ModelTierPanel.tsx'), 'utf-8'));
+
+    expect(panel).toContain('useStore(creationTurnStore)');
+    expect(panel).toMatch(/if \(creationTurn\) \{\s*return 'creation_turn';/);
   });
 
   /*

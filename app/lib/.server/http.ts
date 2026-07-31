@@ -33,6 +33,7 @@ const SAFE_ERRORS = new Set([
   'BuildTooLargeError',
   'SeedTooLargeError',
   'RootAbsoluteAssetError',
+  'UnmountableRouterBasenameError',
 ]);
 
 export function errorResponse(error: unknown): Response {
