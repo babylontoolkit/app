@@ -1,5 +1,5 @@
 /**
- * The boot/creation phase store behind `BootScreen` and `CreationSplash`.
+ * The boot/creation phase store behind `BootScreen` and `WorkspaceSplash`.
  *
  * Two silent failure modes pinned here: a phase `isCreationPhase` does not recognise means the
  * creation splash never shows for it (back to the blank screen it exists to replace), and a phase
@@ -18,9 +18,13 @@ import {
   bootPhaseCopy,
   bootProgress,
   bootRetry,
+  coversWorkspace,
+  effectiveBootPhase,
   endBootPhase,
+  importTailActive,
   isCreationPhase,
   reportBootFailure,
+  shouldCoverWorkspace,
   type BootPhase,
 } from './boot-progress';
 
@@ -53,7 +57,24 @@ const RESUME_PHASES: BootPhase[] = [
   { step: 'sandbox' },
   { step: 'files' },
   { step: 'prepare' },
+
+  /*
+   * The tail of a mount, and a RESUME-family phase: the mount holds `ready` until it finishes, so this
+   * is drawn by the full-page `BootScreen` like every other phase in this list. It is the resume twin
+   * of `creating-settle` — the mount promise resolving is not the workspace having finished filling.
+   */
+  { step: 'settling' },
 ];
+
+/**
+ * The odd one out, and the reason the overlay gate is no longer a name-prefix test.
+ *
+ * An IMPORT covers the workspace like a creation does (its files land behind an already-rendered chat),
+ * but it is not a creation and must not be named as one. It is deliberately in neither list above: the
+ * `CREATION_PHASES` list is asserted against the `creating-` prefix, and `RESUME_PHASES` is asserted to
+ * be invisible to the overlay. This phase is a third thing.
+ */
+const OVERLAY_ONLY_PHASES: BootPhase[] = [{ step: 'importing' }];
 
 /**
  * 🔴 THE LISTS ABOVE ARE HAND-WRITTEN, AND A HAND-WRITTEN LIST CANNOT NOTICE AN OMISSION.
@@ -86,6 +107,7 @@ const DECLARED_STEPS = declaredPhaseSteps(BOOT_PROGRESS_SOURCE);
 const COVERED_STEPS = new Set([
   ...CREATION_PHASES.map((phase) => phase.step),
   ...RESUME_PHASES.map((phase) => phase.step),
+  ...OVERLAY_ONLY_PHASES.map((phase) => phase.step),
   'failed',
 ]);
 
@@ -123,6 +145,28 @@ describe('every declared phase is covered by this file', () => {
   });
 
   /*
+   * 🔴 EVERY WORKING PHASE COVERS THE WORKSPACE — asserted over the declared union, not over a list.
+   *
+   * This is the assertion that survives the next door being found. `coversWorkspace` was twice written
+   * as "the phases somebody remembered to enumerate" (a `creating-` prefix, then a membership set), and
+   * both times a real phase fell outside it and the workspace filled in full view — most recently
+   * `files`, on a mount that ran after the chat had rendered. A test written against the same
+   * enumeration cannot notice that; a test written against the union can.
+   *
+   * `idle` and `failed` are the only two exempt, and they are named here rather than derived, so that
+   * exempting a third phase has to be a deliberate edit to this line.
+   */
+  it('covers the workspace for every declared phase except idle and failed', () => {
+    for (const step of DECLARED_STEPS) {
+      const phase = { step } as BootPhase;
+      expect({ step, covers: coversWorkspace(phase) }).toEqual({
+        step,
+        covers: step !== 'idle' && step !== 'failed',
+      });
+    }
+  });
+
+  /*
    * And the family rule, read off the names rather than off the lists: `isCreationPhase` is a
    * `startsWith('creating-')` prefix test, so a creation phase filed under `RESUME_PHASES` (or the
    * reverse) would be asserted to behave in exactly the way that breaks it.
@@ -135,7 +179,7 @@ describe('every declared phase is covered by this file', () => {
   });
 });
 
-describe('isCreationPhase — the gate on the creation splash overlay', () => {
+describe('isCreationPhase — the creation family', () => {
   it('recognises every creation phase', () => {
     for (const phase of CREATION_PHASES) {
       expect(isCreationPhase(phase)).toBe(true);
@@ -147,14 +191,74 @@ describe('isCreationPhase — the gate on the creation splash overlay', () => {
       expect(isCreationPhase(phase)).toBe(false);
     }
   });
+
+  /*
+   * It is no longer the overlay gate, and this pins the distinction that made the split necessary: an
+   * import covers the workspace without being a creation. Collapsing the two back together means either
+   * calling an import a creation (a lie the copy would then have to keep) or leaving imports uncovered
+   * (the bug).
+   */
+  it('does not claim the import phase', () => {
+    for (const phase of OVERLAY_ONLY_PHASES) {
+      expect(isCreationPhase(phase)).toBe(false);
+    }
+  });
+});
+
+/**
+ * `coversWorkspace` — the actual gate on `WorkspaceSplash`.
+ *
+ * Its failure mode is the silent one this whole file exists to prevent: a phase it does not recognise
+ * draws NO surface, so the user watches the workspace fill a file at a time. That was the reported bug
+ * on the mount path (2026-07-31), and an unrecognised phase is how it comes back.
+ */
+describe('coversWorkspace — the gate on the workspace splash overlay', () => {
+  it('covers every creation phase', () => {
+    for (const phase of CREATION_PHASES) {
+      expect(coversWorkspace(phase)).toBe(true);
+    }
+  });
+
+  it('covers the import phase, which is not a creation phase', () => {
+    for (const phase of OVERLAY_ONLY_PHASES) {
+      expect(coversWorkspace(phase)).toBe(true);
+    }
+  });
+
+  /*
+   * 🔴 AND IT COVERS THE RESUME PHASES, which it used to answer `false` for.
+   *
+   * The old answer encoded an assumption rather than a fact: that a resume phase only ever runs before
+   * the chat exists, so the full-page `BootScreen` would be the surface and the overlay was not needed.
+   * The mount effect fires more than once per load, so a second mount narrates exactly these phases with
+   * the workbench already on screen — measured live at "35 of 86 files", in full view, with nothing over
+   * it. There is no double-render risk: the two surfaces are the two arms of `Chat`'s `ready ? … : …`.
+   */
+  it('covers the resume/open phases too — a second mount runs after the chat is on screen', () => {
+    for (const phase of RESUME_PHASES.filter((candidate) => candidate.step !== 'idle')) {
+      expect(coversWorkspace(phase)).toBe(true);
+    }
+  });
+
+  /* Nothing is happening. Covering here would put a permanent spinner over every open project. */
+  it('never fires when idle', () => {
+    expect(coversWorkspace({ step: 'idle' })).toBe(false);
+  });
+
+  /* A failure is drawn as the failure panel, never as progress over a workspace. */
+  it('never fires for a failure', () => {
+    expect(coversWorkspace({ step: 'failed', message: 'nope', retryable: true })).toBe(false);
+  });
 });
 
 describe('bootPhaseCopy — every phase has its own words', () => {
   it('gives each phase a distinct title, none of them the idle fallback', () => {
     const idleTitle = bootPhaseCopy({ step: 'idle' }).title;
-    const titles = [...CREATION_PHASES, ...RESUME_PHASES.filter((phase) => phase.step !== 'idle')].map(
-      (phase) => bootPhaseCopy(phase).title,
-    );
+    const titles = [
+      ...CREATION_PHASES,
+      ...OVERLAY_ONLY_PHASES,
+      ...RESUME_PHASES.filter((phase) => phase.step !== 'idle'),
+    ].map((phase) => bootPhaseCopy(phase).title);
 
     for (const title of titles) {
       expect(title).toBeTruthy();
@@ -250,5 +354,85 @@ describe('the failed phase is terminal', () => {
 
     reportBootFailure({ message: 'Reload the page to open that project.', retryable: false }, retry);
     expect(bootRetry.get()).toBeUndefined();
+  });
+});
+
+/**
+ * 🔴 AN IMPORT OUTLIVES THE MOUNTS RUNNING BESIDE IT, SO IT CANNOT LIVE IN THE PHASE SLOT.
+ *
+ * Found live, 2026-07-31, twice. Several components call `useChatHistory`, so several mounts run per
+ * page load; each narrates its own phases and then clears to `idle`, while the import's files are
+ * still replaying. Written as a phase, the tail and the mounts overwrote each other every few hundred
+ * milliseconds and the overlay STROBED (measured: on at 13424ms, off at 13628, on at 13801, off at
+ * 14201). Re-asserting the phase on a timer made it strobe more slowly — the same race with a longer
+ * period, which is the shape of a fix that is really a workaround.
+ *
+ * A flag beside the phase removes the contention rather than arbitrating it, and the two are composed
+ * by pure functions. These tests are that composition, because the failure mode is not an exception —
+ * it is a surface that is not there.
+ */
+describe('the import flag composes with the phase instead of competing for it', () => {
+  beforeEach(() => {
+    bootProgress.set({ step: 'idle' });
+    bootRetry.set(undefined);
+    importTailActive.set(false);
+  });
+
+  /* A mount running beside an import has more to say than "importing" does — let it say it. */
+  it('shows the running phase when there is one', () => {
+    expect(effectiveBootPhase({ step: 'files', done: 3, total: 9 }, true)).toEqual({
+      step: 'files',
+      done: 3,
+      total: 9,
+    });
+  });
+
+  /* And fills the silence the moment that mount ends, rather than falling back to the idle copy. */
+  it('shows importing once the phase goes idle', () => {
+    expect(effectiveBootPhase({ step: 'idle' }, true)).toEqual({ step: 'importing' });
+    expect(effectiveBootPhase({ step: 'idle' }, false)).toEqual({ step: 'idle' });
+  });
+
+  /*
+   * 🔴 THE STROBE, pinned. The overlay must stay up across every phase a concurrent mount can be in —
+   * reading the phase alone is what made it blink out for as long as the mount was narrating.
+   */
+  it('keeps the workspace covered through every phase a concurrent mount can reach', () => {
+    for (const phase of RESUME_PHASES) {
+      expect(shouldCoverWorkspace(phase, true)).toBe(true);
+    }
+  });
+
+  /*
+   * The flag's OWN contribution, isolated: `idle` is the only phase where the answer differs by flag,
+   * and it is the one that matters — the replay lands while nothing is narrating. Without this the test
+   * above would pass just as happily on a build where the flag were ignored entirely.
+   */
+  it('CONTROL: idle is covered only because of the flag', () => {
+    expect(shouldCoverWorkspace({ step: 'idle' }, true)).toBe(true);
+    expect(shouldCoverWorkspace({ step: 'idle' }, false)).toBe(false);
+  });
+
+  it('covers the creation phases with or without an import', () => {
+    for (const phase of CREATION_PHASES) {
+      expect(shouldCoverWorkspace(phase, false)).toBe(true);
+      expect(shouldCoverWorkspace(phase, true)).toBe(true);
+    }
+  });
+
+  /*
+   * A failure takes the cover DOWN even mid-import: nothing is arriving any more, and a spinner over a
+   * dead workspace hides the one sentence the user needs.
+   */
+  it('uncovers on a failure, whatever the import flag says', () => {
+    const failure: BootPhase = { step: 'failed', message: 'Could not reach the sandbox provider.', retryable: true };
+
+    expect(shouldCoverWorkspace(failure, true)).toBe(false);
+    expect(effectiveBootPhase(failure, true)).toEqual(failure);
+  });
+
+  /* The flag is plain state with one writer — and it must start down, or every load opens covered. */
+  it('defaults to inactive', () => {
+    expect(importTailActive.get()).toBe(false);
   });
 });

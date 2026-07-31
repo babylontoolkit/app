@@ -22,6 +22,8 @@ import { PREVIEW_RECOVERY_SETTLE_MS, shouldClearStalePreviewAlert } from './prev
 import type { GitLabCommitAction } from '~/types/GitLab';
 import { bytesToBase64, type SerializedFileMap } from '~/lib/binary/binary-files';
 import { createScopedLogger } from '~/utils/logger';
+import { toast } from 'react-toastify';
+import { createExecutionQueue } from './execution-queue';
 
 const logger = createScopedLogger('WorkbenchStore');
 
@@ -65,7 +67,25 @@ export class WorkbenchStore {
     import.meta.hot?.data.deployAlert ?? atom<DeployAlert | undefined>(undefined);
   modifiedFiles = new Set<string>();
   artifactIdList: string[] = [];
-  #globalExecutionQueue = Promise.resolve();
+
+  /**
+   * The serial queue every artifact action runs through — see `execution-queue.ts` for why it is a
+   * module rather than the one-line `.then` chain it used to be (a single throwing action poisoned it
+   * permanently and silently stopped every later action from running).
+   */
+  #globalExecutionQueue = createExecutionQueue({
+    onError: (error) => {
+      /*
+       * LOUD, both ways. The log is for us; the toast is because the user is looking at an artifact row
+       * that is about to stop moving, and an action that did not run must never pass for one that did
+       * (`spec/fail-loud.md`).
+       */
+      logger.error('An artifact action failed', error);
+      toast.error(
+        `An action in this artifact could not be completed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    },
+  });
   constructor() {
     if (import.meta.hot) {
       import.meta.hot.data.artifacts = this.artifacts;
@@ -89,7 +109,7 @@ export class WorkbenchStore {
   }
 
   addToExecutionQueue(callback: () => Promise<void>) {
-    this.#globalExecutionQueue = this.#globalExecutionQueue.then(() => callback());
+    this.#globalExecutionQueue.add(callback);
   }
 
   get previews() {

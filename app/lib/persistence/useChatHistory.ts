@@ -5,7 +5,7 @@ import { useStore } from '@nanostores/react';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { bootProgress, endBootPhase, reportBootFailure } from '~/lib/stores/boot-progress';
+import { bootProgress, endBootPhase, importTailActive, reportBootFailure } from '~/lib/stores/boot-progress';
 import { bootForProject, bootedProjectId, describeSandboxFailure, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import { readSandboxIdentity, writeSandboxIdentity } from '~/lib/sandbox/identity';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
@@ -68,6 +68,14 @@ import {
 import { awaitRunningPreview } from './port-settle';
 import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, hasPendingProjectMount, setPendingRemix } from './pending-remix';
+import { setPendingImport, takePendingImport } from './pending-import';
+import {
+  settleAfterCreation,
+  IMPORT_SETTLE_OPTIONS,
+  MOUNT_SETTLE_OPTIONS,
+  type SettleOptions,
+  type SettleResult,
+} from '~/lib/registry/settle';
 import { identityForMount } from './mount-identity';
 import { runCheckpointSerialize, CHECKPOINT_SETTLE_TIMEOUT_MS } from './checkpoint-run';
 import { waitForActionsSettled } from '~/lib/runtime/actions-settled';
@@ -122,6 +130,41 @@ export const projectId = atom<string | undefined>(undefined);
  * which keeps the gate up so `BootScreen` shows the failure + Retry instead of a broken empty chat.
  */
 export const pendingMountGate = atom<boolean>(hasPendingProjectMount());
+
+/**
+ * "This page load is the tail of an import — keep the workspace covered while its files replay."
+ *
+ * Consumed at MODULE EVALUATION, which is the one difference from `pendingMountGate`'s peek-then-take
+ * and is deliberate. The mount baton has to be peeked because a decision hangs off it in a specific
+ * hook instance's render (`ready`); this one drives nothing but a module-level atom, so any instance
+ * may act on it and the only thing that matters is that exactly ONE does. Reading it once per page
+ * load, before React exists, gives that for free. SSR-safe: no `sessionStorage` → `false`.
+ */
+let importTailPending = takePendingImport();
+
+/**
+ * Cover the workspace while an import's artifact replays into it, once per page load.
+ *
+ * Fire-and-forget on purpose: the files it is waiting for are written by the message parser, which
+ * cannot run until the chat has rendered — so awaiting this before `ready` would deadlock the very
+ * replay it is waiting for. It runs ALONGSIDE the chat coming up, with the overlay drawn over the top.
+ */
+function startImportTail(): void {
+  if (!importTailPending) {
+    return;
+  }
+
+  // Cleared before the await, so two hook instances reaching this line cannot both start one.
+  importTailPending = false;
+
+  /*
+   * A FLAG, never a phase. `bootProgress` is one slot and the mounts running beside this import own
+   * it — the phase version of this raced them and the overlay strobed (see `importTailActive`).
+   */
+  importTailActive.set(true);
+
+  void settleWorkspaceFiles(IMPORT_SETTLE_OPTIONS).finally(() => importTailActive.set(false));
+}
 
 /**
  * Whether the project currently on screen has work that exists only in this browser (§4.5.4b).
@@ -294,8 +337,99 @@ interface MountOptions {
  * exception: a FAILED phase is the outcome, not a leftover, and clearing it would erase the only
  * explanation the user gets.
  */
+/**
+ * Projects whose files this PAGE LOAD has already mounted successfully.
+ *
+ * 🔴 `mountInFlight` only dedupes CONCURRENT calls, and the repeated mounts are SEQUENTIAL — the mount
+ * effect fires more than once per load (its deps include `searchParams`, whose reference changes on
+ * hydration) and several components call `useChatHistory`. `prepareMountedProject` has carried a guard
+ * against exactly this since it was written, and its comment says so; the FILE half never got one.
+ *
+ * Measured live 2026-07-31 on an ordinary reload: the whole mount ran TWICE, back to back — sandbox
+ * wake, an 86-file re-scan, and a settle, ~9 seconds of work on a project that was already complete and
+ * on screen. It was invisible before because nothing narrated it. It stopped being invisible the moment
+ * the splash started covering mounts properly, which is how it was found: the surface came down at the
+ * end of the first mount and went straight back up for the second, one flash apart.
+ *
+ * Only SUCCESSES are recorded, so a failed mount is fully retryable — which is what the failure
+ * surface's "Try again" runs. Per page load, never persisted: a reload must always re-mount.
+ */
+const mountedThisLoad = new Set<string>();
+
 function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> {
-  return mountInFlight(pid, () => doMountProjectFiles(pid, opts).finally(endBootPhase));
+  if (mountedThisLoad.has(pid)) {
+    logger.debug(`Project ${pid} is already mounted in this page load — skipping a duplicate mount.`);
+    return Promise.resolve();
+  }
+
+  return mountInFlight(pid, () =>
+    doMountProjectFiles(pid, opts)
+      /*
+       * 🔴 THE MOUNT RESOLVING IS NOT THE WORKSPACE BEING FULL, and the boot surface belongs to the
+       * second fact (owner report 2026-07-31: "I see all the files loading in the workspace view…
+       * that is the whole point of that splash screen").
+       *
+       * Which branch of `doMountProjectFiles` ran decides how much of the map is filled when it
+       * returns, and only one of them fills it completely. `refreshFiles` walks the tree itself; a
+       * restore writes through synchronously — but the branch that restores NOTHING (no local
+       * checkpoint, no working copy, no seed) leaves the WATCHER as the map's only writer, and the
+       * watcher is buffered and asynchronous, an RTT per file on a server provider. So `ready` flipped,
+       * `ChatImpl` mounted the workbench, and ~88 files arrived into a file tree the user was already
+       * looking at. Exactly what the splash exists to prevent, and it varied by branch — which is why
+       * it was reported as "sometimes".
+       *
+       * Chained on SUCCESS only: a mount that failed has a failure surface to show and nothing to wait
+       * for. `settleAfterCreation` is reused rather than re-derived — the floor/ceiling/quiescence
+       * rules are the same rules, already tested against an injected clock — with the mount's own
+       * profile (`MOUNT_SETTLE_OPTIONS`), whose `minCount` is what makes it safe on the empty branch.
+       */
+      .then(async () => {
+        /* Recorded here — inside the success path, before the settle — so only a real mount counts. */
+        mountedThisLoad.add(pid);
+
+        await settleWorkspaceFiles(MOUNT_SETTLE_OPTIONS, 'settling');
+      })
+      .finally(endBootPhase),
+  );
+}
+
+/**
+ * Hold a boot phase until the file map stops changing.
+ *
+ * One helper for both doors (the mount tail and the import replay) so they cannot drift into two
+ * different ideas of "the workspace has finished filling". The phase is set here rather than by the
+ * caller for the same reason: the wait and the sentence describing it are one thing.
+ *
+ * Never throws. A settle is a cosmetic wait around work that has already succeeded — failing it would
+ * turn a slightly ugly file tree into a failed open, which is the wrong trade in every case.
+ */
+async function settleWorkspaceFiles(
+  options: Partial<SettleOptions>,
+  step?: 'settling',
+): Promise<SettleResult | undefined> {
+  try {
+    if (step) {
+      bootProgress.set({ step });
+    }
+
+    const result = await settleAfterCreation({ ...options, readCount: () => workbenchStore.filesCount });
+
+    if (!result.quiesced) {
+      /*
+       * The ceiling ended it. Normal and bounded — a dev server writing into the tree never goes quiet
+       * — but worth saying once, because the visible consequence is the thing this whole wait exists to
+       * avoid: the last of the files landing in a workspace the user can already see.
+       */
+      logger.warn(
+        `The workspace was still changing after ${result.elapsedMs}ms (${result.finalCount} files) — showing it anyway.`,
+      );
+    }
+
+    return result;
+  } catch (error) {
+    logger.warn(`Could not wait for the workspace to settle: ${(error as Error)?.message}`);
+    return undefined;
+  }
 }
 
 /**
@@ -1261,7 +1395,17 @@ export function useChatHistory() {
             const outcome = await openFromServer(mixedId);
 
             if (outcome === 'opened') {
+              /*
+               * The third door to `ready`, covered for completeness rather than for a known case: a
+               * fresh import always lands on a LOCAL chat id (`createChatFromMessages` mints one from
+               * `getNextId`), so today it never arrives here. `startImportTail` is self-clearing and
+               * costs nothing when there is no import, and the rule worth being able to state is
+               * "every path that reaches `ready` starts the tail" — a path that quietly does not is
+               * exactly how the workspace ends up filling in full view again.
+               */
+              startImportTail();
               setReady(true);
+
               return;
             }
 
@@ -1434,6 +1578,13 @@ ${value.content}
               // Awaited so the ordinary path still reaches `setReady` before this effect's turn ends.
               await openStoredProject();
 
+              /*
+               * AFTER the mount, never before: `mountProjectFiles` ends in `endBootPhase`, so an
+               * `importing` phase raised any earlier would be cleared by the mount finishing and the
+               * replay — the part that actually trickles — would run uncovered.
+               */
+              startImportTail();
+
               return;
             }
           } else {
@@ -1441,6 +1592,13 @@ ${value.content}
             navigate('/', { replace: true });
           }
 
+          /*
+           * The second door into the same tail: an import with NO project behind it (the WebContainer
+           * runtime creates none), which reaches `ready` without ever calling `mountProjectFiles`. Its
+           * files still arrive by replay, so it still needs covering. Self-clearing, so the branch above
+           * having already started one makes this a no-op.
+           */
+          startImportTail();
           setReady(true);
         })
         .catch((error) => {
@@ -2274,6 +2432,19 @@ ${value.content}
 
       try {
         const newId = await createChatFromMessages(db, description, messages, metadata);
+
+        /*
+         * 🔴 Set BEFORE the navigation, because the navigation is a full page load — this page and
+         * everything it is holding is about to cease to exist. The load that comes back is otherwise
+         * indistinguishable from opening any other chat, and it would render the workbench and then
+         * replay the imported artifact into it one file at a time, in full view. The baton is what
+         * lets it know to keep the splash up instead (`pending-import.ts`).
+         *
+         * Every importer — folder, git clone button, the `/git?url=` route — funnels through here, so
+         * this one line covers all of them and a future one gets it without having to know.
+         */
+        setPendingImport();
+
         window.location.href = `/chat/${newId}`;
         toast.success('Chat imported successfully');
       } catch (error) {

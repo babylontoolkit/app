@@ -27,7 +27,7 @@ import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { BaseChat } from './BaseChat';
 import { Menu } from '~/components/sidebar/Menu.client';
 import { ClientOnly } from 'remix-utils/client-only';
-import { BootScreen, CreationSplash } from './BootScreen';
+import { BootScreen, WorkspaceSplash } from './BootScreen';
 import { bootProgress } from '~/lib/stores/boot-progress';
 import Cookies from 'js-cookie';
 import { debounce } from '~/utils/debounce';
@@ -1674,7 +1674,7 @@ export const ChatImpl = memo(
     /*
      * Every creation entry point goes through here so the splash lifecycle has ONE owner: the
      * `creating-*` phases (set inside `createProjectFromRegistry` and the finalize step) drive
-     * `CreationSplash`, and the `finally` guarantees it comes down on every exit — success, fatal
+     * `WorkspaceSplash`, and the `finally` guarantees it comes down on every exit — success, fatal
      * refusal, or a post-create failure. A stale phase would leave a full-screen overlay squatting
      * on a usable chat, which is worse than the blank screen it replaces.
      */
@@ -2358,7 +2358,7 @@ export const ChatImpl = memo(
     return (
       <>
         {baseChat}
-        <CreationSplash />
+        <WorkspaceSplash />
       </>
     );
   },

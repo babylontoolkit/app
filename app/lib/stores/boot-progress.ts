@@ -35,6 +35,29 @@ export type BootPhase =
   /** Post-mount readiness: dependency check / dev-server start. */
   | { step: 'prepare' }
 
+  /**
+   * The mount's own file work is done and the WATCHER's tail is still arriving (`settle.ts`).
+   *
+   * The resume-path twin of `creating-settle`, and it exists for the same measured reason one door
+   * over: a mount that resolves is not a workspace that has finished filling. Several branches never
+   * write the map at all (no local checkpoint, no working copy, no seed), so the watcher is its only
+   * writer — and the boot surface used to come down the moment the mount promise settled, leaving the
+   * user watching the file tree assemble itself a file at a time. Everything the splash exists to hide.
+   */
+  | { step: 'settling' }
+
+  /**
+   * A folder or repository IMPORT landing in the workspace.
+   *
+   * 🔴 An overlay phase, not a full-page one, and the only non-`creating-` member of that family — so
+   * {@link coversWorkspace} is an explicit membership test rather than the name-prefix test it used to
+   * be. Import is the one door where the files cannot arrive before the chat renders: they come in as
+   * `<boltAction type="file">` entries replayed by the message parser, which only runs once the chat is
+   * mounted. Holding `ready` would deadlock it (no chat → no replay → no files), so the wait is drawn
+   * OVER the workbench instead of in front of it.
+   */
+  | { step: 'importing' }
+
   /*
    * ---- CREATION phases (New Project, `create-project.ts` + `startProject`) ----
    * The same silence, one page earlier: creating a project serializes behind the starter download,
@@ -129,11 +152,86 @@ export function endBootPhase(): void {
 }
 
 /**
- * Is this phase part of NEW PROJECT creation? Gates the creation splash overlay — the resume phases
- * must never trigger it (they render full-page via `BootScreen`, before the chat exists at all).
+ * "An import's files are still landing" — a SEPARATE atom, not a phase, and that is the whole point.
+ *
+ * 🔴 Found live (2026-07-31): the import tail was written as a phase, and it flickered. `bootProgress`
+ * is a single slot owned by whatever is currently narrating, and an import outlives the mounts running
+ * beside it — several components call `useChatHistory`, so several mounts run per page load, each one
+ * setting its own phases and then clearing to `idle`. The tail and the mounts overwrote each other
+ * every few hundred milliseconds and the overlay strobed. Re-asserting the phase on a timer made it
+ * strobe more slowly, which is not a fix; it is the same race with a longer period.
+ *
+ * A flag beside the phase removes the contention instead of arbitrating it. Nothing else writes it,
+ * the mount narrates its own steps unmolested, and {@link effectiveBootPhase} composes the two into
+ * the one thing the surface should show.
+ */
+export const importTailActive = atom<boolean>(false);
+
+/**
+ * What to DRAW, given the current phase and whether an import is still landing.
+ *
+ * Precedence, most specific first: a real phase always wins (a mount running underneath an import has
+ * more to say than "importing" does — including a FAILURE, which outranks everything), and `importing`
+ * fills the silence when the phase has gone back to `idle` while the import's files are still arriving.
+ * Pure, so the rule is testable without a store, a timer or a render.
+ */
+export function effectiveBootPhase(phase: BootPhase, importActive: boolean): BootPhase {
+  return importActive && phase.step === 'idle' ? { step: 'importing' } : phase;
+}
+
+/**
+ * Is this phase part of NEW PROJECT creation?
+ *
+ * Kept as its own question (it names a family, and the family rule is readable off the phase names),
+ * but it is NO LONGER the gate on the overlay — see {@link coversWorkspace}.
  */
 export function isCreationPhase(phase: BootPhase): boolean {
   return phase.step.startsWith('creating-');
+}
+
+/**
+ * Does this phase mean "files are going into the workspace right now"?
+ *
+ * 🔴 EVERY working phase, not a chosen subset — the owner's rule, verbatim: *"whenever the workspace is
+ * actually loading files into the project workspace should be the splash screen."* It began as a
+ * `creating-` name prefix (right while creation was the only door), then an explicit membership list
+ * (right while creation and import were the only two), and each version was a list of the doors somebody
+ * had thought of. The third door found it out: a mount that runs AFTER the chat has rendered — the mount
+ * effect fires more than once per load, and a duplicate re-scan repopulates the file map behind a
+ * workbench the user is already looking at. Measured live 2026-07-31: the tree filled to "35 of 86 files"
+ * in full view, narrated by a phase this predicate answered FALSE for, because `files` had been filed as
+ * a resume phase and resume phases were assumed to happen before anything was on screen.
+ *
+ * There is no subset to get right. If a phase is running, files are moving, and the answer is yes.
+ *
+ * The two EXCEPTIONS are the two states where nothing is arriving: `idle` (nothing is happening) and
+ * `failed` (nothing more will) — and a failure must uncover, because a spinner over a dead workspace
+ * hides the one sentence the user needs.
+ *
+ * This does not double-render with the full-page `BootScreen`: they live in mutually exclusive branches
+ * of `Chat` (`ready ? … : …`), so exactly one of them exists for any given phase.
+ */
+export function coversWorkspace(phase: BootPhase): boolean {
+  return phase.step !== 'idle' && phase.step !== 'failed';
+}
+
+/**
+ * The actual gate on `WorkspaceSplash`, phase AND import flag together.
+ *
+ * 🔴 An active import keeps the workspace covered WHATEVER the phase says — including `idle`, which is
+ * the whole reason the flag exists: the import's files are replayed by the message parser, long after
+ * every mount has finished and reset the phase, so there is no phase to read at exactly the moment the
+ * files are landing.
+ *
+ * A FAILURE is the one thing that takes the cover down, because at that point there is nothing left
+ * arriving and the user needs the failure surface rather than a spinner over a dead workspace.
+ */
+export function shouldCoverWorkspace(phase: BootPhase, importActive: boolean): boolean {
+  if (phase.step === 'failed') {
+    return false;
+  }
+
+  return importActive || coversWorkspace(phase);
 }
 
 /** The human copy for a phase. Kept here so the component stays a dumb renderer. */
@@ -172,6 +270,21 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
       return {
         title: 'Getting the project ready…',
         detail: 'Checking dependencies and the dev server.',
+      };
+    case 'settling':
+      return {
+        /*
+         * Phrased as the TAIL of the step the user was already watching, not as a new one. Nothing new
+         * is beginning here — the last of the same files is arriving — so "Finishing" rather than a
+         * heading that reads like another job starting.
+         */
+        title: 'Finishing project files…',
+        detail: 'Waiting for the last files to arrive in your workspace.',
+      };
+    case 'importing':
+      return {
+        title: 'Importing your project…',
+        detail: 'Writing the imported files into your workspace.',
       };
     case 'creating-starter':
       return {

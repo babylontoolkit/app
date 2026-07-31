@@ -152,7 +152,7 @@ vi.mock('framer-motion', async (importOriginal) => ({
   useAnimate: () => [{ current: null }, vi.fn(async () => undefined)],
 }));
 vi.mock('~/components/sidebar/Menu.client', () => ({ Menu: () => null }));
-vi.mock('./BootScreen', () => ({ BootScreen: () => null, CreationSplash: () => null }));
+vi.mock('./BootScreen', () => ({ BootScreen: () => null, WorkspaceSplash: () => null }));
 vi.mock('@remix-run/react', () => ({
   useSearchParams: () => [new URLSearchParams(), vi.fn()],
   useNavigate: () => vi.fn(),

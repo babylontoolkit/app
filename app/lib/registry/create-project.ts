@@ -161,7 +161,7 @@ export async function createProjectFromRegistry(options: {
   const { entry, title, projectId } = options;
 
   /*
-   * The creation splash (`CreationSplash`) narrates these phases — set as each await is reached, so
+   * The creation splash (`WorkspaceSplash`) narrates these phases — set as each await is reached, so
    * "New Project" is never a blank page with three dots. This function only ever moves the phase
    * FORWARD; the caller (`startProject`) owns the reset to `idle` on every exit, success or failure.
    */

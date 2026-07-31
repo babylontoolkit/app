@@ -194,7 +194,7 @@ describe('createProjectFromRegistry — the project is created first and foremos
   });
 
   /*
-   * The creation splash (`CreationSplash`) narrates these phases; without them New Project is a
+   * The creation splash (`WorkspaceSplash`) narrates these phases; without them New Project is a
    * blank page with three dots for the whole starter-download + sandbox-boot + mount sequence.
    * The reset to `idle` deliberately does NOT happen here — `startProject` owns it in a `finally`,
    * so a phase left standing after this function returns is correct, not a leak.

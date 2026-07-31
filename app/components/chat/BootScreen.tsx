@@ -7,7 +7,7 @@
  * signal that anything was happening. This surface narrates the wait from `bootProgress`, the store
  * the mount path phases into.
  *
- * `CreationSplash` is the same story one page earlier: NEW PROJECT creation does comparable work
+ * `WorkspaceSplash` is the same story one page earlier: NEW PROJECT creation does comparable work
  * (starter download, sandbox boot/fork, template mount, visibility wait) while the chat is already
  * rendered, so it overlays rather than replaces. One store, one copy table, one status panel — a
  * second renderer with its own strings is exactly the two-writers drift this repo keeps refinding.
@@ -20,7 +20,14 @@
  */
 import { useStore } from '@nanostores/react';
 import { useEffect, useState } from 'react';
-import { bootProgress, bootPhaseCopy, bootRetry, isCreationPhase } from '~/lib/stores/boot-progress';
+import {
+  bootProgress,
+  bootPhaseCopy,
+  bootRetry,
+  effectiveBootPhase,
+  importTailActive,
+  shouldCoverWorkspace,
+} from '~/lib/stores/boot-progress';
 
 /**
  * The terminal state: no spinner, the server's own sentence, and a way forward.
@@ -56,7 +63,7 @@ function BootFailurePanel({ message, retryable }: { message: string; retryable: 
 
 /** Spinner + phase copy + progress + elapsed — the shared body of both boot surfaces. */
 function BootStatusPanel() {
-  const phase = useStore(bootProgress);
+  const phase = effectiveBootPhase(useStore(bootProgress), useStore(importTailActive));
   const [visible, setVisible] = useState(false);
   const [startedAt] = useState(() => Date.now());
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -131,10 +138,18 @@ export function BootScreen() {
 }
 
 /**
- * The NEW PROJECT splash — an overlay over the (already rendered) landing/chat while `startProject`
- * runs. Renders nothing outside the `creating-*` phases, so the resume path (which shows the
- * full-page `BootScreen` instead) can never double-render it. Mount-gated on the phase so the
- * panel's reveal delay and elapsed clock start when creation starts, not when the page did.
+ * The WORKSPACE splash — an overlay over the (already rendered) landing/chat while files are being
+ * written into the workspace. Renders nothing outside the phases {@link coversWorkspace} names, so the
+ * resume path (which shows the full-page `BootScreen` instead) can never double-render it. Mount-gated
+ * on the phase so the panel's reveal delay and elapsed clock start when the work starts, not when the
+ * page did.
+ *
+ * 🔴 **It covers two doors, not one — which is why it is not called `CreationSplash` any more.** New
+ * Project was the first, IMPORT (folder / git clone) is the second, and import is the harder of the
+ * two: its files arrive as `<boltAction type="file">` entries replayed by the message parser, so they
+ * cannot begin landing until the chat has rendered. Gating `ready` on them would deadlock (no chat →
+ * no replay → no files), so the wait has to be drawn OVER the workbench. That is exactly what an
+ * overlay is for, and it is why the gate had to stop being a `creating-` name test.
  *
  * 🔴 **IT MUST LOOK LIKE `BootScreen`, because it IS the same moment.** Creating and resuming are one
  * experience to a user — "my project is coming up" — and they were drawn as two different things: the
@@ -151,10 +166,11 @@ export function BootScreen() {
  * `BootScreen` rather than replacing the page with it. It briefly went full-page (`.z-max`) to match
  * resume; that made the two consistent by making BOTH a trap, which is the wrong direction.
  */
-export function CreationSplash() {
-  const phase = useStore(bootProgress);
+export function WorkspaceSplash() {
+  const rawPhase = useStore(bootProgress);
+  const importActive = useStore(importTailActive);
 
-  if (!isCreationPhase(phase)) {
+  if (!shouldCoverWorkspace(rawPhase, importActive)) {
     return null;
   }
 
