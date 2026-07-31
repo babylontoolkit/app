@@ -938,26 +938,54 @@ cheaper). It is not a free win — see §3.5a: an under-thinking model does not 
 answer, it returns a confident wrong one, and the repair turns cost more than the routing saved. If it is
 ever attempted, it must be routed on turn KIND (as the effort policy is), never on a prose classifier.
 
-**Second deferred lever (2026-07-28, measure-first): the shared-starter prefix restructure.** A cold
-creation bills **430–633 credits vs 54 warm** — the spread is cache-write luck, and the dominant cached
-entry (the ~110k file context) can NEVER be pre-warmed as shaped today because per-project bytes sit
-inside or ahead of it: the scaffolded `src/scripts/<Title>Mode.ts` (named from the project title,
-`registry/scaffold.ts`), the doc blocks routed from the user's own brief wording (`sources.ts`
-`selectStickyBlocks` — placed at breakpoints 2–3, BEFORE the file context, so even byte-identical
-starter files miss behind them), and the project `CLAUDE.md`. The restructure: order the prefix so the
-starter-identical file bytes (identical across every project on the same template pin) form a shared
-cacheable segment, with the per-project bytes after it. That would genuinely shrink cold cost at the
-source — but the 4-breakpoint budget is fully spent (`MAX_CACHE_BREAKPOINTS`), the append-only rules
-(`selectStickyBlocks`, `stickyLoadedSkills`) all bind on the ordering, and a cache-shape change costs
-~8× one prefix in warmup writes (§"QUANTIFIED") — so this is a measured redesign, never a quick flip.
+**✅ The shared-starter prefix restructure — BUILT 2026-07-30 (deferred 2026-07-28 as measure-first;
+the measurement arrived and was decisive).** What forced it: across 66 real generations, **82% of ALL
+LLM spend was cache WRITES** ($35.75 of $43.83), and on later turns of the same conversation 81% of
+cache traffic was writes even minutes after the previous turn — the per-conversation and per-project
+bytes were being re-written at 2× nearly every turn, multiplied by KIE's per-backend warmup
+(§"QUANTIFIED") and by `maxSteps` re-sends landing on different backends mid-generation. Conversations
+average ~2 turns, so per-conversation-unique prefix bytes essentially never pay back.
+
+The shape that shipped (`proxy.ts` step 8; split rule in `~/lib/context/stable-zones.ts`, pinned by
+`stable-zones.spec.ts` + the new arrays in `cache-breakpoints.spec.ts`, both mutation-verified):
+
+|  BP | entry | shared across |
+|---|---|---|
+| 1 | base prompt | everyone (warmed) |
+| 2 | **starter framework files** (`src/babylon/**`, `src/routing/**`, `public/scripts/**`, shell + config) | every project on a template pin |
+| 3 | routed doc blocks + skills — **merged onto ONE breakpoint** (rides the skills block, else the last doc block) | the conversation (append-only) |
+| 4 | **game-code files** (+ project `CLAUDE.md` just ahead of it, inside the segment) | the turn — the only per-turn write left |
+|   | notes → discuss → media (uncached tail) | — |
+
+Four decisions worth keeping the reasons for: **(a)** the split rule is **default-MUTABLE** — a
+mutable file mis-listed stable silently restores the every-turn big-entry rewrite (the exact bug), while
+a stable file mis-listed mutable just rides in the small entry; nothing is stable unless named, and the
+names are the zones §4.4c already declares read-only or vendored. **(b)** `createFilesContext` now
+**SORTS** its paths — `Object.keys` order was watcher-arrival order, so a reload could reorder identical
+content and rewrite the whole entry at 2× (this also makes the starter block a pure function of file
+content, which is what cross-project sharing rests on; pinned by the byte-identity test). **(c)** The
+freed breakpoint came from MERGING docs+skills — either changing rewrites both, and that is the cheap
+corner: both are append-only and small. **(d)** The project notes finally moved to the real uncached
+tail — closing the 2026-07-19 flagged defect where `project-notes.ts`'s comment claimed "uncached tail"
+while the push sat inside the file entry's cached prefix.
+
+The mature-project measurement that calibrates expectations: on a grown game the stable half is ~17k
+visible tokens and game code ~45k (the starter's bulk is already opaque markers), so the per-turn write
+shrinks to the game-code entry and the cross-project/multi-backend sharing of entries 1–2 is where the
+rest of the win comes from. ⚠️ **Owed: the §"How to re-measure" pass on live turns** (creation + a few
+edits; >~150k total input on a first build turn is a regression) — the shape change costs ~8× one prefix
+in warmup writes before steady state, so do not judge it from the first hour's generations.
+
+**Still deferred from the same family: warming the starter entry.** The warmer covers entry 1 only;
+entry 2 could be warmed per active template pin by rendering the pinned snapshot through the SAME
+`splitFilesForContext` + `createFilesContext` — but a warmer whose bytes drift from the client's map by
+one space warms a prefix nobody sends, silently (the false-comfort failure the warmer's own docs warn
+about). Build it only with a byte-identity test between the warmup request and a real mount's block.
 ⚠️ **Updated 2026-07-29 (§4.4a): the flat creation price that used to absorb this variance is RETIRED**
 (`CREATION_FLAT_CREDITS` is refused; the flat charge moved to project registration, which prices
 clone/install/serve work rather than tokens and absorbs nothing about cache warmth). The build turn now
-bills cost-derived, so **the cache warmer is the only thing standing between a cold prefix and the
-user's bill** — which raises the value of this deferred redesign rather than lowering it. Average cost
-is trimmed by the **base-prompt cache warmer**
-(`prompt/cache-warmer.ts` — the one block that IS byte-identical across all users, kept warm on an
-interval + re-warmed on prompt promotion).
+bills cost-derived, so the warmer + this restructure are what stand between a cold prefix and the
+user's bill.
 
 ---
 

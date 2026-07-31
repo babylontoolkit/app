@@ -16,6 +16,7 @@ import {
   type StreamTextResult,
 } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
+import { splitFilesForContext } from '~/lib/context/stable-zones';
 import { getActivePrompt } from '~/lib/.server/prompt/active';
 import { ensureCacheWarmer, PROMPT_CACHE_TTL } from '~/lib/.server/prompt/cache-warmer';
 import { getPromptStore } from '~/lib/.server/prompt/store';
@@ -83,12 +84,22 @@ export const MAX_REPAIR_TURNS = 2;
 /**
  * Prompt-cache breakpoints (SPEC §4.2.8). Anthropic permits four, and we spend all four:
  *
- *   1. the base prompt
- *   2. the routed doc blocks (one breakpoint for the whole set — `selectStickyBlocks`)
- *   3. skills — the invoked `/slash` skill AND the pre-loaded skills, sharing ONE block
- *   4. the project files
+ *   1. the base prompt                                  (byte-identical globally — the warmed block)
+ *   2. the STARTER framework files                      (byte-identical per template pin, 2026-07-30)
+ *   3. routed doc blocks + skills, sharing ONE breakpoint (append-only per conversation)
+ *   4. the game-code files                              (the one entry that changes every build turn)
  *
- * ⚠️ **There are none spare, and this list is the reason to believe it.** The previous version of this
+ * The 2026-07-30 restructure (`spec/context-budget.md` §"shared-starter prefix restructure", built
+ * after 66 real generations measured 82% of ALL spend as cache writes): the file context used to be
+ * ONE entry, so every build turn re-wrote the starter's never-edited framework zones at 2× to cache
+ * the handful of game files that actually changed. The split (`~/lib/context/stable-zones.ts`) puts
+ * the stable half AHEAD of the per-conversation blocks — identical bytes for every project on a pin,
+ * so it warms across projects the way the base prompt does — and leaves a small game-code entry as
+ * the only per-turn write. Paying for the fifth position: doc blocks and skills MERGED into one
+ * breakpoint region (either changes → both rewrite; both are append-only and small, so that is the
+ * cheap corner to give up).
+ *
+ * ⚠️ **There are none spare, and this list is the reason to believe it.** An earlier version of this
  * comment said the same sentence while naming only base/blocks/skill/files — accurate when written,
  * and then the pre-loaded-skills block was added with a fifth breakpoint and nobody re-counted. Every
  * `/slash` turn that also routed a doc block sent five and the API refused it outright (HTTP 400,
@@ -742,24 +753,36 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
-   * 8. Assemble system blocks, most-stable first.
+   * 8. Assemble system blocks, most-shared first (SPEC §4.2.8; restructured 2026-07-30).
    *
-   * Anthropic caches the prefix UP TO each breakpoint, so ordering is what makes caching pay: the
-   * base prompt (the big, byte-identical chunk) leads and gets its own breakpoint; the routed blocks
-   * and any invoked skill follow with theirs; volatile project context comes LAST with no breakpoint,
-   * so a file edit never invalidates the expensive prefix. This is a primary margin lever (§4.3.5).
+   * Anthropic caches the prefix UP TO each breakpoint, so ordering is what makes caching pay — and
+   * the ordering principle is SHAREDNESS, not merely stability: the base prompt (byte-identical for
+   * everyone) leads, the starter framework files (byte-identical for every project on a template pin)
+   * come second, the per-CONVERSATION blocks (routed docs + skills, append-only) third, and the
+   * per-TURN game-code files last. Everything behind the last breakpoint is uncached tail, where
+   * changing costs nothing. This is a primary margin lever (§4.3.5): measured 2026-07-30, the
+   * pre-restructure shape spent 82% of the platform's LLM bill on cache WRITES, because the
+   * per-project and per-conversation bytes sat in front of (or inside) the biggest entry.
    */
-  const system: CoreMessage[] = [{ role: 'system', content: promptVersion.content, providerOptions: CACHE_CONTROL }];
 
-  blocks.forEach((block, i) => {
-    system.push({
-      role: 'system',
-      content: `# Component Reference: ${block.title}\n\n${block.body}`,
+  /*
+   * The project's own `CLAUDE.md` (§4.2) is LIFTED OUT of the file map before the split — it becomes
+   * the Project Instructions block further down, and the same bytes must never be sent twice (paid
+   * twice per turn, and two copies to disagree after an edit).
+   */
+  const instructions = buildProjectInstructions(request.files);
+  let contextFiles = request.files;
 
-      // One breakpoint for the whole routed set — spend cache breakpoints sparingly.
-      ...(i === blocks.length - 1 ? { providerOptions: CACHE_CONTROL } : {}),
-    });
-  });
+  if (instructions) {
+    const { [instructions.key]: _lifted, ...rest } = request.files!;
+    contextFiles = rest;
+
+    if (instructions.truncated) {
+      logger.warn(`Project CLAUDE.md exceeded ${MAX_INSTRUCTIONS_CHARS} chars and was truncated`);
+    }
+  }
+
+  const { stable: stableFiles, mutable: mutableFiles } = splitFilesForContext(contextFiles ?? {});
 
   /*
    * 🔴 There is no skill ROUTER any more (2026-07-26). Only the creation turn pre-loads — a constant,
@@ -798,21 +821,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * 🔴 THE INVOKED SKILL AND THE PRE-LOADED SKILLS SHARE ONE BREAKPOINT — because ANTHROPIC ALLOWS
    * EXACTLY FOUR AND WE HAD FIVE (found + fixed 2026-07-17).
    *
-   * The budget is base + routed blocks + skills + project files = 4, and the comment on `CACHE_CONTROL`
-   * has always said "there are none spare". It was right when it was written; the pre-loaded-skills
-   * block was added later and nobody re-counted. So any `/slash` turn that ALSO routed a doc block sent
-   * five, and the API refuses the request outright:
+   * Since 2026-07-30 the routed doc blocks share it too (the freed breakpoint bought the starter-files
+   * entry below). Merging is the STRUCTURAL fix rather than a counter: the skill blocks cannot become
+   * two breakpoints again, and the doc set's breakpoint exists only when there is no skills block —
+   * so five is unreachable by construction instead of by arithmetic someone has to redo.
    *
-   *   HTTP 400 — "A maximum of 4 blocks with cache_control may be provided. Found 5."
-   *
-   * That is a HARD failure before a single token: 0 in, 0 out, the whole generation dead. Exactly the
-   * shape of the edit-turn `thinking.signature` bug (CLAUDE.md) — a path that every test drove around
-   * and no measurement pointed at, because slash invocations are rare and creations never use one.
-   *
-   * Merging is the STRUCTURAL fix rather than a counter: two skill blocks cannot become three, so five
-   * is now unreachable by construction instead of by arithmetic someone has to redo. They also belong
-   * together — both answer "which skills does the model already have?" — and one breakpoint for both is
-   * what the budget could always afford.
+   * Computed HERE, before the assembly, because the doc-block push needs to know whether a skills
+   * block will follow (the shared breakpoint rides on whichever comes last).
    *
    * ⚠️ Do not "tidy" this back into two `system.push` calls with their own `providerOptions`.
    */
@@ -827,6 +842,42 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     ...(carried.length > 0 ? [buildPreloadedSkillBlock(carried, true)] : []),
   ];
 
+  const system: CoreMessage[] = [{ role: 'system', content: promptVersion.content, providerOptions: CACHE_CONTROL }];
+
+  /*
+   * The STARTER half of the file context (breakpoint 2 — `~/lib/context/stable-zones.ts`).
+   *
+   * Placed BEFORE the routed doc blocks on purpose, and the placement is the whole value: these bytes
+   * are identical for every project on the same template pin (paths are project-relative; the split
+   * and the sort make the block a pure function of file content), but a cache entry covers the whole
+   * prefix up to its breakpoint — so behind the per-conversation doc blocks these same bytes could
+   * never hit across conversations, let alone across projects. Ahead of them, one project's traffic
+   * warms this entry for every other project on the pin, the way the base prompt warms for everyone.
+   */
+  if (Object.keys(stableFiles).length > 0) {
+    system.push({
+      role: 'system',
+      content: `# Current Project Files (1/2) — starter framework\n\nThe starter's framework zones (read-only library, app shell, vendored runtimes, config). The project's game code follows in part 2/2, after the reference material.\n\n${createFilesContext(stableFiles, true)}`,
+      providerOptions: CACHE_CONTROL,
+    });
+  }
+
+  blocks.forEach((block, i) => {
+    system.push({
+      role: 'system',
+      content: `# Component Reference: ${block.title}\n\n${block.body}`,
+
+      /*
+       * Doc blocks and the skills block SHARE one breakpoint (the 2026-07-30 restructure spent the
+       * freed one on the starter files above): the set's breakpoint rides on the skills block when
+       * one exists, else on the last doc block. `skillBlocks` is computed above the push for exactly
+       * this decision.
+       */
+      ...(i === blocks.length - 1 && skillBlocks.length === 0 ? { providerOptions: CACHE_CONTROL } : {}),
+    });
+  });
+
+  // The merged skills block — computed above the assembly; carries the shared docs+skills breakpoint.
   if (skillBlocks.length > 0) {
     system.push({ role: 'system', content: skillBlocks.join('\n\n'), providerOptions: CACHE_CONTROL });
   }
@@ -952,34 +1003,49 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const allowTools = toolPolicy.allowTools;
 
   /*
-   * Volatile project-context notes (§4.9 assets, §4.14 MCP tools, §4.15 Game Backend).
-   *
-   * These sit in the UNCACHED tail on purpose: they change mid-session (a backend is connected, an
-   * asset is added, `.mcp.json` is edited), so a cache breakpoint here would invalidate the expensive
-   * base prefix every time one of them changed. They are small, and correctness beats caching them.
-   * Placed BEFORE the file context so the model reads "what this project has" before "what is in it".
-   */
-  /*
    * The project's own `CLAUDE.md` (§4.2), promoted from "a file" to "instructions".
    *
-   * It goes FIRST in the volatile tail: it is the user telling us how to work on this project, and it
-   * outranks every note below it. It is also LIFTED OUT of the file context immediately below — the same
-   * bytes must never be sent twice (paid twice per turn, and two copies to disagree after an edit).
+   * Computed up at the top of step 8 (the lifting must happen before the stable/mutable split ever
+   * sees the map); PUSHED here, just ahead of the game-code files, INSIDE the last breakpoint's
+   * segment — it can be up to `MAX_INSTRUCTIONS_CHARS` and changes only when the user edits it, so
+   * caching it with the game code is the cheap placement. It outranks the notes below, which moved
+   * to the uncached tail (2026-07-30).
    */
-  const instructions = buildProjectInstructions(request.files);
-  let contextFiles = request.files;
-
   if (instructions) {
     system.push({ role: 'system', content: instructions.block });
-
-    const { [instructions.key]: _lifted, ...rest } = request.files!;
-    contextFiles = rest;
-
-    if (instructions.truncated) {
-      logger.warn(`Project CLAUDE.md exceeded ${MAX_INSTRUCTIONS_CHARS} chars and was truncated`);
-    }
   }
 
+  if (Object.keys(mutableFiles).length > 0) {
+    /*
+     * The GAME-CODE half of the file context (breakpoint 4 — the starter half went out at
+     * breakpoint 2, before the reference material). Binaries and opaque files arrive here as
+     * `<boltFile>` markers — never bodies (§4.2.8).
+     *
+     * This block IS cached despite changing every build turn, and that is not a contradiction. A
+     * breakpoint caches the prefix UP TO itself, so the entries in front keep hitting regardless:
+     * when a file changes, only THIS entry misses. What the breakpoint buys is the multiplier —
+     * `maxSteps` re-sends the entire prefix on every step of the tool loop, so an uncached block
+     * here is paid up to seven times per generation at full price. Cached, steps 2..n read it at a
+     * tenth. Splitting the starter out of it (2026-07-30) is what shrank the per-turn rewrite from
+     * the whole project to just the code being worked on.
+     */
+    system.push({
+      role: 'system',
+      content: `# Current Project Files (2/2) — game code\n\nThe project's own code and assets — everything not shown in part 1/2.\n\n${createFilesContext(mutableFiles, true)}`,
+      providerOptions: CACHE_CONTROL,
+    });
+  }
+
+  /*
+   * Volatile project-context notes (§4.9 assets, §4.14 MCP tools, §4.15 Game Backend).
+   *
+   * In the UNCACHED tail — which this comment used to claim while the code pushed them BEFORE the
+   * file-context breakpoint, i.e. inside its cached prefix, where a backend connect, an asset add or
+   * a `.mcp.json` edit re-wrote the whole file entry at 2× (the defect CLAUDE.md flagged 2026-07-19;
+   * fixed with the 2026-07-30 restructure). Here, past the last breakpoint, a note appearing or
+   * changing invalidates nothing; they are small, and re-sending them uncached each turn costs less
+   * than one rewrite did.
+   */
   for (const note of buildProjectNotes({
     files: request.files,
     gameBackend: request.gameBackend,
@@ -989,30 +1055,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     system.push({ role: 'system', content: note });
   }
 
-  if (contextFiles && Object.keys(contextFiles).length > 0) {
-    /*
-     * Binaries and opaque files arrive here as `<boltFile>` markers — never bodies (§4.2.8).
-     *
-     * This block IS cached, and that is not a contradiction of the ordering above. A breakpoint
-     * caches the prefix UP TO itself, so the base prompt and the routed blocks keep their own cache
-     * entries regardless: if a file changes next turn, only THIS entry misses and the expensive
-     * prefix still hits. What the breakpoint buys is the multiplier — `maxSteps` re-sends the entire
-     * prefix on every step of the tool loop, so an uncached file context is paid up to seven times
-     * per generation at full price. Cached, steps 2..n read it at a tenth. It was the single largest
-     * line item in the 997k-token creation we measured (§4.2.8).
-     */
-    system.push({
-      role: 'system',
-      content: `# Current Project Files\n\n${createFilesContext(contextFiles, true)}`,
-      providerOptions: CACHE_CONTROL,
-    });
-  }
-
   /*
-   * Discussion mode (§4.2.9) — MUST come after the file-context breakpoint above. A cache breakpoint
-   * covers the whole prefix up to itself, so this note one line earlier would re-write the ~110k-token
-   * file entry at 2x on every Discuss<->Build toggle. Here, past the last breakpoint, toggling it
-   * invalidates nothing. (Decided once, up by the tool policy — this is only the placement.)
+   * Discussion mode (§4.2.9) — past the last breakpoint, so toggling Build<->Plan invalidates
+   * nothing. (Decided once, up by the tool policy — this is only the placement.)
    */
   if (discussNote) {
     system.push({ role: 'system', content: discussNote });

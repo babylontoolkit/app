@@ -5,11 +5,15 @@
  * current project that the model must write code against — the MCP tools available (§4.14), whether a
  * Game Backend is connected (§4.15), and what components a referenced asset actually carries (§4.9).
  *
- * These go in the VOLATILE tail of the system array (after the cached prefix), because they change
- * per-project and mid-session — a user connects a backend, adds an asset, edits `.mcp.json` — and must
- * never invalidate the expensive cached base prompt (§4.2.8). They are built here as pure functions so
- * "what the model is told about the project" is a tested value, not a string concatenated inline in the
- * proxy where it cannot be checked.
+ * These go in the VOLATILE tail of the system array — past the LAST cache breakpoint — because they
+ * change per-project and mid-session (a user connects a backend, adds an asset, edits `.mcp.json`) and
+ * must never invalidate a cached entry (§4.2.8). ⚠️ This sentence was FALSE from 2026-07-19 to
+ * 2026-07-30: the proxy pushed these ahead of the file-context breakpoint, so every note change
+ * re-wrote the biggest cache entry at 2× while this comment claimed otherwise — the
+ * false-claim-in-a-doc-comment failure CLAUDE.md catalogues. The 2026-07-30 restructure moved the push
+ * to the real tail; if you relocate it, re-verify against `proxy.ts` step 8 rather than this comment.
+ * They are built here as pure functions so "what the model is told about the project" is a tested
+ * value, not a string concatenated inline in the proxy where it cannot be checked.
  *
  * Trust note (§4.14, §5): MCP tool descriptions and asset metadata are THIRD-PARTY content (they
  * travel with remixed/imported projects). They are described to the model as available capabilities,

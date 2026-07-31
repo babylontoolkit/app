@@ -58,7 +58,17 @@ export function simplifyBoltActions(input: string): string {
 
 export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
   const ig = ignore().add(IGNORE_PATTERNS);
-  let filePaths = Object.keys(files);
+
+  /*
+   * 🔴 SORTED, because this block is CACHED and `Object.keys` order is watcher-arrival order
+   * (found 2026-07-30). The map's key order is whatever sequence the client's file watcher happened
+   * to discover files in — which differs between a fresh mount, a reload, and a device switch. Same
+   * project, same bytes, different ORDER → a different prefix → the whole file-context cache entry
+   * rewritten at 2×, for content that did not change. Nothing throws; the bill just goes up.
+   * `.sort()` (code-unit order — never `localeCompare`, which is locale-dependent) makes the bytes a
+   * pure function of the map's CONTENT.
+   */
+  let filePaths = Object.keys(files).sort();
   filePaths = filePaths.filter((x) => {
     const relPath = toProjectRelativePath(x);
     return !ig.ignores(relPath);
