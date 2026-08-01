@@ -6,6 +6,7 @@ import { renderHeadToString } from 'remix-island';
 import { Head } from './root';
 import { themeStore } from '~/lib/stores/theme';
 import { assertNotLocalInProduction } from '~/lib/.server/supabase/auth';
+import { resolveSandboxProviderId, SANDBOX_PROVIDER_TRAITS } from '~/lib/common/sandbox-runtime';
 
 /**
  * THE BOOT GATE (SPEC §4.5).
@@ -96,8 +97,21 @@ export default async function handleRequest(
    * WebContainer, needs no SharedArrayBuffer, and must not pay the embedding restriction — this is
    * the incidental win `spec/sandbox-seam.md` names ("dropping WebContainer lets us drop COEP").
    * Same build-time switch as `~/lib/sandbox/index.ts`; the header follows the runtime it serves.
+   *
+   * ✅ **The negation is GONE (2026-07-31).** This used to read `!== 'codesandbox'`, and the note here
+   * said: *"a future provider that does NOT want isolation inherits it silently… when the third
+   * provider lands, make this a property of the provider rather than a list of the ones that do not."*
+   * Nodepod is that third provider, so the answer now comes from `SANDBOX_PROVIDER_TRAITS`, where the
+   * type will not compile until a new runtime has stated whether it needs isolation. Nodepod happens
+   * to want it (its sync VFS bridge is `Atomics.wait` over a SharedArrayBuffer), which is exactly why
+   * making it explicit mattered — a coincidence that keeps working teaches nobody anything.
+   *
+   * NOTE: `require-corp` here is about the RUNTIME, never about the game. Havok does not need
+   * SharedArrayBuffer (SPEC §4.4, corrected 2026-07-31, measured against the shipped wasm).
    */
-  if (import.meta.env.VITE_SANDBOX_PROVIDER !== 'codesandbox') {
+  if (
+    SANDBOX_PROVIDER_TRAITS[resolveSandboxProviderId(import.meta.env.VITE_SANDBOX_PROVIDER)].needsCrossOriginIsolation
+  ) {
     responseHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
     responseHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
   }

@@ -188,6 +188,27 @@ export interface GitProvider {
   /** Create the repo in the user's account, or adopt it if the name is already taken by them. */
   ensureRepo(input: EnsureRepoInput): Promise<EnsureRepoResult>;
 
+  /**
+   * The repository's default branch, or null when the repository does not exist (or is not visible to
+   * this token — GitLab answers 404 for a private project rather than 403, deliberately, so the API
+   * cannot be used to enumerate).
+   *
+   * Import needs this and nothing else does: `StarterTemplates` links to `/git?url=…` with **no
+   * branch**, and a user pasting a repository URL is under no obligation to know whether it calls its
+   * trunk `main`, `master` or `develop`. Guessing `main` is not a fallback, it is a wrong answer that
+   * reads as "repository not found".
+   *
+   * ⚠️ It takes only the COORDINATE, not a `RepoRef` — asking for a branch in order to discover the
+   * branch is a contradiction, and a caller forced to invent one (`branch: ''`, `branch: 'main'`) has
+   * been handed the very guess this method exists to remove. A `RepoRef` **value** still satisfies it
+   * structurally; an inline object literal carrying `branch` does not (TS excess-property checking),
+   * which is the compiler making the same point.
+   *
+   * Absent is `null`, never a throw — the `getBranchHead` rule, for the same reason: a caller must be
+   * able to tell "there is no such repo" from "we could not ask", and an exception collapses them.
+   */
+  getDefaultBranch(ref: Pick<RepoRef, 'owner' | 'repo'>): Promise<string | null>;
+
   /** The branch's head commit sha, or null when the branch does not exist. */
   getBranchHead(ref: RepoRef): Promise<string | null>;
 

@@ -124,4 +124,51 @@ describe('previewUrlWithPath', () => {
   it('returns a malformed base unchanged instead of throwing into a render', () => {
     expect(previewUrlWithPath('not a url', '/play')).toBe('not a url');
   });
+
+  /*
+   * 🔴 A SAME-ORIGIN preview served from a mount prefix (Nodepod: `/__virtual__/<pod>/<port>`).
+   *
+   * This function used to ASSIGN `joined.pathname`, which was right only because every base it had
+   * ever seen had a pathname of `/`. Under a mount prefix, assigning rewrites the URL to `/play` on
+   * OUR origin — the builder page — so the preview iframe loads the app builder inside itself.
+   * Observed live 2026-07-31 before the fix; it reads as a hang, not as a bad URL.
+   */
+  describe('a base served from a mount prefix', () => {
+    const MOUNT = 'http://localhost:5173/__virtual__/pod22122918/5173';
+
+    it('appends the path under the mount instead of replacing it', () => {
+      expect(new URL(previewUrlWithPath(MOUNT, '/play')).pathname).toBe('/__virtual__/pod22122918/5173/play');
+    });
+
+    it('normalises a path with no leading slash under the mount', () => {
+      expect(new URL(previewUrlWithPath(MOUNT, 'play')).pathname).toBe('/__virtual__/pod22122918/5173/play');
+    });
+
+    it('does not double the slash when the mount has a trailing one', () => {
+      expect(new URL(previewUrlWithPath(`${MOUNT}/`, '/play')).pathname).toBe('/__virtual__/pod22122918/5173/play');
+    });
+
+    it('still returns the base untouched at the root path', () => {
+      expect(previewUrlWithPath(MOUNT, '/')).toBe(MOUNT);
+    });
+
+    /* The escape this exists to prevent: the result must never leave the mount. */
+    it('never produces a URL outside the mount', () => {
+      for (const path of ['/play', 'play', '/a/b/c', '/index.html']) {
+        expect(new URL(previewUrlWithPath(MOUNT, path)).pathname.startsWith('/__virtual__/pod22122918/5173/')).toBe(
+          true,
+        );
+      }
+    });
+  });
+
+  /*
+   * CONTROL: the CodeSandbox/WebContainer shape must be byte-identical to the pre-fix behaviour.
+   * Appending to a base whose pathname is `/` is the same operation as assigning — that equivalence
+   * is the whole reason this fix is safe, so it is asserted rather than assumed.
+   */
+  it('CONTROL: a root-pathname base is unaffected by the append', () => {
+    expect(new URL(previewUrlWithPath('https://sb1-5173.csb.app/', '/play')).pathname).toBe('/play');
+    expect(new URL(previewUrlWithPath('https://sb1-5173.csb.app', '/play')).pathname).toBe('/play');
+  });
 });

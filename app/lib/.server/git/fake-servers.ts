@@ -76,6 +76,36 @@ export class FakeRepoStore {
 
   readonly repos = new Set<string>();
 
+  /**
+   * fullName → default branch, for repos that do not use the fake's own default.
+   *
+   * ⚠️ Separate from `repos` rather than replacing it with a `Map`, and that is not laziness: both
+   * fakes and two spec files already read `repos` as a set of names, and a repo whose metadata is
+   * missing must still EXIST. A `Map` makes "registered" and "has metadata" the same fact, so a test
+   * that forgets the second silently asserts against the first.
+   *
+   * It exists at all because `default_branch: 'main'` used to be hardcoded at four call sites, which
+   * meant every repository in every fake agreed — and a `getDefaultBranch` test cannot tell a real
+   * lookup from a constant when every answer is the same constant.
+   */
+  readonly defaultBranches = new Map<string, string>();
+
+  /** The fake's own default, matching what both providers create a repo with. */
+  static readonly DEFAULT_BRANCH = 'main';
+
+  /** Register a repo, optionally with a default branch that is NOT `main`. */
+  addRepo(fullName: string, defaultBranch?: string): void {
+    this.repos.add(fullName);
+
+    if (defaultBranch) {
+      this.defaultBranches.set(fullName, defaultBranch);
+    }
+  }
+
+  defaultBranchOf(fullName: string): string {
+    return this.defaultBranches.get(fullName) ?? FakeRepoStore.DEFAULT_BRANCH;
+  }
+
   putBlobBase64(base64: string): string {
     const id = sha(`blob:${base64}`);
     this.blobs.set(id, base64);
@@ -229,7 +259,7 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
           store.branches.set('main', store.putCommit(tree, [], 'Initial commit'));
         }
 
-        return { data: { full_name: fullName, default_branch: 'main' } };
+        return { data: { full_name: fullName, default_branch: store.defaultBranchOf(fullName) } };
       },
       get: async (params: { owner: string; repo: string }) => {
         record('GET', `/repos/${params.owner}/${params.repo}`);
@@ -240,7 +270,7 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
           throw new FakeHttpError(404, 'Not Found', { headers: {} });
         }
 
-        return { data: { full_name: fullName, default_branch: 'main' } };
+        return { data: { full_name: fullName, default_branch: store.defaultBranchOf(fullName) } };
       },
     },
     git: {
@@ -436,7 +466,7 @@ export function createFakeGitLab(options: { login?: string; store?: FakeRepoStor
 
       store.repos.add(fullName);
 
-      return json({ path_with_namespace: fullName, default_branch: 'main' });
+      return json({ path_with_namespace: fullName, default_branch: store.defaultBranchOf(fullName) });
     }
 
     const projectMatch = path.match(/^\/projects\/([^/]+)(.*)$/);
@@ -448,7 +478,7 @@ export function createFakeGitLab(options: { login?: string; store?: FakeRepoStor
         const fullName = decodeURIComponent(projectMatch[1]);
 
         return store.repos.has(fullName)
-          ? json({ path_with_namespace: fullName, default_branch: 'main' })
+          ? json({ path_with_namespace: fullName, default_branch: store.defaultBranchOf(fullName) })
           : json({ message: '404 Project Not Found' }, 404);
       }
 

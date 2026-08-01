@@ -5,10 +5,14 @@
  * project-backed runtime there is nothing to write into until one does. Three properties here, and
  * every one of them fails SILENTLY:
  *
- *   - on a runtime that needs no project (WebContainer), and on an import started from inside an
- *     already-open project, NOTHING is registered. A server round trip added to the incumbent's
- *     import path is a behaviour change nobody asked for, and a second project row created because
- *     the user imported a folder into the game they already had open is a duplicate on the dashboard.
+ *   - EVERY import registers, on BOTH runtimes, because registration is where `PROJECT_CREATE_CREDITS`
+ *     is taken and both runtimes provision a workspace the platform pays for (owner, 2026-07-31). The
+ *     sole exemption is an import started from inside an ALREADY-OPEN project: that workspace has been
+ *     paid for already, so a second registration bills twice for one VM and puts a duplicate card on
+ *     the dashboard. `SANDBOX_REQUIRES_PROJECT` now decides only whether a failed registration is
+ *     fatal — never whether money is taken.
+ *   - a 402 is a DECISION, not an outage, so it refuses on every runtime; anything else degrades to a
+ *     browser-local import only where the runtime can boot without a project id.
  *   - on a runtime that does need one, the project is registered BEFORE the boot and its id rides out
  *     with the workspace. Without that pointer the reload after an import boots a different sandbox
  *     and the clone is stranded on a VM nothing names.
@@ -42,7 +46,29 @@ vi.mock('~/lib/sandbox', () => ({
 const createProject = vi.hoisted(() => vi.fn());
 const deleteProject = vi.hoisted(() => vi.fn());
 
-vi.mock('~/lib/persistence/projects', () => ({ createProject, deleteProject }));
+/*
+ * `ApiError` must be a REAL class here, not a stub: the module distinguishes a 402 from an outage with
+ * `instanceof`, and a plain object would fail that check silently — turning "the platform declined" into
+ * "the server was unreachable", which is the exact mis-degradation these tests exist to prevent.
+ */
+const errors = vi.hoisted(() => {
+  class ApiError extends Error {
+    statusCode: number;
+
+    constructor(message: string, statusCode: number) {
+      super(message);
+      this.name = 'ApiError';
+      this.statusCode = statusCode;
+    }
+  }
+
+  return { ApiError };
+});
+
+vi.mock('~/lib/persistence/projects', () => ({ ApiError: errors.ApiError, createProject, deleteProject }));
+
+/** A refusal the module must treat as a decision, not an outage. */
+const refusal = (message: string) => new errors.ApiError(message, 402);
 
 import { openImportWorkspace } from './import-project';
 
@@ -72,17 +98,76 @@ describe('an import that already has a workspace registers nothing', () => {
   });
 
   /*
-   * WebContainer's runtime is tab-local and anonymous and boots at module scope; an import there has
-   * never needed a project record. A server round trip here would be a regression, not a fix.
+   * The exemption is `alreadyBooted` and ONLY `alreadyBooted`: that workspace exists and has already
+   * been charged for, so a second registration would bill twice for one VM. It must hold on the
+   * incumbent runtime too, where the tab is bound to a project.
    */
-  it('leaves the incumbent runtime byte-identical — no project, no boot call', async () => {
+  it('registers nothing on the incumbent runtime either, when a project is already open', async () => {
     seam.requiresProject = false;
+    seam.bootedProjectId.mockReturnValue('prj_open');
+
+    const workspace = await openImportWorkspace({ name: 'my-repo' });
+
+    expect(workspace.projectId).toBe('prj_open');
+    expect(createProject).not.toHaveBeenCalled();
+  });
+});
+
+/*
+ * 🔴 EVERY IMPORT REGISTERS, ON BOTH RUNTIMES — because registration is where `PROJECT_CREATE_CREDITS`
+ * is taken, and both runtimes provision a workspace the platform pays for (owner, 2026-07-31).
+ *
+ * This reverses a deliberate earlier decision that skipped registration when the RUNTIME did not need
+ * a project id. That expression was answering a runtime question and a billing question at once, so
+ * the identical import was billed on CodeSandbox and free on the default provider, silently.
+ */
+describe('an import on the incumbent runtime still registers, because that is where the charge is taken', () => {
+  beforeEach(() => {
+    seam.requiresProject = false;
+  });
+
+  it('creates the project even though the runtime does not need its id to boot', async () => {
+    const workspace = await openImportWorkspace({ name: 'my-repo' });
+
+    expect(createProject).toHaveBeenCalledTimes(1);
+    expect(createProject.mock.calls[0][0]).toMatchObject({ name: 'my-repo' });
+    expect(workspace.projectId).toBe('prj_new');
+  });
+
+  /*
+   * §1.3 principle 0 — an unreachable server must not stop someone building. This runtime boots
+   * without a project id, so an outage degrades to a browser-local import rather than a refusal.
+   */
+  it('degrades to a browser-local import when registration is unreachable', async () => {
+    createProject.mockRejectedValue(new Error('network down'));
 
     const workspace = await openImportWorkspace({ name: 'my-repo' });
 
     expect(workspace.sandbox).toBe(EAGER);
     expect(workspace.projectId).toBeUndefined();
-    expect(createProject).not.toHaveBeenCalled();
+    expect(workspace.rollback).toBeDefined();
+    await expect(workspace.rollback()).resolves.toBeUndefined();
+    expect(deleteProject).not.toHaveBeenCalled();
+  });
+
+  /*
+   * ⚠️ THE ONE THAT COSTS MONEY IF IT REGRESSES. A 402 is the platform deliberately declining, not an
+   * outage: degrading past it hands a user with no credits a working project for FREE and tells them
+   * the server was unreachable. Both halves wrong, neither throws.
+   */
+  it('refuses a 402 rather than degrading past it', async () => {
+    createProject.mockRejectedValue(refusal('Not enough credits — 100 needed, 12 available.'));
+
+    await expect(openImportWorkspace({ name: 'my-repo' })).rejects.toThrow(/Not enough credits/);
+    expect(seam.bootForProject).not.toHaveBeenCalled();
+  });
+});
+
+describe('a 402 refuses on the project-backed runtime too', () => {
+  it('rethrows the platform’s own message, naming the price', async () => {
+    createProject.mockRejectedValue(refusal('Not enough credits — 100 needed, 12 available.'));
+
+    await expect(openImportWorkspace({ name: 'my-repo' })).rejects.toThrow(/100 needed/);
     expect(seam.bootForProject).not.toHaveBeenCalled();
   });
 });

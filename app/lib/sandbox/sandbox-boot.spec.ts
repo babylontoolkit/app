@@ -367,17 +367,36 @@ describe('the sandbox demanded outside a project', () => {
 
 describe('an unrecognised VITE_SANDBOX_PROVIDER', () => {
   /*
-   * A typo, an unset variable, or a stale value must land on the INCUMBENT. Defaulting the other way
-   * would turn a mistyped env var into a build that cannot open a project at all.
+   * 🔴 The expectation CHANGED on 2026-07-31, and the reason is worth more than the assertion.
+   *
+   * This used to require the fallback to be WebContainer, "the incumbent" — sound while the incumbent
+   * was free. It is not: WebContainers is priced at ~$10,000 per 8,000 API calls and CodeSandbox bills
+   * per VM-hour, so with the old rule a typo in a deploy config silently selected a PAID runtime.
+   * Nodepod needs no credential and no VM, so the intended provider and the safe fallback are now the
+   * same answer — the first time that has been true (`spec/sandbox-nodepod.md`).
+   *
+   * The test itself was never wrong; a test that encodes a decision has to be re-read when the
+   * decision changes, rather than deleted because it went red.
    */
-  it('falls back to WebContainer rather than to the server provider', async () => {
+  it('falls back to Nodepod — the runtime that costs nothing — rather than to a paid provider', async () => {
     vi.resetModules();
     vi.stubEnv('SSR', false as never);
     vi.stubEnv('VITE_SANDBOX_PROVIDER', 'codesandobx');
 
     const seam = await import('./index');
 
-    expect(seam.SANDBOX_PROVIDER).toBe('webcontainer');
+    expect(seam.SANDBOX_PROVIDER).toBe('nodepod');
     expect(seam.SANDBOX_REQUIRES_PROJECT).toBe(false);
+    expect(seam.SANDBOX_OUTLIVES_SESSION).toBe(false);
+  });
+
+  it('an UNSET variable lands on Nodepod too', async () => {
+    vi.resetModules();
+    vi.stubEnv('SSR', false as never);
+    vi.stubEnv('VITE_SANDBOX_PROVIDER', undefined);
+
+    const seam = await import('./index');
+
+    expect(seam.SANDBOX_PROVIDER).toBe('nodepod');
   });
 });

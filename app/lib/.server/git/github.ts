@@ -291,6 +291,28 @@ export class GitHubProvider implements GitProvider {
    * lets a flaky connection declare the browser authoritative and push over a repo it never read
    * (`mount-source.ts`). An empty repo genuinely HAS no branch, so `null` is the honest answer.
    */
+  /**
+   * The repository's default branch (see `GitProvider.getDefaultBranch`).
+   *
+   * `repos.get` is the right endpoint and not merely a convenient one: it answers on a repository with
+   * **no commits at all**, where every Git Data API endpoint returns 409 (see `getBranchHead` above).
+   * A freshly created empty repo therefore still reports the branch it WOULD use, which is exactly
+   * what an import of somebody's just-initialised repo needs.
+   */
+  async getDefaultBranch(ref: Pick<RepoRef, 'owner' | 'repo'>): Promise<string | null> {
+    try {
+      const { data } = await mapErrors(() => this._octokit.repos.get({ owner: ref.owner, repo: ref.repo }));
+
+      return data.default_branch ?? null;
+    } catch (error) {
+      if (error instanceof GitProviderError && error.kind === 'not-found') {
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
   async getBranchHead(ref: RepoRef): Promise<string | null> {
     try {
       const { data } = await mapErrors(() =>

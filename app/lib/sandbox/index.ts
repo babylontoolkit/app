@@ -32,17 +32,25 @@ export {
   SandboxUnavailableError,
 } from './errors';
 
-export type SandboxProviderId = 'webcontainer' | 'codesandbox';
+import {
+  resolveSandboxProviderId,
+  SANDBOX_PROVIDER_TRAITS,
+  type SandboxProviderId,
+} from '~/lib/common/sandbox-runtime';
+
+export type { SandboxProviderId } from '~/lib/common/sandbox-runtime';
 
 /**
- * Which runtime this build uses.
+ * Which runtime this build uses. **Nodepod is the default** (`spec/sandbox-nodepod.md`).
  *
- * Anything other than `codesandbox` — including unset, a typo, or a stale value — means
- * WebContainer. Defaulting to the incumbent is the safe direction: a mistyped variable produces the
- * behaviour the product already had, rather than a build that cannot open a project at all.
+ * The id, the default, and every fact derived from it live in `~/lib/common/sandbox-runtime.ts` —
+ * shared with `entry.server.tsx`, which needs the same answers and must not import this module (doing
+ * so would pull a browser runtime, and its eager boot, into the server bundle).
  */
-export const SANDBOX_PROVIDER: SandboxProviderId =
-  import.meta.env.VITE_SANDBOX_PROVIDER === 'codesandbox' ? 'codesandbox' : 'webcontainer';
+export const SANDBOX_PROVIDER: SandboxProviderId = resolveSandboxProviderId(
+  import.meta.env.VITE_SANDBOX_PROVIDER,
+  (message) => console.warn(message),
+);
 
 /**
  * Can the project's files survive this browser session?
@@ -63,7 +71,7 @@ export const SANDBOX_PROVIDER: SandboxProviderId =
  * tells its users their files vanish with the tab, silently and wrongly. Adding a provider must be a
  * deliberate answer to this question, in one place.
  */
-export const SANDBOX_OUTLIVES_SESSION: boolean = SANDBOX_PROVIDER === 'codesandbox';
+export const SANDBOX_OUTLIVES_SESSION: boolean = SANDBOX_PROVIDER_TRAITS[SANDBOX_PROVIDER].outlivesSession;
 
 /**
  * Does a boot on this provider need to know WHICH project it is for?
@@ -76,7 +84,7 @@ export const SANDBOX_OUTLIVES_SESSION: boolean = SANDBOX_PROVIDER === 'codesandb
  * Derived here for the same reason as {@link SANDBOX_OUTLIVES_SESSION}: a third provider must ANSWER
  * this question rather than inherit an answer by omission.
  */
-export const SANDBOX_REQUIRES_PROJECT: boolean = SANDBOX_PROVIDER === 'codesandbox';
+export const SANDBOX_REQUIRES_PROJECT: boolean = SANDBOX_PROVIDER_TRAITS[SANDBOX_PROVIDER].requiresProject;
 
 /**
  * The active sandbox for this tab, and the machinery that binds it to one project.
@@ -231,6 +239,16 @@ async function connectProvider(projectId?: string): Promise<SandboxProvider> {
 
       // Per-BOOT, read from the session that produced this client — never module state (see the boot module).
       bootRestoredFilesystem: connected.bootRestoredFilesystem,
+    });
+  }
+
+  if (SANDBOX_PROVIDER === 'nodepod') {
+    const [boot, provider] = await Promise.all([import('./nodepod-boot'), import('./nodepod-provider')]);
+    const connected = await boot.bootNodepod();
+
+    return provider.createNodepodProvider(connected.client, {
+      workdir: boot.NODEPOD_WORKDIR,
+      onServerReady: connected.onServerReady,
     });
   }
 

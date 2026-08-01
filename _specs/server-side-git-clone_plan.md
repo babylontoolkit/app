@@ -1,0 +1,114 @@
+# Implementation Plan — server-side-git-clone
+
+Spec: `_specs/server-side-git-clone_spec.md`
+Branch: `project/feature/server-side-git-clone`
+spec_impact: **yes** (carried from the feature spec)
+
+## Codebase Analysis
+
+Read in full: `_specs/server-side-git-clone_spec.md`, root `SPEC.md` (1,482 lines), `CLAUDE.md`. Fanned out to three read-only subagents across route/rate-limit conventions, the client clone flow, and the default-deny guard scans. Files inspected are cited inline below.
+
+### What already exists (and is live-proven)
+
+- **The `GitProvider` seam** — `app/lib/.server/git/provider.ts:180` declares `getCurrentUser` / `ensureRepo` / `getBranchHead` / `fetchTree` / `fastForwardPush`. `fetchTree` is implemented at `github.ts:322` and `gitlab.ts:307`, returns `{ files: SerializedFileMap; head: string }` or `null` for an empty branch, and is what repo-primary mount already uses.
+- **Byte fidelity is contract-pinned** — `classifyFetchedBlob` (`fetch-decode.ts:52`) decodes provider base64 to bytes and **re-encodes**, so provider 60-column wrapping cannot leak downstream. `git-provider-contract.spec.ts:149` round-trips a PNG and a GLB sha256-identical. Truncation is fatal, not silent (`github.ts:340`, `gitlab.ts:301`).
+- **Token resolution** — `resolveProvider(context, userId, provider)` (`resolve.ts:116`), backed by `GitTokenStore` (`token-store.ts:124`), AES-256-GCM, `git_tokens` RLS-on-no-policy (service role only). Never returns null — throws `GitProviderError{kind:'auth'}`.
+- **A byte-faithful bulk writer** — `workbenchStore.restoreFiles(files, { protect, onProgress })` (`workbench.ts:174`) → `FilesStore.restoreFiles` (`files.ts:1049`) → `writeSerializedFileMap` (`binary/binary-files.ts:326`). Already driven with `onProgress → bootProgress.set({ step:'files', done, total })` at `useChatHistory.ts:739`.
+- **The charge path** — `POST /api/projects` runs `quoteProjectCreate` → row → `debitProjectCreate` (`api.projects.ts:79-100`).
+
+### Three findings that change the plan versus the spec
+
+1. **🔴 The project already exists before the clone fetch, so BOTH walls apply — and the route should be an `op` on the existing project route, not a new one.** Spec FR1/FR2 assume "at clone time there is no project yet" and call for a new route with `requireVerifiedUser` only. That is wrong about the current flow: `useGit.gitClone` calls `openImportWorkspace` **first** (`useGit.ts:111`), which registers the project and takes `PROJECT_CREATE_CREDITS`, and only then fetches. So the clone is project-scoped. `api.projects.$projectId.github.ts` already carries a `POST` `op` discriminator, already has `requireVerifiedUser` + `requireOwnedProject` (`:168-171`), already owns the `GitProviderError` → HTTP mapping, and its `pull()` (`:422`) already returns exactly `{ ok, files, head }`. **Plan: add `op: 'clone'` there.** Strictly more secure than the spec's design (two walls instead of one), and §2.1a-compliant — extend the seam's existing door rather than cutting a second one. It is also already inside `no-client-token.spec.ts`'s scanned file set.
+
+2. **⚠️ There is no per-user rate limiter in this codebase.** Spec FR9 asks for one. The only limiter is `checkRateLimit` (`app/lib/security.ts:24`) — **per-IP, in-process**, keyed `${clientIP}:${endpoint}`, with `/api/*` matching first at 100 req/15 min. Building a real per-user limiter is its own feature (it needs shared state to survive more than one instance). **Plan: use the existing per-IP limiter, and record the gap in SPEC.md §10 rather than pretend it is closed.** Note `withSecurity` catches any throw into a **500** (`security.ts:231`), bypassing `errorResponse` — so the auth wall must be the `denyUnlessVerified` early-return form, never a bare throw.
+
+3. **`GitProviderError` is not a `SAFE_ERRORS` member and has no `statusCode`** (it has `status`, `kind`, `retryable` — `provider.ts:96`). Reaching `errorResponse` turns it into a generic 500. The existing route avoids this with its own mapper (`api.projects.$projectId.github.ts:79-93`): `auth`→401 `{reconnect:true}`, `not-found`→404, `forbidden`→403, everything else→409. The clone op must route through that same mapper.
+
+### Already landed this session (not a task)
+
+The **WebContainer no-charge gap** (spec FR25, Open Question 1) is **fixed and merged into the working tree**: `openImportWorkspace` now registers on both sandbox providers, `SANDBOX_REQUIRES_PROJECT` decides only whether a failed registration is fatal, a 402 refuses on every runtime, and non-402 failures degrade to a browser-local import only where the runtime can boot without a project id. `import-project.spec.ts` is at 14 tests, mutation-verified on the 402 rule. Gates green (4,264 tests).
+
+### Open questions — decided, so the plan is executable
+
+| # | Decision |
+|---|---|
+| 2 | **(a)** Server-side `fetchTree` becomes the only clone path. The isomorphic-git client path is **hidden, not deleted** (§2.1a), and `/api/git-proxy` leaves the user-facing import path. |
+| 3 | **Seam addition.** Resolving a default branch is a genuine capability and must be expressible for both providers — `getDefaultBranch` joins `GitProvider` with contract tests for GitHub *and* GitLab. |
+| 4 | GitHub + GitLab only in v1; anything else is refused **by name** ("Only GitHub and GitLab repositories can be imported"), not generically. Private/self-hosted hosts are permanently out of scope — `net/ssrf.ts` refuses private addresses by design. |
+| 5 | Git-LFS out of scope; pointer files are **detected and reported**, never silently imported as 130-byte text. |
+| 6 | The stale `git:<domain>` cookie is **cleared**, not ignored — leaving a plaintext credential in the browser after superseding the flow that wrote it is its own defect. |
+| 7 | The clone's files land by **direct write** (`restoreFiles`), not artifact replay. The artifact becomes description-only. §4.4a's stated reason for the overlay-not-`ready` gate therefore no longer applies to this door and is rewritten in T12. |
+
+### SPEC.md alignment
+
+Conforms to **§4.13** (server-side tokens, client holds none), **§4.5.3** (two walls, 404-not-403), **§4.5.4b/c** (link tuple all-or-nothing; `GitProvider` seam; binary byte-identity), **§5** (auth inside the handler, SSRF per redirect hop, size caps, no secret emitted), **§4.4a** (the splash covers every door), **§4.2.8** (ingest classified before reaching the model), **§8** (`SandboxProvider` seam). **Spec-impacting — T12 is the required write-back task.**
+
+## Tasks
+
+- [x] **T1** — Stop `GitCloneButton` corrupting binaries and silently dropping files
+  - Files: `app/components/chat/GitCloneButton.tsx`, `app/components/chat/GitCloneButton.spec.tsx` (new)
+  - Details: A **live defect, independent of the rest of this plan — land it first.** `:70` builds a non-fatal `new TextDecoder('utf-8')` and `:80-90` applies it to any path matching its text-extension allow-list (which includes `.svg`, `.json`, `.xml`, `.md`) even when the content is a `Uint8Array`; invalid bytes become U+FFFD and the action runner writes that garbage over the correct bytes on disk. Converge on the already-fixed sibling `GitUrlImport.client.tsx:60-90`: import `isBinaryPath` from `~/lib/binary/binary-files`, exclude binaries from the artifact entirely, and use `new TextDecoder('utf-8', { fatal: true })` so anything that is not valid UTF-8 stays on disk only. Delete `MAX_FILE_SIZE`/`MAX_TOTAL_SIZE` (`:42-43`) — the bytes are already on disk, so the artifact never needed the bodies, which is also the §4.2.8-correct shape. Neither component has any test today.
+  - Acceptance: a fixture map containing a `.png`, a `.wasm`, and a **`.svg` whose bytes are not valid UTF-8** produces an artifact that omits all three and mutates none of them; a text file over 100KB is no longer dropped. Includes a **control** that fails if the decoder is switched back to non-fatal — the distinction is invisible without one.
+
+- [ ] **T2** — Add `getDefaultBranch` to the `GitProvider` seam, for both providers
+  - Files: `app/lib/.server/git/provider.ts`, `github.ts`, `gitlab.ts`, `fake-servers.ts`, `git-provider-contract.spec.ts`
+  - Details: `StarterTemplates.tsx:9` links to `/git?url=…` with **no branch**, so an arbitrary repo reference must resolve its own default. Declare `getDefaultBranch(ref: RepoRef): Promise<string | null>` on the interface (`provider.ts:180`) — `tsc` then forces both implementations. Extend **both** fakes: `FakeRepoStore.repos` is currently a bare `Set<string>` (`fake-servers.ts:78`) with `default_branch: 'main'` hardcoded at `:232/:243/:439/:451`, so give it per-repo metadata or the test cannot tell `owner/a` from `owner/b`. Honour the fakes' own rule (`fake-servers.ts:14`): reproduce provider quirks rather than smoothing them (GitHub answers 409 on an empty repo; GitLab needs URL-encoded project paths).
+  - Acceptance: contract tests run inside the existing `describe.each` so they execute for **GitHub and GitLab from one body**, and cover the happy path asserted on `h.requests` (path + method actually sent), the absent case (unknown repo → `null`, **not** a throw, matching the `:447`/`:464` pattern), and the error taxonomy via `h.failWith` → `{kind:'auth', retryable:false}` and `{kind:'rate-limit', retryable:true}`.
+
+- [ ] **T3** — Add `op: 'clone'` to the project git route
+  - Files: `app/routes/api.projects.$projectId.github.ts`, `app/lib/.server/git/clone.ts` (new)
+  - Details: A new `clone()` helper beside `save()`/`pull()`, dispatched from the existing `op` switch (`:176`) so it inherits `requireVerifiedUser` + `requireOwnedProject` (`:168-171`) — **both walls, because the project already exists by this point** (see Codebase Analysis finding 1). Body: `{ op: 'clone', repo, branch?, provider? }` — never a token, a username, or a password. Steps, in order: `parseRepo()` (`provider.ts:54`) to reduce the user's input to `owner/repo` so **no raw user URL is ever fetched**; refuse a non-GitHub/GitLab host by name; `resolveProvider(context, userId, provider)`; `getDefaultBranch` when no branch was given; `fetchTree`; measure the map against `DEFAULT_PROJECT_SOURCE_MAX_MB` (`storage/limits.ts:28`) and refuse naming size, limit and env var; strip `isSecretPath` entries using the one rule (`git/sync-logic.ts`); return `{ ok: true, files, head, repo, branch, provider }`. Errors route through the existing `providerErrorResponse` mapper (`:79-93`) — **never `errorResponse`**, which would flatten `GitProviderError` to a generic 500 (finding 3). `assertPublicUrl()` applies as defense-in-depth on any URL actually fetched, re-run per redirect hop. Rate limiting is the existing per-IP `checkRateLimit`; do **not** invent a `requireAuth` option on `withSecurity` (`security.ts:170-179` forbids it by name).
+  - Acceptance: a public repo clones for a user with no connection; a private repo clones for a connected user; an unconnected user hitting a private repo gets **401 `{reconnect: true, kind: 'auth'}`**; a non-GitHub/GitLab host is refused with a message naming the limitation; an oversize repo is refused before the bytes are returned; no `.env` appears in the response.
+
+- [ ] **T4** — Extend the guard scans to cover the clone path
+  - Files: `app/lib/.server/git/no-client-token.spec.ts`, `app/lib/.server/security/outbound-auth.spec.ts`
+  - Details: `no-client-token.spec.ts` already scans `api.projects.$projectId.github.ts` for `/^\s*token\??:/m`, `/body\.token/` and `/git:github\.com|parseCookies|headers\.get\(['"]?[Cc]ookie/` — the clone op inherits that automatically, so add the **behavioural** half: a `{ op: 'clone', token }` body with a `Cookie: git:github.com=…` header must 401 with `{reconnect: true}` and never `{ok: true}`. Add the clone UI file to the "UI holds no token" scan (⚠️ that assertion is `/token/i` anywhere in the file — the component may not contain the substring at all, even inside an identifier). Add a `cases` entry to `outbound-auth.spec.ts:93` driving the clone op unauthenticated; global `fetch` is stubbed to throw (`:70`), so the wall must fire before any network call.
+  - Acceptance: unauthenticated clone → 401 with **zero** outbound fetch; a token-carrying body → refused, pinned behaviourally and by source scan. `outbound-enumerate.spec.ts` still passes with no `PUBLIC_BY_DESIGN` entry added.
+
+- [ ] **T5** — Client helper for the clone call
+  - Files: `app/lib/persistence/projects.ts`
+  - Details: Add `cloneRepoIntoProject(projectId, { repo, branch?, provider? })` beside the other git helpers. Follow the **outcome-object** convention the git-sync functions deliberately use (`projects.ts:293-297`) rather than `api()`'s throw: a failed clone must be LOUD at the call site, and a thrown error at a caller that forgot a `catch` is not. Return `{ ok, files?, head?, repo?, branch?, reconnect?, message? }`. Pass the response through `normalizeRepoFileMap()` at the fetch boundary, exactly as `getRepoStatus`/`pullFromRepo` do (`projects.ts:205`, `:259`).
+  - Acceptance: a 401 surfaces as `{ ok: false, reconnect: true }` and never throws; the returned map is normalised identically to the pull path.
+
+- [ ] **T6** — Add the `cloning` boot phase
+  - Files: `app/lib/stores/boot-progress.ts`, `app/lib/stores/boot-progress.spec.ts`
+  - Details: Add `{ step: 'cloning' }` to the `BootPhase` union with its doc block, and a `bootPhaseCopy` case. **The name must not start with `creating-`** — `boot-progress.spec.ts:174` asserts membership in `CREATION_PHASES` equals that prefix. Add it to `OVERLAY_ONLY_PHASES` (`:77`), since a clone runs from the landing page where `ready` is already true and the cover comes from `WorkspaceSplash`. The union is extracted from source by regex (`:97-103`), so `leaves no phase untested` (`:143`) fails until the phase is in exactly one list. The file-write step needs **no new progress plumbing**: reuse the existing `{ step: 'files', done, total }` phase via `restoreFiles`' `onProgress`, exactly as `useChatHistory.ts:739` does — which also means `BootScreen.tsx:90`'s progress bar needs no widening.
+  - Acceptance: `coversWorkspace({step:'cloning'})` is `true`; `bootPhaseCopy` gives it a non-empty title, distinct from every other phase and from the idle fallback; all four union scans pass with no allow-list entry.
+
+- [ ] **T7** — Rewire `GitCloneButton` to the server clone and the shared boot surface
+  - Files: `app/components/chat/GitCloneButton.tsx`
+  - Details: Replace `gitClone(repoUrl)` with `openImportWorkspace` → `cloneRepoIntoProject` → `workbenchStore.restoreFiles(files, { protect: protectForRepoRestore, onProgress })`. Drive phases forward — `cloning` → `files` (via `onProgress`) → settle — and **reset with `endBootPhase()`, never `bootProgress.set({step:'idle'})`**: the creation path's literal reset would stomp a `reportBootFailure`. Delete `loading`/`LoadingOverlay`. The selectors already pass a branch (`GitHubRepositorySelector.tsx:139`, `GitLabRepositorySelector.tsx:142`) and `handleClone` currently **ignores it** — forward it, no UI change needed. Preserve the `rollback` contract from `openImportWorkspace` or a failed clone leaves an empty project and a billing VM. Keep `importChat` as the single choke point and `setPendingImport()` arming the tail. Pass **both** `{ projectId, gitUrl }` in the metadata — today this component passes only `projectId` and its sibling only `gitUrl`.
+  - Acceptance: cloning a private repo as a connected user shows the full-page boot surface for the whole operation with **zero** credential prompts and no `git:*` cookie written; a failed clone reports loudly and leaves no orphan project; the settle uses `IMPORT_SETTLE_OPTIONS` (`settle.ts:169`).
+
+- [ ] **T8** — Rewire `GitUrlImport` (and therefore `StarterTemplates`)
+  - Files: `app/components/git/GitUrlImport.client.tsx`
+  - Details: Same replacement as T7. Fix two live bugs while here: the guard at `:47` is `if (!gitReady && !historyReady)` where the effect's is `||` — the weaker one lets an import start before history is ready; and `:56` **discards `projectId`**, so a `/git?url=` import is never bound to the project its files were written into (metadata is `{ gitUrl }` only). `StarterTemplates.tsx:9` inherits this path with no change of its own — it passes only a URL, which is what T2's `getDefaultBranch` exists for. Replace the generic `toast.error('Failed to import repository')` with the server's own message.
+  - Acceptance: `/git?url=<public repo>` clones with no prompt and binds the chat to its project; a starter template link still works end to end; failure reports the real reason rather than a generic string.
+
+- [ ] **T9** — An imported project is born LINKED
+  - Files: `app/lib/persistence/projects.ts`, `app/components/chat/GitCloneButton.tsx`, `app/components/git/GitUrlImport.client.tsx`
+  - Details: After a successful clone, record the link as a **complete tuple** via the existing `op: 'link'` (`api.projects.$projectId.github.ts:176-195`) — `provider` + `linked_repo` + `linked_branch`, all three or none (migration 0006 `projects_link_complete_check`). There is no client wrapper for the link op today (`GitHubSyncButton.tsx:203` calls it inline and omits `provider`, relying on the default) — add one to `projects.ts` and **send `provider` explicitly**, since a GitLab import must not default to GitHub. A failed link must not fail the import: report it, leave the project unlinked, never half-written.
+  - Acceptance: after importing a GitLab repo the project reads back `{ linked: true, provider: 'gitlab', repo, branch }`; a link failure leaves `linked: false` with all three fields absent, never a partial row.
+
+- [ ] **T10** — Retire the browser-side clone; clear the stale credential cookie
+  - Files: `app/lib/hooks/useGit.ts`, `app/lib/hooks/useGit.spec.ts`
+  - Details: `gitClone`'s user-facing callers are gone after T7/T8. **Hide, do not delete** (§2.1a): leave the module and its isomorphic-git dependency in place, remove the `window.prompt`/`confirm` credential path (`:189-236`) and `saveGitAuth`'s `Cookies.set('git:<domain>')` (`:44-47`), and **actively clear** any existing `git:*` cookie on first load — a plaintext PAT left in the browser after superseding the flow that wrote it is its own defect. Keep the module's rollback semantics intact; `useGit.spec.ts` pins rollback-exactly-once on 404 and on refused credentials, and that a network retry does not delete the project the first attempt created (`:198`, `:217`).
+  - Acceptance: no `window.prompt` remains anywhere on any clone path; a pre-existing `git:github.com` cookie is gone after one page load; `useGit.spec.ts`'s rollback and retry properties still pass.
+
+- [ ] **T11** — Live drive against real GitHub and GitLab
+  - Files: none (verification)
+  - Details: Mirror the 2026-07-18 GitHub verification, which is the standard this repo holds itself to — "correct by construction" is the state the MCP relay was in before live testing found three defects. Drive the real UI: a **private** repo cloned by a connected account; a **public** repo cloned by an unconnected one; binaries sha256-compared against github.com (the 2 MB `havok.wasm` is the established benchmark); a repo over the size cap refused with the env var named; a Git-LFS repo reported rather than silently importing pointers; and the boot surface sampled throughout for **continuous cover** — zero samples of file growth uncovered, `coverToggles: 2`.
+  - Acceptance: all six scenarios pass on the real providers, with the binary hashes and the cover-toggle count recorded in the task notes. Any defect found is fixed before the plan is called done.
+
+- [ ] **T12** — Update SPEC.md to match what was built
+  - Files: `SPEC.md`
+  - Details: Follow SPEC.md's own "How to update this spec" contract — **replace/merge** current-state sections, **append** to the Decisions log. **§4.13**: import/clone becomes a first-class operation beside link/push/pull/divergence (server-side, token from `git_tokens`, two walls, SSRF-guarded, size-capped, client sends no credential); discharge the "Remaining: hardening that per-user token from the connector cookie" note for this path and replace the Linking bullet's one-clause *"or by importing an existing repo"*. **§4.5.4b**: record the new lifecycle fact that an **imported project is born LINKED** — a fourth entry point into UNLINKED → SAVE=LINK → LINKED. **§4.4a**: import is a fourth path beside typed prompt / registry card / guided tour, with its credits, handoff-card and no-scaffolding answers; **rewrite the recorded reason for the overlay-not-`ready` gate** — the clone's files no longer replay through the message parser, so the stated justification no longer applies to this door (Open Question 7). **§5**: name the clone route as an outbound spend path and state that private/self-hosted hosts are unreachable **by design**. **§2.2/§2.3**: log the browser-side credential path as hidden-not-deleted. **§10 Open Questions**: add the **per-user rate limiting gap** (finding 2 — only a per-IP, in-process limiter exists) and Git-LFS policy for imported repos. Record the already-landed WebContainer charging fix under §4.4a/§4.6 as a Decision.
+  - Acceptance: SPEC.md describes the architecture as actually implemented; no section contradicts the shipped code; the per-user rate-limit gap is recorded as open rather than implied closed.
+
+## How to execute this plan
+
+Each task above is a checkbox. To implement:
+- Run a single task with the bt-execute command (e.g. `bt-execute <this-file> T<n>`), run every remaining task in order with `bt-execute <this-file> ALL` (resumable — it skips tasks already checked), or implement the whole plan from a prompt like "implement the plan at <this-file>".
+- Work the tasks top to bottom unless a task notes a different dependency order.
+- When a task is fully implemented and its **Acceptance** criteria are met, mark it complete by editing this file and changing that task's `- [ ]` to `- [x]`.
+- Stop and report if a task cannot be completed. Do NOT check a box for partial, skipped, or unverified work.

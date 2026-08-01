@@ -1,6 +1,6 @@
-import ignore from 'ignore';
 import { useGit } from '~/lib/hooks/useGit';
 import type { Message } from 'ai';
+import { selectImportableFiles } from '~/lib/git/importable-files';
 import { detectProjectCommands, createCommandsMessage, escapeBoltTags } from '~/utils/projectCommands';
 import { generateId } from '~/utils/fileUtils';
 import { useState } from 'react';
@@ -15,32 +15,6 @@ import { X, Github, GitBranch } from 'lucide-react';
 // Import the new repository selector components
 import { GitHubRepositorySelector } from '~/components/@settings/tabs/github/components/GitHubRepositorySelector';
 import { GitLabRepositorySelector } from '~/components/@settings/tabs/gitlab/components/GitLabRepositorySelector';
-
-const IGNORE_PATTERNS = [
-  'node_modules/**',
-  '.git/**',
-  '.github/**',
-  '.vscode/**',
-  'dist/**',
-  'build/**',
-  '.next/**',
-  'coverage/**',
-  '.cache/**',
-  '.idea/**',
-  '**/*.log',
-  '**/.DS_Store',
-  '**/npm-debug.log*',
-  '**/yarn-debug.log*',
-  '**/yarn-error.log*',
-
-  // Include this so npm install runs much faster '**/*lock.json',
-  '**/*lock.yaml',
-];
-
-const ig = ignore().add(IGNORE_PATTERNS);
-
-const MAX_FILE_SIZE = 100 * 1024; // 100KB limit per file
-const MAX_TOTAL_SIZE = 500 * 1024; // 500KB total limit
 
 interface GitCloneButtonProps {
   className?: string;
@@ -66,56 +40,21 @@ export default function GitCloneButton({ importChat, className }: GitCloneButton
       const { workdir, data, projectId } = await gitClone(repoUrl);
 
       if (importChat) {
-        const filePaths = Object.keys(data).filter((filePath) => !ig.ignores(filePath));
-        const textDecoder = new TextDecoder('utf-8');
-
-        let totalSize = 0;
-        const skippedFiles: string[] = [];
-        const fileContents = [];
-
-        for (const filePath of filePaths) {
-          const { data: content, encoding } = data[filePath];
-
-          // Skip binary files
-          if (
-            content instanceof Uint8Array &&
-            !filePath.match(/\.(txt|md|astro|mjs|js|jsx|ts|tsx|json|html|css|scss|less|yml|yaml|xml|svg|vue|svelte)$/i)
-          ) {
-            skippedFiles.push(filePath);
-            continue;
-          }
-
-          try {
-            const textContent =
-              encoding === 'utf8' ? content : content instanceof Uint8Array ? textDecoder.decode(content) : '';
-
-            if (!textContent) {
-              continue;
-            }
-
-            // Check file size
-            const fileSize = new TextEncoder().encode(textContent).length;
-
-            if (fileSize > MAX_FILE_SIZE) {
-              skippedFiles.push(`${filePath} (too large: ${Math.round(fileSize / 1024)}KB)`);
-              continue;
-            }
-
-            // Check total size
-            if (totalSize + fileSize > MAX_TOTAL_SIZE) {
-              skippedFiles.push(`${filePath} (would exceed total size limit)`);
-              continue;
-            }
-
-            totalSize += fileSize;
-            fileContents.push({
-              path: filePath,
-              content: textContent,
-            });
-          } catch (e: any) {
-            skippedFiles.push(`${filePath} (error: ${e.message})`);
-          }
-        }
+        /*
+         * 🔴 `gitClone` has already written every file — binaries included — to the sandbox as real
+         * bytes. The artifact below is a RECORD of the import, never its delivery mechanism, so files
+         * excluded here are still present and correct on disk.
+         *
+         * This used to be ~50 lines inline: a NON-FATAL `TextDecoder` gated on a text-EXTENSION
+         * allow-list that included `.svg`, `.json` and `.xml`. A gzipped `.svg` therefore reached the
+         * decoder, every invalid byte became U+FFFD, and the action runner wrote that garbage back over
+         * the correct bytes. `selectImportableFiles` decides on the BYTES instead.
+         *
+         * Only `excluded` is reported — files whose bytes are not text. `ignored` (node_modules, .git,
+         * build output) is deliberately not shown: naming `.git/objects/pack/*.pack` in the import
+         * message tells the user nothing and is model-visible text on every later turn (§4.2.8).
+         */
+        const { files: fileContents, excluded } = selectImportableFiles(data);
 
         const commands = await detectProjectCommands(fileContents);
         const commandsMessage = createCommandsMessage(commands);
@@ -124,9 +63,9 @@ export default function GitCloneButton({ importChat, className }: GitCloneButton
           role: 'assistant',
           content: `Cloning the repo ${repoUrl} into ${workdir}
 ${
-  skippedFiles.length > 0
-    ? `\nSkipped files (${skippedFiles.length}):
-${skippedFiles.map((f) => `- ${f}`).join('\n')}`
+  excluded.length > 0
+    ? `\n${excluded.length} file(s) are in the project but not shown here (binary or ignored):
+${excluded.map((f) => `- ${f}`).join('\n')}`
     : ''
 }
 

@@ -175,6 +175,15 @@ that would mean deploying a **second application** beside Lightsail.
 One incidental win: dropping WebContainer lets us drop `Cross-Origin-Embedder-Policy: require-corp`
 (`app/entry.server.tsx`), which exists only for SharedArrayBuffer and constrains what the app can embed.
 
+⚠️ **That "win" silently falsified a MANDATORY in SPEC §4.4 for months, and nobody noticed** — §4.4
+said cross-origin isolation was required or "published games with physics break", while this build
+shipped without it and physics worked. Both this line and `spec/sandbox-codesandbox.md` recorded the
+drop as a pure win and neither checked what elsewhere claimed to depend on it. **§4.4 was the wrong
+one** (corrected 2026-07-31: Havok's shipped wasm contains zero `SharedArrayBuffer` references, and
+the un-isolated Babylon Playground runs it) — but the process failure is the point: *removing a
+header is a claim about everything that said it needed one.* Grep the spec set before recording a
+removal as a win.
+
 ## Anti-patterns (reject in review)
 
 - `import ... from '@webcontainer/api'` anywhere outside `app/lib/sandbox/webcontainer-provider.ts`

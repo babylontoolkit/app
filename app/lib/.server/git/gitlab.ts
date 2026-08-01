@@ -237,6 +237,32 @@ export class GitLabProvider implements GitProvider {
     }
   }
 
+  /**
+   * The project's default branch (see `GitProvider.getDefaultBranch`).
+   *
+   * The project path must be URL-ENCODED into one segment (`_projectId`) — GitLab has no
+   * `/projects/:group/:name` form, and a nested `group/subgroup/project` sent raw addresses a
+   * different, usually non-existent, resource. That is why this cannot be a shared string template
+   * with the GitHub adapter.
+   *
+   * ⚠️ GitLab answers **404 for a private project** a token cannot see, on purpose, so it cannot be
+   * used to enumerate. `null` here therefore means "no repository we can reach", not "no repository" —
+   * which is the honest answer to give an importer either way.
+   */
+  async getDefaultBranch(ref: Pick<RepoRef, 'owner' | 'repo'>): Promise<string | null> {
+    try {
+      const project = await this._request<{ default_branch: string | null }>(`/projects/${this._projectId(ref)}`);
+
+      return project.default_branch ?? null;
+    } catch (error) {
+      if (error instanceof GitProviderError && error.kind === 'not-found') {
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
   async getBranchHead(ref: RepoRef): Promise<string | null> {
     try {
       const branch = await this._request<{ commit: { id: string } }>(

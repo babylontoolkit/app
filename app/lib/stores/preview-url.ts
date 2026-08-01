@@ -68,6 +68,18 @@ export function remintDelayMs(
  * token. A re-mint has to re-apply the user's current path onto the NEW base for the same reason —
  * otherwise every hourly token rotation silently kicks the preview back to `/`.
  *
+ * 🔴 The path is APPENDED to the base's own pathname, never assigned over it. Assigning is what this
+ * did until 2026-07-31, and it was correct only because every preview base then had a pathname of
+ * `/` — a CodeSandbox base is `https://<host>.csb.app/`, so `pathname = '/play'` produced the right
+ * answer for the wrong reason. Nodepod serves previews from a SAME-ORIGIN mount
+ * (`/__virtual__/<pod>/<port>`), and assigning there rewrites the URL to `/play` on our own origin —
+ * which is the BUILDER page, not the game. Observed live: the preview iframe silently loaded the app
+ * builder inside itself and read exactly like a hang. Same family as the T17b `/play/:shareId`
+ * base-path defect: a root-absolute path under a prefix.
+ *
+ * Appending is identical for a base whose pathname is `/`, so CodeSandbox and WebContainer are
+ * byte-for-byte unaffected.
+ *
  * A malformed base is returned unchanged rather than throwing: a preview that lost its path is a
  * nuisance, and a `TypeError` inside a render is a blank workbench.
  */
@@ -78,7 +90,12 @@ export function previewUrlWithPath(baseUrl: string, path: string): string {
 
   try {
     const joined = new URL(baseUrl);
-    joined.pathname = path.startsWith('/') ? path : `/${path}`;
+
+    // '' when the base sits at the origin root, so the two providers converge on the same string.
+    const mount = joined.pathname.replace(/\/+$/, '');
+    const suffix = path.startsWith('/') ? path : `/${path}`;
+
+    joined.pathname = `${mount}${suffix}`;
 
     return joined.toString();
   } catch {

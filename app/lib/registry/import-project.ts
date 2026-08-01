@@ -11,14 +11,35 @@
  * the fix is not to restore that behaviour; it is to give an import the same shape a creation now has:
  * **register the project FIRST, boot the sandbox for it, and only then write bytes.**
  *
- * WebContainer is deliberately untouched. Its runtime is tab-local and anonymous, it boots eagerly at
- * module scope, and an import there has never needed a project record — so on that provider this
- * returns the already-booted sandbox and no project, byte-identical to the flow it replaces. Adding a
- * server round trip to the incumbent's import path would be a behaviour change nobody asked for.
+ * 🔴 **EVERY IMPORT REGISTERS A PROJECT, ON BOTH RUNTIMES — because every import provisions a
+ * workspace, and the platform pays for that either way (owner, 2026-07-31, §4.4a/§4.6).**
+ *
+ * This module used to skip registration entirely when `!SANDBOX_REQUIRES_PROJECT`, and its header said
+ * so deliberately: *"WebContainer is deliberately untouched… adding a server round trip to the
+ * incumbent's import path would be a behaviour change nobody asked for."* That reasoning was about
+ * RUNTIME NEED — a tab-local WebContainer boots without a project id, so it does not require the row —
+ * and it silently answered a different question with the same expression: **whether the user is
+ * charged.** `PROJECT_CREATE_CREDITS` is taken at registration (`POST /api/projects`), so a door that
+ * does not register is a door that provisions a workspace for free. New Project always registered on
+ * both providers; import did not, so the identical work was billed on CodeSandbox and free on
+ * WebContainer — the DEFAULT provider — with nothing anywhere reporting the difference.
+ *
+ * `SANDBOX_REQUIRES_PROJECT` now decides only what it is named for: whether a boot NEEDS the id, and
+ * therefore whether a failed registration is fatal (server sandbox: nowhere to put the files) or
+ * degrades to a local-only project (WebContainer: §1.3 principle 0 — an unreachable server must not
+ * stop someone building). It no longer decides whether money is taken.
+ *
+ * The one exemption is `alreadyBooted`: an import INTO a project the user already has open writes to a
+ * workspace that has already been paid for, and charging again would bill twice for one VM.
+ *
+ * ⚠️ A 402 is not an outage. It is the platform deliberately declining, so it refuses the import on
+ * EVERY runtime — degrading past it would hand a user with no credits a working project for free and
+ * tell them the server was unreachable, which is false. Both halves wrong, neither throws. Same rule,
+ * same reason, as the creation path in `Chat.client.tsx`.
  */
 import { bootForProject, bootedProjectId, requireBootedSandbox, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import type { SandboxProvider } from '~/lib/sandbox';
-import { createProject, deleteProject } from '~/lib/persistence/projects';
+import { ApiError, createProject, deleteProject } from '~/lib/persistence/projects';
 import { rollbackRegisteredProject } from './creation-rollback';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -63,8 +84,43 @@ export const NO_ROLLBACK = async (): Promise<void> => {
 };
 
 /**
- * Get a sandbox an import can write into, creating the project it belongs to if that is what the
- * runtime requires.
+ * Register the project this import belongs to — the call that also takes `PROJECT_CREATE_CREDITS`.
+ *
+ * Returns `null` only when registration failed on a runtime that can proceed without it. Three
+ * outcomes, and the middle one is the one that costs money if it is got wrong:
+ *
+ *   - **success** — the project exists and the charge has been taken.
+ *   - **402** — the platform declining, not an outage. Rethrown on EVERY runtime, so a user with no
+ *     credits cannot import a project for free on WebContainer while being told the server was
+ *     unreachable. This is the whole reason the failure is inspected rather than blanket-degraded.
+ *   - **anything else** (500, dropped connection, local-mode hiccup) — fatal on a runtime that needs
+ *     the id to boot at all, degraded to a browser-local import where the runtime does not (§1.3
+ *     principle 0: an unreachable server must not stop someone building).
+ */
+async function registerImportProject(name: string) {
+  try {
+    return await createProject({ name, templateId: IMPORT_TEMPLATE_ID });
+  } catch (error) {
+    if (error instanceof ApiError && error.statusCode === 402) {
+      throw error;
+    }
+
+    if (SANDBOX_REQUIRES_PROJECT) {
+      throw error;
+    }
+
+    logger.warn(
+      `Could not register the imported project "${name}" — continuing as a browser-local import: ${
+        (error as Error).message
+      }`,
+    );
+
+    return null;
+  }
+}
+
+/**
+ * Get a sandbox an import can write into, registering the project it belongs to.
  *
  * @param name What to call the project — the repo or folder being imported. Truncated server-side.
  */
@@ -72,16 +128,24 @@ export async function openImportWorkspace(options: { name: string }): Promise<Im
   const alreadyBooted = bootedProjectId();
 
   /*
-   * Nothing to register: either this tab is already bound to a project (an import from inside an open
-   * project writes into that project, which is what the user is looking at), or the runtime does not
-   * need one at all. `requireBootedSandbox` is the right await in both cases — it refuses with a
-   * sentence rather than hanging if the boot is genuinely impossible.
+   * The ONE exemption: this tab is already bound to a project, so the import writes into the project
+   * the user is looking at — a workspace that already exists and has already been charged for.
+   * Registering again would put a duplicate card on the dashboard AND bill twice for one VM.
+   * `requireBootedSandbox` refuses with a sentence rather than hanging if the boot is impossible.
    */
-  if (alreadyBooted || !SANDBOX_REQUIRES_PROJECT) {
+  if (alreadyBooted) {
     return { sandbox: await requireBootedSandbox(), projectId: alreadyBooted, rollback: NO_ROLLBACK };
   }
 
-  const project = await createProject({ name: options.name, templateId: IMPORT_TEMPLATE_ID });
+  const project = await registerImportProject(options.name);
+
+  /*
+   * Registration was refused or unreachable on a runtime that can carry on without it (WebContainer).
+   * The import proceeds as a browser-local chat, exactly as it always did on that provider.
+   */
+  if (!project) {
+    return { sandbox: await requireBootedSandbox(), projectId: undefined, rollback: NO_ROLLBACK };
+  }
 
   /*
    * 🔴 One rollback, used twice: here if the boot fails, and by the CALLER if the import that follows

@@ -142,7 +142,46 @@ const MAY_IMPORT_CODESANDBOX_SDK: Record<string, string> = {
     'Drives `service.ts`\'s lifecycle marks (T12) against a `vi.mock`ed SDK — the same mock-target carve-out as the boot spec. Proving "a failed hibernate writes NO mark" requires making the provider call fail, which requires standing in for it; the specifier is never a dependency of the module under test.',
 };
 
+/**
+ * Who may import Nodepod's SDK (`spec/sandbox-nodepod.md`).
+ *
+ * Same wall as the other two vendors, and it matters MORE here rather than less: Nodepod is the
+ * DEFAULT provider, so its API is the one a feature author is most likely to reach for directly —
+ * `pod.fs.readFile(...)` is right there and works, and it would bypass the workdir rebasing, the
+ * dirent synthesis and the byte-identity contract in one line. Feature code imports `~/lib/sandbox`.
+ *
+ * A file list with written reasons, never a directory exemption — a directory is a place to append.
+ */
+const MAY_IMPORT_NODEPOD_SDK: Record<string, string> = {
+  'app/lib/sandbox/nodepod-boot.ts':
+    'Owns the vendor import, the service worker registration and the server-ready fan-out. The counterpart to ~/lib/webcontainer and codesandbox-boot.ts. Needs no credential — Nodepod talks only to public infrastructure.',
+};
+
 describe('the sandbox seam is default-deny', () => {
+  it('no module outside the boot module imports @scelar/nodepod', () => {
+    const offenders = filesReferencing('@scelar/nodepod').filter((file) => !(file in MAY_IMPORT_NODEPOD_SDK));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('CONTROL: the scanner really does detect the Nodepod import', () => {
+    /*
+     * Without the control, deleting the boot module — or breaking `sourceWithoutComments` so it strips
+     * code rather than comments — makes the test above pass by matching nothing at all.
+     */
+    expect(filesReferencing('@scelar/nodepod')).toContain('app/lib/sandbox/nodepod-boot.ts');
+  });
+
+  /*
+   * 🔴 The provider is the half that must stay vendor-free. It is injected a client and declares its
+   * own `NodepodClient` interface precisely so it can be unit-tested with no runtime; an import here
+   * would quietly re-couple it and make the next provider read a competitor's `.d.ts` instead of a
+   * specification (`spec/sandbox-seam.md`).
+   */
+  it('the adapter itself never imports the SDK — it takes an injected client', () => {
+    expect(filesReferencing('@scelar/nodepod')).not.toContain('app/lib/sandbox/nodepod-provider.ts');
+  });
+
   it('no module outside the adapter imports @webcontainer/api', () => {
     const offenders = filesReferencing('@webcontainer/api').filter((file) => !(file in MAY_IMPORT_WEBCONTAINER_API));
 
