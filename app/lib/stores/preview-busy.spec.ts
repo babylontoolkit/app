@@ -43,9 +43,9 @@ describe('previewBusyState', () => {
   });
 
   /*
-   * A spinner says "wait"; it does not say "this is one-time". The cold wait is Vite's dependency
-   * optimization, which happens once per dependency set — and a user who is not told that reasonably
-   * concludes their project is always this slow.
+   * A spinner says "wait" and nothing else — fine for a second, unsettling at ten. The cold wait is
+   * the pod's one-time initialization (~13–15 s, `spec/sandbox-nodepod.md` §8), and past this the
+   * user deserves to know what is being waited on rather than wondering whether it is stuck.
    */
   it('explains the first run once it is clearly the cold one', () => {
     expect(at(PREVIEW_BUSY_EXPLAIN_MS - 1)).toBe('loading');
@@ -54,8 +54,9 @@ describe('previewBusyState', () => {
   });
 
   /*
-   * 🔴 A later navigation that happens to be slow is NOT paying for dependency optimization. Claiming
-   * it is would be a confident wrong answer at the one moment the user is reading the screen.
+   * 🔴 A later navigation that happens to be slow is NOT paying the pod's one-time setup — something
+   * else is wrong. Telling the user their workspace is being prepared would be a confident wrong
+   * answer at the one moment they are reading the screen.
    */
   it('never claims a first run after something has already loaded', () => {
     expect(at(17_000, { everLoaded: true })).toBe('loading');
@@ -92,8 +93,30 @@ describe('previewBusyCopy', () => {
     expect(loading.detail).not.toBe(first.detail);
   });
 
-  /* The whole point of the slow branch: say that it is one-time, or the spinner says nothing new. */
-  it('tells the user the first run is one-time', () => {
-    expect(previewBusyCopy('first-run')!.detail).toMatch(/faster|once|first/i);
+  /* The point of the slow branch: name what is being waited on, or the spinner says nothing new. */
+  it('names what is being prepared rather than just spinning', () => {
+    const first = previewBusyCopy('first-run')!;
+
+    expect(first.title).toMatch(/preparing/i);
+    expect(first.title).toMatch(/workspace/i);
+    expect(first.detail.length).toBeGreaterThan(20);
+  });
+
+  /*
+   * 🔴 A REGRESSION GUARD, not a style rule. This copy used to read "First run: the dev server is
+   * optimizing dependencies. Later loads are much faster." The first sentence was measured FALSE
+   * (`spec/sandbox-nodepod.md` §8 — dep optimization is ~2.6 s of a ~15 s one-time pod init), and the
+   * second was a speed promise the product does not need to make: later loads arrive in ~300 ms with
+   * no overlay at all, so the user sees the evidence without being told. Both are easy to reintroduce
+   * in good faith by someone trying to be reassuring.
+   */
+  it('promises nothing about how fast later loads will be', () => {
+    for (const state of ['loading', 'first-run'] as const) {
+      const { title, detail } = previewBusyCopy(state)!;
+      const text = `${title} ${detail}`;
+
+      expect(text).not.toMatch(/faster|quicker|speed|instant|only takes|won't take/i);
+      expect(text).not.toMatch(/optimizing dependencies|dependency optimization/i);
+    }
   });
 });

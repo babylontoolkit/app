@@ -301,11 +301,21 @@ Three timing rules, each failing silently in a different direction, all pure and
 - **An 800 ms delay before it appears.** The measured WARM first paint is 0.5 s, so a zero-delay
   overlay flashes on every ordinary load and every in-preview navigation — the strobing that made the
   import tail unusable as a boot phase. The test asserts the delay stays above the measured number.
-- **After 4 s, and only on the session's FIRST load, it explains itself** — "First run: the dev server
-  is optimizing dependencies. Later loads are much faster." A spinner says *wait*; it does not say
-  *this is one-time*, and a user not told that concludes their project is always this slow. Gated on
-  `everLoaded` because a later slow navigation is not paying for optimization, and saying it is would
-  be a confident wrong answer.
+- **After 4 s, and only on the session's FIRST load, it explains itself** — **"Preparing your
+  workspace… / Starting the dev server and loading your project for the first time."** A spinner says
+  *wait* and nothing else: fine for a second, unsettling at ten. Gated on `everLoaded` because a later
+  slow navigation is not paying the pod's one-time setup — something else is wrong — so calling it a
+  workspace being prepared would be a confident wrong answer.
+  - ⚠️ **This copy was rewritten on 2026-07-31 and the old version is a regression guard, not
+    history.** It read *"First run: the dev server is optimizing dependencies. Later loads are much
+    faster."* The first sentence was measured **false** (§8: dep optimization is ~2.6 s of a ~15 s
+    one-time init) and had been written into the UI, the tests and this spec purely because it was
+    plausible. The second was a speed promise the product never needed to make — later loads are
+    ~300 ms and arrive with **no overlay at all**, so the user gets the evidence without being told,
+    and a number in the copy ages the moment the number moves. `preview-busy.spec.ts` now fails on
+    either coming back. ⚠️ The old assertion (`/faster|once|first/`) would have passed the new copy
+    **by coincidence**, on the word "first" — a test kept green by a word rather than by the property
+    it names is how the false sentence would have survived its own rewrite.
 - **A 120 s ceiling.** The exit must not depend solely on a `load` event that may never fire — a
   preview that has not loaded in two minutes has a problem the user needs to SEE, not a spinner on
   top of it. Same reason `coversWorkspace` refuses to cover the `failed` phase.
