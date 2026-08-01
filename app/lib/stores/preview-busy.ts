@@ -94,19 +94,25 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
     case 'first-run':
       return {
         /*
-         * 🔴 Names the WORK, and deliberately promises nothing about later loads.
+         * 🔴 Says what the wait BUYS, not that we are sorry about it — and every word is literally
+         * true (`spec/sandbox-nodepod.md` §9).
          *
-         * This used to read "First run: the dev server is optimizing dependencies. Later loads are
-         * much faster." Both halves were a problem. The first was simply FALSE — §8 of
-         * `spec/sandbox-nodepod.md` measured the wait and dep optimization is ~2.6 s of a ~15 s
-         * one-time pod initialization; the sentence survived because it was plausible and nobody had
-         * measured the segments. The second was an unnecessary promise: later loads really are ~300 ms,
-         * but they arrive with no overlay at all, so the user simply experiences them as instant. A
-         * speed claim that the product then has to live up to buys nothing when the evidence shows up
-         * on its own a minute later — and it ages badly the moment the number moves.
+         * The ~13–15 s here is Nodepod standing up a real Node.js runtime in the browser, and it was
+         * profiled to its mechanism and then accepted on the merits: a local sandbox costs $0 per
+         * project and meters nothing, against StackBlitz's ~$10k per 8k WebContainer boots. That is the
+         * single best thing about how this product runs, and this overlay is the one moment a user is
+         * looking straight at it. "Your project runs entirely on your machine" is the reason the wait
+         * exists, so it is the honest thing to put here — it explains rather than excuses.
+         *
+         * ⚠️ Two things it must keep NOT doing, both learned the expensive way:
+         *  - **no speed promise about later loads.** They are ~300 ms and arrive with no overlay at
+         *    all, so the user gets the evidence unprompted; a number in copy ages the moment it moves.
+         *  - **no mechanism claim we have not measured.** This previously read "the dev server is
+         *    optimizing dependencies", which §8 measured as FALSE (dep optimization is ~2.6 s of it).
+         *    It survived review because it was plausible. Plausible is not measured.
          */
         title: 'Preparing your workspace…',
-        detail: 'Starting the dev server and loading your project for the first time.',
+        detail: 'Starting a full Node.js environment inside your browser. Your project runs entirely on your machine.',
       };
 
     default:

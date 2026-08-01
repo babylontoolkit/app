@@ -302,10 +302,16 @@ Three timing rules, each failing silently in a different direction, all pure and
   overlay flashes on every ordinary load and every in-preview navigation — the strobing that made the
   import tail unusable as a boot phase. The test asserts the delay stays above the measured number.
 - **After 4 s, and only on the session's FIRST load, it explains itself** — **"Preparing your
-  workspace… / Starting the dev server and loading your project for the first time."** A spinner says
-  *wait* and nothing else: fine for a second, unsettling at ten. Gated on `everLoaded` because a later
-  slow navigation is not paying the pod's one-time setup — something else is wrong — so calling it a
-  workspace being prepared would be a confident wrong answer.
+  workspace… / Starting a full Node.js environment inside your browser. Your project runs entirely on
+  your machine."** A spinner says *wait* and nothing else: fine for a second, unsettling at ten. Gated
+  on `everLoaded` because a later slow navigation is not paying the pod's one-time setup — something
+  else is wrong — so calling it a workspace being prepared would be a confident wrong answer.
+  - **The copy says what the wait BUYS, and that is the owner's call recorded (2026-08-01).** The
+    ~13–15 s was profiled to its mechanism (§9) and then **accepted on the merits**: a browser sandbox
+    is $0 per project and meters nothing, against StackBlitz's ~$10k per 8k WebContainer boots. *"Well
+    worth it — let's give a better detail message while the workspace is loading."* This overlay is the
+    one moment a user looks straight at the thing that makes that trade, so it explains rather than
+    apologises. Every word is literally true; it is not marketing dressed as status.
   - ⚠️ **This copy was rewritten on 2026-07-31 and the old version is a regression guard, not
     history.** It read *"First run: the dev server is optimizing dependencies. Later loads are much
     faster."* The first sentence was measured **false** (§8: dep optimization is ~2.6 s of a ~15 s
