@@ -14,30 +14,28 @@
  *
  * So: cover the pane that is actually busy, leave everything else alone.
  *
- * Pure, because all three of the rules below are timing rules and every one of them fails silently in
- * a different direction — a delay too short flashes on every navigation, a ceiling too long hides a
- * dead preview behind a spinner forever, and getting the "first run" branch wrong tells the user the
- * wrong thing about their own project.
+ * Pure, because the rules below are timing rules and each fails silently in a different direction — a
+ * delay too short flashes on every navigation, and a ceiling too long hides a dead preview behind a
+ * spinner forever.
+ *
+ * 🔴 **There is exactly ONE visible state, and that is a fix rather than a simplification.** It used to
+ * have two — a plain `loading` and a `first-run` that explained the cold wait — chosen from an
+ * `everLoaded` flag. Once the cover started outliving the iframe's `load` event (`shouldRevealPreview`)
+ * that flag flipped to true while the overlay was STILL UP, so the user watched the panel go
+ * *Loading… → Preparing… → Loading…* mid-wait. Two states describing one continuous wait can always
+ * disagree about which one they are in; one state cannot. The elapsed clock carries what the second
+ * state was for, and carries it better, because it is a live number rather than a threshold guess.
  */
 
 /**
  * How long a load may take before it is worth mentioning.
  *
- * 🔴 Not zero, and the number is measured rather than chosen: a WARM first paint is **0.5 s**, so an
+ * 🔴 Not zero, and the number is measured rather than chosen: a WARM first paint is **~0.5 s**, so an
  * overlay with no delay would flash on every ordinary load and on every in-preview navigation —
  * exactly the strobing that made the import tail unusable as a boot phase. Past this, the wait is
  * long enough that silence is the worse option.
  */
 export const PREVIEW_BUSY_DELAY_MS = 800;
-
-/**
- * When a slow load earns an EXPLANATION rather than just a spinner.
- *
- * A spinner says "wait"; it does not say "this is one-time". The cold wait here is Vite's dependency
- * optimization, which happens once per dependency set and then never again — and a user who is not
- * told that reasonably concludes their project is always this slow.
- */
-export const PREVIEW_BUSY_EXPLAIN_MS = 4_000;
 
 /**
  * Stop covering, whatever happens.
@@ -117,10 +115,10 @@ export function shouldRevealPreview({
  * What the pane should be showing.
  *
  * - `hidden` — no load in flight, too early to mention, or past the ceiling.
- * - `loading` — a load is taking a noticeable amount of time.
- * - `first-run` — …and it is the first of this session, i.e. the one paying for dep optimization.
+ * - `loading` — a load is taking long enough to be worth covering. There is no second visible state;
+ *   see the header for why the `first-run` branch was removed rather than fixed.
  */
-export type PreviewBusyState = 'hidden' | 'loading' | 'first-run';
+export type PreviewBusyState = 'hidden' | 'loading';
 
 export interface PreviewBusyInput {
   /** Is a document load in flight at all? */
@@ -128,45 +126,51 @@ export interface PreviewBusyInput {
 
   /** How long it has been in flight. */
   elapsedMs: number;
-
-  /** Has any preview document finished loading in this session yet? */
-  everLoaded: boolean;
 }
 
-export function previewBusyState({ loading, elapsedMs, everLoaded }: PreviewBusyInput): PreviewBusyState {
-  if (!loading || elapsedMs < PREVIEW_BUSY_DELAY_MS || elapsedMs >= PREVIEW_BUSY_CEILING_MS) {
-    return 'hidden';
-  }
+export function previewBusyState({ loading, elapsedMs }: PreviewBusyInput): PreviewBusyState {
+  const worthMentioning = loading && elapsedMs >= PREVIEW_BUSY_DELAY_MS && elapsedMs < PREVIEW_BUSY_CEILING_MS;
 
-  /*
-   * The explanation is gated on BOTH "slow" and "first". A later navigation that happens to be slow is
-   * not paying for dependency optimization, and telling the user it is would be a confident wrong
-   * answer — the thing this codebase keeps paying for elsewhere.
-   */
-  return !everLoaded && elapsedMs >= PREVIEW_BUSY_EXPLAIN_MS ? 'first-run' : 'loading';
+  return worthMentioning ? 'loading' : 'hidden';
 }
 
 /**
- * The words for a state. Kept beside the rule so the component stays a dumb renderer, exactly as
- * `bootPhaseCopy` is.
+ * Whole seconds elapsed, or `undefined` when there is no panel to show them on.
+ *
+ * 🔴 **The REAL elapsed time — never padded, rounded up, or nudged off a particular value.** Its
+ * stated purpose is to let someone watching a cold start tell that about fifteen seconds have gone by
+ * (`spec/sandbox-nodepod.md` §8), and a clock that flatters the wait cannot do that job. Earlier
+ * versions padded it by a second and then refused to finish on 13; both were reverted, and the reason
+ * they were wrong is the same reason this comment exists — **a gauge that lies is not a gauge.**
+ *
+ * `Math.round`, matching `BootScreen.tsx`, so the two clocks agree about what "11s" means when a user
+ * sees one after the other during a single project open.
+ */
+export function previewBusyElapsedSeconds(state: PreviewBusyState, elapsedMs: number): number | undefined {
+  return state === 'hidden' ? undefined : Math.round(elapsedMs / 1000);
+}
+
+/**
+ * The words. Kept beside the rule so the component stays a dumb renderer, exactly as `bootPhaseCopy`
+ * is.
+ *
+ * ⚠️ **The detail ends in NO full stop, deliberately.** The elapsed clock is appended to it (`· 11s`),
+ * so a trailing period renders as "workspace. · 11s". "Fix the missing full stop" is a one-character
+ * change that reads as tidying, hence the test.
  */
 export function previewBusyCopy(state: PreviewBusyState): { title: string; detail: string } | undefined {
-  switch (state) {
-    case 'loading':
-      return { title: 'Loading your game…', detail: 'Waiting for the dev server to serve the page.' };
-
-    case 'first-run':
-      return {
-        /*
-         * Says the one thing a spinner cannot: that this is one-time. It is also TRUE for the right
-         * reason — the dep cache (`nodepod-vite-cache.ts`) persists the result, so the next load of
-         * this dependency set really does skip it.
-         */
-        title: 'Preparing your game…',
-        detail: 'First run: the dev server is optimizing dependencies. Later loads are much faster.',
-      };
-
-    default:
-      return undefined;
+  if (state === 'hidden') {
+    return undefined;
   }
+
+  return {
+    title: 'Loading your project…',
+
+    /*
+     * Names the actual work without promising anything unmeasured. An earlier version claimed the
+     * dev server was "optimizing dependencies", which §8 measured as FALSE — that is ~2.6 s of a ~15 s
+     * one-time pod init — and it survived review precisely because it was plausible.
+     */
+    detail: 'Preparing a cold workspace',
+  };
 }
