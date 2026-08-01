@@ -15,7 +15,7 @@
  */
 import { memo, useEffect, useState } from 'react';
 import { useStore } from '@nanostores/react';
-import { agentStatusStore, describeAgentStatus, isStatusFresh } from '~/lib/stores/agent-status';
+import { agentStatusStore, describeAgentStatus, isStatusFresh, type ArtifactProgress } from '~/lib/stores/agent-status';
 import { activeSkillsStore } from '~/lib/stores/active-skills';
 import { mediaRenderStore } from '~/lib/media/tasks';
 import { SkillBadges } from './SkillBadges';
@@ -47,7 +47,16 @@ function renderLine(images: number, videos: number): string | null {
   return `Generating ${parts.join(' and ')}…`;
 }
 
-export const StreamingStatus = memo(() => {
+/**
+ * @param progress How much of the artifact has landed, counted by the CALLER.
+ *
+ * 🔴 A prop, not a store read, and that is a testability decision with teeth: importing
+ * `workbenchStore` here boots a sandbox, an editor store and a watcher as an import side effect, which
+ * made this component's own spec unrunnable the moment it was tried. `execution-queue.ts` was extracted
+ * for exactly that reason, and the lesson recorded there is that a behaviour no test can reach is how a
+ * one-line bug survives. The parent already holds the store; this stays a dumb renderer.
+ */
+export const StreamingStatus = memo(({ progress: artifact }: { progress?: ArtifactProgress }) => {
   const status = useStore(agentStatusStore);
 
   /*
@@ -97,7 +106,7 @@ export const StreamingStatus = memo(() => {
     );
   }
 
-  const { label, detail } = describeAgentStatus(status, now);
+  const { label, detail, progress } = describeAgentStatus(status, now, artifact);
 
   return (
     <div className="mt-4 w-full rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-1 px-3 py-2">
@@ -106,6 +115,12 @@ export const StreamingStatus = memo(() => {
         <span className="font-medium text-bolt-elements-textPrimary">{label}</span>
       </div>
       <div className="mt-1 pl-6 text-xs text-bolt-elements-textSecondary">{detail}</div>
+      {/*
+       * The observed facts, on their own line and in tabular figures so the numbers do not shift the
+       * text as they tick. Tertiary because it is the most concrete line here and also the one that
+       * changes most — keeping it below the explanation keeps the eye on the sentence.
+       */}
+      {progress && <div className="mt-1 pl-6 text-xs text-bolt-elements-textTertiary tabular-nums">{progress}</div>}
       {media && (
         <div className="mt-1 flex items-center gap-2 pl-6 text-xs text-bolt-elements-textSecondary">
           <div className="text-sm i-svg-spinners:90-ring-with-bg text-bolt-elements-item-contentAccent" />

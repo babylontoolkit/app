@@ -18,6 +18,11 @@ import { protectNothing } from '~/lib/persistence/restore-plan';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { BUILD_AND_APPLY_MESSAGE } from '~/lib/chat/plan-proposal';
 import { useStore } from '@nanostores/react';
+import { atom } from 'nanostores';
+import { countArtifactProgress } from '~/lib/stores/agent-status';
+
+/** Subscribed to before any artifact exists. Module-level for a stable identity — see the call site. */
+const EMPTY_ACTIONS = atom<Record<string, { type?: string; status?: string }>>({});
 import { toast } from 'react-toastify';
 import { forwardRef } from 'react';
 import type { ForwardedRef } from 'react';
@@ -51,6 +56,34 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
     const { id, isStreaming = false, messages = [] } = props;
     const location = useLocation();
     const activeProjectId = useStore(projectId);
+
+    /*
+     * How much of the artifact has landed, for the liveness panel (§4.2a).
+     *
+     * TWO subscriptions, both load-bearing: `artifacts` re-renders this when the turn's artifact first
+     * appears (before that there is no runner to watch), and the runner's own atom is what makes the
+     * count tick as each file tag arrives. Watching only the runner leaves the first artifact of a turn
+     * unsubscribed; watching only `artifacts` updates once and then goes still.
+     *
+     * `EMPTY_ACTIONS` is module-level so its IDENTITY is stable — a fresh atom per render would hand
+     * `useStore` a new store every pass and resubscribe on every tick.
+     */
+    const artifacts = useStore(workbenchStore.artifacts);
+
+    /*
+     * 🔴 The LAST artifact, never `firstArtifact`. Found live: `firstArtifact` is the CREATION bundle
+     * — `npm install` + `npm run dev` — so on every build turn the count read two shell actions, both
+     * filtered out, and the file line never appeared at all. The pure counting tests could not see it
+     * because the defect was entirely in which actions were handed to them (the same wiring-vs-unit
+     * gap the §4.14 relay and §4.5.6 both record).
+     *
+     * `artifactIdList` is the store's own insertion order rather than `Object.values`, so this does
+     * not rest on object-key ordering.
+     */
+    const lastArtifactId = workbenchStore.artifactIdList[workbenchStore.artifactIdList.length - 1];
+    const runner = lastArtifactId ? artifacts[lastArtifactId]?.runner : undefined;
+    const runnerActions = useStore(runner?.actions ?? EMPTY_ACTIONS);
+    const artifactProgress = countArtifactProgress(Object.values(runnerActions));
 
     /** Checkpoints live on the server, so a local-only chat has nothing to restore to (§4.5.5). */
     const canRestore = Boolean(activeProjectId);
@@ -305,7 +338,7 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
          * reports a silent stream, falling back to the classic dots whenever content is flowing.
          * A long think is real billed work — it must never look like a hang.
          */}
-        {isStreaming && <StreamingStatus />}
+        {isStreaming && <StreamingStatus progress={artifactProgress} />}
       </div>
     );
   },

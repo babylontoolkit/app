@@ -16,6 +16,11 @@ import {
   formatElapsed,
   describeAgentStatus,
   STATUS_STALE_MS,
+  currentSilentMs,
+  formatArtifactProgress,
+  SILENCE_WORTH_MENTIONING_MS,
+  countArtifactProgress,
+  SILENCE_RESTATES_ELAPSED_MS,
 } from './agent-status';
 
 function part(overrides: Record<string, unknown> = {}) {
@@ -42,6 +47,9 @@ describe('updateAgentStatus', () => {
       phase: 'thinking',
       kind: 'edit',
       elapsedMs: 5000,
+
+      // The fixture has always carried silentMs; it is now kept rather than dropped at this boundary.
+      silentMs: 3000,
       receivedAt: 1000,
     });
   });
@@ -237,5 +245,224 @@ describe('retry activity', () => {
     // No dangling "attempt  of  " — a half-known count is simply not narrated.
     expect(detail).not.toMatch(/\sof\s/);
     expect(detail).not.toMatch(/undefined|NaN/);
+  });
+});
+
+/*
+ * The concrete-progress line (2026-08-01).
+ *
+ * WHY IT EXISTS. Reported: *"it just seems stuck to look at same progress bar for 5+ minutes"*, with
+ * the artifact's file rows sometimes appearing one by one and sometimes all at once at the end. A
+ * client-side chunk trace of a real generation settled where the time goes: our own heartbeat arrived
+ * on the dot every 3000ms while real model text landed in three bursts (14.2s / 22.0s / 27.5s). The
+ * pipeline was healthy; the PROVIDER was buffering. The panel could not say so — `silentMs` was on the
+ * wire and dropped at the store boundary — so a five-minute wait rendered identically to a hang.
+ */
+describe('concrete progress', () => {
+  const base = {
+    generationId: 'g1',
+    seq: 1,
+    phase: 'generating' as const,
+    kind: 'edit' as const,
+    elapsedMs: 0,
+    receivedAt: 0,
+  };
+
+  it('carries silentMs off the wire', () => {
+    resetAgentStatus();
+    updateAgentStatus(
+      {
+        type: 'agent-status',
+        generationId: 'g1',
+        seq: 1,
+        phase: 'thinking',
+        kind: 'edit',
+        elapsedMs: 1000,
+        silentMs: 900,
+      },
+      0,
+    );
+    expect(agentStatusStore.get()?.silentMs).toBe(900);
+  });
+
+  /* Absent must stay absent — an older server's missing measurement is not a confident zero. */
+  it('leaves silentMs undefined when the server sent none', () => {
+    resetAgentStatus();
+    updateAgentStatus(
+      { type: 'agent-status', generationId: 'g2', seq: 1, phase: 'thinking', kind: 'edit', elapsedMs: 1000 },
+      0,
+    );
+    expect(agentStatusStore.get()?.silentMs).toBeUndefined();
+    expect(currentSilentMs(agentStatusStore.get()!, 5000)).toBeUndefined();
+  });
+
+  it('extrapolates silence between heartbeats, like elapsed', () => {
+    expect(currentSilentMs({ ...base, silentMs: 3000 }, 2000)).toBe(5000);
+  });
+
+  it('counts files without inventing a total', () => {
+    expect(formatArtifactProgress({ written: 3, writing: 1 })).toBe('3 files written · 1 in progress');
+    expect(formatArtifactProgress({ written: 1, writing: 0 })).toBe('1 file written');
+    expect(formatArtifactProgress({ written: 0, writing: 2 })).toBe('2 in progress');
+  });
+
+  /* Nothing has landed yet: say nothing rather than "0 files written", which reads as a failure. */
+  it('shows no line when nothing has landed', () => {
+    expect(formatArtifactProgress({ written: 0, writing: 0 })).toBeUndefined();
+    expect(describeAgentStatus({ ...base }, 0, { written: 0, writing: 0 }).progress).toBeUndefined();
+  });
+
+  it('reports a long silence, and stays quiet about a short one', () => {
+    const quiet = describeAgentStatus({ ...base, elapsedMs: 300_000, silentMs: SILENCE_WORTH_MENTIONING_MS }, 0);
+    expect(quiet.progress).toContain('nothing from the model for');
+
+    /*
+     * A heartbeat only fires after seconds of quiet, so SOME silence is normal whenever this panel is
+     * up. Reporting it at 3s would put an alarming sentence on every ordinary turn and train the user
+     * to ignore the one that matters.
+     */
+    expect(describeAgentStatus({ ...base, elapsedMs: 300_000, silentMs: 3000 }, 0).progress).toBeUndefined();
+  });
+
+  it('combines what landed with whether anything is arriving', () => {
+    const d = describeAgentStatus({ ...base, elapsedMs: 300_000, silentMs: 40_000 }, 0, { written: 2, writing: 1 });
+    expect(d.progress).toBe('2 files written · 1 in progress · nothing from the model for 40s');
+  });
+
+  /*
+   * A retry already SAYS the model stopped responding, in its detail line. Repeating it as a silence
+   * clause reads as two separate problems; the file count is the part the user still needs.
+   */
+  it('does not double-report silence during a retry', () => {
+    const d = describeAgentStatus(
+      { ...base, activity: 'retrying', attempt: 2, maxAttempts: 3, elapsedMs: 300_000, silentMs: 60_000 },
+      0,
+      {
+        written: 4,
+        writing: 0,
+      },
+    );
+    expect(d.progress).toBe('4 files written');
+    expect(d.detail).toContain('retrying');
+  });
+
+  /*
+   * The existing sentences are untouched — this is an added line, not a rewrite.
+   *
+   * ⚠️ Both sides must share the SAME status, varying only the progress argument. An earlier edit
+   * raised `elapsedMs` on one side alone, which changes the label by design and turned this into a
+   * test of its own fixture rather than of the code.
+   */
+  it('leaves label and detail exactly as they were', () => {
+    const status = { ...base, elapsedMs: 300_000, silentMs: 60_000 };
+    const withProgress = describeAgentStatus(status, 0, { written: 9, writing: 0 });
+    const without = describeAgentStatus(status, 0);
+    expect(withProgress.label).toBe(without.label);
+    expect(withProgress.detail).toBe(without.detail);
+    expect(withProgress.progress).not.toBe(without.progress);
+  });
+});
+
+describe('countArtifactProgress', () => {
+  it('counts file and edit actions by status', () => {
+    expect(
+      countArtifactProgress([
+        { type: 'file', status: 'complete' },
+        { type: 'edit', status: 'complete' },
+        { type: 'file', status: 'running' },
+        { type: 'file', status: 'pending' },
+      ]),
+    ).toEqual({ written: 2, writing: 1 });
+  });
+
+  /*
+   * 🔴 A dev server is `running` forever. Counting `start` would park a permanent "1 in progress"
+   * under every panel for the rest of the session — the same long-lived-action trap that stopped the
+   * game-ready celebration from ever firing.
+   */
+  it('ignores the dev server and shell commands', () => {
+    expect(
+      countArtifactProgress([
+        { type: 'start', status: 'running' },
+        { type: 'shell', status: 'complete' },
+      ]),
+    ).toEqual({ written: 0, writing: 0 });
+  });
+
+  it('is empty for no actions', () => {
+    expect(countArtifactProgress([])).toEqual({ written: 0, writing: 0 });
+  });
+});
+
+/*
+ * 🔴 Observed live on the first drive: "Working on your changes — 15s" printed above "nothing from
+ * the model for 15s". When NOTHING has arrived all turn the two numbers are identical, and showing
+ * both reads as a rendering bug while spending the one line meant to carry new information.
+ */
+describe('a stall is only news once something has arrived', () => {
+  const base = {
+    generationId: 'g1',
+    seq: 1,
+    phase: 'generating' as const,
+    kind: 'edit' as const,
+    elapsedMs: 0,
+    receivedAt: 0,
+  };
+
+  it('does not restate the elapsed time as a stall', () => {
+    expect(describeAgentStatus({ ...base, elapsedMs: 60_000, silentMs: 60_000 }, 0).progress).toBeUndefined();
+  });
+
+  it('reports it once the silence is meaningfully shorter than the turn', () => {
+    const d = describeAgentStatus(
+      { ...base, elapsedMs: 60_000, silentMs: 60_000 - SILENCE_RESTATES_ELAPSED_MS - 1 },
+      0,
+    );
+    expect(d.progress).toContain('nothing from the model for');
+  });
+
+  /* The file count is unaffected — it is never a restatement of anything in the label. */
+  it('still counts files while the stall clause is suppressed', () => {
+    const d = describeAgentStatus({ ...base, elapsedMs: 60_000, silentMs: 60_000 }, 0, { written: 3, writing: 0 });
+    expect(d.progress).toBe('3 files written');
+  });
+});
+
+/*
+ * 🔴 FOUND LIVE, not by a unit test (2026-08-01). The count was wired to `firstArtifact`, which is the
+ * CREATION bundle (`npm install` + `npm run dev`) — two shell actions, both correctly filtered out — so
+ * on every build turn the file line silently never appeared. The pure counting function was right the
+ * whole time; the defect was which actions reached it.
+ *
+ * These pin the half that can be tested purely: a count is only reported once text has actually
+ * streamed this turn.
+ */
+describe('the count belongs to THIS turn', () => {
+  const base = {
+    generationId: 'g1',
+    seq: 1,
+    kind: 'edit' as const,
+    elapsedMs: 300_000,
+    receivedAt: 0,
+  };
+
+  it('reports nothing while still thinking, whatever the caller counted', () => {
+    // `thinking` means no text has streamed — so any count in hand is the PREVIOUS turn's artifact.
+    const d = describeAgentStatus({ ...base, phase: 'thinking' }, 0, { written: 8, writing: 0 });
+    expect(d.progress).toBeUndefined();
+  });
+
+  it('reports it once text has streamed', () => {
+    const d = describeAgentStatus({ ...base, phase: 'generating' }, 0, { written: 8, writing: 0 });
+    expect(d.progress).toBe('8 files written');
+  });
+
+  it('applies the same rule during a retry', () => {
+    const thinking = describeAgentStatus(
+      { ...base, phase: 'thinking', activity: 'retrying', attempt: 2, maxAttempts: 3 },
+      0,
+      { written: 8, writing: 0 },
+    );
+    expect(thinking.progress).toBeUndefined();
   });
 });
