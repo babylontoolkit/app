@@ -95,24 +95,32 @@ interface TemplateState {
 }
 
 /**
- * Whether the **Sandbox template** section is shown (hide-don't-delete, §4.1a).
+ * Whether the three **remote-VM provider** sections are shown (hide-don't-delete, §4.1a):
+ * *Sandbox template*, *Sandbox VM time* and *CodeSandbox status*.
  *
- * 🔴 It is a CodeSandbox control: it promotes the VM alias that new projects FORK (plan T14), which is
- * a concept the current provider does not have — Nodepod runs in the user's own browser, mints no VM,
- * and forks no template. So the panel promotes nothing, the route it drives reports "not configured",
- * and its copy ("New projects fork …") states something that is not true of this deploy.
+ * 🔴 All three describe machinery that exists only when a VM provider is running. Nodepod runs in the
+ * user's own browser: it mints no VM, forks no template, bills no VM-hour and has no rate limit to
+ * report. So the template panel promotes nothing, the status panel reads "not configured", and the
+ * VM-time panel is the dangerous one — **it renders the CodeSandbox era's historical marks in the
+ * PRESENT tense.** Observed on this deploy: *491.8 VM hours · Running now 16*, when the true answer
+ * is zero and can never be anything else. That is a false number on the one panel an operator reads
+ * to answer "what is production costing me right now".
  *
  * ⚠️ **An admin control that describes machinery the running provider does not use is worse than a
- * missing one** — it reads as a lever the operator has, and the first thing anyone does with a
- * supply-chain control they believe in is trust what it says about production. Same reasoning as the
- * inherited Settings toggles that only wired to the fail-closed `/api/chat`.
+ * missing one.** A dead lever reads as a lever you have; a stale gauge reads as a live measurement.
+ * Same reasoning as the inherited Settings toggles that only wired to the fail-closed `/api/chat`.
  *
- * Kept, not deleted: the route, the store and the pin logic are all live and correct, and the
- * CodeSandbox provider is still selectable via `VITE_SANDBOX_PROVIDER`. Flip this to restore it —
- * one edit, and it gates the FETCH as well, so a hidden panel does not still call the API on every
- * Admin open.
+ * ONE flag, not three, because they are one story — flip to CodeSandbox and you want all three back
+ * together, and three booleans a few lines apart is how two of them end up disagreeing.
+ *
+ * Kept, not deleted: the routes, the mark store, the pin logic and the report builders are all live
+ * and correct, and CodeSandbox is still selectable via `VITE_SANDBOX_PROVIDER`.
+ *
+ * ⚠️ This gates the RENDER, and the sandbox-template FETCH (its own route, so skipping it is free).
+ * It deliberately does NOT gate `/api/admin/usage` — that one call also carries the usage/cost report
+ * and the provider balance, which are provider-independent and still wanted.
  */
-const SHOW_SANDBOX_TEMPLATE = false;
+const SHOW_VM_PROVIDER_PANELS = false;
 
 /** The `/api/admin/sandbox-template` payload — `sandbox/template-pin.ts`'s shapes, verbatim (plan T14). */
 interface SandboxTemplatePin {
@@ -262,7 +270,7 @@ export function AdminTab() {
       .then((data) => data && setPrompt(data as PromptState))
       .catch(() => undefined);
 
-    if (SHOW_SANDBOX_TEMPLATE) {
+    if (SHOW_VM_PROVIDER_PANELS) {
       fetch('/api/admin/sandbox-template')
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => data && setSandboxTemplate(data as SandboxTemplateState))
@@ -542,57 +550,61 @@ export function AdminTab() {
        * than meter it (`billing/vm-cost.ts`), which is only defensible while somebody checks the
        * estimate that decision rests on. This section is that check — and the number that would
        * eventually justify building metering, if one account's hours ever stop looking like everyone's.
+       *
+       * Hidden while the browser-side provider is the one running — see {@link SHOW_VM_PROVIDER_PANELS}.
        */}
-      <section>
-        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Sandbox VM time</h3>
-        {!vmLoaded ? (
-          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
-        ) : !vm ? (
-          <div className="mt-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor text-sm text-bolt-elements-textSecondary">
-            <span className="text-bolt-elements-textPrimary font-medium">Unavailable</span> — the lifecycle mark store
-            could not be read. Usage and cost above are unaffected.
-          </div>
-        ) : (
-          <>
-            <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
-              <Stat label="VM hours" value={vm.vmHours.toFixed(1)} />
-              <Stat label="Running now" value={vm.running.toLocaleString()} />
-              <Stat label="Sandboxes seen" value={vm.sandboxes.toLocaleString()} />
-              <Stat label="Accounts" value={vm.users.toLocaleString()} />
-              <Stat label="Lifecycle marks" value={vm.marks.toLocaleString()} />
-              <Stat label="Unattributed" value={`${vm.unattributedHours.toFixed(1)} h`} />
+      {SHOW_VM_PROVIDER_PANELS && (
+        <section>
+          <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Sandbox VM time</h3>
+          {!vmLoaded ? (
+            <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+          ) : !vm ? (
+            <div className="mt-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor text-sm text-bolt-elements-textSecondary">
+              <span className="text-bolt-elements-textPrimary font-medium">Unavailable</span> — the lifecycle mark store
+              could not be read. Usage and cost above are unaffected.
             </div>
-            {/*
-             * The accuracy warning, not a footnote: the provider hibernates an idle VM on its own
-             * timeout and never tells us, so those intervals get clamped rather than measured. A count
-             * approaching "running now" means these hours are a ceiling.
-             */}
-            {vm.clamped > 0 && (
-              <div className="mt-2 text-xs text-bolt-elements-textTertiary">
-                {`${vm.clamped} open interval(s) hit the 24h ceiling — the provider's own idle hibernation writes no closing mark, so those hours are an upper bound.`}
+          ) : (
+            <>
+              <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <Stat label="VM hours" value={vm.vmHours.toFixed(1)} />
+                <Stat label="Running now" value={vm.running.toLocaleString()} />
+                <Stat label="Sandboxes seen" value={vm.sandboxes.toLocaleString()} />
+                <Stat label="Accounts" value={vm.users.toLocaleString()} />
+                <Stat label="Lifecycle marks" value={vm.marks.toLocaleString()} />
+                <Stat label="Unattributed" value={`${vm.unattributedHours.toFixed(1)} h`} />
               </div>
-            )}
-            {vm.topUsers.length > 0 && (
-              <div className="mt-3 text-xs text-bolt-elements-textSecondary">
-                {vm.topUsers.map((u) => (
-                  <div key={u.userId} className="flex justify-between py-0.5">
-                    <span className="font-mono">{u.userId}</span>
-                    <span>
-                      {u.vmHours.toFixed(1)} h · {u.sandboxes} VM{u.sandboxes === 1 ? '' : 's'}
-                      {u.running > 0 ? ` · ${u.running} running` : ''}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-            {vm.marks === 0 && (
-              <div className="mt-2 text-xs text-bolt-elements-textTertiary">
-                No lifecycle marks recorded yet. This is empty until a project opens a sandbox.
-              </div>
-            )}
-          </>
-        )}
-      </section>
+              {/*
+               * The accuracy warning, not a footnote: the provider hibernates an idle VM on its own
+               * timeout and never tells us, so those intervals get clamped rather than measured. A count
+               * approaching "running now" means these hours are a ceiling.
+               */}
+              {vm.clamped > 0 && (
+                <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+                  {`${vm.clamped} open interval(s) hit the 24h ceiling — the provider's own idle hibernation writes no closing mark, so those hours are an upper bound.`}
+                </div>
+              )}
+              {vm.topUsers.length > 0 && (
+                <div className="mt-3 text-xs text-bolt-elements-textSecondary">
+                  {vm.topUsers.map((u) => (
+                    <div key={u.userId} className="flex justify-between py-0.5">
+                      <span className="font-mono">{u.userId}</span>
+                      <span>
+                        {u.vmHours.toFixed(1)} h · {u.sandboxes} VM{u.sandboxes === 1 ? '' : 's'}
+                        {u.running > 0 ? ` · ${u.running} running` : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {vm.marks === 0 && (
+                <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+                  No lifecycle marks recorded yet. This is empty until a project opens a sandbox.
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      )}
 
       {/*
        * CodeSandbox status (2026-07-29). Their API has NO credit-balance endpoint (verified against
@@ -600,77 +612,81 @@ export function AdminTab() {
        * this shows the provider's own live counters instead: the three rate-limit gauges (hourly API
        * requests is the cap that bites first — 3,600/hr; hourly creations is the platform's whole
        * fork budget), the VMs burning credits right now, and the fleet count the orphan sweep audits.
+       *
+       * Hidden while the browser-side provider is the one running — see {@link SHOW_VM_PROVIDER_PANELS}.
        */}
-      <section>
-        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">CodeSandbox status</h3>
-        {!vmLoaded ? (
-          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
-        ) : !sandboxStatus ||
-          (!sandboxStatus.requestsHourly && !sandboxStatus.concurrentVms && !sandboxStatus.fleetCount) ? (
-          <div className="mt-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor text-sm text-bolt-elements-textSecondary">
-            <span className="text-bolt-elements-textPrimary font-medium">Unavailable</span>
-            {sandboxStatus?.reason ? ` — ${sandboxStatus.reason}` : ' — the provider could not be read.'} Usage and cost
-            above are unaffected.
-          </div>
-        ) : (
-          <>
-            <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
-              <Stat
-                label="API requests left (this hour)"
-                value={
-                  sandboxStatus.requestsHourly
-                    ? `${sandboxStatus.requestsHourly.remaining.toLocaleString()} / ${sandboxStatus.requestsHourly.limit.toLocaleString()}`
-                    : '—'
-                }
-              />
-              <Stat
-                label="Sandbox creations left (this hour)"
-                value={
-                  sandboxStatus.sandboxesHourly
-                    ? `${sandboxStatus.sandboxesHourly.remaining} / ${sandboxStatus.sandboxesHourly.limit}`
-                    : '—'
-                }
-              />
-              <Stat
-                label="Concurrent VMs"
-                value={
-                  sandboxStatus.concurrentVms
-                    ? `${sandboxStatus.concurrentVms.limit - sandboxStatus.concurrentVms.remaining} of ${sandboxStatus.concurrentVms.limit}`
-                    : '—'
-                }
-              />
-              <Stat
-                label="Running now"
-                value={sandboxStatus.runningVms === null ? '—' : sandboxStatus.runningVms.length.toLocaleString()}
-              />
-              <Stat
-                label="Fleet (btk sandboxes)"
-                value={sandboxStatus.fleetCount === null ? '—' : sandboxStatus.fleetCount.toLocaleString()}
-              />
+      {SHOW_VM_PROVIDER_PANELS && (
+        <section>
+          <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">CodeSandbox status</h3>
+          {!vmLoaded ? (
+            <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+          ) : !sandboxStatus ||
+            (!sandboxStatus.requestsHourly && !sandboxStatus.concurrentVms && !sandboxStatus.fleetCount) ? (
+            <div className="mt-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor text-sm text-bolt-elements-textSecondary">
+              <span className="text-bolt-elements-textPrimary font-medium">Unavailable</span>
+              {sandboxStatus?.reason ? ` — ${sandboxStatus.reason}` : ' — the provider could not be read.'} Usage and
+              cost above are unaffected.
             </div>
-            {sandboxStatus.runningVms !== null && sandboxStatus.runningVms.length > 0 && (
-              <div className="mt-3 text-xs text-bolt-elements-textSecondary">
-                {sandboxStatus.runningVms.map((v) => (
-                  <div key={v.id} className="flex justify-between py-0.5">
-                    <span className="font-mono">{v.id}</span>
-                    <span>
-                      {v.specs ? `${v.specs.cpu ?? '?'} vCPU · ${v.specs.memory ?? '?'}GB` : 'specs unknown'}
-                      {v.sessionStartedAt ? ` · up since ${new Date(v.sessionStartedAt).toLocaleTimeString()}` : ''}
-                    </span>
-                  </div>
-                ))}
+          ) : (
+            <>
+              <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <Stat
+                  label="API requests left (this hour)"
+                  value={
+                    sandboxStatus.requestsHourly
+                      ? `${sandboxStatus.requestsHourly.remaining.toLocaleString()} / ${sandboxStatus.requestsHourly.limit.toLocaleString()}`
+                      : '—'
+                  }
+                />
+                <Stat
+                  label="Sandbox creations left (this hour)"
+                  value={
+                    sandboxStatus.sandboxesHourly
+                      ? `${sandboxStatus.sandboxesHourly.remaining} / ${sandboxStatus.sandboxesHourly.limit}`
+                      : '—'
+                  }
+                />
+                <Stat
+                  label="Concurrent VMs"
+                  value={
+                    sandboxStatus.concurrentVms
+                      ? `${sandboxStatus.concurrentVms.limit - sandboxStatus.concurrentVms.remaining} of ${sandboxStatus.concurrentVms.limit}`
+                      : '—'
+                  }
+                />
+                <Stat
+                  label="Running now"
+                  value={sandboxStatus.runningVms === null ? '—' : sandboxStatus.runningVms.length.toLocaleString()}
+                />
+                <Stat
+                  label="Fleet (btk sandboxes)"
+                  value={sandboxStatus.fleetCount === null ? '—' : sandboxStatus.fleetCount.toLocaleString()}
+                />
               </div>
-            )}
-            {sandboxStatus.reason && (
-              <div className="mt-2 text-xs text-bolt-elements-textTertiary">{`Partial read: ${sandboxStatus.reason}`}</div>
-            )}
-            <div className="mt-2 text-xs text-bolt-elements-textTertiary">
-              CodeSandbox exposes no credit balance — estimated spend is the VM hours above × the configured hourly
-              rate; the balance itself lives in their dashboard.
-            </div>
-          </>
-        )}
-      </section>
+              {sandboxStatus.runningVms !== null && sandboxStatus.runningVms.length > 0 && (
+                <div className="mt-3 text-xs text-bolt-elements-textSecondary">
+                  {sandboxStatus.runningVms.map((v) => (
+                    <div key={v.id} className="flex justify-between py-0.5">
+                      <span className="font-mono">{v.id}</span>
+                      <span>
+                        {v.specs ? `${v.specs.cpu ?? '?'} vCPU · ${v.specs.memory ?? '?'}GB` : 'specs unknown'}
+                        {v.sessionStartedAt ? ` · up since ${new Date(v.sessionStartedAt).toLocaleTimeString()}` : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {sandboxStatus.reason && (
+                <div className="mt-2 text-xs text-bolt-elements-textTertiary">{`Partial read: ${sandboxStatus.reason}`}</div>
+              )}
+              <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+                CodeSandbox exposes no credit balance — estimated spend is the VM hours above × the configured hourly
+                rate; the balance itself lives in their dashboard.
+              </div>
+            </>
+          )}
+        </section>
+      )}
 
       {/*
        * Refund audit (§4.10, spec/fail-loud.md). Every refund is money the OPERATOR ate — the provider
@@ -996,9 +1012,9 @@ export function AdminTab() {
        * "Starter template" above and deliberately next to it: one decides the files a new project gets,
        * the other decides the machine they land on, and both are supply-chain decisions.
        *
-       * Hidden while the browser-side provider is the one running — see {@link SHOW_SANDBOX_TEMPLATE}.
+       * Hidden while the browser-side provider is the one running — see {@link SHOW_VM_PROVIDER_PANELS}.
        */}
-      {SHOW_SANDBOX_TEMPLATE && (
+      {SHOW_VM_PROVIDER_PANELS && (
         <section>
           <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Sandbox template</h3>
           {!sandboxTemplate ? (
