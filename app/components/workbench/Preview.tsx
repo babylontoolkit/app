@@ -5,7 +5,9 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { PortDropdown } from './PortDropdown';
 import { ScreenshotSelector } from './ScreenshotSelector';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
-import { previewUrlWithPath } from '~/lib/stores/preview-url';
+import { previewIdFromUrl, previewUrlWithPath } from '~/lib/stores/preview-url';
+import { PREVIEW_BUSY_CEILING_MS, previewBusyCopy, previewBusyState } from '~/lib/stores/preview-busy';
+import type { PreviewBusyState } from '~/lib/stores/preview-busy';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import type { ElementInfo } from './Inspector';
 
@@ -52,6 +54,42 @@ const WINDOW_SIZES: WindowSize[] = [
   { name: 'Desktop', width: 1920, height: 1080, icon: 'i-ph:monitor', hasFrame: true, frameType: 'desktop' },
   { name: '4K Display', width: 3840, height: 2160, icon: 'i-ph:monitor', hasFrame: true, frameType: 'desktop' },
 ];
+
+/**
+ * The busy cover for the preview pane — see `preview-busy.ts` for why it is scoped to this pane.
+ *
+ * 🔴 **It looks like `BootStatusPanel` because it IS the same moment to a user**, one pane smaller:
+ * same spinner, same title/detail shape, same background token. The workspace splash learned this
+ * the expensive way — creation and resume were drawn as two different things and the modal one read
+ * as the cheaper of the two (`BootScreen.tsx`). A third visual language for "your project is coming
+ * up" would repeat that.
+ *
+ * `absolute inset-0` inside the pane's already-`relative` container, so it covers the iframe and
+ * NOTHING else: the URL bar, the device controls, the file tree, the editor and the chat all stay
+ * live and usable. `pointer-events-none` because there is nothing here to click and the user must
+ * still be able to reach the toolbar above it.
+ */
+function PreviewBusyOverlay({ state }: { state: PreviewBusyState }) {
+  const copy = previewBusyCopy(state);
+
+  if (!copy) {
+    return null;
+  }
+
+  return (
+    <div
+      className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 px-6 pointer-events-none bg-bolt-elements-background-depth-1"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-3xl" aria-hidden="true" />
+      <div className="text-center">
+        <div className="text-base font-medium text-bolt-elements-textPrimary">{copy.title}</div>
+        <div className="mt-1 max-w-xs text-sm text-bolt-elements-textSecondary">{copy.detail}</div>
+      </div>
+    </div>
+  );
+}
 
 export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -121,6 +159,58 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
 
     setIframeUrl(previewUrlWithPath(activePreview.baseUrl, committedPathRef.current));
   }, [activePreview?.baseUrl, activePreview?.port]);
+
+  /*
+   * ---------------------------------------------------------------------------------------------
+   * "The preview is still loading" — the overlay over THIS PANE ONLY (`preview-busy.ts`).
+   * ---------------------------------------------------------------------------------------------
+   *
+   * A load starts when the frame is pointed somewhere and ends at its `load` event. `everLoaded` is
+   * a REF rather than state: it must not re-render anything by itself, and its only reader is the
+   * pure decision below.
+   */
+  const [loadStartedAt, setLoadStartedAt] = useState<number | undefined>(undefined);
+  const [busyTick, setBusyTick] = useState(0);
+  const everLoadedRef = useRef(false);
+
+  useEffect(() => {
+    setLoadStartedAt(iframeUrl ? Date.now() : undefined);
+  }, [iframeUrl]);
+
+  useEffect(() => {
+    if (loadStartedAt === undefined) {
+      return undefined;
+    }
+
+    /*
+     * The clock only runs while a load is in flight, and it stops itself at the ceiling — a timer
+     * that outlives what it is timing is how a "temporary" overlay becomes permanent.
+     */
+    const timer = setInterval(() => {
+      if (Date.now() - loadStartedAt >= PREVIEW_BUSY_CEILING_MS) {
+        clearInterval(timer);
+      }
+
+      setBusyTick((n) => n + 1);
+    }, 250);
+
+    return () => clearInterval(timer);
+  }, [loadStartedAt]);
+
+  const previewBusy = previewBusyState({
+    loading: loadStartedAt !== undefined,
+    elapsedMs: loadStartedAt === undefined ? 0 : Date.now() - loadStartedAt,
+    everLoaded: everLoadedRef.current,
+  });
+
+  // Referenced so the 250 ms tick is a real dependency of the render rather than an unused setState.
+  void busyTick;
+
+  const handlePreviewLoad = useCallback(() => {
+    everLoadedRef.current = true;
+    setLoadStartedAt(undefined);
+    workbenchStore.notePreviewLoaded();
+  }, []);
 
   const findMinPortIndex = useCallback(
     (minIndex: number, preview: { port: number }, index: number, array: { port: number }[]) => {
@@ -420,13 +510,23 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     </div>
   );
 
+  /**
+   * Open the running preview in a window of its own.
+   *
+   * 🔴 **This was silently dead on every provider but WebContainer.** It matched StackBlitz's
+   * `*.local-credentialless.webcontainer-api.io` hostname to recover a preview id, then opened
+   * `/webcontainer/preview/<id>` — a route whose only job is to turn that id back into the URL we
+   * already had. On Nodepod the regex matched nothing, the `if` never ran, and the menu item did
+   * NOTHING: no window, no error, no log.
+   *
+   * The indirection bought nothing even when it worked — *Open in new tab* six lines below has
+   * always just opened `activePreview.baseUrl`. So does this now, carrying the path the user has
+   * navigated to (`previewUrlWithPath`, which respects a same-origin mount prefix).
+   */
   const openInNewWindow = (size: WindowSize) => {
     if (activePreview?.baseUrl) {
-      const match = activePreview.baseUrl.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
-
-      if (match) {
-        const previewId = match[1];
-        const previewUrl = `/webcontainer/preview/${previewId}`;
+      {
+        const previewUrl = previewUrlWithPath(activePreview.baseUrl, committedPathRef.current);
 
         // Adjust dimensions for landscape mode if applicable
         let width = size.width;
@@ -588,8 +688,6 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
             newWindow.focus();
           }
         }
-      } else {
-        console.warn('[Preview] Invalid WebContainer URL:', activePreview.baseUrl);
       }
     }
   };
@@ -840,17 +938,14 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                             return;
                           }
 
-                          const match = activePreview.baseUrl.match(
-                            /^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/,
-                          );
-
-                          if (!match) {
-                            console.warn('[Preview] Invalid WebContainer URL:', activePreview.baseUrl);
-                            return;
-                          }
-
-                          const previewId = match[1];
-                          const previewUrl = `/webcontainer/preview/${previewId}`;
+                          /*
+                           * Same fix as `openInNewWindow` above: this used to require a StackBlitz
+                           * preview hostname and returned early on anything else, so the button was
+                           * inert on Nodepod. The window NAME still needs a stable id — that is what
+                           * makes a second click reuse the window instead of stacking a new one.
+                           */
+                          const previewId = previewIdFromUrl(activePreview.baseUrl) ?? 'default';
+                          const previewUrl = previewUrlWithPath(activePreview.baseUrl, committedPathRef.current);
 
                           // Open in a new window with simple parameters
                           window.open(
@@ -1043,7 +1138,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                         display: 'block',
                       }}
                       src={iframeUrl}
-                      onLoad={() => workbenchStore.notePreviewLoaded()}
+                      onLoad={handlePreviewLoad}
                       sandbox="allow-scripts allow-forms allow-popups allow-modals allow-storage-access-by-user-activation allow-same-origin"
                       allow="cross-origin-isolated"
                     />
@@ -1055,7 +1150,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                   title="preview"
                   className="border-none w-full h-full bg-bolt-elements-background-depth-1"
                   src={iframeUrl}
-                  onLoad={() => workbenchStore.notePreviewLoaded()}
+                  onLoad={handlePreviewLoad}
                   sandbox="allow-scripts allow-forms allow-popups allow-modals allow-storage-access-by-user-activation allow-same-origin"
                   allow="geolocation; ch-ua-full-version-list; cross-origin-isolated; screen-wake-lock; publickey-credentials-get; shared-storage-select-url; ch-ua-arch; bluetooth; compute-pressure; ch-prefers-reduced-transparency; deferred-fetch; usb; ch-save-data; publickey-credentials-create; shared-storage; deferred-fetch-minimal; run-ad-auction; ch-ua-form-factors; ch-downlink; otp-credentials; payment; ch-ua; ch-ua-model; ch-ect; autoplay; camera; private-state-token-issuance; accelerometer; ch-ua-platform-version; idle-detection; private-aggregation; interest-cohort; ch-viewport-height; local-fonts; ch-ua-platform; midi; ch-ua-full-version; xr-spatial-tracking; clipboard-read; gamepad; display-capture; keyboard-map; join-ad-interest-group; ch-width; ch-prefers-reduced-motion; browsing-topics; encrypted-media; gyroscope; serial; ch-rtt; ch-ua-mobile; window-management; unload; ch-dpr; ch-prefers-color-scheme; ch-ua-wow64; attribution-reporting; fullscreen; identity-credentials-get; private-state-token-redemption; hid; ch-ua-bitness; storage-access; sync-xhr; ch-device-memory; ch-viewport-width; picture-in-picture; magnetometer; clipboard-write; microphone"
                 />
@@ -1065,6 +1160,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                 setIsSelectionMode={setIsSelectionMode}
                 containerRef={iframeRef}
               />
+              <PreviewBusyOverlay state={previewBusy} />
             </>
           ) : (
             <div className="flex w-full h-full justify-center items-center bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary">

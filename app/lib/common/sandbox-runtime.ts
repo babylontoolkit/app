@@ -31,6 +31,52 @@ export const SANDBOX_PROVIDER_IDS: readonly SandboxProviderId[] = ['nodepod', 'w
  */
 export const DEFAULT_SANDBOX_PROVIDER: SandboxProviderId = 'nodepod';
 
+/**
+ * Which providers this build may actually select. **Nodepod only, since 2026-07-31.**
+ *
+ * 🔴 **A DISABLED PROVIDER CANNOT BE CHOSEN BY CONFIGURATION — ONLY BY EDITING THIS LINE.** That is
+ * the entire point of the list existing separately from {@link SANDBOX_PROVIDER_IDS}: `.env` files,
+ * Docker build args, SSM parameters and CI variables are all things that can be set by accident, by a
+ * stale copy of a deploy script, or by a machine that has been configured for a different build. None
+ * of them may start a WebContainer.
+ *
+ * Two reasons, and the first is not a cost question:
+ *
+ *   - **WebContainers is proprietary and commercially licensed** (`spec/licensing.md`). Running it on
+ *     a paid platform without a StackBlitz agreement is a licence violation, and it would not announce
+ *     itself — the runtime works perfectly, which is exactly why it must be impossible to reach by
+ *     accident rather than merely non-default. A default is a preference; this is a wall.
+ *   - **CodeSandbox bills per VM-hour.** A build that reaches it starts spending on someone's card.
+ *
+ * The code for both stays in the tree, complete and tested — this is hide-don't-delete, and the seam
+ * is the reason a dormant provider costs nothing to keep. Neither module is even *evaluated* on a
+ * Nodepod build (both branches of `connectProvider` are dynamic imports), so a disabled provider is
+ * not a download, not a boot, and not a WASM fetch.
+ *
+ * ## To re-enable one for debugging
+ *
+ *   1. add its id here (e.g. `['nodepod', 'webcontainer']`);
+ *   2. update `sandbox-runtime.spec.ts`, which pins this list — CI fails otherwise, deliberately, so
+ *      that turning a paid or licensed runtime back on is a reviewed change and never a stray commit;
+ *   3. build with `VITE_SANDBOX_PROVIDER=<id>` (it is a BUILD-time switch — see DEPLOY.md);
+ *   4. **put it back.** For WebContainer, do not ship the result.
+ *
+ * ⚠️ Step 1 alone is not enough and that is intentional. An operator with shell access on a running
+ * container still cannot enable either runtime, because the client bundle chose at build time.
+ */
+export const ENABLED_SANDBOX_PROVIDERS: readonly SandboxProviderId[] = ['nodepod'];
+
+/**
+ * May this build select the given provider?
+ *
+ * Exported so the seam can refuse a second time at the point of connection. One wall in the resolver
+ * is not enough for a licence question: the resolver is a pure function that a future call site could
+ * simply not use, whereas `connectProvider` is the only door to a runtime.
+ */
+export function isSandboxProviderEnabled(id: SandboxProviderId): boolean {
+  return ENABLED_SANDBOX_PROVIDERS.includes(id);
+}
+
 export interface SandboxProviderTraits {
   /**
    * Where this runtime puts the user's project.
@@ -124,7 +170,24 @@ export function resolveSandboxProviderId(
   }
 
   if ((SANDBOX_PROVIDER_IDS as readonly string[]).includes(configured)) {
-    return configured as SandboxProviderId;
+    const id = configured as SandboxProviderId;
+
+    if (isSandboxProviderEnabled(id)) {
+      return id;
+    }
+
+    /*
+     * 🔴 A REAL provider name that this build refuses. Distinguished from a typo because the two need
+     * different sentences: a typo is a mistake to correct, this is a deliberate wall the reader must
+     * be told about by name, or they will spend an afternoon convinced their config is being ignored.
+     */
+    warn(
+      `[sandbox] VITE_SANDBOX_PROVIDER="${configured}" is DISABLED in this build ` +
+        `(enabled: ${ENABLED_SANDBOX_PROVIDERS.join(', ')}); using ${DEFAULT_SANDBOX_PROVIDER}. ` +
+        `See ENABLED_SANDBOX_PROVIDERS in app/lib/common/sandbox-runtime.ts.`,
+    );
+
+    return DEFAULT_SANDBOX_PROVIDER;
   }
 
   warn(

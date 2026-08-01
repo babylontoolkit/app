@@ -181,14 +181,149 @@ Three mutation checks confirm the new tests catch the live defects rather than m
 swallowing Ctrl-C fails 6, restoring the `update_directory` mapping fails 13, dropping the exclusion
 filter fails 7.
 
+## First-class parity pass (2026-07-31)
+
+Four gaps found by AUDIT rather than by a failure — the runtime was never the limit in any of them,
+the adapter was. Owner: *"Nodepod is supposed to be a FIRST CLASS DROP IN REPLACEMENT."*
+
+### 1. The terminal was an argv splitter, not a shell
+
+`createShellProcess` ran `command.split(/\s+/)` and passed the words to `client.spawn(cmd, args)`.
+**Nodepod ships a complete shell interpreter** — tokenizer, parser, pipelines, `&&`/`||`/`;`,
+`>`/`>>`/`<`/`2>&1`, glob and `$VAR` expansion, command substitution, aliases, and builtins
+(`ls cat grep find sed head tail sort uniq wc which xargs cd echo touch` plus
+`npm`/`pnpm`/`yarn`/`bun`/`node`/`git`) — and its `spawn` reaches that interpreter by joining `cmd`
+and `args` into one line, **shell-quoting each argument first**. Only when `args` is empty is `cmd`
+passed through verbatim.
+
+So the words we handed over came back as quoted literals: `npm install && npm run dev` became six
+of them, `echo "hello world"` became two. **The interpreter was there the whole time and we were
+escaping the request out of it.** Passing the line with no args is the documented path in; the fix is
+two lines and the adapter now has no parser of its own.
+
+The worker is also PERSISTENT now (`processManager.spawn({ command: 'shell' })` +
+`exec({ persistent: true })`, which is what `Nodepod.createTerminal` itself does), so `cd` survives
+between commands and no one pays a ~1 s worker boot to run `ls`. Without a process manager it
+degrades to one-shot spawns — still a full shell per command, just slower and with no `cd` memory.
+
+⚠️ **An IDLE Ctrl-C must not kill that worker.** `BoltShell.executeCommand` writes `\x03` before
+*every* command; killing on each one would respawn a worker per command and throw away the `cd`,
+silently converting the persistent shell back into the one-shot one.
+
+### 2. The terminal did not echo, so a human typed blind
+
+`jsh` and a real PTY echo keystrokes, redraw on backspace and print a prompt, because that is the
+terminal's job and not the shell's. Nodepod has neither, and the adapter owned only the *parsing*
+half: keystrokes went in, nothing came back, and output appeared only once Enter was pressed.
+Nothing threw — it just looked broken, which is exactly how it was reported.
+
+`createLineEditor` (pure, in `nodepod-translate.ts`) is now a real line editor: echo, backspace,
+insert at the cursor, ←/→, Delete, Home/End, Ctrl-A/E/U/K/L, bounded ↑/↓ history, and a cwd-aware
+prompt. Output is passed through `toTerminalNewlines` because xterm reads `\n` as "down one row"
+only, so raw Unix output staircases across the screen (Nodepod's own terminal makes the same
+substitution).
+
+**Deliberately not implemented:** cursor movement across a WRAPPED line. The redraw addresses one
+screen row; a line longer than the terminal is wide will smear on edit. Appending — the common case —
+echoes one character and never redraws, so it is unaffected. Tab completion is also absent (the
+vendor exposes `getCompletions`, but only via a deep import the seam scan forbids).
+
+### 3. `textSearch` was declared `false` while the runtime could search
+
+Implemented over the VFS in the adapter, and the capability is now `true`. **Not** shelled out to the
+runtime's `grep -r`, for three reasons that each give a wrong answer rather than a slow one: its
+`grep` writes ANSI colour unconditionally (no `--color=never`, and the columns are what the panel
+positions matches with); its recursive walk honours no excludes, so it would descend `node_modules`
+on every debounced keystroke; and a shell round trip returns TEXT, where the seam's contract is
+structured ranges. The VFS is in this tab's memory — reading it directly is both simpler and faster.
+
+### 4. "Open in new window" was silently dead
+
+`previews.ts`'s `getPreviewId` was a hardcoded StackBlitz hostname regex, so it returned `null` for
+Nodepod and CodeSandbox — and every caller "guarded on null". *Open in new window* did nothing at
+all, the cross-tab preview broadcast never fired, and the storage-sync refresh skipped every preview.
+None of it threw. **Degrading safely is only a virtue when the thing degraded is optional; a menu
+item that no-ops is a defect wearing a guard's clothes.**
+
+`previewIdFromUrl` (in `preview-url.ts`) now answers for any provider — WebContainer's subdomain kept
+byte-identical, Nodepod's `/__virtual__/<pod>/<port>` mount, and the origin for everything else — and
+`null` is reserved for input that is not a URL. Both `Preview.tsx` call sites open the preview URL
+directly; the `/webcontainer/preview/:id` route they went through only ever turned an id back into
+the URL they already had, which is what *Open in new tab* has always done.
+
+### 5. The 17.1 s cold first paint
+
+`nodepod-vite-cache.ts` persists `node_modules/.vite` to IndexedDB, keyed by the project's dependency
+set, and restores it before the dev server starts. Nodepod's own snapshot cache cannot close this: it
+snapshots `node_modules` at the end of `npm install`, and `.vite/deps` does not exist yet at that
+moment — and on a warm boot the install is a no-op, so it never re-snapshots either. The optimized
+deps were recomputed from scratch on every page load, forever.
+
+Three rules, each of which fails silently:
+
+- **The key is an OPTIMIZATION, not a correctness boundary.** Vite writes `deps/_metadata.json` with
+  a hash of its own inputs and re-optimizes when it does not match, so a stale restore costs exactly
+  what today costs. That is why the key can be a cheap sync hash of `package.json` (sorted, with
+  `dependencies` and `devDependencies` tagged apart) rather than a reproduction of Vite's own — which
+  would be a second implementation of a rule we do not own, drifting the first time they change it.
+- **Capture waits for the SENTINEL, never for the server.** The dev server is ready long before the
+  first request triggers optimization; storing then persists a half-written directory, which Vite
+  would trust on the next boot and serve modules that are not there. Restore writes the sentinel
+  LAST for the same reason.
+- **Restore happens before each command until it fires once**, because there is no single moment at
+  boot when both "`node_modules` exists" and "Vite has not started" are true — the install spawn finds
+  no `node_modules` and does nothing, the `npm run dev` after it restores. No command sniffing.
+
+It is skipped entirely when the pod already has optimized deps: that pod's own cache is newer than
+ours, and overwriting it is the `bootRestoredFilesystem` mistake in miniature.
+
+### 6. …and the wait it leaves behind is narrated, over the PREVIEW PANE only
+
+The dep cache removes the 17.1 s on the *second* load of a dependency set. The first one still pays
+it, and creation's splash comes down before it starts — the splash ends when the dev server binds a
+port, and Vite optimizes on the first REQUEST after that. So the user watched a blank preview pane
+with nothing saying why.
+
+`preview-busy.ts` + `PreviewBusyOverlay` cover **the preview pane and nothing else**. That scoping is
+the decision, not an implementation detail: at that moment the file tree, editor, terminal and chat
+are all ready and usable, so extending `WorkspaceSplash` over them would be a lie about three panes
+in order to explain one — and it would take the workspace away exactly when the user could start
+reading their code. It is drawn in the boot panel's visual language (same spinner, same title/detail
+shape) because it is the same moment to a user, one pane smaller; a third look for "your project is
+coming up" would repeat the mistake `BootScreen` already paid for.
+
+Three timing rules, each failing silently in a different direction, all pure and mutation-verified:
+
+- **An 800 ms delay before it appears.** The measured WARM first paint is 0.5 s, so a zero-delay
+  overlay flashes on every ordinary load and every in-preview navigation — the strobing that made the
+  import tail unusable as a boot phase. The test asserts the delay stays above the measured number.
+- **After 4 s, and only on the session's FIRST load, it explains itself** — "First run: the dev server
+  is optimizing dependencies. Later loads are much faster." A spinner says *wait*; it does not say
+  *this is one-time*, and a user not told that concludes their project is always this slow. Gated on
+  `everLoaded` because a later slow navigation is not paying for optimization, and saying it is would
+  be a confident wrong answer.
+- **A 120 s ceiling.** The exit must not depend solely on a `load` event that may never fire — a
+  preview that has not loaded in two minutes has a problem the user needs to SEE, not a spinner on
+  top of it. Same reason `coversWorkspace` refuses to cover the `failed` phase.
+
+⚠️ **Neither §5 nor §6 has been re-driven live.** Both are unit-proven and mutation-verified — for
+the cache, writing the sentinel first fails 2 tests and capturing without waiting for it fails 1; for
+the overlay, a zero delay fails 2, removing the ceiling fails 1, and dropping the `everLoaded` gate
+fails 1 — but the 17.1 s → ? number is owed, and nobody has watched the overlay come up and go down
+in a real pane.
+
 ## Still owed
 
-- **Bake `node_modules/.vite/deps` into the warm restore.** The 17.1 s fresh-pod first paint is almost
-  entirely Vite dep optimization; the snapshot cache restores packages but not the optimized deps.
-- **A build turn against a live model, and publish → `/play`.** The creation path is now driven end to
+- **Re-measure the fresh-pod first paint** with the dep cache in place. The whole point of §5 is a
+  number, and the number has not been taken.
+- **Drive the new terminal live.** Pipes, `&&`, `cd`, history and echo are pinned by tests against a
+  fake process manager; they have not been typed into the real workbench. Same live-fidelity caveat
+  the MCP relay carried before testing found three defects in it.
+- **A build turn against a live model, and publish → `/play`.** The creation path is driven end to
   end; the generation path is not. `type="file"` artifact writes go through `recordAgentWrite` and the
   same watcher that defect 2 broke, so it is the next thing to check, not an assumed pass.
 - **Vendoring beyond the exact npm pin.** The dependency is exact-pinned and the assets are copied with
   a byte-identity drift guard, but no in-tree copy exists yet.
 - A memory-ceiling check. Nodepod documents a soft budget and exposes `memoryStats()`; our projects
   carry an 8 MB binary payload plus a 12.2 MB Toolkit bundle, so the ceiling matters and is unmeasured.
+- Tab completion in the terminal, and cursor editing on a wrapped line — both named above.

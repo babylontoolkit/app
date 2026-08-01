@@ -16,6 +16,7 @@
  * call. It is safe to expose unauthenticated: it reveals which subsystems are configured, which is the
  * same thing the credits-vs-pro UI already reflects, and never a credential.
  */
+import { isSandboxProviderEnabled } from '~/lib/common/sandbox-runtime';
 import { getPlatformConfig, hasPlatformKey } from '~/lib/.server/agent/config';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
 import { isStripeConfigured } from '~/lib/.server/billing/stripe';
@@ -113,6 +114,17 @@ export function buildHealthReport(context: unknown): HealthReport {
  * an outage §9a exists to catch. Pinned by a test, so it is a decision rather than an accident.
  */
 function usesCodeSandbox(): boolean {
+  /*
+   * 🔴 The enabled-list check comes FIRST, because since 2026-07-31 a build cannot select CodeSandbox
+   * at all (`ENABLED_SANDBOX_PROVIDERS`). Without it the `|| process.env` arm below stops being a
+   * chosen risk and becomes a guaranteed lie: a stale deploy variable would make every health check
+   * demand a credential for a runtime this image physically cannot load, dragging `ready` to false
+   * forever on a healthy deploy — the exact §9a outage the comment above is careful to avoid.
+   */
+  if (!isSandboxProviderEnabled('codesandbox')) {
+    return false;
+  }
+
   return (
     import.meta.env?.VITE_SANDBOX_PROVIDER === 'codesandbox' || process.env.VITE_SANDBOX_PROVIDER === 'codesandbox'
   );

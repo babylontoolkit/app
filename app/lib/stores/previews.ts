@@ -1,6 +1,6 @@
 import { atom } from 'nanostores';
 import type { SandboxProvider } from '~/lib/sandbox';
-import { remintDelayMs, REMINT_RETRY_DELAY_MS } from './preview-url';
+import { previewIdFromUrl, remintDelayMs, REMINT_RETRY_DELAY_MS } from './preview-url';
 
 // Extend Window interface to include our custom property
 declare global {
@@ -360,18 +360,14 @@ export class PreviewsStore {
     return this.#availablePreviews.get(port)?.baseUrl;
   }
 
-  /*
-   * Helper to extract preview ID from URL.
+  /**
+   * A stable id for one preview, for ANY provider — see {@link previewIdFromUrl}.
    *
-   * ⚠️ Still WebContainer-shaped: it matches StackBlitz's `*.local-credentialless.webcontainer-api.io`
-   * preview hostname. It degrades safely rather than throwing — a provider with different preview
-   * URLs returns null here and every caller guards on that, costing only the cross-tab preview
-   * broadcast. Promoting preview-id extraction onto `SandboxProvider` is follow-up work; it is left
-   * here so this pass stays behaviour-preserving (`spec/sandbox-seam.md`).
+   * It was a StackBlitz hostname regex until 2026-07-31, which meant every caller below silently
+   * did nothing on Nodepod and CodeSandbox.
    */
   getPreviewId(url: string): string | null {
-    const match = url.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
-    return match ? match[1] : null;
+    return previewIdFromUrl(url);
   }
 
   // Broadcast state change to all tabs

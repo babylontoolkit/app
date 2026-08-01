@@ -133,20 +133,29 @@ aws lightsail get-container-services --service-name btk-builder-staging   # wait
 
 ### 2.2 Build & push the image (first time manually; CI thereafter)
 
+> 🔴 **PRODUCTION RUNS NODEPOD, AND THE OTHER TWO RUNTIMES ARE DISABLED IN CODE** (2026-07-31).
+> `ENABLED_SANDBOX_PROVIDERS` in `app/lib/common/sandbox-runtime.ts` lists `['nodepod']`, so
+> `VITE_SANDBOX_PROVIDER=webcontainer|codesandbox` — build arg, container env, SSM, anywhere — is
+> **refused and logged**, not honoured. WebContainers is proprietary and commercially licensed
+> (`spec/licensing.md`) and CodeSandbox bills per VM-hour; neither may be reachable by a config
+> mistake. Re-enabling one for debugging is a code edit plus the test that pins the list, i.e. a
+> reviewed change and a new image — never an operational action.
+>
 > 🔴 **`VITE_SANDBOX_PROVIDER` is a BUILD ARG, not an environment variable.** Vite inlines
 > `import.meta.env.VITE_SANDBOX_PROVIDER` into the client bundle and `WORK_DIR` is derived from it, so
 > which sandbox runtime a deploy uses is baked into the JavaScript the browser downloads. **Setting it on
 > a running container does nothing** except make the server disagree with its own bundle.
 >
-> **Rollback is "deploy the previous image", never an env flip.** Unset or misspelled builds WebContainer,
-> which is the safe direction.
+> **Rollback is "deploy the previous image", never an env flip.** Unset or misspelled builds Nodepod,
+> which is the safe direction — it needs no credential and no VM, so a typo cannot start spending.
 
 ```bash
-# CodeSandbox build (what production runs):
-docker build --build-arg VITE_SANDBOX_PROVIDER=codesandbox -t btk-builder .
+# The production build. Nodepod is the default, so the arg is optional and only documents intent:
+docker build -t btk-builder .
 
-# WebContainer build (omit the arg — this is also the rollback image):
-# docker build -t btk-builder .
+# The two examples below are kept for the day a provider is re-enabled IN CODE. As shipped they
+# produce a Nodepod bundle regardless of the arg:
+#   docker build --build-arg VITE_SANDBOX_PROVIDER=codesandbox -t btk-builder .
 
 aws lightsail push-container-image \
   --service-name btk-builder-staging \

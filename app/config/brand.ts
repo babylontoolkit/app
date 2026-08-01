@@ -97,9 +97,9 @@ export interface Brand {
 }
 
 export const brand: Brand = {
-  productName: 'App Builder',
-  productFullName: 'Babylon Toolkit App Builder',
-  productSlug: 'babylon-toolkit',
+  productName: 'Game Builder',
+  productFullName: 'Babylon Toolkit Game Builder',
+  productSlug: 'babylon-toolkit-game-builder',
   tagline: 'Build 3D Web Games With AI',
   metaDescription:
     'Build and play Babylon Toolkit 3D web games with AI — describe your game and watch it come to life.',

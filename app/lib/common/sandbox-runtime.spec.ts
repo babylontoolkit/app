@@ -11,8 +11,10 @@ import { WORK_DIR } from '~/utils/constants';
 import { SANDBOX_ROOTS, toProjectRelativePath } from './sandbox-paths';
 import {
   DEFAULT_SANDBOX_PROVIDER,
+  ENABLED_SANDBOX_PROVIDERS,
   SANDBOX_PROVIDER_IDS,
   SANDBOX_PROVIDER_TRAITS,
+  isSandboxProviderEnabled,
   resolveSandboxProviderId,
   type SandboxProviderId,
 } from './sandbox-runtime';
@@ -43,7 +45,7 @@ describe('the default provider', () => {
   it('never warns about a value it accepted', () => {
     const warnings: string[] = [];
 
-    for (const id of SANDBOX_PROVIDER_IDS) {
+    for (const id of ENABLED_SANDBOX_PROVIDERS) {
       expect(resolveSandboxProviderId(id, (m) => warnings.push(m))).toBe(id);
     }
 
@@ -55,6 +57,78 @@ describe('the default provider', () => {
     for (const value of ['', ' ', 'NODEPOD', 'nodepod ', '../x', '{}']) {
       expect(() => resolveSandboxProviderId(value)).not.toThrow();
     }
+  });
+});
+
+/**
+ * 🔴 The disable wall (owner decision, 2026-07-31).
+ *
+ * WebContainers is proprietary and commercially licensed (`spec/licensing.md`) and CodeSandbox bills
+ * per VM-hour, so on a paid platform neither may be reachable BY CONFIGURATION — a stale `.env`, an
+ * old Docker build arg or a CI variable copied from another project must not be able to start one.
+ * The failure is silent by nature: a WebContainer build works perfectly, which is precisely why "it
+ * is not the default" was never sufficient.
+ *
+ * These tests exist to make re-enabling a REVIEWED act. Turning one back on for debugging is a
+ * supported workflow — it just has to break CI on the way through, so it cannot ride along in a
+ * commit that was about something else.
+ */
+describe('the enabled-provider wall', () => {
+  it('allows nodepod and nothing else', () => {
+    expect([...ENABLED_SANDBOX_PROVIDERS]).toEqual(['nodepod']);
+  });
+
+  it('reports webcontainer and codesandbox as disabled', () => {
+    expect(isSandboxProviderEnabled('nodepod')).toBe(true);
+    expect(isSandboxProviderEnabled('webcontainer')).toBe(false);
+    expect(isSandboxProviderEnabled('codesandbox')).toBe(false);
+  });
+
+  /*
+   * The property that matters, asserted over the DECLARED UNION rather than a list someone typed
+   * here: whatever ids exist, every disabled one must resolve away. A test enumerating the two we
+   * happen to have disabled today would not notice a fourth provider added and left reachable.
+   */
+  it('refuses every disabled id, whatever the config says', () => {
+    for (const id of SANDBOX_PROVIDER_IDS) {
+      if (isSandboxProviderEnabled(id)) {
+        continue;
+      }
+
+      const warnings: string[] = [];
+      expect(resolveSandboxProviderId(id, (m) => warnings.push(m))).toBe(DEFAULT_SANDBOX_PROVIDER);
+
+      /*
+       * A refusal must NAME the wall. A disabled provider that silently falls back reads exactly like
+       * a variable being ignored, and the reader's next move is to set it somewhere "more official"
+       * — a Docker arg, an SSM parameter — chasing a config bug that does not exist.
+       */
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(id);
+      expect(warnings[0]).toMatch(/disabled/i);
+      expect(warnings[0]).toContain('ENABLED_SANDBOX_PROVIDERS');
+    }
+  });
+
+  /* The refusal path must not become the crash path: this runs inside the server render. */
+  it('still never throws for a disabled id', () => {
+    for (const id of SANDBOX_PROVIDER_IDS) {
+      expect(() => resolveSandboxProviderId(id)).not.toThrow();
+    }
+  });
+
+  /* An enabled list that did not include the default would make every build unresolvable. */
+  it('enables the default', () => {
+    expect(isSandboxProviderEnabled(DEFAULT_SANDBOX_PROVIDER)).toBe(true);
+  });
+
+  /* Disabled means dormant, NOT deleted — hide-don't-delete. The traits must still be answered. */
+  it('keeps a full trait record for disabled providers', () => {
+    for (const id of SANDBOX_PROVIDER_IDS) {
+      expect(SANDBOX_PROVIDER_TRAITS[id]).toBeDefined();
+    }
+
+    expect(ENABLED_SANDBOX_PROVIDERS.length).toBeLessThan(SANDBOX_PROVIDER_IDS.length);
   });
 });
 

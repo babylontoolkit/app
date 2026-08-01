@@ -1,5 +1,28 @@
 # spec/sandbox-seam.md — The Sandbox Seam (governs SPEC §1.3.5, §8)
 
+> 🔴 **THE PLATFORM RUNS NODEPOD, AND THE OTHER TWO PROVIDERS ARE DISABLED IN CODE (owner decision,
+> 2026-07-31).** `ENABLED_SANDBOX_PROVIDERS` (`app/lib/common/sandbox-runtime.ts`) is `['nodepod']`,
+> and it is a **wall, not a default**: `VITE_SANDBOX_PROVIDER=webcontainer|codesandbox` is refused with
+> a named warning by `resolveSandboxProviderId`, and refused a second time by `connectProvider` before
+> either module is imported — so no StackBlitz WASM is fetched and no VM is minted, whatever any
+> `.env`, build arg, SSM parameter or CI variable says.
+>
+> Two reasons, and the first is not about cost. **WebContainers is proprietary and commercially
+> licensed** (`spec/licensing.md`); running it on a paid platform without a StackBlitz agreement is a
+> licence violation that would never announce itself, because the runtime works perfectly — which is
+> exactly why "it is not the default" was insufficient. **CodeSandbox mints billable VMs.**
+>
+> **Both stay in the tree, complete and TESTED.** Hide-don't-delete; the seam is what makes a dormant
+> provider free to keep. Their specs run against a widened enable list declared per-test
+> (`sandbox-boot.spec.ts`, `health.spec.ts`), with the real wall asserted separately and
+> mutation-verified — a dormant provider whose tests were deleted is one that no longer works,
+> discovered on the day someone re-enables it. **To re-enable for debugging:** add the id to that list,
+> update `sandbox-runtime.spec.ts` (CI fails otherwise, deliberately — turning a licensed or paid
+> runtime back on must be a reviewed change, never a stray commit), rebuild, and put it back.
+>
+> Everything below describes the seam and the CodeSandbox provider as built; it remains accurate about
+> HOW they work, and is now history about WHICH one runs.
+
 > **Status: the seam is BUILT (2026-07-26), the SECOND PROVIDER is BUILT AND WIRED, and the whole
 > creation path has been DRIVEN LIVE on it (2026-07-26/27).** `SandboxProvider` exists, every runtime
 > store is constructed with one, and a default-deny source scan keeps it that way — for **both**
@@ -73,7 +96,11 @@ Measured against real call sites, not copied from WebContainer's `.d.ts`:
 - `spawn(command, args, options)` — returns a process with `output` / `input` / `exit` / `kill` / `resize`.
 - `watchPaths` / `onServerReady` / `onPort` — named for what they do. Two of these were
   `container.internal.*`, i.e. `@unstableInternal` in StackBlitz's own types.
-- `textSearch?` — **optional**, gated by a capability flag.
+- `textSearch?` — **optional**, gated by a capability flag. WebContainer forwards
+  `internal.textSearch`; **Nodepod implements it in the adapter over the VFS** (2026-07-31) rather
+  than shelling out to the runtime's `grep -r`, which writes ANSI colour unconditionally, honours no
+  excludes (so it would descend `node_modules` on every keystroke), and returns TEXT where the seam's
+  contract is structured ranges. CodeSandbox declines it.
 - `clearPort?` — **optional**, gated by a capability flag. Kills whatever is listening on a port and
   waits (bounded) for it to free. Exists for sandboxes that OUTLIVE a page session: a resumed/forked
   microVM wakes with the previous session's dev server still bound to 5173, and a fresh
@@ -94,10 +121,19 @@ answer is "not supported". It now reads `capabilities.textSearch`.
 
 Honesty matters more here than a clean scorecard:
 
-1. **`PreviewsStore.getPreviewId`** parses `*.local-credentialless.webcontainer-api.io` hostnames.
-   It degrades safely — a different provider returns `null` and every caller guards on it, costing
-   only the cross-tab preview broadcast. Promoting preview-id extraction onto the provider is
-   follow-up work.
+1. ~~**`PreviewsStore.getPreviewId`** parses `*.local-credentialless.webcontainer-api.io` hostnames.~~
+   **FIXED 2026-07-31 — and the entry it replaces was wrong about the cost, which is the lesson.**
+   It said this "degrades safely… costing only the cross-tab preview broadcast", because every caller
+   guards on `null`. What it actually cost: ***Open in new window* did nothing at all** on Nodepod and
+   CodeSandbox — no window, no error, no log — plus the broadcast and the storage-sync refresh.
+   **Degrading safely is only a virtue when the thing being degraded is optional; a menu item that
+   no-ops is a defect wearing a guard's clothes, and writing "degrades safely" in the spec is how it
+   stayed unexamined for the whole swap.** `previewIdFromUrl` (`preview-url.ts`, pure + tested) now
+   answers for every provider — WebContainer's subdomain byte-identical, Nodepod's
+   `/__virtual__/<pod>/<port>` mount, the origin otherwise — and `null` means "not a URL". The
+   `/webcontainer/preview/:id` route the window button went through only ever turned an id back into
+   the URL it already had; both call sites open the preview URL directly, as *Open in new tab* always
+   did.
 2. **`shell.ts`'s OSC parsing is now provider-CONFIGURED, not provider-specific** (2026-07-27): the
    shell command and its marker dialect come from the provider's `SandboxShell` (`{command, args,
    readyOsc?, beginOsc?}` — WebContainer declares `/bin/jsh --osc` + `readyOsc:'interactive'`;

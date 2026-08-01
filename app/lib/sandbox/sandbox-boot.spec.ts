@@ -37,6 +37,45 @@ vi.mock('~/lib/webcontainer', () => ({
   },
 }));
 
+/**
+ * 🔴 **Both providers this file drives are DISABLED in the shipping build** (owner decision,
+ * 2026-07-31: WebContainers is proprietary and CodeSandbox bills per VM-hour, so neither may be
+ * reachable by configuration — `ENABLED_SANDBOX_PROVIDERS`). The code stays, complete and dormant,
+ * which is only worth anything if it stays TESTED: a dormant provider whose tests were deleted is a
+ * provider that no longer works, discovered on the day someone re-enables it to debug something.
+ *
+ * So the enable list is widened here for the state-machine tests, through an explicit switch that
+ * every test declares by which loader it calls. The wall itself is asserted with the REAL list at the
+ * bottom of this file and in `sandbox-runtime.spec.ts`, so this mock cannot hide a regression in it —
+ * a wall asserted through the mock that widens it would not be a wall.
+ *
+ * ⚠️ Hoisted, not `vi.doMock` inside the loader: the seam reads the resolver at MODULE SCOPE, and a
+ * non-hoisted mock registered moments before the dynamic import did not apply — every test silently
+ * ran the Nodepod branch instead, which reads exactly like the refusal firing correctly.
+ */
+const allowEveryProvider = vi.hoisted(() => ({ value: false }));
+
+vi.mock('~/lib/common/sandbox-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('~/lib/common/sandbox-runtime')>();
+
+  return {
+    ...actual,
+    isSandboxProviderEnabled: (id: import('~/lib/common/sandbox-runtime').SandboxProviderId) =>
+      allowEveryProvider.value || actual.isSandboxProviderEnabled(id),
+    resolveSandboxProviderId: (configured: string | undefined, warn?: (message: string) => void) => {
+      if (
+        allowEveryProvider.value &&
+        configured &&
+        (actual.SANDBOX_PROVIDER_IDS as readonly string[]).includes(configured)
+      ) {
+        return configured as import('~/lib/common/sandbox-runtime').SandboxProviderId;
+      }
+
+      return actual.resolveSandboxProviderId(configured, warn);
+    },
+  };
+});
+
 type Seam = typeof import('./index');
 
 /**
@@ -54,6 +93,19 @@ async function loadSeam(provider: 'codesandbox' | 'webcontainer'): Promise<Seam>
   vi.resetModules();
   vi.stubEnv('SSR', false as never);
   vi.stubEnv('VITE_SANDBOX_PROVIDER', provider);
+
+  // Dormant-but-tested: see `allowEveryProvider` above for why this switch exists.
+  allowEveryProvider.value = true;
+
+  return import('./index');
+}
+
+/** The seam exactly as it ships: whatever the config says, the REAL enable list decides. */
+async function loadShippingSeam(provider: string): Promise<Seam> {
+  vi.resetModules();
+  vi.stubEnv('SSR', false as never);
+  vi.stubEnv('VITE_SANDBOX_PROVIDER', provider);
+  allowEveryProvider.value = false;
 
   return import('./index');
 }
@@ -90,6 +142,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
+
+  // Back to the shipping wall, so a test that forgets to say which build it wants gets the real one.
+  allowEveryProvider.value = false;
 });
 
 describe('a server-backed build', () => {
@@ -398,5 +453,60 @@ describe('an unrecognised VITE_SANDBOX_PROVIDER', () => {
     const seam = await import('./index');
 
     expect(seam.SANDBOX_PROVIDER).toBe('nodepod');
+  });
+});
+
+/**
+ * 🔴 **THE DISABLE WALL, AT THE SEAM** (owner decision, 2026-07-31).
+ *
+ * `resolveSandboxProviderId` already refuses a disabled id, so these builds land on Nodepod and never
+ * reach the vendor branches at all. That is the behaviour worth pinning, because the thing being
+ * protected is not a preference:
+ *
+ *   - **WebContainers is proprietary and commercially licensed** (`spec/licensing.md`). On a paid
+ *     platform, running it without a StackBlitz agreement is a licence violation — and it would not
+ *     announce itself, because the runtime works perfectly. "Not the default" was never enough.
+ *   - **CodeSandbox mints billable VMs.**
+ *
+ * The tests deliberately do NOT go through `loadSeam` — they use the real enable list, which is the
+ * whole point. A wall asserted through the mock that widens it is not a wall.
+ */
+describe('a disabled provider', () => {
+  it.each(['webcontainer', 'codesandbox'])('cannot be selected by configuration: %s', async (provider) => {
+    const seam = await loadShippingSeam(provider);
+
+    expect(seam.SANDBOX_PROVIDER).toBe('nodepod');
+  });
+
+  /*
+   * The consequence that matters. Not "the id is nodepod" — that a WebContainer is never BOOTED, no
+   * StackBlitz WASM is ever fetched, and no VM is ever minted, on a build configured to ask for one.
+   */
+  it('never touches either vendor runtime, however the build is configured', async () => {
+    for (const provider of ['webcontainer', 'codesandbox']) {
+      const seam = await loadShippingSeam(provider);
+
+      await seam.bootForProject('prj_a').catch(() => {
+        /* Nodepod is not mocked here; whether its boot succeeds is beside the point. */
+      });
+
+      expect(webcontainerBooted).not.toHaveBeenCalled();
+      expect(createWebContainerProvider).not.toHaveBeenCalled();
+      expect(bootCodeSandbox).not.toHaveBeenCalled();
+      expect(createCodeSandboxProvider).not.toHaveBeenCalled();
+    }
+  });
+
+  /*
+   * ⚠️ THE CONTROL. Without it every assertion above would still pass if the seam had simply stopped
+   * booting anything at all — the classic scan-that-matches-nothing failure. This proves the vendor
+   * branches are alive and reachable the moment the list allows them, i.e. that the code really is
+   * dormant rather than dead, and that re-enabling for a debugging session works.
+   */
+  it('CONTROL: the same build boots that runtime once the enable list allows it', async () => {
+    const seam = await loadSeam('codesandbox');
+    await seam.bootForProject('prj_a');
+
+    expect(bootCodeSandbox).toHaveBeenCalledTimes(1);
   });
 });

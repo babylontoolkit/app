@@ -10,10 +10,13 @@
  *
  * ## Choosing a provider
  *
- * `VITE_SANDBOX_PROVIDER=codesandbox` switches the runtime at BUILD time. It is deliberately not a
- * runtime toggle: the two providers have different lifecycles, different latency, and different
- * costs, so a build per target is honest where a live switch would invite mixing them in one
- * session.
+ * `VITE_SANDBOX_PROVIDER` switches the runtime at BUILD time. It is deliberately not a runtime
+ * toggle: the providers have different lifecycles, different latency, and different costs, so a build
+ * per target is honest where a live switch would invite mixing them in one session.
+ *
+ * 🔴 **It can only select a provider that `ENABLED_SANDBOX_PROVIDERS` allows — today, Nodepod alone.**
+ * WebContainer and CodeSandbox are present, complete and dormant: unreachable by any configuration,
+ * re-enabled only by editing that list (and the test pinning it). See `~/lib/common/sandbox-runtime.ts`.
  *
  * ⚠️ **`VITE_`-prefixed on purpose, and this is the one case where that is correct.** Vite inlines
  * every `VITE_*` variable into the client bundle, which is why the standing rule forbids the prefix
@@ -33,6 +36,7 @@ export {
 } from './errors';
 
 import {
+  isSandboxProviderEnabled,
   resolveSandboxProviderId,
   SANDBOX_PROVIDER_TRAITS,
   type SandboxProviderId,
@@ -214,6 +218,24 @@ export function requireBootedSandbox(): Promise<SandboxProvider> {
  * cost for a build that does not use it.
  */
 async function connectProvider(projectId?: string): Promise<SandboxProvider> {
+  /*
+   * 🔴 **THE SECOND WALL, AND IT IS BEFORE ANY IMPORT.** `resolveSandboxProviderId` already refuses a
+   * disabled provider, so in the ordinary path `SANDBOX_PROVIDER` can only be an enabled one — but
+   * that resolver is a pure function, and the thing it protects is a LICENCE (WebContainers is
+   * proprietary, `spec/licensing.md`) and a per-VM-hour bill. A future call site that computes the id
+   * some other way, or a hand-edit during debugging, must not be able to reach a vendor runtime.
+   *
+   * Placed above the branches on purpose: refusing here means the disabled provider's module is never
+   * evaluated, so there is no StackBlitz WASM download and no VM mint — the refusal is the same shape
+   * as the dynamic imports themselves, where "do not import it" is the enforcement rather than a
+   * ternary after the fact.
+   */
+  if (!isSandboxProviderEnabled(SANDBOX_PROVIDER)) {
+    throw new SandboxUnavailableError(`The "${SANDBOX_PROVIDER}" workspace runtime is disabled in this build.`, {
+      retryable: false,
+    });
+  }
+
   if (SANDBOX_PROVIDER === 'codesandbox') {
     const [boot, provider] = await Promise.all([import('./codesandbox-boot'), import('./codesandbox-provider')]);
     const connected = await boot.bootCodeSandbox(projectId!, {

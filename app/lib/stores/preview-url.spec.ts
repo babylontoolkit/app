@@ -17,7 +17,13 @@
  * a path glues it onto the QUERY and breaks the route and the credential at once.
  */
 import { describe, expect, it } from 'vitest';
-import { MIN_REMINT_DELAY_MS, PREVIEW_REMINT_WINDOW_MS, previewUrlWithPath, remintDelayMs } from './preview-url';
+import {
+  MIN_REMINT_DELAY_MS,
+  PREVIEW_REMINT_WINDOW_MS,
+  previewIdFromUrl,
+  previewUrlWithPath,
+  remintDelayMs,
+} from './preview-url';
 
 const NOW = 1_000_000;
 
@@ -170,5 +176,40 @@ describe('previewUrlWithPath', () => {
   it('CONTROL: a root-pathname base is unaffected by the append', () => {
     expect(new URL(previewUrlWithPath('https://sb1-5173.csb.app/', '/play')).pathname).toBe('/play');
     expect(new URL(previewUrlWithPath('https://sb1-5173.csb.app', '/play')).pathname).toBe('/play');
+  });
+});
+
+describe('previewIdFromUrl', () => {
+  /*
+   * 🔴 THE DEFECT: this was a StackBlitz hostname regex, so it returned null for Nodepod and
+   * CodeSandbox — and every caller "guarded on null", which meant *Open in new window* did nothing
+   * at all, the cross-tab preview broadcast never fired, and the storage-sync refresh skipped every
+   * preview. Nothing threw. Asserted per provider so a null can never come back unnoticed.
+   */
+  it('identifies a Nodepod same-origin preview', () => {
+    expect(previewIdFromUrl('http://localhost:5173/__virtual__/pod-abc/5173/')).toBe('pod-abc-5173');
+    expect(previewIdFromUrl('http://localhost:5173/__preview__/pod-abc/5173/play')).toBe('pod-abc-5173');
+  });
+
+  it('keeps the WebContainer subdomain byte-identical to before', () => {
+    expect(previewIdFromUrl('https://abc123--5173.local-credentialless.webcontainer-api.io/')).toBe('abc123--5173');
+  });
+
+  it('identifies a host-per-preview provider by its host', () => {
+    expect(previewIdFromUrl('https://xyz-5173.csb.app/')).toBe('xyz-5173.csb.app');
+  });
+
+  /* Two tabs must derive the SAME id from the same URL, or the channel they share talks to itself. */
+  it('is deterministic and distinguishes ports', () => {
+    const url = 'http://localhost:5173/__virtual__/pod/5173/';
+
+    expect(previewIdFromUrl(url)).toBe(previewIdFromUrl(url));
+    expect(previewIdFromUrl(url)).not.toBe(previewIdFromUrl('http://localhost:5173/__virtual__/pod/4000/'));
+  });
+
+  /* null is reserved for input that is not a URL — the one case the callers' guards are for. */
+  it('returns null only for something that is not a URL', () => {
+    expect(previewIdFromUrl('not a url')).toBeNull();
+    expect(previewIdFromUrl('')).toBeNull();
   });
 });

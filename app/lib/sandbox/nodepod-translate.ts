@@ -7,7 +7,13 @@
  * unit test can reach, and the parts that need a live runtime are exactly the parts that cannot hide a
  * logic bug. Keep new logic on this side of the line.
  */
-import type { SandboxDirent, SandboxFileTree, SandboxWatchEvent } from './types';
+import type {
+  SandboxDirent,
+  SandboxFileTree,
+  SandboxTextSearchMatch,
+  SandboxTextSearchOptions,
+  SandboxWatchEvent,
+} from './types';
 
 /**
  * Seam paths are workdir-RELATIVE (`types.ts` header); Nodepod's VFS takes absolute paths.
@@ -220,27 +226,62 @@ const BACKSPACE = /[\x7f\b]/;
 export type ShellInput = { type: 'interrupt' } | { type: 'command'; line: string };
 
 /**
- * Splits a raw terminal input stream into the actions a shell must take.
+ * How many commands the line editor remembers for ↑/↓.
  *
- * 🔴 **A real shell is a LINE EDITOR, and Nodepod has no shell — so this is it.** WebContainer ships
- * `jsh` and CodeSandbox has bash; both interpret control characters themselves. Here the adapter
- * owns that job, and the first version did not know control characters existed.
- *
- * That cost the product: `BoltShell.executeCommand` writes `'\x03'` and waits for a prompt before
- * every single command (`shell.ts` — it is how a previous command is interrupted). `\x03` carries no
- * newline, so it sat in the buffer and was glued onto whatever came next: the command became
- * `"\x03npm install"`, `String.trim()` does not strip `\x03` (it is not whitespace), and the first
- * word was `"\x03npm"`. Nodepod correctly reported no such command — and because `\x03` does not
- * render, the terminal showed exactly `npm: command not found`. Observed live 2026-07-31 on the very
- * first project: install failed, the dev server never started, and the one character that explained
- * it was invisible in the only place a human would look.
- *
- * `BoltShell.executeCommand` writes `"<command>\n"`, but a human typing into the same terminal sends
- * one keystroke per write and may use `\r` (xterm's Enter). Both must produce exactly one command,
- * and a write that ends mid-line must NOT execute — buffering is the rest of the job.
+ * Bounded because the editor lives for the life of the tab and a terminal is a place people paste
+ * things: an unbounded history is an unbounded string array holding every command ever typed.
  */
-export function createInputBuffer() {
+export const SHELL_HISTORY_LIMIT = 200;
+
+/** Erase from the cursor to the end of the line — the redraw's other half. */
+const ERASE_TO_END = '\x1b[K';
+
+/**
+ * The visible prompt, from the shell's current working directory.
+ *
+ * The workdir renders as `~` because that is what it IS to the user — the project root, and the only
+ * directory they have. Showing `/home/project` instead spends a third of the line on a path that is
+ * identical in every project and can never change.
+ */
+export function formatShellPrompt(cwd: string, workdir: string): string {
+  const rel = toRelPath(workdir, cwd);
+
+  return `\x1b[36m~${rel ? `/${rel}` : ''}\x1b[0m $ `;
+}
+
+/** What one chunk of terminal input produced: bytes to echo, and actions to run. */
+export interface LineEditorResult {
+  echo: string;
+  actions: ShellInput[];
+}
+
+/**
+ * A line editor for the interactive terminal.
+ *
+ * 🔴 **Without this the terminal does not echo, so a human types BLIND.** WebContainer ships `jsh`
+ * and CodeSandbox has a real PTY; both echo keystrokes, redraw on backspace, and print a prompt,
+ * because that is the terminal's job and not the shell's. Nodepod has neither, so the adapter owns
+ * it — and the first version owned only the *parsing* half: it consumed every keystroke, emitted
+ * nothing back, and produced output only once Enter was pressed. Typing `npm run dev` showed an
+ * empty line the whole way. Nothing threw; the terminal simply looked broken, which is exactly the
+ * report we got.
+ *
+ * It is a state machine over plain strings — no xterm, no runtime — so every editing rule below is
+ * pinned by tests rather than discovered by a person pressing a key.
+ *
+ * Deliberately NOT implemented: cursor movement across a WRAPPED line. The redraw is
+ * `\r` + erase + prompt + buffer, which addresses one screen row; a line longer than the terminal is
+ * wide will smear on edit. A correct version needs the column count and multi-row cursor arithmetic,
+ * and getting that subtly wrong corrupts the display of a line the user cannot then see to fix.
+ * Appending — the overwhelmingly common case — echoes the single character and never redraws, so it
+ * is unaffected by the limitation.
+ */
+export function createLineEditor(getPrompt: () => string) {
   let buffer = '';
+  let cursor = 0;
+  const history: string[] = [];
+  let historyIndex = -1;
+  let draft = '';
 
   /*
    * CRLF is ONE terminator. Iterating character by character makes that the caller's problem again —
@@ -250,16 +291,142 @@ export function createInputBuffer() {
    */
   let afterCarriageReturn = false;
 
+  /** Bytes of an escape sequence seen so far, `''` when not in one. Survives across pushes. */
+  let escape = '';
+
+  const redraw = () => {
+    const back = buffer.length - cursor;
+
+    return `\r${ERASE_TO_END}${getPrompt()}${buffer}${back > 0 ? `\x1b[${back}D` : ''}`;
+  };
+
+  const recall = (line: string) => {
+    buffer = line;
+    cursor = line.length;
+
+    return redraw();
+  };
+
+  /** One completed escape sequence. Returns the bytes to echo. */
+  const applyEscape = (sequence: string): string => {
+    switch (sequence) {
+      case '\x1b[A': {
+        if (historyIndex === -1) {
+          if (history.length === 0) {
+            return '';
+          }
+
+          draft = buffer;
+          historyIndex = history.length - 1;
+        } else if (historyIndex > 0) {
+          historyIndex -= 1;
+        } else {
+          return '';
+        }
+
+        return recall(history[historyIndex]);
+      }
+
+      case '\x1b[B': {
+        if (historyIndex === -1) {
+          return '';
+        }
+
+        if (historyIndex < history.length - 1) {
+          historyIndex += 1;
+          return recall(history[historyIndex]);
+        }
+
+        historyIndex = -1;
+
+        return recall(draft);
+      }
+
+      case '\x1b[C':
+        if (cursor >= buffer.length) {
+          return '';
+        }
+
+        cursor += 1;
+
+        return '\x1b[C';
+
+      case '\x1b[D':
+        if (cursor === 0) {
+          return '';
+        }
+
+        cursor -= 1;
+
+        return '\x1b[D';
+
+      case '\x1b[3~':
+        if (cursor >= buffer.length) {
+          return '';
+        }
+
+        buffer = buffer.slice(0, cursor) + buffer.slice(cursor + 1);
+
+        return redraw();
+
+      case '\x1b[H':
+      case '\x1b[1~':
+        cursor = 0;
+        return redraw();
+
+      case '\x1b[F':
+      case '\x1b[4~':
+        cursor = buffer.length;
+        return redraw();
+
+      default:
+        // An unrecognised sequence is swallowed, never echoed: printing it would corrupt the line.
+        return '';
+    }
+  };
+
   return {
-    /** Feed a chunk; get back what it completed, in arrival order. */
-    push(chunk: string): ShellInput[] {
-      const out: ShellInput[] = [];
+    /** Feed a chunk; get back what to echo and what it completed, in arrival order. */
+    push(chunk: string): LineEditorResult {
+      const actions: ShellInput[] = [];
+      let echo = '';
 
       for (const char of chunk) {
+        if (escape !== '') {
+          escape += char;
+
+          /*
+           * A CSI sequence ends at its final byte (`@`–`~`); everything before is parameters. Anything
+           * that is not a CSI introducer after ESC is a two-byte sequence we do not handle — end it
+           * immediately rather than swallowing the rest of the line looking for a terminator.
+           */
+          const isCsi = escape.startsWith('\x1b[');
+
+          if (!isCsi) {
+            escape = '';
+            continue;
+          }
+
+          if (escape.length > 2 && /[@-~]/.test(char)) {
+            echo += applyEscape(escape);
+            escape = '';
+          } else if (escape.length > 16) {
+            // Not a real sequence; stop buffering rather than growing without bound.
+            escape = '';
+          }
+
+          continue;
+        }
+
         const skipLineFeed = afterCarriageReturn && char === '\n';
         afterCarriageReturn = false;
 
         if (skipLineFeed) {
+          continue;
+        }
+
+        if (char === '\x1b') {
+          escape = '\x1b';
           continue;
         }
 
@@ -272,29 +439,283 @@ export function createInputBuffer() {
            * still see the interrupt first.
            */
           buffer = '';
-          out.push({ type: 'interrupt' });
+          cursor = 0;
+          historyIndex = -1;
+          echo += '^C\r\n';
+          actions.push({ type: 'interrupt' });
+
           continue;
         }
 
         if (BACKSPACE.test(char)) {
-          buffer = buffer.slice(0, -1);
+          if (cursor === 0) {
+            continue;
+          }
+
+          buffer = buffer.slice(0, cursor - 1) + buffer.slice(cursor);
+          cursor -= 1;
+
+          /*
+           * At the end of the line the cheap sequence is exact and avoids repainting: back up, write a
+           * space over the character, back up again. Mid-line it would leave the tail unshifted.
+           */
+          echo += cursor === buffer.length ? '\b \b' : redraw();
+
+          continue;
+        }
+
+        if (char === '\x15') {
+          // Ctrl-U — kill the whole line.
+          buffer = '';
+          cursor = 0;
+          echo += redraw();
+
+          continue;
+        }
+
+        if (char === '\x0b') {
+          // Ctrl-K — kill to end of line.
+          buffer = buffer.slice(0, cursor);
+          echo += redraw();
+
+          continue;
+        }
+
+        if (char === '\x01') {
+          cursor = 0;
+          echo += redraw();
+
+          continue;
+        }
+
+        if (char === '\x05') {
+          cursor = buffer.length;
+          echo += redraw();
+
+          continue;
+        }
+
+        if (char === '\x0c') {
+          // Ctrl-L — clear the screen and repaint the line where it now sits.
+          echo += `\x1b[2J\x1b[H${getPrompt()}${buffer}`;
+
+          if (buffer.length - cursor > 0) {
+            echo += `\x1b[${buffer.length - cursor}D`;
+          }
+
           continue;
         }
 
         if (char === '\n' || char === '\r') {
           afterCarriageReturn = char === '\r';
-          out.push({ type: 'command', line: buffer });
+
+          const line = buffer;
+
+          if (line.trim() !== '' && history[history.length - 1] !== line) {
+            history.push(line);
+
+            if (history.length > SHELL_HISTORY_LIMIT) {
+              history.shift();
+            }
+          }
+
+          historyIndex = -1;
+          draft = '';
           buffer = '';
+          cursor = 0;
+          echo += '\r\n';
+          actions.push({ type: 'command', line });
 
           continue;
         }
 
-        buffer += char;
+        if (char < ' ') {
+          // Any other control character is not printable and has no editing meaning here.
+          continue;
+        }
+
+        if (cursor === buffer.length) {
+          buffer += char;
+          cursor += 1;
+          echo += char;
+        } else {
+          buffer = buffer.slice(0, cursor) + char + buffer.slice(cursor);
+          cursor += 1;
+          echo += redraw();
+        }
       }
 
-      return out;
+      return { echo, actions };
     },
 
     pending: () => buffer,
   };
+}
+
+/*
+ * ---------------------------------------------------------------------------------------------
+ * Project-wide text search
+ * ---------------------------------------------------------------------------------------------
+ */
+
+/**
+ * One glob from `SandboxTextSearchOptions.includes` / `.excludes`, as a regular expression.
+ *
+ * The patterns the workbench actually sends are `**\/node_modules/**`, `**\/*.lock`,
+ * `**\/package-lock.json` and `**\/*.*` — so this supports `**` (any number of segments, including
+ * none), `*` (anything within one segment) and `?`. Everything else is escaped to a literal.
+ *
+ * Written here rather than deep-imported from Nodepod's `shell-helpers`: the seam rule is that the
+ * SDK is reachable from two files only, and a glob matcher is a pure function whose failure mode —
+ * silently searching `node_modules`, which is ~50k files in memory — is worth pinning ourselves.
+ */
+export function globToRegExp(glob: string): RegExp {
+  let out = '';
+
+  for (let i = 0; i < glob.length; i++) {
+    const char = glob[i];
+
+    if (char === '*') {
+      if (glob[i + 1] === '*') {
+        // `**/` spans zero or more whole segments; a bare `**` spans anything at all.
+        i += 1;
+
+        if (glob[i + 1] === '/') {
+          i += 1;
+          out += '(?:.*/)?';
+        } else {
+          out += '.*';
+        }
+      } else {
+        out += '[^/]*';
+      }
+
+      continue;
+    }
+
+    out += char === '?' ? '[^/]' : char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+
+  return new RegExp(`^${out}$`);
+}
+
+/**
+ * Should this workdir-relative path be read and scanned?
+ *
+ * 🔴 **Excludes are checked FIRST and win.** The workbench sends `includes: ['**\/*.*']` — which
+ * every file under `node_modules` also matches — so an include-first order would search the whole
+ * dependency tree on every keystroke's debounce. Include-anything (`[]`) means "no restriction",
+ * never "nothing": an empty list read as an empty allow-list returns no results at all, which looks
+ * exactly like a working search over a project with no matches.
+ */
+export function isSearchCandidate(relPath: string, options: Pick<SandboxTextSearchOptions, 'includes' | 'excludes'>) {
+  if (options.excludes?.some((glob) => globToRegExp(glob).test(relPath))) {
+    return false;
+  }
+
+  return !options.includes?.length || options.includes.some((glob) => globToRegExp(glob).test(relPath));
+}
+
+/** The regex one search runs, honouring the workbench's regex/case/word toggles. */
+export function buildSearchRegExp(
+  query: string,
+  options: Pick<SandboxTextSearchOptions, 'isRegex' | 'caseSensitive' | 'isWordMatch'>,
+): RegExp | undefined {
+  if (query === '') {
+    return undefined;
+  }
+
+  const body = options.isRegex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const wrapped = options.isWordMatch ? `\\b(?:${body})\\b` : body;
+
+  try {
+    return new RegExp(wrapped, options.caseSensitive ? 'g' : 'gi');
+  } catch {
+    /*
+     * A half-typed regex (`(`, `[a-`) is the NORMAL state of a search box, not an error worth
+     * throwing from — the panel searches on every debounce while the user is still typing. No
+     * pattern means no matches, and the next keystroke tries again.
+     */
+    return undefined;
+  }
+}
+
+/**
+ * Every match in one file's text, shaped the way `Search.tsx` reads it.
+ *
+ * One entry PER MATCHING LINE with the line as its own preview. The panel computes
+ * `range.startLineNumber - preview.matches[0].startLineNumber` to index into `preview.text.split('\n')`,
+ * so a single-line preview makes that index 0 and the arithmetic exact. Batching several lines into
+ * one preview is expressible but pointless here and gets the offset wrong the moment a match is not
+ * on the preview's first line.
+ *
+ * Columns are 1-based to match the workbench's editor, and `resultLimit` is honoured per file — a
+ * minified bundle that matched on every line would otherwise build a million-entry array before the
+ * caller ever saw the first result.
+ */
+export function findTextMatches(text: string, regex: RegExp, resultLimit: number): SandboxTextSearchMatch[] {
+  const out: SandboxTextSearchMatch[] = [];
+  const lines = text.split('\n');
+
+  for (let i = 0; i < lines.length && out.length < resultLimit; i++) {
+    const line = lines[i];
+
+    // A fresh scanner per line: a shared global regex carries `lastIndex` and would skip matches.
+    const scanner = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : `${regex.flags}g`);
+
+    let match: RegExpExecArray | null;
+
+    while ((match = scanner.exec(line)) !== null && out.length < resultLimit) {
+      const range = {
+        startLineNumber: i + 1,
+        endLineNumber: i + 1,
+        startColumn: match.index + 1,
+        endColumn: match.index + match[0].length + 1,
+      };
+
+      out.push({ preview: { text: line, matches: [range] }, ranges: [range] });
+
+      // A zero-width match (`a*`, `^`) never advances `lastIndex`, so the loop would never end.
+      if (match[0] === '') {
+        scanner.lastIndex += 1;
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Is this file worth reading as text at all?
+ *
+ * A search walks whatever is in the project, and a project contains `havok.wasm`, PNGs and glTF
+ * binaries. Decoding a 2 MB binary to UTF-8 and regexing it costs real time on the UI thread and can
+ * never produce a useful result — and the NUL byte is the same signal `file(1)` uses.
+ */
+export function looksBinary(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.length, 1024);
+
+  for (let i = 0; i < limit; i++) {
+    if (bytes[i] === 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Convert a process's output to what a terminal emulator needs.
+ *
+ * xterm treats `\n` as "down one row" and NOT as "back to column 0", so raw Unix output staircases
+ * down the screen — every line starting where the last one ended. Nodepod's own terminal does exactly
+ * this substitution before writing (`NodepodTerminal._writeOutput`); the adapter has to, because it
+ * writes to the workbench's xterm rather than to theirs.
+ *
+ * Only bare `\n` is rewritten — a `\r\n` already correct must not become `\r\r\n`, and a lone `\r`
+ * (progress bars, npm's spinner) is left exactly alone because overwriting the current line is what
+ * it is FOR.
+ */
+export function toTerminalNewlines(text: string): string {
+  return text.replace(/\r?\n/g, '\r\n');
 }

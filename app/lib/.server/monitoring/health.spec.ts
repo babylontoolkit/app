@@ -2,6 +2,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildHealthReport } from './health';
 
 /**
+ * 🔴 **CodeSandbox is DISABLED in the shipping build** (owner decision, 2026-07-31 —
+ * `ENABLED_SANDBOX_PROVIDERS`): it bills per VM-hour, so no configuration may select it. `/api/health`
+ * therefore reports no CodeSandbox dependency at all, whatever a stale deploy variable says.
+ *
+ * The conditional-reporting logic below is still exercised, because the provider is dormant rather
+ * than deleted — the day someone re-enables it, its health reporting has to already work. This switch
+ * is what lets both be true at once, and the un-mocked reality is asserted in its own block.
+ */
+const codeSandboxEnabled = vi.hoisted(() => ({ value: false }));
+
+vi.mock('~/lib/common/sandbox-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('~/lib/common/sandbox-runtime')>();
+
+  return {
+    ...actual,
+    isSandboxProviderEnabled: (id: import('~/lib/common/sandbox-runtime').SandboxProviderId) =>
+      id === 'codesandbox' ? codeSandboxEnabled.value : actual.isSandboxProviderEnabled(id),
+  };
+});
+
+/**
  * The health report is what an uptime monitor and the §9a credential-pass verification read. Two
  * invariants matter: liveness is ALWAYS healthy (a degraded dependency is not an outage), and `ready`
  * is true only when every dependency is wired — the single "all green in prod" signal.
@@ -182,6 +203,15 @@ describe('buildHealthReport', () => {
    * uptime alert plus a retry storm. Reachability is the rate windows' job (`sandbox-rates.ts`).
    */
   describe('codesandbox is reported only on a build that uses it', () => {
+    // Dormant-but-tested: see `codeSandboxEnabled` at the top of this file.
+    beforeEach(() => {
+      codeSandboxEnabled.value = true;
+    });
+
+    afterEach(() => {
+      codeSandboxEnabled.value = false;
+    });
+
     /** Everything except the sandbox, so `ready` turns purely on the dependency under test. */
     const wireEverythingElse = () => {
       process.env.LLM_PROVIDER = 'KIE';
@@ -224,11 +254,12 @@ describe('buildHealthReport', () => {
       expect(report.status).toBe('healthy');
     });
 
-    it('🔴 is ABSENT on a WebContainer build, which is still ready without a CodeSandbox key', () => {
+    it('🔴 is ABSENT on a browser-runtime build, which is still ready without a CodeSandbox key', () => {
       /*
-       * `VITE_SANDBOX_PROVIDER` unset is the WebContainer build (unset or a typo falls back to
-       * WebContainer — the safe direction, `app/lib/sandbox/index.ts`). Such a deploy has no reason to
-       * hold `CODESANDBOX_API_KEY`, and reporting a key it does not need as `degraded` would pin
+       * `VITE_SANDBOX_PROVIDER` unset is the default build — **Nodepod** since 2026-07-31, when the
+       * fallback moved off the paid runtimes (a typo must never select something that spends).
+       * Such a deploy has no reason to hold `CODESANDBOX_API_KEY`, and reporting a key it does not
+       * need as `degraded` would pin
        * `ready` to false on a perfectly healthy deploy for the rest of its life.
        *
        * ⚠️ `vi.stubEnv` rather than a `process.env` delete: the check reads `import.meta.env` too, and
@@ -254,6 +285,22 @@ describe('buildHealthReport', () => {
       wireEverythingElse();
 
       expect(buildHealthReport(undefined).dependencies.codesandbox).toBe('degraded');
+    });
+  });
+
+  /*
+   * 🔴 THE SHIPPING WALL, un-mocked. CodeSandbox is disabled (`ENABLED_SANDBOX_PROVIDERS`), so the
+   * `|| process.env` arm above stops being a chosen risk and becomes a guaranteed lie: without the
+   * enabled-check in `usesCodeSandbox`, one stale deploy variable would demand a credential for a
+   * runtime this image cannot load and hold `ready` false forever — the §9a outage that whole block
+   * exists to avoid, arriving through the fix rather than through the bug.
+   */
+  describe('with the real enable list, CodeSandbox is never reported', () => {
+    it.each(['codesandbox', ''])('ignores VITE_SANDBOX_PROVIDER=%s', (value) => {
+      vi.stubEnv('VITE_SANDBOX_PROVIDER', value);
+      process.env.VITE_SANDBOX_PROVIDER = value;
+
+      expect(buildHealthReport(undefined).dependencies).not.toHaveProperty('codesandbox');
     });
   });
 });

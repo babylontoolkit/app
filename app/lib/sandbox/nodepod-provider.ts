@@ -13,17 +13,34 @@
  * runtime, and so the interface below documents exactly what we depend on — the CodeSandbox precedent.
  */
 import {
+  buildSearchRegExp,
   classifyWatchEvent,
-  createInputBuffer,
+  createLineEditor,
+  findTextMatches,
   flattenTree,
+  formatShellPrompt,
   isNodepodWatchExcluded,
+  isSearchCandidate,
+  looksBinary,
   makeDirent,
   oscBegin,
   oscExit,
   oscPrompt,
   toPodPath,
   toRelPath,
+  toTerminalNewlines,
 } from './nodepod-translate';
+import {
+  VITE_CACHE_MAX_BYTES,
+  VITE_CACHE_SENTINEL,
+  captureViteCache,
+  openViteCacheStore,
+  pathExists,
+  restoreViteCache,
+  totalBytes,
+  viteCacheKey,
+} from './nodepod-vite-cache';
+import type { ViteCacheFs, ViteCacheStore } from './nodepod-vite-cache';
 import type {
   SandboxCapabilities,
   SandboxDirent,
@@ -33,6 +50,8 @@ import type {
   SandboxProvider,
   SandboxShell,
   SandboxSpawnOptions,
+  SandboxTextSearchOptions,
+  SandboxTextSearchProgress,
   SandboxWatchEvent,
   SandboxWatchOptions,
 } from './types';
@@ -62,6 +81,45 @@ export interface NodepodClient {
   spawn(cmd: string, args?: string[], opts?: { cwd?: string; env?: Record<string, string> }): Promise<NodepodProc>;
   port(num: number): string | null;
   teardown(): void;
+
+  /**
+   * Nodepod's own process table — how the interactive terminal gets a PERSISTENT shell.
+   *
+   * 🔴 Optional on purpose, and the provider degrades to one-shot `spawn` without it. `spawn()`
+   * creates a fresh Web Worker per call (~1 s, and a whole VFS snapshot), and each worker starts at
+   * the directory it was given — so a terminal built on it pays a second per `ls` and forgets `cd`
+   * the moment the command ends. `processManager.spawn({ command: 'shell' })` is what
+   * `Nodepod.createTerminal` itself uses: one worker for the session, `exec({ persistent: true })`
+   * per command, and a `cwd-change` event when the shell moves. Declaring it optional means a
+   * version of the SDK that stops exposing it degrades to a slower terminal rather than to none.
+   */
+  readonly processManager?: NodepodProcessManager;
+}
+
+export interface NodepodProcessManager {
+  spawn(config: { command: string; args?: string[]; cwd?: string; env?: Record<string, string> }): NodepodProcessHandle;
+
+  /** Recursively kills descendants and releases the ports they held. */
+  kill(pid: number, signal?: string): boolean;
+}
+
+/** One entry in Nodepod's process table. Only the parts the terminal needs are declared. */
+export interface NodepodProcessHandle {
+  readonly pid: number;
+  readonly state: 'starting' | 'running' | 'exited';
+  on(event: string, handler: (...values: never[]) => void): unknown;
+  removeListener(event: string, handler: (...values: never[]) => void): unknown;
+  exec(message: {
+    type: 'exec';
+    filePath: string;
+    args: string[];
+    cwd: string;
+    isShell: true;
+    shellCommand: string;
+    persistent: true;
+  }): void;
+  sendStdin(data: string): void;
+  resize(cols: number, rows: number): void;
 }
 
 export interface NodepodProc {
@@ -73,16 +131,25 @@ export interface NodepodProc {
 
 /**
  * `watch: true` — Nodepod's VFS emits real change events, so `FilesStore` uses the incremental path.
- * `textSearch: false` — no ripgrep; `Search.tsx` already degrades on the flag rather than probing.
+ * `textSearch: true` — implemented over the VFS by this adapter (see {@link SandboxProvider.textSearch}).
  * `clearPort: false` — the runtime dies with the tab, so no previous session's server can hold a port
  * (the flag exists for resumed microVMs; claiming it here would add a pointless round trip per mount).
  */
 export const NODEPOD_CAPABILITIES: SandboxCapabilities = {
   terminal: true,
-  textSearch: false,
+  textSearch: true,
   watch: true,
   clearPort: false,
 };
+
+/**
+ * How many files one search may read before it gives up.
+ *
+ * A ceiling rather than a timeout because the walk is synchronous-ish work on the UI thread and the
+ * honest failure is "this project is too big to scan on every keystroke", not "this took a while".
+ * The starter is ~90 files; a project that exceeds this has something unexpected in it.
+ */
+export const SEARCH_FILE_LIMIT = 5000;
 
 /**
  * Sentinel for the interactive shell.
@@ -199,49 +266,198 @@ function adaptProcess(proc: NodepodProc): SandboxProcess {
 }
 
 /**
- * The interactive shell, synthesised.
+ * The interactive shell.
  *
- * Reads command lines from `input`, runs each through Nodepod, and wraps it in the OSC markers
- * `shell.ts` waits for. **The reading side stays `shell.ts`'s** — see `OSC_EXIT_SHAPE`.
+ * 🔴 **The whole command line goes to Nodepod as ONE string, and that is the entire reason pipes,
+ * `&&`, redirects, globs and quoting work.** Nodepod runs a real shell interpreter in the process
+ * worker — a tokenizer, a parser, pipelines, `&&`/`||`/`;`, `>`/`>>`/`<`/`2>&1`, glob and `$VAR`
+ * expansion, command substitution, aliases, and builtins (`ls cat grep find sed head tail sort uniq
+ * wc which xargs cd echo touch` plus `npm`/`pnpm`/`yarn`/`bun`/`node`/`git`). Its `spawn(cmd, args)`
+ * shell-QUOTES every argument before handing the line to that interpreter, so the first version of
+ * this adapter — which split on whitespace and passed the words as `args` — turned
+ * `npm install && npm run dev` into six quoted literals and `echo "hello world"` into two. The
+ * interpreter was there the whole time; we were escaping it out of the request. Passing the line
+ * with NO args is the documented path to it (`args?.length ? quoted : cmd`), and it is why this
+ * function has no parser of its own: writing a second one is how the two halves drift.
+ *
+ * The worker is PERSISTENT (`processManager.spawn({ command: 'shell' })` + `exec({ persistent: true })`
+ * — what Nodepod's own terminal does) so `cd` survives between commands and no one pays a ~1 s
+ * worker boot to run `ls`. Without a process manager it degrades to one-shot spawns: still a full
+ * shell per command, just slower and with no `cd` memory.
  *
  * Commands are serialised through a single chain so a second command cannot start before the first
  * has emitted its exit marker; interleaved markers would let `executeCommand` match the wrong one.
  * A callback that throws still emits an exit marker — a shell that goes silent on a failed command
  * hangs every later action forever, which is the `execution-queue` poisoning lesson in another skin.
  */
-function createShellProcess(client: NodepodClient, workdir: string): SandboxProcess {
+function createShellProcess(
+  client: NodepodClient,
+  workdir: string,
+  size?: { cols: number; rows: number },
+  beforeCommand?: () => Promise<void>,
+) {
   const out = createOutputStream();
-  const input = createInputBuffer();
   let resolveExit: (code: number) => void = () => {};
   const exit = new Promise<number>((resolve) => (resolveExit = resolve));
 
   let alive = true;
-  let current: NodepodProc | undefined;
-  let queue: Promise<void> = Promise.resolve();
+  let cwd = workdir;
+  let cols = size?.cols ?? 80;
+  let rows = size?.rows ?? 15;
 
-  // Ready immediately: with no `readyOsc`, first output is the readiness signal.
-  out.push(oscPrompt());
+  const editor = createLineEditor(() => formatShellPrompt(cwd, workdir));
 
   /**
-   * Ctrl-C: kill whatever is running and hand back a prompt.
+   * Is a command executing right now?
    *
-   * 🔴 The prompt is not optional. `executeCommand` writes the interrupt and then BLOCKS on
-   * `waitTillOscCode('prompt')` before it will send the command — so a shell that swallows `\x03`
-   * silently never runs another command for the life of the tab.
-   *
-   * 🔴 And it runs OUT OF BAND, never through `queue`. The queue serialises commands, so a queued
-   * interrupt would not fire until the command it is meant to interrupt had already finished —
-   * which is not an interrupt, and would hang `executeCommand` behind a dev server that never exits.
-   * Killing the current process makes its own `finally` emit an exit marker, so a second prompt here
-   * is harmless; a missing one is fatal.
+   * 🔴 It decides where a keystroke goes. While a command runs, input belongs to ITS stdin — an
+   * `npm init` asking a question, a dev server reading a keypress — and the line editor must not
+   * swallow it. Idle, the same bytes are a command being typed. Nodepod's own terminal makes the
+   * same split (`getSendStdin` returns null unless something is running).
    */
-  const interrupt = () => {
-    if (!alive) {
-      return;
+  let running = false;
+
+  /** The persistent shell worker, or undefined when there is none (yet, or after a kill). */
+  let handle: NodepodProcessHandle | undefined;
+  let handleReady: Promise<NodepodProcessHandle> | undefined;
+
+  /** One-shot fallback process, so an interrupt can reach it when there is no process manager. */
+  let oneShot: NodepodProc | undefined;
+
+  let queue: Promise<void> = Promise.resolve();
+
+  const write = (text: string) => out.push(text);
+
+  /** The visible prompt AND the marker `executeCommand` waits for — never one without the other. */
+  const writePrompt = () => {
+    write(formatShellPrompt(cwd, workdir));
+    write(oscPrompt());
+  };
+
+  // Ready immediately: with no `readyOsc`, first output is the readiness signal.
+  writePrompt();
+
+  const startWorker = (): Promise<NodepodProcessHandle> => {
+    const manager = client.processManager!;
+    const started = manager.spawn({ command: 'shell', args: [], cwd });
+    handle = started;
+
+    started.on('cwd-change', ((next: string) => {
+      cwd = next;
+    }) as never);
+
+    started.on('exit', (() => {
+      // The worker died; the next command spawns a fresh one rather than hanging against a corpse.
+      if (handle === started) {
+        handle = undefined;
+        handleReady = undefined;
+      }
+    }) as never);
+
+    return new Promise<NodepodProcessHandle>((resolve) => {
+      const ready = () => {
+        /*
+         * Seed the size BEFORE the first exec, or an interactive program reads the worker's 80x24
+         * default and draws itself to the wrong width on the one screen the user is looking at.
+         */
+        try {
+          started.resize(cols, rows);
+        } catch {
+          // A runtime without resize support must not stop the shell from starting.
+        }
+
+        resolve(started);
+      };
+
+      if (started.state === 'running') {
+        ready();
+      } else {
+        started.on('ready', ready as never);
+      }
+    });
+  };
+
+  const ensureWorker = (): Promise<NodepodProcessHandle> => {
+    if (!handle || handle.state === 'exited') {
+      handleReady = startWorker();
     }
 
-    current?.kill();
-    out.push(oscPrompt());
+    return handleReady!;
+  };
+
+  /** Run one line on the persistent worker. Resolves with its exit code. */
+  const runPersistent = async (line: string): Promise<number> => {
+    const worker = await ensureWorker();
+
+    return new Promise<number>((resolve) => {
+      let streamed = false;
+
+      const onStdout = ((chunk: string) => {
+        streamed = true;
+        write(toTerminalNewlines(chunk));
+      }) as never;
+
+      const onStderr = ((chunk: string) => {
+        streamed = true;
+        write(toTerminalNewlines(chunk));
+      }) as never;
+
+      const settle = (code: number, stdout?: string, stderr?: string) => {
+        worker.removeListener('stdout', onStdout);
+        worker.removeListener('stderr', onStderr);
+        worker.removeListener('shell-done', onDone);
+        worker.removeListener('exit', onExit);
+
+        /*
+         * `shell-done` carries the full stdout/stderr as well as streaming it. Writing both would
+         * double every command's output; Nodepod's terminal guards it the same way.
+         */
+        if (!streamed) {
+          write(toTerminalNewlines(String(stdout ?? '')));
+          write(toTerminalNewlines(String(stderr ?? '')));
+        }
+
+        resolve(code);
+      };
+
+      const onDone = ((code: number, stdout: string, stderr: string) => settle(code, stdout, stderr)) as never;
+      const onExit = ((code: number, stdout: string, stderr: string) => settle(code ?? 1, stdout, stderr)) as never;
+
+      worker.on('stdout', onStdout);
+      worker.on('stderr', onStderr);
+      worker.on('shell-done', onDone);
+      worker.on('exit', onExit);
+
+      worker.exec({
+        type: 'exec',
+        filePath: '',
+        args: [],
+        cwd,
+        isShell: true,
+        shellCommand: line,
+        persistent: true,
+      });
+    });
+  };
+
+  /**
+   * Run one line without a process manager: a fresh worker per command.
+   *
+   * Still the FULL shell — the line is passed as the command with no args, which is what routes it
+   * through the interpreter. What is lost is only the worker reuse and the `cd` memory.
+   */
+  const runOneShot = async (line: string): Promise<number> => {
+    const proc = await client.spawn(line, [], { cwd });
+    oneShot = proc;
+
+    proc.on('output', ((chunk: string) => write(toTerminalNewlines(chunk))) as never);
+    proc.on('error', ((chunk: string) => write(toTerminalNewlines(chunk))) as never);
+
+    try {
+      return (await proc.completion).exitCode;
+    } finally {
+      oneShot = undefined;
+    }
   };
 
   const run = async (line: string) => {
@@ -252,29 +468,63 @@ function createShellProcess(client: NodepodClient, workdir: string): SandboxProc
     }
 
     if (command === '') {
-      out.push(oscPrompt());
+      writePrompt();
       return;
     }
 
-    out.push(oscBegin());
+    write(oscBegin());
 
     let code = 0;
+    running = true;
 
     try {
-      const [cmd, ...args] = command.split(/\s+/);
-      const proc = await client.spawn(cmd, args, { cwd: workdir });
-      current = proc;
-      proc.on('output', ((chunk: string) => out.push(chunk)) as never);
-      proc.on('error', ((chunk: string) => out.push(chunk)) as never);
-      code = (await proc.completion).exitCode;
+      /*
+       * Before every command until it fires once — the only point at which `node_modules` is known
+       * to exist and the dev server is known not to have started. See `ensureViteCacheRestored`.
+       */
+      await beforeCommand?.();
+
+      code = client.processManager ? await runPersistent(command) : await runOneShot(command);
     } catch (error) {
-      out.push(`${String((error as Error)?.message ?? error)}\n`);
+      write(toTerminalNewlines(`${String((error as Error)?.message ?? error)}\n`));
       code = 1;
     } finally {
-      current = undefined;
-      out.push(oscExit(code));
-      out.push(oscPrompt());
+      running = false;
+      write(oscExit(code));
+      writePrompt();
     }
+  };
+
+  /**
+   * Ctrl-C: stop whatever is running and hand back a prompt.
+   *
+   * 🔴 The prompt is not optional. `executeCommand` writes the interrupt and then BLOCKS on
+   * `waitTillOscCode('prompt')` before it will send the command — so a shell that swallows `\x03`
+   * silently never runs another command for the life of the tab.
+   *
+   * 🔴 And it runs OUT OF BAND, never through `queue`. The queue serialises commands, so a queued
+   * interrupt would not fire until the command it is meant to interrupt had already finished —
+   * which is not an interrupt, and would hang `executeCommand` behind a dev server that never exits.
+   *
+   * 🔴 An IDLE interrupt must not kill the worker. `executeCommand` sends `\x03` before EVERY
+   * command, and killing the shell each time would respawn a worker per command and throw away the
+   * `cd` this design exists to keep — turning the persistent shell back into the one-shot one, at
+   * exactly the moment nothing needed interrupting.
+   */
+  const interrupt = () => {
+    if (!alive) {
+      return;
+    }
+
+    if (running) {
+      if (handle && client.processManager) {
+        client.processManager.kill(handle.pid, 'SIGINT');
+      }
+
+      oneShot?.kill();
+    }
+
+    writePrompt();
   };
 
   return {
@@ -282,7 +532,28 @@ function createShellProcess(client: NodepodClient, workdir: string): SandboxProc
     output: out.stream,
     input: new WritableStream<string>({
       write(chunk) {
-        for (const event of input.push(chunk)) {
+        if (!alive) {
+          return;
+        }
+
+        /*
+         * A running command owns stdin — but NOT the interrupt, which is the one key that must be
+         * able to reach past it. Scanning for `\x03` first is why Ctrl-C works on a dev server.
+         */
+        if (running && !chunk.includes('\x03')) {
+          handle?.sendStdin(chunk);
+          oneShot?.write(chunk);
+
+          return;
+        }
+
+        const { echo, actions } = editor.push(chunk);
+
+        if (echo !== '') {
+          write(echo);
+        }
+
+        for (const event of actions) {
           if (event.type === 'interrupt') {
             interrupt();
           } else {
@@ -293,12 +564,26 @@ function createShellProcess(client: NodepodClient, workdir: string): SandboxProc
     }),
     kill() {
       alive = false;
-      current?.kill();
+
+      if (handle && client.processManager) {
+        client.processManager.kill(handle.pid, 'SIGKILL');
+      }
+
+      oneShot?.kill();
       out.close();
       resolveExit(0);
     },
-    resize: () => {},
-  };
+    resize(dimensions: { cols: number; rows: number }) {
+      cols = dimensions.cols;
+      rows = dimensions.rows;
+
+      try {
+        handle?.resize(dimensions.cols, dimensions.rows);
+      } catch {
+        // A resize that the runtime cannot honour is cosmetic; it must never break the terminal.
+      }
+    },
+  } satisfies SandboxProcess;
 }
 
 export interface NodepodProviderOptions {
@@ -306,11 +591,149 @@ export interface NodepodProviderOptions {
 
   /** Registers a dev-server listener with the boot module, which owns Nodepod's `onServerReady`. */
   onServerReady(listener: (port: number, url: string) => void): () => void;
+
+  /**
+   * Where Vite's optimized dependencies are kept between pods — see `nodepod-vite-cache.ts`.
+   *
+   * Injectable so the behaviour can be driven by tests without IndexedDB. The default opens the real
+   * browser store, which itself answers `undefined` outside a browser, so this is inert in Node.
+   */
+  openViteCache?: () => Promise<ViteCacheStore | undefined>;
+
+  /** How long to keep watching for Vite to finish optimizing, once a server is up. */
+  viteCaptureTimeoutMs?: number;
+
+  /** Poll interval for the same. */
+  viteCapturePollMs?: number;
 }
+
+/** Defaults for the dep-cache capture watch. Optimization of the real starter took ~17 s. */
+export const VITE_CAPTURE_TIMEOUT_MS = 180_000;
+export const VITE_CAPTURE_POLL_MS = 1_000;
 
 export function createNodepodProvider(client: NodepodClient, options: NodepodProviderOptions): SandboxProvider {
   const { workdir } = options;
   const abs = (relPath: string) => toPodPath(workdir, relPath);
+
+  /*
+   * ---------------------------------------------------------------------------------------------
+   * Vite's optimized dependencies, carried across pods — the 17.1 s cold first paint.
+   * ---------------------------------------------------------------------------------------------
+   */
+  const openViteCache = options.openViteCache ?? openViteCacheStore;
+  const captureTimeoutMs = options.viteCaptureTimeoutMs ?? VITE_CAPTURE_TIMEOUT_MS;
+  const capturePollMs = options.viteCapturePollMs ?? VITE_CAPTURE_POLL_MS;
+
+  /** The pod's fs, in the shape the cache module declares. */
+  const cacheFs: ViteCacheFs = {
+    readFile: (path) => client.fs.readFile(path),
+    writeFile: (path, data) => client.fs.writeFile(path, data),
+    mkdir: (path, opts) => client.fs.mkdir(path, opts),
+    readdir: (path) => client.fs.readdir(path),
+    stat: (path) => client.fs.stat(path),
+  };
+
+  const cacheKey = async (): Promise<string | undefined> => {
+    try {
+      return viteCacheKey(await client.fs.readFile(abs('package.json'), 'utf8'));
+    } catch {
+      // No package.json yet — the mount has not happened. Nothing to key on, and nothing to restore.
+      return undefined;
+    }
+  };
+
+  /**
+   * Put a previously optimized dep cache back, at most once per pod.
+   *
+   * 🔴 **The timing is the whole trick, and it is why this is not simply done at boot.** The cache
+   * only helps if it is in place BEFORE Vite starts, and `node_modules` only exists AFTER
+   * `npm install` has run — so there is no single moment at boot when both are true. Instead this is
+   * checked before each command until it fires: the install spawn finds no `node_modules` and does
+   * nothing, and the `npm run dev` that follows finds one and restores. No command sniffing, no
+   * guessing at what the agent is about to run.
+   *
+   * It is skipped when the pod ALREADY has optimized deps — that is a warm pod whose own cache is
+   * newer than ours, and overwriting it would be the `bootRestoredFilesystem` mistake in miniature.
+   */
+  let restoreAttempted = false;
+
+  const ensureViteCacheRestored = async (): Promise<void> => {
+    if (restoreAttempted) {
+      return;
+    }
+
+    try {
+      if (!(await pathExists(cacheFs, abs('node_modules')))) {
+        return;
+      }
+
+      restoreAttempted = true;
+
+      if (await pathExists(cacheFs, abs(VITE_CACHE_SENTINEL))) {
+        return;
+      }
+
+      const key = await cacheKey();
+      const store = key ? await openViteCache() : undefined;
+      const files = key && store ? await store.get(key) : undefined;
+
+      if (files) {
+        await restoreViteCache(cacheFs, workdir, files);
+      }
+    } catch {
+      /*
+       * A cache must never be able to stop a project from starting. Every branch above is an
+       * optimization whose worst case is the behaviour we already had.
+       */
+    }
+  };
+
+  /**
+   * Capture the dep cache once Vite has finished optimizing.
+   *
+   * Watches for the sentinel rather than firing on server-ready: the dev server is up long before
+   * the first request triggers optimization, so capturing then would store a half-written directory.
+   */
+  let captureStarted = false;
+
+  const captureViteCacheWhenReady = () => {
+    if (captureStarted) {
+      return;
+    }
+
+    captureStarted = true;
+
+    void (async () => {
+      const deadline = Date.now() + captureTimeoutMs;
+
+      try {
+        while (Date.now() < deadline) {
+          if (await pathExists(cacheFs, abs(VITE_CACHE_SENTINEL))) {
+            const key = await cacheKey();
+            const store = key ? await openViteCache() : undefined;
+
+            if (!store || !key) {
+              return;
+            }
+
+            const files = await captureViteCache(cacheFs, workdir);
+
+            if (files && totalBytes(files) <= VITE_CACHE_MAX_BYTES) {
+              await store.put(key, files);
+            }
+
+            return;
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, capturePollMs));
+        }
+      } catch {
+        // As above: no speed-up next time is the whole cost.
+      }
+    })();
+  };
+
+  options.onServerReady(() => captureViteCacheWhenReady());
 
   const fs: SandboxFileSystem = {
     readFile: ((path: string, encoding?: BufferEncoding | null) =>
@@ -387,8 +810,10 @@ export function createNodepodProvider(client: NodepodClient, options: NodepodPro
 
     async spawn(command: string, args: string[] = [], spawnOptions: SandboxSpawnOptions = {}) {
       if (command === NODEPOD_SHELL_COMMAND) {
-        return createShellProcess(client, workdir);
+        return createShellProcess(client, workdir, spawnOptions.terminal, ensureViteCacheRestored);
       }
+
+      await ensureViteCacheRestored();
 
       const env = spawnOptions.env
         ? Object.fromEntries(Object.entries(spawnOptions.env).map(([k, v]) => [k, String(v)]))
@@ -490,6 +915,106 @@ export function createNodepodProvider(client: NodepodClient, options: NodepodPro
         disposed = true;
         handle.close();
       };
+    },
+
+    /**
+     * Project-wide text search, walked over the VFS.
+     *
+     * 🔴 **Implemented here rather than shelled out to the runtime's `grep -r`, for three reasons
+     * that each produce a wrong answer rather than a slow one.** (1) Nodepod's `grep` writes ANSI
+     * colour codes unconditionally — no `--color=never` — so every result would have to be
+     * un-highlighted before its columns could be read, and the columns are what the panel uses to
+     * position the match. (2) Its recursive walk honours no excludes, so it would descend
+     * `node_modules`: tens of thousands of files, in memory, on every debounced keystroke. (3) A
+     * shell round trip returns TEXT, and the seam's contract is structured ranges — parsing
+     * `path:line:content` back apart breaks on any path or match containing a colon. The VFS is in
+     * this tab's memory; reading it directly is both the simplest and the fastest option.
+     *
+     * Results stream through `onProgress` per file so the panel fills in as the walk proceeds, which
+     * is the contract WebContainer's `internal.textSearch` already had.
+     */
+    async textSearch(query: string, searchOptions: SandboxTextSearchOptions, onProgress: SandboxTextSearchProgress) {
+      const regex = buildSearchRegExp(query, searchOptions);
+
+      if (!regex) {
+        return;
+      }
+
+      let filesRead = 0;
+      let resultsLeft = searchOptions.resultLimit > 0 ? searchOptions.resultLimit : Infinity;
+
+      const walk = async (relDir: string): Promise<void> => {
+        if (resultsLeft <= 0 || filesRead >= SEARCH_FILE_LIMIT) {
+          return;
+        }
+
+        let entries: string[] = [];
+
+        try {
+          entries = await client.fs.readdir(abs(relDir));
+        } catch {
+          // A directory that vanished mid-walk is not an error; there is simply nothing in it.
+          return;
+        }
+
+        for (const name of entries) {
+          if (resultsLeft <= 0 || filesRead >= SEARCH_FILE_LIMIT) {
+            return;
+          }
+
+          const rel = relDir ? `${relDir}/${name}` : name;
+
+          let directory = false;
+
+          try {
+            directory = isDirectory(await client.fs.stat(abs(rel)));
+          } catch {
+            continue;
+          }
+
+          if (directory) {
+            /*
+             * The exclude globs are applied to the DIRECTORY too, not only to files. Checking them
+             * only at the leaf still reads every file in `node_modules` before discarding it, which
+             * is the entire cost this search is trying not to pay.
+             */
+            if (isSearchCandidate(`${rel}/`, { includes: [], excludes: searchOptions.excludes })) {
+              await walk(rel);
+            }
+
+            continue;
+          }
+
+          if (!isSearchCandidate(rel, searchOptions)) {
+            continue;
+          }
+
+          let bytes: Uint8Array;
+
+          try {
+            bytes = await client.fs.readFile(abs(rel));
+          } catch {
+            continue;
+          }
+
+          filesRead += 1;
+
+          if (looksBinary(bytes)) {
+            continue;
+          }
+
+          const matches = findTextMatches(new TextDecoder().decode(bytes), regex, resultsLeft);
+
+          if (matches.length > 0) {
+            resultsLeft -= matches.length;
+
+            // Absolute: `Search.tsx` hands the path straight to `workbenchStore.setSelectedFile`.
+            onProgress(abs(rel), matches);
+          }
+        }
+      };
+
+      await walk('');
     },
 
     onServerReady: options.onServerReady,

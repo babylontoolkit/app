@@ -102,3 +102,53 @@ export function previewUrlWithPath(baseUrl: string, path: string): string {
     return baseUrl;
   }
 }
+
+/**
+ * A stable, provider-agnostic id for one preview.
+ *
+ * 🔴 **This used to be a hardcoded StackBlitz hostname regex, and everything downstream of it was
+ * silently dead on any other provider.** It matched only
+ * `<sub>.local-credentialless.webcontainer-api.io`, returned `null` for a Nodepod or CodeSandbox
+ * preview, and every caller "guarded on that" — so *Open in new window* did nothing at all, the
+ * cross-tab preview broadcast never fired, and the storage-sync refresh skipped every preview. None
+ * of it threw; the buttons were simply inert. Degrading safely is only a virtue when the thing being
+ * degraded is optional, and a menu item that no-ops is a defect wearing a guard's clothes.
+ *
+ * The id is required to be (a) DETERMINISTIC — two tabs deriving it from the same URL must agree, or
+ * the broadcast channel they share is talking to itself — and (b) distinct per port, since a project
+ * can have more than one server up. It is NOT required to be meaningful; nothing parses it back.
+ *
+ * The WebContainer subdomain is kept as the first branch so that provider's ids are byte-identical
+ * to before (hide-don't-delete, `spec/sandbox-seam.md`).
+ */
+export function previewIdFromUrl(url: string): string | null {
+  const webcontainer = url.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
+
+  if (webcontainer) {
+    return webcontainer[1];
+  }
+
+  try {
+    const parsed = new URL(url);
+
+    /*
+     * Nodepod serves previews from our own origin at `/__virtual__/<pod>/<port>` (or `/__preview__/`),
+     * so the HOST is the builder's and cannot identify anything — the mount path is the only part
+     * that distinguishes one preview from another.
+     */
+    const mount = parsed.pathname.match(/^\/__(?:virtual|preview)__\/([^/]+)\/([^/]+)/);
+
+    if (mount) {
+      return `${mount[1]}-${mount[2]}`;
+    }
+
+    // Everything else (CodeSandbox, a plain host:port) is identified by its own origin.
+    return parsed.host;
+  } catch {
+    /*
+     * Genuinely unusable input — not a URL at all. `null` here is honest, and it is the ONE case the
+     * callers' guards were written for.
+     */
+    return null;
+  }
+}
