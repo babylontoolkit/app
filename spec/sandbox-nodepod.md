@@ -94,11 +94,14 @@ could not offer at any price, and it is why this is not simply trading one depen
 1. **`readdir` returns `string[]`, but `refresh-walk.ts:15-18` requires
    `readdir(path,{withFileTypes:true})`.** Synthesise dirents via `stat()`. Cheap here — the VFS is
    in-memory, unlike CodeSandbox where every `fs` call is a network round trip.
-2. **🔴 The preview is same-origin at `/__virtual__/<pod>/<port>`, and the app client-side-routes to
-   `/` — which on that origin is the BUILDER page, not the game.** Observed live: an iframe reload
-   loaded the harness page instead of the app and looked exactly like a hang. This is the same class as
-   the T17b `/play/:shareId` base-path defect. Resolve with a dedicated preview origin or a
-   subpath-scoped SW; do not leave it to chance.
+2. **🔴 RESOLVED — the preview is same-origin at `/__virtual__/<pod>/<port>`, and a root-absolute path
+   escapes the mount.** Observed live: an iframe reload loaded the builder page instead of the game and
+   looked exactly like a hang. Cause was `previewUrlWithPath` doing `joined.pathname = path` —
+   **assigning** over the pathname, which was correct only because every preview base until then had a
+   pathname of `/`. Under the mount, assigning rewrote the URL to `/play` on our own origin. Fixed by
+   APPENDING under the mount; CodeSandbox and WebContainer are byte-identical, asserted as a control
+   rather than assumed. Same class as the T17b `/play/:shareId` base-path defect. A dedicated preview
+   origin was NOT needed.
 3. **`Nodepod.boot()` throws without cross-origin isolation.** COOP `same-origin` + COEP
    `require-corp` are mandatory (the sync VFS bridge is `Atomics.wait` over `SharedArrayBuffer`).
    Without SAB, `execSync`/`spawnSync` throw and threaded WASI modules — rolldown included — refuse to
@@ -121,11 +124,71 @@ could not offer at any price, and it is why this is not simply trading one depen
 - **The landing page has no `canvas` by design** (Babylon is lazy-loaded on the game view, which is what
   `vite.config.ts` is set up for). Waiting for a canvas on `/` reports a false negative forever.
 
+## Live drive of the real product (2026-07-31) — three defects, all silent, all now pinned
+
+Phase 1 shipped unit-proven and "correct by construction". Driving the actual builder found three
+defects in the first minute, none of which any unit test could have reached — the same lesson the MCP
+relay taught, and the reason `CLAUDE.md` says to drive the real UI before claiming a feature works.
+
+**1. `npm: command not found`, and the character that explained it was invisible.**
+`BoltShell.executeCommand` writes `'\x03'` (Ctrl-C) before EVERY command and then waits for a prompt.
+Nodepod has no shell, so the adapter's synthesised one IS the line editor — and it knew nothing about
+control characters. `\x03` carries no newline, so it sat in the line buffer and was glued onto the next
+line: the command ran as `"\x03npm install"`, `String.trim()` does not strip `\x03` (it is not
+whitespace), and the first word was `"\x03npm"`. The runtime correctly reported no such command, and
+because `\x03` does not render, the terminal displayed exactly `npm: command not found`. Install
+failed, the dev server never started, and the terminal — the one place a human would look — showed a
+command that looks perfectly correct. Fixed in `createInputBuffer` (interrupt + backspace as first-class
+inputs); the interrupt runs **out of band**, never through the command queue, or it would not fire until
+the process it is meant to interrupt had already exited.
+
+**2. The file map stayed EMPTY behind a fully populated VFS.** 54 text + 13 binary files were written
+to disk, and `workbenchStore.files` had none of them: blank workbench tree, `Mount not visible in the
+file store after 15000ms — generating with a PARTIAL context`, and the working copy refused as empty.
+Cause: `toWatchEventType` mapped Nodepod's `rename` to `update_directory`, and
+`FilesStore.#processEventBuffer` has **no case** for that type, so every event fell through the switch.
+The mapping was written deliberately, to avoid guessing add-vs-remove — **and that instinct is what
+caused it: when the consumer has no handler for the honest answer, honesty is silence.** The fix is not
+to guess harder but to ASK — the adapter stats the path and reads its bytes, and the pure
+`classifyWatchEvent` decides from facts. Note this would have shipped a *worse model context* while
+throwing nothing (§4.2.8's stated failure mode).
+
+**3. `node_modules` would have flooded the map.** Nodepod's `fs.watch` takes no exclude option, so
+`options.exclude` must be applied in the adapter — the first version ignored the options object
+entirely. Unfiltered, `npm install`'s 306 packages each cost a stat, a full `readFile` and a store write
+on the UI thread. Defect 1 masked this by preventing install from ever running.
+
+Also fixed while in there: `WORK_DIR` was still computed as
+`VITE_SANDBOX_PROVIDER === 'codesandbox' ? … : '/home/project'` — the last instance of the exact
+compare-against-one-id shape `sandbox-runtime.ts` was created to delete, missed when the other three
+were converted **because it gave Nodepod the right answer by luck**. An anti-pattern that is
+accidentally correct is invisible. The workdir is now a trait per provider, and
+`sandbox-runtime.spec.ts` asserts every one of them is in `SANDBOX_ROOTS` — an agreement that until now
+existed only as a sentence in a comment.
+
+### Verified live, end to end
+
+| | |
+|---|---|
+| Creation → playable starter | ~50 s cold, splash covering continuously (`coverToggles: 2`, zero uncovered file growth) |
+| `npm install` + `vite` | **VITE v8.2.0 ready in 887 ms** in-pod |
+| Preview | served by the SW at `/__virtual__/<pod>/5173`, starter landing page rendering in the real workbench |
+| File tree | fully populated, binaries included |
+| Working copy | **76 files, 0 `node_modules` keys, 0 `dist`/`.git` keys** |
+| Binary byte-identity | **11/11 sha256-identical**, pinned template → mount → VFS → watcher → working copy (`havok.wasm` 2,094,566 bytes, magic `0061736d`) |
+
+Three mutation checks confirm the new tests catch the live defects rather than merely describing them:
+swallowing Ctrl-C fails 6, restoring the `update_directory` mapping fails 13, dropping the exclusion
+filter fails 7.
+
 ## Still owed
 
 - **Bake `node_modules/.vite/deps` into the warm restore.** The 17.1 s fresh-pod first paint is almost
   entirely Vite dep optimization; the snapshot cache restores packages but not the optimized deps.
-- Everything in Phase 1 of the plan: the provider, the seam wiring, the preview-origin fix, and the
-  default-deny import scan.
+- **A build turn against a live model, and publish → `/play`.** The creation path is now driven end to
+  end; the generation path is not. `type="file"` artifact writes go through `recordAgentWrite` and the
+  same watcher that defect 2 broke, so it is the next thing to check, not an assumed pass.
+- **Vendoring beyond the exact npm pin.** The dependency is exact-pinned and the assets are copied with
+  a byte-identity drift guard, but no in-tree copy exists yet.
 - A memory-ceiling check. Nodepod documents a soft budget and exposes `memoryStats()`; our projects
   carry an 8 MB binary payload plus a 12.2 MB Toolkit bundle, so the ceiling matters and is unmeasured.

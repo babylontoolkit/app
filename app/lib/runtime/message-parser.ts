@@ -63,6 +63,9 @@ interface MessageState {
   currentArtifact?: BoltArtifactData;
   currentAction: BoltActionData;
   actionId: number;
+
+  /** Raw tail of an action still streaming, so `finish()` can salvage a truncated file. */
+  pendingActionTail?: string;
 }
 
 function cleanoutMarkdownSyntax(content: string) {
@@ -201,6 +204,7 @@ export class StreamingMessageParser {
 
             state.insideAction = false;
             state.currentAction = { content: '' };
+            state.pendingActionTail = undefined;
 
             /*
              * Explicit close: consume the </boltAction>. Implicit (artifact) close: leave `i` AT the
@@ -209,6 +213,14 @@ export class StreamingMessageParser {
             i = usesArtifactClose ? actionEndIndex : actionEndIndex + ARTIFACT_ACTION_TAG_CLOSE.length;
           } else {
             if ('type' in currentAction && currentAction.type === 'file') {
+              /*
+               * The RAW, uncleaned tail, kept so `finish()` can salvage this file if the stream ends
+               * without ever closing the action. It is stored rather than appended to
+               * `currentAction.content` because the close path does `content += input.slice(i, end)`
+               * from this same `i` — appending here would duplicate the body on a normal close.
+               */
+              state.pendingActionTail = input.slice(i);
+
               let content = input.slice(i);
 
               if (!currentAction.filePath.endsWith('.md')) {
@@ -358,6 +370,85 @@ export class StreamingMessageParser {
     state.position = i;
 
     return output;
+  }
+
+  /**
+   * The stream for `messageId` has ENDED. Close anything still open.
+   *
+   * 🔴 **Without this, a generation that stops mid-artifact leaves the file unwritten and its row
+   * spinning forever.** A file action's CLOSING run is what writes the file and marks it complete, so
+   * an action that never closes is a permanent "creating…" under prose that says the build shipped —
+   * and nothing throws.
+   *
+   * The parser is otherwise purely streaming: it closes an action at `</boltAction>`, or (a recurring
+   * model formatting slip) at the enclosing `</boltArtifact>`. This is the third case, and the only
+   * one it could not see — **NEITHER tag ever arrives.** Observed live 2026-07-31: the model leaked
+   * tool-call protocol syntax into the TEXT channel from inside a `<boltAction>`, then left to make a
+   * tool call and never came back to the artifact. The transcript ends with 1 open `<boltArtifact>`,
+   * 1 open `<boltAction>`, **zero closes** — a complete, valid `StreetRacerMode.ts` that never reached
+   * the disk, after 15,051 billed output tokens. `finish=tool-calls` on the server; a clean-looking
+   * generation on the client.
+   *
+   * Bounded by construction: it emits exactly the callbacks the ordinary close path emits, using the
+   * content accumulated so far. Idempotent — a second call after the state is closed does nothing —
+   * because the caller is a React effect and will run again on re-render.
+   *
+   * ⚠️ This CANNOT be "just call reset()". Reset drops the state; the file still never gets written.
+   * The whole point is to run the close side effects first.
+   */
+  finish(messageId: string) {
+    const state = this.#messages.get(messageId);
+
+    if (!state?.insideArtifact || !state.currentArtifact) {
+      return;
+    }
+
+    const currentArtifact = state.currentArtifact;
+
+    const currentAction = state.currentAction;
+
+    /*
+     * 🔴 ONLY a `file` action is salvaged. A truncated `shell`/`start` action is a HALF-WRITTEN
+     * COMMAND, and running one is worse than leaving its row unfinished — `npm install lodash` and
+     * `npm install lodash && rm -rf /` share a prefix, which is the same reasoning that makes
+     * `shell-strip.ts` buffer a command until it can see the whole thing. A partial file is
+     * recoverable by the user and inspectable in the editor; a partial command is not.
+     */
+    if (state.insideAction && 'type' in currentAction && currentAction.type === 'file') {
+      /*
+       * The body lives in the raw streaming tail, not in `content`: while an action is open the
+       * parser re-slices from `state.position` on every pass and only accumulates at a close tag, so
+       * `currentAction.content` is still empty here.
+       */
+      let content = (currentAction.content + (state.pendingActionTail ?? '')).trim();
+
+      if (!currentAction.filePath.endsWith('.md')) {
+        content = cleanoutMarkdownSyntax(content);
+        content = cleanEscapedTags(content);
+      }
+
+      currentAction.content = `${content}\n`;
+
+      this._options.callbacks?.onActionClose?.({
+        artifactId: currentArtifact.id,
+        messageId,
+
+        // Decremented for the same reason the ordinary close path decrements it.
+        actionId: String(state.actionId - 1),
+        action: currentAction as BoltAction,
+      });
+    }
+
+    if (state.insideAction) {
+      state.insideAction = false;
+      state.currentAction = { content: '' };
+      state.pendingActionTail = undefined;
+    }
+
+    this._options.callbacks?.onArtifactClose?.({ messageId, artifactId: currentArtifact.id, ...currentArtifact });
+
+    state.insideArtifact = false;
+    state.currentArtifact = undefined;
   }
 
   reset() {

@@ -8,10 +8,11 @@
  * every later agent action forever, with nothing thrown).
  */
 import { describe, expect, it } from 'vitest';
+import { MAP_EXCLUDE_GLOBS } from '~/lib/stores/files';
 import { scanOscSignals } from '~/utils/shell';
 import { NODEPOD_CAPABILITIES, NODEPOD_SHELL_COMMAND, createNodepodProvider } from './nodepod-provider';
 import type { NodepodClient, NodepodProc } from './nodepod-provider';
-import type { SandboxFileTree } from './types';
+import type { SandboxFileTree, SandboxWatchEvent } from './types';
 
 const WORKDIR = '/home/user/workspace';
 
@@ -19,12 +20,16 @@ interface FakeSpawn {
   output?: string;
   exitCode?: number;
   throws?: boolean;
+
+  /** A process that never exits on its own — a dev server. Only `kill()` ends it. */
+  neverExits?: boolean;
 }
 
 function createFakeClient(spawns: Record<string, FakeSpawn> = {}) {
   const files = new Map<string, string | Uint8Array>();
   const dirs = new Set<string>([WORKDIR]);
   const spawnCalls: Array<{ cmd: string; args: string[]; cwd?: string }> = [];
+  const killed: string[] = [];
   let watcher: ((event: string, filename: string | null) => void) | undefined;
   const closed = { watch: false, pod: false };
 
@@ -97,10 +102,19 @@ function createFakeClient(spawns: Record<string, FakeSpawn> = {}) {
       }
 
       const handlers: Record<string, Array<(v: unknown) => void>> = {};
+
+      let endRun: (r: { exitCode: number }) => void = () => {};
+      const completion = plan?.neverExits
+        ? new Promise<{ exitCode: number }>((resolve) => (endRun = resolve))
+        : Promise.resolve({ exitCode: plan?.exitCode ?? 0 });
+
       const proc: NodepodProc = {
-        completion: Promise.resolve({ exitCode: plan?.exitCode ?? 0 }),
+        completion,
         write: () => {},
-        kill: () => {},
+        kill: () => {
+          killed.push(cmd);
+          endRun({ exitCode: 130 });
+        },
         on(event, handler) {
           (handlers[event] ??= []).push(handler as (v: unknown) => void);
 
@@ -121,7 +135,7 @@ function createFakeClient(spawns: Record<string, FakeSpawn> = {}) {
     },
   };
 
-  return { client, files, dirs, spawnCalls, closed, fire: (e: string, f: string | null) => watcher?.(e, f) };
+  return { client, files, dirs, spawnCalls, killed, closed, fire: (e: string, f: string | null) => watcher?.(e, f) };
 }
 
 const noServers = () => () => {};
@@ -371,30 +385,209 @@ describe('the synthesised interactive shell', () => {
 
     expect(fake.spawnCalls).toEqual([]);
   });
+
+  /*
+   * 🔴 THE LIVE FAILURE (2026-07-31). `BoltShell.executeCommand` writes `'\x03'` before EVERY
+   * command. Without control-character handling it was buffered and glued onto the next line, so
+   * the command ran as `"\x03npm"` — reported by the runtime as `npm: command not found`, with the
+   * offending character invisible in the terminal. Install failed and the dev server never started.
+   *
+   * This asserts the COMMAND the runtime is asked to run, which is where the corruption showed.
+   */
+  it('runs the real command after the interrupt executeCommand always sends first', async () => {
+    const { provider, fake } = makeProvider({ npm: {} });
+    const shell = await provider.spawn(NODEPOD_SHELL_COMMAND, []);
+
+    await write(shell, '\x03');
+    await write(shell, 'npm install\n');
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(fake.spawnCalls).toEqual([{ cmd: 'npm', args: ['install'], cwd: WORKDIR }]);
+  });
+
+  /*
+   * `executeCommand` BLOCKS on `waitTillOscCode('prompt')` immediately after writing the interrupt,
+   * so a shell that swallows Ctrl-C silently never runs another command for the life of the tab.
+   */
+  it('answers an interrupt with a prompt so executeCommand can proceed', async () => {
+    const { provider } = makeProvider();
+    const shell = await provider.spawn(NODEPOD_SHELL_COMMAND, []);
+    const seen = readUntil(shell.output, (s) => s.split('prompt').length > 2);
+
+    await write(shell, '\x03');
+
+    expect((await seen).split('prompt').length - 1).toBeGreaterThanOrEqual(2);
+  });
+
+  /*
+   * An interrupt must reach a RUNNING process. Routing it through the command queue would delay it
+   * until that process had already exited — which is not an interrupt, and would hang the shell
+   * behind a dev server that never returns.
+   */
+  it('kills a running process instead of queueing behind it', async () => {
+    const { provider, fake } = makeProvider({ npm: { neverExits: true } });
+    const shell = await provider.spawn(NODEPOD_SHELL_COMMAND, []);
+
+    await write(shell, 'npm run dev\n');
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(fake.killed).toEqual([]);
+
+    await write(shell, '\x03');
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(fake.killed).toEqual(['npm']);
+  });
 });
 
 describe('watch and lifecycle', () => {
-  it('emits absolute paths and unsubscribes cleanly', () => {
+  /** Classification is async (it stats and reads); let the chain drain before asserting. */
+  const settle = () => new Promise((r) => setTimeout(r, 5));
+
+  it('emits absolute paths and unsubscribes cleanly', async () => {
     const { provider, fake } = makeProvider();
-    const seen: unknown[] = [];
+    await provider.fs.writeFile('src/main.tsx', 'export default 1;');
+
+    const seen: SandboxWatchEvent[] = [];
     const stop = provider.watchPaths({}, (events) => seen.push(...events));
 
     fake.fire('change', 'src/main.tsx');
-    expect(seen).toEqual([{ type: 'change', path: `${WORKDIR}/src/main.tsx` }]);
+    await settle();
 
-    fake.fire('rename', 'src/new.ts');
-    expect(seen[1]).toEqual({ type: 'update_directory', path: `${WORKDIR}/src/new.ts` });
+    expect(seen[0].path).toBe(`${WORKDIR}/src/main.tsx`);
 
     stop();
     expect(fake.closed.watch).toBe(true);
   });
 
-  it('ignores an event with no filename instead of emitting the workdir', () => {
+  /*
+   * 🔴 THE LIVE REGRESSION (2026-07-31). `rename` used to map to `update_directory`, a type
+   * `FilesStore.#processEventBuffer` has NO case for — so every event was silently discarded and the
+   * file map stayed empty behind a fully populated VFS. Asserted as membership of the set the store
+   * actually handles, so no future mapping can quietly reintroduce an ignored type.
+   */
+  it('never emits an event type FilesStore would silently drop', async () => {
+    const { provider, fake } = makeProvider();
+    await provider.fs.writeFile('src/main.tsx', 'x');
+    await provider.fs.mkdir('src/deep', { recursive: true });
+
+    const seen: SandboxWatchEvent[] = [];
+    provider.watchPaths({ includeContent: true }, (e) => seen.push(...e));
+
+    fake.fire('rename', 'src/main.tsx');
+    fake.fire('change', 'src/main.tsx');
+    fake.fire('rename', 'src/deep');
+    fake.fire('rename', 'src/gone.ts');
+    await settle();
+
+    expect(seen.length).toBe(4);
+
+    for (const event of seen) {
+      expect(['change', 'add_file', 'remove_file', 'add_dir', 'remove_dir']).toContain(event.type);
+    }
+  });
+
+  it('classifies a create, a modify, a directory and a delete from the filesystem', async () => {
+    const { provider, fake } = makeProvider();
+    await provider.fs.writeFile('src/main.tsx', 'x');
+    await provider.fs.mkdir('src/deep', { recursive: true });
+
+    const seen: SandboxWatchEvent[] = [];
+    provider.watchPaths({ includeContent: true }, (e) => seen.push(...e));
+
+    fake.fire('rename', 'src/main.tsx');
+    await settle();
+    expect(seen.at(-1)!.type).toBe('add_file');
+
+    fake.fire('change', 'src/main.tsx');
+    await settle();
+    expect(seen.at(-1)!.type).toBe('change');
+
+    fake.fire('rename', 'src/deep');
+    await settle();
+    expect(seen.at(-1)!.type).toBe('add_dir');
+
+    await provider.fs.rm('src/main.tsx');
+    fake.fire('rename', 'src/main.tsx');
+    await settle();
+    expect(seen.at(-1)!.type).toBe('remove_file');
+  });
+
+  /*
+   * 🔴 `FilesStore` builds its entry from `buffer`, so an unenriched event records the file as
+   * EMPTY — a generation's output would appear as a tree full of blank files. The CodeSandbox
+   * adapter carries the same warning; this is the Nodepod half of it.
+   */
+  it('enriches file events with their real bytes when includeContent is set', async () => {
+    const { provider, fake } = makeProvider();
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    await provider.fs.writeFile('public/logo.png', bytes);
+
+    const seen: SandboxWatchEvent[] = [];
+    provider.watchPaths({ includeContent: true }, (e) => seen.push(...e));
+
+    fake.fire('rename', 'public/logo.png');
+    await settle();
+
+    expect(seen[0].type).toBe('add_file');
+    expect(Array.from(seen[0].buffer!)).toEqual(Array.from(bytes));
+  });
+
+  it('sends no buffer for a directory', async () => {
+    const { provider, fake } = makeProvider();
+    await provider.fs.mkdir('src/deep', { recursive: true });
+
+    const seen: SandboxWatchEvent[] = [];
+    provider.watchPaths({ includeContent: true }, (e) => seen.push(...e));
+
+    fake.fire('rename', 'src/deep');
+    await settle();
+
+    expect(seen[0]).toEqual({ type: 'add_dir', path: `${WORKDIR}/src/deep`, buffer: undefined });
+  });
+
+  /*
+   * 🔴 Nodepod's watcher takes NO excludes, so this filter is the only thing between the file map and
+   * `node_modules`. Unfiltered, `npm install`'s 306 packages each cost a stat, a full readFile and a
+   * store write on the UI thread.
+   */
+  it('applies the exclude globs the runtime cannot', async () => {
+    const { provider, fake } = makeProvider();
+    await provider.fs.writeFile('node_modules/react/index.js', 'x');
+    await provider.fs.writeFile('src/main.tsx', 'x');
+
+    const seen: SandboxWatchEvent[] = [];
+    provider.watchPaths({ includeContent: true, exclude: MAP_EXCLUDE_GLOBS }, (e) => seen.push(...e));
+
+    fake.fire('rename', 'node_modules/react/index.js');
+    fake.fire('rename', 'src/main.tsx');
+    await settle();
+
+    expect(seen.map((e) => e.path)).toEqual([`${WORKDIR}/src/main.tsx`]);
+  });
+
+  it('ignores an event with no filename instead of emitting the workdir', async () => {
     const { provider, fake } = makeProvider();
     const seen: unknown[] = [];
     provider.watchPaths({}, (e) => seen.push(...e));
 
     fake.fire('change', null);
+    await settle();
+
+    expect(seen).toEqual([]);
+  });
+
+  /* An unsubscribe must silence events already in flight, not just future ones. */
+  it('emits nothing after unsubscribing', async () => {
+    const { provider, fake } = makeProvider();
+    await provider.fs.writeFile('src/main.tsx', 'x');
+
+    const seen: unknown[] = [];
+    const stop = provider.watchPaths({ includeContent: true }, (e) => seen.push(...e));
+
+    fake.fire('rename', 'src/main.tsx');
+    stop();
+    await settle();
 
     expect(seen).toEqual([]);
   });

@@ -1,3 +1,4 @@
+import { SANDBOX_PROVIDER_TRAITS, resolveSandboxProviderId } from '~/lib/common/sandbox-runtime';
 import { LLMManager } from '~/lib/modules/llm/manager';
 import type { Template } from '~/types/template';
 
@@ -21,15 +22,24 @@ export const WORK_DIR_NAME = 'project';
  *
  * It stays a plain synchronous constant because ~6 call sites — the editor's root folder, the
  * breadcrumb regex, the search root, the diff regex, and the system prompt's description of the
- * project layout — read it at module scope and cannot await a provider. Deriving it from
- * `VITE_SANDBOX_PROVIDER` keeps that shape while making it true per build, which is exactly the
- * granularity the switch already has (SPEC §8: "we make builds for that").
+ * project layout — read it at module scope and cannot await a provider. Resolving it at module
+ * scope keeps that shape while making it true per build, which is exactly the granularity the
+ * switch already has (SPEC §8: "we make builds for that").
  *
- * ⚠️ It must agree with `SANDBOX_ROOTS` in `~/lib/common/sandbox-paths.ts`, which is the one place
- * that knows every provider's root. Adding a provider means touching both.
+ * 🔴 **LOOKED UP, never compared.** This was
+ * `VITE_SANDBOX_PROVIDER === 'codesandbox' ? '/project/workspace' : '/home/project'` — the same
+ * "a list of the ones that do not" shape `sandbox-runtime.ts` was created to delete, and the one
+ * instance missed when the other three were converted. It gave Nodepod the right answer by luck
+ * (both browser runtimes use `/home/project`), which is exactly why it went unnoticed: an
+ * anti-pattern that is accidentally correct looks like working code. The next provider would have
+ * inherited `/home/project` in silence and shown an empty workbench over a full project.
+ *
+ * ⚠️ Every root must also be a member of `SANDBOX_ROOTS` in `~/lib/common/sandbox-paths.ts`, which
+ * recognises OTHER providers' roots too — a working copy outlives the provider that wrote it.
+ * `sandbox-runtime.spec.ts` asserts that rather than trusting this sentence.
  */
 export const WORK_DIR =
-  import.meta.env.VITE_SANDBOX_PROVIDER === 'codesandbox' ? '/project/workspace' : `/home/${WORK_DIR_NAME}`;
+  SANDBOX_PROVIDER_TRAITS[resolveSandboxProviderId(import.meta.env.VITE_SANDBOX_PROVIDER)].workdir;
 export const MODIFICATIONS_TAG_NAME = 'bolt_file_modifications';
 export const MODEL_REGEX = /^\[Model: (.*?)\]\n\n/;
 export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;

@@ -33,6 +33,25 @@ export const DEFAULT_SANDBOX_PROVIDER: SandboxProviderId = 'nodepod';
 
 export interface SandboxProviderTraits {
   /**
+   * Where this runtime puts the user's project.
+   *
+   * 🔴 A property of the runtime, so it belongs with the runtime's other properties. `WORK_DIR` used
+   * to compute it as `VITE_SANDBOX_PROVIDER === 'codesandbox' ? … : '/home/project'` — the same
+   * `!== codesandbox` shape this module was created to remove, and the one instance that was missed
+   * when the other three were converted. It happens to give Nodepod the right answer, which is
+   * precisely why it survived: an anti-pattern that is accidentally correct is invisible.
+   *
+   * Getting it wrong is silent both ways — the watcher fills the map with correct keys while the
+   * tree renders `rootFolder={WORK_DIR}` and matches none of them, so the workbench shows an EMPTY
+   * project on top of a full one (MEASURED live on the CodeSandbox swap).
+   *
+   * ⚠️ Must be a member of `SANDBOX_ROOTS` (`~/lib/common/sandbox-paths.ts`), which recognises the
+   * roots of OTHER providers too — a working copy outlives the provider that wrote it. Pinned by
+   * `sandbox-runtime.spec.ts` rather than left to the comment.
+   */
+  readonly workdir: string;
+
+  /**
    * Can the project's files survive this browser session?
    *
    * Drives the save nudges (§4.5.4b). A browser-side runtime's filesystem dies with the tab, so "it
@@ -65,13 +84,28 @@ export const SANDBOX_PROVIDER_TRAITS: Record<SandboxProviderId, SandboxProviderT
    * reason it costs nothing when a user walks away. Its sync VFS bridge is `Atomics.wait` over a
    * SharedArrayBuffer, so isolation is mandatory: without it `boot()` throws.
    */
-  nodepod: { outlivesSession: false, requiresProject: false, needsCrossOriginIsolation: true },
+  nodepod: {
+    workdir: '/home/project',
+    outlivesSession: false,
+    requiresProject: false,
+    needsCrossOriginIsolation: true,
+  },
 
   /* Tab-local WASM VM; SharedArrayBuffer is what makes the runtime exist at all. */
-  webcontainer: { outlivesSession: false, requiresProject: false, needsCrossOriginIsolation: true },
+  webcontainer: {
+    workdir: '/home/project',
+    outlivesSession: false,
+    requiresProject: false,
+    needsCrossOriginIsolation: true,
+  },
 
   /* A server microVM: it holds the files on a remote disk, it IS the project, and it needs no SAB. */
-  codesandbox: { outlivesSession: true, requiresProject: true, needsCrossOriginIsolation: false },
+  codesandbox: {
+    workdir: '/project/workspace',
+    outlivesSession: true,
+    requiresProject: true,
+    needsCrossOriginIsolation: false,
+  },
 };
 
 /**

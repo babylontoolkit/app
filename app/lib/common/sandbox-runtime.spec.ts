@@ -7,6 +7,8 @@
  * provider would have inherited silently.
  */
 import { describe, expect, it } from 'vitest';
+import { WORK_DIR } from '~/utils/constants';
+import { SANDBOX_ROOTS, toProjectRelativePath } from './sandbox-paths';
 import {
   DEFAULT_SANDBOX_PROVIDER,
   SANDBOX_PROVIDER_IDS,
@@ -62,21 +64,60 @@ describe('provider traits', () => {
     for (const id of SANDBOX_PROVIDER_IDS) {
       const traits = SANDBOX_PROVIDER_TRAITS[id];
 
-      expect(Object.keys(traits).sort()).toEqual(['needsCrossOriginIsolation', 'outlivesSession', 'requiresProject']);
+      expect(Object.keys(traits).sort()).toEqual([
+        'needsCrossOriginIsolation',
+        'outlivesSession',
+        'requiresProject',
+        'workdir',
+      ]);
 
-      for (const value of Object.values(traits)) {
+      const { workdir, ...flags } = traits;
+      expect(typeof workdir).toBe('string');
+
+      for (const value of Object.values(flags)) {
         expect(typeof value).toBe('boolean');
       }
     }
   });
 
-  it.each<[SandboxProviderId, boolean, boolean, boolean]>([
-    // id, outlivesSession, requiresProject, needsCrossOriginIsolation
-    ['nodepod', false, false, true],
-    ['webcontainer', false, false, true],
-    ['codesandbox', true, true, false],
-  ])('pins %s exactly', (id, outlivesSession, requiresProject, needsCrossOriginIsolation) => {
-    expect(SANDBOX_PROVIDER_TRAITS[id]).toEqual({ outlivesSession, requiresProject, needsCrossOriginIsolation });
+  it.each<[SandboxProviderId, string, boolean, boolean, boolean]>([
+    // id, workdir, outlivesSession, requiresProject, needsCrossOriginIsolation
+    ['nodepod', '/home/project', false, false, true],
+    ['webcontainer', '/home/project', false, false, true],
+    ['codesandbox', '/project/workspace', true, true, false],
+  ])('pins %s exactly', (id, workdir, outlivesSession, requiresProject, needsCrossOriginIsolation) => {
+    expect(SANDBOX_PROVIDER_TRAITS[id]).toEqual({
+      workdir,
+      outlivesSession,
+      requiresProject,
+      needsCrossOriginIsolation,
+    });
+  });
+
+  /*
+   * ⚠️ THE AGREEMENT THAT WAS ONLY EVER A COMMENT. `constants.ts` said "it must agree with
+   * SANDBOX_ROOTS ... adding a provider means touching both", and nothing checked. `SANDBOX_ROOTS`
+   * recognises the roots of OTHER providers too, because a working copy outlives the provider that
+   * wrote it — so a root missing from that list does not throw, it leaves paths absolute and they
+   * fail later, somewhere that does not mention paths at all.
+   */
+  it('puts every provider workdir in SANDBOX_ROOTS, which strips them', () => {
+    for (const id of SANDBOX_PROVIDER_IDS) {
+      const { workdir } = SANDBOX_PROVIDER_TRAITS[id];
+
+      expect(SANDBOX_ROOTS).toContain(workdir);
+      expect(toProjectRelativePath(`${workdir}/src/main.tsx`)).toBe('src/main.tsx');
+    }
+  });
+
+  /*
+   * WORK_DIR is what the workbench renders as its root folder and what six module-scope call sites
+   * read. It must BE the resolved provider's workdir — the bug this replaced computed it with a
+   * `=== 'codesandbox'` comparison, which silently handed every future provider `/home/project`.
+   */
+  it('is the source of WORK_DIR for the build this test runs in', () => {
+    expect(SANDBOX_ROOTS).toContain(WORK_DIR);
+    expect(Object.values(SANDBOX_PROVIDER_TRAITS).map((t) => t.workdir)).toContain(WORK_DIR);
   });
 
   /*

@@ -231,6 +231,158 @@ describe('StreamingMessageParser', () => {
       expect(closed.map((c) => c.content.trim())).toEqual(['A', 'B']);
     });
   });
+
+  /*
+   * 🔴 THE STREAM ENDS WITH NOTHING CLOSED — the third case, and the one the parser cannot see.
+   *
+   * The fallback above handles a missing `</boltAction>` when `</boltArtifact>` still arrives. Here
+   * NEITHER arrives: the model stops mid-action and never returns. Observed live 2026-07-31 — the
+   * model leaked tool-call protocol syntax into the text channel from inside a `<boltAction>`, went
+   * off to make a tool call, and never came back. The saved transcript (the exact text the client
+   * parses) ended with **1 open `<boltArtifact>`, 1 open `<boltAction>`, ZERO closes**, carrying a
+   * complete and valid `StreetRacerMode.ts` that never reached the disk — after 15,051 billed output
+   * tokens, `finish=tool-calls` server-side, and no error anywhere.
+   *
+   * A file action's CLOSING run is what writes the file, so the visible symptom is a row stuck on
+   * "creating…" forever underneath prose announcing that the build shipped.
+   */
+  describe('the stream ends mid-action (no </boltAction> AND no </boltArtifact>)', () => {
+    /** The live shape: prose, an open artifact, an open file action, and then the stream stops. */
+    const TRUNCATED =
+      'Here is the build. <boltArtifact title="Street Racer" id="street-racer">' +
+      '<boltAction type="file" filePath="src/scripts/StreetRacerMode.ts">' +
+      'export class StreetRacerMode {}\nSceneManager.RegisterClass("StreetRacerMode", StreetRacerMode);\n';
+
+    const makeParser = () => {
+      const closed: { filePath: string; content: string }[] = [];
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn((d: any) => closed.push({ filePath: d.action.filePath, content: d.action.content })),
+      };
+
+      return { parser: new StreamingMessageParser({ artifactElement: () => '', callbacks }), callbacks, closed };
+    };
+
+    it('writes NOTHING while the stream is still open — the file is not complete yet', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse('m1', TRUNCATED);
+
+      expect(callbacks.onActionOpen).toHaveBeenCalledTimes(1);
+      expect(callbacks.onActionClose).not.toHaveBeenCalled();
+    });
+
+    it('closes the action and writes the file once the stream is declared finished', () => {
+      const { parser, callbacks, closed } = makeParser();
+      parser.parse('m1', TRUNCATED);
+
+      parser.finish('m1');
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1); // 0 before the fix — the bug
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+      expect(closed[0].filePath).toBe('src/scripts/StreetRacerMode.ts');
+      expect(closed[0].content).toContain('RegisterClass("StreetRacerMode"');
+    });
+
+    /* The caller is a React effect, so this runs again on every re-render once loading is false. */
+    it('is idempotent — a second finish writes the file only once', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse('m1', TRUNCATED);
+
+      parser.finish('m1');
+      parser.finish('m1');
+      parser.finish('m1');
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1);
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+    });
+
+    /*
+     * 🔴 The control that keeps this safe: `finish` must be a NO-OP on a well-formed message. It runs
+     * for every message on every parse pass once loading is false, so an unconditional close would
+     * re-fire `onActionClose` for every file in the conversation — re-writing historical bodies over
+     * the user's later edits, which is §4.5.4b's stale-replay bug arriving through a new door.
+     */
+    it('CONTROL: does nothing for a well-formed, already-closed artifact', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse(
+        'm2',
+        'Before <boltArtifact title="t" id="a1">' +
+          '<boltAction type="file" filePath="a.css">A</boltAction>' +
+          '</boltArtifact> After',
+      );
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1);
+
+      parser.finish('m2');
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1);
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('CONTROL: does nothing for a message that never opened an artifact', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse('m3', 'Just prose, no artifact at all.');
+
+      parser.finish('m3');
+      parser.finish('never-seen-message-id');
+
+      expect(callbacks.onActionClose).not.toHaveBeenCalled();
+      expect(callbacks.onArtifactClose).not.toHaveBeenCalled();
+    });
+
+    /* An artifact that opened but never got as far as an action still has to stop announcing itself. */
+    it('closes an artifact truncated before any action opened', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse('m4', 'Text <boltArtifact title="t" id="a1">');
+
+      parser.finish('m4');
+
+      expect(callbacks.onActionClose).not.toHaveBeenCalled();
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+    });
+
+    /*
+     * 🔴 A truncated SHELL action is a half-written COMMAND, and running one is worse than leaving
+     * its row unfinished: `npm install lodash` and `npm install lodash && rm -rf /` share a prefix,
+     * which is exactly why `shell-strip.ts` buffers a command until it can see all of it. A partial
+     * file is recoverable and visible in the editor; a partial command is not.
+     */
+    it('REFUSES to run a truncated shell action, while still closing the artifact', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse('m6', '<boltArtifact title="t" id="a1"><boltAction type="shell">npm install lodash && rm -rf');
+
+      parser.finish('m6');
+
+      expect(callbacks.onActionClose).not.toHaveBeenCalled();
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+    });
+
+    /* A COMPLETE shell action is untouched — the refusal above must not disarm ordinary commands. */
+    it('CONTROL: a well-formed shell action still runs', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse(
+        'm7',
+        '<boltArtifact title="t" id="a1"><boltAction type="shell">npm install</boltAction></boltArtifact>',
+      );
+      parser.finish('m7');
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1);
+    });
+
+    /* The body must survive the same cleanup the ordinary close path applies. */
+    it('applies the normal file-body cleanup to the salvaged content', () => {
+      const { parser, closed } = makeParser();
+      parser.parse(
+        'm5',
+        '<boltArtifact title="t" id="a1"><boltAction type="file" filePath="a.ts">```ts\nconst a = 1;\n```',
+      );
+      parser.finish('m5');
+
+      expect(closed[0].content.trim()).toBe('const a = 1;');
+    });
+  });
 });
 
 describe('EnhancedStreamingMessageParser', () => {

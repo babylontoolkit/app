@@ -34,12 +34,18 @@ const ALLOWED: Record<string, string> = {
   'lib/common/sandbox-paths.ts': 'The rule itself — this is where the roots are DEFINED.',
 
   /*
-   * ⚠️ The OTHER definition site, and the one place the two must be kept in step: `WORK_DIR` picks a
-   * root from `VITE_SANDBOX_PROVIDER` at build time, while `SANDBOX_ROOTS` lists every root a map may
-   * ever carry. Different jobs — "where does THIS build write?" vs "which prefixes might I have to
-   * strip?" — which is why they are not merged. A new provider needs an entry in BOTH.
+   * ⚠️ The OTHER definition site, and the one place the two must be kept in step: `SANDBOX_PROVIDER_TRAITS`
+   * records the root each runtime writes to, while `SANDBOX_ROOTS` lists every root a map may ever
+   * carry. Different jobs — "where does THIS build write?" vs "which prefixes might I have to strip?"
+   * — which is why they are not merged. A new provider needs an entry in BOTH.
+   *
+   * This entry MOVED here from `utils/constants.ts` on 2026-07-31. `WORK_DIR` no longer holds a
+   * literal at all: it was `VITE_SANDBOX_PROVIDER === 'codesandbox' ? … : '/home/project'`, the same
+   * compare-against-one-id shape `sandbox-runtime.ts` exists to delete, and it is now a lookup into
+   * this record. `sandbox-runtime.spec.ts` asserts every workdir here is also in `SANDBOX_ROOTS`, so
+   * "keep them in step" is finally a test rather than this sentence.
    */
-  'utils/constants.ts': 'Defines WORK_DIR — the build-time choice of root, paired with SANDBOX_ROOTS.',
+  'lib/common/sandbox-runtime.ts': 'Defines each provider’s workdir — the per-runtime root, paired with SANDBOX_ROOTS.',
 
   /*
    * Upstream prompt files on the fail-closed `/api/chat` path (§2.1a hide-don't-delete). They are

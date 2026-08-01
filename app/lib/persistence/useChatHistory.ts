@@ -66,6 +66,7 @@ import {
   shouldStartDevServer,
 } from './dependencies';
 import { awaitRunningPreview } from './port-settle';
+import { awaitShellAttached } from './shell-attach';
 import { SaveQueue, saveState } from './save-queue';
 import { takePendingProjectMount, hasPendingProjectMount, setPendingRemix } from './pending-remix';
 import { setPendingImport, takePendingImport } from './pending-import';
@@ -818,14 +819,35 @@ async function prepareMountedProject(files: SerializedFileMap, opts: PrepareOpti
     }
   }
 
-  const ready = await installDependencies(files);
+  /*
+   * 🔴 **DETACHED FROM THE MOUNT, and that is the whole fix.**
+   *
+   * The install needs the agent's shell, the shell is spawned by the workbench's `<Terminal>` on
+   * mount, and the workbench does not render until THIS function's caller has finished. MEASURED on
+   * a resumed 76-file project: `showWorkbench`, the xterm element and the shell process all appeared
+   * at **22,433 ms — the same millisecond**, because they are one event. Awaiting the install here
+   * therefore waits for something that cannot happen until we return: any bound short enough not to
+   * hang the mount is too short to win, and a larger project loses by more.
+   *
+   * So it runs alongside the mount instead of inside it. The user gets their workbench immediately
+   * and watches `npm install` in the terminal — exactly what creation already does. `preparingContainer`
+   * still guards against a second mount starting a second install.
+   */
+  void (async () => {
+    try {
+      const ready = await installDependencies(files);
 
-  if (ready) {
-    await startDevServer(files);
-  } else {
-    // Install failed — let a later mount try again rather than wedging this container as "prepared".
-    preparingContainer = false;
-  }
+      if (ready) {
+        await startDevServer(files);
+      } else {
+        // Not installed — let a later mount try again rather than wedging this container as "prepared".
+        preparingContainer = false;
+      }
+    } catch (error) {
+      preparingContainer = false;
+      logger.error('Could not prepare the mounted project', error);
+    }
+  })();
 }
 
 /**
@@ -863,16 +885,30 @@ async function installDependencies(files: SerializedFileMap): Promise<boolean> {
   const toastId = toast.loading('Getting this project ready — installing its dependencies…');
 
   try {
-    const result = await shell.executeCommand(`deps-${Date.now()}`, 'npm install');
+    /*
+     * 🔴 WAIT for the terminal to attach, EXPLICITLY — see `awaitShellAttached` for the full story.
+     *
+     * `executeCommand` silently drops the command and returns `undefined` when the shell has no
+     * process yet, and the shell is spawned by the workbench's `<Terminal>` on mount. This used to be
+     * survivable because the mount effect ran more than once per page load and a later cycle picked
+     * the install up; the `mountedThisLoad` dedupe removed that second cycle, and with it the only
+     * thing that ever retried. A resumed project then mounted every file, never installed, never
+     * started its dev server, and showed an empty terminal and no preview — silently (MEASURED live
+     * 2026-07-31 on Nodepod; CodeSandbox cannot reach it, because its VM never needs the install).
+     */
+    const attached = await awaitShellAttached({
+      attached: () => Boolean(shell.process),
+      wait: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+      now: () => Date.now(),
+    });
+
+    const result = attached ? await shell.executeCommand(`deps-${Date.now()}`, 'npm install') : undefined;
 
     /*
-     * `undefined` means the boltTerminal had not attached yet — `executeCommand` drops the command and
-     * returns nothing (it is not a non-zero exit). On a fresh page the mount effect can reach here
-     * before the terminal's process exists, and the effect re-fires (its deps include `searchParams`),
-     * so a later cycle runs the install once the terminal is up. Treat this as "not yet", NOT a
-     * failure: dismiss the toast quietly and return false so `prepareMountedProject` frees its guard and
-     * lets that later cycle retry. Deliberately NOT `await shell.ready()` — the terminal may never
-     * attach (the workbench can stay closed), and an unbounded wait there hangs the whole mount.
+     * Still nothing: the terminal never attached (the workbench can stay closed, and waiting forever
+     * would hang the mount instead of the install). Treat it as "not yet", NOT a failure — dismiss
+     * the toast quietly and return false so `prepareMountedProject` frees its guard, leaving a later
+     * mount free to try again.
      */
     if (!result) {
       toast.dismiss(toastId);

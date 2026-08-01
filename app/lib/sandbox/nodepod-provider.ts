@@ -13,15 +13,16 @@
  * runtime, and so the interface below documents exactly what we depend on — the CodeSandbox precedent.
  */
 import {
-  createLineBuffer,
+  classifyWatchEvent,
+  createInputBuffer,
   flattenTree,
+  isNodepodWatchExcluded,
   makeDirent,
   oscBegin,
   oscExit,
   oscPrompt,
   toPodPath,
   toRelPath,
-  toWatchEventType,
 } from './nodepod-translate';
 import type {
   SandboxCapabilities,
@@ -210,7 +211,7 @@ function adaptProcess(proc: NodepodProc): SandboxProcess {
  */
 function createShellProcess(client: NodepodClient, workdir: string): SandboxProcess {
   const out = createOutputStream();
-  const lines = createLineBuffer();
+  const input = createInputBuffer();
   let resolveExit: (code: number) => void = () => {};
   const exit = new Promise<number>((resolve) => (resolveExit = resolve));
 
@@ -220,6 +221,28 @@ function createShellProcess(client: NodepodClient, workdir: string): SandboxProc
 
   // Ready immediately: with no `readyOsc`, first output is the readiness signal.
   out.push(oscPrompt());
+
+  /**
+   * Ctrl-C: kill whatever is running and hand back a prompt.
+   *
+   * 🔴 The prompt is not optional. `executeCommand` writes the interrupt and then BLOCKS on
+   * `waitTillOscCode('prompt')` before it will send the command — so a shell that swallows `\x03`
+   * silently never runs another command for the life of the tab.
+   *
+   * 🔴 And it runs OUT OF BAND, never through `queue`. The queue serialises commands, so a queued
+   * interrupt would not fire until the command it is meant to interrupt had already finished —
+   * which is not an interrupt, and would hang `executeCommand` behind a dev server that never exits.
+   * Killing the current process makes its own `finally` emit an exit marker, so a second prompt here
+   * is harmless; a missing one is fatal.
+   */
+  const interrupt = () => {
+    if (!alive) {
+      return;
+    }
+
+    current?.kill();
+    out.push(oscPrompt());
+  };
 
   const run = async (line: string) => {
     const command = line.trim();
@@ -259,8 +282,12 @@ function createShellProcess(client: NodepodClient, workdir: string): SandboxProc
     output: out.stream,
     input: new WritableStream<string>({
       write(chunk) {
-        for (const line of lines.push(chunk)) {
-          queue = queue.then(() => run(line));
+        for (const event of input.push(chunk)) {
+          if (event.type === 'interrupt') {
+            interrupt();
+          } else {
+            queue = queue.then(() => run(event.line));
+          }
         }
       },
     }),
@@ -372,16 +399,97 @@ export function createNodepodProvider(client: NodepodClient, options: NodepodPro
       );
     },
 
-    watchPaths(_watchOptions: SandboxWatchOptions, callback: (events: SandboxWatchEvent[]) => void) {
+    /**
+     * Bridge Nodepod's `fs.watch` (coarse, content-free, unfiltered) onto `watchPaths`.
+     *
+     * Three impedance mismatches, each of which failed SILENTLY in the first version:
+     *
+     *   - the event vocabulary is Node's `'rename' | 'change'`, and `rename` means created OR
+     *     deleted. Mapping it to `update_directory` — which `FilesStore` has no case for — dropped
+     *     every event and left the map empty (see {@link classifyWatchEvent});
+     *   - the events carry no content, and `FilesStore` builds its entry from `buffer`, so an
+     *     unenriched event records the file as EMPTY — the CodeSandbox adapter's `startWatch` carries
+     *     the same warning for the same reason;
+     *   - Nodepod's watcher takes no excludes, so `options.exclude` must be applied HERE or
+     *     `node_modules` floods the map (see {@link isNodepodWatchExcluded}).
+     *
+     * Classification is serialised through one chain because it is async and ORDER IS MEANING: a
+     * recursive delete arrives children-first (MEASURED), and `add_dir` must precede the files inside
+     * it. Concurrent `stat`/`readFile` would interleave those and leave ghosts in the map.
+     */
+    watchPaths(watchOptions: SandboxWatchOptions, callback: (events: SandboxWatchEvent[]) => void) {
+      let disposed = false;
+      const knownFiles = new Set<string>();
+      const knownDirs = new Set<string>();
+      let chain: Promise<void> = Promise.resolve();
+
+      const classify = async (nodepodEvent: string, relPath: string) => {
+        const path = abs(relPath);
+
+        let state = { exists: false, isDirectory: false };
+
+        try {
+          state = { exists: true, isDirectory: isDirectory(await client.fs.stat(path)) };
+        } catch {
+          /* ENOENT — the path is gone. That is the answer, not an error. */
+        }
+
+        const type = classifyWatchEvent(nodepodEvent, state, {
+          knownFile: knownFiles.has(path),
+          knownDir: knownDirs.has(path),
+        });
+
+        let buffer: Uint8Array | undefined;
+
+        if (watchOptions.includeContent && (type === 'add_file' || type === 'change')) {
+          try {
+            buffer = await client.fs.readFile(path);
+          } catch {
+            /*
+             * Deleted between the stat and the read. Reporting it with no buffer would record an
+             * EMPTY file — the exact corruption this enrichment exists to prevent — so drop the
+             * event and let the removal that is already on its way speak for it.
+             */
+            return;
+          }
+        }
+
+        switch (type) {
+          case 'add_dir':
+            knownDirs.add(path);
+            break;
+          case 'add_file':
+          case 'change':
+            knownFiles.add(path);
+            break;
+          default:
+            knownFiles.delete(path);
+            knownDirs.delete(path);
+        }
+
+        if (!disposed) {
+          callback([{ type, path, buffer }]);
+        }
+      };
+
       const handle = client.fs.watch(workdir, { recursive: true }, (event, filename) => {
-        if (!filename) {
+        if (!filename || disposed) {
           return;
         }
 
-        callback([{ type: toWatchEventType(event), path: filename.startsWith('/') ? filename : abs(filename) }]);
+        const relPath = filename.startsWith('/') ? toRelPath(workdir, filename) : filename;
+
+        if (isNodepodWatchExcluded(relPath, watchOptions.exclude)) {
+          return;
+        }
+
+        chain = chain.then(() => classify(event, relPath)).catch(() => {});
       });
 
-      return () => handle.close();
+      return () => {
+        disposed = true;
+        handle.close();
+      };
     },
 
     onServerReady: options.onServerReady,

@@ -281,6 +281,26 @@ export function useMessageParser() {
           ...prevParsed,
           [index]: !reset ? (prevParsed[index] || '') + newParsedContent : newParsedContent,
         }));
+
+        /*
+         * 🔴 THE STREAM IS OVER — close anything the model left open (see `MessageParser.finish`).
+         *
+         * A file action's CLOSING run is what writes the file, so an artifact that never closes is a
+         * row that spins forever under prose claiming the build shipped, and a file that never
+         * reaches the sandbox. The parser is streaming-only and cannot see "no more input is
+         * coming"; only the caller knows that, which is why the call belongs here.
+         *
+         * Observed live 2026-07-31: the model leaked tool-call syntax into the text channel from
+         * inside a `<boltAction>`, left to make a tool call, and never returned — transcript ended
+         * with 1 open artifact, 1 open action, zero closes, after 15,051 billed output tokens.
+         *
+         * `finish` is idempotent and returns immediately when nothing is open, which matters because
+         * this runs on every parse pass once loading is false — including for a restored transcript,
+         * whose parser writes nothing by design (§4.5.4b).
+         */
+        if (!isLoading) {
+          parser.finish(message.id);
+        }
       }
     }
   }, []);
