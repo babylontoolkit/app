@@ -10,6 +10,7 @@ import {
   PREVIEW_BUSY_CEILING_MS,
   previewBusyCopy,
   previewBusyElapsedSeconds,
+  previewBusyLingerMs,
   previewBusyState,
 } from '~/lib/stores/preview-busy';
 import type { PreviewBusyState } from '~/lib/stores/preview-busy';
@@ -195,9 +196,26 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [busyTick, setBusyTick] = useState(0);
   const everLoadedRef = useRef(false);
 
+  /*
+   * Mirrored into a ref because `handlePreviewLoad` is a stable `useCallback` with no deps — it is
+   * handed to the iframe's `onLoad` and must not be rebuilt on every tick of the clock. State read
+   * from inside it would be the value captured at mount, i.e. always `undefined`.
+   */
+  const loadStartedAtRef = useRef<number | undefined>(undefined);
+
+  /* The linger timer, so a new load can cancel one still pending from the previous load. */
+  const lingerTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
   useEffect(() => {
-    setLoadStartedAt(iframeUrl ? Date.now() : undefined);
+    clearTimeout(lingerTimerRef.current);
+
+    const startedAt = iframeUrl ? Date.now() : undefined;
+    loadStartedAtRef.current = startedAt;
+    setLoadStartedAt(startedAt);
   }, [iframeUrl]);
+
+  /* A pending linger must never outlive the pane — that is exactly how a cover becomes permanent. */
+  useEffect(() => () => clearTimeout(lingerTimerRef.current), []);
 
   useEffect(() => {
     if (loadStartedAt === undefined) {
@@ -237,8 +255,29 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
 
   const handlePreviewLoad = useCallback(() => {
     everLoadedRef.current = true;
-    setLoadStartedAt(undefined);
     workbenchStore.notePreviewLoaded();
+
+    const startedAt = loadStartedAtRef.current;
+
+    /*
+     * The preview is READY at this point — the only thing still on screen is the overlay, and the only
+     * reason to hold it is so the count does not come to rest on a number we will not end on
+     * (`previewBusyLingerMs`). Sub-second, and `0` on nearly every load.
+     */
+    const linger = startedAt === undefined ? 0 : previewBusyLingerMs(Date.now() - startedAt);
+
+    const finish = () => {
+      loadStartedAtRef.current = undefined;
+      setLoadStartedAt(undefined);
+    };
+
+    if (linger <= 0) {
+      finish();
+      return;
+    }
+
+    clearTimeout(lingerTimerRef.current);
+    lingerTimerRef.current = setTimeout(finish, linger);
   }, []);
 
   const findMinPortIndex = useCallback(
