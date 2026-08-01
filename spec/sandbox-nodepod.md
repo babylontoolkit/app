@@ -24,7 +24,7 @@ are comparable rather than merely both existing.
 | `npm install` — direct to registry.npmjs.org | **306 packages, 46.6 s, exit 0** |
 | `npm run dev` — our own 8,903-byte `vite.config.ts` | **VITE v8.2.0 ready in 1,244 ms** |
 | Landing page first paint, **deps already optimized** | **0.5 s** |
-| Landing page first paint, **fresh pod** (includes Vite dep optimization) | **17.1 s** |
+| Landing page first paint, **fresh pod** | **17.1 s** — ⚠️ originally attributed to Vite dep optimization; §8 measured it and that is WRONG (~15 s is one-time pod init) |
 | `fs.writeFile` → Vite HMR notification | **66 ms** |
 | `fs.writeFile` → changed UI on screen | **1.0 s** |
 | Click → `PlayerControllerDemo` rendering | **4.6 s**, WebGPU, 1040×640 |
@@ -39,10 +39,14 @@ are comparable rather than merely both existing.
 | `npm run dev` → server ready | 2.5 s | **1.1 s** |
 
 ⚠️ **The two first-paint numbers are both real and must not be quoted interchangeably.** 0.5 s is a
-page load against an already-warm Vite; 17.1 s is the first load on a fresh pod, where Vite still has to
-optimize deps even though `node_modules` came back from IndexedDB. The snapshot cache restores
-packages, **not** `node_modules/.vite/deps`. Baking the dep cache into the restore is the obvious next
-win and is not yet attempted.
+page load against an already-warm pod; 17.1 s is the first load into a fresh one.
+
+⚠️ **The explanation originally given here was wrong, and the wrongness survived because it was
+plausible.** This paragraph used to say the gap was Vite re-optimizing deps because the snapshot cache
+restores packages but not `node_modules/.vite/deps` — which is true as far as it goes, and led
+straight to building §5's dep cache. §5 works and saves ~2.6 s. **The other ~13 s was never dep
+optimization at all** (§8): it is one-time pod-side init that lands on whichever request comes first.
+Nobody had measured the segments, only the total.
 
 `watermark: false` verified — no "nodepod" mark anywhere in the preview DOM.
 
@@ -341,25 +345,69 @@ the restored deps and did not re-optimize — and first paint still measured **1
 | The same 12 modules re-fetched on a warm pod | **32–64 ms each** |
 | Full page reload inside the same pod | **295 / 386 / 401 ms** |
 
-Two requests stalling for *exactly* 10.2 s, twice, is a timeout — not work. `platform.tsx` imports
-only React and is 3,485 B; it cannot take ten seconds to transform, and the host main thread is idle
-throughout. The suspect is inside Nodepod: its constant table carries `MAX_WORKERS_CAP: 4` beside
-`WORKER_REAP_INTERVAL: 1e4`, so a first-load burst that exceeds the worker cap waits for the next
-ten-second reap. Not proven, and no tuning for it is exposed on the public API.
-
 ⚠️ **Do not quote §5 as "the fix for the cold first paint".** It is a real saving (16.4 s → 13.7 s,
 and it removes a genuine re-optimize) and it is now correctly scoped and half the size — but the
-dominant term is this 10.2 s stall, and it was hidden for as long as it was because "cold paint = dep
-optimization" was assumed rather than measured. The measurement that settled it costs one page: fetch
-the modules yourself, warm and cold, and compare.
+dominant term is the stall characterised in §8, and it stayed hidden because "cold paint = dep
+optimization" was assumed rather than measured.
+
+### 8. What the cold first paint ACTUALLY is: ~15 s of one-time pod init
+
+Chased to the bottom on 2026-07-31 by blanking the preview iframe (`src = about:blank` as soon as the
+URL appears), which leaves a genuinely cold pod nobody has requested anything from, then driving the
+request pattern by hand. **Four hypotheses were tested and killed**, and recording them matters more
+than the survivor, because each is the obvious next guess:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| A timeout (10.2 s twice looked like one) | Re-measure across pods | ✗ Varies 3.7–10.9 s — it is work |
+| Request concurrency / `MAX_WORKERS_CAP: 4` | Cold pod, **sequential** requests | ✗ Doc 3.6 s then **1–53 ms each**, no stall. Warm pod at 12-way concurrency: **27 ms total** |
+| Wrong SW prefix (`__virtual__` is documented as the *API* path, `__preview__` as *preview iframe navigation*) | First navigation on a cold pod via each | ✗ **9,956 ms vs 10,885 ms** — identical |
+| Something specific to an iframe *navigation* or a new SW client | New iframe on a warm pod | ✗ **399 / 246 / 265 ms** |
+
+What it is: **a fixed ~15 s of one-time initialization inside the pod, which lands on whichever
+requests arrive first and is not attributable to any module.** Two sequential runs on cold pods, the
+second deliberately reversed:
+
+| Request | Natural order | Reversed order |
+|---|---|---|
+| `/@vite/client` (199 KB) | **3,006 ms** | 32 ms |
+| `/src/main.tsx` (**1.2 KB**) | **9,577 ms** | 1,827 ms |
+| `/@react-refresh` (109 KB) | **1,934 ms** | 7 ms |
+| `/src/pages/Home.tsx` (5.8 KB) | 3 ms | **9,049 ms** |
+| everything else | 1–10 ms | 1–10 ms |
+| **total** | **14,727 ms** | **15,081 ms** |
+
+9.6 s for a 1.2 KB file is not transform; and moving that file later in the order moves the 9 s onto
+whatever now goes first, while the total stays put. So it is Vite's cold pipeline — plugin container,
+transformer init, module-graph setup — running at pod CPU speed. A normal Vite pays this in a few
+hundred milliseconds.
+
+**It is payable off the visible path, but that buys nothing.** Warming the whole entry graph with
+plain `fetch()` costs **11,627 ms** and the subsequent navigation is then **349 ms** — the work simply
+moves, it does not shrink, and firing all 12 requests in parallel (11.6 s) is no faster than the
+browser's own serial waterfall (10.9 s), because the pod serialises them anyway. **No pre-warm was
+shipped**: it is real complexity on the boot path for a measured saving of zero.
+
+⚠️ It is **not** the dep cache (§5 removes ~2.6 s of it and the remaining ~13 s is unchanged with the
+cache present or absent), not the deps themselves (the restored `deps/` holds React only — Babylon
+stays in the lazy `/play` chunk, correctly), and not our config. It is charged **once per pod**, and a
+page reload builds a new pod, so every reload pays it.
+
+The honest summary for anyone comparing against WebContainers: **first paint into a fresh pod is ~13–15 s
+and every subsequent load in that pod is ~300 ms.** The overlay in §6 exists precisely because that
+first number cannot currently be argued down from our side.
 
 ## Still owed
 
-- 🔴 **The 10.2 s first-load stall (§7) — now the whole cold first paint, and the top open number.**
-  Evidence is in §7; what is missing is a cause proven rather than suspected. Next step is to
-  reproduce it against a bare Nodepod pod outside this app (the spike harness still exists) with the
-  request count varied — if it tracks `MAX_WORKERS_CAP: 4`, it is a vendor issue to report upstream
-  with a reproduction, not something to work around here.
+- 🔴 **The ~15 s cold-pod init (§8) — the whole of the cold first paint, and the top open number.**
+  It is characterised as far as it can be from outside: measured, isolated, four wrong explanations
+  eliminated, and shown to be unshrinkable from our side. **What is left is a vendor conversation, not
+  a code change here.** The next step is a minimal reproduction against a bare pod outside this app
+  (boot → `npm run dev` → time the first three requests; the numbers above are the expected shape) to
+  send upstream, plus asking whether that init is cacheable — Nodepod already keeps a
+  `nodepod-wasm-modules` IndexedDB store, so some of it may be intended to be and is not landing.
+  ⚠️ **Do not "optimize" this from our side without a measurement first**: a pre-warm was built and
+  measured during the investigation and saved **zero**, and it would have looked like progress.
 - **A build turn against a live model, and publish → `/play`.** The creation path is driven end to
   end; the generation path is not. `type="file"` artifact writes go through `recordAgentWrite` and the
   same watcher that defect 2 broke, so it is the next thing to check, not an assumed pass.
