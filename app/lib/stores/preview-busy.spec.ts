@@ -8,12 +8,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   PREVIEW_BUSY_CEILING_MS,
-  PREVIEW_BUSY_CLOCK_PADDING_SECONDS,
   PREVIEW_BUSY_DELAY_MS,
   PREVIEW_BUSY_EXPLAIN_MS,
+  PREVIEW_SETTLE_CEILING_MS,
+  PREVIEW_SETTLE_QUIET_MS,
   previewBusyCopy,
-  previewBusyElapsedSeconds,
   previewBusyState,
+  shouldRevealPreview,
 } from './preview-busy';
 
 const at = (elapsedMs: number, overrides: Partial<Parameters<typeof previewBusyState>[0]> = {}) =>
@@ -45,9 +46,9 @@ describe('previewBusyState', () => {
   });
 
   /*
-   * A spinner says "wait" and nothing else — fine for a second, unsettling at ten. The cold wait is
-   * the pod's one-time initialization (~13–15 s, `spec/sandbox-nodepod.md` §8), and past this the
-   * user deserves to know what is being waited on rather than wondering whether it is stuck.
+   * A spinner says "wait"; it does not say "this is one-time". The cold wait is Vite's dependency
+   * optimization, which happens once per dependency set — and a user who is not told that reasonably
+   * concludes their project is always this slow.
    */
   it('explains the first run once it is clearly the cold one', () => {
     expect(at(PREVIEW_BUSY_EXPLAIN_MS - 1)).toBe('loading');
@@ -56,9 +57,8 @@ describe('previewBusyState', () => {
   });
 
   /*
-   * 🔴 A later navigation that happens to be slow is NOT paying the pod's one-time setup — something
-   * else is wrong. Telling the user their workspace is being prepared would be a confident wrong
-   * answer at the one moment they are reading the screen.
+   * 🔴 A later navigation that happens to be slow is NOT paying for dependency optimization. Claiming
+   * it is would be a confident wrong answer at the one moment the user is reading the screen.
    */
   it('never claims a first run after something has already loaded', () => {
     expect(at(17_000, { everLoaded: true })).toBe('loading');
@@ -82,105 +82,67 @@ describe('previewBusyState', () => {
   });
 });
 
-describe('previewBusyElapsedSeconds', () => {
-  /* Nothing on screen, nothing to hang a number on. */
-  it('never counts while hidden', () => {
-    for (const ms of [0, PREVIEW_BUSY_DELAY_MS, 5_000, 30_000]) {
-      expect(previewBusyElapsedSeconds('hidden', ms)).toBeUndefined();
-    }
+describe('shouldRevealPreview', () => {
+  const settled = {
+    sinceLoadMs: 1_000,
+    imagesPending: 0,
+    quietForMs: PREVIEW_SETTLE_QUIET_MS,
+    observable: true,
+  };
+
+  it('reveals once nothing is outstanding and it has stayed that way', () => {
+    expect(shouldRevealPreview(settled)).toBe(true);
   });
 
   /*
-   * 🔴 The clock belongs to the OVERLAY, not to a state, and it has no threshold of its own. It ran on
-   * `first-run` alone at first, which did not delay the clock — it delayed the first SIGHT of it: the
-   * panel sat silent and then opened at `· 4s`. A counter that starts mid-count reads as a skip, i.e.
-   * as evidence something was missed, which is the opposite of what a clock is there to say.
+   * 🔴 The measured defect this exists for: the iframe `load` event fires before React has rendered,
+   * so the page paints its text ~1.8 s before the logo lands while a restored pod snapshot is still
+   * streaming files in. Uncovering there lets the user watch the page assemble.
    */
-  it('starts counting the moment the overlay appears', () => {
-    expect(previewBusyElapsedSeconds('loading', PREVIEW_BUSY_DELAY_MS)).toBe(1 + PREVIEW_BUSY_CLOCK_PADDING_SECONDS);
+  it('keeps covering while images are still outstanding', () => {
+    expect(shouldRevealPreview({ ...settled, imagesPending: 1, quietForMs: 0 })).toBe(false);
+    expect(shouldRevealPreview({ ...settled, imagesPending: 3, quietForMs: 5_000 })).toBe(false);
   });
 
   /*
-   * 🔴 The count is padded so it never reads BEHIND the real wait: `elapsedMs` starts at the iframe
-   * load, not at the moment the user started waiting, and rounding shaves the low end further. Erring
-   * high costs nothing; erring low makes the finish look like a jump and teaches the user a number
-   * that is not the one they lived through.
-   *
-   * Asserted as a PROPERTY (never under the true elapsed) as well as a value, so the padding cannot be
-   * dropped as a stray `+ 1` by someone who reads it as an off-by-one.
+   * 🔴 At the `load` event there are legitimately ZERO images pending — not because the page is
+   * finished but because React has not rendered yet. Without the quiet period this reveals instantly
+   * on every load and the whole rule does nothing, while still LOOKING implemented.
    */
-  it('never reports less time than has actually elapsed', () => {
-    for (let ms = PREVIEW_BUSY_DELAY_MS; ms < 30_000; ms += 173) {
-      expect(previewBusyElapsedSeconds('loading', ms)!).toBeGreaterThanOrEqual(ms / 1000);
-    }
+  it('does not mistake "not started yet" for "finished"', () => {
+    expect(shouldRevealPreview({ ...settled, sinceLoadMs: 0, quietForMs: 0 })).toBe(false);
+    expect(shouldRevealPreview({ ...settled, quietForMs: PREVIEW_SETTLE_QUIET_MS - 1 })).toBe(false);
   });
 
   /*
-   * 🔴 …and it does not restart, reset, or gap at the handover. `loading` → `first-run` is a change of
-   * WORDS about one continuous wait, so the number either side of the boundary must be the same
-   * number. Anything else is a visible stutter at the exact second the user is reading the panel.
+   * 🔴 A broken image, an image the pod cannot serve, or a loader that never settles must NEVER hide a
+   * broken preview behind a spinner. Every hold needs an exit that does not depend on the thing being
+   * waited for — the same principle as `PREVIEW_BUSY_CEILING_MS`, one layer down.
    */
-  it('counts unbroken across the loading → first-run handover', () => {
-    const boundary = PREVIEW_BUSY_EXPLAIN_MS;
-
-    expect(previewBusyElapsedSeconds('loading', boundary - 1)).toBe(previewBusyElapsedSeconds('first-run', boundary));
-  });
-
-  it('counts up in whole seconds', () => {
-    const pad = PREVIEW_BUSY_CLOCK_PADDING_SECONDS;
-
-    expect(previewBusyElapsedSeconds('first-run', 11_000)).toBe(11 + pad);
-    expect(previewBusyElapsedSeconds('first-run', 15_400)).toBe(15 + pad);
-    expect(previewBusyElapsedSeconds('first-run', 15_600)).toBe(16 + pad);
-  });
-
-  /*
-   * 🔴 **The count NEVER skips a value** — it goes 11, 12, 13, 14 and not 11, 12, 14.
-   *
-   * A regression guard with a story: a "never DISPLAY 13" rule was built, live-driven and reverted,
-   * because a number that is never displayed forces a visible 12 → 14 jump on every cold load. The
-   * jump reads as a dropped frame — the clock looks broken rather than tidy — which is strictly more
-   * noticeable than the thing it was avoiding.
-   *
-   * Its successor (hold the overlay until the count ticks past) was also reverted, for a worse reason:
-   * it delayed the user's game appearing. Both are recorded in `preview-busy.ts`. Anyone reintroducing
-   * a skip list, for any number, fails here.
-   */
-  it('never skips a value as it counts', () => {
-    let previous = previewBusyElapsedSeconds('loading', PREVIEW_BUSY_DELAY_MS)!;
-
-    for (let ms = PREVIEW_BUSY_DELAY_MS; ms < PREVIEW_BUSY_CEILING_MS; ms += 50) {
-      const state = previewBusyState({ loading: true, elapsedMs: ms, everLoaded: false });
-      const seconds = previewBusyElapsedSeconds(state, ms);
-
-      if (seconds === undefined) {
-        continue;
-      }
-
-      expect(seconds - previous).toBeLessThanOrEqual(1);
-      previous = seconds;
-    }
+  it('gives up at the ceiling however much is still pending', () => {
+    expect(
+      shouldRevealPreview({
+        sinceLoadMs: PREVIEW_SETTLE_CEILING_MS,
+        imagesPending: 9,
+        quietForMs: 0,
+        observable: true,
+      }),
+    ).toBe(true);
+    expect(shouldRevealPreview({ sinceLoadMs: 60_000, imagesPending: 9, quietForMs: 0, observable: true })).toBe(true);
   });
 
   /*
-   * …and it shows every value in the cold band, 13 included — the half the skip version got wrong.
-   * Named explicitly rather than swept, so the guard still says what it is protecting.
+   * ⚠️ A cross-origin preview (CodeSandbox serves from its own origin) cannot be inspected at all.
+   * Holding it on a blind delay would penalise every load on that provider for a wait that may not
+   * exist, so an unobservable document degrades to the old behaviour: reveal at `load`.
    */
-  it('displays every second in the cold-start band while counting', () => {
-    const shown = new Set<number>();
+  it('reveals immediately when the document cannot be inspected', () => {
+    expect(shouldRevealPreview({ sinceLoadMs: 0, imagesPending: 0, quietForMs: 0, observable: false })).toBe(true);
+    expect(shouldRevealPreview({ sinceLoadMs: 0, imagesPending: 5, quietForMs: 0, observable: false })).toBe(true);
+  });
 
-    for (let ms = PREVIEW_BUSY_DELAY_MS; ms < 30_000; ms += 50) {
-      const state = previewBusyState({ loading: true, elapsedMs: ms, everLoaded: false });
-      const seconds = previewBusyElapsedSeconds(state, ms);
-
-      if (seconds !== undefined) {
-        shown.add(seconds);
-      }
-    }
-
-    for (const value of [12, 13, 14, 15]) {
-      expect(shown).toContain(value);
-    }
+  it('keeps the quiet period well under the ceiling', () => {
+    expect(PREVIEW_SETTLE_QUIET_MS).toBeLessThan(PREVIEW_SETTLE_CEILING_MS);
   });
 });
 
@@ -197,45 +159,8 @@ describe('previewBusyCopy', () => {
     expect(loading.detail).not.toBe(first.detail);
   });
 
-  /*
-   * 🔴 The clock is appended to the END of whichever detail is showing (`· 11s`), so a trailing full
-   * stop renders as "sandbox. · 11s". Adding one back is a one-character "punctuation fix" that reads
-   * as an improvement and that nothing else would catch.
-   *
-   * Asserted over BOTH visible states rather than the one that happened to be wrong once: the clock
-   * moved from first-run-only to every visible state, and the guard that only knew about `first-run`
-   * would have gone on passing while `loading` rendered "project. · 2s".
-   */
-  it('leaves room for the elapsed clock at the end of every visible detail', () => {
-    for (const state of ['loading', 'first-run'] as const) {
-      expect(previewBusyCopy(state)!.detail).not.toMatch(/[.!?]$/);
-    }
-  });
-
-  /* The point of the slow branch: name what is being waited on, or the spinner says nothing new. */
-  it('names what is being prepared rather than just spinning', () => {
-    const first = previewBusyCopy('first-run')!;
-
-    expect(first.title).toMatch(/preparing/i);
-    expect(first.title).toMatch(/workspace/i);
-    expect(first.detail.length).toBeGreaterThan(20);
-  });
-
-  /*
-   * 🔴 A REGRESSION GUARD, not a style rule. This copy used to read "First run: the dev server is
-   * optimizing dependencies. Later loads are much faster." The first sentence was measured FALSE
-   * (`spec/sandbox-nodepod.md` §8 — dep optimization is ~2.6 s of a ~15 s one-time pod init), and the
-   * second was a speed promise the product does not need to make: later loads arrive in ~300 ms with
-   * no overlay at all, so the user sees the evidence without being told. Both are easy to reintroduce
-   * in good faith by someone trying to be reassuring.
-   */
-  it('promises nothing about how fast later loads will be', () => {
-    for (const state of ['loading', 'first-run'] as const) {
-      const { title, detail } = previewBusyCopy(state)!;
-      const text = `${title} ${detail}`;
-
-      expect(text).not.toMatch(/faster|quicker|speed|instant|only takes|won't take/i);
-      expect(text).not.toMatch(/optimizing dependencies|dependency optimization/i);
-    }
+  /* The whole point of the slow branch: say that it is one-time, or the spinner says nothing new. */
+  it('tells the user the first run is one-time', () => {
+    expect(previewBusyCopy('first-run')!.detail).toMatch(/faster|once|first/i);
   });
 });

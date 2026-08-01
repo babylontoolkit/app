@@ -9,8 +9,8 @@ import { previewIdFromUrl, previewUrlWithPath } from '~/lib/stores/preview-url';
 import {
   PREVIEW_BUSY_CEILING_MS,
   previewBusyCopy,
-  previewBusyElapsedSeconds,
   previewBusyState,
+  shouldRevealPreview,
 } from '~/lib/stores/preview-busy';
 import type { PreviewBusyState } from '~/lib/stores/preview-busy';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
@@ -74,9 +74,8 @@ const WINDOW_SIZES: WindowSize[] = [
  * live and usable. `pointer-events-none` because there is nothing here to click and the user must
  * still be able to reach the toolbar above it.
  */
-function PreviewBusyOverlay({ state, elapsedMs }: { state: PreviewBusyState; elapsedMs: number }) {
+function PreviewBusyOverlay({ state }: { state: PreviewBusyState }) {
   const copy = previewBusyCopy(state);
-  const elapsedSeconds = previewBusyElapsedSeconds(state, elapsedMs);
 
   if (!copy) {
     return null;
@@ -91,23 +90,7 @@ function PreviewBusyOverlay({ state, elapsedMs }: { state: PreviewBusyState; ela
       <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-3xl" aria-hidden="true" />
       <div className="text-center">
         <div className="text-base font-medium text-bolt-elements-textPrimary">{copy.title}</div>
-        {/*
-         * The elapsed clock rides at the END of the detail line — the same rule, the same middot,
-         * the same tabular figures and the same tertiary tone as `BootScreen.tsx`, because this is
-         * that panel one pane smaller and a second dialect of "your project is coming up" is exactly
-         * what unifying the two boot surfaces removed.
-         *
-         * Tabular figures matter more here than they look: the text is CENTRED, so without them the
-         * whole line shifts left and right as the digit widths change, once a second, for fifteen
-         * seconds. `aria-live="polite"` on the wrapper is already set, and the seconds are inside it
-         * deliberately — a screen reader announcing the count is the point, not a side effect.
-         */}
-        <div className="mt-1 max-w-xs text-sm text-bolt-elements-textSecondary">
-          {copy.detail}
-          {elapsedSeconds !== undefined && (
-            <span className="ml-1.5 text-bolt-elements-textTertiary tabular-nums">· {elapsedSeconds}s</span>
-          )}
-        </div>
+        <div className="mt-1 max-w-xs text-sm text-bolt-elements-textSecondary">{copy.detail}</div>
       </div>
     </div>
   );
@@ -195,9 +178,82 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [busyTick, setBusyTick] = useState(0);
   const everLoadedRef = useRef(false);
 
+  /* Set at the iframe's `load` event; the overlay then waits for the PAGE to settle (see below). */
+  const [documentLoadedAt, setDocumentLoadedAt] = useState<number | undefined>(undefined);
+
   useEffect(() => {
     setLoadStartedAt(iframeUrl ? Date.now() : undefined);
+    setDocumentLoadedAt(undefined);
   }, [iframeUrl]);
+
+  /*
+   * -----------------------------------------------------------------------------------------------
+   * Hold the cover until the page is COMPLETE, not merely until the document loaded.
+   * -----------------------------------------------------------------------------------------------
+   *
+   * The preview is a React SPA, so the iframe's `load` event fires before React has rendered — and on
+   * a pod restoring from a snapshot the remaining files are still streaming in over the sync-RPC
+   * bridge while React is already painting. Measured: text at 13.2 s, logo at 15.0 s. The overlay was
+   * coming down at 13.2 s and letting the user watch the page assemble.
+   *
+   * ⚠️ Every exit from this loop is bounded and none of them depend on the page cooperating:
+   * a cross-origin document is unobservable and reveals at once, and the ceiling reveals regardless —
+   * a broken image must never hide a broken preview behind a spinner.
+   */
+  useEffect(() => {
+    if (documentLoadedAt === undefined) {
+      return undefined;
+    }
+
+    let quietSince: number | undefined;
+    let lastPending = -1;
+
+    const finish = () => {
+      window.clearInterval(timer);
+      setLoadStartedAt(undefined);
+    };
+
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+
+      let imagesPending = 0;
+      let observable = true;
+
+      try {
+        const doc = iframeRef.current?.contentDocument;
+
+        if (!doc) {
+          observable = false;
+        } else {
+          imagesPending = [...doc.images].filter((img) => !img.complete).length;
+        }
+      } catch {
+        // A cross-origin preview cannot be inspected at all — that is a provider fact, not a failure.
+        observable = false;
+      }
+
+      /* The quiet clock restarts whenever the set of outstanding images CHANGES, not merely when it is non-zero. */
+      if (imagesPending !== lastPending) {
+        lastPending = imagesPending;
+        quietSince = imagesPending === 0 ? now : undefined;
+      } else if (imagesPending === 0 && quietSince === undefined) {
+        quietSince = now;
+      }
+
+      if (
+        shouldRevealPreview({
+          sinceLoadMs: now - documentLoadedAt,
+          imagesPending,
+          quietForMs: quietSince === undefined ? 0 : now - quietSince,
+          observable,
+        })
+      ) {
+        finish();
+      }
+    }, 100);
+
+    return () => window.clearInterval(timer);
+  }, [documentLoadedAt]);
 
   useEffect(() => {
     if (loadStartedAt === undefined) {
@@ -219,16 +275,9 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     return () => clearInterval(timer);
   }, [loadStartedAt]);
 
-  /*
-   * One elapsed reading per render, shared by the state decision and the clock — two `Date.now()`
-   * calls could land either side of a second boundary and show a count that disagrees with the state
-   * that produced it.
-   */
-  const busyElapsedMs = loadStartedAt === undefined ? 0 : Date.now() - loadStartedAt;
-
   const previewBusy = previewBusyState({
     loading: loadStartedAt !== undefined,
-    elapsedMs: busyElapsedMs,
+    elapsedMs: loadStartedAt === undefined ? 0 : Date.now() - loadStartedAt,
     everLoaded: everLoadedRef.current,
   });
 
@@ -236,16 +285,14 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   void busyTick;
 
   /*
-   * 🔴 The overlay comes down the INSTANT the preview is ready — never a moment later.
-   *
-   * A version of this held it for a fraction of a second so the elapsed count would not come to rest
-   * on a particular number. It worked, and it was the wrong trade: the thing being delayed is the
-   * user's own game appearing, which is the entire payoff of the wait. Cosmetics on the way out are
-   * never worth postponing the result. Do not reintroduce a delay here for any reason.
+   * The document is loaded — but the PAGE is not necessarily finished, so this hands off to the settle
+   * effect above rather than uncovering. `notePreviewLoaded` still fires here: the rest of the app is
+   * asking "has the preview loaded", which is true now, and delaying that would change behaviour well
+   * outside this pane.
    */
   const handlePreviewLoad = useCallback(() => {
     everLoadedRef.current = true;
-    setLoadStartedAt(undefined);
+    setDocumentLoadedAt(Date.now());
     workbenchStore.notePreviewLoaded();
   }, []);
 
@@ -1197,7 +1244,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                 setIsSelectionMode={setIsSelectionMode}
                 containerRef={iframeRef}
               />
-              <PreviewBusyOverlay state={previewBusy} elapsedMs={busyElapsedMs} />
+              <PreviewBusyOverlay state={previewBusy} />
             </>
           ) : (
             <div className="flex w-full h-full justify-center items-center bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary">

@@ -462,6 +462,49 @@ round-trip each. That is a change inside Nodepod's threading layer, not a knob �
 patch or an upstream contribution, but now with a named mechanism, a profile and three eliminated
 non-fixes attached, which is what makes it a real conversation rather than a bug report.**
 
+### 10. The preview assembled on screen, and the cause was SNAPSHOT RESTORE (2026-08-01)
+
+Reported as *"the logo displays 1 or 2 seconds later than the text of `Home.tsx`"*. Real, measured, and
+**nothing to do with any commit** — it reproduces identically on the commit before this session's work.
+
+The mechanism is the §9 RPC chattiness wearing a second hat. A pod restoring a persisted snapshot
+writes the whole filesystem back through the same synchronous bridge, and the dev server binds
+**before that finishes** — so React is already rendering while files are still streaming in. The text
+has what it needs; `src/assets/babylon.png` queues behind the remaining restore.
+
+| run | pod snapshot | text (FCP) | logo fetch | fully rendered |
+|---|---|---|---|---|
+| after clearing the pod caches | **none** | 16,217 ms | **8 ms** | 16.2 s |
+| immediately after | **restored** | 13,191 ms | **1,892 ms** | **15.0 s** |
+
+⚠️ **The snapshot is not a regression — it is a 1.2 s WIN that changed the SHAPE of the wait.** It pulls
+first paint 3 s forward and the image only 1.2 s, and the gap between those two gains is what the user
+sees. Anyone reading "1.8 s late" as "snapshots made it slower" has it backwards and will delete a
+working optimisation.
+
+**Three ways this investigation went wrong, all worth copying:**
+
+1. **A confounded A/B nearly buried it.** Baseline samples measured with four tabs open — each running
+   its own pod — produced 9.5 s and 12.8 s, which "proved" the delay was pre-existing variance. It was
+   contention I had created. **A performance A/B with more than one sandbox alive is not a measurement.**
+2. **Clearing the caches "fixed" it, and that was the strongest clue, not the fix.** The next run was
+   slow again. The cleared run was fast *because it had no snapshot to restore* — the fix and the cause
+   were the same fact seen from opposite sides.
+3. **The user said it three times before it was believed.** Same lesson as `waitForMountVisible`: the
+   report was accurate and the measurements were wrong.
+
+**Fixed at the overlay** (`shouldRevealPreview`, `preview-busy.ts`): the cover came down on the iframe's
+`load` event, which fires before React has rendered — so it was uncovering a page that was still
+assembling. It now waits for the page to be COMPLETE (no outstanding images, quiet for 250 ms), bounded
+by a 4 s ceiling, and degrades to revealing at `load` when the document is cross-origin and cannot be
+inspected. Measured after: overlay reveals **375 ms after the logo lands** instead of **51 ms before the
+text paints**; a warm load never shows the overlay at all.
+
+⚠️ **This is NOT the linger that was built and reverted the same day.** That one held the overlay after
+the preview was genuinely READY, to make a digit look nicer, and it delayed the user's game for
+cosmetics. This one covers a page that is visibly incomplete, which is the overlay's actual job. The
+distinction is *ready* vs *complete*, and it is the whole difference between the two changes.
+
 ## Still owed
 
 - 🔴 **The ~15 s cold-pod first paint — profiled to its mechanism in §9, still the top open number.**

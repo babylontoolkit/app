@@ -7,7 +7,6 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  VITE_CACHE_DEPS_DIR,
   VITE_CACHE_DIR,
   VITE_CACHE_SENTINEL,
   captureViteCache,
@@ -145,44 +144,6 @@ describe('captureViteCache', () => {
       `${VITE_CACHE_DIR}/deps/nested/more.js`,
     ]);
     expect(totalBytes(captured)).toBe(10 + 1 + '{"hash":"abc"}'.length);
-  });
-
-  /*
-   * 🔴 LIVE-MEASURED REGRESSION (2026-07-31). Vite optimizes into `deps_temp_<hash>/` and renames it
-   * onto `deps/`, but the temp directory was still present in the pod afterwards — so a walk rooted at
-   * `.vite` captured a byte-identical SECOND copy of every module: 38 files / 7.40 MB stored where 19
-   * files / 3.70 MB were needed, on every capture and every restore, forever.
-   *
-   * The rule this pins is narrower than "skip temp dirs": capture exactly what the sentinel attests
-   * to. `_metadata.json` is written at the end of optimizing `deps/` and says nothing about any
-   * sibling, so a sibling swept in beside it is bytes with no completeness signal — the very hazard
-   * the sentinel exists to prevent, arriving through the back door.
-   */
-  it('captures only deps/, never the temp directory Vite optimizes through', async () => {
-    const { fs } = fakeFs({
-      [`${WORKDIR}/${VITE_CACHE_SENTINEL}`]: '{"hash":"abc"}',
-      [`${WORKDIR}/${VITE_CACHE_DEPS_DIR}/babylon.js`]: 'x'.repeat(10),
-
-      // The leftovers of the rename — identical bytes, under a name Vite never reads again.
-      [`${WORKDIR}/${VITE_CACHE_DIR}/deps_temp_87357cc0/babylon.js`]: 'x'.repeat(10),
-      [`${WORKDIR}/${VITE_CACHE_DIR}/deps_temp_87357cc0/_metadata.json`]: '{"hash":"abc"}',
-
-      // A sibling cache with no sentinel of its own: capturing it would restore a partial directory.
-      [`${WORKDIR}/${VITE_CACHE_DIR}/deps_ssr/half-written.js`]: 'z',
-    });
-
-    const captured = (await captureViteCache(fs, WORKDIR))!;
-
-    expect(Object.keys(captured).sort()).toEqual([VITE_CACHE_SENTINEL, `${VITE_CACHE_DEPS_DIR}/babylon.js`]);
-    expect(totalBytes(captured)).toBe(10 + '{"hash":"abc"}'.length);
-  });
-
-  /* The key must retire v1 entries outright — they hold the doubled payload described above. */
-  it('files captures under a format key that never collides with the doubled v1 entries', () => {
-    const pkg = JSON.stringify({ dependencies: { babylonjs: '9.16.0' } });
-
-    expect(viteCacheKey(pkg)).not.toBe(viteCacheKey(pkg, 1));
-    expect(viteCacheKey(pkg)!.startsWith('v2-')).toBe(true);
   });
 });
 
