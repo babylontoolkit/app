@@ -275,7 +275,13 @@ describe('the synthesised OSC protocol is understood by the REAL shell parser', 
 describe('createLineEditor', () => {
   const cmd = (line: string) => ({ type: 'command', line });
   const PROMPT = '$ ';
-  const editor = () => createLineEditor(() => PROMPT);
+
+  /** Idle unless a test says otherwise — the state an interactive editor is in for most of its life. */
+  const editor = (busy = false) =>
+    createLineEditor(
+      () => PROMPT,
+      () => busy,
+    );
 
   /** The actions half — most rules below are about WHAT RAN, not what was drawn. */
   const run = (input: string, on = editor()) => on.push(input).actions;
@@ -331,14 +337,14 @@ describe('createLineEditor', () => {
   it('reports Ctrl-C as an interrupt and never as part of a command', () => {
     const on = editor();
 
-    expect(run('\x03', on)).toEqual([{ type: 'interrupt' }]);
+    expect(run('\x03', on)).toEqual([{ type: 'interrupt', echoed: false }]);
     expect(on.pending()).toBe('');
     expect(run('npm install\n', on)).toEqual([cmd('npm install')]);
   });
 
   /* The exact byte sequence `executeCommand` writes, as one chunk: interrupt first, then the command. */
   it('handles the real executeCommand sequence in one chunk, in order', () => {
-    expect(run('\x03npm install\n')).toEqual([{ type: 'interrupt' }, cmd('npm install')]);
+    expect(run('\x03npm install\n')).toEqual([{ type: 'interrupt', echoed: false }, cmd('npm install')]);
   });
 
   /* Ctrl-C abandons the half-typed line, exactly as a real shell does. */
@@ -346,7 +352,7 @@ describe('createLineEditor', () => {
     const on = editor();
 
     run('rm -rf /', on);
-    expect(run('\x03', on)).toEqual([{ type: 'interrupt' }]);
+    expect(run('\x03', on)).toEqual([{ type: 'interrupt', echoed: true }]);
     expect(on.pending()).toBe('');
     expect(run('\n', on)).toEqual([cmd('')]);
   });
@@ -392,8 +398,51 @@ describe('createLineEditor', () => {
       expect(editor().push('ls\r').echo).toBe('ls\r\n');
     });
 
-    it('shows ^C for an interrupt, as a real terminal does', () => {
-      expect(editor().push('\x03').echo).toBe('^C\r\n');
+    /*
+     * 🔴 THE RULE THAT CHANGED (2026-08-01), reported as *"why does the Nodepod terminal start with a
+     * `^C` on a couple lines"*. `BoltShell.executeCommand` (upstream `shell.ts`) writes `\x03` before
+     * EVERY command as a defensive "kill whatever might be running, then wait for a clean prompt".
+     * On an idle shell that cancels nothing — so echoing unconditionally printed a `^C` above every
+     * command the app ran, i.e. the app's own protocol chatter rendered as though the user had
+     * cancelled something, in the surface they read to find out what happened.
+     */
+    it('shows ^C when a running command is interrupted', () => {
+      expect(editor(true).push('\x03').echo).toBe('^C\r\n');
+    });
+
+    it('shows ^C when a half-typed line is abandoned', () => {
+      const on = editor();
+      on.push('rm -rf /');
+
+      expect(on.push('\x03').echo).toBe('^C\r\n');
+    });
+
+    it('draws nothing when an interrupt cancels nothing', () => {
+      expect(editor().push('\x03').echo).toBe('');
+    });
+
+    /*
+     * The action must agree with what was drawn. The handler answers `echoed` by re-drawing the
+     * prompt — right after a line break, and `~ $ ~ $ ` without one — so a mismatch here is a visibly
+     * corrupted terminal, in whichever of the two directions the fields disagree.
+     */
+    it('reports echoed exactly when it drew something', () => {
+      for (const [busy, typed] of [
+        [false, ''],
+        [false, 'ls'],
+        [true, ''],
+        [true, 'ls'],
+      ] as Array<[boolean, string]>) {
+        const on = editor(busy);
+        on.push(typed);
+
+        const { echo, actions } = on.push('\x03');
+        const action = actions[0] as { type: 'interrupt'; echoed: boolean };
+
+        expect(action.type).toBe('interrupt');
+        expect(action.echoed).toBe(echo !== '');
+        expect(action.echoed).toBe(busy || typed !== '');
+      }
     });
 
     /* A control character with no editing meaning must not be drawn — it would corrupt the line. */

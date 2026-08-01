@@ -860,6 +860,60 @@ describe('the interactive shell', () => {
   });
 
   /*
+   * 🔴 An idle interrupt signals a prompt WITHOUT re-drawing one (2026-08-01).
+   *
+   * The test above pins that the OSC still fires — it must, or `executeCommand` blocks forever. This
+   * pins the other half: since the editor drew no `^C` and therefore no line break, the shell is
+   * still sitting on the prompt it printed before, and printing a second one appends it to that same
+   * row. The user reads `~ $ ~ $ npm install`.
+   *
+   * Asserting on the visible text is the only way to see it — a signal-only assertion passes with the
+   * prompt drawn twice, which is exactly the bug.
+   */
+  it('does not re-draw the prompt when an interrupt cancels nothing', async () => {
+    const { provider } = makeProvider();
+    const shell = await provider.spawn(NODEPOD_SHELL_COMMAND, []);
+    const seen = readUntil(shell.output, (s) => (s.match(/;prompt/g) ?? []).length >= 2);
+
+    await write(shell, '\x03');
+
+    const output = await seen;
+
+    // The banner prompt drawn at startup, and no second one.
+    expect(output.match(/\$ /g) ?? []).toHaveLength(1);
+    expect(output).not.toContain('^C');
+  });
+
+  /*
+   * The inverse: a real cancellation is acknowledged, and gets a fresh prompt to type at.
+   *
+   * ⚠️ The prompt must be looked for AFTER the `^C`, not anywhere in the output. Asserting
+   * `toContain('$ ')` on the whole buffer passes with the re-draw deleted — the startup prompt is
+   * already in there — which is a test that cannot fail for the reason it names. Found by mutation.
+   */
+  it('echoes ^C and re-draws the prompt when it interrupts a running command', async () => {
+    const { provider } = makeProvider({ 'npm run dev': { neverExits: true } }, true);
+    const shell = await provider.spawn(NODEPOD_SHELL_COMMAND, []);
+
+    await write(shell, 'npm run dev\n');
+    await settle();
+
+    /*
+     * ⚠️ Waits on the prompt OSC, not on the `^C` and not on the prompt TEXT. The OSC is written on
+     * both branches, so this terminates either way and the assertion decides the verdict. Waiting for
+     * the text would HANG when the re-draw is missing — a hang reads as a broken suite rather than as
+     * the defect it is, and a test that hangs on failure is one nobody keeps.
+     */
+    const seen = readUntil(shell.output, (s) => (s.match(/;prompt/g) ?? []).length >= 2);
+    await write(shell, '\x03');
+
+    const output = await seen;
+
+    expect(output).toContain('^C');
+    expect(output.slice(output.indexOf('^C'))).toContain('$ ');
+  });
+
+  /*
    * An interrupt must reach a RUNNING process. Routing it through the command queue would delay it
    * until that process had already exited — which is not an interrupt, and would hang the shell
    * behind a dev server that never returns.

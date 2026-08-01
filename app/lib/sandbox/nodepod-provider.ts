@@ -305,7 +305,15 @@ function createShellProcess(
   let cols = size?.cols ?? 80;
   let rows = size?.rows ?? 15;
 
-  const editor = createLineEditor(() => formatShellPrompt(cwd, workdir));
+  /*
+   * `running` is read through a thunk rather than passed by value: the editor outlives every command,
+   * so it needs the answer at the moment a key arrives, not the answer at construction time (which is
+   * always `false`). Declared below — safe because nothing calls this before the shell is built.
+   */
+  const editor = createLineEditor(
+    () => formatShellPrompt(cwd, workdir),
+    () => running,
+  );
 
   /**
    * Is a command executing right now?
@@ -511,7 +519,7 @@ function createShellProcess(
    * `cd` this design exists to keep — turning the persistent shell back into the one-shot one, at
    * exactly the moment nothing needed interrupting.
    */
-  const interrupt = () => {
+  const interrupt = (echoed: boolean) => {
     if (!alive) {
       return;
     }
@@ -524,7 +532,21 @@ function createShellProcess(
       oneShot?.kill();
     }
 
-    writePrompt();
+    if (echoed) {
+      writePrompt();
+      return;
+    }
+
+    /*
+     * 🔴 Nothing was interrupted, so the editor printed no `^C` and no line break — the shell is still
+     * sitting on the prompt it drew before. Drawing another one appends it to that same line and the
+     * user reads `~ $ ~ $ npm install`.
+     *
+     * The OSC still fires, and that is not optional: `executeCommand` BLOCKS on
+     * `waitTillOscCode('prompt')` before sending its command, so a shell that stays quiet here never
+     * runs another command for the life of the tab. Signal without redraw is exactly the distinction.
+     */
+    write(oscPrompt());
   };
 
   return {
@@ -555,7 +577,7 @@ function createShellProcess(
 
         for (const event of actions) {
           if (event.type === 'interrupt') {
-            interrupt();
+            interrupt(event.echoed);
           } else {
             queue = queue.then(() => run(event.line));
           }

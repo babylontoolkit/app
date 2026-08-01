@@ -222,8 +222,21 @@ export const SHELL_INTERRUPT = '\x03';
 /** DEL and BS: xterm sends one of these per backspace keystroke. */
 const BACKSPACE = /[\x7f\b]/;
 
+/**
+ * Ctrl-C.
+ *
+ * `echoed` is whether the editor drew `^C` and a line break for it, and it exists because the two
+ * halves of an interrupt must agree. The handler answers it by re-drawing the prompt — which is
+ * correct after a line break and produces `~ $ ~ $ ` without one. So the fact travels WITH the
+ * action rather than being re-derived by the caller from state it does not own.
+ */
+export interface ShellInterrupt {
+  type: 'interrupt';
+  echoed: boolean;
+}
+
 /** One thing the shell must do, in the order the bytes arrived. */
-export type ShellInput = { type: 'interrupt' } | { type: 'command'; line: string };
+export type ShellInput = ShellInterrupt | { type: 'command'; line: string };
 
 /**
  * How many commands the line editor remembers for ↑/↓.
@@ -276,7 +289,15 @@ export interface LineEditorResult {
  * Appending — the overwhelmingly common case — echoes the single character and never redraws, so it
  * is unaffected by the limitation.
  */
-export function createLineEditor(getPrompt: () => string) {
+/**
+ * @param isBusy Whether a command is currently running — decides whether Ctrl-C echoes `^C`.
+ *
+ * ⚠️ REQUIRED, with no default, deliberately. The tempting default is `() => false`, and it is the
+ * dangerous one: a caller that forgot to wire it would silently stop echoing `^C` when the user
+ * interrupts a running dev server, which is the one interrupt that most needs acknowledging. A
+ * missing answer should fail to compile, not resolve to the wrong answer.
+ */
+export function createLineEditor(getPrompt: () => string, isBusy: () => boolean) {
   let buffer = '';
   let cursor = 0;
   const history: string[] = [];
@@ -438,11 +459,33 @@ export function createLineEditor(getPrompt: () => string) {
            * the interrupt and the command in separate writes, but a caller that batched them must
            * still see the interrupt first.
            */
+          const interrupted = buffer !== '' || isBusy();
+
           buffer = '';
           cursor = 0;
           historyIndex = -1;
-          echo += '^C\r\n';
-          actions.push({ type: 'interrupt' });
+
+          /*
+           * 🔴 `^C` is echoed only when something was actually interrupted — a command in flight, or
+           * a line part-way typed.
+           *
+           * A real terminal echoes unconditionally because a HUMAN pressed the key, and seeing the
+           * keystroke acknowledged is the point. Here most interrupts are not keystrokes at all:
+           * `BoltShell.executeCommand` writes `\x03` before EVERY command as a defensive "kill
+           * whatever might be running, then wait for a clean prompt" (upstream `shell.ts`). On an
+           * idle shell that cancels nothing, so echoing it printed a `^C` above every single command
+           * the app ran — the app's own protocol chatter rendered as though the user had cancelled
+           * something, in the one surface they read to find out what happened.
+           *
+           * The cost is honest and small: pressing Ctrl-C yourself at an empty idle prompt now shows
+           * nothing, where bash would show `^C`. That is the same no-op, and it is worth trading for
+           * a log that only reports real events.
+           */
+          if (interrupted) {
+            echo += '^C\r\n';
+          }
+
+          actions.push({ type: 'interrupt', echoed: interrupted });
 
           continue;
         }
