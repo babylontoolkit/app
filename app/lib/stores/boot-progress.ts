@@ -256,7 +256,7 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
     case 'sandbox':
       return {
         title: 'Waking your workspace…',
-        detail: 'Starting the project sandbox. After a long sleep this can take up to a minute.',
+        detail: 'Starting the project sandbox. This can take up to a minute.',
       };
     case 'files':
       return {
@@ -294,7 +294,7 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
     case 'creating-workspace':
       return {
         title: 'Preparing your workspace…',
-        detail: 'Starting the project sandbox. On a fresh workspace this can take a moment.',
+        detail: 'Starting the project sandbox. This can take a moment.',
       };
     case 'creating-mount':
       return {

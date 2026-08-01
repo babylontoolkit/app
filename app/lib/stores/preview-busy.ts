@@ -83,13 +83,41 @@ export function previewBusyState({ loading, elapsedMs, everLoaded }: PreviewBusy
 }
 
 /**
+ * Whole seconds to show beside the detail line, or `undefined` when this state gets no clock.
+ *
+ * 🔴 **The clock belongs to `first-run` and to nothing else, for its WHOLE duration** — the gate is
+ * the state, not a second threshold of its own. That is deliberate on both halves:
+ *
+ *  - **Only `first-run`.** It is the long one (~13–15 s, `spec/sandbox-nodepod.md` §9), and a spinner
+ *    with static text over that span reads as *stuck*. The count is the difference between "this is
+ *    broken" and "this takes about fifteen seconds". `loading` is the brief case — a couple of
+ *    seconds, or a later slow load — where a ticking number is noise, and it is the only moving thing
+ *    on the panel, so it draws the eye hardest exactly where it matters least.
+ *  - **From the state's first frame.** An extra threshold would open the longest state with a silent
+ *    second or two, which is precisely the moment the user starts wondering whether it has hung; and
+ *    two numbers that must stay ordered are two numbers that can drift apart. One gate, no drift.
+ *
+ * `Math.round`, matching `BootScreen.tsx` — the two clocks must not disagree about what "11s" means
+ * when a user sees one after the other during a single project open.
+ */
+export function previewBusyElapsedSeconds(state: PreviewBusyState, elapsedMs: number): number | undefined {
+  return state === 'first-run' ? Math.round(elapsedMs / 1000) : undefined;
+}
+
+/**
  * The words for a state. Kept beside the rule so the component stays a dumb renderer, exactly as
  * `bootPhaseCopy` is.
+ *
+ * ⚠️ **`first-run`'s detail ends in NO full stop, and that is deliberate, not an oversight.** The
+ * elapsed clock is appended to the end of that line (`· 11s`), so a trailing period would render as
+ * "sandbox. · 11s". `loading` keeps its full stop precisely because it never gets a clock — the
+ * punctuation differs between the two because the rendering does. Pinned by `preview-busy.spec.ts`,
+ * since "fix the missing full stop" is a one-character change that reads as tidying.
  */
 export function previewBusyCopy(state: PreviewBusyState): { title: string; detail: string } | undefined {
   switch (state) {
     case 'loading':
-      return { title: 'Loading your game…', detail: 'Waiting for the dev server to serve the page.' };
+      return { title: 'Loading your project…', detail: 'The dev server is starting your project.' };
 
     case 'first-run':
       return {
@@ -112,7 +140,7 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
          *    It survived review because it was plausible. Plausible is not measured.
          */
         title: 'Preparing your workspace…',
-        detail: 'Starting a full Node.js environment inside your browser. Your project runs entirely on your machine.',
+        detail: 'Initializing your local project sandbox',
       };
 
     default:

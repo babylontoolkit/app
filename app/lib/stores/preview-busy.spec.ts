@@ -11,6 +11,7 @@ import {
   PREVIEW_BUSY_DELAY_MS,
   PREVIEW_BUSY_EXPLAIN_MS,
   previewBusyCopy,
+  previewBusyElapsedSeconds,
   previewBusyState,
 } from './preview-busy';
 
@@ -80,6 +81,59 @@ describe('previewBusyState', () => {
   });
 });
 
+describe('previewBusyElapsedSeconds', () => {
+  /*
+   * 🔴 The clock is scoped to `first-run` and nothing else. That state is the long one (~13–15 s), and
+   * a spinner with static text over that span reads as STUCK — the count is the difference between
+   * "this is broken" and "this takes about fifteen seconds". On the brief `loading` state a ticking
+   * number is noise, and it is the only moving thing on the panel, so it draws the eye hardest exactly
+   * where it matters least.
+   */
+  it('never counts on any state but first-run', () => {
+    for (const ms of [0, PREVIEW_BUSY_DELAY_MS, 5_000, 30_000]) {
+      expect(previewBusyElapsedSeconds('hidden', ms)).toBeUndefined();
+      expect(previewBusyElapsedSeconds('loading', ms)).toBeUndefined();
+    }
+  });
+
+  /*
+   * 🔴 …and it counts for the WHOLE of first-run, from its very first frame. A second threshold of its
+   * own would open the longest state silent for a beat — exactly when the user starts wondering
+   * whether it has hung — and two numbers that must stay ordered are two numbers that can drift.
+   */
+  it('counts from the first frame of first-run, with no threshold of its own', () => {
+    expect(previewBusyElapsedSeconds('first-run', PREVIEW_BUSY_EXPLAIN_MS)).toBe(4);
+  });
+
+  it('counts up in whole seconds', () => {
+    expect(previewBusyElapsedSeconds('first-run', 11_000)).toBe(11);
+    expect(previewBusyElapsedSeconds('first-run', 15_400)).toBe(15);
+    expect(previewBusyElapsedSeconds('first-run', 15_600)).toBe(16);
+  });
+
+  /* Monotonic: a count that ever goes backwards on screen reads as a glitch, not a clock. */
+  it('never goes backwards as the wait grows', () => {
+    let previous = 0;
+
+    for (let ms = PREVIEW_BUSY_EXPLAIN_MS; ms <= 30_000; ms += 137) {
+      const seconds = previewBusyElapsedSeconds('first-run', ms)!;
+      expect(seconds).toBeGreaterThanOrEqual(previous);
+      previous = seconds;
+    }
+  });
+
+  /* Every frame the state machine calls first-run must produce a number — no silent gap anywhere. */
+  it('produces a count for every elapsed value that yields first-run', () => {
+    for (let ms = PREVIEW_BUSY_EXPLAIN_MS; ms < PREVIEW_BUSY_CEILING_MS; ms += 250) {
+      const state = previewBusyState({ loading: true, elapsedMs: ms, everLoaded: false });
+
+      if (state === 'first-run') {
+        expect(previewBusyElapsedSeconds(state, ms)).toBeTypeOf('number');
+      }
+    }
+  });
+});
+
 describe('previewBusyCopy', () => {
   it('renders nothing at all when hidden', () => {
     expect(previewBusyCopy('hidden')).toBeUndefined();
@@ -91,6 +145,19 @@ describe('previewBusyCopy', () => {
 
     expect(loading.title).not.toBe(first.title);
     expect(loading.detail).not.toBe(first.detail);
+  });
+
+  /*
+   * 🔴 The clock is appended to the END of first-run's detail (`· 11s`), so a trailing full stop there
+   * renders as "sandbox. · 11s". Adding one back is a one-character "punctuation fix" that reads as an
+   * improvement and that nothing else would catch.
+   *
+   * `loading` KEEPS its full stop, and the asymmetry is the point: the punctuation differs because the
+   * rendering differs. Asserting both ways round stops someone "harmonising" them in either direction.
+   */
+  it('leaves room for the elapsed clock at the end of the first-run detail', () => {
+    expect(previewBusyCopy('first-run')!.detail).not.toMatch(/[.!?]$/);
+    expect(previewBusyCopy('loading')!.detail).toMatch(/\.$/);
   });
 
   /* The point of the slow branch: name what is being waited on, or the spinner says nothing new. */
