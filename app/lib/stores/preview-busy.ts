@@ -18,13 +18,18 @@
  * delay too short flashes on every navigation, and a ceiling too long hides a dead preview behind a
  * spinner forever.
  *
- * 🔴 **There is exactly ONE visible state, and that is a fix rather than a simplification.** It used to
- * have two — a plain `loading` and a `first-run` that explained the cold wait — chosen from an
- * `everLoaded` flag. Once the cover started outliving the iframe's `load` event (`shouldRevealPreview`)
- * that flag flipped to true while the overlay was STILL UP, so the user watched the panel go
- * *Loading… → Preparing… → Loading…* mid-wait. Two states describing one continuous wait can always
- * disagree about which one they are in; one state cannot. The elapsed clock carries what the second
- * state was for, and carries it better, because it is a live number rather than a threshold guess.
+ * 🔴 **The TITLE never changes, and the detail line only ever moves FORWARD.** Both of those are
+ * scars. There were once two states with two different titles, chosen from an `everLoaded` flag — and
+ * once the cover started outliving the iframe's `load` event (`shouldRevealPreview`), that flag
+ * flipped while the overlay was STILL UP, so the user watched the panel go *Loading… → Preparing… →
+ * Loading…* mid-wait.
+ *
+ * The lesson was not "one state"; it was that the thing selecting the state must only be able to move
+ * one way. `elapsedMs` can only increase, so a detail keyed off it can advance and can never revert —
+ * the failure above is unreachable by construction rather than by careful ordering. A stable heading
+ * plus a progressing sub-line then buys back what the second state was for: a panel that sits on one
+ * unchanging sentence for 15+ seconds reads as STUCK, and the spinner cannot argue otherwise because a
+ * hung spinner looks exactly the same.
  */
 
 /**
@@ -36,6 +41,19 @@
  * long enough that silence is the worse option.
  */
 export const PREVIEW_BUSY_DELAY_MS = 800;
+
+/**
+ * When the detail line moves on to describing the cold workspace.
+ *
+ * A single unchanging line for 15+ seconds reads as STUCK — the panel gives the user no evidence that
+ * anything is still happening, and the spinner alone is not evidence (a hung spinner looks identical).
+ * Moving the detail on once says "this is a longer job than a page load", which is exactly what has
+ * just become true.
+ *
+ * ⚠️ Below this, the wait genuinely might be an ordinary page load, so claiming a cold workspace would
+ * be a confident wrong answer at the one moment the user is reading the screen.
+ */
+export const PREVIEW_BUSY_PREPARING_MS = 5_000;
 
 /**
  * Stop covering, whatever happens.
@@ -115,10 +133,13 @@ export function shouldRevealPreview({
  * What the pane should be showing.
  *
  * - `hidden` — no load in flight, too early to mention, or past the ceiling.
- * - `loading` — a load is taking long enough to be worth covering. There is no second visible state;
- *   see the header for why the `first-run` branch was removed rather than fixed.
+ * - `loading` — a load is taking long enough to be worth covering.
+ * - `preparing` — …and it has gone on long enough to be a cold workspace rather than a page load.
+ *
+ * ⚠️ `loading` → `preparing` is a change of DETAIL LINE under an unchanging title, never a change of
+ * heading. See the header: a changing heading mid-wait is the defect this shape exists to avoid.
  */
-export type PreviewBusyState = 'hidden' | 'loading';
+export type PreviewBusyState = 'hidden' | 'loading' | 'preparing';
 
 export interface PreviewBusyInput {
   /** Is a document load in flight at all? */
@@ -129,9 +150,16 @@ export interface PreviewBusyInput {
 }
 
 export function previewBusyState({ loading, elapsedMs }: PreviewBusyInput): PreviewBusyState {
-  const worthMentioning = loading && elapsedMs >= PREVIEW_BUSY_DELAY_MS && elapsedMs < PREVIEW_BUSY_CEILING_MS;
+  if (!loading || elapsedMs < PREVIEW_BUSY_DELAY_MS || elapsedMs >= PREVIEW_BUSY_CEILING_MS) {
+    return 'hidden';
+  }
 
-  return worthMentioning ? 'loading' : 'hidden';
+  /*
+   * Keyed on elapsed time ALONE, which is what makes the progression safe: it can only increase, so
+   * the panel can move forward and can never fall back. The predecessor keyed this off `everLoaded`,
+   * a flag that flips in both directions, and the user watched the words revert mid-wait.
+   */
+  return elapsedMs >= PREVIEW_BUSY_PREPARING_MS ? 'preparing' : 'loading';
 }
 
 /**
@@ -163,14 +191,19 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
     return undefined;
   }
 
-  return {
-    title: 'Loading your project…',
+  /*
+   * 🔴 ONE title, shared by both states and written once so the two cannot drift apart. A heading that
+   * changes while the user is reading it is the defect this whole shape exists to avoid, and two
+   * string literals a few lines apart is exactly how that comes back — someone improves one of them.
+   */
+  const title = 'Loading your project…';
 
-    /*
-     * Names the actual work without promising anything unmeasured. An earlier version claimed the
-     * dev server was "optimizing dependencies", which §8 measured as FALSE — that is ~2.6 s of a ~15 s
-     * one-time pod init — and it survived review precisely because it was plausible.
-     */
-    detail: 'Preparing a cold workspace',
-  };
+  /*
+   * Neither line promises anything unmeasured. An earlier version claimed the dev server was
+   * "optimizing dependencies", which `spec/sandbox-nodepod.md` §8 measured as FALSE — that is ~2.6 s
+   * of a ~15 s one-time pod init — and it survived review precisely because it was plausible.
+   */
+  return state === 'preparing'
+    ? { title, detail: 'Preparing a cold project workspace' }
+    : { title, detail: 'Starting the dev server' };
 }

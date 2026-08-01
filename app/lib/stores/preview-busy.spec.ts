@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   PREVIEW_BUSY_CEILING_MS,
   PREVIEW_BUSY_DELAY_MS,
+  PREVIEW_BUSY_PREPARING_MS,
   PREVIEW_SETTLE_CEILING_MS,
   PREVIEW_SETTLE_QUIET_MS,
   previewBusyCopy,
@@ -52,13 +53,42 @@ describe('previewBusyState', () => {
    * state, so no second branch can be reintroduced without failing here.
    */
   it('never changes what it is called part-way through a wait', () => {
-    const seen = new Set<string>();
+    const titles = new Set<string>();
 
     for (let ms = PREVIEW_BUSY_DELAY_MS; ms < PREVIEW_BUSY_CEILING_MS; ms += 250) {
-      seen.add(previewBusyState({ loading: true, elapsedMs: ms }));
+      titles.add(previewBusyCopy(previewBusyState({ loading: true, elapsedMs: ms }))!.title);
     }
 
-    expect([...seen]).toEqual(['loading']);
+    expect([...titles]).toHaveLength(1);
+  });
+
+  /*
+   * 🔴 …and the detail may ADVANCE but must never fall back. This is the actual lesson from the
+   * *Loading… → Preparing… → Loading…* defect: the fault was not having two states, it was selecting
+   * them with `everLoaded`, a flag that moves in both directions. Keyed on elapsed time the
+   * progression is monotonic by construction — asserted here as a sweep so a future selector that can
+   * reverse fails immediately.
+   */
+  it('moves the detail forward and never back', () => {
+    const rank = { loading: 0, preparing: 1 } as const;
+    let previous = -1;
+
+    for (let ms = PREVIEW_BUSY_DELAY_MS; ms < PREVIEW_BUSY_CEILING_MS; ms += 50) {
+      const state = previewBusyState({ loading: true, elapsedMs: ms }) as 'loading' | 'preparing';
+      expect(rank[state]).toBeGreaterThanOrEqual(previous);
+      previous = rank[state];
+    }
+  });
+
+  /*
+   * A panel that sits on one sentence for 15+ seconds reads as STUCK, and a spinner cannot argue
+   * otherwise — a hung one looks identical. Below the threshold the wait might still be an ordinary
+   * page load, so claiming a cold workspace there would be a confident wrong answer.
+   */
+  it('moves on to the cold-workspace line once the wait is clearly not a page load', () => {
+    expect(at(PREVIEW_BUSY_PREPARING_MS - 1)).toBe('loading');
+    expect(at(PREVIEW_BUSY_PREPARING_MS)).toBe('preparing');
+    expect(at(15_000)).toBe('preparing');
   });
 
   /*
@@ -67,13 +97,14 @@ describe('previewBusyState', () => {
    * not a spinner sitting on top of it. Same reason `coversWorkspace` refuses to cover `failed`.
    */
   it('gives up at the ceiling rather than covering a dead preview forever', () => {
-    expect(at(PREVIEW_BUSY_CEILING_MS - 1)).toBe('loading');
+    expect(at(PREVIEW_BUSY_CEILING_MS - 1)).toBe('preparing');
     expect(at(PREVIEW_BUSY_CEILING_MS)).toBe('hidden');
     expect(at(10 * PREVIEW_BUSY_CEILING_MS)).toBe('hidden');
   });
 
   it('orders its own thresholds', () => {
-    expect(PREVIEW_BUSY_DELAY_MS).toBeLessThan(PREVIEW_BUSY_CEILING_MS);
+    expect(PREVIEW_BUSY_DELAY_MS).toBeLessThan(PREVIEW_BUSY_PREPARING_MS);
+    expect(PREVIEW_BUSY_PREPARING_MS).toBeLessThan(PREVIEW_BUSY_CEILING_MS);
   });
 });
 
@@ -92,10 +123,10 @@ describe('previewBusyElapsedSeconds', () => {
    */
   it('reports the true elapsed time', () => {
     expect(previewBusyElapsedSeconds('loading', 1_000)).toBe(1);
-    expect(previewBusyElapsedSeconds('loading', 15_000)).toBe(15);
+    expect(previewBusyElapsedSeconds('preparing', 15_000)).toBe(15);
 
     for (let ms = PREVIEW_BUSY_DELAY_MS; ms < 30_000; ms += 137) {
-      expect(previewBusyElapsedSeconds('loading', ms)).toBe(Math.round(ms / 1000));
+      expect(previewBusyElapsedSeconds('preparing', ms)).toBe(Math.round(ms / 1000));
     }
   });
 
@@ -104,7 +135,7 @@ describe('previewBusyElapsedSeconds', () => {
     let previous = 0;
 
     for (let ms = PREVIEW_BUSY_DELAY_MS; ms <= 40_000; ms += 50) {
-      const seconds = previewBusyElapsedSeconds('loading', ms)!;
+      const seconds = previewBusyElapsedSeconds('preparing', ms)!;
       expect(seconds - previous).toBeGreaterThanOrEqual(0);
       expect(seconds - previous).toBeLessThanOrEqual(1);
       previous = seconds;
@@ -182,10 +213,23 @@ describe('previewBusyCopy', () => {
   });
 
   it('names what is being waited on rather than just spinning', () => {
-    const copy = previewBusyCopy('loading')!;
+    expect(previewBusyCopy('loading')!.title).toMatch(/loading your project/i);
+    expect(previewBusyCopy('loading')!.detail).toMatch(/dev server/i);
+    expect(previewBusyCopy('preparing')!.detail).toMatch(/workspace/i);
+  });
 
-    expect(copy.title).toMatch(/loading your project/i);
-    expect(copy.detail).toMatch(/workspace/i);
+  /*
+   * 🔴 The two visible states share ONE title, byte for byte. They are written from a single constant
+   * for this reason: two literals a few lines apart is exactly how a heading starts changing mid-wait
+   * again, because someone improves one of them and not the other.
+   */
+  it('uses the same title for every visible state', () => {
+    expect(previewBusyCopy('loading')!.title).toBe(previewBusyCopy('preparing')!.title);
+  });
+
+  /* Two lines that say the same thing buy nothing — the point is visible progress. */
+  it('gives the two states different details', () => {
+    expect(previewBusyCopy('loading')!.detail).not.toBe(previewBusyCopy('preparing')!.detail);
   });
 
   /*
@@ -193,8 +237,10 @@ describe('previewBusyCopy', () => {
    * "workspace. · 11s". Adding one back is a one-character "punctuation fix" that reads as an
    * improvement and that nothing else would catch.
    */
-  it('leaves room for the elapsed clock at the end of the detail', () => {
-    expect(previewBusyCopy('loading')!.detail).not.toMatch(/[.!?]$/);
+  it('leaves room for the elapsed clock at the end of every detail', () => {
+    for (const state of ['loading', 'preparing'] as const) {
+      expect(previewBusyCopy(state)!.detail).not.toMatch(/[.!?]$/);
+    }
   });
 
   /*
@@ -206,10 +252,12 @@ describe('previewBusyCopy', () => {
    * faith by someone trying to be reassuring.
    */
   it('promises nothing unmeasured about speed', () => {
-    const { title, detail } = previewBusyCopy('loading')!;
-    const text = `${title} ${detail}`;
+    for (const state of ['loading', 'preparing'] as const) {
+      const { title, detail } = previewBusyCopy(state)!;
+      const text = `${title} ${detail}`;
 
-    expect(text).not.toMatch(/faster|quicker|instant|only takes|won't take/i);
-    expect(text).not.toMatch(/optimizing dependencies|dependency optimization/i);
+      expect(text).not.toMatch(/faster|quicker|instant|only takes|won't take/i);
+      expect(text).not.toMatch(/optimizing dependencies|dependency optimization/i);
+    }
   });
 });
