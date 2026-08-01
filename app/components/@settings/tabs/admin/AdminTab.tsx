@@ -94,6 +94,26 @@ interface TemplateState {
   storage: string;
 }
 
+/**
+ * Whether the **Sandbox template** section is shown (hide-don't-delete, §4.1a).
+ *
+ * 🔴 It is a CodeSandbox control: it promotes the VM alias that new projects FORK (plan T14), which is
+ * a concept the current provider does not have — Nodepod runs in the user's own browser, mints no VM,
+ * and forks no template. So the panel promotes nothing, the route it drives reports "not configured",
+ * and its copy ("New projects fork …") states something that is not true of this deploy.
+ *
+ * ⚠️ **An admin control that describes machinery the running provider does not use is worse than a
+ * missing one** — it reads as a lever the operator has, and the first thing anyone does with a
+ * supply-chain control they believe in is trust what it says about production. Same reasoning as the
+ * inherited Settings toggles that only wired to the fail-closed `/api/chat`.
+ *
+ * Kept, not deleted: the route, the store and the pin logic are all live and correct, and the
+ * CodeSandbox provider is still selectable via `VITE_SANDBOX_PROVIDER`. Flip this to restore it —
+ * one edit, and it gates the FETCH as well, so a hidden panel does not still call the API on every
+ * Admin open.
+ */
+const SHOW_SANDBOX_TEMPLATE = false;
+
 /** The `/api/admin/sandbox-template` payload — `sandbox/template-pin.ts`'s shapes, verbatim (plan T14). */
 interface SandboxTemplatePin {
   target: string;
@@ -242,10 +262,12 @@ export function AdminTab() {
       .then((data) => data && setPrompt(data as PromptState))
       .catch(() => undefined);
 
-    fetch('/api/admin/sandbox-template')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => data && setSandboxTemplate(data as SandboxTemplateState))
-      .catch(() => undefined);
+    if (SHOW_SANDBOX_TEMPLATE) {
+      fetch('/api/admin/sandbox-template')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => data && setSandboxTemplate(data as SandboxTemplateState))
+        .catch(() => undefined);
+    }
   };
 
   useEffect(load, []);
@@ -973,98 +995,102 @@ export function AdminTab() {
        * Sandbox template pin (plan T14) — §4.4's pin-and-promote applied to the RUNTIME. Sibling of
        * "Starter template" above and deliberately next to it: one decides the files a new project gets,
        * the other decides the machine they land on, and both are supply-chain decisions.
+       *
+       * Hidden while the browser-side provider is the one running — see {@link SHOW_SANDBOX_TEMPLATE}.
        */}
-      <section>
-        <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Sandbox template</h3>
-        {!sandboxTemplate ? (
-          <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
-        ) : (
-          <div className="mt-2 flex flex-col gap-2">
-            <div className="text-xs text-bolt-elements-textTertiary">
-              New projects fork <span className="font-mono">{sandboxTemplate.live}</span> ({sandboxTemplate.effective}
-              {sandboxTemplate.effective === 'default' ? ` — ${sandboxTemplate.baked}` : ''})
-            </div>
-
-            {!sandboxTemplate.configured && (
-              <div className="text-xs px-3 py-2 rounded-md bg-amber-500/10 text-amber-600">
-                CodeSandbox is not configured on this deploy — promoting is unavailable.
+      {SHOW_SANDBOX_TEMPLATE && (
+        <section>
+          <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Sandbox template</h3>
+          {!sandboxTemplate ? (
+            <div className="mt-2 text-sm text-bolt-elements-textSecondary">Loading…</div>
+          ) : (
+            <div className="mt-2 flex flex-col gap-2">
+              <div className="text-xs text-bolt-elements-textTertiary">
+                New projects fork <span className="font-mono">{sandboxTemplate.live}</span> ({sandboxTemplate.effective}
+                {sandboxTemplate.effective === 'default' ? ` — ${sandboxTemplate.baked}` : ''})
               </div>
-            )}
 
-            <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor">
-              <div className="flex-1 min-w-0">
-                {sandboxTemplate.pin ? (
-                  <>
-                    <div className="text-sm text-bolt-elements-textPrimary truncate font-mono">
-                      {sandboxTemplate.pin.target}
-                    </div>
-                    <div className="text-xs text-bolt-elements-textTertiary truncate">
-                      {sandboxTemplate.pin.promotedBy} {new Date(sandboxTemplate.pin.promotedAt).toLocaleString()}
-                      {sandboxTemplate.pin.provenance ? ` · ${sandboxTemplate.pin.provenance}` : ''}
-                    </div>
-                  </>
-                ) : (
-                  <div className="text-sm text-bolt-elements-textSecondary">
-                    Nothing promoted — new projects fork whatever the alias points at today.
-                  </div>
-                )}
-              </div>
-              <button
-                className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
-                disabled={busy || !sandboxTemplate.configured}
-                onClick={() => {
-                  /*
-                   * A promotion re-points what EVERY new project boots from, and validating it forks a
-                   * real VM — so it asks for the target by name rather than guessing one, and confirms
-                   * before spending.
-                   */
-                  // `window.` is required: `prompt` is this component's own state (the docs/skills panel).
-                  const target = window.prompt('Template id or alias to promote (e.g. btk@starter):');
-
-                  if (target?.trim()) {
-                    void moveSandboxTemplate({
-                      action: 'promote',
-                      target: target.trim(),
-                      provenance:
-                        window.prompt('What is this build? (optional note for the history)')?.trim() || undefined,
-                    });
-                  }
-                }}
-              >
-                Promote…
-              </button>
-            </div>
-
-            {sandboxTemplate.history
-              .filter((entry) => entry.target !== sandboxTemplate.pin?.target)
-              .map((entry) => (
-                <div
-                  key={entry.target}
-                  className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor"
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-bolt-elements-textPrimary truncate font-mono">{entry.target}</div>
-                    <div className="text-xs text-bolt-elements-textTertiary truncate">
-                      {new Date(entry.promotedAt).toLocaleString()}
-                      {entry.provenance ? ` · ${entry.provenance}` : ''}
-                    </div>
-                  </div>
-                  <button
-                    className="text-xs px-2 py-1 rounded bg-red-500/10 text-red-500 disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => {
-                      if (confirm(`Roll new projects back to ${entry.target}?`)) {
-                        void moveSandboxTemplate({ action: 'rollback', target: entry.target });
-                      }
-                    }}
-                  >
-                    Roll back
-                  </button>
+              {!sandboxTemplate.configured && (
+                <div className="text-xs px-3 py-2 rounded-md bg-amber-500/10 text-amber-600">
+                  CodeSandbox is not configured on this deploy — promoting is unavailable.
                 </div>
-              ))}
-          </div>
-        )}
-      </section>
+              )}
+
+              <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor">
+                <div className="flex-1 min-w-0">
+                  {sandboxTemplate.pin ? (
+                    <>
+                      <div className="text-sm text-bolt-elements-textPrimary truncate font-mono">
+                        {sandboxTemplate.pin.target}
+                      </div>
+                      <div className="text-xs text-bolt-elements-textTertiary truncate">
+                        {sandboxTemplate.pin.promotedBy} {new Date(sandboxTemplate.pin.promotedAt).toLocaleString()}
+                        {sandboxTemplate.pin.provenance ? ` · ${sandboxTemplate.pin.provenance}` : ''}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-sm text-bolt-elements-textSecondary">
+                      Nothing promoted — new projects fork whatever the alias points at today.
+                    </div>
+                  )}
+                </div>
+                <button
+                  className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
+                  disabled={busy || !sandboxTemplate.configured}
+                  onClick={() => {
+                    /*
+                     * A promotion re-points what EVERY new project boots from, and validating it forks a
+                     * real VM — so it asks for the target by name rather than guessing one, and confirms
+                     * before spending.
+                     */
+                    // `window.` is required: `prompt` is this component's own state (the docs/skills panel).
+                    const target = window.prompt('Template id or alias to promote (e.g. btk@starter):');
+
+                    if (target?.trim()) {
+                      void moveSandboxTemplate({
+                        action: 'promote',
+                        target: target.trim(),
+                        provenance:
+                          window.prompt('What is this build? (optional note for the history)')?.trim() || undefined,
+                      });
+                    }
+                  }}
+                >
+                  Promote…
+                </button>
+              </div>
+
+              {sandboxTemplate.history
+                .filter((entry) => entry.target !== sandboxTemplate.pin?.target)
+                .map((entry) => (
+                  <div
+                    key={entry.target}
+                    className="flex items-center gap-2 px-3 py-2 rounded-md border border-bolt-elements-borderColor"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-bolt-elements-textPrimary truncate font-mono">{entry.target}</div>
+                      <div className="text-xs text-bolt-elements-textTertiary truncate">
+                        {new Date(entry.promotedAt).toLocaleString()}
+                        {entry.provenance ? ` · ${entry.provenance}` : ''}
+                      </div>
+                    </div>
+                    <button
+                      className="text-xs px-2 py-1 rounded bg-red-500/10 text-red-500 disabled:opacity-50"
+                      disabled={busy}
+                      onClick={() => {
+                        if (confirm(`Roll new projects back to ${entry.target}?`)) {
+                          void moveSandboxTemplate({ action: 'rollback', target: entry.target });
+                        }
+                      }}
+                    >
+                      Roll back
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {/*
        * Marketplace prices (§4.6). The platform's cost basis — what we believe KIE charges for LLM
