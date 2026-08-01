@@ -41,6 +41,35 @@ function playUrl(shareId: string): string {
   return `${window.location.origin}/play/${shareId}`;
 }
 
+/**
+ * Why the publish failed, with the build log when there is one.
+ *
+ * Rendered in BOTH branches of the dialog: "Update with latest changes" runs the same build as a
+ * first publish, so a live game whose code has since stopped compiling fails in exactly the same way
+ * and deserves exactly the same answer.
+ */
+function BuildFailurePanel({ message, detail }: { message: string; detail?: string }) {
+  /*
+   * `overflow-auto` on BOTH axes with `whitespace-pre`: a compiler diagnostic is column-aligned (the
+   * `~~~~` underline sits under the offending token) and wrapping it destroys the one thing it is
+   * drawing. `max-h` keeps a hundred-error log from pushing the buttons off the dialog.
+   */
+  const logClass =
+    'text-[11px] leading-relaxed font-mono text-bolt-elements-textSecondary ' +
+    'bg-bolt-elements-background-depth-3 rounded p-2 max-h-48 overflow-auto whitespace-pre';
+
+  return (
+    <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-3 flex flex-col gap-2">
+      <span className="text-sm font-medium text-red-500">Your game didn't build, so it wasn't shared</span>
+      <span className="text-xs text-bolt-elements-textSecondary break-words">{message}</span>
+      {detail && <pre className={logClass}>{detail}</pre>}
+      <span className="text-xs text-bolt-elements-textTertiary">
+        Fix it in the editor — or ask in the chat — then try sharing again.
+      </span>
+    </div>
+  );
+}
+
 export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: ShareDialogProps) {
   const { isPublishing, publish, unpublish } = useShareGame();
   const [title, setTitle] = useState(defaultTitle ?? '');
@@ -49,6 +78,16 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
   const [shareId, setShareId] = useState<string | undefined>(existingShareId);
   const [findings, setFindings] = useState<ChecklistFinding[]>([]);
   const [awaitingAck, setAwaitingAck] = useState(false);
+
+  /**
+   * The last failure, kept ON the dialog rather than only in a toast.
+   *
+   * 🔴 A toast cannot do this job: it auto-dismisses, it is one line, and it renders no monospace —
+   * so a compiler diagnostic put in one is unreadable and then gone. The user needs to read a file
+   * path and a line number, and very likely to keep reading it while fixing the code. It stays until
+   * the next attempt.
+   */
+  const [failure, setFailure] = useState<{ message: string; detail?: string } | undefined>();
 
   /**
    * Set when the game published but its source could not be stored, so nobody can remix it (§4.8).
@@ -78,6 +117,7 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
       setShareId(outcome.shareId);
       setFindings([]);
       setAwaitingAck(false);
+      setFailure(undefined);
       setRemixBlockedReason(outcome.remixBlockedReason);
 
       // The publish DID succeed — celebrating it is right. The remix caveat is shown in the dialog below.
@@ -89,11 +129,19 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
       setFindings(outcome.findings);
       setAwaitingAck(true);
     } else {
+      setFailure({ message: outcome.message, detail: outcome.detail });
+
+      /*
+       * The toast still fires — the dialog can be scrolled away from, and a failure that changes
+       * nothing visible reads as a button that did nothing. The panel below is where the detail is.
+       */
       toast.error(outcome.message);
     }
   };
 
   const doPublish = async (acknowledgeWarnings = false) => {
+    // Clear the previous failure FIRST: a stale error panel above a running build reads as this one failing.
+    setFailure(undefined);
     handleOutcome(await publish({ title, description, submitToGallery, acknowledgeWarnings }));
   };
 
@@ -157,6 +205,8 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
                 </div>
               )}
 
+              {failure && <BuildFailurePanel message={failure.message} detail={failure.detail} />}
+
               <div className="flex justify-between items-center">
                 <DialogButton type="danger" onClick={doUnpublish} disabled={isPublishing}>
                   Unpublish
@@ -205,6 +255,8 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
                   ))}
                 </div>
               )}
+
+              {failure && <BuildFailurePanel message={failure.message} detail={failure.detail} />}
 
               {awaitingAck && warnings.length > 0 && (
                 <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/5 p-3 flex flex-col gap-1">

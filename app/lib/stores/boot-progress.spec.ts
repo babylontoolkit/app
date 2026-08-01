@@ -280,7 +280,15 @@ describe('bootPhaseCopy — every phase has its own words', () => {
     const serve = bootPhaseCopy({ step: 'creating-serve' });
 
     expect(install.title.toLowerCase()).toContain('install');
-    expect(install.detail).toContain('npm install');
+
+    /*
+     * ⚠️ Asserts that the detail NAMES the step, not that it spells `npm install`. The literal
+     * command was pinned here originally and turned an ordinary copy edit into a failing test that
+     * had caught nothing — the wording of a sentence shown to a non-developer is the owner's call,
+     * and "Running install on your project" describes the step at least as well as the command does.
+     */
+    expect(install.detail.toLowerCase()).toContain('install');
+
     expect(serve.title.toLowerCase()).toContain('start');
     expect(serve.detail.toLowerCase()).toContain('dev server');
 

@@ -30,6 +30,23 @@ import { buildOutputCandidates } from '~/lib/sandbox/build-output';
 import { SHARE_BUILD_COMMAND } from '~/lib/runtime/build-command';
 import { streamingState } from '~/lib/stores/streaming';
 import { decidePublishReadiness } from '~/lib/chat/publish-readiness';
+import { describeBuildFailure } from '~/lib/share/build-failure';
+
+/**
+ * A build that failed, carrying the compiler log.
+ *
+ * A plain `Error` has one string, and the whole defect being fixed here is that one string was all
+ * the user ever got (`build-failure.ts`). The class exists so the log survives the throw.
+ */
+class BuildFailedError extends Error {
+  constructor(
+    message: string,
+    readonly detail?: string,
+  ) {
+    super(message);
+    this.name = 'BuildFailedError';
+  }
+}
 
 export interface PublishOptions {
   title?: string;
@@ -51,7 +68,13 @@ export type ShareOutcome =
   | { status: 'published'; shareId: string; remixBlockedReason?: string }
   | { status: 'blocked'; findings: ChecklistFinding[] }
   | { status: 'needs-acknowledgement'; findings: ChecklistFinding[] }
-  | { status: 'error'; message: string };
+
+  /**
+   * `detail` is the build log when the build is what failed — the compiler's own words, which name
+   * the file and line. It is ADDITIVE: `message` always stands alone, so a surface that renders only
+   * the message is still correct, merely less useful.
+   */
+  | { status: 'error'; message: string; detail?: string };
 
 /** Read a built output directory into a byte-faithful SerializedFileMap (the publish route's input). */
 async function readDist(finalBuildPath: string): Promise<SerializedFileMap> {
@@ -116,12 +139,19 @@ async function buildProject(): Promise<string> {
 
   if (!buildOutput || buildOutput.exitCode !== 0) {
     /*
-     * A stalled build is NOT a broken project (`build-stall.ts`), and saying so sends the user to the
-     * editor to hunt for a compile error they do not have. Report what actually happened.
+     * 🔴 The compiler log travels. This used to throw a hardcoded sentence and drop `buildOutput`
+     * entirely, so a project that simply did not compile produced "fix the errors in the editor"
+     * with nothing naming the error — and the only conclusion available to the user was that Share
+     * was broken (`build-failure.ts` records the live case). A stalled build is still NOT a broken
+     * project (`build-stall.ts`); `describeBuildFailure` keeps the two apart.
      */
-    throw new Error(
-      buildOutput?.stalledReason ?? 'The project failed to build. Fix the errors in the editor and try again.',
-    );
+    const failure = describeBuildFailure({
+      exitCode: buildOutput?.exitCode ?? 1,
+      output: buildOutput?.output ?? '',
+      stalledReason: buildOutput?.stalledReason,
+    });
+
+    throw new BuildFailedError(failure.message, failure.detail);
   }
 
   const container = await sandbox;
@@ -212,7 +242,11 @@ export function useShareGame() {
 
       return { status: 'error', message: data.message ?? 'Publishing failed. Please try again.' };
     } catch (error) {
-      return { status: 'error', message: error instanceof Error ? error.message : 'Publishing failed.' };
+      return {
+        status: 'error',
+        message: error instanceof Error ? error.message : 'Publishing failed.',
+        detail: error instanceof BuildFailedError ? error.detail : undefined,
+      };
     } finally {
       setIsPublishing(false);
     }
