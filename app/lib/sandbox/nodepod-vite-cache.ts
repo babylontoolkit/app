@@ -22,8 +22,26 @@
  * of a rule we do not own, drifting silently the first time they change it.
  */
 
-/** Where Vite keeps optimized deps, relative to the project root. */
+/** Where Vite keeps its caches, relative to the project root. */
 export const VITE_CACHE_DIR = 'node_modules/.vite';
+
+/**
+ * The ONE directory that is captured and restored: Vite's optimized client deps.
+ *
+ * 🔴 Not `VITE_CACHE_DIR`, and the difference was a live-measured defect (2026-07-31). Vite optimizes
+ * into `node_modules/.vite/deps_temp_<hash>/` and then renames that directory onto `deps/` — but the
+ * temp directory was still present in the pod's VFS afterwards, so walking all of `.vite` captured a
+ * byte-identical SECOND copy of every optimized module. Measured on the real starter: **38 files /
+ * 7.40 MB stored where 19 files / 3.70 MB were needed** — double the IndexedDB write, double the read,
+ * and a junk directory materialized into every restored pod, forever.
+ *
+ * The rule that prevents the whole family of this bug: **capture exactly what the sentinel attests
+ * to.** {@link VITE_CACHE_SENTINEL} is written at the end of optimizing `deps/` and says nothing about
+ * any sibling, so a sibling swept in alongside it is bytes with no completeness signal — which is the
+ * precise hazard the sentinel exists to prevent, arriving through the back door. A future `deps_ssr`
+ * would need its own sentinel, not a wider walk.
+ */
+export const VITE_CACHE_DEPS_DIR = `${VITE_CACHE_DIR}/deps`;
 
 /**
  * The file Vite writes LAST, once optimization has actually finished.
@@ -33,7 +51,7 @@ export const VITE_CACHE_DIR = 'node_modules/.vite';
  * and a partial dep cache restored later is worse than none: Vite would find a metadata file, trust
  * it, and serve modules that are not there.
  */
-export const VITE_CACHE_SENTINEL = `${VITE_CACHE_DIR}/deps/_metadata.json`;
+export const VITE_CACHE_SENTINEL = `${VITE_CACHE_DEPS_DIR}/_metadata.json`;
 
 /**
  * Skip persisting a dep cache larger than this.
@@ -62,8 +80,13 @@ export type ViteCacheFiles = Record<string, Uint8Array>;
  *
  * `FORMAT` is part of the key so that changing what we capture invalidates every stored entry
  * without needing a migration — an old entry under a new format is simply never looked up.
+ *
+ * Format history: **1** captured all of `node_modules/.vite`, which swept in a byte-identical copy of
+ * Vite's transient `deps_temp_<hash>/` (see {@link VITE_CACHE_DEPS_DIR}); **2** captures `deps/` only.
+ * A v1 entry is twice the size it should be and restores a junk directory, so it is retired by never
+ * being looked up rather than migrated.
  */
-export function viteCacheKey(packageJsonText: string, format = 1): string | undefined {
+export function viteCacheKey(packageJsonText: string, format = 2): string | undefined {
   let parsed: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
 
   try {
@@ -221,7 +244,7 @@ export async function pathExists(fs: ViteCacheFs, absPath: string): Promise<bool
 }
 
 /**
- * Read `node_modules/.vite` out of the pod, as project-relative paths.
+ * Read {@link VITE_CACHE_DEPS_DIR} out of the pod, as project-relative paths.
  *
  * Returns `undefined` when the sentinel is absent — i.e. when optimization has not finished. See
  * {@link VITE_CACHE_SENTINEL} for why a half-written directory must never be captured.
@@ -257,7 +280,7 @@ export async function captureViteCache(fs: ViteCacheFs, workdir: string): Promis
     }
   };
 
-  await walk(VITE_CACHE_DIR);
+  await walk(VITE_CACHE_DEPS_DIR);
 
   return Object.keys(files).length > 0 ? files : undefined;
 }

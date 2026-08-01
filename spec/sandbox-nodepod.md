@@ -306,19 +306,60 @@ Three timing rules, each failing silently in a different direction, all pure and
   preview that has not loaded in two minutes has a problem the user needs to SEE, not a spinner on
   top of it. Same reason `coversWorkspace` refuses to cover the `failed` phase.
 
-⚠️ **Neither §5 nor §6 has been re-driven live.** Both are unit-proven and mutation-verified — for
-the cache, writing the sentinel first fails 2 tests and capturing without waiting for it fails 1; for
-the overlay, a zero delay fails 2, removing the ceiling fails 1, and dropping the `everLoaded` gate
-fails 1 — but the 17.1 s → ? number is owed, and nobody has watched the overlay come up and go down
-in a real pane.
+### 7. Both were driven live (2026-07-31), and the headline claim in §5 was WRONG
+
+Driven through the real UI against a real pod: create → cold paint → reload → warm paint, with a
+recorder in the page rather than a stopwatch. What it found is more useful than a confirmation.
+
+**The overlay behaves exactly as specified.** Measured, cold creation: preview URL set at 14,601 ms →
+overlay at 15,600 ms (Δ 999, i.e. the 800 ms delay plus one 100 ms poll) → the first-run explanation
+at 18,600 ms (Δ 3,999) → iframe `load` at 29,815 ms → overlay gone at 29,901 ms. On the reload storm
+described below it correctly stayed on `loading` and never re-claimed "first run", because something
+had already loaded. Nothing owed here.
+
+**🔴 The capture was one directory too wide, and it cost double storage forever.** Vite optimizes into
+`node_modules/.vite/deps_temp_<hash>/` and renames that onto `deps/`, but the temp directory was still
+present in the pod afterwards — so a walk rooted at `.vite` swept in a byte-identical second copy of
+every module. Measured in IndexedDB: **38 files / 7.05 MB stored where 19 files / 3.53 MB were
+needed.** Fixed by capturing {@link VITE_CACHE_DEPS_DIR} only, under a bumped format key so the
+doubled v1 entries are retired rather than migrated. The rule worth keeping is narrower than "skip
+temp dirs": **capture exactly what the sentinel attests to** — `_metadata.json` is written at the end
+of optimizing `deps/` and says nothing about any sibling, so a sibling captured beside it is bytes
+with no completeness signal, which is the very hazard the sentinel exists to prevent.
+
+**🔴 And the 17.1 s was never mostly dep optimization, so §5 could never have fixed it.** The cache
+works — `VITE v8.2.0 ready in 763 ms` with no "new dependencies optimized" line, i.e. Vite accepted
+the restored deps and did not re-optimize — and first paint still measured **13.7 s**. Taken apart:
+
+| Segment | Measured |
+|---|---|
+| Pod answers the first document request | **34 ms** (11,226 B) |
+| Vite startup, deps restored | **763 ms** |
+| Dep-cache capture (read + IndexedDB write) | **50 ms** |
+| Host main thread blocked during the wait | **0 ms** (1,325 ms total, all *before* the preview starts) |
+| `platform.tsx` and `Home.css` | **10,205 ms each, in parallel** |
+| The same 12 modules re-fetched on a warm pod | **32–64 ms each** |
+| Full page reload inside the same pod | **295 / 386 / 401 ms** |
+
+Two requests stalling for *exactly* 10.2 s, twice, is a timeout — not work. `platform.tsx` imports
+only React and is 3,485 B; it cannot take ten seconds to transform, and the host main thread is idle
+throughout. The suspect is inside Nodepod: its constant table carries `MAX_WORKERS_CAP: 4` beside
+`WORKER_REAP_INTERVAL: 1e4`, so a first-load burst that exceeds the worker cap waits for the next
+ten-second reap. Not proven, and no tuning for it is exposed on the public API.
+
+⚠️ **Do not quote §5 as "the fix for the cold first paint".** It is a real saving (16.4 s → 13.7 s,
+and it removes a genuine re-optimize) and it is now correctly scoped and half the size — but the
+dominant term is this 10.2 s stall, and it was hidden for as long as it was because "cold paint = dep
+optimization" was assumed rather than measured. The measurement that settled it costs one page: fetch
+the modules yourself, warm and cold, and compare.
 
 ## Still owed
 
-- **Re-measure the fresh-pod first paint** with the dep cache in place. The whole point of §5 is a
-  number, and the number has not been taken.
-- **Drive the new terminal live.** Pipes, `&&`, `cd`, history and echo are pinned by tests against a
-  fake process manager; they have not been typed into the real workbench. Same live-fidelity caveat
-  the MCP relay carried before testing found three defects in it.
+- 🔴 **The 10.2 s first-load stall (§7) — now the whole cold first paint, and the top open number.**
+  Evidence is in §7; what is missing is a cause proven rather than suspected. Next step is to
+  reproduce it against a bare Nodepod pod outside this app (the spike harness still exists) with the
+  request count varied — if it tracks `MAX_WORKERS_CAP: 4`, it is a vendor issue to report upstream
+  with a reproduction, not something to work around here.
 - **A build turn against a live model, and publish → `/play`.** The creation path is driven end to
   end; the generation path is not. `type="file"` artifact writes go through `recordAgentWrite` and the
   same watcher that defect 2 broke, so it is the next thing to check, not an assumed pass.
@@ -327,3 +368,12 @@ in a real pane.
 - A memory-ceiling check. Nodepod documents a soft budget and exposes `memoryStats()`; our projects
   carry an 8 MB binary payload plus a 12.2 MB Toolkit bundle, so the ceiling matters and is unmeasured.
 - Tab completion in the terminal, and cursor editing on a wrapped line — both named above.
+
+**Closed by the 2026-07-31 live drive** (kept so nobody re-opens them): the fresh-pod re-measurement
+(§7), and the terminal, which was driven in the real workbench — `echo`, `|`, `&&`, `||`, `>` with
+read-back, `$( )`, `grep`, `wc`, `cd` persisting across commands with the prompt tracking it
+(`~ $` → `~/src $` → `~ $`), ↑-history recall executing the recalled line, Ctrl-U, and backspace
+(`echo abcXX` + 2×⌫ ran as `echo abc`). No defects. ⚠️ One trap worth remembering: the **"Bolt
+Terminal" tab is the dev-server process**, so keystrokes there go to Vite's stdin and appear to do
+nothing — a user terminal (the `+` tab) is the one to drive. That cost a detour and briefly looked
+like a broken shell.

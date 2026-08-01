@@ -116,7 +116,7 @@ export const brand: Brand = {
    * The company behind the product — and, DELIBERATELY, what the chat greets the user with: "How can
    * codewrx.ai help you today?" (`ChatBox.tsx`). Confirmed 2026-07-16.
    *
-   * Called out because it reads as a bug and is not one: the product name is "App Builder", so a
+   * Called out because it reads as a bug and is not one: the product name is "Game Builder", so a
    * greeting using `company` looks like someone reached for the wrong field. Leave it. The brand gate
    * cannot protect this — it catches hardcoded names OUTSIDE this file, and this is inside it.
    */
