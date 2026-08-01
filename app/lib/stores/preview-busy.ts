@@ -83,41 +83,86 @@ export function previewBusyState({ loading, elapsedMs, everLoaded }: PreviewBusy
 }
 
 /**
- * Whole seconds to show beside the detail line, or `undefined` when this state gets no clock.
+ * Seconds added to the displayed count so it never reads BEHIND the wait the user is living through.
  *
- * 🔴 **The clock belongs to `first-run` and to nothing else, for its WHOLE duration** — the gate is
- * the state, not a second threshold of its own. That is deliberate on both halves:
+ * `elapsedMs` is measured from the moment the iframe load starts, which is not the moment the user
+ * started waiting — the pane was already mounted and the pod already booting before that. The clock is
+ * therefore structurally a slight under-report, and rounding compounds it at the low end: the overlay
+ * appears at `PREVIEW_BUSY_DELAY_MS` (800 ms) and would otherwise open on `1s` having in truth been
+ * waiting a touch longer.
  *
- *  - **Only `first-run`.** It is the long one (~13–15 s, `spec/sandbox-nodepod.md` §9), and a spinner
- *    with static text over that span reads as *stuck*. The count is the difference between "this is
- *    broken" and "this takes about fifteen seconds". `loading` is the brief case — a couple of
- *    seconds, or a later slow load — where a ticking number is noise, and it is the only moving thing
- *    on the panel, so it draws the eye hardest exactly where it matters least.
- *  - **From the state's first frame.** An extra threshold would open the longest state with a silent
- *    second or two, which is precisely the moment the user starts wondering whether it has hung; and
- *    two numbers that must stay ordered are two numbers that can drift apart. One gate, no drift.
+ * ⚠️ Erring HIGH is the safe direction here and erring low is not, which is why this is a constant
+ * rather than a wash. A clock that reads low makes the finish look like a jump ("it said 14s and then
+ * it was just done"), and it quietly teaches the wrong number to a user who is timing the product with
+ * their own patience. One second over-report costs nothing and keeps the count on the honest side of
+ * the wait.
+ */
+export const PREVIEW_BUSY_CLOCK_PADDING_SECONDS = 1;
+
+/**
+ * Counts that are never shown — the clock steps straight past them to the next second.
+ *
+ * Owner's call, and a superstition rather than a measurement, which is exactly why it is a named
+ * constant with this comment attached: someone will find `13` in a timing module and reasonably
+ * assume it encodes a threshold. It does not. A cold pod lands in the 13–15 s band often enough that
+ * the count would sometimes come to rest on thirteen, and a number that is never DISPLAYED can never
+ * be the number it finishes on.
+ *
+ * Safe because skipping only ever moves the count UP, so both properties the clock actually owes the
+ * user survive: it stays monotonic, and it still never reads behind the true elapsed time. The one
+ * visible consequence is that the second after a skipped value sits on screen for two seconds instead
+ * of one — a barely-perceptible dwell, and the honest price of the rule.
+ */
+export const PREVIEW_BUSY_SKIPPED_SECONDS: readonly number[] = [13];
+
+/**
+ * Seconds to show beside the detail line, or `undefined` when nothing is on screen to show it
+ * beside.
+ *
+ * 🔴 **The clock runs on EVERY visible state, with no threshold of its own — it belongs to the
+ * OVERLAY, not to a state.** `elapsedMs` is measured from the start of the load, and `loading` →
+ * `first-run` is a change of WORDS about one continuous wait, not a new wait. Gating the clock on
+ * `first-run` therefore did not delay the clock, it delayed the *first sight* of it: the panel sat
+ * silent for four seconds and then opened at `· 4s`, which reads as a skip — the one thing a counter
+ * must never do, since a number that jumps is evidence something was missed rather than reassurance
+ * that progress is being made.
+ *
+ * So it starts at `· 1s` when the overlay appears and counts unbroken through the handover. The
+ * threshold that already exists (`PREVIEW_BUSY_DELAY_MS`) is the only gate needed: below it there is
+ * no panel to hang a number on, and above it the count is exactly as old as the thing it is counting.
  *
  * `Math.round`, matching `BootScreen.tsx` — the two clocks must not disagree about what "11s" means
  * when a user sees one after the other during a single project open.
  */
 export function previewBusyElapsedSeconds(state: PreviewBusyState, elapsedMs: number): number | undefined {
-  return state === 'first-run' ? Math.round(elapsedMs / 1000) : undefined;
+  if (state === 'hidden') {
+    return undefined;
+  }
+
+  let seconds = Math.round(elapsedMs / 1000) + PREVIEW_BUSY_CLOCK_PADDING_SECONDS;
+
+  // A `while`, not an `if`: two skipped values in a row must not leave one of them on screen.
+  while (PREVIEW_BUSY_SKIPPED_SECONDS.includes(seconds)) {
+    seconds += 1;
+  }
+
+  return seconds;
 }
 
 /**
  * The words for a state. Kept beside the rule so the component stays a dumb renderer, exactly as
  * `bootPhaseCopy` is.
  *
- * ⚠️ **`first-run`'s detail ends in NO full stop, and that is deliberate, not an oversight.** The
- * elapsed clock is appended to the end of that line (`· 11s`), so a trailing period would render as
- * "sandbox. · 11s". `loading` keeps its full stop precisely because it never gets a clock — the
- * punctuation differs between the two because the rendering does. Pinned by `preview-busy.spec.ts`,
- * since "fix the missing full stop" is a one-character change that reads as tidying.
+ * ⚠️ **NO detail ends in a full stop, and that is deliberate, not an oversight.** The elapsed clock is
+ * appended to the end of whichever line is showing (`· 11s`), so a trailing period renders as
+ * "sandbox. · 11s". Both visible states get the clock, so both drop the stop. Pinned by
+ * `preview-busy.spec.ts`, since "fix the missing full stop" is a one-character change that reads as
+ * tidying and would silently deface the one state nobody re-checked.
  */
 export function previewBusyCopy(state: PreviewBusyState): { title: string; detail: string } | undefined {
   switch (state) {
     case 'loading':
-      return { title: 'Loading your project…', detail: 'The dev server is starting your project.' };
+      return { title: 'Loading your project…', detail: 'The dev server is starting your project' };
 
     case 'first-run':
       return {

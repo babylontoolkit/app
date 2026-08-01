@@ -8,8 +8,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   PREVIEW_BUSY_CEILING_MS,
+  PREVIEW_BUSY_CLOCK_PADDING_SECONDS,
   PREVIEW_BUSY_DELAY_MS,
   PREVIEW_BUSY_EXPLAIN_MS,
+  PREVIEW_BUSY_SKIPPED_SECONDS,
   previewBusyCopy,
   previewBusyElapsedSeconds,
   previewBusyState,
@@ -82,33 +84,82 @@ describe('previewBusyState', () => {
 });
 
 describe('previewBusyElapsedSeconds', () => {
-  /*
-   * 🔴 The clock is scoped to `first-run` and nothing else. That state is the long one (~13–15 s), and
-   * a spinner with static text over that span reads as STUCK — the count is the difference between
-   * "this is broken" and "this takes about fifteen seconds". On the brief `loading` state a ticking
-   * number is noise, and it is the only moving thing on the panel, so it draws the eye hardest exactly
-   * where it matters least.
-   */
-  it('never counts on any state but first-run', () => {
+  /* Nothing on screen, nothing to hang a number on. */
+  it('never counts while hidden', () => {
     for (const ms of [0, PREVIEW_BUSY_DELAY_MS, 5_000, 30_000]) {
       expect(previewBusyElapsedSeconds('hidden', ms)).toBeUndefined();
-      expect(previewBusyElapsedSeconds('loading', ms)).toBeUndefined();
     }
   });
 
   /*
-   * 🔴 …and it counts for the WHOLE of first-run, from its very first frame. A second threshold of its
-   * own would open the longest state silent for a beat — exactly when the user starts wondering
-   * whether it has hung — and two numbers that must stay ordered are two numbers that can drift.
+   * 🔴 The clock belongs to the OVERLAY, not to a state, and it has no threshold of its own. It ran on
+   * `first-run` alone at first, which did not delay the clock — it delayed the first SIGHT of it: the
+   * panel sat silent and then opened at `· 4s`. A counter that starts mid-count reads as a skip, i.e.
+   * as evidence something was missed, which is the opposite of what a clock is there to say.
    */
-  it('counts from the first frame of first-run, with no threshold of its own', () => {
-    expect(previewBusyElapsedSeconds('first-run', PREVIEW_BUSY_EXPLAIN_MS)).toBe(4);
+  it('starts counting the moment the overlay appears', () => {
+    expect(previewBusyElapsedSeconds('loading', PREVIEW_BUSY_DELAY_MS)).toBe(1 + PREVIEW_BUSY_CLOCK_PADDING_SECONDS);
+  });
+
+  /*
+   * 🔴 The count is padded so it never reads BEHIND the real wait: `elapsedMs` starts at the iframe
+   * load, not at the moment the user started waiting, and rounding shaves the low end further. Erring
+   * high costs nothing; erring low makes the finish look like a jump and teaches the user a number
+   * that is not the one they lived through.
+   *
+   * Asserted as a PROPERTY (never under the true elapsed) as well as a value, so the padding cannot be
+   * dropped as a stray `+ 1` by someone who reads it as an off-by-one.
+   */
+  it('never reports less time than has actually elapsed', () => {
+    for (let ms = PREVIEW_BUSY_DELAY_MS; ms < 30_000; ms += 173) {
+      expect(previewBusyElapsedSeconds('loading', ms)!).toBeGreaterThanOrEqual(ms / 1000);
+    }
+  });
+
+  /*
+   * 🔴 …and it does not restart, reset, or gap at the handover. `loading` → `first-run` is a change of
+   * WORDS about one continuous wait, so the number either side of the boundary must be the same
+   * number. Anything else is a visible stutter at the exact second the user is reading the panel.
+   */
+  it('counts unbroken across the loading → first-run handover', () => {
+    const boundary = PREVIEW_BUSY_EXPLAIN_MS;
+
+    expect(previewBusyElapsedSeconds('loading', boundary - 1)).toBe(previewBusyElapsedSeconds('first-run', boundary));
   });
 
   it('counts up in whole seconds', () => {
-    expect(previewBusyElapsedSeconds('first-run', 11_000)).toBe(11);
-    expect(previewBusyElapsedSeconds('first-run', 15_400)).toBe(15);
-    expect(previewBusyElapsedSeconds('first-run', 15_600)).toBe(16);
+    const pad = PREVIEW_BUSY_CLOCK_PADDING_SECONDS;
+
+    expect(previewBusyElapsedSeconds('first-run', 11_000)).toBe(11 + pad);
+    expect(previewBusyElapsedSeconds('first-run', 15_400)).toBe(15 + pad);
+    expect(previewBusyElapsedSeconds('first-run', 15_600)).toBe(16 + pad);
+  });
+
+  /*
+   * 🔴 Skipped values are never rendered, so the count can never come to REST on one — which is the
+   * whole point, since a cold pod finishes in the 13–15 s band and would otherwise sometimes stop
+   * there. Swept across the entire visible window rather than spot-checked, because a skip that works
+   * at one elapsed value and not another is worse than no skip at all.
+   */
+  it('never displays a skipped second, anywhere in the visible window', () => {
+    for (const everLoaded of [false, true]) {
+      for (let ms = 0; ms < PREVIEW_BUSY_CEILING_MS; ms += 50) {
+        const state = previewBusyState({ loading: true, elapsedMs: ms, everLoaded });
+        const seconds = previewBusyElapsedSeconds(state, ms);
+
+        if (seconds !== undefined) {
+          expect(PREVIEW_BUSY_SKIPPED_SECONDS).not.toContain(seconds);
+        }
+      }
+    }
+  });
+
+  /* The skip steps UP to the next second — down would under-report, which the padding exists to prevent. */
+  it('steps up past a skipped second rather than down', () => {
+    for (const skipped of PREVIEW_BUSY_SKIPPED_SECONDS) {
+      const ms = (skipped - PREVIEW_BUSY_CLOCK_PADDING_SECONDS) * 1000;
+      expect(previewBusyElapsedSeconds('first-run', ms)).toBeGreaterThan(skipped);
+    }
   });
 
   /* Monotonic: a count that ever goes backwards on screen reads as a glitch, not a clock. */
@@ -122,13 +173,18 @@ describe('previewBusyElapsedSeconds', () => {
     }
   });
 
-  /* Every frame the state machine calls first-run must produce a number — no silent gap anywhere. */
-  it('produces a count for every elapsed value that yields first-run', () => {
-    for (let ms = PREVIEW_BUSY_EXPLAIN_MS; ms < PREVIEW_BUSY_CEILING_MS; ms += 250) {
-      const state = previewBusyState({ loading: true, elapsedMs: ms, everLoaded: false });
+  /*
+   * Every frame the overlay is on screen must produce a number — swept across the whole visible
+   * window, both branches, so no silent gap can hide anywhere in it.
+   */
+  it('produces a count for every frame the overlay is visible', () => {
+    for (const everLoaded of [false, true]) {
+      for (let ms = 0; ms < PREVIEW_BUSY_CEILING_MS; ms += 250) {
+        const state = previewBusyState({ loading: true, elapsedMs: ms, everLoaded });
 
-      if (state === 'first-run') {
-        expect(previewBusyElapsedSeconds(state, ms)).toBeTypeOf('number');
+        if (state !== 'hidden') {
+          expect(previewBusyElapsedSeconds(state, ms)).toBeTypeOf('number');
+        }
       }
     }
   });
@@ -148,16 +204,18 @@ describe('previewBusyCopy', () => {
   });
 
   /*
-   * 🔴 The clock is appended to the END of first-run's detail (`· 11s`), so a trailing full stop there
-   * renders as "sandbox. · 11s". Adding one back is a one-character "punctuation fix" that reads as an
-   * improvement and that nothing else would catch.
+   * 🔴 The clock is appended to the END of whichever detail is showing (`· 11s`), so a trailing full
+   * stop renders as "sandbox. · 11s". Adding one back is a one-character "punctuation fix" that reads
+   * as an improvement and that nothing else would catch.
    *
-   * `loading` KEEPS its full stop, and the asymmetry is the point: the punctuation differs because the
-   * rendering differs. Asserting both ways round stops someone "harmonising" them in either direction.
+   * Asserted over BOTH visible states rather than the one that happened to be wrong once: the clock
+   * moved from first-run-only to every visible state, and the guard that only knew about `first-run`
+   * would have gone on passing while `loading` rendered "project. · 2s".
    */
-  it('leaves room for the elapsed clock at the end of the first-run detail', () => {
-    expect(previewBusyCopy('first-run')!.detail).not.toMatch(/[.!?]$/);
-    expect(previewBusyCopy('loading')!.detail).toMatch(/\.$/);
+  it('leaves room for the elapsed clock at the end of every visible detail', () => {
+    for (const state of ['loading', 'first-run'] as const) {
+      expect(previewBusyCopy(state)!.detail).not.toMatch(/[.!?]$/);
+    }
   });
 
   /* The point of the slow branch: name what is being waited on, or the spinner says nothing new. */
