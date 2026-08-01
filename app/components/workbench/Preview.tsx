@@ -9,7 +9,7 @@ import { previewIdFromUrl, previewUrlWithPath } from '~/lib/stores/preview-url';
 import {
   PREVIEW_BUSY_CEILING_MS,
   previewBusyCopy,
-  previewBusyElapsedSeconds,
+  previewBusyElapsedLabel,
   previewBusyState,
   shouldRevealPreview,
 } from '~/lib/stores/preview-busy';
@@ -77,7 +77,7 @@ const WINDOW_SIZES: WindowSize[] = [
  */
 function PreviewBusyOverlay({ state, elapsedMs }: { state: PreviewBusyState; elapsedMs: number }) {
   const copy = previewBusyCopy(state);
-  const elapsedSeconds = previewBusyElapsedSeconds(state, elapsedMs);
+  const elapsed = previewBusyElapsedLabel(state, elapsedMs);
 
   if (!copy) {
     return null;
@@ -103,8 +103,8 @@ function PreviewBusyOverlay({ state, elapsedMs }: { state: PreviewBusyState; ela
          */}
         <div className="mt-1 max-w-xs text-sm text-bolt-elements-textSecondary">
           {copy.detail}
-          {elapsedSeconds !== undefined && (
-            <span className="ml-1.5 text-bolt-elements-textTertiary tabular-nums">· {elapsedSeconds}s</span>
+          {elapsed !== undefined && (
+            <span className="ml-1.5 text-bolt-elements-textTertiary tabular-nums">· {elapsed}</span>
           )}
         </div>
       </div>

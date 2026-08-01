@@ -179,6 +179,23 @@ export function previewBusyElapsedSeconds(state: PreviewBusyState, elapsedMs: nu
 }
 
 /**
+ * The clock as it is written: `01s`, `09s`, `15s`.
+ *
+ * Zero-padded to two digits, which is presentation only — {@link previewBusyElapsedSeconds} remains
+ * the number and the truth. Padding is what `tabular-nums` cannot do on its own: figures of equal
+ * width still leave the line one glyph narrower at `9s` than at `10s`, so a CENTRED panel visibly
+ * jumps at that boundary, once, halfway through the wait.
+ *
+ * ⚠️ A floor, never a fixed width — a wait long enough to reach `100s` prints all three digits rather
+ * than being truncated into a wrong number.
+ */
+export function previewBusyElapsedLabel(state: PreviewBusyState, elapsedMs: number): string | undefined {
+  const seconds = previewBusyElapsedSeconds(state, elapsedMs);
+
+  return seconds === undefined ? undefined : `${String(seconds).padStart(2, '0')}s`;
+}
+
+/**
  * The words. Kept beside the rule so the component stays a dumb renderer, exactly as `bootPhaseCopy`
  * is.
  *
@@ -196,7 +213,7 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
    * changes while the user is reading it is the defect this whole shape exists to avoid, and two
    * string literals a few lines apart is exactly how that comes back — someone improves one of them.
    */
-  const title = 'Loading your project…';
+  const title = 'Preparing project workspace…';
 
   /*
    * Neither line promises anything unmeasured. An earlier version claimed the dev server was
@@ -204,6 +221,6 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
    * of a ~15 s one-time pod init — and it survived review precisely because it was plausible.
    */
   return state === 'preparing'
-    ? { title, detail: 'Preparing a cold project workspace' }
-    : { title, detail: 'Starting the dev server' };
+    ? { title, detail: 'Loading your project workspace files' }
+    : { title, detail: 'Starting project workspace sandbox' };
 }

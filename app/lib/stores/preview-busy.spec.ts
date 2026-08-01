@@ -13,6 +13,7 @@ import {
   PREVIEW_SETTLE_CEILING_MS,
   PREVIEW_SETTLE_QUIET_MS,
   previewBusyCopy,
+  previewBusyElapsedLabel,
   previewBusyElapsedSeconds,
   previewBusyState,
   shouldRevealPreview,
@@ -207,15 +208,67 @@ describe('shouldRevealPreview', () => {
   });
 });
 
+describe('previewBusyElapsedLabel', () => {
+  it('shows nothing when there is no panel to show it on', () => {
+    expect(previewBusyElapsedLabel('hidden', 10_000)).toBeUndefined();
+  });
+
+  /*
+   * Zero-padded because `tabular-nums` cannot fix the 9 → 10 boundary: equal-width figures still leave
+   * the line one glyph narrower at `9s`, and the panel is CENTRED, so it visibly jumps once halfway
+   * through the wait.
+   */
+  it('pads single digits to two', () => {
+    expect(previewBusyElapsedLabel('loading', 1_000)).toBe('01s');
+    expect(previewBusyElapsedLabel('loading', 9_000)).toBe('09s');
+    expect(previewBusyElapsedLabel('preparing', 10_000)).toBe('10s');
+    expect(previewBusyElapsedLabel('preparing', 15_000)).toBe('15s');
+  });
+
+  /* Every label the same width across the boundary — that is the entire point of padding it. */
+  it('keeps the width steady either side of ten seconds', () => {
+    for (let s = 1; s < 100; s++) {
+      expect(previewBusyElapsedLabel('preparing', s * 1_000)).toHaveLength(3);
+    }
+  });
+
+  /*
+   * ⚠️ A FLOOR, not a fixed width. A wait long enough to reach three digits must print all of them —
+   * truncating to two would turn 100s into a smaller, wrong number, which is the one thing a gauge
+   * may never do.
+   */
+  it('never truncates a longer wait into a wrong number', () => {
+    expect(previewBusyElapsedLabel('preparing', 100_000)).toBe('100s');
+    expect(previewBusyElapsedLabel('preparing', 119_000)).toBe('119s');
+  });
+
+  /* The label and the number must never disagree about how long it has been. */
+  it('agrees with the underlying count', () => {
+    for (let ms = PREVIEW_BUSY_DELAY_MS; ms < 30_000; ms += 137) {
+      const seconds = previewBusyElapsedSeconds('preparing', ms)!;
+      expect(previewBusyElapsedLabel('preparing', ms)).toBe(`${String(seconds).padStart(2, '0')}s`);
+    }
+  });
+});
+
 describe('previewBusyCopy', () => {
   it('renders nothing at all when hidden', () => {
     expect(previewBusyCopy('hidden')).toBeUndefined();
   });
 
+  /*
+   * ⚠️ Asserts that each line SAYS something, not what it says. The exact wording is the owner's call
+   * and has been revised several times; a regex pinning a phrase turns every copy edit into a failing
+   * test that has caught nothing. The properties worth holding are below: one shared title, two
+   * distinct details, no trailing stop, and no unmeasured promise.
+   */
   it('names what is being waited on rather than just spinning', () => {
-    expect(previewBusyCopy('loading')!.title).toMatch(/loading your project/i);
-    expect(previewBusyCopy('loading')!.detail).toMatch(/dev server/i);
-    expect(previewBusyCopy('preparing')!.detail).toMatch(/workspace/i);
+    for (const state of ['loading', 'preparing'] as const) {
+      const { title, detail } = previewBusyCopy(state)!;
+
+      expect(title.trim().length).toBeGreaterThan(0);
+      expect(detail.trim().length).toBeGreaterThan(10);
+    }
   });
 
   /*
