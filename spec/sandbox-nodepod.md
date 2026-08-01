@@ -407,17 +407,66 @@ The honest summary for anyone comparing against WebContainers: **first paint int
 and every subsequent load in that pod is ~300 ms.** The overlay in §6 exists precisely because that
 first number cannot currently be argued down from our side.
 
+### 9. Profiled to the mechanism (2026-08-01) — chatty synchronous cross-thread RPC
+
+§8 stopped at "one-time pod init" and concluded *vendor problem, go talk to them*. **That conclusion
+was premature and the reasoning behind it was wrong**: it mistook *where the time goes* for *what is
+slow*, and it assumed the code was a black box. It is not. The package ships its **full TypeScript
+source** (`files: ["src","dist"]` — 221 `.ts` files under `node_modules/@scelar/nodepod/src/`), the
+repo is public at `github.com/R1ck404/Nodepod`, and the licence is **MIT + Commons Clause** (not plain
+MIT as previously recorded here): MIT grants modification, Commons Clause only forbids reselling
+Nodepod itself. Author's own words: *"Use it in anything, just don't resell nodepod itself."*
+
+**A Chrome trace of the cold load, aggregated over the hot worker thread (72,290 complete events):**
+
+| Worker event | Total | Count |
+|---|---|---|
+| `RunTask` | 6,862 ms | 17,862 |
+| `v8.callFunction` | 6,546 ms | 13,174 |
+| **`HandlePostMessage`** | **4,160 ms** | **7,050** |
+| `RunMicrotasks` | 4,061 ms | 237 |
+| `FunctionCall` | 2,502 ms | 13,175 |
+| all GC (`MinorGC` + `MajorGC` + scavenger) | ~110 ms | — |
+| `EvaluateScript` / `v8.run` | 74 ms / 61 ms | 1 / 1 |
+
+**It is not compilation and it is not GC** — both are rounding errors. It is **~7,000 cross-thread
+messages**. `src/threading/lazy-fs-client.ts` says why in its own header: *"Synchronous fs proxy client
+for lean spawn mode. The process worker blocks on a SAB + `Atomics.wait` round-trip to the main
+thread"* — **one `postMessage` per filesystem call**. Vite's cold start resolves modules by stat-ing
+and reading thousands of candidate paths, and each one is a blocking round trip.
+
+**Three fixes were tried against the real number and all three measured nothing.** Recording them so
+nobody re-runs them:
+
+| Attempt | Rationale | Result |
+|---|---|---|
+| Raise the worker transform cache 512 → 32,768 entries, 24 MB → 512 MB | `getWorkerTransformCache()` is a hardcoded singleton LRU; a Vite graph plausibly thrashes it | 13,597 → **14,819 ms** (worse/noise) |
+| `Nodepod.boot({ memory: { transformCacheSize } })` | it is a documented public option | ✗ **cannot work** — it sizes the *main-thread* `MemoryHandler` cache, and `memoryStats()` says outright *"main thread no longer runs a ScriptEngine"*. The cache that matters is the worker singleton, which takes no options |
+| `spawnSnapshot: 'full'` | `'lean'` (the default whenever SAB exists — i.e. always for us) excludes `node_modules` from spawn snapshots and hydrates lazily over exactly that fs proxy | 13,597 → **13,471 ms** (nothing). Plumbing verified at `sdk/nodepod.ts:320-323`, so the option really was applied |
+
+⚠️ **The `transformCacheSize` one is the lesson.** It is a real, documented, type-checked boot option
+that reads exactly like the fix, and setting it would have changed nothing while looking like
+diligence — the kind of change that gets shipped, believed, and defended. It only fell over because the
+number was measured afterwards.
+
+**Where that leaves it.** The remaining cost is architectural: a synchronous per-fs-call RPC between
+the process worker and the main thread. Shrinking it means batching those calls, or serving them from
+the SAB-backed `SharedVFS` (`src/threading/shared-vfs.ts`, allocated lazily today) instead of a
+round-trip each. That is a change inside Nodepod's threading layer, not a knob — **so it is still a
+patch or an upstream contribution, but now with a named mechanism, a profile and three eliminated
+non-fixes attached, which is what makes it a real conversation rather than a bug report.**
+
 ## Still owed
 
-- 🔴 **The ~15 s cold-pod init (§8) — the whole of the cold first paint, and the top open number.**
-  It is characterised as far as it can be from outside: measured, isolated, four wrong explanations
-  eliminated, and shown to be unshrinkable from our side. **What is left is a vendor conversation, not
-  a code change here.** The next step is a minimal reproduction against a bare pod outside this app
-  (boot → `npm run dev` → time the first three requests; the numbers above are the expected shape) to
-  send upstream, plus asking whether that init is cacheable — Nodepod already keeps a
-  `nodepod-wasm-modules` IndexedDB store, so some of it may be intended to be and is not landing.
-  ⚠️ **Do not "optimize" this from our side without a measurement first**: a pre-warm was built and
-  measured during the investigation and saved **zero**, and it would have looked like progress.
+- 🔴 **The ~15 s cold-pod first paint — profiled to its mechanism in §9, still the top open number.**
+  It is **~7,000 synchronous per-fs-call `postMessage` round-trips** between the process worker and the
+  main thread (`src/threading/lazy-fs-client.ts`), not compilation and not GC. The fix is batching
+  those calls or serving them from the SAB-backed `SharedVFS` — a change in Nodepod's threading layer,
+  deliverable as a `pnpm patch` against `src/` (we have the full TypeScript source) and offerable
+  upstream. ⚠️ **Read §9's table of three eliminated non-fixes before touching this**, especially
+  `memory.transformCacheSize`: it is a documented public option that reads exactly like the fix, is
+  type-checked, and provably cannot work. **Every change here is measured against the cold number or
+  it does not ship** — a pre-warm and two cache knobs each looked like progress and each saved zero.
 - **A build turn against a live model, and publish → `/play`.** The creation path is driven end to
   end; the generation path is not. `type="file"` artifact writes go through `recordAgentWrite` and the
   same watcher that defect 2 broke, so it is the next thing to check, not an assumed pass.

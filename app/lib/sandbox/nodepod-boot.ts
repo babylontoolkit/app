@@ -137,6 +137,13 @@ async function connect(): Promise<BootedNodepod> {
       // Their mark, not ours (§2.5 — every brand surface comes from `app/config/brand.ts`).
       watermark: false,
 
+      /*
+       * ⚠️ `spawnSnapshot` is deliberately LEFT AT ITS DEFAULT ('lean'), and that is a measured
+       * decision rather than an omission — see `spec/sandbox-nodepod.md` §9. 'full' was tried against
+       * the cold first paint and moved it 13,597 ms → 13,471 ms, i.e. nothing, while costing a copy of
+       * `node_modules` into every spawn snapshot. Do not set it without re-measuring.
+       */
+
       onServerReady: (port: number, url: string) => hub.emit(port, url),
     });
 
