@@ -127,7 +127,7 @@ async function connect(): Promise<BootedNodepod> {
 
   try {
     // Not destructured: the naming-convention rule reserves PascalCase for types, and `Nodepod` is a class.
-    const sdk = await import('@scelar/nodepod');
+    const sdk = await import('@babylonjs-toolkit/nodepod');
 
     const pod = await sdk.Nodepod.boot({
       workdir: NODEPOD_WORKDIR,

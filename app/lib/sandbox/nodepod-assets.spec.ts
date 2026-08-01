@@ -7,7 +7,7 @@
  * moment the dependency is bumped, and the failure is not an error: the browser registers a service
  * worker from one version against a runtime from another, and previews 404 with nothing to trace.
  *
- * Bump `@scelar/nodepod` without running `pnpm sync:nodepod` and this fails loudly instead.
+ * Bump `@babylonjs-toolkit/nodepod` without running `pnpm sync:nodepod` and this fails loudly instead.
  */
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';

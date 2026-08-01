@@ -158,8 +158,10 @@ const MAY_IMPORT_NODEPOD_SDK: Record<string, string> = {
 };
 
 describe('the sandbox seam is default-deny', () => {
-  it('no module outside the boot module imports @scelar/nodepod', () => {
-    const offenders = filesReferencing('@scelar/nodepod').filter((file) => !(file in MAY_IMPORT_NODEPOD_SDK));
+  it('no module outside the boot module imports @babylonjs-toolkit/nodepod', () => {
+    const offenders = filesReferencing('@babylonjs-toolkit/nodepod').filter(
+      (file) => !(file in MAY_IMPORT_NODEPOD_SDK),
+    );
 
     expect(offenders).toEqual([]);
   });
@@ -169,7 +171,7 @@ describe('the sandbox seam is default-deny', () => {
      * Without the control, deleting the boot module — or breaking `sourceWithoutComments` so it strips
      * code rather than comments — makes the test above pass by matching nothing at all.
      */
-    expect(filesReferencing('@scelar/nodepod')).toContain('app/lib/sandbox/nodepod-boot.ts');
+    expect(filesReferencing('@babylonjs-toolkit/nodepod')).toContain('app/lib/sandbox/nodepod-boot.ts');
   });
 
   /*
@@ -179,7 +181,7 @@ describe('the sandbox seam is default-deny', () => {
    * specification (`spec/sandbox-seam.md`).
    */
   it('the adapter itself never imports the SDK — it takes an injected client', () => {
-    expect(filesReferencing('@scelar/nodepod')).not.toContain('app/lib/sandbox/nodepod-provider.ts');
+    expect(filesReferencing('@babylonjs-toolkit/nodepod')).not.toContain('app/lib/sandbox/nodepod-provider.ts');
   });
 
   it('no module outside the adapter imports @webcontainer/api', () => {

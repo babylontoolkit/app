@@ -28,13 +28,13 @@ export const NODEPOD_PUBLIC_ASSETS = ['__sw__.js', '__worker__.js'];
 /**
  * Locate the installed package without deep-importing it.
  *
- * `@scelar/nodepod`'s `exports` map does not expose `./package.json` or `./dist/*`, so
- * `require.resolve('@scelar/nodepod/package.json')` throws. Resolving the package ENTRY and walking
+ * `@babylonjs-toolkit/nodepod`'s `exports` map does not expose `./package.json` or `./dist/*`, so
+ * `require.resolve('@babylonjs-toolkit/nodepod/package.json')` throws. Resolving the package ENTRY and walking
  * up from it is the form that works against an exports-restricted package.
  */
 export function nodepodDistDir() {
   const require = createRequire(import.meta.url);
-  const entry = require.resolve('@scelar/nodepod');
+  const entry = require.resolve('@babylonjs-toolkit/nodepod');
 
   return dirname(entry);
 }
