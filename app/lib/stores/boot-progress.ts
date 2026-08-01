@@ -21,7 +21,7 @@ export type BootPhase =
    * The `/remix/:shareId` clone, BEFORE the builder exists. Set by the remix route while `/api/remix`
    * runs and deliberately left standing across its `navigate('/')` — the atom is module-level, so the
    * builder's `BootScreen` picks up mid-phrase and the user sees ONE continuous surface from "Making
-   * your copy…" through "Waking your workspace…" instead of a spinner that blinks out and restarts.
+   * your copy" through "Waking your workspace" instead of a spinner that blinks out and restarts.
    * The mount path's own phases overwrite it; its `finally` still resets to idle on every exit.
    */
   | { step: 'remixing' }
@@ -250,17 +250,17 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
       };
     case 'remixing':
       return {
-        title: 'Making your copy…',
+        title: 'Making your copy',
         detail: 'Cloning this game into your account.',
       };
     case 'sandbox':
       return {
-        title: 'Waking your workspace…',
-        detail: 'Starting the project sandbox. After a long sleep this can take up to a minute.',
+        title: 'Waking your workspace',
+        detail: 'Starting project sandbox. This can take a moment.',
       };
     case 'files':
       return {
-        title: 'Loading project files…',
+        title: 'Loading project files',
         detail:
           phase.done !== undefined && phase.total !== undefined
             ? `${phase.done} of ${phase.total} files`
@@ -268,7 +268,7 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
       };
     case 'prepare':
       return {
-        title: 'Getting the project ready…',
+        title: 'Getting the project ready',
         detail: 'Checking dependencies and the dev server.',
       };
     case 'settling':
@@ -278,33 +278,33 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          * is beginning here — the last of the same files is arriving — so "Finishing" rather than a
          * heading that reads like another job starting.
          */
-        title: 'Finishing project files…',
-        detail: 'Waiting for the last files to arrive in your workspace.',
+        title: 'Reading project files',
+        detail: 'Reading files as they arrive in your workspace.',
       };
     case 'importing':
       return {
-        title: 'Importing your project…',
+        title: 'Importing your project',
         detail: 'Writing the imported files into your workspace.',
       };
     case 'creating-starter':
       return {
-        title: 'Creating your project…',
-        detail: 'Downloading the starter template.',
+        title: 'Creating your project',
+        detail: 'Downloading the starter game template.',
       };
     case 'creating-workspace':
       return {
-        title: 'Preparing your workspace…',
-        detail: 'Starting the project sandbox. On a fresh workspace this can take a moment.',
+        title: 'Preparing your workspace',
+        detail: 'Starting project sandbox. This can take a moment.',
       };
     case 'creating-mount':
       return {
-        title: 'Writing project files…',
+        title: 'Writing project files',
         detail: 'Copying the starter into your workspace.',
       };
     case 'creating-finalize':
       return {
-        title: 'Almost ready…',
-        detail: 'Registering the project and waiting for it to appear.',
+        title: 'Almost ready',
+        detail: 'Registering project and waiting for it to appear.',
       };
     case 'creating-settle':
       return {
@@ -315,12 +315,12 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          * no idea which one they were watching.
          */
         title: 'Creating project files',
-        detail: 'Finishing the starter files and settling your workspace…',
+        detail: 'Finishing starter files and settling your workspace',
       };
     case 'creating-install':
       return {
-        title: 'Installing dependencies…',
-        detail: 'Running npm install in your project. The first one takes the longest.',
+        title: 'Installing dependencies',
+        detail: 'Running install on your project. This can take a moment.',
       };
     case 'creating-serve':
       return {
@@ -329,10 +329,10 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          * at their own running project, and naming it is what makes the preview appearing feel like the
          * end of a sequence rather than something that eventually showed up.
          */
-        title: 'Starting your project…',
+        title: 'Starting your project',
         detail: 'Launching the dev server and loading the starter home page.',
       };
     default:
-      return { title: 'Opening project…', detail: 'Fetching the conversation and project record.' };
+      return { title: 'Opening project', detail: 'Fetching the conversation and project record.' };
   }
 }

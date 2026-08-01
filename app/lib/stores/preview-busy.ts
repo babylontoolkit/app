@@ -53,7 +53,7 @@ export const PREVIEW_BUSY_DELAY_MS = 800;
  * ⚠️ Below this, the wait genuinely might be an ordinary page load, so claiming a cold workspace would
  * be a confident wrong answer at the one moment the user is reading the screen.
  */
-export const PREVIEW_BUSY_PREPARING_MS = 5_000;
+export const PREVIEW_BUSY_PREPARING_MS = 6_000;
 
 /**
  * Stop covering, whatever happens.
@@ -213,7 +213,7 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
    * changes while the user is reading it is the defect this whole shape exists to avoid, and two
    * string literals a few lines apart is exactly how that comes back — someone improves one of them.
    */
-  const title = 'Preparing project workspace…';
+  const title = 'Initializing development environment';
 
   /*
    * Neither line promises anything unmeasured. An earlier version claimed the dev server was
@@ -221,6 +221,6 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
    * of a ~15 s one-time pod init — and it survived review precisely because it was plausible.
    */
   return state === 'preparing'
-    ? { title, detail: 'Loading your project workspace files' }
-    : { title, detail: 'Starting project workspace sandbox' };
+    ? { title, detail: 'Preparing your project workspace sandbox' }
+    : { title, detail: 'Loading your project workspace files' };
 }
