@@ -99,34 +99,26 @@ export function previewBusyState({ loading, elapsedMs, everLoaded }: PreviewBusy
  */
 export const PREVIEW_BUSY_CLOCK_PADDING_SECONDS = 1;
 
-/**
- * Counts the overlay will not FINISH on. It still passes through them while counting.
+/*
+ * ⚠️ **The count is whatever it is, including the number it stops on. Both attempts to control that
+ * were built, live-driven and reverted — do not try a third.**
  *
- * Owner's call. A cold pod is a ~13–15 s job (`spec/sandbox-nodepod.md` §8) and the preferred story is
- * the round one — *"about fifteen seconds to cold-start a workspace"* — so a run that would have come
- * to rest at 13 or 14 is held the extra beat and finishes on 15. It over-reports by up to two seconds
- * on the runs that land in the range, which is the direction this whole clock already errs in
- * (`PREVIEW_BUSY_CLOCK_PADDING_SECONDS`), and it is the owner's stated preference over the alternative.
+ * The ask was that the clock not come to rest on 13 (a cold pod is a ~13–15 s job, so it sometimes
+ * did). Two mechanisms, each correct, each worse than the problem:
  *
- * ⚠️ It is a RANGE, and treating it as one is load-bearing — see the loop in `previewBusyLingerMs`.
- * ⚠️ It is not a threshold, despite being a bare number in a timing module. Nothing branches on it.
+ *  1. **Never display 13.** Anything that hides a value must jump 12 → 14, and that jump is visible on
+ *     every single cold load — the clock reads as broken rather than tidy, which is louder than the
+ *     thing it avoided.
+ *  2. **Hold the overlay until the count ticks past 13–14.** No visual artifact, and it worked, but
+ *     what it delays is the user's GAME appearing — the overlay was still covering a preview that was
+ *     already ready. The payoff of the whole wait, postponed for a cosmetic detail on the way out.
  *
- * ⚠️ **The distinction between "never shown" and "never landed on" is the whole design.** The first
- * version of this never DISPLAYED 13, which forces a visible 12 → 14 jump on every single cold load —
- * the clock reads as broken rather than tidy, and that is strictly worse than the thing it avoided.
- * Passing through 13 normally and only refusing to STOP there costs nothing on the loads that do not
- * land on it, which is nearly all of them. Do not "simplify" this back into a skip list.
+ * The second failure is the general one and it is worth stating plainly: **the overlay's job is to
+ * stop existing the moment it has nothing left to say.** Any rule that makes it linger is trading the
+ * thing the user is waiting FOR against a detail of how the waiting was described, and that trade only
+ * ever goes one way. If the ending number matters again, change the padding (which costs nothing at
+ * the end) — never the timing.
  */
-export const PREVIEW_BUSY_NEVER_END_ON: readonly number[] = [13, 14];
-
-/**
- * Slack added to the linger below so the ticked-over value is actually PAINTED.
- *
- * The clock re-renders on a 250 ms interval, so hiding at the exact boundary would race it and the new
- * number might never reach the screen — leaving the count resting on the value the linger exists to
- * avoid, intermittently, which is the worst of both outcomes.
- */
-export const PREVIEW_BUSY_LINGER_MARGIN_MS = 300;
 
 /**
  * Seconds to show beside the detail line, or `undefined` when nothing is on screen to show it
@@ -149,55 +141,6 @@ export const PREVIEW_BUSY_LINGER_MARGIN_MS = 300;
  */
 export function previewBusyElapsedSeconds(state: PreviewBusyState, elapsedMs: number): number | undefined {
   return state === 'hidden' ? undefined : Math.round(elapsedMs / 1000) + PREVIEW_BUSY_CLOCK_PADDING_SECONDS;
-}
-
-/**
- * How long to hold the overlay open after the load has actually finished, so the count does not come
- * to REST on a `PREVIEW_BUSY_NEVER_END_ON` value.
- *
- * 🔴 **This is consulted ONLY at the moment the load completes, and it constrains only the ENDING.**
- * While counting, every second is real and shown as-is — 13 and 14 included — and a load that
- * genuinely runs past the range keeps reporting the truth (16, 17, 20…). The single question here is
- * "may the count come to rest on the number currently displayed?", so nothing about the ordinary
- * ticking, the copy, or a long wait is touched by it.
- *
- * Returns `0` — the overwhelmingly common case — unless that number is one we will not end on. Then it
- * returns the time until the display reaches an acceptable value, plus the paint margin: at most a
- * little over the width of the range, and usually a few hundred milliseconds.
- *
- * ⚠️ This deliberately makes the overlay outlive its own load, which is normally a defect — an overlay
- * that lingers is how a "temporary" cover becomes permanent. It is safe only because it is bounded by
- * construction (sub-second, derived from the next tick rather than a chosen constant) and because the
- * caller still owns the ceiling. Never let it grow into a general-purpose delay.
- */
-export function previewBusyLingerMs(elapsedMs: number): number {
-  const shown = previewBusyElapsedSeconds('loading', elapsedMs);
-
-  if (shown === undefined || !PREVIEW_BUSY_NEVER_END_ON.includes(shown)) {
-    return 0;
-  }
-
-  /*
-   * The display rounds, so it advances as elapsed crosses each `n + 0.5` seconds — NOT on the whole
-   * second. Deriving the wait from that boundary rather than assuming a flat 1000 ms is what keeps the
-   * extra dwell as short as it can be while still guaranteeing the tick actually happens.
-   */
-  let landsAt = (Math.round(elapsedMs / 1000) + 0.5) * 1000;
-
-  /*
-   * 🔴 The values are a RANGE, so the FIRST boundary is not necessarily far enough: a load finishing
-   * on 13 ticks over to 14, which is also a value we will not end on. Stopping there would satisfy the
-   * letter of the rule and break it for every load that finishes at the bottom of the range.
-   *
-   * ⚠️ At the current width a single extra step would do, so `while` vs `if` is not observable today —
-   * it is written as a loop because the list is configuration and a third value would silently make an
-   * `if` wrong. Terminates: the list is finite and the count only ever goes up.
-   */
-  while (PREVIEW_BUSY_NEVER_END_ON.includes(previewBusyElapsedSeconds('loading', landsAt)!)) {
-    landsAt += 1_000;
-  }
-
-  return landsAt - elapsedMs + PREVIEW_BUSY_LINGER_MARGIN_MS;
 }
 
 /**

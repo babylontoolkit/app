@@ -11,11 +11,8 @@ import {
   PREVIEW_BUSY_CLOCK_PADDING_SECONDS,
   PREVIEW_BUSY_DELAY_MS,
   PREVIEW_BUSY_EXPLAIN_MS,
-  PREVIEW_BUSY_LINGER_MARGIN_MS,
-  PREVIEW_BUSY_NEVER_END_ON,
   previewBusyCopy,
   previewBusyElapsedSeconds,
-  previewBusyLingerMs,
   previewBusyState,
 } from './preview-busy';
 
@@ -143,9 +140,11 @@ describe('previewBusyElapsedSeconds', () => {
    * A regression guard with a story: a "never DISPLAY 13" rule was built, live-driven and reverted,
    * because a number that is never displayed forces a visible 12 → 14 jump on every cold load. The
    * jump reads as a dropped frame — the clock looks broken rather than tidy — which is strictly more
-   * noticeable than the thing it was avoiding. The requirement is that the count never ENDS on 13
-   * (see `previewBusyLingerMs`), not that it never shows it. Anyone reintroducing a skip list, for 13
-   * or for any other number, fails here.
+   * noticeable than the thing it was avoiding.
+   *
+   * Its successor (hold the overlay until the count ticks past) was also reverted, for a worse reason:
+   * it delayed the user's game appearing. Both are recorded in `preview-busy.ts`. Anyone reintroducing
+   * a skip list, for any number, fails here.
    */
   it('never skips a value as it counts', () => {
     let previous = previewBusyElapsedSeconds('loading', PREVIEW_BUSY_DELAY_MS)!;
@@ -163,8 +162,11 @@ describe('previewBusyElapsedSeconds', () => {
     }
   });
 
-  /* …and it does pass through every one of them, which is the half the skip version got wrong. */
-  it('displays the values it will not end on, while counting', () => {
+  /*
+   * …and it shows every value in the cold band, 13 included — the half the skip version got wrong.
+   * Named explicitly rather than swept, so the guard still says what it is protecting.
+   */
+  it('displays every second in the cold-start band while counting', () => {
     const shown = new Set<number>();
 
     for (let ms = PREVIEW_BUSY_DELAY_MS; ms < 30_000; ms += 50) {
@@ -176,132 +178,8 @@ describe('previewBusyElapsedSeconds', () => {
       }
     }
 
-    for (const value of PREVIEW_BUSY_NEVER_END_ON) {
+    for (const value of [12, 13, 14, 15]) {
       expect(shown).toContain(value);
-    }
-  });
-});
-
-describe('previewBusyLingerMs', () => {
-  /*
-   * 🔴 **Not decoration — without this every other test in this block is VACUOUS.** They all iterate
-   * `PREVIEW_BUSY_NEVER_END_ON`, so emptying the list makes each one loop over nothing and report
-   * success: the rule would be silently gone with a green suite. Verified by mutation, which is how
-   * the hole was found in the first place.
-   */
-  it('actually has a value it refuses to end on', () => {
-    expect(PREVIEW_BUSY_NEVER_END_ON.length).toBeGreaterThan(0);
-    expect(PREVIEW_BUSY_NEVER_END_ON).toContain(13);
-  });
-
-  /* The overwhelmingly common case: the load ends on an ordinary number and the overlay goes at once. */
-  it('does not delay an ordinary finish', () => {
-    for (let ms = PREVIEW_BUSY_DELAY_MS; ms < 30_000; ms += 50) {
-      const shown = previewBusyElapsedSeconds('loading', ms)!;
-
-      if (!PREVIEW_BUSY_NEVER_END_ON.includes(shown)) {
-        expect(previewBusyLingerMs(ms)).toBe(0);
-      }
-    }
-  });
-
-  /*
-   * 🔴 The point of the whole mechanism: whenever the load finishes on a number we will not end on,
-   * holding for the returned time must actually land the display on a DIFFERENT, larger number.
-   *
-   * Asserted as that end-to-end property rather than as a duration, because a linger that is merely
-   * "about a second" can still finish a hair before the boundary and leave the count sitting on the
-   * value it was supposed to move off — intermittently, which is the worst way for this to fail.
-   */
-  it('holds just long enough to move the count off a value it will not end on', () => {
-    for (let ms = 0; ms < 30_000; ms += 17) {
-      const shown = previewBusyElapsedSeconds('loading', ms)!;
-
-      if (!PREVIEW_BUSY_NEVER_END_ON.includes(shown)) {
-        continue;
-      }
-
-      const linger = previewBusyLingerMs(ms);
-      const after = previewBusyElapsedSeconds('loading', ms + linger)!;
-
-      expect(after).toBeGreaterThan(shown);
-      expect(PREVIEW_BUSY_NEVER_END_ON).not.toContain(after);
-    }
-  });
-
-  /*
-   * ⚠️ Bounded by construction. An overlay that outlives its own load is normally a defect, and the
-   * only thing making it acceptable here is that it cannot be long: derived from the next tick, never
-   * a chosen constant. A linger that could reach seconds would be a cover over a READY preview.
-   */
-  it('never holds the overlay for longer than the range it is stepping over', () => {
-    const ceiling = (PREVIEW_BUSY_NEVER_END_ON.length + 1) * 1_000 + PREVIEW_BUSY_LINGER_MARGIN_MS;
-
-    for (let ms = 0; ms < 30_000; ms += 17) {
-      expect(previewBusyLingerMs(ms)).toBeLessThan(ceiling);
-    }
-  });
-
-  /*
-   * 🔴 A load that genuinely runs long reports the TRUTH — the rule constrains the ending, not the
-   * clock. Past the range there is nothing to step over, so every finish is immediate and the seconds
-   * shown are real. Without this, "round the number up" could grow into rounding a 40 s wait.
-   */
-  it('never delays a finish beyond the range', () => {
-    const past = Math.max(...PREVIEW_BUSY_NEVER_END_ON);
-
-    for (let ms = (past + 1) * 1_000; ms < 60_000; ms += 17) {
-      expect(previewBusyLingerMs(ms)).toBe(0);
-    }
-  });
-
-  /*
-   * 🔴 The linger CLEARS the tick boundary rather than landing exactly on it.
-   *
-   * This cannot be caught by asserting on the resulting number: arithmetically, stopping dead on the
-   * boundary already rounds to the next second, so the pure function looks correct without any margin
-   * at all (verified by mutation — removing it passed every other test here). The margin exists for
-   * the RENDER: the clock repaints on a 250 ms interval, so finishing at the boundary races the paint
-   * and the new value may never reach the screen, leaving the count resting on the very number this
-   * exists to avoid — intermittently, and only in a real browser. So the slack itself is the property.
-   */
-  it('clears the tick boundary instead of landing on it', () => {
-    for (let ms = 0; ms < 30_000; ms += 17) {
-      const linger = previewBusyLingerMs(ms);
-
-      if (linger === 0) {
-        continue;
-      }
-
-      const boundary = (Math.round(ms / 1000) + 0.5) * 1000 - ms;
-      expect(linger - boundary).toBeGreaterThanOrEqual(PREVIEW_BUSY_LINGER_MARGIN_MS);
-    }
-  });
-
-  /* Monotonic: a count that ever goes backwards on screen reads as a glitch, not a clock. */
-  it('never goes backwards as the wait grows', () => {
-    let previous = 0;
-
-    for (let ms = PREVIEW_BUSY_EXPLAIN_MS; ms <= 30_000; ms += 137) {
-      const seconds = previewBusyElapsedSeconds('first-run', ms)!;
-      expect(seconds).toBeGreaterThanOrEqual(previous);
-      previous = seconds;
-    }
-  });
-
-  /*
-   * Every frame the overlay is on screen must produce a number — swept across the whole visible
-   * window, both branches, so no silent gap can hide anywhere in it.
-   */
-  it('produces a count for every frame the overlay is visible', () => {
-    for (const everLoaded of [false, true]) {
-      for (let ms = 0; ms < PREVIEW_BUSY_CEILING_MS; ms += 250) {
-        const state = previewBusyState({ loading: true, elapsedMs: ms, everLoaded });
-
-        if (state !== 'hidden') {
-          expect(previewBusyElapsedSeconds(state, ms)).toBeTypeOf('number');
-        }
-      }
     }
   });
 });
