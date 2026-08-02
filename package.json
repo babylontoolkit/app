@@ -109,7 +109,7 @@
     "@remix-run/cloudflare-pages": "^2.15.2",
     "@remix-run/node": "^2.15.2",
     "@remix-run/react": "^2.15.2",
-    "@babylonjs-toolkit/nodepod": "1.9.18-btk.3",
+    "@babylonjs-toolkit/nodepod": "1.9.18-btk.4",
     "@supabase/ssr": "^0.12.1",
     "@supabase/supabase-js": "^2.110.3",
     "@tanstack/react-virtual": "^3.13.0",

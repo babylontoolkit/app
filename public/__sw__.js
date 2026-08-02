@@ -747,7 +747,17 @@ self.addEventListener("fetch", (event) => {
   }
 
   // 1b. anything requested BY a host frame stays with the host.
-  if (clientId && hostClients.has(clientId)) return;
+  //
+  // A NAVIGATION performed by that frame commits a NEW client, and the URL it
+  // navigates to carries no marker of its own (an in-app route change is the
+  // app's business, not ours). Without propagating the mark here, the frame
+  // survives exactly one page: the second document is unmarked, rule 6 adopts it,
+  // and its scripts come back as the pod's SPA-fallback HTML -- which surfaces as
+  // "Unexpected token '<'" the moment the user clicks anything that navigates.
+  if (clientId && hostClients.has(clientId)) {
+    if (request.mode === "navigate") markHostClient(resultingClientId);
+    return;
+  }
 
   // 2. only same-origin (and localhost-alias) URLs can belong to a pod;
   //    cross-origin (fonts, CDNs) always passes through

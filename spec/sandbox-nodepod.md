@@ -103,6 +103,7 @@ Provenance is readable from the version string — `<upstream base>-btk.<n>`.
 |---|---|
 | `1.9.18-btk.0` | **pure repackage** — name, version, repository URL. No functional change, so the 1.9.12 → 1.9.18 runtime upgrade could be judged on its own. |
 | `1.9.18-btk.1` | the two polyfill fixes below. |
+| `1.9.18-btk.2/3/4` | the service-worker host opt-out below. Three versions because the first two each fixed a real hole and left another; that shape is the lesson, not an accident. |
 
 **Two `node:` polyfill defects, both of which made shipping a game impossible.** Neither is a
 regression we introduced — both were latent from the day Nodepod was adopted:
@@ -118,6 +119,34 @@ regression we introduced — both were latent from the day Nodepod was adopted:
    published game emitted `.index.js` instead of `./index.js`, 404ing every asset. This was only
    *reachable* once defect 1 was fixed — the build had never got far enough to emit HTML.
 
+🔴 **THE POD'S SERVICE WORKER ATE THE SHARE PAGE'S IFRAME, so every published game was blank in local
+dev (`btk.2/3/4`; the plan's "FOURTH DEFECT").** `__sw__.js` claims paths for the pods it hosts, and the builder's
+pod holds a claim on `/`. The Share dialog frames the published game **same-origin**, so
+`lookupPodForClaimedPath` walked the path tree up from `/play/<id>/`, hit that `/` claim, and served the
+**builder's own document** into the frame. React Router then reported the game's URL as unmatched —
+which sent the first investigation to `appBasename()`, an entirely innocent function. **When a component
+reports a nonsense input, suspect what fed it before suspecting the component.**
+
+The fix is an explicit opt-out: `share/wrapper.ts` appends **`?__nodepod=host`** to the iframe `src`, and
+the worker declines anything from a marked client. **It took three versions because scope kept being
+under-estimated in the same direction** — `btk.2` covered the **document** but not its subresources
+(which walked up to the `/` claim on their own); `btk.3` added a `hostClients` set keyed on
+`resultingClientId`, covering one **page** but not a navigation inside the frame (which commits a *new*
+client id); `btk.4` propagates the marking across navigations. Pinned in `share.spec.ts` by an
+**every-variant** assertion — a single-case test passes on both partial fixes.
+
+⚠️ **Local-dev only, which is exactly why it hid.** In production `PLAY_URL` puts the game on another
+origin and the worker passes cross-origin requests straight through. A "but does it work in prod?"
+instinct would have mis-filed this as fine.
+
+⚠️ **Two publish-time repairs live in `share/publish.ts` because of this runtime**, both found by
+loading a real published game: `repairBareImportMeta` (Nodepod rewrites `import.meta` → `import_meta`
+for its CJS loading, and that rewrite reaches code bundled into the user's build, where nothing declares
+the binding — it **refuses to touch a chunk that declares `import_meta` itself**, since rewriting one
+produces a syntax error) and `repairRootAbsoluteAssetRefs` (re-points `/assets/…` under the `/play/<id>/`
+prefix — **only for a path that names a file the build actually emitted**, so somebody's API route is
+never silently relativised).
+
 **Why a fork rather than `pnpm patch`:** the package's `main`/`exports` resolve to `dist/`, and the
 polyfills are bundled **minified** into three dist files including the ~1 MB `dist/__worker__.js`. A
 patch would have to edit minified bundles. `NodepodOptions` exposes no polyfill hook, and a Vite
@@ -125,16 +154,33 @@ patch would have to edit minified bundles. `NodepodOptions` exposes no polyfill 
 Licence is not a blocker: MIT + Commons Clause permits modification and redistribution, forbidding only
 reselling Nodepod itself.
 
-⚠️ **`package.json` currently points at a LOCAL TARBALL** (`file:../../../Nodepod/…-btk.1.tgz`) — the
-fork is built and committed but **not yet published to npm**, so the tree is *unbuildable on any other
-machine and in CI*. Publishing is blocked on owner npm auth. Both fixes are also owed upstream as a PR;
-`formatWithOptions` in particular hits any project whose build pulls in `debug`.
+**Published on npm** — `package.json` pins a registry version, not a `file:` tarball (a `file:` spec is
+unbuildable on any other machine and in CI, and the tree sat that way while publishing was blocked on
+owner npm auth). Each bump needs an `npm publish --access public --tag latest` from the owner: `--tag` is
+**required**, because a `-btk.n` version is a prerelease and a bare publish refuses it, and npm's 2FA
+makes it interactive.
 
-🔴 **Bumping the pinned tarball is NOT a bare `pnpm install`.** Doing that once re-resolved every caret
+**The two polyfill fixes are owed upstream** and the branch is ready —
+`MackeyK24/Nodepod:btk/upstream-util-parity`, 4 files, no rename, 163 tests green off upstream HEAD. The
+PR is one click and lives in the plan's T8. ⚠️ **`R1ck404/Nodepod` shares NO history with our fork** —
+their `main` is a single squashed "Initial project snapshot" against our 175 commits — so sync by
+applying paths, never by merging refs.
+
+🔴 **Bumping the pinned version is NOT a bare `pnpm install`.** Doing that once re-resolved every caret
 range in the project — 590 resolutions — and carried `react-icons` 5.5.0 → 5.7.0, which dropped an
 export the app imports by name and **white-screened the entire product**. The procedure that does not
 do this, plus the guard test that now catches the failure class, is in the plan's "THIRD DEFECT"
 section. Diff the lockfile and count changed resolutions before blaming the dependency.
+
+**It is guarded structurally now, not by remembering** — the owner's objection was exactly that (*"i
+will never remember to do something special after a pnpm install"*), and a procedure written in a spec
+is not a guard. **`.npmrc` sets `frozen-lockfile=true`**, so a plain `pnpm install` that would re-resolve
+the tree fails with `ERR_PNPM_OUTDATED_LOCKFILE` instead of succeeding quietly (verified by recreating
+the mismatch). `icon-exports.spec.ts` catches the same failure class from the other side: it statically
+imports every `react-icons` symbol the app uses and asserts each resolves, so a dropped export fails a
+test rather than white-screening the product at module-eval time. ⚠️ **`pnpm install --frozen-lockfile`
+exits 0 on an integrity mismatch** while leaving the package uninstalled behind an
+`ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE` line — read the output, never the exit code.
 
 ## Gaps to close in the adapter — each of these fails silently if skipped
 

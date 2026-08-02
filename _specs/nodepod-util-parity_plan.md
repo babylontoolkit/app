@@ -50,7 +50,33 @@ green (116 util, 47 path); `formatWithOptions` confirmed present in `dist/__work
 ESM (`index-8HRj_Dty.js`) and CJS (`index-DA_V3tLa.cjs`) chunks, so T3's both-module-systems requirement
 is proven at the BUNDLE level, not just in `src/`. All 14 symbols verified on both export surfaces.
 
-**🔴 T7 is BLOCKED on npm 2FA — the publish is the ONLY thing standing between here and done.**
+### ✅ T7 DONE (2026-08-01) — published, adopted, and step 6 live-verified
+
+`@babylonjs-toolkit/nodepod@1.9.18-btk.3` is on npm and pinned in `package.json` as a **registry**
+version. The blank-published-game blocker that Verification step 6 tripped on was **ours** (the pod
+service worker adopting the share iframe — see the FOURTH DEFECT, since corrected) and is fixed: a
+published game now renders, plays, and serves all its assets 200.
+
+**`1.9.18-btk.4` published and adopted 2026-08-01** — the third and final piece of the service-worker
+fix. Adopted by the hand-edit recipe below: **10-line lockfile diff, nodepod only**, and
+`pnpm install --frozen-lockfile` printed *"Lockfile is up to date, resolution step is skipped"*, which
+is the proof no re-resolution happened (590 was the white-screen).
+
+**Live-driven as a visitor, on btk.4, with `node_modules/.vite` cleared and the dev server restarted:**
+
+| check | result |
+|---|---|
+| `/play/9m2epwr45j6v` landing | renders fully — hero, car cutout, all three track tiles |
+| iframe URL | `…/?embed=1&__nodepod=host` — the marker is on the wire |
+| document in the frame | the **game's**, not the builder's |
+| START RACE → **in-frame navigation** to `/play/<id>/play` | **resolves correctly** — this is the exact case `btk.3` failed |
+| Babylon canvas | live, 3930×2218, car rendering |
+| console | no `No routes matched`, no `import_meta`. Remaining warnings (`TrackManager`, `StartPosition 20`, AudioContext) are the game's own scene content and audio device |
+| `markHostClient(clientId)` **and** `markHostClient(resultingClientId)` in `public/__sw__.js` | both present — the fix is in the SHIPPED worker, not merely in the package |
+
+### Historical — the publish block, kept for the `--tag`/2FA details
+
+**🔴 T7 WAS BLOCKED on npm 2FA — the publish was the ONLY thing standing between there and done.**
 `npm whoami` → `mackeyk24`, scope `@babylonjs-toolkit` read-write, package validates
 (460 files, 5.8 MB). `npm publish --access public --tag latest` then fails `EOTP`: npm demands a
 one-time password through an interactive browser flow. `--tag` is REQUIRED — `1.9.18-btk.1` is a
@@ -185,8 +211,8 @@ Answer this, then proceed from T1.
 - [x] **T4** — The remaining 13
 - [x] **T5** — Fork tests
 - [x] **T6** — Build and prove it reached the bundles
-- [x] **T7** — Publish and adopt *(published 2026-08-01; see the FOURTH DEFECT — Verification step 6 is blocked by a PRE-EXISTING, unrelated bug)*
-- [ ] **T8** — Upstream PR to `R1ck404/Nodepod`
+- [x] **T7** — Publish and adopt *(published 2026-08-01; the FOURTH DEFECT that blocked Verification step 6 turned out to be OURS and is fixed — step 6 now passes, live)*
+- [ ] **T8** — Upstream PR to `R1ck404/Nodepod` — **DEFERRED by the owner (2026-08-01), branch prepared and pushed.** *"i am not 100% i should send my customizations upstream"* — a judgement call about their own work going out under their name, not a blocker. Everything else in this plan is done. See T8 below for the ready branch and for what shipping it would and would not commit them to.
 
 ### T1 — Fork housekeeping
 
@@ -279,6 +305,53 @@ keep **passing** after the rename — never be relaxed to accommodate it.
 PR `formatWithOptions` (at least) to `R1ck404/Nodepod` with the `debug` call site attached, branched off
 their HEAD. It is a standard `node:util` API and any project whose build pulls in `debug` hits this — a
 real contribution, not a private hack. Keep the local fork until it lands and releases.
+
+**STATUS 2026-08-01 — prepared, verified, NOT submitted. One click from the owner finishes it:**
+
+**https://github.com/R1ck404/Nodepod/compare/main...MackeyK24:Nodepod:btk/upstream-util-parity**
+
+Branch `btk/upstream-util-parity` @ `0a67acd`, pushed to `MackeyK24/Nodepod`, branched off
+`upstream/main` exactly (verified by `git merge-base`, not merely by ancestry). Independently verified:
+
+- **4 files only** — `src/polyfills/util.ts`, `src/polyfills/path.ts` and their two test files. **No
+  `package.json`** (so no `@babylonjs-toolkit` rename and no `-btk` version reaches a stranger's diff),
+  no `dist/`, and **none of the service-worker commits** — those add new API surface (`?__nodepod=host`)
+  and are a design proposal, not a bug fix, so they belong in their own PR if at all.
+- `formatWithOptions` present on **both** export surfaces, which is the property that matters.
+- The commit message carries both `debug` call sites, as the task requires.
+- **163 tests green off upstream HEAD** (116 util, 47 path) — re-run by the verifier, not taken on trust.
+
+**The box stays unchecked** on the verifier's reasoning, which is correct: the named deliverable is a
+pull request on `R1ck404/Nodepod`. A branch on our own fork is necessary but not sufficient — no
+maintainer sees it, their CI never runs, and nothing can "land and release" as the task's closing
+sentence requires. `gh` is not installed here and opening a public PR under the owner's identity is
+theirs to do.
+
+**DEFERRED 2026-08-01 — the owner is unsure about sending customizations upstream, and nothing depends
+on resolving that.** Recorded so it is not re-raised as an oversight. What the deferral does and does
+not cost:
+
+- **Nothing breaks.** We ship our own package and the fork is self-sufficient. The plan's own note —
+  *"keep the local fork until it lands and releases"* — means the fork is the plan of record either way.
+- **The cost is carrying rebases forever.** Every future upstream release has to be re-applied by path
+  (they share no git history with us, see below), and `util.ts` is a large file that upstream is
+  actively editing.
+- **What the branch would actually expose, if that is the hesitation:** two `node:` polyfill bug fixes
+  and their tests — no product code, no `@babylonjs-toolkit` name, no `-btk` version, and none of the
+  service-worker work. It reads as "your polyfill diverges from Node here", not as a look inside
+  anything we built. The genuinely bespoke part (`?__nodepod=host`) is deliberately excluded and would
+  be a separate conversation with the maintainer if it were ever wanted.
+- **The reverse is also fair:** `formatWithOptions` is a real upstream bug that breaks any Nodepod user
+  whose build pulls in `debug`. Not sending it is a choice to let that stand, which is the owner's to
+  make.
+
+⚠️ **Finding, and it changes how a future rebase must work: upstream has NO shared history with our
+fork.** `R1ck404/Nodepod`'s `main` is a **single commit** — `d89642f "Initial project snapshot"`, dated
+2026-08-01 — while our fork carries 175 commits including `8180909 "Merge pull request #78 from
+R1ck404/Nodepod"`. Upstream squashed (or re-created) its history after we forked. The **content** is
+identical where it matters (`util.ts` and `path.ts` at `upstream/main` are byte-for-byte our base
+`8180909`), which is why the patch applied cleanly — but `git merge upstream/main` or a rebase would see
+two unrelated histories. **Sync by applying paths, not by merging refs.**
 
 ---
 
@@ -379,7 +452,12 @@ the changed resolutions before debugging the dependency**. 590 ≠ 1 is the whol
 
 ---
 
-## 🔴 FOURTH DEFECT — every published game renders BLANK (found 2026-08-01, NOT ours, NOT fixed)
+## 🔴 FOURTH DEFECT — every published game renders BLANK (found 2026-08-01, **WAS ours, FIXED**)
+
+> ⚠️ **This section originally concluded "NOT ours, NOT fixed" and that conclusion was WRONG.** The
+> owner rejected it — *"There is a blank page on share.. that is our problem... that used work now it
+> not"* — and was right. The original reasoning is kept below the line because **how it was wrong is
+> the most transferable thing in this file**; the fix follows.
 
 Driving T7's live verification end to end: the Arcade Racing project built, published, returned
 `/play/9m2epwr45j6v`, the dialog said **"Your game is shared"** — and the page is **white**, with only
@@ -389,40 +467,79 @@ the "Made with Babylon Toolkit" badge. The game never renders.
 [warn] No routes matched location "/play/9m2epwr45j6v/?embed=1"
 ```
 
-**Measured in the iframe** (`root` div, zero children, body text 7 chars):
+### Root cause — the Nodepod service worker adopts the share page's iframe
 
-| | value |
-|---|---|
-| iframe pathname | `/play/4r96kmxdm94f/` |
-| computed basename | `/play/4r96kmxdm94f/` |
-| React Router's reported location | `/play/4r96kmxdm94f/?embed=1` — **unstripped** |
+`__sw__.js` claims paths for the pods it hosts and routes matching requests into them. The builder page
+has a live pod, so the worker holds a claim on `/`. The Share dialog then loads the published game in a
+**same-origin** iframe — and the worker's `lookupPodForClaimedPath` walks the path tree UP, hits the `/`
+claim, and serves `/play/<id>/…` **out of the builder's pod** instead of letting it reach the server. The
+iframe gets the builder's own document back, so React Router is handed a location its routes have never
+heard of, and reports it unmatched. Hence the misleading warning: the basename logic was innocent all
+along, and the document in the frame was never the game's.
 
-`appBasename()` IS present in the built bundle (`basename:U()`, `U = () => new URL("./",
-window.location.href).pathname`) so the T17b template fix is shipping. It resolves to the correct
-prefix *with a trailing slash*, and the router then reports the FULL path as unmatched — i.e. the
-basename never got applied. Root cause past that point is not yet isolated; do not guess it.
+**Local-dev only.** In production `PLAY_URL` puts the game on a different origin, and SW rule 2 passes
+cross-origin requests straight through. That is why it had never been seen before — and why a "does it
+work in prod?" instinct would have mis-filed it as fine.
 
-**🔴 This is NOT a regression from the util/path work, and the control is what proves it.** The
-`Blank Canvas` game, published in an EARLIER session, fails **identically** — same warning, same blank
-page. And the basename is computed in the BROWSER at runtime from `window.location`; our polyfills only
-affect the BUILD. Both point the same way.
+**Fixed across three fork commits, each closing a hole the previous one left:**
 
-**What the util + path fixes DID deliver, all verified this run:** the build completes at all (it used
-to die in 2 ms); the emitted HTML carries **`src="./index.js"`**, not the one-character-short
-`.index.js` the `path.normalize` defect produced; and `index.js` / `index.css` / `favicon.ico` all
-serve **200**. The publish pipeline is fixed. What sits on top of it is broken for a different reason.
+| commit | version | what it adds | the hole it closed |
+|---|---|---|---|
+| `961b321` | btk.2 | `?__nodepod=host` on a request makes the worker decline it | the **document** only — its subresources still walked up to the `/` claim and came back as HTML |
+| `e048a50` | btk.3 | a `hostClients` Set; the opt-out marks `resultingClientId`, and any request from a marked client is declined | one **page** only — a navigation inside the frame commits a NEW client id, which was unmarked |
+| `5182a1b` | btk.4 | a marked client that performs a navigation marks the resulting client too | — |
 
-⚠️ **So the plan's Verification step 6 does NOT pass, and T7 is checked on its own deliverables only**
-(publish, the 5 specifier sites, `sync:nodepod`, the seam guard still passing, gates green, live pod
-boot + preview + HMR). **Do not read a checked T7 as "a stranger can play a published game" — they
-cannot.** That needs its own investigation, starting at how the template's router consumes
-`appBasename()`.
+Consumer side: `share/wrapper.ts` appends `&__nodepod=host` to the iframe `src`. Every variant is
+pinned in `share.spec.ts`, including a guard that the marker is present on **all** of them — the two
+partial fixes above are exactly what an every-variant assertion catches and a single-case one does not.
+
+### Two further defects the same live drive uncovered, both fixed
+
+**`import_meta is not defined`** — the game's landing page rendered but pressing START threw in Vite's
+own preload helper, which every dynamic import goes through. Nodepod rewrites `import.meta` →
+`import_meta` for its CJS module loading, where its wrapper declares the binding; that rewrite reached
+code which then got **bundled into the user's build**, where nothing declares it. Repaired at publish
+time by `repairBareImportMeta` (`share/publish.ts`), which **refuses to touch a chunk that declares
+`import_meta` itself** — rewriting one of those would produce `var import.meta = …`, a syntax error, i.e.
+strictly worse than the bug.
+
+**Root-absolute generated-asset URLs** — the game played and its track tiles were empty boxes.
+`Home.tsx` carried `"/assets/generated/track-x.jpg"`, which under `/play/<id>/` resolves to the app
+origin's root. The CSS hero in the SAME build loaded fine, because a bundler rewrites `url()` and cannot
+rewrite a JS string literal. Fixed at **both** ends: `mediaReferenceUrl` now hands the model
+`./assets/generated/…` (future games), and `repairRootAbsoluteAssetRefs` re-points existing ones at
+publish time — **only for a path that names a file the build actually emitted**, so an API route or a
+path on another service is never silently relativised.
+
+**Live-verified end to end 2026-08-01:** published game renders, START RACE launches a Babylon canvas
+(3930×2218), all 5 images return 200. **Verification step 6 now passes.**
+
+---
+
+### The original (wrong) reasoning, kept as the lesson
+
+> **🔴 This is NOT a regression from the util/path work, and the control is what proves it.** The
+> `Blank Canvas` game, published in an EARLIER session, fails **identically** — same warning, same blank
+> page. And the basename is computed in the BROWSER at runtime from `window.location`; our polyfills only
+> affect the BUILD.
+
+**Why that control was worthless.** It establishes only that the defect is not in the *build output* —
+and both games were being **served and framed by the CURRENT app**, running the CURRENT Nodepod worker.
+An old artifact viewed through new machinery tests the new machinery, not the old artifact. The control
+answered a question nobody had asked, and its confident framing ("the control is what proves it") is
+what made it persuasive.
+
+**And the warning text actively misdirected.** `No routes matched location` names the router, so the
+investigation went to `appBasename()` and stopped at "the basename never got applied — root cause past
+that point is not yet isolated". The router was reporting honestly about a document that should never
+have been in that frame. **When a component reports a nonsense input, suspect what fed it before
+suspecting the component.**
 
 **Generalisable, and it is this plan's own lesson landing a third time:** the `path.normalize` entry
-above says *"publish returned success, the dialog said 'Your game is shared', and the game was
-unplayable. Only fetching the built HTML found it."* Here the built HTML was **correct** and the game
-was still unplayable — so even fetching the HTML is not enough. Only loading the page and reading the
-console found this one.
+says *"publish returned success, the dialog said 'Your game is shared', and the game was unplayable.
+Only fetching the built HTML found it."* Here the built HTML was **correct** and the game was still
+unplayable — so even fetching the HTML is not enough. Only loading the page, reading the console, **and
+disbelieving the first plausible exoneration** found this one.
 
 ---
 
