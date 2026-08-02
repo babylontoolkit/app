@@ -289,17 +289,47 @@ describe('the play wrapper iframe src (T17b)', () => {
   const input = { shareId: 'abc123def456', title: 'Kart Racer', solo: false, playOrigin: '' };
 
   it('loads the DIRECTORY URL with ?embed=1 — same-origin (local dev)', () => {
-    expect(renderPlayWrapper(input)).toContain('src="/play/abc123def456/?embed=1"');
+    expect(renderPlayWrapper(input)).toContain('src="/play/abc123def456/?embed=1&__nodepod=host"');
   });
 
   it('appends &solo=true for a network-capable game', () => {
-    expect(renderPlayWrapper({ ...input, solo: true })).toContain('src="/play/abc123def456/?embed=1&solo=true"');
+    expect(renderPlayWrapper({ ...input, solo: true })).toContain(
+      'src="/play/abc123def456/?embed=1&__nodepod=host&solo=true"',
+    );
   });
 
   it('crosses to the play origin when one is configured', () => {
     const html = renderPlayWrapper({ ...input, playOrigin: 'https://play.example.com' });
 
-    expect(html).toContain('src="https://play.example.com/abc123def456/?embed=1"');
+    expect(html).toContain('src="https://play.example.com/abc123def456/?embed=1&__nodepod=host"');
+  });
+
+  /*
+   * 🔴 The marker is what stops the published game being REPLACED by the builder's sandbox.
+   *
+   * Nodepod's service worker owns the root of our origin and cannot tell one of OUR same-origin
+   * iframes from a pod preview, so its recovery rule adopts any unattributed frame into whatever pod
+   * is live — serving the BUILDER's dev server in place of the game. Every asset still returns 200, so
+   * it reads as a working publish and shows a blank page (found live 2026-08-01; fixed in our Nodepod
+   * fork as rule 1b, `@babylonjs-toolkit/nodepod@1.9.18-btk.2`).
+   *
+   * Asserted on EVERY variant above rather than once: the bug is in the URL the browser actually
+   * requests, so a marker that survives the plain case and is dropped when `solo` is set (a string
+   * built by concatenation, which is exactly how that happens) would be a blank page for precisely the
+   * multiplayer games nobody tests locally.
+   */
+  it('marks the frame as the HOST’s on every variant, so the sandbox worker cannot adopt it', () => {
+    for (const variant of [
+      input,
+      { ...input, solo: true },
+      { ...input, playOrigin: 'https://play.example.com' },
+      { ...input, solo: true, playOrigin: 'https://play.example.com' },
+    ]) {
+      const src = /src="([^"]*embed=1[^"]*)"/.exec(renderPlayWrapper(variant))?.[1];
+
+      expect(src, 'no iframe src matched — the wrapper markup changed shape').toBeDefined();
+      expect(src, `frame is adoptable by the sandbox worker: ${src}`).toContain('__nodepod=host');
+    }
   });
 
   /**

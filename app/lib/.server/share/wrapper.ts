@@ -42,7 +42,25 @@ export function renderPlayWrapper(input: PlayWrapperInput): string {
    * tells the serve layer "this request wants the game document, not the wrapper" (`resolvePlayRequest`
    * — without it, the extensionless directory URL would serve the wrapper again, recursively).
    */
-  const gameSrc = `${base}/?embed=1${solo ? '&solo=true' : ''}`;
+  /*
+   * 🔴 `__nodepod=host` is what keeps the published game from being replaced by the BUILDER'S SANDBOX
+   * (found live 2026-08-01, local dev only). Nodepod registers a service worker at the root of our
+   * origin to serve pod previews, and its fetch handler cannot tell one of OUR same-origin iframes from
+   * a preview — so its recovery rule adopts ANY unattributed frame into whatever pod is currently live
+   * and proxies it to that pod's dev server. The share page then renders the BUILDER's Vite app
+   * (`/@vite/client`, `/src/main.tsx`) instead of the built game: a blank screen, with the only trace a
+   * console warning about routes not matching. Every asset still 200s, so it looks like a working
+   * publish.
+   *
+   * Production is unaffected — `PLAY_URL` makes this iframe cross-origin, and the worker passes
+   * cross-origin straight through — which is exactly why this could hide: it breaks only where the
+   * game is developed, never where it is shipped.
+   *
+   * The parameter is answered by the worker BEFORE any claim rule (`static/__sw__.js` rule 1b in our
+   * fork). It must survive on the DIRECTORY url the iframe loads; the game's own subresources need no
+   * marker, because a frame that was never claimed leaves nothing for them to be attributed to.
+   */
+  const gameSrc = `${base}/?embed=1&__nodepod=host${solo ? '&solo=true' : ''}`;
 
   return `<!doctype html>
 <html lang="en">

@@ -708,6 +708,17 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // 1b. explicit host opt-out.
+  //
+  // A host app that embeds one of its OWN same-origin pages in an iframe (a share
+  // shell, a docs example) is indistinguishable to this worker from a pod preview,
+  // and the recovery fallbacks below deliberately GUESS — rule 6 will adopt any
+  // unattributed frame into whatever pod happens to be live. That guess silently
+  // replaces the host page with the pod dev server. `?__nodepod=host` is the page
+  // saying "this frame is mine"; checked before every claim rule so nothing
+  // downstream can adopt it. An explicit preview prefix (rule 1) still wins.
+  if (url.searchParams.get("__nodepod") === "host") return;
+
   // 2. only same-origin (and localhost-alias) URLs can belong to a pod;
   //    cross-origin (fonts, CDNs) always passes through
   const sameOrigin =
