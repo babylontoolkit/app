@@ -8,5 +8,5 @@ import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { buildHealthReport } from '~/lib/.server/monitoring/health';
 
 export const loader = async ({ context }: LoaderFunctionArgs) => {
-  return json(buildHealthReport(context));
+  return json(await buildHealthReport(context));
 };

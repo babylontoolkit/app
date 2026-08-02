@@ -13,7 +13,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseFrontmatter, validateSkill } from './frontmatter';
 import { buildSkillsIndex } from './sync';
 import { MAX_SKILL_LOADS } from '~/lib/.server/agent/tools';
-import { FsSkillStore } from './store';
+import { SkillVersionStore } from './store';
+import { FsObjectStore } from '~/lib/.server/storage';
 
 const VALID = `---
 name: bt-spec
@@ -145,11 +146,11 @@ describe('skills index', () => {
 
 describe('skill store — manifest-only resource resolution', () => {
   let root: string;
-  let store: FsSkillStore;
+  let store: SkillVersionStore;
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-store-'));
-    store = new FsSkillStore(root);
+    store = new SkillVersionStore(new FsObjectStore(root));
   });
 
   afterEach(async () => {

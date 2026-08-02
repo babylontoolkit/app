@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildHealthReport } from './health';
+import { setPromptStore } from '~/lib/.server/prompt/store';
+import { invalidateActivePrompt } from '~/lib/.server/prompt/active';
 
 /**
  * 🔴 **CodeSandbox is DISABLED in the shipping build** (owner decision, 2026-07-31 —
@@ -93,10 +95,21 @@ describe('buildHealthReport', () => {
      * machine whose `.env.local` says otherwise.
      */
     vi.stubEnv('VITE_SANDBOX_PROVIDER', '');
+
+    /*
+     * 🔴 The `oauth.spec.ts` trap, one dependency later. `systemPrompt` reads a REAL store, and the
+     * default one resolves to the developer's own object store — so "nothing is configured" would
+     * quietly become "…except the prompt version I happen to have synced locally", and `ready` would
+     * differ between a developer's machine and CI. Pinned empty here; the tests that care override it.
+     */
+    setPromptStore({ getActive: async () => null } as unknown as Parameters<typeof setPromptStore>[0]);
+    invalidateActivePrompt();
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    setPromptStore(undefined);
+    invalidateActivePrompt();
 
     for (const k of keys) {
       if (saved[k] === undefined) {
@@ -107,13 +120,63 @@ describe('buildHealthReport', () => {
     }
   });
 
-  it('reports healthy liveness and NOT ready when nothing is configured', () => {
-    const report = buildHealthReport(undefined);
+  it('reports healthy liveness and NOT ready when nothing is configured', async () => {
+    const report = await buildHealthReport(undefined);
 
     expect(report.status).toBe('healthy');
     expect(report.ready).toBe(false);
     expect(report.dependencies.platformKey).toBe('degraded');
     expect(report.dependencies.playOrigin).toBe('degraded');
+  });
+
+  /*
+   * 🔴 A deploy with no prompt version fails EVERY generation, and used to report itself ready.
+   *
+   * There is no boot-time doc-sync — a version is built only by an admin pressing Refresh or a `curl`
+   * with `ADMIN_TOKEN` — so a brand-new environment has none and `proxy.ts` throws
+   * `NotConfiguredError('The system prompt')` on every request. This is the same failure the
+   * `platformKey` block below describes ("healthy AND ready while 503ing every generation"), which is
+   * exactly why it belongs in the one check §9a keys on.
+   */
+  describe('the system prompt is a reported dependency', () => {
+    it('is degraded, and blocks ready, when no version is active', async () => {
+      setPromptStore({ getActive: async () => null } as unknown as Parameters<typeof setPromptStore>[0]);
+      invalidateActivePrompt();
+
+      const report = await buildHealthReport(undefined);
+
+      expect(report.dependencies.systemPrompt).toBe('degraded');
+      expect(report.ready).toBe(false);
+
+      // Liveness is unaffected: a degraded dependency is not an outage.
+      expect(report.status).toBe('healthy');
+    });
+
+    it('CONTROL — is ok once a version is active', async () => {
+      setPromptStore({ getActive: async () => ({ id: 'pv_test' }) } as unknown as Parameters<typeof setPromptStore>[0]);
+      invalidateActivePrompt();
+
+      expect((await buildHealthReport(undefined)).dependencies.systemPrompt).toBe('ok');
+    });
+
+    /*
+     * Observability must never be the thing that breaks the health endpoint. A store that throws is
+     * reported as `degraded` — the same answer as "no version", and the honest one: we cannot confirm
+     * we can serve.
+     */
+    it('reports degraded rather than throwing when the store errors', async () => {
+      setPromptStore({
+        getActive: async () => {
+          throw new Error('S3 unreachable');
+        },
+      } as unknown as Parameters<typeof setPromptStore>[0]);
+      invalidateActivePrompt();
+
+      const report = await buildHealthReport(undefined);
+
+      expect(report.dependencies.systemPrompt).toBe('degraded');
+      expect(report.status).toBe('healthy');
+    });
   });
 
   /*
@@ -124,12 +187,12 @@ describe('buildHealthReport', () => {
    * because the assumption had silently become false. A test that leans on the default is really
    * testing the default; pin what you mean.
    */
-  it('flips a dependency to ok once its env is present', () => {
+  it('flips a dependency to ok once its env is present', async () => {
     process.env.LLM_PROVIDER = 'Anthropic';
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
     process.env.PLAY_URL = 'https://play.example.com';
 
-    const report = buildHealthReport(undefined);
+    const report = await buildHealthReport(undefined);
 
     expect(report.dependencies.platformKey).toBe('ok');
     expect(report.dependencies.playOrigin).toBe('ok');
@@ -143,10 +206,10 @@ describe('buildHealthReport', () => {
    * using .env files"). The platform key must resolve to KIE's, not Anthropic's, or a correctly
    * configured default deploy reports degraded forever and §9a's `ready` never goes green.
    */
-  it('defaults to KIE, so KIE_API_KEY alone is a healthy platform key', () => {
+  it('defaults to KIE, so KIE_API_KEY alone is a healthy platform key', async () => {
     process.env.KIE_API_KEY = 'kie-test';
 
-    expect(buildHealthReport(undefined).dependencies.platformKey).toBe('ok');
+    expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('ok');
   });
 
   /*
@@ -158,30 +221,30 @@ describe('buildHealthReport', () => {
    * a wrong-key-present must not read as ok, and the right key alone must be enough.
    */
   describe('platformKey follows the configured provider', () => {
-    it('is degraded on KIE when only the Anthropic key is set', () => {
+    it('is degraded on KIE when only the Anthropic key is set', async () => {
       process.env.LLM_PROVIDER = 'KIE';
       process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
 
-      expect(buildHealthReport(undefined).dependencies.platformKey).toBe('degraded');
+      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('degraded');
     });
 
-    it('is ok on KIE with only the KIE key set — an Anthropic key is not required', () => {
+    it('is ok on KIE with only the KIE key set — an Anthropic key is not required', async () => {
       process.env.LLM_PROVIDER = 'KIE';
       process.env.KIE_API_KEY = 'kie-test';
 
-      expect(buildHealthReport(undefined).dependencies.platformKey).toBe('ok');
+      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('ok');
     });
 
-    it('is degraded on Anthropic when only the KIE key is set', () => {
+    it('is degraded on Anthropic when only the KIE key is set', async () => {
       process.env.LLM_PROVIDER = 'Anthropic';
       process.env.KIE_API_KEY = 'kie-test';
 
-      expect(buildHealthReport(undefined).dependencies.platformKey).toBe('degraded');
+      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('degraded');
     });
   });
 
-  it('is never anything but healthy for liveness, even fully unconfigured', () => {
-    expect(buildHealthReport(undefined).status).toBe('healthy');
+  it('is never anything but healthy for liveness, even fully unconfigured', async () => {
+    expect((await buildHealthReport(undefined)).status).toBe('healthy');
   });
 
   /*
@@ -223,20 +286,28 @@ describe('buildHealthReport', () => {
       process.env.PLAY_URL = 'https://play.example.com';
       process.env.MONITORING_WEBHOOK_URL = 'https://collector.example.com/errors';
       process.env.ANALYTICS_WEBHOOK_URL = 'https://collector.example.com/events';
+
+      /*
+       * The prompt version is not an env var, but it IS part of "everything else" — a deploy with no
+       * active version is not ready no matter how complete its configuration is. Left out, `ready`
+       * would turn on this instead of on the dependency each test names.
+       */
+      setPromptStore({ getActive: async () => ({ id: 'pv_test' }) } as unknown as Parameters<typeof setPromptStore>[0]);
+      invalidateActivePrompt();
     };
 
-    it('is ok — and counts toward ready — on a CodeSandbox build with a key', () => {
+    it('is ok — and counts toward ready — on a CodeSandbox build with a key', async () => {
       vi.stubEnv('VITE_SANDBOX_PROVIDER', 'codesandbox');
       process.env.CODESANDBOX_API_KEY = 'csb_test_key';
       wireEverythingElse();
 
-      const report = buildHealthReport(undefined);
+      const report = await buildHealthReport(undefined);
 
       expect(report.dependencies.codesandbox).toBe('ok');
       expect(report.ready).toBe(true);
     });
 
-    it('🔴 is degraded — and drags ready false — on a CodeSandbox build with NO key', () => {
+    it('🔴 is degraded — and drags ready false — on a CodeSandbox build with NO key', async () => {
       /*
        * The whole point of reporting it: this deploy answers every `/api/sandbox/session` with a 503
        * and is otherwise indistinguishable from a healthy one. §9a's `ready` is the check that is
@@ -245,7 +316,7 @@ describe('buildHealthReport', () => {
       vi.stubEnv('VITE_SANDBOX_PROVIDER', 'codesandbox');
       wireEverythingElse();
 
-      const report = buildHealthReport(undefined);
+      const report = await buildHealthReport(undefined);
 
       expect(report.dependencies.codesandbox).toBe('degraded');
       expect(report.ready).toBe(false);
@@ -254,7 +325,7 @@ describe('buildHealthReport', () => {
       expect(report.status).toBe('healthy');
     });
 
-    it('🔴 is ABSENT on a browser-runtime build, which is still ready without a CodeSandbox key', () => {
+    it('🔴 is ABSENT on a browser-runtime build, which is still ready without a CodeSandbox key', async () => {
       /*
        * `VITE_SANDBOX_PROVIDER` unset is the default build — **Nodepod** since 2026-07-31, when the
        * fallback moved off the paid runtimes (a typo must never select something that spends).
@@ -269,13 +340,13 @@ describe('buildHealthReport', () => {
       vi.stubEnv('VITE_SANDBOX_PROVIDER', '');
       wireEverythingElse();
 
-      const report = buildHealthReport(undefined);
+      const report = await buildHealthReport(undefined);
 
       expect(report.dependencies).not.toHaveProperty('codesandbox');
       expect(report.ready).toBe(true);
     });
 
-    it('reports the sandbox when the container sets the variable without a matching build', () => {
+    it('reports the sandbox when the container sets the variable without a matching build', async () => {
       /*
        * `process.env` is checked as well as `import.meta.env` so a runtime that was handed the variable
        * without a rebuild is not silently reported as WebContainer — the answer should follow whichever
@@ -284,7 +355,7 @@ describe('buildHealthReport', () => {
       process.env.VITE_SANDBOX_PROVIDER = 'codesandbox';
       wireEverythingElse();
 
-      expect(buildHealthReport(undefined).dependencies.codesandbox).toBe('degraded');
+      expect((await buildHealthReport(undefined)).dependencies.codesandbox).toBe('degraded');
     });
   });
 
@@ -296,11 +367,11 @@ describe('buildHealthReport', () => {
    * exists to avoid, arriving through the fix rather than through the bug.
    */
   describe('with the real enable list, CodeSandbox is never reported', () => {
-    it.each(['codesandbox', ''])('ignores VITE_SANDBOX_PROVIDER=%s', (value) => {
+    it.each(['codesandbox', ''])('ignores VITE_SANDBOX_PROVIDER=%s', async (value) => {
       vi.stubEnv('VITE_SANDBOX_PROVIDER', value);
       process.env.VITE_SANDBOX_PROVIDER = value;
 
-      expect(buildHealthReport(undefined).dependencies).not.toHaveProperty('codesandbox');
+      expect((await buildHealthReport(undefined)).dependencies).not.toHaveProperty('codesandbox');
     });
   });
 });

@@ -22,6 +22,7 @@ import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
 import { isStripeConfigured } from '~/lib/.server/billing/stripe';
 import { isSandboxConfigured } from '~/lib/.server/sandbox/config';
 import { isMonitoringConfigured } from './index';
+import { getActivePrompt } from '~/lib/.server/prompt/active';
 
 export type DependencyState = 'ok' | 'degraded';
 
@@ -43,10 +44,38 @@ export interface HealthReport {
   ready: boolean;
 }
 
-export function buildHealthReport(context: unknown): HealthReport {
+/**
+ * Is there a prompt version to generate against?
+ *
+ * The ONLY non-config check in this report, and it earns the exception for the reason the
+ * `platformKey` comment below gives: without it a deploy reports **healthy and ready while every
+ * generation fails**. There is no boot-time doc-sync — a version is built only by an admin pressing
+ * Refresh or a `curl` with `ADMIN_TOKEN` — so a brand-new environment (or one whose object store was
+ * emptied) has none, and `proxy.ts` throws `NotConfiguredError('The system prompt')` on every request.
+ * §9a keys on `ready` to confirm "all green in prod"; that check would have waved this through.
+ *
+ * ⚠️ It reads OUR OWN store, never GitHub, and `active.ts` memoises for 30s — so a monitor hitting
+ * `/healthz` every few seconds costs at most two reads a minute, not one per probe. It is deliberately
+ * NOT a reachability probe of anything external, which is this endpoint's stated contract.
+ *
+ * ⚠️ Never throws. Observability cannot be the thing that takes the health endpoint down, so a store
+ * that errors reports `degraded` — the same answer as "no version", and the honest one: we cannot
+ * confirm we can serve.
+ */
+async function systemPromptState(): Promise<DependencyState> {
+  try {
+    return (await getActivePrompt()) ? 'ok' : 'degraded';
+  } catch {
+    return 'degraded';
+  }
+}
+
+export async function buildHealthReport(context: unknown): Promise<HealthReport> {
   const platform = getPlatformConfig(context);
 
   const dependencies: Record<string, DependencyState> = {
+    systemPrompt: await systemPromptState(),
+
     /*
      * The key for the CONFIGURED provider — never `anthropicApiKey` outright.
      *

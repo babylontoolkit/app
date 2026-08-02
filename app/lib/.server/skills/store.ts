@@ -1,18 +1,20 @@
 /**
  * Skills store (SPEC §4.11, spec/skills.md).
  *
- * Same STORAGE SEAM as the prompt store: the spec's target is Supabase `skills` / `skill_versions`
- * rows with resources in S3 under a `storage_prefix` (Stage 2). Until those exist, this filesystem
- * adapter provides everything the runtime actually needs — immutable versions, per-skill activation,
- * per-skill rollback, and a resources manifest. Swap the adapter, keep the callers.
+ * Same STORAGE SEAM as the prompt store, and persisted the same way — through `ObjectStore`, so a
+ * skill version survives the container that built it. This file's header used to promise exactly
+ * that ("resources in S3 under a `storage_prefix`") while writing to `.data/skills` unconditionally;
+ * see `prompt/store.ts` for the deploy-time outage that made the gap real. Everything the runtime
+ * needs is here — immutable versions, per-skill activation, per-skill rollback, and a resources
+ * manifest.
  *
  * The `resources` manifest is the security boundary: `read_skill_resource` resolves ONLY through it
  * by exact path match. There are no filesystem path semantics anywhere in that lookup, so the whole
- * path-traversal class of bugs cannot occur.
+ * path-traversal class of bugs cannot occur — and routing storage through `ObjectStore` does not
+ * weaken it, because the manifest still decides which key is read.
  */
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { platformDataDir, sha256 } from '~/lib/.server/prompt/store';
+import { getObjectStore, type ObjectStore } from '~/lib/.server/storage';
+import { sha256 } from '~/lib/.server/prompt/store';
 
 export interface SkillVersionMeta {
   id: string;
@@ -70,57 +72,66 @@ interface SkillRecord {
   resources: Record<string, string>;
 }
 
-export class FsSkillStore implements SkillStore {
-  private readonly _root: string;
+/** Everything this store owns lives under one prefix, so a `list` can never see another subsystem. */
+export const SKILL_STORE_PREFIX = 'skills';
 
-  constructor(root?: string) {
-    this._root = root ?? path.join(platformDataDir(), 'skills');
+export class SkillVersionStore implements SkillStore {
+  private readonly _objects: ObjectStore;
+  private readonly _prefix: string;
+
+  constructor(objects?: ObjectStore, prefix = SKILL_STORE_PREFIX) {
+    this._objects = objects ?? getObjectStore();
+    this._prefix = prefix;
   }
 
-  private get _versionsDir() {
-    return path.join(this._root, 'versions');
+  private _versionKey(id: string) {
+    return `${this._prefix}/versions/${id}.json`;
   }
 
-  private get _blobsDir() {
-    return path.join(this._root, 'blobs');
+  private _blobKey(hash: string) {
+    return `${this._prefix}/blobs/${hash}`;
   }
 
-  private get _activePath() {
-    return path.join(this._root, 'active.json');
+  private get _activeKey() {
+    return `${this._prefix}/active.json`;
   }
 
-  private async _atomicWrite(file: string, content: string): Promise<void> {
-    const tmp = `${file}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, content, 'utf8');
-    await fs.rename(tmp, file);
+  private async _putText(key: string, content: string): Promise<void> {
+    await this._objects.put(key, new TextEncoder().encode(content), 'application/json');
+  }
+
+  private async _getText(key: string): Promise<string | null> {
+    const bytes = await this._objects.get(key);
+    return bytes ? new TextDecoder().decode(bytes) : null;
   }
 
   private async _writeBlob(content: string): Promise<string> {
     const hash = sha256(content);
-    const file = path.join(this._blobsDir, hash);
+    const key = this._blobKey(hash);
 
-    try {
-      await fs.access(file);
-      return hash;
-    } catch {
-      await fs.mkdir(this._blobsDir, { recursive: true });
-      await this._atomicWrite(file, content);
-
+    // Content-addressed: identical bytes are already there, and rewriting is pure waste.
+    if (await this._objects.get(key)) {
       return hash;
     }
+
+    await this._putText(key, content);
+
+    return hash;
   }
 
   private async _readBlob(hash: string): Promise<string | null> {
-    try {
-      return await fs.readFile(path.join(this._blobsDir, hash), 'utf8');
-    } catch {
-      return null;
-    }
+    return this._getText(this._blobKey(hash));
   }
 
   private async _readRecord(id: string): Promise<SkillRecord | null> {
+    const raw = await this._getText(this._versionKey(id));
+
+    if (raw === null) {
+      return null;
+    }
+
     try {
-      return JSON.parse(await fs.readFile(path.join(this._versionsDir, `${id}.json`), 'utf8')) as SkillRecord;
+      return JSON.parse(raw) as SkillRecord;
     } catch {
       return null;
     }
@@ -128,8 +139,14 @@ export class FsSkillStore implements SkillStore {
 
   /** name → active version id. */
   private async _activeMap(): Promise<Record<string, string>> {
+    const raw = await this._getText(this._activeKey);
+
+    if (raw === null) {
+      return {};
+    }
+
     try {
-      return JSON.parse(await fs.readFile(this._activePath, 'utf8')) as Record<string, string>;
+      return JSON.parse(raw) as Record<string, string>;
     } catch {
       return {};
     }
@@ -149,8 +166,6 @@ export class FsSkillStore implements SkillStore {
   }
 
   async put(version: NewSkillVersion): Promise<SkillVersionMeta> {
-    await fs.mkdir(this._versionsDir, { recursive: true });
-
     const createdAt = new Date().toISOString();
     const bodyHash = sha256(version.body);
 
@@ -169,7 +184,7 @@ export class FsSkillStore implements SkillStore {
       record.resources[resourcePath] = await this._writeBlob(contents);
     }
 
-    await this._atomicWrite(path.join(this._versionsDir, `${record.id}.json`), JSON.stringify(record, null, 2));
+    await this._putText(this._versionKey(record.id), JSON.stringify(record, null, 2));
 
     const active = await this._activeMap();
 
@@ -187,28 +202,25 @@ export class FsSkillStore implements SkillStore {
       throw new Error(`Skill version ${versionId} belongs to "${record.name}", not "${name}"`);
     }
 
-    await fs.mkdir(this._root, { recursive: true });
-
     const active = await this._activeMap();
     active[name] = versionId;
 
-    await this._atomicWrite(this._activePath, JSON.stringify(active, null, 2));
+    await this._putText(this._activeKey, JSON.stringify(active, null, 2));
   }
 
   async listAll(): Promise<SkillVersionMeta[]> {
-    let files: string[];
-
-    try {
-      files = await fs.readdir(this._versionsDir);
-    } catch {
-      return [];
-    }
-
+    const objects = await this._objects.list(`${this._prefix}/versions/`);
     const active = await this._activeMap();
     const metas: SkillVersionMeta[] = [];
 
-    for (const file of files.filter((f) => f.endsWith('.json'))) {
-      const record = await this._readRecord(file.replace(/\.json$/, ''));
+    for (const object of objects) {
+      if (!object.key.endsWith('.json')) {
+        continue;
+      }
+
+      // The key is prefixed and the id is the basename — never split on '/' assuming a fixed depth.
+      const id = object.key.slice(object.key.lastIndexOf('/') + 1).replace(/\.json$/, '');
+      const record = await this._readRecord(id);
 
       if (record) {
         metas.push(this._toMeta(record, active[record.name]));
@@ -268,7 +280,7 @@ let _store: SkillStore | undefined;
 
 export function getSkillStore(): SkillStore {
   if (!_store) {
-    _store = new FsSkillStore();
+    _store = new SkillVersionStore();
   }
 
   return _store;

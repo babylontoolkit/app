@@ -71,6 +71,8 @@
 ## Scaling & ops notes
 
 - SSE concurrency is the sizing driver, not CPU (LLM work happens at Anthropic). Start nano/micro; bump power before adding nodes (sticky sessions not required — app is stateless; anything stateful in the container is a bug).
+  - 🔴 **That rule was violated for the whole build and nothing was checking it (fixed 2026-08-01, SPEC §8d).** The prompt and skills stores wrote to `.data/` on the container's own disk, so **every deploy would have landed a container that could not generate at all** — there is no boot-time doc-sync, so a version is built only when an admin presses Refresh. Both now persist through `ObjectStore` → S3, and `/healthz` reports `systemPrompt` so the state is visible instead of silent. **A rule that cannot fail is a rule nobody is keeping** — the same lesson as the sandbox seam, which held "in spirit" while 13 modules imported the vendor directly.
+  - Local dev is unaffected: `ObjectStore` falls back to the filesystem, so the data simply moved from `.data/prompt` + `.data/skills` to `.data/storage/prompt` + `.data/storage/skills`. The old directories are dead and can be deleted.
 - Deploys restart containers: in-flight generations abort → client retry affordance; ledger abort/refund rules (spec/billing.md) cover billing. Deploy during low traffic.
 - Cost ballpark at beta scale: Lightsail ~$7–15/mo per env + S3/CloudFront cents-to-dollars + Supabase free tier. Verify current AWS pricing before committing budgets.
 - Migration path if outgrown: same image to ECS Fargate + ALB; storage/DB unchanged.

@@ -296,6 +296,36 @@ Deploy behavior note: Lightsail replaces containers on deploy → in-flight gene
 
 ---
 
+## 4b. Seed the prompt + skills (ONCE per environment — nothing generates until you do)
+
+🔴 **A brand-new environment has no prompt version, and every generation fails until one exists.** There
+is no boot-time doc-sync by design (SPEC §4.3: generation must have zero GitHub dependency at request
+time), so the first build is something a human triggers. Until then `proxy.ts` throws
+`NotConfiguredError('The system prompt')` on every request — a container that is otherwise perfectly
+healthy.
+
+Either **Settings → Admin → Refresh**, or headless:
+
+```
+curl -X POST https://staging.app.../api/admin/prompt \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"action":"refresh"}'
+```
+
+Confirm with `/healthz`: **`dependencies.systemPrompt` must read `ok`.** It is the one non-config entry
+in that report, and it exists precisely so this cannot be silently missed (`monitoring/health.ts`).
+
+✅ **Only once per environment, not once per deploy.** The prompt and skills stores persist through
+`ObjectStore` → S3, so a redeployed container picks up the existing active version. That was NOT true
+before 2026-08-01: both stores wrote to the container filesystem, which does not survive a deployment,
+so *every* deploy silently landed a container that could not generate. See `prompt/store.ts`.
+
+⚠️ Re-run it whenever the Agent Reference or skills repos change and you want the new docs live — that
+is a deliberate promotion, not an automatic one.
+
+---
+
 ## 5. Ops wiring (Phase 2, alongside first staging deploy)
 
 - [ ] CloudWatch alarms: container service `CPUUtilization`, unhealthy deployment states; billing alarm on the AWS account.
@@ -313,6 +343,7 @@ Deploy behavior note: Lightsail replaces containers on deploy → in-flight gene
 - [ ] ToS/Privacy pages live; play-domain isolation verified (cookies from app domain unreadable on play domain)
 - [ ] `BILLING_ENFORCED=true` decision made; grants configured
 - [ ] Anthropic Console spend caps set for prod key
+- [ ] Prompt + skills seeded in PROD (§4b) — `/healthz` reports `systemPrompt: ok`. The "generate" step below cannot pass without it.
 - [ ] DNS `app.babylontoolkit.com` → prod service; 200 from `/healthz`; full smoke: signup → verify → new project → generate → share → play on play-domain → purchase (live-mode $1 test) → ledger row
 
 ---

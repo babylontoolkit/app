@@ -9,7 +9,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FsPromptStore, getPromptStore, setPromptStore, sha256 } from './store';
+import { PromptVersionStore, PROMPT_STORE_PREFIX, getPromptStore, setPromptStore, sha256 } from './store';
+import { FsObjectStore } from '~/lib/.server/storage';
 import { BASE_DOCS, DECLARATION_FILES, ON_DEMAND_BLOCKS, selectOnDemandBlocks } from './sources';
 import { isOpaqueToModel } from '~/lib/context/opaque-files';
 
@@ -43,11 +44,13 @@ vi.mock('./github', () => ({
 const { buildSystemPrompt, assemblePrompt } = await import('./build');
 
 let root: string;
-let store: FsPromptStore;
+let store: PromptVersionStore;
+let objects: FsObjectStore;
 
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'prompt-store-'));
-  store = new FsPromptStore(root);
+  objects = new FsObjectStore(root);
+  store = new PromptVersionStore(objects);
 });
 
 afterEach(async () => {
@@ -165,11 +168,11 @@ describe('prompt version store', () => {
     const meta = await store.put(version('LEGACY'));
 
     // Strip the fields exactly as a record written by the old code would lack them.
-    const file = path.join(root, 'versions', `${meta.id}.json`);
-    const record = JSON.parse(await fs.readFile(file, 'utf8'));
+    const key = `${PROMPT_STORE_PREFIX}/versions/${meta.id}.json`;
+    const record = JSON.parse(new TextDecoder().decode((await objects.get(key))!));
     delete record.lastSeenCommitSha;
     delete record.lastSeenAt;
-    await fs.writeFile(file, JSON.stringify(record));
+    await objects.put(key, new TextEncoder().encode(JSON.stringify(record)));
 
     const read = await store.get(meta.id);
 
@@ -197,8 +200,13 @@ describe('prompt version store', () => {
     await store.put(version('A'));
     await store.put(version('B'));
 
-    // Two versions, but the identical on-demand + declaration bodies are stored once each.
-    const blobs = await fs.readdir(path.join(root, 'blobs'));
+    /*
+     * Asserted through the STORE's own backend rather than by reading a directory: the physical
+     * layout is the object store's business (a `prompt/blobs/…` key on the filesystem, an S3 object
+     * in production), and a test that reads the disk would fail on S3 while the property it names —
+     * "identical bodies are stored once" — held perfectly.
+     */
+    const blobs = await objects.list(`${PROMPT_STORE_PREFIX}/blobs/`);
 
     // 2 distinct base prompts + 1 shared on-demand + 1 shared declaration.
     expect(blobs).toHaveLength(4);

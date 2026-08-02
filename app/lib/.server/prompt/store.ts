@@ -1,18 +1,35 @@
 /**
  * Prompt-version store (SPEC §4.3, spec/doc-sync.md).
  *
- * STORAGE SEAM. The spec's target backend is a Supabase `prompt_versions` table (§4.5.5), which
- * does not exist yet (Stage 2). Everything the spec requires of the store — immutable versions,
- * exactly-one-active, atomic activation, rollback to any prior version, content hashing — is
- * implemented here against the filesystem, behind an interface. When Supabase lands, add a
- * `SupabasePromptStore` implementing `PromptStore` and switch `getPromptStore()`. No caller changes.
+ * STORAGE SEAM. Everything the spec requires of the store — immutable versions, exactly-one-active,
+ * atomic activation, rollback to any prior version, content hashing — is implemented here against
+ * `ObjectStore`, behind an interface.
+ *
+ * 🔴 **IT PERSISTS THROUGH `ObjectStore`, NOT THE CONTAINER'S DISK, AND THAT IS THE WHOLE POINT
+ * (2026-08-01).** This store wrote to `.data/prompt` unconditionally. `spec/hosting.md` says the app
+ * is stateless and *"anything stateful in the container is a bug"* — and a Lightsail container
+ * filesystem does not survive a deployment, so on AWS **every deploy landed a container with no
+ * prompt version at all**. There is no boot-time sync: a version is built ONLY by an admin pressing
+ * Refresh or a `curl` with `ADMIN_TOKEN`. So `getActivePrompt()` returned null and `proxy.ts` threw
+ * `NotConfiguredError('The system prompt')` on **every generation, for every user, until a human
+ * noticed** — and `DEPLOY.md`'s own smoke test ends with "new project → generate", which is exactly
+ * the step that would have failed. Reproduced before fixing: a store on an empty root reports
+ * `getActive() → null`, `list() → []`.
+ *
+ * Routing it through `ObjectStore` fixes it without a new mechanism: that seam is already "S3 when
+ * `S3_BUCKET` is set, the local filesystem otherwise", so production gets durability across
+ * deployments and local dev is byte-identical behaviour one directory over. There is ONE
+ * implementation — a second local-only class would be two writers of one state, which is the drift
+ * this codebase keeps re-learning.
+ *
+ * ⚠️ The hot path is unaffected: `active.ts` memoises the active version for 30s in-process, so this
+ * costs at most one round of GETs per 30 seconds, never one per generation.
  *
  * Large bodies (the 490KB `babylon.toolkit.d.ts`, the on-demand system docs) are content-addressed
  * so that N versions of a prompt do not store N copies of an unchanged declaration file.
  */
 import { createHash } from 'node:crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
+import { getObjectStore, type ObjectStore } from '~/lib/.server/storage';
 
 export interface PromptVersionMeta {
   id: string;
@@ -157,72 +174,86 @@ interface VersionRecord {
   declarations: Record<string, string>;
 }
 
-/** Root for all locally-persisted platform data. Overridable so tests never touch the real store. */
-export function platformDataDir(): string {
-  return process.env.PLATFORM_DATA_DIR || path.join(process.cwd(), '.data');
-}
+export { platformDataDir } from '~/lib/.server/platform-dir';
 
-export class FsPromptStore implements PromptStore {
-  private readonly _root: string;
+/** Everything this store owns lives under one prefix, so a `list` can never see another subsystem. */
+export const PROMPT_STORE_PREFIX = 'prompt';
 
-  constructor(root?: string) {
-    this._root = root ?? path.join(platformDataDir(), 'prompt');
+export class PromptVersionStore implements PromptStore {
+  private readonly _objects: ObjectStore;
+  private readonly _prefix: string;
+
+  constructor(objects?: ObjectStore, prefix = PROMPT_STORE_PREFIX) {
+    this._objects = objects ?? getObjectStore();
+    this._prefix = prefix;
   }
 
-  private get _versionsDir() {
-    return path.join(this._root, 'versions');
+  private _versionKey(id: string) {
+    return `${this._prefix}/versions/${id}.json`;
   }
 
-  private get _blobsDir() {
-    return path.join(this._root, 'blobs');
+  private _blobKey(hash: string) {
+    return `${this._prefix}/blobs/${hash}`;
   }
 
-  private get _activePath() {
-    return path.join(this._root, 'active.json');
+  private get _activeKey() {
+    return `${this._prefix}/active.json`;
+  }
+
+  private async _putText(key: string, content: string): Promise<void> {
+    await this._objects.put(key, new TextEncoder().encode(content), 'application/json');
+  }
+
+  private async _getText(key: string): Promise<string | null> {
+    const bytes = await this._objects.get(key);
+    return bytes ? new TextDecoder().decode(bytes) : null;
   }
 
   private async _writeBlob(content: string): Promise<string> {
     const hash = sha256(content);
-    const file = path.join(this._blobsDir, hash);
+    const key = this._blobKey(hash);
 
-    // Content-addressed: identical bytes are already there, and rewriting is pure waste.
-    try {
-      await fs.access(file);
-      return hash;
-    } catch {
-      await fs.mkdir(this._blobsDir, { recursive: true });
-      await this._atomicWrite(file, content);
-
+    /*
+     * Content-addressed: identical bytes are already there, and rewriting is pure waste. On S3 the
+     * existence probe is a GET rather than a stat, which is why it matters that the blobs it skips
+     * are the big ones — a 490KB declaration file re-uploaded per build would dwarf the check.
+     */
+    if (await this._objects.get(key)) {
       return hash;
     }
+
+    await this._putText(key, content);
+
+    return hash;
   }
 
   private async _readBlob(hash: string): Promise<string | null> {
-    try {
-      return await fs.readFile(path.join(this._blobsDir, hash), 'utf8');
-    } catch {
-      return null;
-    }
-  }
-
-  /** Write via temp + rename so a crash mid-write can never leave a half-written record readable. */
-  private async _atomicWrite(file: string, content: string): Promise<void> {
-    const tmp = `${file}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, content, 'utf8');
-    await fs.rename(tmp, file);
+    return this._getText(this._blobKey(hash));
   }
 
   private async _readRecord(id: string): Promise<VersionRecord | null> {
+    const raw = await this._getText(this._versionKey(id));
+
+    if (raw === null) {
+      return null;
+    }
+
     try {
-      return JSON.parse(await fs.readFile(path.join(this._versionsDir, `${id}.json`), 'utf8')) as VersionRecord;
+      return JSON.parse(raw) as VersionRecord;
     } catch {
+      // A record that cannot be parsed is a record we do not have — never a thrown refresh.
       return null;
     }
   }
 
   private async _activeId(): Promise<string | null> {
+    const raw = await this._getText(this._activeKey);
+
+    if (raw === null) {
+      return null;
+    }
+
     try {
-      const raw = await fs.readFile(this._activePath, 'utf8');
       return (JSON.parse(raw) as { versionId: string }).versionId;
     } catch {
       return null;
@@ -258,8 +289,6 @@ export class FsPromptStore implements PromptStore {
   }
 
   async put(version: NewPromptVersion): Promise<PromptVersionMeta> {
-    await fs.mkdir(this._versionsDir, { recursive: true });
-
     const contentHash = sha256(version.content);
     const createdAt = new Date().toISOString();
 
@@ -288,7 +317,7 @@ export class FsPromptStore implements PromptStore {
       record.declarations[id] = await this._writeBlob(body);
     }
 
-    await this._atomicWrite(path.join(this._versionsDir, `${record.id}.json`), JSON.stringify(record, null, 2));
+    await this._putText(this._versionKey(record.id), JSON.stringify(record, null, 2));
 
     return this._toMeta(record, await this._activeId());
   }
@@ -315,19 +344,18 @@ export class FsPromptStore implements PromptStore {
   }
 
   async list(): Promise<PromptVersionMeta[]> {
-    let files: string[];
-
-    try {
-      files = await fs.readdir(this._versionsDir);
-    } catch {
-      return [];
-    }
-
+    const objects = await this._objects.list(`${this._prefix}/versions/`);
     const activeId = await this._activeId();
     const metas: PromptVersionMeta[] = [];
 
-    for (const file of files.filter((f) => f.endsWith('.json'))) {
-      const record = await this._readRecord(file.replace(/\.json$/, ''));
+    for (const object of objects) {
+      if (!object.key.endsWith('.json')) {
+        continue;
+      }
+
+      // The key is prefixed and the id is the basename — never split on '/' assuming a fixed depth.
+      const id = object.key.slice(object.key.lastIndexOf('/') + 1).replace(/\.json$/, '');
+      const record = await this._readRecord(id);
 
       if (record) {
         metas.push(this._toMeta(record, activeId));
@@ -348,8 +376,7 @@ export class FsPromptStore implements PromptStore {
       throw new Error(`Prompt version not found: ${id}`);
     }
 
-    await fs.mkdir(this._root, { recursive: true });
-    await this._atomicWrite(this._activePath, JSON.stringify({ versionId: id }, null, 2));
+    await this._putText(this._activeKey, JSON.stringify({ versionId: id }, null, 2));
   }
 
   /**
@@ -369,7 +396,7 @@ export class FsPromptStore implements PromptStore {
 
     const updated: VersionRecord = { ...record, lastSeenCommitSha: commitSha, lastSeenAt: new Date().toISOString() };
 
-    await this._atomicWrite(path.join(this._versionsDir, `${record.id}.json`), JSON.stringify(updated, null, 2));
+    await this._putText(this._versionKey(record.id), JSON.stringify(updated, null, 2));
   }
 
   async readOnDemand(versionId: string, blockId: string): Promise<string | null> {
@@ -391,7 +418,7 @@ let _store: PromptStore | undefined;
 
 export function getPromptStore(): PromptStore {
   if (!_store) {
-    _store = new FsPromptStore();
+    _store = new PromptVersionStore();
   }
 
   return _store;

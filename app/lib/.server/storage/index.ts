@@ -7,7 +7,7 @@
  */
 import path from 'node:path';
 import { createScopedLogger } from '~/utils/logger';
-import { platformDataDir } from '~/lib/.server/prompt/store';
+import { platformDataDir } from '~/lib/.server/platform-dir';
 import { FsObjectStore, getS3Config, S3ObjectStore, type ObjectStore } from './store';
 
 const logger = createScopedLogger('storage');

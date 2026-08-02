@@ -1396,6 +1396,16 @@ Trigger conditions: StackBlitz terms unacceptable at scale, or WebContainer limi
 
 ---
 
+### §8d Decisions log (prompt + skills durability — newest last)
+
+1. **🔴 The prompt and skills stores persist through `ObjectStore`, not the container filesystem (2026-08-01).** Both wrote to `platformDataDir()` unconditionally, which `spec/hosting.md` already forbids — *"the app is stateless; anything stateful in the container is a bug."* A Lightsail container filesystem does not survive a deployment and **there is no boot-time doc-sync by design** (§4.3: generation must have zero GitHub dependency at request time), so on AWS **every deploy would have landed a container with no prompt version, failing every generation** with `NotConfiguredError('The system prompt')` until an admin pressed Refresh. Reproduced before fixing (a store on an empty root reports `getActive() → null`). `skills/store.ts`'s own header had promised this backend since it was written ("resources in S3 under a `storage_prefix`") while doing the opposite — **a comment describing an intention reads as a description of the code**, the same way `shell-strip`'s false claim survived review.
+2. **ONE implementation, not a local class beside an S3 class.** `ObjectStore` is already "S3 when `S3_BUCKET` is set, the filesystem otherwise", so routing through it gives production durability and leaves local dev byte-identical one directory over. A second local-only store would be two writers of one state — the drift this codebase keeps re-learning (two Syncs, two `started` flags, two prompt copies).
+3. **The hot path is untouched and was checked, not assumed.** `active.ts` memoises the active version for 30s in-process, so this costs at most one round of GETs per 30 seconds, never one per generation.
+4. **`/healthz` reports `systemPrompt`, the report's only non-config entry (§9a).** Its `platformKey` sibling exists because a deploy once reported *"healthy AND ready while 503ing every generation"*; a missing prompt version is that failure exactly, so the one check §9a keys on must see it. Guarded to report `degraded` rather than throw — observability may never take down the endpoint it reports on. Live-verified: `degraded` → sync → `ok`.
+5. **⚠️ The earlier claim that split stores caused cache/billing divergence between instances was WRONG, and is retired.** The version id embeds a timestamp but **never reaches the model**, and the prompt sections are static files with no clock, so identical docs produce byte-identical prompt text on any container. Confirmed live: a fresh sync of unchanged docs produced build hash `71e75fcf` — the same hash as the version built the day before. The real defect was the outage above, which is worse and simpler.
+
+---
+
 ## 9. Milestones (LAUNCH/GATING ORDER — NOT CONSTRUCTION ORDER)
 
 > **Read §1.3 principle 0 first.** These phases exist to sequence *launch gates* (what must be true before external users, before billing, before scale) — they do NOT sequence the build. **Build every feature in every phase now.** A feature's phase tells you when it must be *live and gated*, not when you're allowed to write it.
