@@ -151,6 +151,19 @@ Answer this, then proceed from T1.
 
 ## Tasks
 
+> Checklist added 2026-08-01 at the start of the `bt-execute ALL` run — the tasks were written as plain
+> headings, so there was nothing for a resumable run to flip. Each box is checked only after its own
+> Acceptance is independently verified.
+
+- [x] **T1** — Fork housekeeping (upstream remote, `btk/util-parity`, version → `-btk.1`)
+- [x] **T2** — `formatWithOptions` via a shared `formatImpl`
+- [x] **T3** — Both export surfaces, every symbol
+- [x] **T4** — The remaining 13
+- [x] **T5** — Fork tests
+- [x] **T6** — Build and prove it reached the bundles
+- [ ] **T7** — Publish and adopt *(publish needs owner npm auth)*
+- [ ] **T8** — Upstream PR to `R1ck404/Nodepod`
+
 ### T1 — Fork housekeeping
 
 In `~/Documents/Repos/Nodepod` (already cloned; `origin` → the fork, no `upstream` remote yet):
@@ -262,6 +275,83 @@ real contribution, not a private hack. Keep the local fork until it lands and re
 7. **Sandbox unaffected** — a cold pod still boots, preview appears, HMR works. One polyfill changed but
    the worker bundle is rebuilt wholesale, so confirm rather than assume. Under Option B this is the
    step carrying the whole 10k-line upgrade — budget for it.
+
+---
+
+## 🔴 SECOND DEFECT, found by this plan's own verification — `path.normalize` (FIXED 2026-08-01)
+
+Fixing `formatWithOptions` let a publish build finish for the first time ever on Nodepod — and the
+game it produced was **broken**: every asset 404'd, because the emitted HTML said
+
+```html
+<script type="module" src=".index.js"></script>   <!-- one character short of ./index.js -->
+```
+
+**This is NOT a regression from the util work.** Before the fix the build died in 2 ms, so no
+published game had ever existed on this provider; the bug was unreachable, not introduced. It is the
+same defect CLASS as the whole plan — a `node:` polyfill silently disagreeing with Node.
+
+**Root cause, isolated rather than guessed.** Ruled out in order: the template (it already ships
+`base: "./"`), the CLI arg (`buildSpawnArgs` passes `--base=./`), the shell (Nodepod's own parser
+tokenises `--base=./` intact), and Vite (real Node + the same Vite 8 emits `./index.js`). What was
+left was `src/polyfills/path.ts`:
+
+| input | Node | Nodepod (before) |
+|---|---|---|
+| `normalize("./")` | `"./"` | `"."` |
+| `normalize("a/b/")` | `"a/b/"` | `"a/b"` |
+| `normalize("a/../")` | `"./"` | `"."` |
+
+Node's docs are explicit — *"Trailing separators are preserved"* — and **11 of 21 probed inputs
+diverged**. Vite normalises its `base` through this call, so `./` became `.` and every asset URL lost
+its separator. One-line fix, `join` inherits it, full fork suite green (only the 4 pre-existing
+`nodepod-sab` failures), pinned by 4 tests in `path.test.ts` (mutation-verified: reverting fails 3).
+
+⚠️ The pairs in those tests are asserted TOGETHER on purpose — a fix that appends `/`
+unconditionally passes `normalize("./")` and corrupts `normalize("a/b/..")`.
+
+**Generalisable:** the plan's Verification step 6 says *"A 201 is not proof a stranger can play the
+game"*. It was right twice over — publish returned success, the dialog said "Your game is shared",
+and the game was unplayable. Only fetching the built HTML found it.
+
+---
+
+## 🔴 THIRD DEFECT — a bare `pnpm install` re-resolved the WHOLE tree and white-screened the app (FIXED 2026-08-01)
+
+Adopting `-btk.1` was done with a plain `pnpm install`. That did not change one specifier — it
+**re-resolved every caret range in the project**: 590 resolution changes, a 9,392-line lockfile diff,
+`@types/node` 24→26, `sass-embedded` 1.89→1.100, `vite` 5.4.19→5.4.21, the whole CodeMirror set, and —
+fatally — **`react-icons` 5.5.0 → 5.7.0, which dropped the `SiAmazon` export**:
+
+```
+Uncaught SyntaxError: The requested module '/node_modules/.vite/deps/react-icons_si.js'
+does not provide an export named 'SiAmazon'
+```
+
+One missing export at module-eval time takes down the whole React tree, so the symptom was a **total
+white screen** — which reads as "the new nodepod runtime broke the app". Nodepod was innocent; the
+package under test was the one thing in the diff that was *supposed* to change.
+
+**How to adopt a new tarball without this happening.** The lockfile is the known-good state, so
+edit it rather than regenerate it:
+
+1. `git checkout HEAD -- pnpm-lock.yaml`
+2. rewrite the tarball filename (4 refs), the `version:` field (**line ~1068 — a separate field the
+   filename rewrite does not touch**), and the `integrity:` hash
+   (`sha512-` + base64 of `createHash('sha512')` over the `.tgz`)
+3. **`pnpm install --frozen-lockfile`** — it prints *"Lockfile is up to date, resolution step is
+   skipped"*, which is the proof no re-resolution happened
+4. `rm -rf node_modules/.vite` — Vite caches optimized deps, so a stale bad bundle survives the fix
+
+Result: a **6-line** lockfile diff touching nothing but nodepod.
+
+⚠️ **`pnpm install --frozen-lockfile` exits 0 on the integrity mismatch** but leaves the package
+uninstalled behind an `ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE` line. Read the output; do not trust
+the exit code.
+
+**Generalisable:** a lockfile is a money-path-shaped artifact — it fails silently, in bulk, and blames
+whatever else was in the commit. When a dependency bump breaks something, **diff the lockfile and count
+the changed resolutions before debugging the dependency**. 590 ≠ 1 is the whole diagnosis.
 
 ---
 

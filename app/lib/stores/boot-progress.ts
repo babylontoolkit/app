@@ -278,32 +278,32 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          * is beginning here — the last of the same files is arriving — so "Finishing" rather than a
          * heading that reads like another job starting.
          */
-        title: 'Reading project files',
+        title: 'Reading project workspace files',
         detail: 'Reading files as they arrive in your workspace.',
       };
     case 'importing':
       return {
-        title: 'Importing your project',
+        title: 'Importing your project workspace',
         detail: 'Writing the imported files into your workspace.',
       };
     case 'creating-starter':
       return {
-        title: 'Creating your project',
+        title: 'Creating your project workspace',
         detail: 'Downloading the starter game template.',
       };
     case 'creating-workspace':
       return {
-        title: 'Preparing your workspace',
+        title: 'Preparing your project workspace',
         detail: 'Starting project sandbox. This can take a moment.',
       };
     case 'creating-mount':
       return {
-        title: 'Writing project files',
+        title: 'Writing project workspace files',
         detail: 'Copying the starter into your workspace.',
       };
     case 'creating-finalize':
       return {
-        title: 'Almost ready',
+        title: 'Your workspace is almost ready',
         detail: 'Registering project and waiting for it to appear.',
       };
     case 'creating-settle':
@@ -314,12 +314,12 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          * Putting build language here made one long wait out of two distinct jobs, and left the user with
          * no idea which one they were watching.
          */
-        title: 'Creating project files',
+        title: 'Creating project workspace files',
         detail: 'Finishing starter files and settling your workspace',
       };
     case 'creating-install':
       return {
-        title: 'Installing dependencies',
+        title: 'Installing project dependencies',
         detail: 'Running install on your project. This can take a moment.',
       };
     case 'creating-serve':
@@ -329,7 +329,7 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          * at their own running project, and naming it is what makes the preview appearing feel like the
          * end of a sequence rather than something that eventually showed up.
          */
-        title: 'Starting your project',
+        title: 'Starting your project workspace',
         detail: 'Launching the dev server and loading the starter home page.',
       };
     default:
