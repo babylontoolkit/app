@@ -66,7 +66,11 @@ export function mediaProtocolNote(input: MediaNoteInput): string | null {
     '- Each call returns the asset path IMMEDIATELY; the render finishes in the background. Do NOT ' +
       'wait for it, poll for it, or mention waiting.',
     '- The returned paths are the ONE exception to "never invent an asset path": reference them ' +
-      'exactly as returned (as `/assets/generated/…` URLs) and the files will appear there.',
+      'exactly as returned (as `./assets/generated/…` URLs) and the files will appear there.',
+    '- Keep the leading `./` EXACTLY as returned, in JSX and in CSS. A published game is served under ' +
+      'a prefix (`/play/<id>/`), so a root-absolute `/assets/…` resolves to the wrong origin path and ' +
+      '404s for every visitor — it looks fine in dev, where the app is at the root, and fine in CSS, ' +
+      'where the bundler rewrites it for you. Only your JSX string literals ship broken.',
     '- Design every surface to look finished while a render is still landing — a styled background ' +
       'colour or gradient behind each generated image, never a blank box.',
     '- These files SHIP IN THE GAME, so mind their weight. Ordinary art (backgrounds, textures, ' +

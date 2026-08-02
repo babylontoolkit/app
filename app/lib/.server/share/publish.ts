@@ -228,6 +228,100 @@ export function unmountableRouterBasenames(js: string): string[] {
 }
 
 /**
+ * Repair a bare `import_meta` identifier the SANDBOX left in an emitted ES-module chunk.
+ *
+ * 🔴 FOUND LIVE 2026-08-01: a published game rendered its landing page and then threw
+ * `Uncaught ReferenceError: import_meta is not defined` the moment the lazy Babylon chunk executed —
+ * i.e. on the button that starts the game. The culprit was Vite's own preload helper, emitted as:
+ *
+ *   return import_meta.resolve ? import_meta.resolve(e) : new URL(e, import_meta.url).href
+ *
+ * Nodepod rewrites `import.meta` → `import_meta` for its OWN CJS module loading, where its module
+ * wrapper supplies the binding (`var import_meta = $importMeta`). That rewrite reaches code which is
+ * then BUNDLED into the user's build, where no wrapper exists and the identifier is simply undefined.
+ *
+ * **The repair is exact, not a guess.** The original source was `import.meta`; the emitted chunks are
+ * ES modules (loaded via `<script type="module">` and dynamic `import()`), where `import.meta` is
+ * valid. Restoring it returns the code to what the compiler meant.
+ *
+ * Deliberately a REPAIR and not a refusal, unlike its two siblings below: this corruption is produced
+ * by our own sandbox, not by anything in the user's project, so there is no edit they could make to
+ * satisfy a refusal — it would be a permanent, unexplainable "your game cannot be published".
+ *
+ * ⚠️ Only a BARE identifier is rewritten. A property access (`x.import_meta`), a declaration
+ * (`var import_meta`), or the string `"import_meta"` are all left alone: a chunk that legitimately
+ * declares the binding is already correct, and rewriting its declaration would break it.
+ */
+export function repairBareImportMeta(js: string): { code: string; count: number } {
+  // A chunk that declares the binding itself is self-contained — leave it entirely alone.
+  if (/\b(?:var|let|const|function)\s+import_meta\b/.test(js)) {
+    return { code: js, count: 0 };
+  }
+
+  let count = 0;
+
+  const code = js.replace(/(^|[^\w$.])import_meta\b/g, (match, lead: string) => {
+    count++;
+    return `${lead}import.meta`;
+  });
+
+  return { code, count };
+}
+
+/**
+ * Re-point a root-absolute asset URL in emitted JS at the file it actually means.
+ *
+ * 🔴 FOUND LIVE 2026-08-01: a published game rendered, played, and showed EMPTY BOXES where its
+ * track art belonged. `Home.tsx` referenced `"/assets/generated/track-x.jpg"`; the share is served
+ * under `/play/<id>/`, so that resolves to the app origin's root and 404s for every visitor.
+ *
+ * The generated media pipeline used to hand the model root-absolute URLs, which is fixed at the source
+ * (`mediaReferenceUrl`) — but that only helps games generated AFTERWARDS. Every game already published,
+ * every imported folder, and every remix of an old share carries the broken literal, and its owner has
+ * no way to know: the same path is correct in dev, where the app IS at the origin root.
+ *
+ * **Only a path that names a REAL FILE IN THIS BUILD is rewritten**, which is what makes it safe rather
+ * than a guess. `/assets/generated/x.png` is rewritten only when `assets/generated/x.png` was actually
+ * emitted; anything else — an API route, a path on another service, a string that merely looks like one
+ * — is left exactly as written. And a rewrite can only ever improve matters: under a share prefix the
+ * original was a guaranteed 404.
+ *
+ * A REPAIR, not a refusal (like {@link repairBareImportMeta}, unlike its two neighbours): the art is
+ * already paid for and the game is otherwise fine, so refusing would strand a working game over a URL
+ * we can resolve ourselves.
+ *
+ * CSS needs none of this — the bundler rewrites `url()` at build time. That asymmetry is exactly why the
+ * bug hid: on the game that surfaced it, the CSS hero loaded 200 while all four `<img>` tiles 404'd, in
+ * the same build.
+ */
+export function repairRootAbsoluteAssetRefs(
+  js: string,
+  buildPaths: ReadonlySet<string>,
+): { code: string; count: number } {
+  let count = 0;
+
+  const code = js.replace(
+    /(["'`])(\/[A-Za-z0-9_\-./@]+\.[A-Za-z0-9]{2,5})\1/g,
+    (match, quote: string, path: string) => {
+      // Protocol-relative (`//cdn…`) is another origin's business, never ours.
+      if (path.startsWith('//')) {
+        return match;
+      }
+
+      if (!buildPaths.has(path.slice(1))) {
+        return match;
+      }
+
+      count++;
+
+      return `${quote}.${path}${quote}`;
+    },
+  );
+
+  return { code, count };
+}
+
+/**
  * The boot-breaking references ONLY: entry `<script src="/…">` and `<link rel="stylesheet|modulepreload"
  * href="/…">`. Deliberately narrow — a root-absolute favicon merely misses an icon, and refusing a
  * publish for it would be vetoing a working game. Protocol-relative (`//cdn…`) is not root-absolute.
@@ -361,6 +455,51 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
       `That build is ${(approxBytes / 1048576).toFixed(1)}MB, over the ${Math.round(byteLimit / 1048576)}MB ` +
         'publish limit. Raise BUILD_MAX_MB to publish it.',
     );
+  }
+
+  /*
+   * Repair the sandbox's `import_meta` corruption BEFORE the bytes are keyed (see
+   * {@link repairBareImportMeta}). Text JS only — a binary is never a module, and decoding one to run
+   * a regex over it would be both wrong and expensive.
+   */
+  let importMetaRepairs = 0;
+  let assetRefRepairs = 0;
+
+  /*
+   * The set of paths this build actually emitted, build-relative. It is what makes the asset repair
+   * exact instead of a guess — a URL is only re-pointed when it names a file that is really here.
+   */
+  const buildPaths = new Set(entries.map(([path]) => stripSandboxRootPrefix(path).replace(/^dist\//, '')));
+
+  for (const entry of entries) {
+    const [path, dirent] = entry;
+
+    if (dirent.isBinary || !/\.[cm]?js$/i.test(path)) {
+      continue;
+    }
+
+    const meta = repairBareImportMeta(dirent.content);
+    const assets = repairRootAbsoluteAssetRefs(meta.code, buildPaths);
+
+    importMetaRepairs += meta.count;
+    assetRefRepairs += assets.count;
+
+    if (meta.count > 0 || assets.count > 0) {
+      entry[1] = { ...dirent, content: assets.code };
+    }
+  }
+
+  /*
+   * Surfaced, never silent. Both repairs paper over something upstream — a sandbox emitting broken
+   * output, and project code written against a root-served app — and if either ever stops happening
+   * (or starts happening somewhere new) these counts are the only way anyone finds out.
+   */
+  if (importMetaRepairs > 0) {
+    logger.warn(`publish: repaired ${importMetaRepairs} bare import_meta reference(s) in ${shareId}`);
+  }
+
+  if (assetRefRepairs > 0) {
+    logger.warn(`publish: re-pointed ${assetRefRepairs} root-absolute asset URL(s) in ${shareId}`);
   }
 
   // Derive every key BEFORE writing anything — one bad path fails the publish, it does not half-do it.

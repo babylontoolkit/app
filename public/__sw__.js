@@ -45,6 +45,24 @@ const previewClients = new Map();
 const pathClaims = new Map();
 const PATH_CLAIMS_MAX = 512;
 
+// clientIds belonging to the HOST app, never a pod. Populated when a document
+// opts out via ?__nodepod=host (see rule 1a). Subresources cannot carry a query
+// marker of their own, and lookupPodForClaimedPath WALKS UP the path tree — a
+// preview that claimed "/" therefore matches every host URL beneath it — so
+// without remembering the client, a host frame keeps its own HTML and loses
+// every script and stylesheet under it to the pod.
+const hostClients = new Set();
+const HOST_CLIENTS_MAX = 256;
+
+function markHostClient(clientId) {
+  if (!clientId) return;
+  if (hostClients.size >= HOST_CLIENTS_MAX) {
+    const oldest = hostClients.values().next().value;
+    if (oldest !== undefined) hostClients.delete(oldest);
+  }
+  hostClients.add(clientId);
+}
+
 // instanceId -> Set<serverPort>. mirrors live virtual servers from
 // server-registered / server-unregistered messages. only consulted as a
 // last-resort recovery for iframe document navigations (e.g. hard reload at a
@@ -708,16 +726,28 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // 1b. explicit host opt-out.
+  // 1a. explicit host opt-out, and the client it creates.
   //
   // A host app that embeds one of its OWN same-origin pages in an iframe (a share
   // shell, a docs example) is indistinguishable to this worker from a pod preview,
-  // and the recovery fallbacks below deliberately GUESS — rule 6 will adopt any
-  // unattributed frame into whatever pod happens to be live. That guess silently
-  // replaces the host page with the pod dev server. `?__nodepod=host` is the page
-  // saying "this frame is mine"; checked before every claim rule so nothing
-  // downstream can adopt it. An explicit preview prefix (rule 1) still wins.
-  if (url.searchParams.get("__nodepod") === "host") return;
+  // and the rules below deliberately GUESS: rule 6 adopts any unattributed frame
+  // into whatever pod is live, and lookupPodForClaimedPath walks UP the path tree,
+  // so a preview holding the "/" claim matches every host URL there is. The result
+  // is the pod dev server rendered in place of the host page, with every asset
+  // still returning 200.
+  //
+  // `?__nodepod=host` is the page saying "this frame is mine". Marking the
+  // RESULTING client is the load-bearing half: subresources carry no query of
+  // their own, so a document-only opt-out keeps the host HTML and still loses
+  // every script under it to the root claim. An explicit preview prefix (rule 1)
+  // is checked first and still wins.
+  if (url.searchParams.get("__nodepod") === "host") {
+    markHostClient(resultingClientId || clientId);
+    return;
+  }
+
+  // 1b. anything requested BY a host frame stays with the host.
+  if (clientId && hostClients.has(clientId)) return;
 
   // 2. only same-origin (and localhost-alias) URLs can belong to a pod;
   //    cross-origin (fonts, CDNs) always passes through

@@ -24,6 +24,32 @@ import { MediaRefusedError, startMediaTask, type StartedMediaTask } from '~/lib/
 
 const logger = createScopedLogger('media-tools');
 
+/**
+ * The URL the model should write into project code for a generated asset.
+ *
+ * 🔴 RELATIVE, never root-absolute — this is the difference between a published game showing its art
+ * and showing empty boxes (found live 2026-08-01 on a real share).
+ *
+ * Generated media lands in `public/`, which Vite copies to the build ROOT, and a share is served under
+ * a PREFIX (`/play/<id>/`). So `/assets/generated/x.png` resolves to the app origin's root and 404s for
+ * every visitor. It survived this long because it is correct in the two places anyone looks:
+ *
+ * - **dev**, where the app IS served at the origin root; and
+ * - **CSS**, because Vite rewrites `url()` at build time and fixes the path for you.
+ *
+ * Only a JS/JSX string literal — which Vite cannot rewrite, because it cannot know a string is a URL —
+ * carries the broken path into the shipped bundle. Measured on one published game: the CSS hero loaded
+ * 200 while all four `<img>` tiles written from `Home.tsx` 404'd, in the same build.
+ *
+ * `./assets/…` resolves against the document, so it is correct at the origin root AND under any share
+ * prefix, in CSS and in JSX alike. `import.meta.env.BASE_URL` would also work, but it is awkward inside
+ * a JSX attribute and reads as boilerplate the model drops under pressure; a plain relative path is the
+ * form that survives being copied around.
+ */
+export function mediaReferenceUrl(destPath: string): string {
+  return `./${destPath.replace(/^public\//, '')}`;
+}
+
 /** What the client needs to start polling — written to the stream as a `media-task` data part. */
 export interface MediaTaskEvent {
   taskId: string;
@@ -94,7 +120,7 @@ export function createMediaTools(ctx: MediaToolContext) {
     return (
       `Started (${started.model}, ${started.credits} credits). The ${started.kind} will be saved to ` +
       `${started.destPath} when the render finishes (renders take seconds for images, minutes for video — ` +
-      `it happens in the background, DO NOT wait for it or poll for it). Reference "${started.destPath.replace(/^public\//, '/')}" ` +
+      `it happens in the background, DO NOT wait for it or poll for it). Reference "${mediaReferenceUrl(started.destPath)}" ` +
       `in the project's code now; the file will appear there automatically.`
     );
   };
