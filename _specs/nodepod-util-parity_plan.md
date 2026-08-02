@@ -45,9 +45,33 @@ terminal is live-verified working on both.
 
 ### Remaining
 
-1. `npm publish --access public` from the fork (needs owner npm auth), then flip `package.json` off the
-   `file:` spec and re-run gates.
-2. Phase 2 — the util work: T2–T6, T8 below, published as `1.9.18-btk.1`.
+**T2–T6 are DONE and verified (2026-08-01).** Fork commit `96b951e` on `btk/util-parity`; 163 fork tests
+green (116 util, 47 path); `formatWithOptions` confirmed present in `dist/__worker__.js` **and** both the
+ESM (`index-8HRj_Dty.js`) and CJS (`index-DA_V3tLa.cjs`) chunks, so T3's both-module-systems requirement
+is proven at the BUNDLE level, not just in `src/`. All 14 symbols verified on both export surfaces.
+
+**🔴 T7 is BLOCKED on npm 2FA — the publish is the ONLY thing standing between here and done.**
+`npm whoami` → `mackeyk24`, scope `@babylonjs-toolkit` read-write, package validates
+(460 files, 5.8 MB). `npm publish --access public --tag latest` then fails `EOTP`: npm demands a
+one-time password through an interactive browser flow. `--tag` is REQUIRED — `1.9.18-btk.1` is a
+prerelease (the hyphen), and a bare publish refuses.
+
+The owner must run, in `~/Documents/Repos/Nodepod`:
+
+```
+npm publish --access public --tag latest
+```
+
+⚠️ **The prepublish build reruns `build:lib` + `build:types`, regenerating `dist/`.** Verified
+deterministic — integrity came back `sha512-P59Rs8W78R+0L[...]qTJ1y5LZG5ouw==` across three separate
+packs, matching the tarball hash already in `pnpm-lock.yaml`. Do not assume that; re-read the hash npm
+prints and compare before editing the lockfile.
+
+**Then the adoption half of T7**, which is where the THIRD DEFECT below bites: flipping `package.json`
+off the `file:` spec to `"1.9.18-btk.1"` changes the resolution KIND (file → registry), so the
+tarball-swap recipe does not transfer verbatim — the lockfile entry loses its `tarball:` field and the
+key changes shape. Hand-edit it, then `pnpm install --frozen-lockfile`, then **`git diff --stat
+pnpm-lock.yaml` and confirm it is ~6 lines before running anything else.**
 
 ⚠️ **The user's `Top Down Twin Stick` project now carries its own workaround** for this bug — a
 `tools/build.mjs` that polyfills `util.formatWithOptions` before importing Vite, plus a `package.json`
@@ -161,7 +185,7 @@ Answer this, then proceed from T1.
 - [x] **T4** — The remaining 13
 - [x] **T5** — Fork tests
 - [x] **T6** — Build and prove it reached the bundles
-- [ ] **T7** — Publish and adopt *(publish needs owner npm auth)*
+- [x] **T7** — Publish and adopt *(published 2026-08-01; see the FOURTH DEFECT — Verification step 6 is blocked by a PRE-EXISTING, unrelated bug)*
 - [ ] **T8** — Upstream PR to `R1ck404/Nodepod`
 
 ### T1 — Fork housekeeping
@@ -352,6 +376,53 @@ the exit code.
 **Generalisable:** a lockfile is a money-path-shaped artifact — it fails silently, in bulk, and blames
 whatever else was in the commit. When a dependency bump breaks something, **diff the lockfile and count
 the changed resolutions before debugging the dependency**. 590 ≠ 1 is the whole diagnosis.
+
+---
+
+## 🔴 FOURTH DEFECT — every published game renders BLANK (found 2026-08-01, NOT ours, NOT fixed)
+
+Driving T7's live verification end to end: the Arcade Racing project built, published, returned
+`/play/9m2epwr45j6v`, the dialog said **"Your game is shared"** — and the page is **white**, with only
+the "Made with Babylon Toolkit" badge. The game never renders.
+
+```
+[warn] No routes matched location "/play/9m2epwr45j6v/?embed=1"
+```
+
+**Measured in the iframe** (`root` div, zero children, body text 7 chars):
+
+| | value |
+|---|---|
+| iframe pathname | `/play/4r96kmxdm94f/` |
+| computed basename | `/play/4r96kmxdm94f/` |
+| React Router's reported location | `/play/4r96kmxdm94f/?embed=1` — **unstripped** |
+
+`appBasename()` IS present in the built bundle (`basename:U()`, `U = () => new URL("./",
+window.location.href).pathname`) so the T17b template fix is shipping. It resolves to the correct
+prefix *with a trailing slash*, and the router then reports the FULL path as unmatched — i.e. the
+basename never got applied. Root cause past that point is not yet isolated; do not guess it.
+
+**🔴 This is NOT a regression from the util/path work, and the control is what proves it.** The
+`Blank Canvas` game, published in an EARLIER session, fails **identically** — same warning, same blank
+page. And the basename is computed in the BROWSER at runtime from `window.location`; our polyfills only
+affect the BUILD. Both point the same way.
+
+**What the util + path fixes DID deliver, all verified this run:** the build completes at all (it used
+to die in 2 ms); the emitted HTML carries **`src="./index.js"`**, not the one-character-short
+`.index.js` the `path.normalize` defect produced; and `index.js` / `index.css` / `favicon.ico` all
+serve **200**. The publish pipeline is fixed. What sits on top of it is broken for a different reason.
+
+⚠️ **So the plan's Verification step 6 does NOT pass, and T7 is checked on its own deliverables only**
+(publish, the 5 specifier sites, `sync:nodepod`, the seam guard still passing, gates green, live pod
+boot + preview + HMR). **Do not read a checked T7 as "a stranger can play a published game" — they
+cannot.** That needs its own investigation, starting at how the template's router consumes
+`appBasename()`.
+
+**Generalisable, and it is this plan's own lesson landing a third time:** the `path.normalize` entry
+above says *"publish returned success, the dialog said 'Your game is shared', and the game was
+unplayable. Only fetching the built HTML found it."* Here the built HTML was **correct** and the game
+was still unplayable — so even fetching the HTML is not enough. Only loading the page and reading the
+console found this one.
 
 ---
 

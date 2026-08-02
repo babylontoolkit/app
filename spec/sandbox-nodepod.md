@@ -93,6 +93,49 @@ could not offer at any price, and it is why this is not simply trading one depen
   `LICENSE` and the npm `license` field both read `MIT WITH Commons-Clause`, while the project's blog
   states "MIT licensed… no commercial restrictions." Do not re-litigate this here.
 
+## We run a FORK, and why (2026-08-01, `_specs/nodepod-util-parity_plan.md`)
+
+The adoption decision above said "fork and vendor at a pinned version". That is now literal: we run
+**`@babylonjs-toolkit/nodepod`**, forked from `R1ck404/Nodepod` at **1.9.18**, not `@scelar/nodepod`.
+Provenance is readable from the version string — `<upstream base>-btk.<n>`.
+
+| version | what it is |
+|---|---|
+| `1.9.18-btk.0` | **pure repackage** — name, version, repository URL. No functional change, so the 1.9.12 → 1.9.18 runtime upgrade could be judged on its own. |
+| `1.9.18-btk.1` | the two polyfill fixes below. |
+
+**Two `node:` polyfill defects, both of which made shipping a game impossible.** Neither is a
+regression we introduced — both were latent from the day Nodepod was adopted:
+
+1. **`util.formatWithOptions` was missing.** `debug` — a transitive dependency of essentially every
+   build tool — calls it, so `tsc -b && vite build` died in **2 ms** and **no game could ever be
+   published on this provider**. Fixed on BOTH export surfaces (named + the `export default` object),
+   because CJS `require('node:util')` receives the default object and a named export alone leaves CJS
+   consumers broken *while looking fixed in the diff*. Vite reaches `node:util` from both module
+   systems.
+2. **`path.normalize` dropped trailing separators**, which Node's docs explicitly preserve (11 of 21
+   probed inputs diverged). Vite normalises its `--base` through that call, so `./` became `.` and every
+   published game emitted `.index.js` instead of `./index.js`, 404ing every asset. This was only
+   *reachable* once defect 1 was fixed — the build had never got far enough to emit HTML.
+
+**Why a fork rather than `pnpm patch`:** the package's `main`/`exports` resolve to `dist/`, and the
+polyfills are bundled **minified** into three dist files including the ~1 MB `dist/__worker__.js`. A
+patch would have to edit minified bundles. `NodepodOptions` exposes no polyfill hook, and a Vite
+`resolve.alias` cannot help — Vite's own code `require`s `node:util` from inside the pod runtime.
+Licence is not a blocker: MIT + Commons Clause permits modification and redistribution, forbidding only
+reselling Nodepod itself.
+
+⚠️ **`package.json` currently points at a LOCAL TARBALL** (`file:../../../Nodepod/…-btk.1.tgz`) — the
+fork is built and committed but **not yet published to npm**, so the tree is *unbuildable on any other
+machine and in CI*. Publishing is blocked on owner npm auth. Both fixes are also owed upstream as a PR;
+`formatWithOptions` in particular hits any project whose build pulls in `debug`.
+
+🔴 **Bumping the pinned tarball is NOT a bare `pnpm install`.** Doing that once re-resolved every caret
+range in the project — 590 resolutions — and carried `react-icons` 5.5.0 → 5.7.0, which dropped an
+export the app imports by name and **white-screened the entire product**. The procedure that does not
+do this, plus the guard test that now catches the failure class, is in the plan's "THIRD DEFECT"
+section. Diff the lockfile and count changed resolutions before blaming the dependency.
+
 ## Gaps to close in the adapter — each of these fails silently if skipped
 
 1. **`readdir` returns `string[]`, but `refresh-walk.ts:15-18` requires
