@@ -233,7 +233,7 @@ async function fetchRepoContentsZip(repo: string, sha: string, githubToken?: str
    * starter keeps the Babylon Toolkit React Framework at `src/babylon` this way, so the
    * mounted project was missing the entire framework and Vite failed with an unresolvable
    * `./babylon/…` import (historically "./babylon/custom/loading"; the chrome now lives at
-   * `src/custom` outside the framework, but every `../babylon/globals` import fails the same
+   * `src/chrome` outside the framework, but every `../babylon/globals` import fails the same
    * way without the vendored contents). WebContainers cannot run `git submodule`,
    * so the server resolves and inlines the contents here, at the pinned commit.
    */

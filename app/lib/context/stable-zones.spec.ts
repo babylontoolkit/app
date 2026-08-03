@@ -48,7 +48,7 @@ describe('what is mutable — everything else, BY DEFAULT', () => {
     // The game's own code — the whole point of the split is that ONLY this rewrites per turn.
     'src/scripts/RaceMode.ts',
     'src/pages/Home.tsx',
-    'src/custom/SplashScreen.tsx',
+    'src/chrome/SplashScreen.tsx',
     'src/components/Hud.tsx',
 
     // Generated media lands mid-turn (§4.16) — stable-listing this would rewrite the big entry per render.

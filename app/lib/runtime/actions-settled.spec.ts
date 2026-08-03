@@ -2,7 +2,7 @@
  * When is a turn actually finished? (SPEC §4.4)
  *
  * Reported live 2026-07-27: the creation success toast fired on `onFinish` — the model's stream ending —
- * while the artifact card still had a spinner on `Write src/custom/splash.css`. The product announced a
+ * while the artifact card still had a spinner on `Write src/chrome/splash.css`. The product announced a
  * finished game while it was writing the splash screen, and pointed the user at a preview that was
  * mid-rebuild. Every rule below is one way that message can be wrong again.
  */

@@ -127,7 +127,7 @@ Play launches the project's own GameMode.
 > **Verify (current):** type "make me a kart racer" → the project is created, seeded from Racing, and the
 > preview shows the **STOCK starter home page** with the prompt waiting in the textbox and the New
 > Project banner up — a themed landing page at this point is a REGRESSION, not a pass. Then press send:
-> the landing page is themed, the chrome in `src/custom/**` is redesigned, and Play launches the
+> the landing page is themed, the chrome in `src/chrome/**` is redesigned, and Play launches the
 > project's own GameMode. Two charges, not one: a flat `PROJECT_CREATE_CREDITS` at creation and a
 > per-token bill on the build.
 

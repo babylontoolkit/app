@@ -176,7 +176,7 @@ the request which of these it is — a stated default with an exception, never a
    **Steps 6–7 are the `bt-landing` skill's procedure** — the brief delegates to it,
    and the user can re-run `/bt-landing <new brief>` any time to redesign the whole frontend
    shell (landing + splash + preloader + overlay) until they like it.
-7. **Redesign the game's chrome in `src/custom/**`** (its own top-level folder since 2026-07-18 —
+7. **Redesign the game's chrome in `src/chrome/**`** (its own top-level folder since 2026-07-18 —
    deliberately OUTSIDE the read-only `src/babylon`, so the project can edit and maintain it freely;
    its framework imports go through `'../babylon/…'`, e.g. `import GameManager from '../babylon/globals'`)
    to the same design — all three
@@ -190,7 +190,7 @@ the request which of these it is — a stated default with an exception, never a
 **READ-ONLY, always:** `src/babylon/classes/**` (demo source library — copy FROM, never edit),
 `src/babylon/system/**` (framework internals), `app.tsx` + `src/routing/**` (router shell).
 **WRITE ZONE:** `src/scripts/` (GameModes + Script Components), `src/pages/` + `src/components/` (frontend),
-`src/custom/**` (the game's chrome — splash, preloader, overlay).
+`src/chrome/**` (the game's chrome — splash, preloader, overlay).
 
 ### Layout law (every UI surface — landing page, chrome, menus, HUD)
 

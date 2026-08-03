@@ -9,7 +9,7 @@
  * queued and executed against the sandbox afterwards, and on a server sandbox every file write is a
  * round trip rather than a memory write. Observed: the chat showed the model's closing summary in the
  * past tense ("I gave First-Person Explorer a cohesive expedition-survey direction…") and a success
- * toast, while the artifact card still had a spinner on `Write src/custom/splash.css`.
+ * toast, while the artifact card still had a spinner on `Write src/chrome/splash.css`.
  *
  * So the product announced a finished game while it was still writing the splash screen, and told the
  * user to open a preview that was mid-rebuild. Both halves are wrong, and the second is worse: it sends

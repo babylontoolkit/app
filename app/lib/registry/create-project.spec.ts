@@ -288,14 +288,14 @@ describe('the creation brief — what the first build turn is told', () => {
     expect(text).toMatch(/user's own message above is the request/i);
   });
 
-  it('carries the DEFAULT branch — a game brief gets the landing page AND the src/custom chrome', async () => {
+  it('carries the DEFAULT branch — a game brief gets the landing page AND the src/chrome chrome', async () => {
     const text = await brief();
 
     expect(text).toMatch(/a game, an experience, or anything that implies a whole project/i);
     expect(text).toContain('DEFAULT');
     expect(text).toContain('bt-landing');
     expect(text).toContain('src/pages/Home.tsx');
-    expect(text).toContain('src/custom/**');
+    expect(text).toContain('src/chrome/**');
   });
 
   it('carries the EXCEPTION branch — a narrow request leaves the landing page and chrome alone', async () => {

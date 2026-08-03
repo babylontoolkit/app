@@ -43,7 +43,7 @@ Work within the React Framework's conventions:
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/scripts/**`                    | **The write zone.** ALL project game code — GameModes and Script Components — is authored here.                                                |
 | `src/pages/**`, `src/components/**` | The frontend. Fully yours to redesign.                                                                                                         |
-| `src/custom/**`                     | The game's **chrome** — splash screen, preloader, in-game overlay. Yours to redesign (keep the wiring — see "Chrome rewrites").                |
+| `src/chrome/**`                     | The game's **chrome** — splash screen, preloader, in-game overlay. Yours to redesign (keep the wiring — see "Chrome rewrites").                |
 | `src/babylon/classes/**`            | **READ-ONLY** demo/source library. Copy FROM it; never edit it. To change a demo class, copy it into `src/scripts/` first, then edit the copy. |
 | `src/babylon/system/**`             | **READ-ONLY** framework internals.                                                                                                             |
 | `app.tsx`, `src/routing/**`         | **READ-ONLY** routing shell.                                                                                                                   |
@@ -53,7 +53,7 @@ Work within the React Framework's conventions:
 file actually sits**:
 
 - From `src/scripts/` (your GameModes and Script Components): `import GameManager from '../babylon/globals';`
-- From `src/custom/` (the chrome): `import GameManager from '../babylon/globals';`
+- From `src/chrome/` (the chrome): `import GameManager from '../babylon/globals';`
 - From `src/babylon/classes/` (inside the framework folder, one level from `globals.ts`): `import GameManager from '../globals';`
 
 **When you COPY a demo class from `src/babylon/classes/` into `src/scripts/`, you MUST fix this import** —
@@ -97,7 +97,7 @@ the rest. **Never delete image files from disk** — unused assets stay, and `pu
 ## Layout law — full-bleed by default, ALWAYS responsive (NON-NEGOTIABLE)
 
 These two rules bind **every** UI surface you write or restyle — the landing page (`src/pages`,
-`src/components`), the game chrome (`src/custom/**`), menus, HUDs, dialogs, every screen. They
+`src/components`), the game chrome (`src/chrome/**`), menus, HUDs, dialogs, every screen. They
 are not stylistic preferences; a design that breaks either is a **defect**, the same as an unresolved
 import.
 
@@ -133,26 +133,26 @@ repeat(auto-fit, minmax(...))`), not absolute positioning or fixed columns that 
 ## Chrome rewrites — splash, preloader, overlay (do ALL THREE, not just the overlay)
 
 The landing page is not the only starter surface. On a new project you redesign the game's **chrome** in
-`src/custom/**` to match that same design. **This is FIVE required files, and it is easy to do
+`src/chrome/**` to match that same design. **This is FIVE required files, and it is easy to do
 only the overlay and stop — do not.** The splash and preloader are the two that ship with the **Babylon
 logo and spinner**, so skipping them leaves BabylonJS branding sitting in the user's game (§2.3) — the
 exact thing the landing-page rewrite exists to prevent. Restyle freely, but keep each one's wiring,
 because all three are functional:
 
-1. **Preloader** — `src/custom/loading.tsx`. The first thing shown, before the app mounts.
+1. **Preloader** — `src/chrome/loading.tsx`. The first thing shown, before the app mounts.
    Currently the Babylon logo + "Downloading…". Rethemed to the game. It **re-exports `babylonLogo` /
    `spinnerLogo`** that `splash.tsx` imports — if you rewrite it, keep those exports (or update
    `splash.tsx`'s import). Never delete `public/babylon.png` / `public/spinner.png` — framework-required,
    whatever your design shows.
-2. **Splash / loading screen** — `src/custom/splash.tsx` + `splash.css`. Shown while the 3D scene
+2. **Splash / loading screen** — `src/chrome/splash.tsx` + `splash.css`. Shown while the 3D scene
    loads. Currently the Babylon logo + spinner. Rethemed to the game, but **keep the `GameManager.EventBus`
    `"OnLoadProgress"` subscription and its status text** — that is real load progress, not decoration.
-3. **Initial overlay** — `src/custom/overlay.tsx` + `overlay.css`. The in-game HUD layer. A
+3. **Initial overlay** — `src/chrome/overlay.tsx` + `overlay.css`. The in-game HUD layer. A
    minimal, themed starting point (a title/brand corner, a frame) — the full HUD grows later with the
    gameplay. **Keep `pointer-events: none` on the container** so driving/input reaches the canvas; make
    only genuinely interactive elements `pointer-events: auto`.
 
-`src/custom/**` runs in the viewer context, so it MAY import `GameManager`/`EventBus` for game
+`src/chrome/**` runs in the viewer context, so it MAY import `GameManager`/`EventBus` for game
 data and `useUnifiedNavigation` for navigation (unlike `src/pages`/`src/components`, which stay
 Babylon-free) — it sits OUTSIDE the framework folder, so its framework imports go through
 `'../babylon/…'`: `import GameManager from '../babylon/globals'`, `'../babylon/system/platform'`;

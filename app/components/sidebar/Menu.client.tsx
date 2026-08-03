@@ -61,10 +61,15 @@ function CurrentDateTime() {
    * directly under the top strip, which put a clock immediately above the chat list — the panel's
    * actual job — and pushed everything down a row. It carries no border of its own: the footer it
    * now sits in already has a `border-t`, and a second rule 1px away reads as a mistake.
+   *
+   * ── NO CLOCK GLYPH (owner, 2026-08-02) ────────────────────────────────────────────────────────
+   * It had one in the old full-width row, where the icon was the row's left anchor and the text ran
+   * away from it. Centred between two ICON buttons (settings, theme) it stopped being a label and
+   * became a third icon in the row — one that is not a control, sitting between two that are. A date
+   * and a time need no glyph to be recognised as a date and a time.
    */
   return (
     <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 whitespace-nowrap">
-      <div className="h-4 w-4 i-ph:clock opacity-80 shrink-0" />
       <span>{dateTime.toLocaleDateString()}</span>
       <span>{dateTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
     </div>

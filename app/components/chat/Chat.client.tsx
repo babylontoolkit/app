@@ -564,7 +564,7 @@ export const ChatImpl = memo(
            * which execute against the sandbox afterwards — and on a server sandbox each file write is a
            * round trip, so the queue lags the text badly. Observed: this toast on screen, the model's
            * closing summary in the past tense, and the artifact card still spinning on
-           * `Write src/custom/splash.css`. We announced a finished game while writing the splash, and
+           * `Write src/chrome/splash.css`. We announced a finished game while writing the splash, and
            * sent the user to a preview that was mid-rebuild — which reads as a broken build.
            *
            * So the celebration waits for every queued action to reach a terminal state (`actions-settled.ts`;
