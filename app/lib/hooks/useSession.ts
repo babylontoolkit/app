@@ -10,6 +10,7 @@ import { useStore } from '@nanostores/react';
 import { useEffect } from 'react';
 import { refreshSession, sessionStore, canGenerate, type SessionState } from '~/lib/stores/session';
 import { profileStore } from '~/lib/stores/profile';
+import { startLocalOwnerSync } from '~/lib/persistence/local-owner-sync';
 import { resolveDisplayIdentity, type DisplayIdentity } from '~/lib/identity';
 
 let started = false;
@@ -21,6 +22,14 @@ export function useSession(): SessionState & { refresh: () => Promise<SessionSta
     // One fetch per page load, however many components ask.
     if (!started) {
       started = true;
+
+      /*
+       * Started BEFORE the fetch, so the very first session state is observed. It scopes every
+       * browser-local record to the signed-in account (`local-owner.ts`); starting it after would
+       * leave the first resolved session unhandled and the previous user's chats readable until
+       * something else refreshed.
+       */
+      startLocalOwnerSync();
       void refreshSession();
     }
   }, []);

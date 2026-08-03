@@ -9,6 +9,7 @@ import { Button } from '~/components/ui/Button';
 import { db, deleteById, getAll, chatId, type ChatHistoryItem, useChatHistory } from '~/lib/persistence';
 import { deleteChat as deleteServerChat, listAllChats } from '~/lib/persistence/projects';
 import { mergeChatList, localChatList, type SidebarChat } from '~/lib/persistence/chat-list';
+import { filterOwnedRecords, localOwnerRevision, localViewer, localViewerStore } from '~/lib/persistence/local-owner';
 import { createScopedLogger } from '~/utils/logger';
 import { cubicEasingFn } from '~/utils/easings';
 import { HistoryItem } from './HistoryItem';
@@ -16,7 +17,13 @@ import { binDates } from './date-binning';
 import { useSearchFilter } from '~/lib/hooks/useSearchFilter';
 import { classNames } from '~/utils/classNames';
 import { useStore } from '@nanostores/react';
-import { sidebarDockedStore } from '~/lib/stores/sidebar';
+import {
+  sidebarDockableStore,
+  sidebarDockedEffective,
+  sidebarOverlayOpen,
+  setSidebarOverlayOpen,
+  startSidebarViewportSync,
+} from '~/lib/stores/sidebar';
 import { brand } from '~/config/brand';
 import { useDisplayIdentity } from '~/lib/hooks/useSession';
 
@@ -123,10 +130,35 @@ export const Menu = () => {
   const [dialogContent, setDialogContent] = useState<DialogContent>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-  const docked = useStore(sidebarDockedStore);
+  /*
+   * 🔴 The EFFECTIVE dock, never the raw preference (`~/lib/stores/sidebar`). Below
+   * `SIDEBAR_DOCK_MIN_WIDTH` a stored `docked: true` must not pin the drawer: measured at a 500px
+   * viewport it sat over the content at 340px — 68% of the screen — because the body's dock offset is
+   * suppressed there and the drawer's width was not. Reading `sidebarDockedStore` here is that bug.
+   */
+  const docked = useStore(sidebarDockedEffective);
+  const dockable = useStore(sidebarDockableStore);
 
-  // Docked pins the drawer open; otherwise it follows the edge-hover `open` state.
-  const isOpen = open || docked;
+  // One listener for the tab; idempotent, so mounting the Menu twice is harmless.
+  useEffect(() => startSidebarViewportSync(), []);
+
+  /*
+   * Reload the list whenever WHO IS LOOKING changes, or when legacy chats have just been attributed
+   * (`local-owner.ts`). The session resolves after first paint and adoption waits on `/api/chats`
+   * behind it, so without this the sidebar keeps rendering the answer it computed for an unresolved
+   * viewer — which is deliberately empty, and reads as "my chats are gone".
+   */
+  const viewer = useStore(localViewerStore);
+  const ownerRevision = useStore(localOwnerRevision);
+  const viewerRevision = `${viewer.status}:${viewer.status === 'user' ? viewer.id : ''}:${ownerRevision}`;
+
+  /*
+   * Three ways the drawer can be showing, and the narrow one is not hover-driven: a touch device
+   * fires no `mousemove`, so without the header button summoning `overlayOpen` the sidebar would be
+   * unreachable on exactly the screens this change is about.
+   */
+  const overlayOpen = useStore(sidebarOverlayOpen);
+  const isOpen = open || docked || overlayOpen;
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
 
@@ -155,7 +187,19 @@ export const Menu = () => {
       return Promise.resolve();
     }
 
-    const local = getAll(db).catch(() => [] as ChatHistoryItem[]);
+    /*
+     * 🔴 Scoped to the signed-in account BEFORE either branch sees it (`local-owner.ts`). IndexedDB is
+     * per-browser-profile and sign-out does not clear it, so on a shared computer this list is the
+     * widest door in the product — and the fallback below is wider still, because `localChatList`
+     * filters nothing by design and an expired session arrives there as an ordinary thrown 401. The
+     * filter has to be here rather than inside either list function: `mergeChatList` keeps every
+     * local-only chat on purpose (an unsaved chat is real), which is correct about SAVEDNESS and says
+     * nothing about whose it is.
+     */
+    const viewer = localViewer();
+    const local = getAll(db)
+      .then((chats) => filterOwnedRecords(chats, viewer))
+      .catch(() => [] as ChatHistoryItem[]);
 
     return listAllChats()
       .then(async (server) => mergeChatList(server, await local))
@@ -169,7 +213,7 @@ export const Menu = () => {
       .catch((error) => {
         toast.error(error.message);
       });
-  }, []);
+  }, [viewerRevision]);
 
   /** Manual refresh of the chat list — spins the icon while the server round-trip is in flight. */
   const [refreshing, setRefreshing] = useState(false);
@@ -419,6 +463,17 @@ export const Menu = () => {
     }
   }, [open, selectionMode]);
 
+  /*
+   * The overlay is a NARROW-viewport affordance, so widening past the breakpoint must retire it —
+   * otherwise a desktop window that was briefly narrow keeps a floating drawer over a layout that now
+   * has a docked column reserved for it, i.e. the sidebar twice.
+   */
+  useEffect(() => {
+    if (dockable && overlayOpen) {
+      setSidebarOverlayOpen(false);
+    }
+  }, [dockable, overlayOpen]);
+
   useEffect(() => {
     // When docked, the sidebar is pinned open — the edge-hover auto-slide is disabled entirely.
     if (docked) {
@@ -473,16 +528,38 @@ export const Menu = () => {
        */}
       <div className="contents" data-theme="dark">
         {/*
+         * The overlay's dismiss surface — narrow viewports only, and only while summoned.
+         *
+         * On a wide screen the drawer closes when the pointer leaves it (the `mousemove` handler
+         * above). A touch device fires no `mousemove` at all, so without this the drawer opens and
+         * can never be put away — the same dead end as the pinned sidebar this change is fixing, one
+         * gesture later. It is deliberately NOT rendered when docked or dockable: a scrim over a
+         * pinned column would grey out the app the user chose to keep beside their work.
+         */}
+        {overlayOpen && !dockable && (
+          <div
+            className="fixed inset-0 z-sidebar-scrim bg-black/50"
+            onClick={() => setSidebarOverlayOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+
+        {/*
          * `initial={isOpen...}`: mount already in the current open/closed state so a docked sidebar does
          * NOT replay its slide-in on every route change (each view mounts its own Menu). Only genuine
          * open/close transitions animate; navigating while docked is seamless.
+         *
+         * The `min()` width keeps the drawer narrower than the screen it floats over. Docked it is
+         * always the flat 340px the body offset reserves (docking only exists at >=1024px, where 85vw
+         * is far larger), so this changes nothing there — it bounds the narrow overlay only, and the
+         * 15% gutter leaves the page visible behind it rather than reading as a full-screen page.
          */}
         <motion.div
           ref={menuRef}
           initial={isOpen ? 'open' : 'closed'}
           animate={isOpen ? 'open' : 'closed'}
           variants={menuVariants}
-          style={{ width: 'var(--sidebar-dock-width, 340px)' }}
+          style={{ width: 'min(var(--sidebar-dock-width, 340px), 85vw)' }}
           className={classNames(
             'flex selection-accent flex-col side-menu fixed top-0 h-full',
             'bg-white dark:bg-gray-950 border-r border-bolt-elements-borderColor text-sm',

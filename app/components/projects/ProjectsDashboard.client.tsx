@@ -20,6 +20,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { db, getAll, deleteById, type ChatHistoryItem } from '~/lib/persistence';
 import { listProjects, deleteProject, renameProject, ApiError } from '~/lib/persistence/projects';
 import { setPendingOpenProject, setPendingRemix } from '~/lib/persistence/pending-remix';
+import { filterOwnedRecords, localViewer } from '~/lib/persistence/local-owner';
 import { describeProjectSaveBadge } from '~/lib/persistence/save-status';
 import { readCurrentLocalSnapshot } from '~/lib/persistence/local-snapshots';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
@@ -102,7 +103,16 @@ export function ProjectsDashboard() {
       serverProjects.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 
       setProjects(serverProjects);
-      setLocalChats(buildLocalChatIndex(chats));
+
+      /*
+       * The GRID is already safe — `listProjects` is `requireUser` → `listByUser` server-side, so it
+       * only ever returns this account's projects. This index is the other half: it resolves "Open"
+       * to a `/chat/:urlId` out of the shared IndexedDB, and an unfiltered one would hand this user a
+       * chat id belonging to whoever else uses the browser. Scoped for the same reason the sidebar is
+       * (`local-owner.ts`); a project with no chat of the viewer's own falls through to the fresh
+       * mount, which is the correct answer and already the common one across devices.
+       */
+      setLocalChats(buildLocalChatIndex(filterOwnedRecords(chats, localViewer())));
     } catch (err) {
       if (err instanceof ApiError && err.statusCode === 401) {
         setNeedsAuth(true);

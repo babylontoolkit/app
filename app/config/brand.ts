@@ -28,6 +28,9 @@ export interface Brand {
   /** The product's working name (browser title, headers, receipts). Final name undecided — change here only. */
   productName: string;
 
+  /** The product's working title (logo title). Final name undecided — change here only. */
+  productTitle: string;
+
   /** Full/legal-ish product name for formal surfaces (footers, emails, ToS headers). */
   productFullName: string;
 
@@ -98,12 +101,13 @@ export interface Brand {
 
 export const brand: Brand = {
   productName: 'App Builder',
+  productTitle: '3D APP BUILDER',
   productFullName: 'Babylon Toolkit App Builder',
   productSlug: 'babylon-toolkit-app-builder',
-  tagline: 'Build 3D Web Apps With AI',
-  metaDescription: 'Build Babylon Toolkit 3D web apps with AI — describe your app and watch it come to life.',
+  tagline: 'Create 3D Apps With AI',
+  metaDescription: 'Create Babylon Toolkit 3D Apps with AI — describe your app and watch it come to life.',
   intro: {
-    heading: 'Build A 3D Web App With AI',
+    heading: 'Build A 3D Application',
     subheading: 'Describe your app and watch it come to life — ready in minutes, exportable as real projects.',
   },
   poweredBy: {

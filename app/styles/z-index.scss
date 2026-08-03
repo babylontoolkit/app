@@ -8,6 +8,18 @@ $zIndexMax: 999;
   z-index: $zIndexMax - 2;
 }
 
+/*
+ * The narrow-viewport sidebar overlay's dismiss scrim — directly BENEATH the drawer it dims.
+ *
+ * Sharing `.z-sidebar` would leave the winner to DOM order, and the scrim renders first, so a later
+ * refactor that reorders the two would put an invisible full-screen click-catcher over the drawer:
+ * every tap inside the sidebar would close it instead. One step down states the relationship instead
+ * of relying on source order.
+ */
+.z-sidebar-scrim {
+  z-index: $zIndexMax - 3;
+}
+
 .z-port-dropdown {
   z-index: $zIndexMax - 3;
 }

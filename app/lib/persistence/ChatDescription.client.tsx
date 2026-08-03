@@ -61,11 +61,20 @@ export function ChatDescription() {
      * CHAT, and there is no chat identity to rename yet). Nothing at all only when there is no
      * project either (the landing page).
      */
-    return projectTitle ? <div className="flex items-center justify-center">{projectTitle}</div> : null;
+    return projectTitle ? <div className="flex items-center justify-start">{projectTitle}</div> : null;
   }
 
+  /*
+   * `justify-start`, not `justify-center` (2026-08-02). The header slot that holds this is now
+   * left-aligned and flush with the chat column beneath it, and these wrappers were re-centring the
+   * text inside it — so the span moved and the title did not. The Header is this component's only
+   * consumer, so aligning at the source beats overriding it from outside.
+   *
+   * The nested form below keeps `justify-center`: it is a compact input + save/cancel cluster that
+   * sizes to its own content, not a thing being positioned in the header.
+   */
   return (
-    <div className="flex items-center justify-center">
+    <div className="flex items-center justify-start">
       {editing ? (
         <form onSubmit={handleSubmit} className="flex items-center justify-center">
           <input

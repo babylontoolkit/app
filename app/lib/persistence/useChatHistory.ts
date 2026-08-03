@@ -29,6 +29,7 @@ import { CoalescedTask } from './coalesce';
 import { streamingState } from '~/lib/stores/streaming';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
+import { localViewer, localViewerStore, ownsLocalRecord } from './local-owner';
 import {
   getRepoStatus,
   isServerChatId,
@@ -93,6 +94,15 @@ export interface ChatHistoryItem {
   messages: Message[];
   timestamp: string;
   metadata?: IChatMetadata;
+
+  /**
+   * The account this browser-local record belongs to (`local-owner.ts`).
+   *
+   * IndexedDB is per-browser-profile and sign-out does not clear it, so without this two people on one
+   * computer read each other's conversations. Optional because records written before it existed carry
+   * none — `planAdoption` attributes those from the server's own chat list rather than by guessing.
+   */
+  ownerId?: string;
 }
 
 const persistenceEnabled = !import.meta.env.VITE_DISABLE_PERSISTENCE;
@@ -1172,6 +1182,9 @@ export function useChatHistory() {
   const { id: mixedId } = useLoaderData<{ id?: string }>();
   const [searchParams] = useSearchParams();
 
+  /** Who is signed in, for the local-record ownership check in the mount effect (`local-owner.ts`). */
+  const localViewerState = useStore(localViewerStore);
+
   const [archivedMessages, setArchivedMessages] = useState<Message[]>([]);
   const [initialMessages, setInitialMessages] = useState<Message[]>([]);
   const [ready, setReady] = useState<boolean>(false);
@@ -1221,6 +1234,22 @@ export function useChatHistory() {
         toast.error('Chat persistence is unavailable');
       }
 
+      return;
+    }
+
+    /*
+     * 🔴 Wait for the session before deciding whether this browser's copy is openable.
+     *
+     * `/api/me` resolves AFTER first paint, so this effect runs at least once with the viewer still
+     * `unknown` — and an unknown viewer owns nothing, by design (`local-owner.ts`). Deciding on that
+     * would bounce every user off their OWN chat URL on every cold load, and the re-run once the
+     * session arrived would not undo the navigation. Not-yet-known is not an answer, so we do not give
+     * one; the store change re-runs this effect within one round trip.
+     *
+     * Deliberately narrow: only the `mixedId` branch reads local records. A fresh builder has nothing
+     * to be denied and must not be made to wait on the network to render.
+     */
+    if (mixedId && localViewerState.status === 'unknown') {
       return;
     }
 
@@ -1455,7 +1484,30 @@ export function useChatHistory() {
             }
           }
 
-          if (storedMessages && storedMessages.messages.length > 0) {
+          /*
+           * 🔴 The browser's copy is only openable by the account that WROTE it (`local-owner.ts`).
+           *
+           * Everything above this line has an ownership answer: a server chat id goes through
+           * `openFromServer`, which searches the caller's OWN `/api/chats` list, so a stranger's UUID
+           * is simply absent and falls through — 404-not-403 applied to a URL (§4.5.3). This branch
+           * had none. A local id is not a UUID, so it never reaches that check, and `getMessages` +
+           * `getSnapshot` read straight out of a database that is shared by everyone using the browser
+           * profile: the whole conversation and the snapshot's files, to whoever typed the URL.
+           *
+           * Refusing here is not a dead end for the rightful owner — the same id opens normally once
+           * they sign in, because the records are filtered, never deleted.
+           */
+          const openable = storedMessages && ownsLocalRecord(storedMessages, localViewer());
+
+          if (storedMessages && !openable) {
+            logger.warn(`Chat ${mixedId} belongs to a different account on this browser — not opening it.`);
+            navigate('/', { replace: true });
+            setReady(true);
+
+            return;
+          }
+
+          if (openable && storedMessages.messages.length > 0) {
             /*
              * const snapshotStr = localStorage.getItem(`snapshot:${mixedId}`); // Remove localStorage usage
              * const snapshot: Snapshot = snapshotStr ? JSON.parse(snapshotStr) : { chatIndex: 0, files: {} }; // Use snapshot from DB
@@ -1766,7 +1818,13 @@ ${value.content}
        * clear re-renders us when the mount lands.
        */
     }
-  }, [mixedId, db, navigate, searchParams]); // Added db, navigate, searchParams dependencies
+
+    /*
+     * `localViewerState` is a dependency because the effect RETURNS EARLY while the viewer is unknown
+     * (see the guard at the top). Without it the effect never re-runs when the session resolves and
+     * `/chat/:id` renders an empty chat forever — the guard would have turned a race into a hang.
+     */
+  }, [mixedId, db, navigate, searchParams, localViewerState]); // Added db, navigate, searchParams dependencies
 
   /**
    * The LATEST snapshot request. Overwritten, never queued — see `snapshotTask`.

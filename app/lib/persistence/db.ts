@@ -2,6 +2,7 @@ import type { Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import type { ChatHistoryItem } from './useChatHistory';
 import type { Snapshot } from './types'; // Import Snapshot type
+import { currentOwnerId } from './local-owner';
 
 export interface IChatMetadata {
   /*
@@ -121,6 +122,19 @@ export async function getAll(db: IDBDatabase): Promise<ChatHistoryItem[]> {
   });
 }
 
+/**
+ * Write a chat, stamped with the account that owns it (`local-owner.ts`).
+ *
+ * 🔴 The owner is read from the module store rather than taken as an argument, deliberately. This has
+ * a dozen call sites, none of which have a session in scope, and an unstamped write is INVISIBLE to
+ * its own author — the chat simply stops appearing in the sidebar, with nothing thrown and nothing
+ * logged. Making the stamp automatic is what makes it impossible for a new call site to forget.
+ *
+ * ⚠️ An unknown owner PRESERVES whatever the record already had; it never clears it. `put` replaces
+ * the whole record, so writing `ownerId: undefined` during a boot race (the session resolves
+ * asynchronously, and the user can be typing before it does) would un-own a live conversation and
+ * hide it from the person writing it. Hence the read-then-put inside one transaction.
+ */
 export async function setMessages(
   db: IDBDatabase,
   id: string,
@@ -139,17 +153,69 @@ export async function setMessages(
       return;
     }
 
-    const request = store.put({
-      id,
-      messages,
-      urlId,
-      description,
-      timestamp: timestamp ?? new Date().toISOString(),
-      metadata,
-    });
+    // One transaction: the record cannot change between reading its owner and writing it back.
+    const existing = store.get(id);
 
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+    existing.onerror = () => reject(existing.error);
+
+    existing.onsuccess = () => {
+      const previous = existing.result as ChatHistoryItem | undefined;
+      const request = store.put({
+        id,
+        messages,
+        urlId,
+        description,
+        timestamp: timestamp ?? new Date().toISOString(),
+        metadata,
+        ownerId: currentOwnerId() ?? previous?.ownerId,
+      });
+
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    };
+  });
+}
+
+/**
+ * Attribute legacy chats to the account that owns them — the plan comes from `planAdoption`.
+ *
+ * Records written before ownership existed carry none, and `ownsLocalRecord` gives an unstamped
+ * record to nobody, so without this every pre-existing conversation would silently vanish from its
+ * own owner's sidebar on upgrade. Stamping is the ONLY mutation here: messages, urlId, description,
+ * timestamp and metadata are written back exactly as found.
+ *
+ * A record that disappeared between planning and applying is skipped rather than recreated — the
+ * plan is a list of ids, and putting one back would resurrect a chat the user deleted in another tab.
+ */
+export async function stampChatOwners(db: IDBDatabase, ids: readonly string[], ownerId: string): Promise<number> {
+  if (ids.length === 0) {
+    return 0;
+  }
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('chats', 'readwrite');
+    const store = transaction.objectStore('chats');
+    let stamped = 0;
+
+    for (const id of ids) {
+      const read = store.get(id);
+
+      read.onsuccess = () => {
+        const record = read.result as ChatHistoryItem | undefined;
+
+        // Gone, or claimed by someone else since the plan was made. Both mean: not ours to touch.
+        if (!record || record.ownerId !== undefined) {
+          return;
+        }
+
+        store.put({ ...record, ownerId });
+        stamped += 1;
+      };
+    }
+
+    transaction.oncomplete = () => resolve(stamped);
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
   });
 }
 

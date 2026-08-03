@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { toast } from 'react-toastify';
 import { ImportExportService } from '~/lib/services/importExportService';
 import { useIndexedDB } from '~/lib/hooks/useIndexedDB';
+import { claimForImport, filterOwnedRecords, localViewer } from '~/lib/persistence/local-owner';
 import { generateId } from 'ai';
 
 interface UseDataOperationsProps {
@@ -291,8 +292,15 @@ export function useDataOperations({
           const request = store.getAll();
 
           request.onsuccess = () => {
-            console.log(`Found ${request.result ? request.result.length : 0} chats directly from database`);
-            resolve(request.result || []);
+            /*
+             * 🔴 Scoped to the signed-in account (`local-owner.ts`). This bypasses `getAllChats` and
+             * reads the store directly — "Direct database query approach for more reliable access" —
+             * so it needs its own filter, and it is the export button: unscoped, it writes every
+             * account's conversations on a shared computer into a file the user then keeps.
+             */
+            const owned = filterOwnedRecords((request.result || []) as { ownerId?: string }[], localViewer());
+            console.log(`Found ${owned.length} chats directly from database`);
+            resolve(owned);
           };
 
           request.onerror = () => {
@@ -412,9 +420,16 @@ export function useDataOperations({
           });
         });
 
-        // Wait for all promises to resolve
+        /*
+         * Wait for all promises to resolve, then drop anything this account does not own.
+         *
+         * The ids come from a picker that is already scoped, so this is defence in depth rather than
+         * a known hole — but the ids are the INPUT to this function, and a caller that builds them
+         * some other way (a future "export by project", a restored selection) would arrive here with
+         * no filter between a chat id and a file on disk.
+         */
         const chats = await Promise.all(chatPromises);
-        const filteredChats = chats.filter(Boolean); // Remove any null/undefined results
+        const filteredChats = filterOwnedRecords(chats.filter(Boolean), localViewer());
 
         console.log(`Retrieved ${filteredChats.length} chats for export`);
 
@@ -638,7 +653,13 @@ export function useDataOperations({
         let processed = 0;
 
         for (const chat of validatedChats) {
-          store.put(chat);
+          /*
+           * Claimed for the importing account (`local-owner.ts`). Two reasons, and the second is the
+           * one that bites: an `ownerId` inside a user-supplied file is not evidence of anything, and
+           * an UNSTAMPED write is invisible to the person who just made it — the import would report
+           * success and the chats would never appear.
+           */
+          store.put(claimForImport(chat));
           processed++;
 
           if (processed % 5 === 0 || processed === validatedChats.length) {
@@ -1098,7 +1119,8 @@ export function useDataOperations({
           const store = transaction.objectStore('chats');
 
           for (const chat of lastOperation.data.previous.chats) {
-            store.put(chat);
+            // Restoring this account's own export — re-claimed so an undo cannot orphan it.
+            store.put(claimForImport(chat));
           }
 
           await new Promise((resolve, reject) => {
@@ -1146,7 +1168,8 @@ export function useDataOperations({
           const chatStore = chatTransaction.objectStore('chats');
 
           for (const chat of lastOperation.data.previous.chats) {
-            chatStore.put(chat);
+            // Restoring this account's own export — re-claimed so an undo cannot orphan it.
+            chatStore.put(claimForImport(chat));
           }
 
           await new Promise((resolve, reject) => {

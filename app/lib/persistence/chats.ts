@@ -4,6 +4,7 @@
 
 import type { Message } from 'ai';
 import type { IChatMetadata } from './db'; // Import IChatMetadata
+import { filterOwnedRecords, localViewer } from './local-owner';
 
 export interface ChatMessage {
   id: string;
@@ -19,10 +20,25 @@ export interface Chat {
   timestamp: string;
   urlId?: string;
   metadata?: IChatMetadata;
+
+  /** The account that wrote it — see `local-owner.ts`. Absent on records predating ownership. */
+  ownerId?: string;
 }
 
 /**
- * Get all chats from the database
+ * Get the SIGNED-IN ACCOUNT's chats from the database.
+ *
+ * 🔴 The scoping is inside this function rather than at its call sites, deliberately. Every caller —
+ * the Settings → Data tab's list, "Export all your chats to a JSON file", the bulk delete — means
+ * "mine", and one that forgot to filter would quietly hand another account's whole conversation
+ * history to a `.json` download on a shared computer. There is no caller that wants the unscoped
+ * read, so the unscoped read is not offered; see `local-owner.ts` for why the browser's stores need
+ * this at all.
+ *
+ * Consequences worth stating, both intended: an unresolved session gets NOTHING (the export button
+ * reports "no chats available" for a moment on a cold load, rather than exporting someone else's),
+ * and "delete all chats" clears only the caller's own.
+ *
  * @param db The IndexedDB database instance
  * @returns A promise that resolves to an array of chats
  */
@@ -36,7 +52,7 @@ export async function getAllChats(db: IDBDatabase): Promise<Chat[]> {
       const request = store.getAll();
 
       request.onsuccess = () => {
-        const result = request.result || [];
+        const result = filterOwnedRecords((request.result || []) as Chat[], localViewer());
         console.log(`getAllChats: Found ${result.length} chats in database '${db.name}'`);
         resolve(result);
       };

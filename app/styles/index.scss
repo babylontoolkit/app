@@ -150,10 +150,150 @@ body.dock-animate {
   flex: 0 0 var(--header-brand-width, 150px);
 }
 
-@media (min-width: 1024px) {
-  body.sidebar-docked {
-    /*
-     * 🔴 `!important` is LOAD-BEARING — do not "clean it up".
+/*
+ * ── THE CHAT TITLE IS PINNED, EXACTLY LIKE THE BRAND (2026-08-02) ────────────────────────────────
+ *
+ * It is `position: fixed` for the same reason the logo is: **docking must not move it.**
+ *
+ * The tempting version is to leave it in the header's flow and cancel the dock offset with a spacer
+ * that shrinks by the same amount. That is the counter-translate design the brand was rescued FROM,
+ * and it fails the same way: `body.dock-animate` glides `padding-left` over 200ms while a flex-basis
+ * flip is instantaneous, so the title lurches left and slides back on every toggle. Two properties on
+ * two pipelines, correct only while they stay in lockstep. Zero moving parts beats two synchronised
+ * ones — see the rule block above `.header-brand`.
+ *
+ * `left` is derived, not guessed: `--sidebar-dock-width` + 24px is exactly where the chat column's
+ * content begins beneath it (the column sits at the dock width, and its own inset is `sm:px-6`), so
+ * the title starts on the same vertical line as the conversation it names. MEASURED: both at 364px.
+ *
+ * ⚠️ `right` is the one hand-measured number here. The header's action cluster (credits, workbench
+ * toggle, Media, Share, Deploy, the git chip and ⋯) measured **584px** in the builder state; 620
+ * clears it. Too small and the title runs under the buttons — which is visible and ugly rather than
+ * silent, and the title truncates rather than overlapping, so the failure mode is a short title.
+ */
+.header-chat-title {
+  position: fixed;
+  top: 0;
+  left: calc(var(--sidebar-dock-width, 340px) + 24px);
+  right: var(--header-actions-reserve, 620px);
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+}
+
+/*
+ * ── THE BRAND LOCKUP: mark │ APP BUILDER (2026-08-02) ────────────────────────────────────────────
+ *
+ * The mark alone read as an unfinished corner of the chrome, so the product name now sits beside it
+ * behind a hairline rule. Three things here are load-bearing rather than taste:
+ *
+ * 1. **It must stay inside `.header-brand::before`.** That band is the only thing painting chrome
+ *    behind the fixed brand, it is `--sidebar-dock-width` (340px) wide, and the lettering is light.
+ *    A lockup wider than the band puts white-on-white text on the page for the frames the header has
+ *    slid but the drawer has not arrived — the flash the band was added to kill. Measured footprint
+ *    is ~290px; the reservation below is 300px. **Anything that grows this must re-check both.**
+ * 2. **`--header-brand-width` is a RESERVATION, not a size.** The brand is `position: fixed` and out
+ *    of flow, so this is the only thing stopping the chat title and credits pill sliding underneath
+ *    it. It is set with the lockup, in the same media query, or the two silently disagree.
+ * 3. **The name is hidden on narrow viewports**, where 300px of reservation is most of the header.
+ *    The mark survives alone, which is what it did before this existed.
+ */
+/*
+ * ONE size at every viewport, deliberately.
+ *
+ * A responsive step-down was tried and rejected: the MARK does not scale (it is a fixed `h-8`), so
+ * shrinking only the words beside it re-balances the lockup into a logo with a caption — which is the
+ * thing the divider treatment exists to avoid. The name either fits at full size or it is not shown;
+ * it never appears diminished.
+ */
+.header-lockup-rule {
+  display: none; /* Shown from the breakpoint down the file. */
+  width: 1px;
+  height: 18px;
+  margin: 0 0.75rem;
+  background: rgb(255 255 255 / 22%);
+  flex: none;
+}
+
+.header-lockup-name {
+  display: none; /* Shown from the breakpoint down the file. */
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  white-space: nowrap;
+
+  /*
+   * Letter-spacing is applied AFTER the final glyph too, so the lockup carries a phantom trailing
+   * gap that reads as lopsided next to the chat title. Pull it back.
+   */
+  margin-right: -0.18em;
+
+  /*
+   * The gradient echoes the orb already inside the mark's "O" — the lockup reads as one object
+   * rather than a logo with a caption bolted on.
+   */
+  background-image: linear-gradient(100deg, #cebeff 0%, #b69eff 42%, #e879f9 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+
+  /*
+   * `color: transparent` is the failure mode to design for: where `background-clip: text` is not
+   * supported the name renders INVISIBLE, not unstyled. The fallback restores a solid fill, so the
+   * worst case is a plainer lockup rather than a mark next to nothing.
+   */
+  @supports not ((background-clip: text) or (-webkit-background-clip: text)) {
+    background-image: none;
+    color: #cebeff;
+  }
+}
+
+/*
+ * ── WHERE THE NAME APPEARS ───────────────────────────────────────────────────────────────────────
+ *
+ * It is the product's NAME, so it shows on phones too — at FULL size, never a shrunken copy (see the
+ * rules above for why: the mark is a fixed `h-8` and does not scale with it).
+ *
+ * 400px is the floor and it is arithmetic, not taste. MEASURED with the lockup forced on: the brand
+ * is 301.7px and the header's right-hand cluster (credits + account menu) is 75.5px, so the header
+ * needs **378px** before the two collide. 400 rounds that up with a little margin. An iPhone SE at
+ * 375px therefore shows the mark alone, exactly as it did before the lockup existed.
+ *
+ * ⚠️ Re-measure when `brand.productTitle` changes — a longer name moves BOTH this floor and the
+ * reservation below. With the lockup on screen:
+ *     document.querySelector('.header-brand').getBoundingClientRect().width
+ *
+ * ⚠️ Known and NOT addressed here: once a chat is started the right-hand cluster also carries the
+ * workbench toggle, Media, Share, Deploy and the ⋯ menu. That row was already tight on small
+ * viewports before this lockup existed, and the chat title absorbs it by truncating. If the header
+ * ever needs to fit a phone in the BUILDER state, that cluster is the thing to solve, not this.
+ *
+ * ⚠️ The matching `--header-brand-width` bump is NOT here. A media query adds no specificity, so this
+ * block sits earlier in the file than the `:root` that declares the variable and would lose the
+ * cascade to it — silently, leaving the name rendered and the chat title sliding underneath it. The
+ * override lives directly after that declaration instead. Keep the two in step.
+ */
+@media (min-width: 400px) {
+  .header-lockup-rule,
+  .header-lockup-name {
+    display: block;
+  }
+}
+
+/*
+ * ⚠️ **No `@media` guard here any more, deliberately (2026-08-02).** This block used to sit inside
+ * `@media (min-width: 1024px)` — a SECOND copy of the dock breakpoint, and that duplication IS the
+ * responsive bug that was reported: the stylesheet suppressed the body offset below 1024px while the
+ * DRAWER, sized in JS, kept its 340px and simply covered the content (measured: 68% of a 500px
+ * viewport). The class is now applied only when docking is EFFECTIVE (`sidebarDockedEffective`, gated
+ * by `SIDEBAR_DOCK_MIN_WIDTH`), so the breakpoint lives in exactly one place and the two halves of
+ * docking cannot disagree again. Do not re-add a media query — put the condition in the store.
+ */
+body.sidebar-docked {
+  /*
+   * 🔴 `!important` is LOAD-BEARING — do not "clean it up".
      *
      * Radix's scroll lock (`react-remove-scroll`, used by every modal Dialog) injects a stylesheet at
      * runtime containing `body[data-scroll-locked] { padding-left: 0; padding-right: 0; … }`. That
@@ -192,10 +332,10 @@ body.dock-animate {
    * Chat-hidden mode gives the workbench the full width; when docked it must start after the sidebar.
    * Targeted by data-attribute (the `.BaseChat` class is CSS-module-hashed, unreachable from here).
    */
-  body.sidebar-docked [data-chat-visible='false'] {
-    --workbench-inner-width: calc(100% - var(--sidebar-dock-width));
-    --workbench-left: var(--sidebar-dock-width);
-  }
+body.sidebar-docked [data-chat-visible='false'] {
+  --workbench-inner-width: calc(100% - var(--sidebar-dock-width));
+  --workbench-left: var(--sidebar-dock-width);
+}
 
   /*
    * The creation splash is `position: fixed`, so like the workbench panel above it does not move with
@@ -205,9 +345,8 @@ body.dock-animate {
    * land in the same place. (It deliberately stays BELOW `.z-sidebar`; a splash must never cover the
    * chrome — see `BootScreen.tsx`.)
    */
-  body.sidebar-docked .creation-splash {
-    left: var(--sidebar-dock-width, 340px);
-  }
+body.sidebar-docked .creation-splash {
+  left: var(--sidebar-dock-width, 340px);
 }
 
 :root {
@@ -215,10 +354,29 @@ body.dock-animate {
 
   /*
    * The footprint `.header-brand-spacer` holds open in the header's flow, since the brand itself is
-   * `position: fixed` and no longer occupies any. Measured 142.5px (dock toggle + gap + wordmark at
-   * `h-8`); rounded up so a slightly wider wordmark cannot slide under the chat title.
+   * `position: fixed` and no longer occupies any.
+   *
+   * This is the NARROW value — the mark on its own. The lockup's "│ APP BUILDER" appears at 640px and
+   * widens it to 300px, in the media query further down.
+   *
+   * ⚠️ **It is a hand-measured number that must be >= the rendered brand, and nothing checks that.**
+   * It said 150px against a measured 142.5px, and by 2026-08-02 the brand measured 158.5px — so the
+   * chat title had been overlapping the mark by ~8px at narrow widths, silently, since whenever the
+   * artwork last changed. Re-derive rather than nudge; every term is observable:
+   *
+   *     16  header px-4 (`.header-brand` padding-left)
+   *   + 20  dock toggle (`text-xl` icon)
+   *   +  8  gap-2
+   *   +  4  the anchor's ml-1
+   *   + 110.5  the mark: `h-8` (32px) x its 3.45:1 aspect  <-- the term that drifts
+   *   ─────
+   *     158.5  ->  160 (round up; a reservation may exceed the brand, never trail it)
+   *
+   * The mark's ASPECT RATIO is the moving part: swap `brand.assets.mark` for art of a different shape
+   * and this is wrong again, with no error — just a title creeping under the logo. If that happens
+   * twice more, derive it with a ResizeObserver instead of measuring a third time.
    */
-  --header-brand-width: 150px;
+  --header-brand-width: 160px;
 
   /*
    * The docking animation, shared by the body reflow and the `.header-brand` counter-slide — and it
@@ -240,6 +398,32 @@ body.dock-animate {
   // --primary-color: rgba(147, 112, 219, var(--gradient-opacity));
   // --secondary-color: rgba(138, 43, 226, var(--gradient-opacity));
   // --accent-color: rgba(180, 170, 220, var(--gradient-opacity));
+}
+
+/*
+ * The brand lockup's reservation — the footprint of what the 400px block above decided to render, so
+ * the two share a breakpoint and must move together.
+ *
+ * 🔴 It MUST stay after the `:root` above. A media query contributes no specificity, so declaring
+ * this anywhere earlier loses to that block's base value on every viewport — the name would render
+ * and the chat title would slide under it, with nothing throwing.
+ *
+ * ⚠️ **This tracks `brand.productTitle`, so it moves when the STRING moves.** It was 300px against a
+ * measured 277px ("App Builder"); retitling to "3D APP BUILDER" measured 301.7px and overflowed it
+ * the same day. Two ceilings when re-deriving:
+ *
+ *   - >= the rendered `.header-brand` width, or the chat title slides under the lockup.
+ *   - the RENDERED BRAND (not this number) must stay <= 340px, the `--sidebar-dock-width` chrome band
+ *     that `.header-brand::before` paints. Past it the light lettering sits on bare page for the
+ *     frames the header has slid and the drawer has not yet arrived.
+ *
+ * Measure, do not guess: `document.querySelector('.header-brand').getBoundingClientRect().width`.
+ */
+@media (min-width: 400px) {
+  :root {
+    /* 158.5 mark + 25 rule + 120.1 name = 303.6 measured -> 320 (and 38px clear of the 340px band). */
+    --header-brand-width: 320px;
+  }
 }
 
 .modern-scrollbar {
