@@ -21,10 +21,11 @@ import { Dialog, DialogRoot, DialogTitle, DialogDescription, DialogButton } from
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { db } from '~/lib/persistence/useChatHistory';
 import { createLocalSnapshot } from '~/lib/persistence/local-snapshots';
-import { getProject } from '~/lib/persistence/projects';
+import { getProject, linkProjectToRepo } from '~/lib/persistence/projects';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { protectForRepoRestore } from '~/lib/persistence/restore-plan';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
+import { PROVIDER_LABEL, type GitProvider } from '~/lib/persistence/useSaveProject';
 
 interface SyncResponse {
   ok?: boolean;
@@ -51,7 +52,7 @@ interface SyncResponse {
  * "connect first" at a connected user), the OPERATOR has no OAuth app configured ("not set up on this
  * server" — nothing the user can do), and the USER has not connected (actionable).
  */
-function startConnect(provider: 'github' | 'gitlab' = 'github') {
+function startConnect(provider: GitProvider) {
   const returnTo = `${window.location.pathname}${window.location.search}`;
   window.location.href = `/api/git/connect/${provider}?returnTo=${encodeURIComponent(returnTo)}`;
 }
@@ -91,7 +92,31 @@ export function GitHubSyncButton() {
   );
 }
 
-export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+/**
+ * 🔴 **`provider` is a REQUIRED-BY-DEFAULT prop, not an assumption (fixed 2026-08-02).**
+ *
+ * This dialog hardcoded GitHub in three places at once: it posted `op: 'link'` with no `provider` (so
+ * the route's legacy `github` default stood), it asked `connections.some(c => c.provider === 'github')`,
+ * and it sent a lapsed connection to `startConnect('github')`. That was survivable while the dialog
+ * had its own button, and stopped being so when `GitStatusChip` became the only way in: the chip
+ * carries a provider radio group that can be set to GitLab and did not pass the choice down. So a user
+ * with both providers connected could link a **GitLab** repo, have `github` recorded on the row, and
+ * then have every later push resolve the wrong token against the wrong host — silently, since the link
+ * itself succeeds.
+ *
+ * The check that looked like a guard was not one: `c.provider === 'github'` proves the user has a
+ * GitHub CONNECTION, not that the repository they typed is on GitHub.
+ */
+export function GitHubSyncDialog({
+  projectId,
+  provider = 'github',
+  onClose,
+}: {
+  projectId: string;
+  provider?: GitProvider;
+  onClose: () => void;
+}) {
+  const providerLabel = PROVIDER_LABEL[provider];
   const [busy, setBusy] = useState(false);
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');
@@ -138,8 +163,8 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
       }
 
       if (connections) {
-        setConfigured(connections.configured.includes('github'));
-        setConnected(connections.connections.some((c) => c.provider === 'github'));
+        setConfigured(connections.configured.includes(provider));
+        setConnected(connections.connections.some((c) => c.provider === provider));
       } else {
         setConnected(false);
       }
@@ -148,7 +173,7 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [projectId, provider]);
 
   /**
    * One call to the sync route. No token — the server holds it (§4.5.4b).
@@ -182,8 +207,8 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
   /** Every failure path funnels through here, so none of them can end in silence. */
   const reportFailure = (result: SyncResponse, fallback: string) => {
     if (result.reconnect) {
-      toast.error('Your GitHub connection expired. Reconnecting…');
-      startConnect('github');
+      toast.error(`Your ${providerLabel} connection expired. Reconnecting…`);
+      startConnect(provider);
 
       return;
     }
@@ -200,7 +225,12 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
     setBusy(true);
 
     try {
-      const result = await call({ op: 'link', repo, branch });
+      /*
+       * Through `linkProjectToRepo`, never an inline `call({op:'link'})` — that wrapper makes
+       * `provider` a REQUIRED argument precisely so this call site cannot fall back to the route's
+       * legacy `github` default and mislabel a GitLab repo. One writer for one fact (§4.5.4b).
+       */
+      const result = await linkProjectToRepo(projectId, { repo, branch, provider });
 
       if (result.ok) {
         setLinkedRepo(repo);
@@ -230,12 +260,12 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
       const result = await call({ op: 'push', files });
 
       if (result.ok) {
-        toast.success('Saved To GitHub.');
+        toast.success(`Saved to ${providerLabel}.`);
         setDiverged(false);
       } else if (result.divergence) {
         setDiverged(true);
       } else {
-        reportFailure(result, 'Could not sync to GitHub.');
+        reportFailure(result, `Could not sync to ${providerLabel}.`);
       }
     } finally {
       setBusy(false);
@@ -266,14 +296,14 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
       if (result.ok && result.files) {
         await checkpointBeforeOverwrite();
         await workbenchStore.restoreFiles(result.files, { protect: protectForRepoRestore });
-        await snapshotLocally(result.files, 'Pulled from GitHub');
-        toast.success('Updated from GitHub.');
+        await snapshotLocally(result.files, `Pulled from ${providerLabel}`);
+        toast.success(`Updated from ${providerLabel}.`);
         setDiverged(false);
       } else if (result.ok && result.branch) {
         toast.success(`Saved your changes to a new branch: ${result.branch}`);
         setDiverged(false);
       } else {
-        reportFailure(result, 'Could not sync with GitHub.');
+        reportFailure(result, `Could not sync with ${providerLabel}.`);
       }
     } finally {
       setBusy(false);
@@ -282,7 +312,7 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
 
   /** Capture what is about to be replaced, so any regret is one restore away (§4.12). */
   const checkpointBeforeOverwrite = async () => {
-    await snapshotLocally(await workbenchStore.serializeFiles(), 'Before updating from GitHub');
+    await snapshotLocally(await workbenchStore.serializeFiles(), `Before updating from ${providerLabel}`);
   };
 
   const snapshotLocally = async (files: SerializedFileMap, label: string) => {
@@ -303,28 +333,34 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
       <Dialog className="!max-w-lg !w-[90vw]" onClose={onClose}>
         <div className="p-6 flex flex-col gap-4">
           <div>
-            <DialogTitle>GitHub Sync</DialogTitle>
+            <DialogTitle>{providerLabel} Sync</DialogTitle>
             <DialogDescription>
-              Keep this project in a GitHub repo. Push your changes up, or pull changes you made locally.
+              Keep this project in a {providerLabel} repo. Push your changes up, or pull changes you made locally.
             </DialogDescription>
           </div>
 
           {connected === undefined ? (
             <div className="rounded-lg border border-bolt-elements-borderColor p-3 text-sm text-bolt-elements-textSecondary">
-              Checking your GitHub connection…
+              Checking your {providerLabel} connection…
             </div>
           ) : !configured ? (
             <div className="rounded-lg border border-bolt-elements-borderColor p-3 text-sm text-bolt-elements-textSecondary">
-              Saving to GitHub is not set up on this server yet.
+              Saving to {providerLabel} is not set up on this server yet.
             </div>
           ) : !connected ? (
             <div className="flex flex-col gap-3">
               <div className="rounded-lg border border-bolt-elements-borderColor p-3 text-sm text-bolt-elements-textSecondary">
-                Connect your GitHub account to keep this project safe in your own repository. You stay the owner — we
-                only ever write to the repo you choose.
+                Connect your {providerLabel} account to keep this project safe in your own repository. You stay the
+                owner — we only ever write to the repo you choose.
               </div>
-              <DialogButton type="primary" onClick={() => startConnect('github')}>
-                Connect GitHub
+              {/*
+               * 🔴 `provider`, never a literal. This button was `startConnect('github')` while the copy
+               * above it and the reconnect path both followed the chosen provider — so a user in GitLab
+               * mode with no GitLab connection was sent to authorise GITHUB, came back still
+               * unconnected, and was shown the same screen again. A loop with no error anywhere.
+               */}
+              <DialogButton type="primary" onClick={() => startConnect(provider)}>
+                Connect {providerLabel}
               </DialogButton>
             </div>
           ) : !linkedRepo ? (
@@ -374,10 +410,10 @@ export function GitHubSyncDialog({ projectId, onClose }: { projectId: string; on
               </div>
               <div className="flex gap-2 justify-end">
                 <DialogButton type="secondary" onClick={() => pull('pull')} disabled={busy}>
-                  {busy ? 'Working…' : 'Sync from GitHub'}
+                  {busy ? 'Working…' : `Sync from ${providerLabel}`}
                 </DialogButton>
                 <DialogButton type="primary" onClick={push} disabled={busy}>
-                  {busy ? 'Working…' : 'Push to GitHub'}
+                  {busy ? 'Working…' : `Push to ${providerLabel}`}
                 </DialogButton>
               </div>
             </div>

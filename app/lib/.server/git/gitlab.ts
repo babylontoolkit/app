@@ -87,7 +87,14 @@ export class GitLabProvider implements GitProvider {
       response = await this._fetch(url, {
         ...init,
         headers: {
-          Authorization: `Bearer ${this._token}`,
+          /*
+           * No token → NO header, rather than an empty `Bearer `. The import path (`git/clone.ts`)
+           * builds an anonymous provider so a PUBLIC repository clones for a user who has never
+           * connected an account — a first-class path, not a degraded one. GitLab rejects a malformed
+           * bearer header outright, so sending an empty one would turn every anonymous public read into
+           * a 401 and, downstream, into a connect prompt for a repository that needs no connection.
+           */
+          ...(this._token ? { Authorization: `Bearer ${this._token}` } : {}),
           'Content-Type': 'application/json',
           ...(init.headers ?? {}),
         },
@@ -299,7 +306,18 @@ export class GitLabProvider implements GitProvider {
       let response: Response;
 
       try {
-        response = await this._fetch(url, { headers: { Authorization: `Bearer ${this._token}` } });
+        /*
+         * 🔴 NO TOKEN → NO HEADER, the same rule as `_request` — and this is the SECOND door.
+         *
+         * `_request` was made anonymous-safe for the import path (`git/clone.ts`) and this method,
+         * which builds its own request because of the pagination headers, kept sending `Bearer `.
+         * GitLab rejects a malformed bearer outright, so an anonymous clone of a PUBLIC project read
+         * the branch head fine and then 401-ed on the tree — surfacing to the user as a connect prompt
+         * for a repository that needs no connection. One rule, both doors.
+         */
+        response = await this._fetch(url, {
+          headers: this._token ? { Authorization: `Bearer ${this._token}` } : {},
+        });
       } catch (error) {
         throw new GitProviderError({ kind: 'unavailable', message: 'GitLab is unreachable.', cause: error });
       }

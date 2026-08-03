@@ -947,3 +947,86 @@ describe('append-only', () => {
     expect(await balance()).toBe(1000);
   });
 });
+
+/**
+ * Account deletion keeps the books (SPEC §4.5.1, migration 0017).
+ *
+ * 🔴 It did not. `credit_ledger.user_id` and `generations.user_id` were both declared
+ * `references auth.users(id) ON DELETE CASCADE` in 0001, so the first `auth.admin.deleteUser()` would
+ * have taken the user's entire financial record with it — including `purchase` rows backing real
+ * Stripe payments — and shrunk every historical §4.10 margin report by however much that user spent.
+ * Nothing throws; the numbers simply get smaller and stay confident.
+ *
+ * This is the CASCADE half of the money path, and `FsLedger` cannot see it: the local mirror has no
+ * foreign keys at all, so both the bug and the fix are invisible to every TypeScript test.
+ */
+describe('deleting an account (§4.5.1, migration 0017)', () => {
+  it('KEEPS the ledger — a purchase we took money for cannot vanish from the books', async () => {
+    await append({ delta: 5000, reason: 'purchase', paymentRef: 'pi_live_1' });
+    await append({ delta: -250, reason: 'generation', generationId: null });
+
+    await db.query(`delete from auth.users where id = $1`, [USER]);
+
+    const { rows } = await db.query<{ reason: string; delta: number }>(
+      `select reason, delta from public.credit_ledger where user_id = $1 order by seq`,
+      [USER],
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ reason: 'purchase', delta: 5000 });
+  });
+
+  it('KEEPS the generations record — historical cost and margin must not move retroactively', async () => {
+    await createGeneration('gen_kept');
+
+    await db.query(`delete from auth.users where id = $1`, [USER]);
+
+    const { rows } = await db.query(`select id from public.generations where user_id = $1`, [USER]);
+    expect(rows).toHaveLength(1);
+  });
+
+  /*
+   * The retained row still names the account — that is what makes it an accounting record rather than
+   * an anonymous number — while the PII it pointed at is gone with `auth.users`. "Disassociated",
+   * not "detached": a ledger whose owner column empties on deletion cannot be reconciled with
+   * anything.
+   */
+  it('leaves the user id in place, now resolving to nobody', async () => {
+    await append({ delta: 5000, reason: 'purchase', paymentRef: 'pi_live_2' });
+    await db.query(`delete from auth.users where id = $1`, [USER]);
+
+    const { rows } = await db.query<{ user_id: string | null }>(
+      `select user_id from public.credit_ledger where reason = 'purchase'`,
+    );
+
+    expect(rows[0].user_id).toBe(USER);
+    expect((await db.query(`select id from auth.users where id = $1`, [USER])).rows).toHaveLength(0);
+  });
+
+  /*
+   * CONTROL, in the other direction — 0017 must not have turned every cascade off. What describes the
+   * PERSON or their property still goes when they do, and `git_tokens` (their OAuth credential) most
+   * of all. Without this, dropping every FK in the schema would pass the three tests above.
+   */
+  it('CONTROL — still cascades the person away: profile, projects, credential', async () => {
+    // The profile already exists — 0001's `on_auth_user_created` trigger made it (§4.5.2).
+    expect((await db.query(`select 1 from public.profiles where id = $1`, [USER])).rows).toHaveLength(1);
+
+    await db.query(`insert into public.projects (user_id, name, template_id) values ($1, 'Game', 'racing')`, [USER]);
+    await db.query(
+      `insert into public.git_tokens (user_id, provider, access_token_encrypted, provider_login)
+       values ($1, 'github', 'enc', 'octocat')`,
+      [USER],
+    );
+
+    await db.query(`delete from auth.users where id = $1`, [USER]);
+
+    for (const table of ['profiles', 'projects', 'git_tokens']) {
+      const { rows } = await db.query(
+        `select 1 from public.${table} where ${table === 'profiles' ? 'id' : 'user_id'} = $1`,
+        [USER],
+      );
+      expect(rows, `${table} must not outlive its user`).toHaveLength(0);
+    }
+  });
+});

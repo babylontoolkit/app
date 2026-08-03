@@ -207,7 +207,14 @@ export function GitStatusChip() {
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
 
-      {dialogOpen && <GitHubSyncDialog projectId={activeProjectId} onClose={() => setDialogOpen(false)} />}
+      {/*
+       * 🔴 The chip's CHOSEN provider goes down with it. This rendered without a `provider` prop, so
+       * the dialog fell back to GitHub while the radio group above said GitLab — and a GitLab repo
+       * linked from here was recorded as `github`, sending every later push at the wrong host.
+       */}
+      {dialogOpen && (
+        <GitHubSyncDialog projectId={activeProjectId} provider={providerToUse} onClose={() => setDialogOpen(false)} />
+      )}
     </>
   );
 }

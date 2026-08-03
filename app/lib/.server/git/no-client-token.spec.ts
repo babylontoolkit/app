@@ -37,6 +37,35 @@ vi.mock('~/lib/.server/supabase/auth', async (importOriginal) => ({
 }));
 
 /**
+ * Every token a provider is ever built with on this route — the direct observation.
+ *
+ * The IMPORT op (`op: 'clone'`, §4.13) is the one operation here that can legitimately run with NO
+ * credential at all: a public repository clones for a user who has never connected an account. That
+ * makes "it returned 401" a weaker signal for clone than it is for push — a clone can fail for reasons
+ * that have nothing to do with the token — so the assertion that actually matters is this one: whatever
+ * the caller put in the body, the string the provider gets is never it.
+ *
+ * Only `buildProvider` (the ANONYMOUS constructor) is replaced. `resolveProvider` stays real, so the
+ * empty token store still produces the genuine `auth` failure and the fallback under test is the
+ * shipped one, not a stub of it.
+ */
+const providerTokens: string[] = [];
+
+vi.mock('./resolve', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+
+  return {
+    ...actual,
+    buildProvider: (_provider: string, token: string) => {
+      providerTokens.push(token);
+
+      // A repository an anonymous read cannot see — the connect-prompt path (`git/clone.ts`).
+      return { getDefaultBranch: async () => null, fetchTree: async () => null };
+    },
+  };
+});
+
+/**
  * A store with no rows: this user has never connected a provider.
  *
  * `put` throws rather than no-oping. A sync request must never CREATE a connection — only the OAuth
@@ -57,6 +86,7 @@ let tmp: string;
 let project: Project;
 
 beforeEach(async () => {
+  providerTokens.length = 0;
   tmp = await fs.mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'git-token-pin-'));
 
   const projects = new FsProjectStore(tmp);
@@ -121,6 +151,52 @@ describe('the sync route never takes a token from the caller', () => {
 
     expect(await response.json()).not.toMatchObject({ ok: true });
   });
+
+  /**
+   * IMPORT (`op: 'clone'`, §4.13) — the op this whole feature added, and the one that superseded the
+   * flow this file exists because of.
+   *
+   * Before it, cloning asked the user by `window.prompt` for a username and a personal access token,
+   * stored that credential in a plaintext, non-httpOnly `git:<domain>` cookie, and sent it as browser
+   * Basic auth. So the request shape this test drives — a token in the body AND a connector cookie on
+   * the header — is not a hypothetical regression, it is exactly what the product used to do. Both are
+   * present here and both must be inert.
+   */
+  it('ignores body.token AND the connector cookie on a clone, and demands a connection', async () => {
+    const response = await post({
+      op: 'clone',
+      repo: 'octocat/private-thing',
+      token: 'gho_a_token_the_client_supplied',
+      username: 'octocat',
+      password: 'hunter2',
+    });
+
+    const payload = (await response.json()) as { ok?: boolean; reconnect?: boolean; kind?: string; message?: string };
+
+    expect(response.status).toBe(401);
+    expect(payload).toMatchObject({ reconnect: true, kind: 'auth' });
+    expect(payload).not.toMatchObject({ ok: true });
+
+    // A CONNECT prompt, never a credential prompt — the whole point of superseding the old flow.
+    expect(payload.message).toMatch(/connect/i);
+    expect(payload.message).not.toMatch(/token|password|username/i);
+  });
+
+  /**
+   * ⚠️ The assertion that a 401 alone cannot make.
+   *
+   * A clone MAY legitimately run unauthenticated (a public repo), so "it refused" does not by itself
+   * prove the body's token was ignored — a route that honoured it would also refuse, for a different
+   * reason, against a repo that does not exist. This reads the token the provider was actually
+   * constructed with: it is the empty string, and it is never the one the caller sent.
+   */
+  it('never builds a provider from a caller-supplied credential', async () => {
+    await post({ op: 'clone', repo: 'octocat/private-thing', token: 'gho_a_token_the_client_supplied' });
+
+    expect(providerTokens.length).toBeGreaterThan(0);
+    expect(providerTokens).not.toContain('gho_a_token_the_client_supplied');
+    expect(providerTokens.every((t) => t === '')).toBe(true);
+  });
 });
 
 describe('the token-from-client shape cannot reappear', () => {
@@ -150,9 +226,35 @@ describe('the token-from-client shape cannot reappear', () => {
     expect(source).not.toMatch(/git:github\.com|parseCookies|headers\.get\(['"]?[Cc]ookie/);
   });
 
-  /** The other half: the browser must not be holding one to send. */
-  it('the sync UI holds no token and sends none', async () => {
-    const source = await code('app/components/github/GitHubSyncButton.tsx');
+  /** The clone helper reads its credential from the SESSION; there is no other input it could take. */
+  it('the clone module neither declares nor reads a caller-supplied credential', async () => {
+    const source = await code('app/lib/.server/git/clone.ts');
+
+    expect(source).not.toMatch(/^\s*(token|username|password)\??:/m);
+    expect(source).not.toMatch(/body\.(token|username|password)/);
+    expect(source).not.toMatch(/git:github\.com|parseCookies|headers\.get\(['"]?[Cc]ookie/);
+  });
+
+  /**
+   * The other half: the browser must not be holding one to send.
+   *
+   * ⚠️ These assertions are `/token/i` against the WHOLE file, which is deliberately blunt — it fires
+   * on an identifier, a comment, a prop name, anything. That is only tolerable because these components
+   * genuinely have no business naming a credential at all: they post a repo coordinate and the server
+   * does the rest. A future component that legitimately needs the word will need a narrower rule here,
+   * not an exemption.
+   *
+   * The two IMPORT doors are listed for the reason the file exists: cloning is where the browser used
+   * to prompt for a PAT and write it to a cookie, so they are the components most likely to have it put
+   * back. `StarterTemplates` is not listed separately — it links to `/git?url=…` and reaches the
+   * workspace through `GitUrlImport`, so it is covered by the door it goes through.
+   */
+  it.each([
+    ['the sync UI', 'app/components/github/GitHubSyncButton.tsx'],
+    ['the clone button', 'app/components/chat/GitCloneButton.tsx'],
+    ['the /git?url= import', 'app/components/git/GitUrlImport.client.tsx'],
+  ])('%s holds no token and sends none', async (_label, file) => {
+    const source = await code(file);
 
     expect(source).not.toMatch(/token/i);
     expect(source).not.toMatch(/localStorage|githubConnectionStore/);

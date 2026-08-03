@@ -5,6 +5,7 @@ import tailwindReset from '@unocss/reset/tailwind-compat.css?url';
 import { themeStore } from './lib/stores/theme';
 import { brand } from './config/brand';
 import { captureClientError } from './lib/monitoring/client';
+import { clearLegacyGitCredentialCookies } from './lib/git/legacy-credentials';
 import { stripIndents } from './utils/stripIndent';
 import { createHead } from 'remix-island';
 import { useEffect } from 'react';
@@ -175,6 +176,18 @@ export default function App() {
   const theme = useStore(themeStore);
 
   useEffect(() => {
+    /*
+     * Reap the plaintext PAT the retired browser-side clone used to write (§4.13,
+     * `~/lib/git/legacy-credentials`). Here because this is the only effect guaranteed to run for every
+     * user — the hook that wrote it has no callers left, so a cleanup living there would never fire for
+     * exactly the people who have one.
+     */
+    const reaped = clearLegacyGitCredentialCookies();
+
+    if (reaped.length > 0) {
+      logStore.logSystem('Removed legacy git credential cookies', { count: reaped.length });
+    }
+
     logStore.logSystem('Application initialized', {
       theme,
       platform: navigator.platform,

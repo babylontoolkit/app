@@ -97,15 +97,14 @@ export interface Brand {
 }
 
 export const brand: Brand = {
-  productName: 'Game Builder',
-  productFullName: 'Babylon Toolkit Game Builder',
-  productSlug: 'babylon-toolkit-game-builder',
-  tagline: 'Build 3D Web Games With AI',
-  metaDescription:
-    'Build and play Babylon Toolkit 3D web games with AI — describe your game and watch it come to life.',
+  productName: 'App Builder',
+  productFullName: 'Babylon Toolkit App Builder',
+  productSlug: 'babylon-toolkit-app-builder',
+  tagline: 'Build 3D Web Apps With AI',
+  metaDescription: 'Build Babylon Toolkit 3D web apps with AI — describe your app and watch it come to life.',
   intro: {
-    heading: 'Build A 3D Game With AI',
-    subheading: 'Describe your game and watch it come to life — playable in minutes, exportable as real code.',
+    heading: 'Build A 3D Web App With AI',
+    subheading: 'Describe your app and watch it come to life — ready in minutes, exportable as real projects.',
   },
   poweredBy: {
     name: 'Babylon Toolkit',
@@ -116,7 +115,7 @@ export const brand: Brand = {
    * The company behind the product — and, DELIBERATELY, what the chat greets the user with: "How can
    * codewrx.ai help you today?" (`ChatBox.tsx`). Confirmed 2026-07-16.
    *
-   * Called out because it reads as a bug and is not one: the product name is "Game Builder", so a
+   * Called out because it reads as a bug and is not one: the product name is "App Builder", so a
    * greeting using `company` looks like someone reached for the wrong field. Leave it. The brand gate
    * cannot protect this — it catches hardcoded names OUTSIDE this file, and this is inside it.
    */

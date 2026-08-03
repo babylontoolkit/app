@@ -39,12 +39,75 @@ button {
  * is applied with NO transition, so it lands instantly instead of sliding in every navigation. (The
  * body-padding and header transforms desync mid-load otherwise, sliding the logo in from off-screen.)
  */
+/*
+ * 🔴 THE DOCK CURVE IS SHARED WITH THE SIDEBAR, AND IT IS NOT A STYLE CHOICE (fixed 2026-08-02).
+ *
+ * Docking animates TWO EDGES THAT HAVE TO MEET: the sidebar's right edge (framer-motion, in
+ * `Menu.client.tsx`'s `menuVariants`) and the padded body's left edge, which is where the <header>
+ * starts. Between them there is nothing — no chrome, just the page background.
+ *
+ * They shipped on different curves. The body used CSS `ease` (`cubic-bezier(.25,.1,.25,1)`); the
+ * sidebar uses `cubicEasingFn` = `cubicBezier(0.4, 0, 0.2, 1)` (`~/utils/easings`). Same 0.2s
+ * duration, so they START and END together — which is exactly why this survived: the before and
+ * after frames are perfect, and only the middle is wrong. MEASURED mid-flight: the two edges
+ * diverged by up to **32.3px at t=74ms** while docking, opening a 32px band of bare page background
+ * across the top-left — directly under the pinned identity in `.header-brand`, whose white text and
+ * avatar sat over the white page for a few frames. Reported as "the user name and icon flashes when
+ * you toggle the sidebar".
+ *
+ * The duration matching alone was never enough; the CURVE has to match too, or the edges only agree
+ * at the two endpoints. Keep these two in lockstep with `cubicEasingFn` — if that constant changes,
+ * change this, and vice versa. `--dock-ease`/`--dock-duration` live in the `:root` below, beside
+ * `--chrome-gradient`, for the reason that one gives: defined once to prevent drift.
+ *
+ * VERIFIED by sampling both edges every frame through a toggle: worst gap went from **+32.3px** to
+ * **0** (the remaining divergence is negative, i.e. the sidebar overlapping the header, which is
+ * covered and invisible).
+ *
+ * ⚠️ Matching the curve was necessary and NOT sufficient — see `body::before` below. The two edges
+ * are driven by different engines (framer-motion writes `left` from JS; the body padding is a CSS
+ * transition), so they do not reliably START on the same frame. Re-measuring caught undock still
+ * opening a 49px band on one run in three: same curve, one frame of head start. A race you have to
+ * win every time is not a fix, so the band itself is made impossible instead.
+ */
 body.dock-animate {
-  transition: padding-left 0.2s ease;
+  transition: padding-left var(--dock-duration) var(--dock-ease);
 }
 
 body.dock-animate .header-brand {
-  transition: transform 0.2s ease;
+  transition: transform var(--dock-duration) var(--dock-ease);
+}
+
+/*
+ * 🔴 THE CHROME BAND IS PAINTED ON THE PAGE ITSELF, SO THE SEAM CAN NEVER SHOW.
+ *
+ * The header and the sidebar both paint `--chrome-gradient` across the top of the screen, and between
+ * them — for 200ms per toggle — is whatever the page background happens to be. That band is the flash:
+ * the pinned identity in `.header-brand` is white text on white paper for a few frames, in light mode.
+ *
+ * Matching the easing (above) removed the systematic divergence; it could not remove the RACE, because
+ * the two edges are animated by different engines and do not reliably start on the same frame.
+ *
+ * This paints the same gradient across the full width, behind everything, permanently. There is then
+ * no such thing as a gap — whatever the two edges are doing, the pixels underneath are already the
+ * colour they are travelling towards. It costs one always-composited layer and nothing else.
+ *
+ * `z-index: -1` puts it under all in-flow content (the header's own text and buttons included) while
+ * still sitting above the body's background — do NOT raise it to 0, which paints it OVER unpositioned
+ * header content and hides the credits pill. It is `fixed` and `pointer-events: none`, so it neither
+ * scrolls nor takes clicks, and it is deliberately NOT gated on `dock-animate`: it is identical to
+ * what the header already draws, so it is invisible at rest and only matters mid-animation.
+ */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--header-height);
+  background: var(--chrome-gradient);
+  z-index: -1;
+  pointer-events: none;
 }
 
 @media (min-width: 1024px) {
@@ -113,6 +176,15 @@ body.dock-animate .header-brand {
 
 :root {
   --sidebar-dock-width: 340px;
+
+  /*
+   * The docking animation, shared by the body reflow and the `.header-brand` counter-slide — and it
+   * must equal `cubicEasingFn` (`~/utils/easings.ts`), which drives the SIDEBAR. Those are two edges
+   * that have to meet; see the long comment on `body.dock-animate` above for what happens when they
+   * disagree (a measured 32px band of bare page background, mid-animation only).
+   */
+  --dock-duration: 0.2s;
+  --dock-ease: cubic-bezier(0.4, 0, 0.2, 1);
 
   /* The dark-purple "chrome" gradient shared by the header and the sidebar's top row so the two top
    * bars are the exact same colour and read as one continuous bar. Defined once to prevent drift. */

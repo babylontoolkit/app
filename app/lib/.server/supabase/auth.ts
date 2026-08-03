@@ -33,6 +33,10 @@ export interface AuthUser {
   emailVerified: boolean;
 
   displayName: string;
+
+  /** `profiles.avatar_url` — set from OAuth on first sign-in, absent for most password accounts. */
+  avatarUrl?: string;
+
   isAdmin: boolean;
 
   /** True when this is the synthetic local user (Supabase unconfigured). */
@@ -121,7 +125,7 @@ export async function getUser(request: Request, context?: unknown): Promise<Auth
    */
   const { data: profile } = await client
     .from('profiles')
-    .select('display_name, is_admin')
+    .select('display_name, avatar_url, is_admin')
     .eq('id', user.id)
     .maybeSingle();
 
@@ -130,6 +134,7 @@ export async function getUser(request: Request, context?: unknown): Promise<Auth
     email: user.email ?? '',
     emailVerified: Boolean(user.email_confirmed_at),
     displayName: profile?.display_name || user.email?.split('@')[0] || 'Builder',
+    ...(profile?.avatar_url ? { avatarUrl: String(profile.avatar_url) } : {}),
     isAdmin: Boolean(profile?.is_admin),
     isLocal: false,
   };

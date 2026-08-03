@@ -9,6 +9,8 @@
 import { useStore } from '@nanostores/react';
 import { useEffect } from 'react';
 import { refreshSession, sessionStore, canGenerate, type SessionState } from '~/lib/stores/session';
+import { profileStore } from '~/lib/stores/profile';
+import { resolveDisplayIdentity, type DisplayIdentity } from '~/lib/identity';
 
 let started = false;
 
@@ -43,4 +45,18 @@ export function useCanGenerate(): { allowed: boolean; reason?: string } {
   const session = useStore(sessionStore);
 
   return canGenerate(session);
+}
+
+/**
+ * The name, email and avatar the chrome should print (SPEC §4.5.2).
+ *
+ * The ONE place any surface asks "who am I looking at". Two of them used to answer it from upstream's
+ * per-browser `bolt_profile` and print "Guest User" — see `~/lib/identity` for why that is wrong once
+ * accounts exist, and for the rules this resolves by.
+ */
+export function useDisplayIdentity(): DisplayIdentity {
+  const session = useSession();
+  const profile = useStore(profileStore);
+
+  return resolveDisplayIdentity(session, profile);
 }

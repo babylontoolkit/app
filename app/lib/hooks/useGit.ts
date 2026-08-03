@@ -1,32 +1,40 @@
+/**
+ * The browser-side clone — SUPERSEDED, kept per §2.1a's hide-don't-delete rule (SPEC §4.13).
+ *
+ * 🔴 **This hook has NO production callers.** Both clone doors now go through
+ * `~/lib/git/import-repository`, which asks the SERVER to read the repository with the token the user
+ * already authorized (`git/clone.ts`). The module and its `isomorphic-git` dependency stay on disk
+ * because the upstream project still uses them and this fork stays mergeable with it (§2.1a) — not
+ * because anything here is a live fallback.
+ *
+ * ## What was REMOVED rather than left standing, and why
+ *
+ * The credential path. `git.clone`'s `onAuth` used to `confirm()` and then `prompt()` for a username
+ * and a personal access token, and `onAuthSuccess` wrote the pair — plaintext, JSON, non-httpOnly, no
+ * expiry — to a `git:<domain>` cookie which was then replayed as Basic auth through `/api/git-proxy`.
+ * The platform therefore held TWO unrelated GitHub identities and the one the user had explicitly
+ * granted was the one clone could not see.
+ *
+ * "Hide, don't delete" is about keeping upstream's SHAPE, not about keeping a credential prompt alive
+ * on an unreachable path: a `window.prompt` asking for a PAT is the kind of thing that gets found again
+ * and re-wired in good faith. What remains here clones PUBLIC repositories only; `onAuth` cancels, and
+ * the resulting `UserCanceledError` is translated in the catch — NOT in `onAuthFailure`, which
+ * isomorphic-git never calls when authentication was never offered.
+ *
+ * Cookies the old flow already wrote are actively reaped at app start — superseding a flow does not
+ * remove what it wrote (`~/lib/git/legacy-credentials`).
+ */
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { bootedProjectId, requireBootedSandbox, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import type { SandboxProvider } from '~/lib/sandbox';
 import { NO_ROLLBACK, openImportWorkspace } from '~/lib/registry/import-project';
 import { clearWorkspace } from '~/lib/registry/clear-workspace';
-import git, { type GitAuth, type PromiseFsClient } from 'isomorphic-git';
+import git, { type PromiseFsClient } from 'isomorphic-git';
 import http from 'isomorphic-git/http/web';
-import Cookies from 'js-cookie';
 import { toast } from 'react-toastify';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('useGit');
-
-const lookupSavedPassword = (url: string) => {
-  const domain = url.split('/')[2];
-  const gitCreds = Cookies.get(`git:${domain}`);
-
-  if (!gitCreds) {
-    return null;
-  }
-
-  try {
-    const { username, password } = JSON.parse(gitCreds || '{}');
-    return { username, password };
-  } catch (error) {
-    console.log(`Failed to parse Git Cookie ${error}`);
-    return null;
-  }
-};
 
 /**
  * What to call the project a clone creates: the repository's own name.
@@ -39,11 +47,6 @@ export const repoNameOf = (url: string): string => {
   const last = withoutRef.split('/').pop() ?? '';
 
   return last.replace(/\.git$/i, '') || 'Imported Repository';
-};
-
-const saveGitAuth = (url: string, auth: GitAuth) => {
-  const domain = url.split('/')[2];
-  Cookies.set(`git:${domain}`, JSON.stringify(auth));
 };
 
 export function useGit() {
@@ -147,17 +150,15 @@ export function useGit() {
        * This avoids potential issues with our manual initialization
        */
 
+      /*
+       * No `Authorization` header, and no way to acquire one here. The credential this used to read
+       * came out of a `git:<domain>` cookie written by a `window.prompt` — see the module header.
+       */
       const headers: {
         [x: string]: string;
       } = {
         'User-Agent': 'bolt.diy',
       };
-
-      const auth = lookupSavedPassword(url);
-
-      if (auth) {
-        headers.Authorization = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
-      }
 
       /*
        * The clone below is the LAST thing that can fail, and until now it failed with a project
@@ -186,41 +187,26 @@ export function useGit() {
             onProgress: (event) => {
               console.log('Git clone progress:', event);
             },
-            onAuth: (baseUrl) => {
-              let auth = lookupSavedPassword(baseUrl);
 
-              if (auth) {
-                console.log('Using saved authentication for', baseUrl);
-                return auth;
-              }
+            /*
+             * 🔴 CANCEL, never a prompt. This is the callback that used to `confirm()` and then
+             * `prompt()` for a username and a personal access token; a private repository is now the
+             * server's job, with the token the user already authorized (`git/clone.ts`).
+             *
+             * `{ cancel: true }` rather than a thrown error because isomorphic-git treats a cancel as
+             * a clean refusal and surfaces it as one, where a throw from inside `onAuth` becomes an
+             * opaque transport failure that the retry logic below would then re-attempt three times.
+             */
+            onAuth: () => ({ cancel: true }),
 
-              console.log('Repository requires authentication:', baseUrl);
-
-              if (
-                confirm('This repository requires authentication. Would you like to enter your GitHub credentials?')
-              ) {
-                auth = {
-                  username: prompt('Enter username') || '',
-                  password: prompt('Enter password or personal access token') || '',
-                };
-                return auth;
-              } else {
-                return { cancel: true };
-              }
-            },
-            onAuthFailure: (baseUrl, _auth) => {
-              console.error(`Authentication failed for ${baseUrl}`);
-              toast.error(
-                `Authentication failed for ${baseUrl.split('/')[2]}. Please check your credentials and try again.`,
-              );
-              throw new Error(
-                `Authentication failed for ${baseUrl.split('/')[2]}. Please check your credentials and try again.`,
-              );
-            },
-            onAuthSuccess: (baseUrl, auth) => {
-              console.log(`Authentication successful for ${baseUrl}`);
-              saveGitAuth(baseUrl, auth);
-            },
+            /*
+             * ⚠️ NO `onAuthFailure`. isomorphic-git only calls it when credentials were SUPPLIED and
+             * then rejected (`providedAuthBefore ? onAuthFailure : onAuth`); cancelling means it never
+             * runs at all, and the clone rejects with `UserCanceledError` instead. A first draft of
+             * this change put a carefully-worded "connect your account" sentence there — dead code
+             * that could never be shown, with a module header claiming it would be. The message the
+             * user would actually get is handled in the catch below, where the cancel really lands.
+             */
           });
 
           const data: Record<string, { data: any; encoding?: string }> = {};
@@ -240,6 +226,19 @@ export function useGit() {
 
           // Handle specific error types
           const errorMessage = error instanceof Error ? error.message : String(error);
+
+          /*
+           * The cancel from `onAuth` above — what a private repository now produces on this path.
+           * isomorphic-git's own wording for it is "The operation was canceled", which tells a user
+           * nothing and reads as the button having failed; the actionable sentence is that the
+           * repository needs a connected account, so it is said here, where the error actually lands.
+           */
+          if (error instanceof Error && error.name === 'UserCanceledError') {
+            const message = 'That repository needs a connected account to read. Connect it in Settings and try again.';
+
+            toast.error(message);
+            throw new Error(message);
+          }
 
           // Check for common error patterns
           if (errorMessage.includes('Authentication failed')) {

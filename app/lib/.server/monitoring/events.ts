@@ -23,6 +23,13 @@ export const FUNNEL_EVENTS = {
   SHARE_PUBLISHED: 'share_published',
   REMIX_CREATED: 'remix_created',
   PURCHASE_COMPLETED: 'purchase_completed',
+
+  /**
+   * The funnel's exit (§4.5.1). Churn is a growth number like any other, and this is the only place
+   * it can be counted: the ledger keeps the user's spend after deletion (migration 0017) but nothing
+   * in it records that they LEFT, and the account row that would have said so is gone.
+   */
+  ACCOUNT_DELETED: 'account_deleted',
 } as const;
 
 export type FunnelEvent = (typeof FUNNEL_EVENTS)[keyof typeof FUNNEL_EVENTS];

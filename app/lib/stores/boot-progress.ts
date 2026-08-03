@@ -58,6 +58,27 @@ export type BootPhase =
    */
   | { step: 'importing' }
 
+  /**
+   * Reading a repository from GitHub/GitLab, server-side (§4.13, `git/clone.ts`).
+   *
+   * The network half of an import, and the reason it needs a phase of its own rather than borrowing
+   * `importing`: it is the part where nothing is happening in the workspace yet. The server is
+   * resolving the coordinate, resolving the caller's token, asking for the default branch and pulling
+   * the tree — seconds of real waiting with no file to show for it — and the step that follows
+   * (`files`, driven by `restoreFiles`' `onProgress`) narrates the writing. Collapsing the two into one
+   * opaque step is exactly what `creating-starter` → `creating-mount` exists not to do.
+   *
+   * 🔴 An OVERLAY phase, like `importing`, and for a different reason from `importing`'s: a clone is
+   * started from the landing page by a user who already has a workspace on screen, so `ready` is
+   * already true and there is no full-page `BootScreen` to render into. The cover comes from
+   * `WorkspaceSplash`, which {@link coversWorkspace} grants to every phase that is not `idle` or
+   * `failed` — so this phase needs no gate of its own, which is the whole point of that rewrite.
+   *
+   * ⚠️ The name must NOT begin with `creating-`: that prefix is the `isCreationPhase` family test, and
+   * an import is emphatically not a New Project (no §4.4b scaffolding, no creation handoff card).
+   */
+  | { step: 'cloning' }
+
   /*
    * ---- CREATION phases (New Project, `create-project.ts` + `startProject`) ----
    * The same silence, one page earlier: creating a project serializes behind the starter download,
@@ -285,6 +306,17 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
       return {
         title: 'Importing your project workspace',
         detail: 'Writing the imported files into your workspace.',
+      };
+    case 'cloning':
+      return {
+        /*
+         * The REPOSITORY is the subject, because that is what the user just named and what they are
+         * waiting on. "Importing your project" would be true of the next two phases as well, and a
+         * heading that is true of three consecutive steps tells the user nothing about which one they
+         * are watching — the failure `creating-settle`'s copy was written to avoid.
+         */
+        title: 'Reading your repository',
+        detail: 'Fetching the files from your repository. This can take a moment.',
       };
     case 'creating-starter':
       return {

@@ -2,11 +2,22 @@ import { useState, useCallback } from 'react';
 import { useStore } from '@nanostores/react';
 import { classNames } from '~/utils/classNames';
 import { profileStore, updateProfile } from '~/lib/stores/profile';
+import { useDisplayIdentity } from '~/lib/hooks/useSession';
 import { toast } from 'react-toastify';
 import { debounce } from '~/utils/debounce';
+import { AccountSection } from './AccountSection';
+import { DeleteAccountSection } from './DeleteAccountSection';
 
 export default function ProfileTab() {
   const profile = useStore(profileStore);
+
+  /*
+   * When there is a real account, IT names you everywhere in the chrome (`~/lib/identity`) — the
+   * fields below stay, but they are a per-browser preference, and the copy has to say so or they read
+   * as account settings that silently do not apply.
+   */
+  const identity = useDisplayIdentity();
+  const hasAccount = identity.kind === 'account';
   const [isUploading, setIsUploading] = useState(false);
 
   // Create debounced update functions
@@ -62,8 +73,17 @@ export default function ProfileTab() {
   return (
     <div className="max-w-2xl mx-auto">
       <div className="space-y-6">
+        {/* The account itself, when there is one. Renders nothing in local mode. */}
+        <AccountSection />
+
         {/* Personal Information Section */}
         <div>
+          {hasAccount && (
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
+              These are saved in this browser only — they are not part of your account and other people using this
+              computer will see them.
+            </p>
+          )}
           {/* Avatar Upload */}
           <div className="flex items-start gap-6 mb-8">
             <div
@@ -175,6 +195,8 @@ export default function ProfileTab() {
             </div>
           </div>
         </div>
+
+        <DeleteAccountSection />
       </div>
     </div>
   );

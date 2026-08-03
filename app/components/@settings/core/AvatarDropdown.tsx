@@ -1,17 +1,20 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { motion } from 'framer-motion';
-import { useStore } from '@nanostores/react';
 import { classNames } from '~/utils/classNames';
-import { profileStore } from '~/lib/stores/profile';
+import { useDisplayIdentity } from '~/lib/hooks/useSession';
 import { brand } from '~/config/brand';
-import type { TabType, Profile } from './types';
+import type { TabType } from './types';
 
 interface AvatarDropdownProps {
   onSelectTab: (tab: TabType) => void;
 }
 
 export const AvatarDropdown = ({ onSelectTab }: AvatarDropdownProps) => {
-  const profile = useStore(profileStore) as Profile;
+  /*
+   * The SESSION, not `profileStore` (§4.5.2). This used to read the browser's local `bolt_profile` and
+   * print "Guest User" — see `~/lib/identity`.
+   */
+  const identity = useDisplayIdentity();
 
   return (
     <DropdownMenu.Root>
@@ -21,10 +24,10 @@ export const AvatarDropdown = ({ onSelectTab }: AvatarDropdownProps) => {
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.98 }}
         >
-          {profile?.avatar ? (
+          {identity.avatar ? (
             <img
-              src={profile.avatar}
-              alt={profile?.username || 'Profile'}
+              src={identity.avatar}
+              alt={identity.name || 'Profile'}
               className="w-full h-full rounded-full object-cover"
               loading="eager"
               decoding="sync"
@@ -57,10 +60,10 @@ export const AvatarDropdown = ({ onSelectTab }: AvatarDropdownProps) => {
             )}
           >
             <div className="w-10 h-10 rounded-full overflow-hidden flex-shrink-0 bg-white dark:bg-gray-800 shadow-sm">
-              {profile?.avatar ? (
+              {identity.avatar ? (
                 <img
-                  src={profile.avatar}
-                  alt={profile?.username || 'Profile'}
+                  src={identity.avatar}
+                  alt={identity.name || 'Profile'}
                   className={classNames('w-full h-full', 'object-cover', 'transform-gpu', 'image-rendering-crisp')}
                   loading="eager"
                   decoding="sync"
@@ -72,10 +75,10 @@ export const AvatarDropdown = ({ onSelectTab }: AvatarDropdownProps) => {
               )}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="font-medium text-sm text-gray-900 dark:text-white truncate">
-                {profile?.username || 'Guest User'}
-              </div>
-              {profile?.bio && <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{profile.bio}</div>}
+              <div className="font-medium text-sm text-gray-900 dark:text-white truncate">{identity.name}</div>
+              {identity.secondary && (
+                <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{identity.secondary}</div>
+              )}
             </div>
           </div>
 

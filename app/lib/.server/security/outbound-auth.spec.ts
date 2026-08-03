@@ -64,6 +64,18 @@ import { action as bugReportAction } from '~/routes/api.bug-report';
 import { action as sandboxSessionAction } from '~/routes/api.sandbox.session';
 import { loader as sandboxPreviewLoader } from '~/routes/api.sandbox.preview';
 
+/*
+ * The project git route's IMPORT op (2026-08-02, §4.13). It is the only op on this route that reaches
+ * a repository the project is NOT linked to — a coordinate the CALLER names — so it is the one that
+ * belongs in this file: an anonymous caller who could reach it would be spending the platform's egress
+ * on any public repository on GitHub, repeatedly, with nothing to attribute it to.
+ *
+ * It is also the op most likely to look safe. `clone` reads rather than writes, and it can legitimately
+ * run with no credential at all, so the reasoning that gets a guard removed ("it is only a public read")
+ * is already true of it — which is precisely why the wall is pinned here rather than assumed.
+ */
+import { action as projectGitAction } from '~/routes/api.projects.$projectId.github';
+
 let fetchSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -158,6 +170,25 @@ const cases: Array<{ name: string; call: () => Promise<Response> }> = [
       (sandboxPreviewLoader as Handler)(
         args('GET', {}, 'http://localhost/api/sandbox/preview?projectId=prj_anything&port=5173'),
       ),
+  },
+
+  /*
+   * A fully-formed clone body, naming a real public repository. The point is that the request is one
+   * that would SUCCEED for a signed-in caller: a body the route would reject on its own merits proves
+   * nothing about the auth wall, because the refusal could be coming from the validation instead.
+   */
+  {
+    name: 'project git action (op: clone)',
+    call: () =>
+      (projectGitAction as Handler)({
+        request: new Request('http://localhost/api/projects/prj_anything/github', {
+          method: 'POST',
+          body: JSON.stringify({ op: 'clone', repo: 'https://github.com/octocat/Hello-World' }),
+          headers: { 'Content-Type': 'application/json' },
+        }),
+        context: {},
+        params: { projectId: 'prj_anything' },
+      }),
   },
 ];
 

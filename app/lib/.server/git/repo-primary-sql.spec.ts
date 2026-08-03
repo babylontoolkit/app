@@ -226,6 +226,15 @@ describe('projects — the link is all-or-nothing', () => {
     ['a repo with no provider', { linked_repo: 'octocat/my-game', linked_branch: 'main' }],
     ['a repo with no branch', { provider: 'github', linked_repo: 'octocat/my-game' }],
     ['a branch with no repo', { provider: 'github', linked_branch: 'main' }],
+
+    /*
+     * The two shapes with NO provider at all. Covered by the constraint's symmetry, and unasserted
+     * until now — which meant a weakened check (`provider is null OR (provider is not null AND repo is
+     * not null AND branch is not null)`) passed all four rows above while permitting exactly these.
+     * Six partial shapes exist; the list must name all six, or it pins the four somebody thought of.
+     */
+    ['a repo alone', { linked_repo: 'octocat/my-game' }],
+    ['a branch alone', { linked_branch: 'main' }],
   ])('REFUSES %s', async (_label, columns) => {
     expect(await insertProject(columns)).toMatch(/projects_link_complete_check|violates check constraint/i);
   });

@@ -96,6 +96,9 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
         id: user.id,
         email: user.email,
         displayName: user.displayName,
+
+        // The chrome labels an account from the ACCOUNT, never from the browser's local profile (`~/lib/identity`).
+        ...(user.avatarUrl ? { avatarUrl: user.avatarUrl } : {}),
         emailVerified: user.emailVerified,
         isAdmin: user.isAdmin,
         isLocal: user.isLocal,

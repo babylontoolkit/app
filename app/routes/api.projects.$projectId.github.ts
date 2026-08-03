@@ -3,6 +3,7 @@
  *
  *   GET  /api/projects/:id/github                             → where it is saved + the repo's head
  *   POST /api/projects/:id/github  { op: 'save',    files, summary? }        → create the repo + push + link
+ *   POST /api/projects/:id/github  { op: 'clone',   repo, branch?, provider? } → import a repo's tree
  *   POST /api/projects/:id/github  { op: 'link',    repo, branch, provider? }
  *   POST /api/projects/:id/github  { op: 'push',    files, summary? }
  *   POST /api/projects/:id/github  { op: 'pull' }
@@ -51,6 +52,9 @@ import { GitProviderError, parseRepo, type GitProvider, type GitProviderId } fro
 import { resolveProvider } from '~/lib/.server/git/resolve';
 import { configuredProviders } from '~/lib/.server/git/oauth';
 import { saveToNewRepo } from '~/lib/.server/git/save';
+import { cloneRepository, parseCloneTarget } from '~/lib/.server/git/clone';
+import { CLONE_RATE_LIMIT, enforceUserRateLimit } from '~/lib/.server/security/user-rate-limit';
+import { getOAuthConfig } from '~/lib/.server/git/oauth';
 import { errorResponse } from '~/lib/.server/http';
 import { createScopedLogger } from '~/utils/logger';
 import type { Project } from '~/lib/.server/projects/types';
@@ -59,7 +63,7 @@ import type { SerializedFileMap } from '~/lib/binary/binary-files';
 const logger = createScopedLogger('git.sync-route');
 
 interface Body {
-  op: 'save' | 'link' | 'push' | 'pull' | 'resolve';
+  op: 'save' | 'clone' | 'link' | 'push' | 'pull' | 'resolve';
   repo?: string;
   branch?: string;
   provider?: string;
@@ -171,6 +175,53 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     const project = await requireOwnedProject(user, params.projectId!, context);
     const projects = getProjectStore(context);
     const body = await request.json<Body>();
+
+    /*
+     * CLONE (§4.13) — import an existing repository's tree into this project.
+     *
+     * It lives HERE, as an op on the project's git route, rather than on a route of its own, and that
+     * is a security property rather than tidiness: by the time a clone runs the project already exists
+     * (`openImportWorkspace` registers it and takes `PROJECT_CREATE_CREDITS` before any fetch), so
+     * BOTH walls apply — verified user AND owned project — instead of the single `requireVerifiedUser`
+     * a standalone route would have carried. It also inherits this file's `providerErrorResponse`
+     * mapper, without which a `GitProviderError` reaching `errorResponse` would flatten to a generic
+     * 500 and the client would lose the `reconnect` signal that drives the connect prompt.
+     *
+     * Handled BEFORE the linked-repo check below: an import is precisely what a project with no repo
+     * does, and the repo being cloned is deliberately NOT the project's own link (there is not one yet
+     * — T9 writes it afterwards, as a complete tuple).
+     */
+    if (body.op === 'clone') {
+      if (!body.repo) {
+        return json({ error: true, message: 'Enter a repository to import.' }, { status: 400 });
+      }
+
+      /*
+       * PER-USER (§5, §10 item 20) — not the inherited per-IP limiter, which a single account holder
+       * resets by changing network. Counted BEFORE the fetch, so a refused call costs no egress.
+       */
+      await enforceUserRateLimit({ userId: user.id, bucket: 'git-clone', rule: CLONE_RATE_LIMIT });
+
+      const target = parseCloneTarget(body.repo, {
+        gitlabHost: getOAuthConfig(context, 'gitlab')?.host,
+        provider: body.provider,
+      });
+
+      if (body.branch) {
+        target.branch = body.branch;
+      }
+
+      try {
+        const cloned = await cloneRepository({ context, userId: user.id, target });
+        return json({ ok: true, ...cloned });
+      } catch (error) {
+        if (error instanceof GitProviderError) {
+          return providerErrorResponse(error);
+        }
+
+        throw error;
+      }
+    }
 
     // Linking stores the repo pointer; it needs no provider call.
     if (body.op === 'link') {

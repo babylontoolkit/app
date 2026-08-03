@@ -337,6 +337,148 @@ export async function saveProjectToRepo(
   return payload;
 }
 
+/* ------------------------------------------------------------------ import */
+
+export interface CloneOutcome {
+  ok: boolean;
+
+  /** The repository's tree, ready to write to the sandbox. Normalised at the fetch boundary. */
+  files?: SerializedFileMap;
+  head?: string;
+
+  /** How the server resolved the coordinate — `owner/name`, and the branch it actually read. */
+  repo?: string;
+  branch?: string;
+  provider?: 'github' | 'gitlab';
+
+  /** Secret files the import declined to carry. Reported, never silently dropped. */
+  skippedSecrets?: string[];
+
+  /** The repository needs a connection this user does not have; send them through OAuth. */
+  reconnect?: boolean;
+
+  /** Worth trying again (rate limit, transport). A bad repo name is not. */
+  retryable?: boolean;
+  message?: string;
+}
+
+/**
+ * Import an existing repository into this project (§4.13).
+ *
+ * The server resolves the credential from the caller's session, fetches the tree, and hands it back;
+ * **the browser sends no credential and never sees one** — which is the whole point of the operation
+ * that replaced upstream's `window.prompt` + plaintext `git:<domain>` cookie. `repo` is whatever the
+ * user typed (a URL, an `scp` address, or a bare `owner/repo`); reducing it to a coordinate is the
+ * server's job, because it is also the SSRF wall (`git/clone.ts`).
+ *
+ * ⚠️ Returns an OUTCOME and never throws, deliberately — the convention the other git helpers here use
+ * rather than `api()`'s throw. An import is a long, visible, expensive operation with a project already
+ * registered behind it, so a failure has to be LOUD at the call site; a thrown error at a caller that
+ * forgot a `catch` is a spinner that stops and a user who does not know why (§4.5.4b's "a failed save
+ * is LOUD", one door over). The caller must read `ok`.
+ */
+export async function cloneRepoIntoProject(
+  projectId: string,
+  input: { repo: string; branch?: string; provider?: 'github' | 'gitlab' },
+): Promise<CloneOutcome> {
+  let response: Response;
+
+  try {
+    response = await fetch(`/api/projects/${projectId}/github`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'clone', ...input }),
+    });
+  } catch {
+    return { ok: false, retryable: true, message: 'Could not reach the server. Try the import again.' };
+  }
+
+  const payload = (await response.json().catch(() => null)) as CloneOutcome | null;
+
+  if (!payload) {
+    // A non-JSON body (an HTML 500 page) must not become a silent success or an unhandled throw.
+    return {
+      ok: false,
+      retryable: response.status >= 500,
+      message: `The server returned an error (${response.status}).`,
+    };
+  }
+
+  if (!payload.ok) {
+    logger.error(`Clone failed for ${projectId}: ${payload.message ?? response.status}`);
+    return payload;
+  }
+
+  /*
+   * The same fetch-boundary normalization `getRepoStatus`/`pullFromRepo` apply: a damaged repo (one
+   * carrying a nested workdir prefix) must not round-trip its damage into the sandbox — see
+   * `normalizeRepoFileMap`. An import is the FIRST thing that ever happens to these files, so getting
+   * it wrong here means every later path inherits paths that are wrong from the start.
+   */
+  return payload.files ? { ...payload, files: normalizeRepoFileMap(payload.files) } : payload;
+}
+
+export interface LinkOutcome {
+  ok: boolean;
+  message?: string;
+}
+
+/**
+ * Record where this project lives, as a COMPLETE tuple (§4.5.4b).
+ *
+ * 🔴 **All three fields or none.** `provider` + `linked_repo` + `linked_branch` are one fact, enforced
+ * by migration 0006's `projects_link_complete_check` — a repo with no provider names no adapter, so the
+ * project would read as LINKED while every save silently had nowhere to go. That constraint caught two
+ * live half-link writers on the way in, which is why the rule is a database check and not a convention.
+ *
+ * ⚠️ **`provider` is REQUIRED here, deliberately, where the route defaults it to `github`.** The route's
+ * default exists for rows linked before §4.5.4b; a new caller relying on it is a bug waiting for its
+ * first GitLab user, because a GitLab-linked project that records `github` resolves the wrong token
+ * against the wrong host on every push. Requiring it is what makes that impossible to forget.
+ *
+ * 🔴 **`GitHubSyncButton.link()` still posts `op: 'link'` INLINE with no provider, and that is a real
+ * pre-existing defect, not a safe exception.** An earlier draft of this comment claimed it was
+ * "GitHub-only by construction" because it checks `c.provider === 'github'` — that check proves the
+ * user has a GitHub CONNECTION, not that the repository being linked is on GitHub, and the dialog is
+ * now reached from `GitStatusChip`, whose provider radio group can be set to GitLab and is NOT threaded
+ * through to it. So a user with both providers connected can link a GitLab repo and have `github`
+ * recorded. It is outside this feature's scope and is logged in SPEC §10; do not treat it as precedent,
+ * and do not re-add a wrapper-free second writer.
+ *
+ * Returns an outcome and never throws: an IMPORT calls this after the files have already landed, and a
+ * link that fails there must leave an honestly-unlinked project rather than take down a successful
+ * import.
+ */
+export async function linkProjectToRepo(
+  projectId: string,
+  input: { repo: string; branch: string; provider: 'github' | 'gitlab' },
+): Promise<LinkOutcome> {
+  let response: Response;
+
+  try {
+    response = await fetch(`/api/projects/${projectId}/github`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'link', ...input }),
+    });
+  } catch {
+    return { ok: false, message: 'Could not reach the server to record where this project is saved.' };
+  }
+
+  const payload = (await response.json().catch(() => null)) as { ok?: boolean; message?: string } | null;
+
+  if (!payload?.ok) {
+    const message = payload?.message ?? `The server returned an error (${response.status}).`;
+    logger.error(`Link failed for ${projectId}: ${message}`);
+
+    return { ok: false, message };
+  }
+
+  return { ok: true };
+}
+
 /* -------------------------------------------------------------- remix seed */
 
 /**

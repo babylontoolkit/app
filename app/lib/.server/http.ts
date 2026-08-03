@@ -32,8 +32,19 @@ const SAFE_ERRORS = new Set([
   'DuplicatePaymentError',
   'BuildTooLargeError',
   'SeedTooLargeError',
+
+  /*
+   * The import refusals (§4.13, `git/clone.ts`). Each names the limitation it hit — an unsupported
+   * host, the size cap and its env var, the LFS paths — and a refusal that names no cause is read as
+   * the button being broken (`share/build-failure.ts`, the same lesson one door over).
+   */
+  'RateLimitedError',
+  'UnsupportedGitHostError',
+  'CloneTooLargeError',
+  'LfsPointerError',
   'RootAbsoluteAssetError',
   'UnmountableRouterBasenameError',
+  'AccountDeletionError',
 ]);
 
 export function errorResponse(error: unknown): Response {

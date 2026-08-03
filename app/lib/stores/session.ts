@@ -34,6 +34,16 @@ export interface SessionUser {
   id: string;
   email: string;
   displayName: string;
+
+  /**
+   * The account's avatar (`profiles.avatar_url`, usually from OAuth). Absent for most email/password
+   * accounts, which fall back to an icon.
+   *
+   * It rides on the SESSION rather than being read from the browser's `bolt_profile` because identity
+   * shown next to an account must come from the account — see `~/lib/identity`.
+   */
+  avatarUrl?: string;
+
   emailVerified: boolean;
   isAdmin: boolean;
   isLocal: boolean;

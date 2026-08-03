@@ -1,15 +1,9 @@
-import { useGit } from '~/lib/hooks/useGit';
-import type { Message } from 'ai';
-import { selectImportableFiles } from '~/lib/git/importable-files';
-import { detectProjectCommands, createCommandsMessage, escapeBoltTags } from '~/utils/projectCommands';
-import { generateId } from '~/utils/fileUtils';
+import { importRepositoryIntoWorkspace, type ImportChat } from '~/lib/git/import-repository';
 import { useState } from 'react';
 import { toast } from 'react-toastify';
-import { LoadingOverlay } from '~/components/ui/LoadingOverlay';
 
 import { classNames } from '~/utils/classNames';
 import { Button } from '~/components/ui/Button';
-import type { IChatMetadata } from '~/lib/persistence/db';
 import { X, Github, GitBranch } from 'lucide-react';
 
 // Import the new repository selector components
@@ -18,97 +12,61 @@ import { GitLabRepositorySelector } from '~/components/@settings/tabs/gitlab/com
 
 interface GitCloneButtonProps {
   className?: string;
-  importChat?: (description: string, messages: Message[], metadata?: IChatMetadata) => Promise<void>;
+  importChat?: ImportChat;
 }
 
 export default function GitCloneButton({ importChat, className }: GitCloneButtonProps) {
-  const { ready, gitClone } = useGit();
   const [loading, setLoading] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<'github' | 'gitlab' | null>(null);
 
-  const handleClone = async (repoUrl: string) => {
-    if (!ready) {
-      return;
-    }
-
+  /**
+   * Both selectors have ALWAYS passed the branch the user chose, and this handler used to drop it.
+   *
+   * `GitHubRepositorySelector` and `GitLabRepositorySelector` each open a branch picker before calling
+   * back, so picking `develop` and getting `main` was a silent wrong answer with a UI that had already
+   * asked the right question. It is forwarded now — no UI change was needed, only a second parameter.
+   */
+  const handleClone = async (repoUrl: string, branch?: string) => {
     setLoading(true);
     setIsDialogOpen(false);
     setSelectedProvider(null);
 
+    /*
+     * Still the provider the user picked, despite the `setSelectedProvider(null)` two lines up.
+     *
+     * ⚠️ The reason is CLOSURE CAPTURE, not batching: `selectedProvider` is a `const` binding in this
+     * render's scope, and a state setter cannot reassign it — the next render gets a new binding, this
+     * one keeps what it was called with, batched or not. (Said "React batches them" in its first
+     * draft, which is true of React and irrelevant here; the rule holds for a different reason than
+     * the one written down, which is how a comment stops protecting the code it describes.)
+     *
+     * It matters because both selectors are only rendered while `selectedProvider` is set, so this can
+     * never legitimately be `null` — and a GitLab import that silently defaulted to GitHub would
+     * resolve the wrong token against the wrong host.
+     */
+    const provider = selectedProvider ?? undefined;
+
     try {
-      const { workdir, data, projectId } = await gitClone(repoUrl);
-
-      if (importChat) {
-        /*
-         * 🔴 `gitClone` has already written every file — binaries included — to the sandbox as real
-         * bytes. The artifact below is a RECORD of the import, never its delivery mechanism, so files
-         * excluded here are still present and correct on disk.
-         *
-         * This used to be ~50 lines inline: a NON-FATAL `TextDecoder` gated on a text-EXTENSION
-         * allow-list that included `.svg`, `.json` and `.xml`. A gzipped `.svg` therefore reached the
-         * decoder, every invalid byte became U+FFFD, and the action runner wrote that garbage back over
-         * the correct bytes. `selectImportableFiles` decides on the BYTES instead.
-         *
-         * Only `excluded` is reported — files whose bytes are not text. `ignored` (node_modules, .git,
-         * build output) is deliberately not shown: naming `.git/objects/pack/*.pack` in the import
-         * message tells the user nothing and is model-visible text on every later turn (§4.2.8).
-         */
-        const { files: fileContents, excluded } = selectImportableFiles(data);
-
-        const commands = await detectProjectCommands(fileContents);
-        const commandsMessage = createCommandsMessage(commands);
-
-        const filesMessage: Message = {
-          role: 'assistant',
-          content: `Cloning the repo ${repoUrl} into ${workdir}
-${
-  excluded.length > 0
-    ? `\n${excluded.length} file(s) are in the project but not shown here (binary or ignored):
-${excluded.map((f) => `- ${f}`).join('\n')}`
-    : ''
-}
-
-<boltArtifact id="imported-files" title="Git Cloned Files" type="bundled">
-${fileContents
-  .map(
-    (file) =>
-      `<boltAction type="file" filePath="${file.path}">
-${escapeBoltTags(file.content)}
-</boltAction>`,
-  )
-  .join('\n')}
-</boltArtifact>`,
-          id: generateId(),
-          createdAt: new Date(),
-        };
-
-        const messages = [filesMessage];
-
-        if (commandsMessage) {
-          messages.push(commandsMessage);
-        }
-
-        /*
-         * The project the clone was written into (`openImportWorkspace`) — omitted on a runtime that
-         * needs none. Without it the reloaded chat has no project to boot a sandbox for, and the
-         * cloned files are on a VM nothing points at.
-         */
-        await importChat(
-          `Git Project:${repoUrl.split('/').slice(-1)[0]}`,
-          messages,
-          projectId ? { projectId } : undefined,
-        );
+      if (!importChat) {
+        return;
       }
-    } catch (error) {
+
       /*
-       * Say WHAT went wrong. This used to be a fixed "Failed to import repository", which is
-       * indistinguishable from a button that did nothing — and on a project-backed runtime the real
-       * reason ("open or create a project first", a refused workspace) is precisely the sentence the
-       * user needs (T3b).
+       * Everything — the boot surface, the server clone, the byte-faithful write, the settle and the
+       * hand-off — lives in one module shared with the `/git?url=` door (`import-repository.ts`). It
+       * returns an outcome and never throws; the `catch` below is for a genuine programming error.
        */
-      console.error('Error during import:', error);
-      toast.error(`Failed to import repository: ${error instanceof Error ? error.message : String(error)}`);
+      const result = await importRepositoryIntoWorkspace({ repo: repoUrl, branch, provider, importChat });
+
+      if (!result.ok) {
+        /*
+         * The server's own words — "connect GitHub and try again", "over the 256MB import limit",
+         * "that repository stores 12 file(s) in Git-LFS". A fixed "Failed to import repository" is
+         * indistinguishable from a button that did nothing, and each of those names a different action.
+         */
+        toast.error(result.message ?? 'The repository could not be imported.');
+      }
     } finally {
       setLoading(false);
     }
@@ -133,7 +91,7 @@ ${escapeBoltTags(file.content)}
           'transition-all duration-200 ease-in-out',
           className,
         )}
-        disabled={!ready || loading}
+        disabled={loading}
       >
         Clone a repo
         <div className="flex items-center gap-1 ml-2">
@@ -274,8 +232,6 @@ ${escapeBoltTags(file.content)}
           </div>
         </div>
       )}
-
-      {loading && <LoadingOverlay message="Please wait while we clone the repository..." />}
     </>
   );
 }

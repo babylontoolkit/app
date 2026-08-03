@@ -74,7 +74,18 @@ const RESUME_PHASES: BootPhase[] = [
  * `CREATION_PHASES` list is asserted against the `creating-` prefix, and `RESUME_PHASES` is asserted to
  * be invisible to the overlay. This phase is a third thing.
  */
-const OVERLAY_ONLY_PHASES: BootPhase[] = [{ step: 'importing' }];
+const OVERLAY_ONLY_PHASES: BootPhase[] = [
+  { step: 'importing' },
+
+  /*
+   * The network half of an import (§4.13). Overlay-only for a DIFFERENT reason from `importing`'s, and
+   * the difference is worth keeping straight: `importing` cannot hold `ready` because its files arrive
+   * through the message parser, which needs the chat rendered first; `cloning` simply starts from a page
+   * where `ready` is already true, because the user pressed a button in a workspace they were looking at.
+   * Same list, same treatment, two independent reasons — so neither is load-bearing for the other.
+   */
+  { step: 'cloning' },
+];
 
 /**
  * 🔴 THE LISTS ABOVE ARE HAND-WRITTEN, AND A HAND-WRITTEN LIST CANNOT NOTICE AN OMISSION.
