@@ -4,7 +4,7 @@ import { chatStore } from '~/lib/stores/chat';
 import { sidebarDockableStore, sidebarDockedEffective, sidebarOverlayOpen, toggleSidebar } from '~/lib/stores/sidebar';
 import { classNames } from '~/utils/classNames';
 import { HeaderActionButtons } from './HeaderActionButtons.client';
-import { ChatDescription } from '~/lib/persistence/ChatDescription.client';
+import { ProjectTitle } from './ProjectTitle.client';
 import { CreditsIndicator } from '~/components/chat/CreditsIndicator.client';
 import { AccountMenu } from '~/components/auth/AccountMenu.client';
 import { useSession } from '~/lib/hooks/useSession';
@@ -43,10 +43,21 @@ export function Header() {
    * theme. `data-theme="dark"` re-scopes the `--bolt-elements-*` tokens so the title/credits/menu text
    * stays light and legible on the gradient, and the white wordmark reads in light mode too.
    */
+  /*
+   * The bar carries the WORKSPACE tone; the brand plaque beside it paints `--chrome-gradient` (the
+   * darker sidebar tone), so the top bar reads as two sections — brand on the left, project on the
+   * right. The boundary is the plaque's pinned right edge, so unlike the ray glow this replaces, it
+   * does not move.
+   *
+   * ⚠️ `backgroundAttachment: 'fixed'` is required, not cosmetic. Docking changes this element's left
+   * edge (0 → `--sidebar-dock-width`), so a percentage-based horizontal ramp painted into its own box
+   * would rescale and slide on every toggle. Fixed attachment paints it against the viewport, so the
+   * colour under any given pixel is the same docked or not.
+   */
   return (
     <header
       data-theme="dark"
-      style={{ background: 'var(--chrome-gradient)' }}
+      style={{ background: 'var(--chrome-gradient-workspace)', backgroundAttachment: 'fixed' }}
       className={classNames(
         'flex items-center px-4 border-b h-[var(--header-height)] shrink-0 text-bolt-elements-textPrimary',
         {
@@ -62,7 +73,17 @@ export function Header() {
        * it above the drawer, so the sidebar's gradient strip slides in UNDERNEATH it and the two read
        * as one continuous top bar. Read the rule block before changing any of this.
        */}
-      <div className="header-brand flex items-center gap-2 z-logo text-bolt-elements-textPrimary">
+      <div
+        className={classNames('header-brand flex items-center gap-2 z-logo text-bolt-elements-textPrimary', {
+          /*
+           * Continues the header's bottom rule across the plaque (0→340), so the top bar's bottom
+           * edge is ONE line rather than a rule on the right and a bare colour step on the left.
+           * Driven by the SAME `chat.started` as the header's own `border-b` two lines below — if
+           * these two ever disagree the seam comes back, mirrored.
+           */
+          'header-brand-divided': chat.started,
+        })}
+      >
         {/*
          * The sidebar button. Its MEANING follows the viewport (`~/lib/stores/sidebar`).
          *
@@ -117,13 +138,13 @@ export function Header() {
           aria-label={brand.productTitle}
         >
           {/*
-           * ── LOGO SIZE LIVES HERE: the `h-8` below ──────────────────────────────────────────────
+           * ── LOGO SIZE LIVES HERE: the `h-7` below ─────────────────────────────────────────────
            * Sized by HEIGHT, never width — the artwork is ~3.5:1, so a width-based size renders it
-           * tiny. `h-8` is 32px against the 54px header. The lettering is `fill="#ffffff"` chrome
+           * tiny. `h-7` is 28px against the 54px header. The lettering is `fill="#ffffff"` chrome
            * art, legible only on a dark band — which the header itself guarantees, since the brand
            * rides it (see the block comment above).
            */}
-          <img src={brand.assets.mark} alt="" className="h-8 w-auto inline-block" />
+          <img src={brand.assets.mark} alt="" className="h-7 w-auto inline-block" />
 
           {/*
            * Rule + name. Both are `aria-hidden` (the anchor's label already says it) and both live in
@@ -155,7 +176,7 @@ export function Header() {
            * buttons collapse leftward into the middle of the bar.
            */}
           <span className="header-chat-title truncate text-bolt-elements-textPrimary">
-            <ClientOnly>{() => <ChatDescription />}</ClientOnly>
+            <ClientOnly>{() => <ProjectTitle />}</ClientOnly>
           </span>
           <div className="flex-1" aria-hidden="true" />
           <ClientOnly>

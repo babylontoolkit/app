@@ -138,11 +138,61 @@ body.dock-animate {
   position: absolute;
   top: 0;
   left: 0;
+
+  /*
+   * 🔴 THE PLAQUE REPRODUCES THE SIDEBAR'S WHOLE EDGE — background AND border (2026-08-02).
+   *
+   * The drawer is `border-box` at `--sidebar-dock-width`, so its `border-r` lives INSIDE that width:
+   * measured `offsetWidth 340` / `clientWidth 339`, i.e. background 0→339 and the divider 339→340.
+   * The plaque has to end up with the SAME two zones, or the top of the sidebar column and the rest
+   * of it disagree about where the column ends — which is what was reported, twice:
+   *
+   *   1. A flat `width: 340` painted gradient straight over the 339→340 divider strip, so the
+   *      vertical line stopped dead at y=54.
+   *   2. Narrowing it to 339 fixed that while docked (the drawer's own border showed through) but
+   *      left the UNDOCKED state 1px short: with the drawer off-screen there is no border to show,
+   *      so 339→340 fell through to the header's lighter tone and the dark block was 339 wide while
+   *      the sidebar column is 340. Reported as the sidebar "extending 1px too far", and as the dark
+   *      header growing and shrinking — because which of the two it was depended on the dock state.
+   *
+   * Border-box + a real `border-right` gives the plaque both zones itself, so it is 0→340 with the
+   * divider at 339→340 in EVERY state: docked, undocked, and mid-slide. Nothing to disagree with.
+   *
+   * ⚠️ The width and colour of that border are the DRAWER's (`Menu.client.tsx` `border-r`
+   * `border-bolt-elements-borderColor`). They are one edge described in two files — change one and
+   * this must change with it.
+   */
+  box-sizing: border-box;
   width: var(--sidebar-dock-width, 340px);
   height: var(--header-height);
+  border-right: 1px solid var(--bolt-elements-borderColor);
   background: var(--chrome-gradient);
   z-index: -1;
   pointer-events: none;
+}
+
+/*
+ * ── THE TOP BAR'S BOTTOM EDGE IS ONE LINE, ACROSS THE WHOLE VIEWPORT (2026-08-02) ────────────────
+ *
+ * Reported as the corner where the sidebar, the content and the top bar meet looking "a bit off…
+ * not a seamless flow". It was: the `<header>` sits in the body's flow, so docking pushes its box to
+ * **x=340** and its `border-b` therefore began at 340 — while the plaque above, which paints the
+ * chrome for 0→340, had no bottom border at all. So the top bar's bottom edge was a 1px
+ * `#FFFFFF1a` rule on the right and a bare colour step (plaque `#1a1030` meeting sidebar `#0a0a0a`)
+ * on the left, with the change of treatment landing exactly on the sidebar's vertical border. Three
+ * edges converging, two of them different, at the one pixel where the eye checks alignment.
+ *
+ * The plaque now carries the same border, so the rule runs unbroken 0→viewport and the sidebar's
+ * vertical border drops cleanly out of it. Safe because the plaque is `border-box`: the 1px comes out
+ * of its own `--header-height`, so it lands at the same y as the header's and the band does not grow.
+ *
+ * 🔴 It is on a MODIFIER, not on `.header-brand::before` itself, because the header's own border is
+ * conditional — `border-transparent` until a chat starts (the landing page has no rule under its top
+ * bar). An unconditional border here would invert the very defect it fixes: a line on the left half
+ * and nothing on the right. The class and the header's `border-b` are set from the same `chat.started`.
+ */
+.header-brand-divided::before {
+  border-bottom: 1px solid var(--bolt-elements-borderColor);
 }
 
 /* Holds the brand's footprint in the header's flow now that the brand itself is out of it. */
@@ -217,7 +267,7 @@ body.dock-animate {
 
 .header-lockup-name {
   display: none; /* Shown from the breakpoint down the file. */
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1;
   text-transform: uppercase;
@@ -390,6 +440,28 @@ body.sidebar-docked .creation-splash {
   /* The dark-purple "chrome" gradient shared by the header and the sidebar's top row so the two top
    * bars are the exact same colour and read as one continuous bar. Defined once to prevent drift. */
   --chrome-gradient: linear-gradient(180deg, #2a1550 0%, #1a1030 100%);
+
+  /*
+   * The top bar's WORKSPACE half — everything right of the pinned brand plaque.
+   *
+   * 🔴 A deliberate two-tone that REPLACES AN ACCIDENT, colour-matched to it on purpose. The lighter
+   * band used to be eight decorative `BackgroundRays` glows bleeding up over a `position: static`
+   * header (see the clip in `BackgroundRays/styles.module.scss`). It looked good — it sections the
+   * brand off from the project title, which is why it is kept — but those rays run a slow float
+   * animation, so the light/dark boundary crawled across the chrome on its own. Owning the tone here
+   * keeps the look and makes it hold still.
+   *
+   * The stops were matched EMPIRICALLY, not invented: the candidate was rendered across the header's
+   * lower half against the live glow on the upper half until the seam between them disappeared. Hence
+   * the horizontal falloff — the original was bright mid-bar and dim at both ends, and a flat tone
+   * reads noticeably deader next to the plaque.
+   *
+   * ⚠️ Paired with `background-attachment: fixed` at the point of use, and that is LOAD-BEARING: the
+   * header's box starts at `--sidebar-dock-width` when docked and at 0 when not, so a percentage
+   * gradient painted into that box would rescale on every toggle — reintroducing the exact drift this
+   * replaces. Fixed attachment anchors the ramp to the viewport instead.
+   */
+  --chrome-gradient-workspace: linear-gradient(100deg, #43257e 0%, #6a44b8 38%, #5c3aa4 62%, #3a2070 100%);
 
   --gradient-opacity: 0.8;
   --primary-color: rgba(158, 117, 240, var(--gradient-opacity));

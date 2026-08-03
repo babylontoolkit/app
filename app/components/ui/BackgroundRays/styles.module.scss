@@ -10,7 +10,33 @@
   --ray-gradient-accent: radial-gradient(var(--ray-color-accent) 0%, transparent 70%);
 
   position: fixed;
-  inset: 0;
+
+  /*
+   * 🔴 STARTS BELOW THE TOP BAR — `inset: 0` put decoration on top of the chrome (2026-08-02).
+   *
+   * These rays are `position: absolute` with negative `top`s (they bleed upward on purpose), inside a
+   * container that was `inset: 0` — the whole viewport — at `z-index: 0`. The `<header>` is `position:
+   * static`, and a POSITIONED element later in the DOM paints above a non-positioned one in the same
+   * stacking context, so eight radial glows were being drawn over the top bar. The plaque behind the
+   * logo escaped only because it rides `.z-logo` (998), which is exactly why the header read as two
+   * different purples: glowing on the right, flat on the left.
+   *
+   * And it MOVED — reported as "the dark purple header area GROWING and SHRINKING just a tiny bit".
+   * ⚠️ Not because of docking, which was the intuitive reading and is wrong: this container is
+   * `position: fixed`, so it is viewport-anchored and MEASURED at [0,0] both docked and undocked. The
+   * rays inside it run a slow float animation — measured drifting ~16px/s with no toggle involved —
+   * so the light/dark boundary crawls across the chrome continuously. Docking only drew the eye to
+   * it. The tone the glow produced was liked and is kept, as a stable gradient the header owns
+   * (`--chrome-gradient-workspace`), colour-matched against this glow before it was clipped away.
+   *
+   * Clipping here rather than raising the header is deliberate: giving the header a `z-index` would
+   * make it a stacking context and TRAP `.header-brand` (998) inside it, dropping the pinned logo
+   * below the sidebar drawer (997) — the plaque would slide under the drawer instead of over it,
+   * trading a subtle glow for the white-flash bug the plaque exists to prevent.
+   *
+   * `--header-height` and not a literal: the top bar's height is declared once, in `index.scss`.
+   */
+  inset: var(--header-height) 0 0;
   overflow: hidden;
   animation: fadeIn 1.5s ease-out;
   pointer-events: none;
