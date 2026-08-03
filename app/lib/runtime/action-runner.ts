@@ -270,7 +270,14 @@ export class ActionRunner {
                 return;
               }
 
-              this.#updateAction(actionId, { status: 'failed', error: 'Action failed' });
+              /*
+               * The row's own error text, not a constant. "Action failed" on a dev-server row tells
+               * the user only what they can already see; the header names what actually happened.
+               */
+              this.#updateAction(actionId, {
+                status: 'failed',
+                error: err instanceof ActionCommandError ? err.header : 'Action failed',
+              });
               logger.error(`[${action.type}]:Action failed\n\n`, err);
 
               if (!(err instanceof ActionCommandError)) {
@@ -429,10 +436,27 @@ export class ActionRunner {
       unreachable('Shell terminal not found');
     }
 
-    const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
-      logger.debug(`[${action.type}]:Aborting Action\n\n`, action);
-      action.abort();
-    });
+    let resp;
+
+    try {
+      resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
+        logger.debug(`[${action.type}]:Aborting Action\n\n`, action);
+        action.abort();
+      });
+    } catch (error) {
+      /*
+       * 🔴 The shell died under the command (`shellDiedError`). Re-thrown as an `ActionCommandError`
+       * because the runner's catch shows an alert ONLY for that type and silently swallows anything
+       * else — so a plain `Error` here would mark the row failed and still tell the user nothing,
+       * which is most of the defect this fixes. The message already names the cause and carries
+       * whatever the command printed before dying.
+       */
+      throw new ActionCommandError(
+        'Dev server stopped',
+        error instanceof Error ? error.message : 'The workspace shell stopped unexpectedly.',
+      );
+    }
+
     logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
 
     if (resp?.exitCode != 0) {

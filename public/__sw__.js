@@ -159,8 +159,21 @@ const previewScripts = new Map();
 // host's setPreviewScript() can never disable first-party diagnostics.
 const previewInspectorScripts = new Map();
 
-// global watermark toggle, last writer across tabs wins
-let watermarkEnabled = true;
+// global watermark toggle, last writer across tabs wins.
+//
+// DEFAULTS OFF IN THIS FORK. A service worker is terminated when idle and restarted on the next
+// event, and module state resets with it — so this `let` returns to its default every time the
+// worker recycles. `setWatermark(false)` is a one-shot postMessage from the client, re-sent only on
+// `controllerchange` or after the SW asks for `sw-needs-init`, which it does only when a request
+// arrives for an instance with no registered port. Neither fires on an ordinary recycle.
+//
+// The result, observed live: `Nodepod.boot({ watermark: false })` holds for a fresh boot — exactly
+// when anyone would verify it — and the badge silently comes back mid-session. Defaulting to `false`
+// removes the race rather than narrowing it; re-posting on every registration would not, since the
+// worker can serve a page before the message lands.
+//
+// Safe here because nothing in this fork ever enables the mark, so `true` could only ever be wrong.
+let watermarkEnabled = false;
 
 // per-instance ws bridge tokens
 const wsTokens = new Map();

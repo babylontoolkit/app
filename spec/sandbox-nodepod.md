@@ -48,7 +48,43 @@ straight to building §5's dep cache. §5 works and saves ~2.6 s. **The other ~1
 optimization at all** (§8): it is one-time pod-side init that lands on whichever request comes first.
 Nobody had measured the segments, only the total.
 
-`watermark: false` verified — no "nodepod" mark anywhere in the preview DOM.
+~~`watermark: false` verified — no "nodepod" mark anywhere in the preview DOM.~~
+
+🔴 **THAT VERIFICATION WAS TRUE WHEN TAKEN AND IS NOT A STANDING GUARANTEE (2026-08-03).** The mark
+came back, observed live in the bottom-right of a preview: an `<a href="…/Nodepod">nodepod</a>`, fixed
+at `z-index: 2147483647`, injected by a `__nodepodWatermark` script the service worker adds to **every
+served HTML page**. `Nodepod.boot({ watermark: false })` is still set and still correct — it is simply
+not sufficient, and the reason is worth generalising:
+
+- `watermarkEnabled` is a **module-level `let` in the service worker, defaulting to `true`**
+  (`static/__sw__.js`). It is not persisted.
+- The client turns it off by POSTING `set-watermark` (`RequestProxy.setWatermark`) — a message, not a
+  stored setting.
+- **A service worker is terminated when idle and restarted on the next event, and module state resets
+  with it.** The only re-sends are on `controllerchange` and on the SW asking for `sw-needs-init`,
+  which it does only when a request arrives for an instance with no registered port.
+
+So the flag holds for a fresh boot — which is exactly when anyone would check it — and silently lapses
+back to the default the first time the worker recycles without prompting a re-init. **A one-shot
+message cannot configure a component whose state resets underneath it; that is a fact about service
+workers, not a bug in the call site.** The original check was done minutes after boot and was honest;
+what was wrong was recording it as a property rather than as an observation.
+
+**The fix belongs in the fork, and it is one line** (`static/__sw__.js`):
+
+```js
+let watermarkEnabled = true;   // →  false
+```
+
+Defaulting OFF is correct *for this fork specifically*: the adoption decision below is "watermark
+off", and no code path in it ever turns the mark on — so a default of `true` can only ever be wrong
+here. It also removes the race outright rather than narrowing it, which re-posting the message on
+every registration would not (the worker can serve one page before the message lands).
+
+⚠️ **NOT FIXED YET — it needs a fork edit plus an npm publish, which is the owner's call.** There is
+no supported workaround from this repo: `RequestProxy` is `private _proxy` on the `Nodepod` class, so
+`setWatermark` cannot be re-asserted from here, and hiding the badge with `setPreviewScript` would be
+exactly the patching the adoption decision rejected.
 
 Confirmed from the preview's own resource log: `@babylonjs-toolkit/next/lib/scenemanager.js`
 (**12.2 MB**, 1,244 ms), `@babylonjs/havok/lib/esm/HavokPhysics_es.js` (277 KB), `havokPlugin`
@@ -89,6 +125,9 @@ could not offer at any price, and it is why this is not simply trading one depen
 - **FORK AND VENDOR IN-TREE at a pinned version.** MIT means nobody can take it away — but only if we
   actually hold a copy. Do not track a floating npm range.
 - **Watermark off.** `Nodepod.boot({ watermark: false })` — a documented boot flag, no patching.
+  ⚠️ **The flag alone does not hold** — it is a one-shot message to a service worker whose state
+  resets when the worker recycles, so the mark returns mid-session. See §"That verification was true
+  when taken" above for the mechanism and the one-line fork fix.
 - **Licence interpretation is the owner's call and is settled.** For the record only: the repo
   `LICENSE` and the npm `license` field both read `MIT WITH Commons-Clause`, while the project's blog
   states "MIT licensed… no commercial restrictions." Do not re-litigate this here.

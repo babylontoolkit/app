@@ -258,6 +258,29 @@ function retainPartialOsc(tail: string): string {
  * The state machine is `reduceOscSignals` (pure, pinned); this is just the bookkeeping around it —
  * what the wait is for, what it has collected, and how to answer it.
  */
+/**
+ * The error a wait fails with when the shell process dies underneath it.
+ *
+ * Exported and pure because this string is the ONLY thing the user gets told about a dev server that
+ * died — `build-failure.ts`'s lesson: a refusal that names no cause is read as the button being
+ * broken. It carries whatever the command had printed before dying, which for a crashed dev server
+ * is the crash, and which was previously discarded along with the wait.
+ *
+ * `-1` means the provider's own `exit` promise rejected, i.e. we could not learn the code. That is a
+ * different fact from "exited 0" and must not be printed as one.
+ */
+export function shellDiedError(code: number, output: string): Error {
+  const cause =
+    code === -1 ? 'The workspace shell stopped unexpectedly.' : `The workspace shell exited (code ${code}).`;
+
+  const error = new Error(
+    `${cause} Any command running in it was stopped.` + (output.trim() ? `\n\n${output.trimEnd()}` : ''),
+  );
+  error.name = 'ShellDiedError';
+
+  return error;
+}
+
 interface OscWaiter {
   waitCode: string;
   afterOsc?: string;
@@ -279,6 +302,23 @@ export class BoltShell {
     { sessionId: string; active: boolean; executionPrms?: Promise<any>; abort?: () => void } | undefined
   >();
   #outputStream: ReadableStreamDefaultReader<string> | undefined;
+
+  /**
+   * Set once the shell PROCESS has exited. Every later wait fails immediately instead of parking.
+   *
+   * 🔴 **A DEAD PROCESS IS NOT A CLOSED STREAM, AND ONLY ONE OF THE TWO WAS HANDLED.** `#pumpOutput`
+   * covers the stream ending (`done`) and the stream erroring — but on a sandbox whose PTY survives
+   * its process, the shell can die with the stream simply going quiet. `read()` then never returns,
+   * every registered wait parks forever, and `executeCommand` never settles.
+   *
+   * MEASURED live 2026-08-03 on a cloned Vite 8 project: `npm run dev` printed `> vite`, the dev
+   * server died, and the `start` action sat at `running` — the terminal-window icon, which is the
+   * ONLY icon that status draws — with no error, no alert and a blank Preview tab. The action
+   * runner's `.then`/`.catch` around `#runStartAction` are both correct and neither could run,
+   * because the promise they are attached to never settled. Same silent shape as the execution-queue
+   * poisoning: not a wrong answer, no answer.
+   */
+  #processExit: { code: number } | undefined;
   #shellInputStream: WritableStreamDefaultWriter<string> | undefined;
 
   /**
@@ -320,6 +360,16 @@ export class BoltShell {
     const { process, commandStream, expoUrlStream } = await this.newBoltShellProcess(sandbox, terminal);
     this.#process = process;
     this.#outputStream = commandStream.getReader();
+
+    /*
+     * The shell's own death is a first-class event, not something to infer from silence.
+     *
+     * Fire-and-forget by design: nothing awaits the shell's lifetime, and a `catch` here is required
+     * because a provider whose `exit` REJECTS would otherwise raise an unhandled rejection while
+     * leaving every wait parked — the failure this whole block exists to end, arriving by a
+     * different door.
+     */
+    void process.exit.then((code) => this.#onProcessExit(code)).catch(() => this.#onProcessExit(-1));
 
     /*
      * Start background Expo URL watcher immediately.
@@ -518,6 +568,15 @@ export class BoltShell {
       return { output: '', exitCode: 0 };
     }
 
+    /*
+     * A wait registered AFTER the shell died would park forever with nothing left to wake it — the
+     * pump has stopped and no further signal is coming. Failing up front also makes the second
+     * action after a death loud instead of silent, which matters because the runner keeps going.
+     */
+    if (this.#processExit) {
+      throw shellDiedError(this.#processExit.code, '');
+    }
+
     return new Promise<{ output: string; exitCode: number }>((resolve, reject) => {
       this.#waiters.add({
         waitCode,
@@ -627,6 +686,31 @@ export class BoltShell {
   #finishWaiter(waiter: OscWaiter) {
     this.#waiters.delete(waiter);
     waiter.resolve({ output: waiter.output, exitCode: waiter.state.exitCode });
+  }
+
+  /**
+   * The shell process exited: fail every wait, and remember so later waits fail immediately.
+   *
+   * REJECT rather than resolve, and this is the whole point. Resolving with `exitCode: 0` would tell
+   * `#runStartAction` the dev server started fine (its check is `resp?.exitCode != 0`), turning a
+   * hang into a false success — strictly worse, because the artifact would go green over a project
+   * with no server. Resolving with a non-zero code would work today but relies on every caller
+   * reading the code; a rejection cannot be ignored by a caller that forgets to look.
+   *
+   * The error names the shell rather than the command, because at this level that is all that is
+   * known — the process that would have reported an exit code is the one that died.
+   */
+  #onProcessExit(code: number) {
+    if (this.#processExit) {
+      return;
+    }
+
+    this.#processExit = { code };
+
+    for (const waiter of [...this.#waiters]) {
+      this.#waiters.delete(waiter);
+      waiter.reject(shellDiedError(code, waiter.output));
+    }
   }
 
   /** Expo URL detection, once per chunk on the pump — it used to be per-wait, i.e. missed or doubled. */
