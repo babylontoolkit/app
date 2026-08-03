@@ -18,6 +18,7 @@ import { classNames } from '~/utils/classNames';
 import { useStore } from '@nanostores/react';
 import { sidebarDockedStore } from '~/lib/stores/sidebar';
 import { brand } from '~/config/brand';
+import { useDisplayIdentity } from '~/lib/hooks/useSession';
 
 const logger = createScopedLogger('sidebar');
 
@@ -55,12 +56,55 @@ function CurrentDateTime() {
     return () => clearInterval(timer);
   }, []);
 
+  /*
+   * Lives in the FOOTER (2026-08-02), centred, in the slot the wordmark vacated. It used to sit
+   * directly under the top strip, which put a clock immediately above the chat list — the panel's
+   * actual job — and pushed everything down a row. It carries no border of its own: the footer it
+   * now sits in already has a `border-t`, and a second rule 1px away reads as a mistake.
+   */
   return (
-    <div className="flex items-center gap-2 px-4 py-2 text-sm text-gray-600 dark:text-gray-400 border-b border-gray-100 dark:border-gray-800/50">
-      <div className="h-4 w-4 i-ph:clock opacity-80" />
-      <div className="flex gap-2">
-        <span>{dateTime.toLocaleDateString()}</span>
-        <span>{dateTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+    <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 whitespace-nowrap">
+      <div className="h-4 w-4 i-ph:clock opacity-80 shrink-0" />
+      <span>{dateTime.toLocaleDateString()}</span>
+      <span>{dateTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+    </div>
+  );
+}
+
+/**
+ * The sidebar's user bar (2026-08-02): the ROW the date/time used to occupy, directly under the
+ * gradient strip — same container, same border — now dedicated to who you are. Name left, avatar
+ * right; the clock moved to the footer's centre slot. It moves WITH the sidebar, so unlike the
+ * header-pinned identity it replaced there is no animation seam for it to flash on.
+ *
+ * `identity.name` is EMPTY while `/api/me` is in flight, deliberately (`~/lib/identity`): asserting a
+ * name we have not been told and swapping it a moment later is the defect that module exists to
+ * remove. The avatar well renders regardless, so the row does not reflow when the name arrives.
+ */
+function SidebarIdentity() {
+  const identity = useDisplayIdentity();
+
+  return (
+    <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-gray-100 dark:border-gray-800/50">
+      <div className="flex flex-col min-w-0">
+        <span className="font-medium text-sm truncate text-gray-900 dark:text-gray-100">{identity.name}</span>
+        {identity.secondary && (
+          <span className="text-[11px] truncate text-gray-500 dark:text-gray-500">{identity.secondary}</span>
+        )}
+      </div>
+
+      <div className="flex items-center justify-center w-8 h-8 overflow-hidden bg-gray-100 dark:bg-gray-800 rounded-full shrink-0">
+        {identity.avatar ? (
+          <img
+            src={identity.avatar}
+            alt={identity.name || 'User'}
+            className="w-full h-full object-cover"
+            loading="eager"
+            decoding="sync"
+          />
+        ) : (
+          <div className="i-ph:user-fill text-base text-gray-500 dark:text-gray-400" />
+        )}
       </div>
     </div>
   );
@@ -451,26 +495,19 @@ export const Menu = () => {
             )}
           >
             {/*
-             * Deliberately EMPTY, and it must stay here (2026-08-02).
-             *
-             * The identity that used to sit in this strip now lives in the header's `header-brand`
-             * block, which counter-translates back over this column when the sidebar is docked — the
-             * pinning the wordmark used to get. This bar is the GRADIENT IT SITS ON: the header content
-             * is only floated above it (`z-logo`), it does not bring a background with it. Delete this
-             * strip and the pinned name loses its backing and the sidebar's top stops lining up with
-             * the header.
+             * Deliberately EMPTY. When the sidebar is docked this strip sits beside the header at the
+             * same height with the same gradient, so the chrome band reads as one continuous bar
+             * across the top of the screen — that continuity is its whole job. The user bar is the
+             * ROW BELOW (`SidebarIdentity`, where the date/time used to be), not this strip.
              */}
-            <div className="flex items-center gap-3">
-              {/*
-               * Hidden (hide-don't-delete, the Deploy "Coming Soon" precedent — §4.1a). A docs link is
-               * not identity, and it was the third control in a strip that only needed to answer "who
-               * am I". Documentation is not orphaned by this: it is still one click away in the avatar
-               * dropdown's "Help & Documentation" item and in the ⋯ main menu's Help & diagnostics group.
-               */}
-              {false && <HelpButton onClick={() => window.open(brand.urls.docs, '_blank')} />}
-            </div>
+            {/*
+             * Hidden (hide-don't-delete, the Deploy "Coming Soon" precedent — §4.1a). Documentation
+             * is not orphaned: it is one click away in the avatar dropdown's "Help & Documentation"
+             * item and in the ⋯ main menu's Help & diagnostics group.
+             */}
+            {false && <HelpButton onClick={() => window.open(brand.urls.docs, '_blank')} />}
           </div>
-          <CurrentDateTime />
+          <SidebarIdentity />
           <div className="flex-1 flex flex-col h-full w-full overflow-hidden">
             <div className="p-4 space-y-3">
               {/* The whole project library (server-backed, cross-device) — the chat UI below is local chats only (§4.1). */}
@@ -661,42 +698,26 @@ export const Menu = () => {
               </DialogRoot>
             </div>
             {/*
-             * The footer carries the WORDMARK (moved out of the header, 2026-08-02 — that row was too
-             * busy). Two things about it are worth knowing before changing it:
+             * The footer's centre slot holds the CLOCK (2026-08-02; it held the wordmark for a few
+             * hours, which went back to the page header where it started). The date/time used to be a
+             * full-width row directly under the top strip — a clock sitting above the chat list, which
+             * is the panel's actual job.
              *
-             * 🔴 **It is chrome art, and it only works here because THIS SIDEBAR IS ALWAYS DARK.** The
-             * wordmark's lettering is a `fill="#ffffff"` group in the SVG, drawn for the dark purple
-             * bar it used to live on. It is legible in the footer solely because of the
-             * `data-theme="dark"` wrapper ~250 lines above (see its comment) — on an ordinary
-             * `bg-white` surface it is INVISIBLE, and it would look perfectly fine to anyone reviewing
-             * in dark mode. **If the sidebar is ever made theme-following, this needs a second asset**:
-             * `logo-light.png` / `logo-dark.png` are a matched pair (identical 1786×624) named for the
-             * BACKGROUND they sit on — `logo-light.png` is the BLACK-lettering artwork — and swapping
-             * them with `dark:hidden` / `hidden dark:inline-block` is the whole fix. That pair is NOT
-             * used today on purpose: under the always-dark wrapper the light one can never render, and
-             * a `display:none` image is still downloaded (134KB for a branch that cannot run).
-             *
-             * **A 3-column grid, not `justify-between`.** With three children `justify-between` centres
-             * the middle one only while the two side controls happen to be the same width. They are
-             * today (both `IconButton size="xl"`), which is exactly what makes it a trap: the left slot
-             * is already a flex row built to hold more than one button, and the day a second one lands
-             * there the logo slides off-centre with nothing to explain why. `1fr auto 1fr` centres it
-             * by construction.
+             * **A 3-column grid, not `justify-between`.** With three children `justify-between`
+             * centres the middle one only while the two side controls happen to be the same width.
+             * They are today (both `IconButton size="xl"`), which is exactly what makes it a trap:
+             * the left slot is a flex row built to hold more than one button, and the day a second
+             * one lands there the centre slides off with nothing to explain why. `1fr auto 1fr`
+             * centres it by construction.
              */}
             <div className="grid grid-cols-[1fr_auto_1fr] items-center border-t border-gray-200 dark:border-gray-800 px-4 py-3">
               <div className="flex items-center gap-3 justify-self-start">
                 <SettingsButton onClick={handleSettingsClick} />
               </div>
 
-              <a href="/" className="justify-self-center flex items-center cursor-pointer" title={brand.productName}>
-                {/*
-                 * ── LOGO SIZE LIVES HERE: the `h-8` below ────────────────────────────────────────
-                 * Sized by HEIGHT, never width — the artwork is ~3.5:1, so a width-based size renders
-                 * it tiny. `h-8` is 32px, the same size it was in the header. Much above this and the
-                 * row starts taking rows off the chat list, which is the panel's actual job.
-                 */}
-                <img src={brand.assets.mark} alt={brand.productName} className="h-8 w-auto inline-block" />
-              </a>
+              <div className="justify-self-center">
+                <CurrentDateTime />
+              </div>
 
               <div className="justify-self-end">
                 <ThemeSwitch />

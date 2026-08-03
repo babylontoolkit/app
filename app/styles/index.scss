@@ -34,10 +34,9 @@ button {
  * viewports; below that, a docked sidebar simply stays pinned open as an overlay.
  */
 /*
- * The docking transitions (body reflow + the header wordmark counter-slide) animate ONLY after a user
- * toggle — `body.dock-animate`, added in `toggleSidebarDocked`. On a fresh page load the docked state
- * is applied with NO transition, so it lands instantly instead of sliding in every navigation. (The
- * body-padding and header transforms desync mid-load otherwise, sliding the logo in from off-screen.)
+ * The docking transition (body reflow) animates ONLY after a user toggle — `body.dock-animate`, added
+ * in `toggleSidebarDocked`. On a fresh page load the docked state is applied with NO transition, so it
+ * lands instantly instead of sliding in on every navigation.
  */
 /*
  * 🔴 THE DOCK CURVE IS SHARED WITH THE SIDEBAR, AND IT IS NOT A STYLE CHOICE (fixed 2026-08-02).
@@ -48,73 +47,110 @@ button {
  *
  * They shipped on different curves. The body used CSS `ease` (`cubic-bezier(.25,.1,.25,1)`); the
  * sidebar uses `cubicEasingFn` = `cubicBezier(0.4, 0, 0.2, 1)` (`~/utils/easings`). Same 0.2s
- * duration, so they START and END together — which is exactly why this survived: the before and
- * after frames are perfect, and only the middle is wrong. MEASURED mid-flight: the two edges
- * diverged by up to **32.3px at t=74ms** while docking, opening a 32px band of bare page background
- * across the top-left — directly under the pinned identity in `.header-brand`, whose white text and
- * avatar sat over the white page for a few frames. Reported as "the user name and icon flashes when
- * you toggle the sidebar".
- *
- * The duration matching alone was never enough; the CURVE has to match too, or the edges only agree
- * at the two endpoints. Keep these two in lockstep with `cubicEasingFn` — if that constant changes,
+ * duration, so they START and END together — only the middle was wrong (measured: up to 32.3px of
+ * divergence at t=74ms). Keep these two in lockstep with `cubicEasingFn` — if that constant changes,
  * change this, and vice versa. `--dock-ease`/`--dock-duration` live in the `:root` below, beside
  * `--chrome-gradient`, for the reason that one gives: defined once to prevent drift.
  *
- * VERIFIED by sampling both edges every frame through a toggle: worst gap went from **+32.3px** to
- * **0** (the remaining divergence is negative, i.e. the sidebar overlapping the header, which is
- * covered and invisible).
+ * ⚠️ Matching the curve narrows the seam; it cannot CLOSE it — the two edges are driven by different
+ * engines (framer-motion writes `left` from JS; the body padding is a CSS transition) and do not
+ * reliably start on the same frame. That is why whatever is pinned over the seam carries ITS OWN
+ * backing — see `.header-brand::before` below.
  *
- * ⚠️ Matching the curve was necessary and NOT sufficient — see `body::before` below. The two edges
- * are driven by different engines (framer-motion writes `left` from JS; the body padding is a CSS
- * transition), so they do not reliably START on the same frame. Re-measuring caught undock still
- * opening a 49px band on one run in three: same curve, one frame of head start. A race you have to
- * win every time is not a fix, so the band itself is made impossible instead.
+ * 🔴 **THE LOGO IS PINNED OVER THE SIDEBAR COLUMN, AND THE PLAQUE IS WHAT KEEPS IT SOLID (owner
+ * design, 2026-08-02).** `.header-brand` (dock toggle + wordmark) counter-translates back over the
+ * sidebar when docked and floats above the drawer (`.z-logo` 998 > `.z-sidebar` 997), so the
+ * sidebar's gradient strip slides in UNDERNEATH it and the two blend into one continuous top bar —
+ * that blend is the point; do not "simplify" the brand into an ordinary in-flow header child (tried
+ * 2026-08-02: the drawer then covers the logo on hover, which reads as the logo vanishing). What a
+ * pinned brand needs is a guarantee about the pixels BEHIND it during the race, and that is the
+ * `::before` plaque: the same gradient, rigidly attached to the brand, painted behind it in every
+ * frame. MEASURED flat (name-band peak 215.6 → 75.5 against a steady 75, every sampled column across
+ * the 0–340px strip flat) across dock toggles, an undock and a hover slide-out.
+ *
+ * Two dead ends, kept so they stay dead: an easing match alone leaves the one-frame race; and a
+ * `body::before` full-width band CANNOT paint — the app shell renders an opaque in-flow wrapper
+ * (`bg-bolt-elements-background-depth-1`) above any negative-z body pseudo, so that "fix" shipped
+ * invisible while `getComputedStyle` reported it faithfully. A guard that cannot fail is why this
+ * bug kept coming back.
+ */
+/*
+ * The content reflow slides, on the same curve as the drawer — unchanged from how it has always
+ * behaved, and deliberately restored after being tried as a snap (2026-08-02).
+ *
+ * Docking reserves a 340px column, so the page content genuinely has to move; the only question is
+ * whether it travels or teleports. Snapping was tried on the theory that animating `padding-left`
+ * is expensive (it is a layout property — the whole app re-lays-out each frame, the chat column
+ * measured 1625px → 1965px) and it is WORSE to look at: a 340px instant jump draws far more
+ * attention than a 200ms glide. Cheaper to compute, louder to watch. Do not re-take that trade.
+ *
+ * ⚠️ What must NOT come back is anything counter-animated against this padding. `.header-brand` used
+ * to hold still by cancelling it with a `translateX`, and that pair — two properties, two pipelines
+ * — is what made the logo slide about an inch on every toggle. The brand is `position: fixed` now
+ * and simply is not in this flow, so this transition has nothing to stay in step with.
  */
 body.dock-animate {
   transition: padding-left var(--dock-duration) var(--dock-ease);
 }
 
-body.dock-animate .header-brand {
-  transition: transform var(--dock-duration) var(--dock-ease);
-}
-
 /*
- * 🔴 THE CHROME BAND IS PAINTED ON THE PAGE ITSELF, SO THE SEAM CAN NEVER SHOW.
+ * 🔴 THE BRAND IS NAILED TO THE VIEWPORT. IT DOES NOT MOVE, EVER (owner requirement, 2026-08-02).
  *
- * The header and the sidebar both paint `--chrome-gradient` across the top of the screen, and between
- * them — for 200ms per toggle — is whatever the page background happens to be. That band is the flash:
- * the pinned identity in `.header-brand` is white text on white paper for a few frames, in light mode.
+ * `position: fixed` at the top-left corner, full stop. Body padding cannot reach it, the header can
+ * slide under it, the drawer can slide beside it — none of that is expressible as motion for an
+ * element whose containing block is the viewport itself.
  *
- * Matching the easing (above) removed the systematic divergence; it could not remove the RACE, because
- * the two edges are animated by different engines and do not reliably start on the same frame.
+ * ⚠️ THIS REPLACES A CANCELLATION, AND THE DIFFERENCE IS THE WHOLE POINT. The brand used to sit in
+ * the header's flow with a counter-`translateX(-340px)`: body `padding-left` pushed it right, the
+ * transform pulled it back, and it held still only while those two animated in lockstep. They are
+ * different properties on different pipelines, so every attempt to stabilise it was really an
+ * attempt to win a per-frame race — and it visibly lost, sliding about an inch on each toggle
+ * (worst with `will-change: transform`, which moved the transform onto the compositor's clock while
+ * the padding stayed on the main thread's). **Do not reintroduce a transform on `.header-brand` to
+ * "fix" anything.** Zero moving parts beats two synchronised ones.
  *
- * This paints the same gradient across the full width, behind everything, permanently. There is then
- * no such thing as a gap — whatever the two edges are doing, the pixels underneath are already the
- * colour they are travelling towards. It costs one always-composited layer and nothing else.
- *
- * `z-index: -1` puts it under all in-flow content (the header's own text and buttons included) while
- * still sitting above the body's background — do NOT raise it to 0, which paints it OVER unpositioned
- * header content and hides the credits pill. It is `fixed` and `pointer-events: none`, so it neither
- * scrolls nor takes clicks, and it is deliberately NOT gated on `dock-animate`: it is identical to
- * what the header already draws, so it is invisible at rest and only matters mid-animation.
+ * `--header-brand-width` reserves the space it vacated, so the header's own content (chat title,
+ * credits) still starts where it always did. Keep it >= the rendered brand or the title slides under
+ * the logo; it is a layout reservation, not a size — the brand is sized by its content.
  */
-body::before {
-  content: '';
+.header-brand {
   position: fixed;
   top: 0;
   left: 0;
-  right: 0;
+  height: var(--header-height);
+
+  /* Matches the header's own `px-4`, so the toggle sits exactly where it has always sat. */
+  padding-left: 1rem;
+}
+
+/*
+ * The chrome band under the brand. Undocked, the header paints this area; docked, the sidebar's
+ * strip does — but MID-TOGGLE the header has slid right and the drawer has not yet arrived (or vice
+ * versa) and for a few frames neither covers it, which is the white flash reported three times. The
+ * band is the sidebar column exactly, pinned like its owner, so there is no frame in which the white
+ * lettering is over bare page.
+ *
+ * `z-index: -1` keeps it behind the logo while staying inside the brand's own `.z-logo` (998)
+ * stacking context, so the drawer (997) can never come between them.
+ */
+.header-brand::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--sidebar-dock-width, 340px);
   height: var(--header-height);
   background: var(--chrome-gradient);
   z-index: -1;
   pointer-events: none;
 }
 
-@media (min-width: 1024px) {
-  body.sidebar-docked .header-brand {
-    transform: translateX(calc(-1 * var(--sidebar-dock-width, 340px)));
-  }
+/* Holds the brand's footprint in the header's flow now that the brand itself is out of it. */
+.header-brand-spacer {
+  flex: 0 0 var(--header-brand-width, 150px);
+}
 
+@media (min-width: 1024px) {
   body.sidebar-docked {
     /*
      * 🔴 `!important` is LOAD-BEARING — do not "clean it up".
@@ -176,6 +212,13 @@ body::before {
 
 :root {
   --sidebar-dock-width: 340px;
+
+  /*
+   * The footprint `.header-brand-spacer` holds open in the header's flow, since the brand itself is
+   * `position: fixed` and no longer occupies any. Measured 142.5px (dock toggle + gap + wordmark at
+   * `h-8`); rounded up so a slightly wider wordmark cannot slide under the chat title.
+   */
+  --header-brand-width: 150px;
 
   /*
    * The docking animation, shared by the body reflow and the `.header-brand` counter-slide — and it
