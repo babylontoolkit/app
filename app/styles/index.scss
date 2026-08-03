@@ -399,6 +399,54 @@ body.sidebar-docked .creation-splash {
   left: var(--sidebar-dock-width, 340px);
 }
 
+/*
+ * 🔴 A MODAL CENTRES ON THE CONTENT COLUMN, NOT THE VIEWPORT (owner, 2026-08-03).
+ *
+ * Every dialog in the app is `position: fixed`, so — exactly like the workbench panel and the
+ * creation splash above — it does not move with body padding. Docked, the content column starts at
+ * `--sidebar-dock-width` and its centre is `50vw + dock/2`; a viewport-centred dialog therefore sits
+ * `dock/2` (170px) to the LEFT of everything it belongs to. Reported as the Clone / Import Folder /
+ * Import Chat dialogs looking off-centre.
+ *
+ * The third instance of one bug, which is why this is a SHARED pair of classes rather than a fourth
+ * hand-placed rule: `--workbench-left`, `.creation-splash`, and now every modal. A new overlay opts
+ * in by naming the class that matches how it centres — there is no way to get it right by accident,
+ * so it has to be cheap to get right on purpose.
+ *
+ * Two classes because there are two centring idioms in this codebase and they need opposite fixes:
+ *
+ *   • `.overlay-centered` — `fixed inset-0 flex items-center justify-center`. PADDING, not `left`,
+ *     so the scrim still covers the whole viewport (including the sidebar) while the flex centring
+ *     happens inside the content column. Moving `left` here would pull the backdrop off the sidebar
+ *     and leave it clickable behind a modal.
+ *   • `.overlay-centered-x50` — `fixed left-1/2 -translate-x-1/2` (the Radix `Dialog`), which has no
+ *     box to pad. Its 50% is the viewport, so the offset is added directly.
+ *
+ * Scoped under `body.sidebar-docked` for specificity (0,2,0), which beats Tailwind's single-class
+ * `.inset-0` / `.left-1\/2` regardless of emit order — the `TOOLBAR_ICON_BUTTON_FILLED` lesson:
+ * when two rules set one property, generated-stylesheet ORDER decides, so win the cascade explicitly
+ * rather than hoping to be declared last.
+ */
+body.sidebar-docked {
+  /*
+   * ⚠️ BOTH paddings, and that is not tidiness — it is what makes the centre exact.
+   *
+   * These overlays carry their own gutter (`p-4`, `px-6`). Overriding only `padding-left` leaves the
+   * box asymmetric — left `dock`, right `1rem` — so the flex centre lands `gutter/2` short. MEASURED:
+   * 1138 against a content centre of 1146, 8px off, which is small enough to look like "roughly
+   * centred" and be left alone. Setting both makes the padded box symmetric about the content
+   * column, so the centre is exact for any gutter the component happened to choose.
+   */
+  .overlay-centered {
+    padding-left: calc(var(--sidebar-dock-width, 340px) + 1rem);
+    padding-right: 1rem;
+  }
+
+  .overlay-centered-x50 {
+    left: calc(50% + var(--sidebar-dock-width, 340px) / 2);
+  }
+}
+
 :root {
   --sidebar-dock-width: 340px;
 

@@ -2,6 +2,7 @@ import { json } from '@remix-run/cloudflare';
 import { getApiKeysFromCookie } from '~/lib/api/cookies';
 import { withSecurity } from '~/lib/security';
 import { denyUnlessVerified } from '~/lib/.server/http';
+import { callerOAuthToken } from '~/lib/.server/git/caller-token';
 
 interface GitHubBranch {
   name: string;
@@ -36,7 +37,14 @@ async function githubBranchesLoader({ request, context }: { request: Request; co
       const body: any = await request.json();
       owner = body.owner;
       repo = body.repo;
-      githubToken = body.token;
+
+      /*
+       * The BranchSelector sends whatever token the BROWSER holds, which under §4.5.4b is none —
+       * so a platform-connected user reached "GitHub token is required" the moment they pressed
+       * Clone, with the repository list right behind the dialog proving they were connected. Same
+       * defect as `api.github-stats`, one route further along the same flow.
+       */
+      githubToken = body.token || (await callerOAuthToken(request, context));
 
       if (!owner || !repo) {
         return json({ error: 'Owner and repo parameters are required' }, { status: 400 });
@@ -59,10 +67,11 @@ async function githubBranchesLoader({ request, context }: { request: Request; co
       const cookieHeader = request.headers.get('Cookie');
       const apiKeys = getApiKeysFromCookie(cookieHeader);
 
-      // Try to get GitHub token from various sources
+      // Same ordering as every other git read route: caller cookie, caller OAuth, operator env.
       githubToken =
         apiKeys.GITHUB_API_KEY ||
         apiKeys.VITE_GITHUB_ACCESS_TOKEN ||
+        (await callerOAuthToken(request, context)) ||
         context?.cloudflare?.env?.GITHUB_TOKEN ||
         context?.cloudflare?.env?.VITE_GITHUB_ACCESS_TOKEN ||
         process.env.GITHUB_TOKEN ||

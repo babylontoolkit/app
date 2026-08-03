@@ -295,7 +295,7 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="overlay-centered fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
         className="w-[560px] max-w-[92vw] max-h-[85vh] overflow-y-auto rounded-lg bg-bolt-elements-background-depth-1 border border-bolt-elements-borderColor p-4 flex flex-col gap-3"
         onClick={(e) => e.stopPropagation()}

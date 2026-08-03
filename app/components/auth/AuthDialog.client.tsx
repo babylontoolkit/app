@@ -101,7 +101,10 @@ export function AuthDialog({ open, onClose, redirectTo }: Props) {
     'focus:outline-none focus:border-bolt-elements-focus';
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div
+      className="overlay-centered fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
+      onClick={onClose}
+    >
       <div
         className="w-full max-w-sm rounded-xl p-6 bg-bolt-elements-background-depth-2
           border border-bolt-elements-borderColor shadow-xl"

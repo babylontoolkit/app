@@ -113,10 +113,16 @@ export const Dialog = memo(({ children, className, showCloseButton = true, onClo
           onClick={onBackdrop}
         />
       </RadixDialog.Overlay>
+      {/*
+       * `overlay-centered-x50`: the content is `position: fixed`, so its `left: 50%` is half the
+       * VIEWPORT and body padding does not move it — docked, that puts it 170px left of the content
+       * column it belongs to. See the rule in `index.scss` (the `-x50` variant exists because there
+       * is no box to pad here, unlike the `inset-0 flex` overlays).
+       */}
       <RadixDialog.Content asChild>
         <motion.div
           className={classNames(
-            'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white dark:bg-gray-950 rounded-lg shadow-xl border border-bolt-elements-borderColor z-[9999] w-[520px] focus:outline-none',
+            'overlay-centered-x50 fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white dark:bg-gray-950 rounded-lg shadow-xl border border-bolt-elements-borderColor z-[9999] w-[520px] focus:outline-none',
             className,
           )}
           initial="closed"

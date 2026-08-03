@@ -114,6 +114,64 @@ describe('token precedence in the inherited read routes', () => {
     });
   });
 
+  /**
+   * 🔴 DEFAULT-DENY, because fixing these one at a time is how three rounds of the same bug shipped.
+   *
+   * The connect button, then the repo list, then the BRANCH list — each surfaced only when a user
+   * walked one step further into the flow, and each was the identical omission in a route nobody had
+   * enumerated. `api.github-branches` was missed precisely because the repo picker's stats hook does
+   * not call it; the Clone button does, two clicks later.
+   *
+   * So the rule is stated over the WHOLE directory rather than over the routes someone remembered:
+   * any `api.git*` route that resolves a provider token must consider the caller's own stored one.
+   * A new route is a failure until it either does, or is exempted here with a written reason —
+   * `outbound-enumerate.spec.ts`'s shape, for the same reason it exists.
+   */
+  it('EVERY git route that resolves a token considers the caller’s own', async () => {
+    const { readFileSync, readdirSync } = await import('node:fs');
+
+    /** Routes that resolve no provider token at all, and why. */
+    const EXEMPT: Record<string, string> = {
+      'api.git.connections.ts': 'Lists connections. Never touches a token (§5) — that is its point.',
+      'api.git.connect.$provider.ts': 'Starts OAuth; there is no token yet.',
+      'api.git.callback.$provider.ts': 'Completes OAuth and WRITES the token.',
+      'api.git-proxy.$.ts': 'Forwards the caller’s own credentials verbatim; adds none.',
+      'api.git-info.ts': 'Reads local `git` output on the host. No provider API, no token.',
+      'api.github-template.ts': 'Fetches a public starter template by name.',
+    };
+
+    const offenders: string[] = [];
+
+    for (const name of readdirSync('app/routes').filter((f) => /^api\.git(hub|lab)?[.-]/.test(f))) {
+      if (EXEMPT[name]) {
+        continue;
+      }
+
+      const source = readFileSync(`app/routes/${name}`, 'utf8');
+
+      // Does it resolve a provider token at all? If so, it must consider the caller's own.
+      const resolvesToken = /githubToken\s*=|const token\s*=|body\.token|apiKeys\.GITHUB_API_KEY/.test(source);
+
+      if (resolvesToken && !source.includes('callerOAuthToken')) {
+        offenders.push(name);
+      }
+    }
+
+    expect(
+      offenders,
+      'these resolve a provider token but ignore the caller’s platform connection — add callerOAuthToken, or exempt with a reason',
+    ).toEqual([]);
+  });
+
+  it('control: the route scan is actually looking at files', async () => {
+    const { readdirSync } = await import('node:fs');
+    const routes = readdirSync('app/routes').filter((f) => /^api\.git(hub|lab)?[.-]/.test(f));
+
+    // Without this, a regex that matches nothing reports a clean bill of health forever.
+    expect(routes.length, 'the scan must be finding git routes').toBeGreaterThan(5);
+    expect(routes).toContain('api.github-branches.ts');
+  });
+
   it('the GitLab route prefers the body token and falls back to the caller’s own', async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync('app/routes/api.gitlab-projects.ts', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');

@@ -1,6 +1,7 @@
 import { json } from '@remix-run/cloudflare';
 import { withSecurity } from '~/lib/security';
 import { denyUnlessVerified } from '~/lib/.server/http';
+import { callerOAuthToken } from '~/lib/.server/git/caller-token';
 import { isAllowedUrl } from '~/utils/url';
 
 interface GitLabBranch {
@@ -31,7 +32,10 @@ async function gitlabBranchesLoader({ request, context }: { request: Request; co
 
   try {
     const body: any = await request.json();
-    const { token, gitlabUrl = 'https://gitlab.com', projectId } = body;
+    const { token: bodyToken, gitlabUrl = 'https://gitlab.com', projectId } = body;
+
+    // See the GitHub twin: a platform connection carries no browser token. Body first, then the caller's own.
+    const token = bodyToken || (await callerOAuthToken(request, context, 'gitlab'));
 
     if (!token) {
       return json({ error: 'GitLab token is required' }, { status: 400 });

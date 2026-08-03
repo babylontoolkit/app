@@ -8,7 +8,7 @@ export const LoadingOverlay = ({
   progressText?: string;
 }) => {
   return (
-    <div className="fixed inset-0 flex items-center justify-center bg-black/80 z-50 backdrop-blur-sm">
+    <div className="overlay-centered fixed inset-0 flex items-center justify-center bg-black/80 z-50 backdrop-blur-sm">
       <div className="relative flex flex-col items-center gap-4 p-8 rounded-lg bg-bolt-elements-background-depth-2 shadow-lg">
         <div
           className={'i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress'}

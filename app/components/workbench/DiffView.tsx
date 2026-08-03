@@ -52,7 +52,7 @@ const FullscreenOverlay = memo(({ isFullscreen, children }: { isFullscreen: bool
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-6">
+    <div className="overlay-centered fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-6">
       <div className="w-full h-full max-w-[90vw] max-h-[90vh] bg-bolt-elements-background-depth-2 rounded-lg border border-bolt-elements-borderColor shadow-xl overflow-hidden">
         {children}
       </div>
