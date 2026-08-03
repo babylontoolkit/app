@@ -8,6 +8,7 @@ export { useFeatures } from './useFeatures';
 export { useNotifications } from './useNotifications';
 export { useConnectionStatus } from './useConnectionStatus';
 export { useGitHubConnection } from './useGitHubConnection';
+export { usePlatformGitConnection, type PlatformGitConnection } from './usePlatformGitConnection';
 export { useGitHubStats } from './useGitHubStats';
 export { useGitLabConnection } from './useGitLabConnection';
 export { useGitLabAPI } from './useGitLabAPI';

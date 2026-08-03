@@ -203,6 +203,35 @@ export function requireBootedSandbox(): Promise<SandboxProvider> {
 }
 
 /**
+ * Can this tab's runtime load a compiled native addon? See `SandboxCapabilities.nativeAddons`.
+ *
+ * A helper rather than three copies of `(await …).capabilities.nativeAddons`, because the three
+ * import paths (folder, git clone, snapshot restore) must not be able to answer this differently.
+ *
+ * **Never throws, and its failure answer is `true`** — i.e. "assume the runtime is fine". The only
+ * consumer adds a ~10MB WASM binding to an install when this is false, so guessing `false` on a
+ * sandbox we could not ask about would spend a download on every import for a runtime that never
+ * needed one. `true` is the no-op, which is the correct thing to do when you do not know.
+ *
+ * 🔴 **It must never await `state.sandbox`, which only ever RESOLVES.** The obvious one-liner here
+ * was `(await requireBootedSandbox()).capabilities.nativeAddons`, and on a runtime that needs no
+ * project (WebContainer) that returns the shared promise — which stays pending forever if nothing
+ * has booted. So a rendering hint would have hung an import indefinitely, with no error: MEASURED,
+ * as two spec files going from milliseconds to a 30s and a 115s timeout. Same trap
+ * `requireBootedSandbox` documents one function up, reached through its other branch. Only an
+ * already-booted provider, or a boot genuinely in flight (that promise DOES reject), is awaited.
+ */
+export async function runtimeSupportsNativeAddons(): Promise<boolean> {
+  try {
+    const provider = state.provider ?? (state.inFlight ? await state.inFlight : undefined);
+
+    return provider ? provider.capabilities.nativeAddons : true;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Evaluate the chosen provider's modules and connect.
  *
  * 🔴 **BOTH branches are dynamic imports, and that is load-bearing — not a bundling nicety.**

@@ -288,7 +288,13 @@ async function readUntil(stream: ReadableStream<string>, predicate: (seen: strin
 
 describe('capabilities are pinned exactly', () => {
   it('declares terminal, textSearch and watch, and declines clearPort', () => {
-    expect(NODEPOD_CAPABILITIES).toEqual({ terminal: true, textSearch: true, watch: true, clearPort: false });
+    expect(NODEPOD_CAPABILITIES).toEqual({
+      terminal: true,
+      textSearch: true,
+      watch: true,
+      clearPort: false,
+      nativeAddons: false,
+    });
   });
 
   /*

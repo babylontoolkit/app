@@ -4,7 +4,8 @@ import { Button } from '~/components/ui/Button';
 import { BranchSelector } from '~/components/ui/BranchSelector';
 import { GitHubRepositoryCard } from './GitHubRepositoryCard';
 import type { GitHubRepoInfo } from '~/types/GitHub';
-import { useGitHubConnection, useGitHubStats } from '~/lib/hooks';
+import { useGitHubConnection, useGitHubStats, usePlatformGitConnection } from '~/lib/hooks';
+import { startGitConnect } from '~/lib/persistence';
 import { classNames } from '~/utils/classNames';
 import { Search, RefreshCw, GitBranch, Calendar, Filter } from 'lucide-react';
 
@@ -18,12 +19,41 @@ type FilterOption = 'all' | 'own' | 'forks' | 'archived';
 
 export function GitHubRepositorySelector({ onClone, className }: GitHubRepositorySelectorProps) {
   const { connection, isConnected } = useGitHubConnection();
+
+  /*
+   * 🔴 TWO CONNECTIONS, AND ONLY ONE OF THEM IS THE PLATFORM'S.
+   *
+   * `useGitHubConnection` answers "does this BROWSER hold a GitHub token?" — upstream bolt.diy's
+   * BYOK model. Under §4.5.4b the answer is permanently NO: the platform's OAuth writes an
+   * encrypted `git_tokens` row and the client never sees a token. So this picker gated on a fact
+   * that a successful connection could not change, and pressing Connect ran a real OAuth
+   * round-trip, succeeded, and returned to the identical "connect first" screen.
+   *
+   * Either connection is sufficient, and they are NOT interchangeable below: a browser token drives
+   * the client-side API service, a platform connection drives the server-side route (which now
+   * resolves the caller's stored token — see `callerOAuthToken`).
+   */
+  const platform = usePlatformGitConnection('github');
+  const hasAnyConnection = isConnected || platform.connected;
+
+  /*
+   * `useGitHubStats` dereferences `connection` and its auto-fetch effect skips a null one, so a
+   * platform-only user needs a stand-in. It carries NO token — that is what routes the fetch
+   * server-side — and a `login` purely so the client-side branch, if ever taken, has a name rather
+   * than `undefined`.
+   */
+  const statsConnection = connection?.token
+    ? connection
+    : platform.connected
+      ? ({ ...(connection ?? {}), user: { login: platform.login ?? '' } } as typeof connection)
+      : connection;
+
   const {
     stats,
     isLoading: isStatsLoading,
     refreshStats,
   } = useGitHubStats(
-    connection,
+    statsConnection,
     {
       autoFetch: true,
       cacheTimeout: 30 * 60 * 1000, // 30 minutes
@@ -154,12 +184,37 @@ export function GitHubRepositorySelector({ onClone, className }: GitHubRepositor
     setCurrentPage(1);
   }, [searchQuery, sortBy, filterBy]);
 
-  if (!isConnected || !connection) {
+  /*
+   * Wait rather than guess. `platform.connected` is false while `/api/git/connections` is in flight,
+   * so rendering the prompt immediately shows a connected user "not connected" and invites them to
+   * press a button they do not need — the wrong-then-right flash the sidebar identity was fixed for.
+   */
+  if (platform.isLoading && !hasAnyConnection) {
+    return (
+      <div className="flex flex-col items-center justify-center p-8 space-y-4">
+        <div className="animate-spin w-8 h-8 border-2 border-bolt-elements-borderColorActive border-t-transparent rounded-full" />
+        <p className="text-sm text-bolt-elements-textSecondary">Checking your GitHub connection…</p>
+      </div>
+    );
+  }
+
+  if (!hasAnyConnection) {
+    /*
+     * 🔴 This button used to be `window.location.reload()` labelled "Refresh Connection" — a dead
+     * end wearing an action's clothes. Told "connect to GitHub first", the user presses the only
+     * control on screen, the page reloads, and they are looking at the same sentence again with no
+     * idea what they did wrong. Reloading cannot create a connection; only OAuth can.
+     *
+     * So it says what it does and does what it says: the same `startGitConnect` every other
+     * connect affordance uses (the git chip, the divergence dialog), which returns here afterwards.
+     * §4.1a's rule about permanently-disabled menu rows is the same rule — a control that cannot
+     * reach its stated outcome is worse than no control, because the user blames themselves.
+     */
     return (
       <div className="text-center p-8">
-        <p className="text-bolt-elements-textSecondary mb-4">Please connect to GitHub first to browse repositories</p>
-        <Button variant="outline" onClick={() => window.location.reload()}>
-          Refresh Connection
+        <p className="text-bolt-elements-textSecondary mb-4">Connect your GitHub account to browse your repositories</p>
+        <Button variant="outline" onClick={() => startGitConnect('github')}>
+          Connect to GitHub
         </Button>
       </div>
     );

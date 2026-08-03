@@ -2,6 +2,7 @@ import { json } from '@remix-run/cloudflare';
 import { getApiKeysFromCookie } from '~/lib/api/cookies';
 import { withSecurity } from '~/lib/security';
 import { denyUnlessVerified } from '~/lib/.server/http';
+import { callerOAuthToken } from '~/lib/.server/git/caller-token';
 
 async function githubUserLoader({ request, context }: { request: Request; context: any }) {
   const denied = await denyUnlessVerified(request, context);
@@ -15,10 +16,17 @@ async function githubUserLoader({ request, context }: { request: Request; contex
     const cookieHeader = request.headers.get('Cookie');
     const apiKeys = getApiKeysFromCookie(cookieHeader);
 
-    // Try to get GitHub token from various sources
+    /*
+     * ⚠️ This file has TWO token chains — this loader (GET, "who am I?") and the action below
+     * (repos and branches) — and the first fix touched only the action. `lib/stores/github.ts` calls
+     * THIS one, so a platform-connected user still resolved no identity. Found by the precedence
+     * test, not by reading: its first draft used one `indexOf` per file and could not see a second
+     * chain. Keep the ordering identical in both — caller cookie, caller OAuth, operator env.
+     */
     const githubToken =
       apiKeys.GITHUB_API_KEY ||
       apiKeys.VITE_GITHUB_ACCESS_TOKEN ||
+      (await callerOAuthToken(request, context)) ||
       context?.cloudflare?.env?.GITHUB_TOKEN ||
       context?.cloudflare?.env?.VITE_GITHUB_ACCESS_TOKEN ||
       process.env.GITHUB_TOKEN ||
@@ -111,10 +119,15 @@ async function githubUserAction({ request, context }: { request: Request; contex
     const cookieHeader = request.headers.get('Cookie');
     const apiKeys = getApiKeysFromCookie(cookieHeader);
 
-    // Try to get GitHub token from various sources
+    /*
+     * Same ordering as the loader above and as `api.github-stats`, and it MUST stay the same: this
+     * chain serves the branch list for the picker that route serves the repo list for, so a
+     * disagreement shows up as repositories that load and branches that do not.
+     */
     const githubToken =
       apiKeys.GITHUB_API_KEY ||
       apiKeys.VITE_GITHUB_ACCESS_TOKEN ||
+      (await callerOAuthToken(request, context)) ||
       context?.cloudflare?.env?.GITHUB_TOKEN ||
       context?.cloudflare?.env?.VITE_GITHUB_ACCESS_TOKEN ||
       process.env.GITHUB_TOKEN ||

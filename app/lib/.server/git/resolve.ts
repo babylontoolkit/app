@@ -120,6 +120,41 @@ export async function resolveProvider(context: unknown, userId: string, provider
   return buildProvider(provider, record.accessToken, config?.host);
 }
 
+/**
+ * The caller's OWN stored OAuth access token, or `null` when they have not connected.
+ *
+ * 🔴 **This exists because the platform grew TWO GitHub connections and only one of them was real.**
+ * §4.5.4b requires that the browser never holds a git token, so `/api/git/connect/:provider` puts an
+ * encrypted one in `git_tokens` and nothing client-side ever sees it. But upstream bolt.diy's repo
+ * pickers were built on the opposite model — a token in `localStorage` plus a cookie — and their
+ * data routes (`api.github-stats`, `api.github-user`) resolved from cookies and operator env only.
+ *
+ * So a user could complete OAuth successfully, the server could hold a perfectly good token for
+ * them, and the picker would still answer `401 GitHub token not found` and show "connect first".
+ * Pressing the connect button ran a real OAuth round-trip, GitHub auto-approved it, and the user
+ * came back to the identical screen — MEASURED live, and reported (correctly) as "it does NOTHING".
+ *
+ * Non-throwing on purpose: `currentToken` throws a `reconnect` error for "not connected", which is
+ * the right shape for a save (the badge offers a reconnect) and the wrong shape for a read that has
+ * two other token sources to try. Absent is `null`, never an exception — the `getBranchHead` rule.
+ *
+ * ⚠️ It returns the CALLER'S token, resolved from their own user id, and it is deliberately NOT a
+ * platform fallback (`spec/spend-holes.md`): a route reaching for an operator-wide token on behalf
+ * of whoever asked is how `api.system.git-info` listed the operator's private repos to strangers.
+ */
+export async function storedAccessToken(
+  context: unknown,
+  userId: string,
+  provider: GitProviderId,
+): Promise<string | null> {
+  try {
+    // `currentToken` also refreshes a token that is about to expire, so this stays valid to use.
+    return (await currentToken(context, userId, provider)).accessToken;
+  } catch {
+    return null;
+  }
+}
+
 /** Which providers this user has connected — for the UI. Never includes a token (§5). */
 export async function listConnections(context: unknown, userId: string) {
   const records = await getGitTokenStore(context).listByUser(userId);

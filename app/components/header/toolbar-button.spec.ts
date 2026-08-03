@@ -188,4 +188,34 @@ describe('the shapes the row depends on', () => {
 
     expect(heightOf(TOOLBAR_ICON_BUTTON)).toBe(heightOf(TOOLBAR_BUTTON));
   });
+
+  /**
+   * 🔴 The git chip's QUIET states must carry the row's fill, or the §4.5.4b asymmetry inverts.
+   *
+   * The chip is the one control that opts out of these constants, because it carries STATE and
+   * `warning`/`danger` have to break the uniform. The cost of that exemption is that its two quiet
+   * tones are a hand-maintained copy of the row's look — and when the row gained a dark fill
+   * (2026-08-02) they still said "no fill", which would have left "Linked to GitHub" as the only
+   * hollow control among solid ones: the state that is supposed to feel like nothing, drawn as the
+   * loudest thing on the bar.
+   *
+   * Asserted against the SHARED VAR rather than a hex, so the two cannot agree on a stale colour.
+   */
+  it('keeps the git chip’s quiet tones matching the row', async () => {
+    const { readFileSync } = await import('node:fs');
+    const chip = readFileSync('app/components/header/GitStatusChip.client.tsx', 'utf8');
+
+    const fill = /bg-\[var\((--toolbar-button-fill)\)\]/.exec(TOOLBAR_BUTTON)?.[1];
+    const hover = /hover:bg-\[var\((--toolbar-button-fill-hover)\)\]/.exec(TOOLBAR_BUTTON)?.[1];
+
+    expect(fill, 'TOOLBAR_BUTTON should carry the shared fill var').toBe('--toolbar-button-fill');
+    expect(hover, 'TOOLBAR_BUTTON should carry the shared hover var').toBe('--toolbar-button-fill-hover');
+
+    expect(chip, 'the chip’s quiet tone must use the row’s fill var').toContain(`bg-[var(${fill})]`);
+    expect(chip, 'the chip’s quiet tone must use the row’s hover var').toContain(`hover:bg-[var(${hover})]`);
+
+    // …and the loud states must NOT, or the asymmetry disappears in the other direction.
+    expect(chip).toMatch(/bg-amber-500\//);
+    expect(chip).toMatch(/bg-red-500\//);
+  });
 });

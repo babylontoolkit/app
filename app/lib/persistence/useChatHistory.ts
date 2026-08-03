@@ -6,7 +6,13 @@ import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { bootProgress, endBootPhase, importTailActive, reportBootFailure } from '~/lib/stores/boot-progress';
-import { bootForProject, bootedProjectId, describeSandboxFailure, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
+import {
+  bootForProject,
+  bootedProjectId,
+  describeSandboxFailure,
+  runtimeSupportsNativeAddons,
+  SANDBOX_REQUIRES_PROJECT,
+} from '~/lib/sandbox';
 import { readSandboxIdentity, writeSandboxIdentity } from '~/lib/sandbox/identity';
 import { logStore } from '~/lib/stores/logs'; // Import logStore
 import {
@@ -1553,7 +1559,9 @@ export function useChatHistory() {
                   };
                 })
                 .filter((x): x is { content: string; path: string } => !!x); // Type assertion
-              const projectCommands = await detectProjectCommands(files);
+              const projectCommands = await detectProjectCommands(files, {
+                nativeAddons: await runtimeSupportsNativeAddons(),
+              });
 
               // Call the modified function to get only the command actions string
               const commandActionsString = createCommandActionsString(projectCommands);

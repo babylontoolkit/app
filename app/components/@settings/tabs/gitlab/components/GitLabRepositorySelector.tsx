@@ -4,7 +4,8 @@ import { Button } from '~/components/ui/Button';
 import { BranchSelector } from '~/components/ui/BranchSelector';
 import { RepositoryCard } from './RepositoryCard';
 import type { GitLabProjectInfo } from '~/types/GitLab';
-import { useGitLabConnection } from '~/lib/hooks';
+import { useGitLabConnection, usePlatformGitConnection } from '~/lib/hooks';
+import { startGitConnect } from '~/lib/persistence';
 import { classNames } from '~/utils/classNames';
 import { Search, RefreshCw, GitBranch, Calendar, Filter } from 'lucide-react';
 
@@ -18,6 +19,11 @@ type FilterOption = 'all' | 'owned' | 'member';
 
 export function GitLabRepositorySelector({ onClone, className }: GitLabRepositorySelectorProps) {
   const { connection, isConnected } = useGitLabConnection();
+
+  // See the twin in GitHubRepositorySelector: two connections, only one of which is the platform's.
+  const platform = usePlatformGitConnection('gitlab');
+  const hasAnyConnection = isConnected || platform.connected;
+
   const [repositories, setRepositories] = useState<GitLabProjectInfo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -33,7 +39,12 @@ export function GitLabRepositorySelector({ onClone, className }: GitLabRepositor
 
   // Fetch repositories
   const fetchRepositories = async (refresh = false) => {
-    if (!isConnected || !connection?.token) {
+    /*
+     * A platform connection carries no browser token, so gating on `connection?.token` meant a
+     * connected user never fetched anything at all. The route resolves the caller's stored token
+     * when the body omits one (`callerOAuthToken`).
+     */
+    if (!hasAnyConnection) {
       return;
     }
 
@@ -47,9 +58,15 @@ export function GitLabRepositorySelector({ onClone, className }: GitLabRepositor
         headers: {
           'Content-Type': 'application/json',
         },
+
+        /*
+         * `token` is OMITTED, not sent empty, when this browser holds none — the route falls back to
+         * the caller's stored OAuth token only when the body has no token, and an empty string would
+         * satisfy a truthiness check somewhere between here and there.
+         */
         body: JSON.stringify({
-          token: connection.token,
-          gitlabUrl: connection.gitlabUrl || 'https://gitlab.com',
+          ...(connection?.token ? { token: connection.token } : {}),
+          gitlabUrl: connection?.gitlabUrl || 'https://gitlab.com',
         }),
       });
 
@@ -158,17 +175,18 @@ export function GitLabRepositorySelector({ onClone, className }: GitLabRepositor
 
   // Fetch repositories when connection is ready
   useEffect(() => {
-    if (isConnected && connection?.token) {
+    if (hasAnyConnection) {
       fetchRepositories();
     }
-  }, [isConnected, connection?.token]);
+  }, [hasAnyConnection]);
 
-  if (!isConnected || !connection) {
+  if (!hasAnyConnection) {
+    // See the twin in GitHubRepositorySelector: a reload can never make a connection, OAuth can.
     return (
       <div className="text-center p-8">
-        <p className="text-bolt-elements-textSecondary mb-4">Please connect to GitLab first to browse repositories</p>
-        <Button variant="outline" onClick={() => window.location.reload()}>
-          Refresh Connection
+        <p className="text-bolt-elements-textSecondary mb-4">Connect your GitLab account to browse your repositories</p>
+        <Button variant="outline" onClick={() => startGitConnect('gitlab')}>
+          Connect to GitLab
         </Button>
       </div>
     );

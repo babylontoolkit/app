@@ -1,5 +1,6 @@
 import type { Message } from 'ai';
 import { generateId } from './fileUtils';
+import { decideRolldownWasm } from './rolldown-wasm';
 
 export interface ProjectCommands {
   type: string;
@@ -13,35 +14,66 @@ interface FileContent {
   path: string;
 }
 
-// Helper function to make any command non-interactive
-function makeNonInteractive(command: string): string {
-  // Set environment variables for non-interactive mode
-  const envVars = 'export CI=true DEBIAN_FRONTEND=noninteractive FORCE_COLOR=0';
+/**
+ * 🔴 EVERY COMMAND THIS MODULE EMITS MUST PASS `isAllowedShellCommand` — OR IT NEVER RUNS.
+ *
+ * Upstream built the setup command with a `makeNonInteractive()` helper that prefixed
+ * `export CI=true DEBIAN_FRONTEND=noninteractive FORCE_COLOR=0 &&`, chained
+ * `npx update-browserslist-db@latest`, and appended `npx shadcn@latest init` for shadcn projects.
+ * Sensible in bolt.diy, which runs whatever the model emits. In this fork the shell allow-list
+ * (SPEC §4.2.5, §5) permits exactly `npm install …` and `npm run <script>`, and `isAllowedShellCommand`
+ * refuses a chain unless EVERY `&&` segment passes — so the first segment, `export`, killed the whole
+ * command. **Every repository import in this fork ran zero `npm install`s.**
+ *
+ * It failed in the worst possible shape: the install action was refused, the `start` action was not
+ * (`npm run dev` is allow-listed), so the dev server launched into an empty `node_modules`, Vite exited
+ * immediately, and the user got a terminal showing `> vite` and a fresh prompt with **no preview and no
+ * stated cause**. Reported as "it looks like the npm install DID NOT RUN. The terminal does not look
+ * right" — which was exactly correct.
+ *
+ * So the commands are now written to be allow-list-legal BY CONSTRUCTION, and
+ * `projectCommands.spec.ts` runs the real `isAllowedShellCommand` over everything this module can
+ * produce. Adding a flag or a chained tool here without checking that gate reintroduces a silent,
+ * total failure of every import path.
+ *
+ * What was dropped and why it costs nothing:
+ *   • the `export …` env prefix — WebContainer/Nodepod shells are already non-interactive;
+ *   • `npx update-browserslist-db@latest` — a caniuse data refresh, never required to boot a project;
+ *   • `npx shadcn@latest init` — scaffolding that would clobber an imported repo's own config anyway.
+ *
+ * `--no-audit --no-fund` stay: both are plain `npm install` flags the allow-list accepts, and they cut
+ * a lot of noise from the terminal. `--silent` is deliberately NOT used — this output is the user's
+ * only window into a slow or failing install.
+ */
+const SETUP_COMMAND = 'npm install --no-audit --no-fund';
 
-  // Common interactive packages and their non-interactive flags
-  const interactivePackages = [
-    { pattern: /npx\s+([^@\s]+@?[^\s]*)\s+init/g, replacement: 'echo "y" | npx --yes $1 init --defaults --yes' },
-    { pattern: /npx\s+create-([^\s]+)/g, replacement: 'npx --yes create-$1 --template default' },
-    { pattern: /npx\s+([^@\s]+@?[^\s]*)\s+add/g, replacement: 'npx --yes $1 add --defaults --yes' },
-    { pattern: /npm\s+install(?!\s+--)/g, replacement: 'npm install --yes --no-audit --no-fund --silent' },
-    { pattern: /yarn\s+add(?!\s+--)/g, replacement: 'yarn add --non-interactive' },
-    { pattern: /pnpm\s+add(?!\s+--)/g, replacement: 'pnpm add --yes' },
-  ];
-
-  let processedCommand = command;
-
-  // Apply replacements for known interactive patterns
-  interactivePackages.forEach(({ pattern, replacement }) => {
-    processedCommand = processedCommand.replace(pattern, replacement);
-  });
-
-  return `${envVars} && ${processedCommand}`;
+/**
+ * What the detector needs to know about the runtime it is writing commands for.
+ *
+ * REQUIRED rather than defaulted, following `restore-plan.ts`'s `protect`: a default here would be
+ * a silent answer to a question only the call site can answer, and both wrong answers cost
+ * something real (a lost preview, or a ~10MB download nobody uses). Making it required means a new
+ * import path cannot forget it — TypeScript asks.
+ */
+export interface DetectOptions {
+  /** `SandboxProvider.capabilities.nativeAddons` — can this runtime load a compiled `.node`? */
+  nativeAddons: boolean;
 }
 
-export async function detectProjectCommands(files: FileContent[]): Promise<ProjectCommands> {
+export async function detectProjectCommands(files: FileContent[], options: DetectOptions): Promise<ProjectCommands> {
   const hasFile = (name: string) => files.some((f) => f.path.endsWith(name));
-  const hasFileContent = (name: string, content: string) =>
-    files.some((f) => f.path.endsWith(name) && f.content.includes(content));
+
+  /*
+   * A browser-hosted runtime cannot load rolldown's native binding, so a Vite 8 project installs and
+   * starts and then dies with `Cannot find native binding` and no preview. Chained onto the install
+   * with `&&` rather than emitted as a third action: `ProjectCommands` carries exactly two commands
+   * and both message builders render exactly those two, so a third field would have to be threaded
+   * through every one of them — and `&&` makes the ordering a property of the command instead of a
+   * property of the queue that runs it. Both segments are allow-list legal (`rolldown-wasm.ts`).
+   */
+  const rolldown = decideRolldownWasm(files, options);
+  const setupCommand = rolldown.install ? `${SETUP_COMMAND} && ${rolldown.install}` : SETUP_COMMAND;
+  const withNote = (message: string) => (rolldown.note ? `${message}\n\n${rolldown.note}` : message);
 
   if (hasFile('package.json')) {
     const packageJsonFile = files.find((f) => f.path.endsWith('package.json'));
@@ -53,42 +85,28 @@ export async function detectProjectCommands(files: FileContent[]): Promise<Proje
     try {
       const packageJson = JSON.parse(packageJsonFile.content);
       const scripts = packageJson?.scripts || {};
-      const dependencies = { ...packageJson.dependencies, ...packageJson.devDependencies };
-
-      // Check if this is a shadcn project
-      const isShadcnProject =
-        hasFileContent('components.json', 'shadcn') ||
-        Object.keys(dependencies).some((dep) => dep.includes('shadcn')) ||
-        hasFile('components.json');
 
       // Check for preferred commands in priority order
       const preferredCommands = ['dev', 'start', 'preview'];
       const availableCommand = preferredCommands.find((cmd) => scripts[cmd]);
-
-      // Build setup command with non-interactive handling
-      let baseSetupCommand = 'npx update-browserslist-db@latest && npm install';
-
-      // Add shadcn init if it's a shadcn project
-      if (isShadcnProject) {
-        baseSetupCommand += ' && npx shadcn@latest init';
-      }
-
-      const setupCommand = makeNonInteractive(baseSetupCommand);
 
       if (availableCommand) {
         return {
           type: 'Node.js',
           setupCommand,
           startCommand: `npm run ${availableCommand}`,
-          followupMessage: `Found "${availableCommand}" script in package.json. Running "npm run ${availableCommand}" after installation.`,
+          followupMessage: withNote(
+            `Found "${availableCommand}" script in package.json. Running "npm run ${availableCommand}" after installation.`,
+          ),
         };
       }
 
       return {
         type: 'Node.js',
         setupCommand,
-        followupMessage:
+        followupMessage: withNote(
           'Would you like me to inspect package.json to determine the available scripts for running this project?',
+        ),
       };
     } catch (error) {
       console.error('Error parsing package.json:', error);
@@ -97,10 +115,19 @@ export async function detectProjectCommands(files: FileContent[]): Promise<Proje
   }
 
   if (hasFile('index.html')) {
+    /*
+     * A static site with no `package.json`. Upstream started it with `npx --yes serve`, which the
+     * allow-list refuses (`npx` is not `npm`) — so it emitted an action guaranteed to fail and the
+     * user was told nothing useful. Say what is true instead: the files are here, and there is no
+     * command we are permitted to run to serve them. A refusal that names its cause beats a red
+     * action row with a shell error in it (`share/build-failure.ts`, same lesson one door over).
+     */
     return {
       type: 'Static',
-      startCommand: 'npx --yes serve',
-      followupMessage: '',
+      followupMessage:
+        'This looks like a static site with no `package.json`. Add one with a `dev` script (for example ' +
+        'using Vite) and I can install and run it — only `npm install` and `npm run <script>` may be ' +
+        'run in your workspace.',
     };
   }
 

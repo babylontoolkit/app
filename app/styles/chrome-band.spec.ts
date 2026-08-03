@@ -139,9 +139,16 @@ describe('the identity lives in the sidebar, the clock in the footer', () => {
     expect(HEADER).not.toContain('identity.name');
   });
 
-  it('the header carries the wordmark, sized by height, from the brand module', () => {
+  it('the header carries the wordmark, sized by HEIGHT, from the brand module', () => {
     expect(HEADER).toContain('brand.assets.mark');
-    expect(HEADER).toMatch(/h-8 w-auto/);
+
+    /*
+     * The artwork is ~3.5:1, so a width-based size renders it tiny. Which height is a taste call the
+     * owner retunes (`h-8` → `h-7` on 2026-08-02) — pinning a specific one just breaks the suite on a
+     * design tweak. What must not change is that the constraint is on the height and the width is
+     * free.
+     */
+    expect(HEADER).toMatch(/h-\d+ w-auto/);
   });
 
   it('the loading state stays nameless — the RENDERED name is the store value, no fallback', () => {

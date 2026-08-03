@@ -72,6 +72,9 @@ export const CODESANDBOX_CAPABILITIES: SandboxCapabilities = {
   textSearch: false,
   watch: true,
   clearPort: true,
+
+  /** A real Linux microVM: `.node` addons load normally, so rolldown finds its native binding. */
+  nativeAddons: true,
 };
 
 /**

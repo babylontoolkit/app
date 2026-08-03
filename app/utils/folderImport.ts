@@ -2,6 +2,7 @@ import type { Message } from 'ai';
 import { generateId } from './fileUtils';
 import { detectProjectCommands, createCommandsMessage, escapeBoltTags } from './projectCommands';
 import { openImportWorkspace, type ImportWorkspace } from '~/lib/registry/import-project';
+import { runtimeSupportsNativeAddons } from '~/lib/sandbox';
 import { createScopedLogger } from './logger';
 
 const logger = createScopedLogger('FolderImport');
@@ -111,7 +112,9 @@ const buildImportedFolder = async (
 
   const importedBinaries = await writeBinaryFiles(workspace, binaryFiles);
 
-  const commands = await detectProjectCommands(fileArtifacts);
+  const commands = await detectProjectCommands(fileArtifacts, {
+    nativeAddons: await runtimeSupportsNativeAddons(),
+  });
   const commandsMessage = createCommandsMessage(commands);
 
   // The agent is told these assets exist — never their contents.

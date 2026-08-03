@@ -109,7 +109,40 @@ Measured against real call sites, not copied from WebContainer's `.d.ts`:
   its runtime dies with the tab, so there is nothing to inherit.
 - `teardown()` — unused by app code today (a WebContainer dies with the tab) but in the contract,
   because a server provider bills for whatever it does not reap.
-- `capabilities: { terminal, textSearch, watch, clearPort }` — so the UI degrades instead of throwing.
+- `capabilities: { terminal, textSearch, watch, clearPort, nativeAddons }` — so the UI degrades
+  instead of throwing.
+
+### `nativeAddons` — the toolchain is drifting into native code (2026-08-03)
+
+**Can this runtime `require()` a compiled `.node` addon?** WebContainer and Nodepod answer `false`
+(both run Node in the browser); CodeSandbox answers `true` (a real Linux microVM).
+
+It exists because Vite 8 bundles with **rolldown**, which is Rust behind a napi binding. On a
+browser runtime a cloned Vite 8 repo installs cleanly, `npm run dev` starts cleanly, and Vite then
+dies with `Cannot find native binding. npm has a bug related to optional dependencies…` — a message
+that is misleading twice over: nothing about the project is wrong, and the npm bug it names is not
+what happened. The user gets a stack trace and no preview.
+
+The fix is `~/utils/rolldown-wasm`, which adds `@rolldown/binding-wasm32-wasi` — pinned to the
+rolldown version read out of the project's lockfile — to an import's install command when, and only
+when, this flag is false. Three facts, each verified against the published packages rather than
+assumed:
+
+- rolldown's loader tries the native binding, then a local `.wasi.cjs` artifact, then
+  **`require('@rolldown/binding-wasm32-wasi')` gated on nothing**, then a WebContainer-only
+  auto-downloader keyed on `process.versions.webcontainer` (so it never fires on Nodepod);
+- the WASM package is **not** among rolldown's `optionalDependencies` — those 14 entries are all
+  native triples — so no amount of `npm install`, cache clearing or lockfile deleting brings it in.
+  It has to be named;
+- the version is **resolved or refused, never guessed** (`lookupMediaPrice`'s rule): the loader only
+  checks the binding's version under `NAPI_RS_ENFORCE_VERSION_CHECK`, so a mismatched pin loads and
+  misbehaves quietly, whereas no pin leaves the user exactly where they already are and can see.
+
+⚠️ **The flag is read via `runtimeSupportsNativeAddons()`, which must never await `state.sandbox`.**
+That promise only ever RESOLVES, so awaiting it on a runtime that has not booted hangs forever with
+no error — measured, as two import spec files going from milliseconds to a 30s and a 115s timeout.
+Only an already-booted provider, or a boot genuinely in flight (that promise rejects), is awaited;
+anything else answers `true`, which is the no-op.
 
 ### Capability flags replaced method-probing
 

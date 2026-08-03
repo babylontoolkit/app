@@ -39,9 +39,28 @@ const TOOLBAR_SHAPE =
   'flex items-center justify-center h-7 rounded-md border border-white/15 ' +
   'transition-colors outline-none disabled:opacity-50 disabled:cursor-not-allowed';
 
+/**
+ * The row's shared FILL and hover (owner, 2026-08-02).
+ *
+ * The controls used to be transparent with only a `border-white/15` outline. That held while the bar
+ * was the dark `--chrome-gradient`; once the workspace half was lightened
+ * (`--chrome-gradient-workspace`, mid stop `#6a44b8`) the outline sat at nearly the same value as the
+ * bar behind it and the buttons stopped reading as buttons. A darker fill gives every control a body
+ * of its own instead of relying on a hairline to carry it.
+ *
+ * Both colours are CSS vars declared next to the bar's own gradients in `index.scss`, because "is
+ * this darker than the header?" is a question about the PAIR — putting the hex here would let the two
+ * drift the next time the bar is retoned, and nothing would notice.
+ *
+ * ⚠️ NOT folded into `TOOLBAR_SHAPE`. The shape is shared with `TOOLBAR_ICON_BUTTON_FILLED`, and two
+ * background declarations on one element is exactly the stylesheet-ordering hazard documented there —
+ * the variant must not inherit a background the base already set.
+ */
+const TOOLBAR_FILL = 'bg-[var(--toolbar-button-fill)] hover:bg-[var(--toolbar-button-fill-hover)]';
+
 /** A labelled button: icon + text. The default for anything in the toolbar. */
 export const TOOLBAR_BUTTON =
-  `${TOOLBAR_SHAPE} gap-1.5 px-2.5 text-xs font-medium ` + 'text-bolt-elements-textPrimary hover:bg-white/10';
+  `${TOOLBAR_SHAPE} gap-1.5 px-2.5 text-xs font-medium ` + `text-bolt-elements-textPrimary ${TOOLBAR_FILL}`;
 
 /**
  * An icon-only button. Same height, same border, same hover as the labelled ones — only width differs.
@@ -51,7 +70,7 @@ export const TOOLBAR_BUTTON =
  * because a 28×28 square next to `px-2.5` labelled buttons reads as a different, smaller kind of
  * control rather than the same button without a word in it.
  */
-export const TOOLBAR_ICON_BUTTON = `${TOOLBAR_SHAPE} shrink-0 w-9 text-bolt-elements-textPrimary hover:bg-white/10`;
+export const TOOLBAR_ICON_BUTTON = `${TOOLBAR_SHAPE} shrink-0 w-9 text-bolt-elements-textPrimary ${TOOLBAR_FILL}`;
 
 /**
  * The FILLED icon button, reserved for the ⋯ main menu (owner decision, SPEC §4.1a).

@@ -1,6 +1,7 @@
 import { json } from '@remix-run/cloudflare';
 import { withSecurity } from '~/lib/security';
 import { denyUnlessVerified } from '~/lib/.server/http';
+import { callerOAuthToken } from '~/lib/.server/git/caller-token';
 import { isAllowedUrl } from '~/utils/url';
 import type { GitLabProjectInfo } from '~/types/GitLab';
 
@@ -27,7 +28,16 @@ async function gitlabProjectsLoader({ request, context }: { request: Request; co
 
   try {
     const body: any = await request.json();
-    const { token, gitlabUrl = 'https://gitlab.com' } = body;
+    const { token: bodyToken, gitlabUrl = 'https://gitlab.com' } = body;
+
+    /*
+     * Same fix as `api.github-stats`, and it has to be here too or the two pickers disagree: a user
+     * connected through the platform's OAuth (§4.5.4b) holds no token in the browser, so the client
+     * sent none and this answered 400 — which the picker renders as "connect first" on an account
+     * that IS connected. The caller's own body token still wins (explicit BYOK); the stored OAuth
+     * token is the fallback, and it is the CALLER'S, never an operator-wide one.
+     */
+    const token = bodyToken || (await callerOAuthToken(request, context, 'gitlab'));
 
     if (!token) {
       return json({ error: 'GitLab token is required' }, { status: 400 });

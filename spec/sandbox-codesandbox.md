@@ -79,7 +79,7 @@ CodeSandbox resumes with the filesystem intact and is a plain HTTPS API callable
 >    WebContainer declares `false`) called from `clearInheritedDevServer` BEFORE `mountTemplate`.
 > 7. **🔴 Stale OSC markers made `executeCommand` resolve against the PREVIOUS command — which
 >    KILLED `npm install` on every creation.** bash's `PROMPT_COMMAND` fires on prompt draws that
->    follow NO command (attach, Ctrl-C at idle) — jsh marks neither — so a fresh bolt terminal
+>    follow NO command (attach, Ctrl-C at idle) — jsh marks neither — so a fresh app terminal
 >    buffers exit+prompt pairs nothing consumes. Measured cascade: `npm install` "completed"
 >    instantly against a stale exit 0 → the action chain moved on → `npm run dev`'s leading
 >    interrupt killed the STILL-RUNNING install (its ^C surfaced as exit 130 on whichever wait was

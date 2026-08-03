@@ -51,17 +51,25 @@ const PROVIDER_ORIGIN: Record<GitProvider, string> = {
 /*
  * Tone drives the chip's colour and nothing else.
  *
- * 🔴 `busy` and `neutral` deliberately match `TOOLBAR_BUTTON` EXACTLY — same border, no fill — so a
- * project that is synced or mid-sync sits in the row looking like every other control. Only `warning`
- * and `danger` break out of the uniform, which is the §4.5.4b asymmetry expressed in colour: a synced
- * project should feel like nothing, and an unsynced one should feel like something. If you restyle the
- * toolbar button, restyle these two with it or the "nothing to worry about" states start shouting.
+ * 🔴 `busy` and `neutral` deliberately match `TOOLBAR_BUTTON` EXACTLY — same border, same dark fill —
+ * so a project that is synced or mid-sync sits in the row looking like every other control. Only
+ * `warning` and `danger` break out of the uniform, which is the §4.5.4b asymmetry expressed in
+ * colour: a synced project should feel like nothing, and an unsynced one should feel like something.
+ *
+ * ⚠️ **If you restyle the toolbar button, restyle these two with it.** Not a tidiness note — the
+ * asymmetry INVERTS if they drift. When the row gained its dark fill (2026-08-02) these two still
+ * said "no fill", which would have left "Linked to GitHub" as the only hollow control in a row of
+ * solid ones: the quietest state in the product, drawn as the loudest thing on the bar.
  */
+const QUIET_TONE =
+  'text-bolt-elements-textPrimary border-white/15 ' +
+  'bg-[var(--toolbar-button-fill)] hover:bg-[var(--toolbar-button-fill-hover)]';
+
 const TONE_CLASSES: Record<SaveTone, string> = {
   danger: 'text-red-300 border-red-500/50 bg-red-500/15 hover:bg-red-500/25',
   warning: 'text-amber-300 border-amber-500/50 bg-amber-500/15 hover:bg-amber-500/25',
-  busy: 'text-bolt-elements-textPrimary border-white/15 hover:bg-white/10',
-  neutral: 'text-bolt-elements-textPrimary border-white/15 hover:bg-white/10',
+  busy: QUIET_TONE,
+  neutral: QUIET_TONE,
 };
 
 const TONE_ICONS: Record<SaveTone, string> = {

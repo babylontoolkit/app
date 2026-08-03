@@ -191,6 +191,25 @@ export interface SandboxCapabilities {
    * which a WebContainer — whose runtime dies with the tab — can never do.
    */
   readonly clearPort: boolean;
+
+  /**
+   * Can this runtime `require()` a compiled native addon (a `.node` file)?
+   *
+   * 🔴 **A browser-hosted Node cannot, and the whole modern JS toolchain is drifting into ones.**
+   * Vite 8 bundles with rolldown, which is Rust behind a napi binding — so on Nodepod (and on
+   * WebContainer) `npm install` succeeds, `npm run dev` starts, and Vite dies on
+   * `Cannot find native binding`. The project is not broken; the runtime cannot load its bundler.
+   *
+   * This is a FLAG rather than a probe on purpose (`spec/sandbox-seam.md`): "does `require` of a
+   * `.node` throw here?" is a property of the provider that it already knows, and a runtime probe
+   * both costs a failing load and reports "not found" where the truth is "not supported".
+   *
+   * Read by `decideRolldownWasm` (`~/utils/rolldown-wasm`), which adds the WASM binding to an
+   * imported project's install when — and only when — this is false. A provider that answers `true`
+   * wrongly loses a preview with an unexplained stack trace; one that answers `false` wrongly buys
+   * a ~10MB download nobody uses.
+   */
+  readonly nativeAddons: boolean;
 }
 
 /**

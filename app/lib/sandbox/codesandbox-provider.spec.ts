@@ -1558,7 +1558,13 @@ describe('the adapter translates the right calls', () => {
      * `clearPort: true` because this provider is the one that NEEDS it: a resumed/forked VM wakes
      * with the previous session's dev server still bound to its port.
      */
-    expect(CODESANDBOX_CAPABILITIES).toEqual({ terminal: true, textSearch: false, watch: true, clearPort: true });
+    expect(CODESANDBOX_CAPABILITIES).toEqual({
+      terminal: true,
+      textSearch: false,
+      watch: true,
+      clearPort: true,
+      nativeAddons: true,
+    });
     expect(provider.textSearch).toBeUndefined();
     expect(typeof provider.clearPort).toBe('function');
   });

@@ -140,6 +140,15 @@ export const NODEPOD_CAPABILITIES: SandboxCapabilities = {
   textSearch: true,
   watch: true,
   clearPort: false,
+
+  /*
+   * Nodepod runs Node in the browser. A compiled `.node` addon cannot be loaded at all, which is
+   * exactly how a cloned Vite 8 repo fails: install fine, start fine, then `Cannot find native
+   * binding` from rolldown with no preview. Unlike WebContainer there is no vendor fallback here —
+   * rolldown's auto-downloader checks `process.versions.webcontainer` — so the install has to name
+   * the WASM binding itself. See `~/utils/rolldown-wasm`.
+   */
+  nativeAddons: false,
 };
 
 /**

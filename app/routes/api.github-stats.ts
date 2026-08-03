@@ -2,6 +2,7 @@ import { json } from '@remix-run/cloudflare';
 import { getApiKeysFromCookie } from '~/lib/api/cookies';
 import { withSecurity } from '~/lib/security';
 import { denyUnlessVerified } from '~/lib/.server/http';
+import { callerOAuthToken } from '~/lib/.server/git/caller-token';
 import type { GitHubUserResponse, GitHubStats } from '~/types/GitHub';
 
 async function githubStatsLoader({ request, context }: { request: Request; context: any }) {
@@ -16,10 +17,16 @@ async function githubStatsLoader({ request, context }: { request: Request; conte
     const cookieHeader = request.headers.get('Cookie');
     const apiKeys = getApiKeysFromCookie(cookieHeader);
 
-    // Try to get GitHub token from various sources
+    /*
+     * The caller's own OAuth connection (§4.5.4b) is a token source this route never knew about, so
+     * a user who had connected through the platform still got `401 GitHub token not found`. See
+     * `storedAccessToken`. Ordered: the caller's explicit BYOK cookie, then their platform OAuth
+     * connection, then the operator's pre-wired env (kept per SPEC §2.3, never shown in the UI).
+     */
     const githubToken =
       apiKeys.GITHUB_API_KEY ||
       apiKeys.VITE_GITHUB_ACCESS_TOKEN ||
+      (await callerOAuthToken(request, context)) ||
       context?.cloudflare?.env?.GITHUB_TOKEN ||
       context?.cloudflare?.env?.VITE_GITHUB_ACCESS_TOKEN ||
       process.env.GITHUB_TOKEN ||

@@ -38,6 +38,14 @@ export const WEBCONTAINER_CAPABILITIES: SandboxCapabilities = {
   textSearch: true,
   watch: true,
   clearPort: false,
+
+  /*
+   * WebContainer's Node is itself WebAssembly; there is no dlopen and no `.node` to load. Rolldown
+   * carries a WebContainer-only fallback that pnpm-installs its WASM binding into /tmp — gated on
+   * `process.versions.webcontainer`, so it never fires anywhere else — but declaring the truth here
+   * costs nothing and means an import stops depending on a vendor's private escape hatch.
+   */
+  nativeAddons: false,
 };
 
 export function createWebContainerProvider(container: WebContainer): SandboxProvider {

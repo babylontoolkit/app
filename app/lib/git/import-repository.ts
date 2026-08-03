@@ -48,6 +48,7 @@ import { bootProgress, endBootPhase, reportBootFailure } from '~/lib/stores/boot
 import { workbenchStore } from '~/lib/stores/workbench';
 import { protectForRepoRestore } from '~/lib/persistence/restore-plan';
 import { createCommandsMessage, detectProjectCommands } from '~/utils/projectCommands';
+import { runtimeSupportsNativeAddons } from '~/lib/sandbox';
 import { createScopedLogger } from '~/utils/logger';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { IChatMetadata } from '~/lib/persistence/db';
@@ -274,7 +275,9 @@ export async function importRepositoryIntoWorkspace(input: {
       }
     }
 
-    const commands = await detectProjectCommands(textFilesFor(cloned.files));
+    const commands = await detectProjectCommands(textFilesFor(cloned.files), {
+      nativeAddons: await runtimeSupportsNativeAddons(),
+    });
     const commandsMessage = createCommandsMessage(commands);
 
     const messages: Message[] = [
