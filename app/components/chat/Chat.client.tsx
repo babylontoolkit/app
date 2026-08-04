@@ -1547,34 +1547,49 @@ export const ChatImpl = memo(
         );
 
         /*
-         * 🔴 A PROJECT THAT IS NOT RUNNING IS NOT CREATED (owner rule, 2026-07-29).
+         * 🔴 THE SPLASH COMES DOWN BEFORE THE INSTALL, NOT AFTER IT (owner, 2026-08-03: *"I don't like
+         * the 'Installing project dependencies' splash screen state — at that stage we should see the
+         * workspace and the dependencies being installed in our Nodepod Terminal"*).
          *
-         * The success condition is *"npm install + npm run dev and showing the starter app template basic
-         * home page"* — so the splash covers those two steps rather than coming down while they run in a
-         * terminal nobody is looking at. It could get away with that before only because a generation
-         * started immediately and gave the user something else to watch.
+         * This REVERSES the 2026-07-29 rule that had the splash cover install+serve, whose reasoning was
+         * that they would otherwise "run in a terminal nobody is looking at". The terminal IS the thing
+         * to look at — it is the honest, moving account of a step that can take a minute, and hiding it
+         * behind a spinner replaces information with a wait. It also makes creation and re-open behave
+         * the same way, which they did not: re-opening a project has always installed with the workbench
+         * on screen (`ensureRunnableOnce`), so the two most similar moments in the product looked like
+         * different products.
          *
-         * The work itself is unchanged and is NOT driven from here: the setup artifact's `shell` and
-         * `start` actions were handed to the action runner when the message was committed above. This
-         * only WATCHES them, and both waits are bounded — a ceiling reached is normal, silent, and
-         * dismisses the splash on a project that keeps installing behind it (§1.3 principle 0).
+         * The wait below is UNCHANGED and still bounded — it is what makes "a project that is not
+         * running is not created" true, and it still gates the rest of the creation flow. It simply no
+         * longer covers the screen while it runs.
+         *
+         * The work itself is not driven from here either: the setup artifact's `shell` and `start`
+         * actions were handed to the action runner when the message was committed above. This only
+         * WATCHES them.
          */
+        bootProgress.set({ step: 'idle' });
+
         const running = await awaitStarterRunning({
           /*
            * What counts as "installed" is a decision, and it lives in `starter-ready.ts` where it is tested.
            *
            * ⚠️ `firstArtifact` is `artifactIdList[0]` — the first artifact of the TAB, not of this project.
            * A second creation inside one page load would read the previous project's already-complete
-           * shell action and skip the install narration (the wait would end immediately; nothing breaks,
-           * the splash just stops describing the install). Every route into creation forces a full page
-           * load today (§T19), which is the same assumption the chat's `description` derivation already
-           * rests on — but if that ever stops being true, this reads the wrong artifact.
+           * shell action and skip the wait entirely (it would end immediately; nothing breaks). Every
+           * route into creation forces a full page load today (§T19), which is the same assumption the
+           * chat's `description` derivation already rests on — but if that ever stops being true, this
+           * reads the wrong artifact.
            */
           installComplete: () =>
             isInstallFinished(Object.values(workbenchStore.firstArtifact?.runner.actions.get() ?? {})),
           runningPreviews: () => workbenchStore.previews.get().length,
           wait: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
-          onStage: (stage) => bootProgress.set({ step: stage === 'install' ? 'creating-install' : 'creating-serve' }),
+
+          /*
+           * No `onStage`: the stages are narrated by the terminal the user is now looking at. Setting a
+           * boot phase here would raise the splash back over a workspace that is already on screen —
+           * see the note above, and the same mistake made one door over in `ensureRunnableOnce`.
+           */
         });
 
         logger.info(

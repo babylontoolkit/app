@@ -155,40 +155,37 @@ describe('ModelTierPill — the first-build lock', () => {
   });
 
   /**
-   * 🔴 LOCKED IN NEW PROJECT MODE. This is the window T13 closed: the creation brief is appended at
-   * SEND, so while the user edits the carried prompt nothing carries `CREATION_BRIEF_MARKER` yet —
-   * `creationTurnStore` is true from the MODE (`isCreationTurn`'s `newProjectMode` key), and the pill
-   * must be locked for exactly as long as the user is looking at it.
+   * 🔴 THE FIRST BUILD IS NOT A LOCK (owner, 2026-08-03: "we can choose our model as long as we have
+   * enough credits and the additional models are enabled").
+   *
+   * The pill used to show Standard, with a padlock, on the first build turn no matter how funded the
+   * user was. It must now name the rung the user PAID for — the pill's entire job is naming what will
+   * actually run, so a stale lock here is the component lying about a purchase on the most expensive
+   * turn in the product.
    */
-  it('locks while the next turn is a first build', () => {
+  it('runs the selected rung on a first build turn, unlocked', () => {
     modelTierStore.set('premium');
     creationTurnStore.set(true);
     render(<ModelTierPill />);
 
-    expect(locked()).toBe(true);
-    expect(label()).toContain('Sonnet 5');
-
-    /*
-     * The negative names the PREMIUM rung's model, which the ladder moved from Fable 5 to Opus 5
-     * (§4.6.1a). Left as `Fable` it would still pass and assert nothing — the pill cannot render a
-     * model that is no longer on this rung.
-     */
-    expect(label()).not.toContain('Opus');
+    expect(locked()).toBe(false);
+    expect(label()).toContain('Opus 5');
+    expect(label(), 'a first build on Premium must not be showing the standard model').not.toContain('Sonnet');
   });
 
-  /** And UNLOCKS after — the mode is cleared on send and the user's next turn is an ordinary edit. */
-  it('unlocks once the first build turn is over', () => {
+  /** Unchanged by the turn: the same funded user reads the same pill either side of the first build. */
+  it('reads identically once the first build turn is over', () => {
     modelTierStore.set('premium');
     creationTurnStore.set(true);
 
     const view = render(<ModelTierPill />);
-
-    expect(locked()).toBe(true);
+    const during = label();
 
     creationTurnStore.set(false);
     view.rerender(<ModelTierPill />);
 
     expect(locked()).toBe(false);
+    expect(label()).toBe(during);
   });
 
   /*
@@ -285,7 +282,7 @@ describe('ModelTierPill — the first-build lock', () => {
   /* A locked pill still opens the picker: that is where the explanation lives (§4.1a — no dead ends). */
   it('still opens the picker while locked, rather than doing nothing', () => {
     modelTierStore.set('premium');
-    creationTurnStore.set(true);
+    sessionStore.set({ ...funded, credits: { ...funded.credits, balance: 10 } });
     render(<ModelTierPill />);
 
     fireEvent.click(pill());
@@ -295,15 +292,17 @@ describe('ModelTierPill — the first-build lock', () => {
   });
 
   /**
-   * 🔴 THE LOCK OUTRANKS AN ALREADY-CHOSEN RUNG. A user who selected Premium, then created a new
-   * project, arrives at the first build with `modelTierStore === 'premium'`. `eligible` folds the
-   * creation lock in (`!creationTurn && …`) and `active` is `eligible`, so the pill must fall back to
-   * the STANDARD model rather than showing an accented "Opus 5" it cannot honour — the one state where
-   * a stale preference and a hard rule disagree.
+   * 🔴 THE THRESHOLD OUTRANKS AN ALREADY-CHOSEN RUNG. A user who selected Premium and then spent down
+   * below its minimum must see the STANDARD model, not an accented "Opus 5" the server will not honour
+   * — the one state where a stale preference and a live rule disagree.
+   *
+   * ⚠️ This test used to assert the same thing about the FIRST BUILD TURN, which is no longer a lock
+   * (owner, 2026-08-03). The property it protects — the pill never names a rung that will not run — is
+   * unchanged; only the reason a rung can fail to run is.
    */
-  it('shows the STANDARD model on a first build even when premium was already enabled', () => {
+  it('shows the STANDARD model when the chosen rung is unaffordable', () => {
     modelTierStore.set('premium');
-    creationTurnStore.set(true);
+    sessionStore.set({ ...funded, credits: { ...funded.credits, balance: 10 } });
     render(<ModelTierPill />);
 
     expect(locked()).toBe(true);
@@ -318,31 +317,19 @@ describe('ModelTierPill — the first-build lock', () => {
   });
 
   /**
-   * The OTHER lock reason must still work and must still read differently. Both states render the same
-   * glyph, and the tooltip/toast is the only thing that tells a user whether to add credits or wait —
-   * a first-build lock that said "unlocks at 1,200 credits" would send a funded user to the billing page.
+   * The threshold lock is the ONLY lock left, and the tooltip must never mention the retired one.
+   *
+   * The negative is the load-bearing half: the first-build sentence used to be one of two branches
+   * here, so a copy string left behind would tell a funded user to wait for a lock that no longer
+   * exists — and, on a first build, would be the only thing on screen contradicting the pill itself.
    */
-  it('distinguishes the threshold lock from the first-build lock in its tooltip', () => {
+  it('explains the threshold lock and never claims a first-build one', () => {
     modelTierStore.set('premium');
     creationTurnStore.set(true);
-    render(<ModelTierPill />);
-
-    expect(pill().getAttribute('title')).toMatch(/first build/i);
-
-    cleanup();
-
-    creationTurnStore.set(false);
-    modelTierStore.set('premium');
     sessionStore.set({ ...funded, credits: { ...funded.credits, balance: 10 } });
     render(<ModelTierPill />);
 
     expect(locked()).toBe(true);
-
-    /*
-     * The pill says WHICH rung is unavailable and leaves the number to the picker — the two locks are
-     * told apart by the panel's per-row copy (`lockCopy`), which is the surface that can act on either.
-     * What the pill must never do is claim a creation lock on an ordinary turn.
-     */
     expect(pill().getAttribute('title')).toMatch(/Premium/);
     expect(pill().getAttribute('title')).not.toMatch(/first build/i);
   });

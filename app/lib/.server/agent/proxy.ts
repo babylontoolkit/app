@@ -50,6 +50,7 @@ import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
 import { mediaProtocolNote } from './media-note';
 import { MAX_PROVIDER_RETRY_ATTEMPTS, retryThinkingMode, retryToolMode, shouldRetryGeneration } from './retry-policy';
+import { providerDeliveryMode, type DeliveryMode } from './delivery';
 import type { AgentActivitySnapshot, AgentStatusKind } from './heartbeat';
 import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
 import { createWebFetchTool } from './web-fetch-tool';
@@ -328,6 +329,16 @@ export interface AgentGeneration {
    * signals `effort-policy.ts` reads — that lets the client say "Building your project" instead.
    */
   statusKind: AgentStatusKind;
+
+  /**
+   * How the configured provider puts the answer on the wire (`agent/delivery.ts`).
+   *
+   * On a `batched` provider nothing can appear until the turn ends — measured 2026-08-03, KIE holds a
+   * whole 26KB answer and flushes it in the final second. The panel needs this to say so, because a
+   * silence that is EXPECTED and a silence that means "broken" look identical from the outside, and
+   * the user reasonably reads the second one.
+   */
+  deliveryMode: DeliveryMode;
 
   /**
    * What is happening to the REQUEST right now (a provider retry in flight), or null. Read on every
@@ -2007,6 +2018,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         cacheReadTokens: totals.cacheReadTokens,
         cacheCreationTokens: totals.cacheCreationTokens,
         toolRounds,
+
+        /*
+         * WHAT KIND of turn this was (migration 0019). Already decided before a token was spent, and
+         * paired with `durationMs` it is what makes "how long does a typical edit take?" answerable at
+         * all — the question `agent/delivery.ts`'s baseline had to answer with a hand-picked constant
+         * because this was computed on every turn and persisted on none of them.
+         */
+        statusKind: statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: Boolean(discussNote) }),
         durationMs: Date.now() - startedAt,
         steps: stepLog,
         repairOf: request.repairOf,
@@ -2124,6 +2143,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * uses: a repair is a repair even on a creation, and plan mode outranks an ordinary edit.
      */
     statusKind: statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: Boolean(discussNote) }),
+
+    /*
+     * A property of the configured PROVIDER, resolved once here where `config` is in hand. Keyed by
+     * provider rather than model deliberately (`delivery.ts`) — the buffering lives in the adapter, so
+     * a model swap must not silently flip this to "streamed".
+     */
+    deliveryMode: providerDeliveryMode(config.provider),
     toolContext,
     usage: usagePromise,
     settlement: settlementPromise,

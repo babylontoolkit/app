@@ -89,8 +89,15 @@ export interface StarterReadyOptions {
   /** Injected so the wait is testable without real time passing. */
   wait: (ms: number) => Promise<void>;
 
-  /** Called once as each stage begins, so the caller can narrate it. */
-  onStage: (stage: StarterReadyStage) => void;
+  /**
+   * Called once as each stage begins, so the caller can narrate it.
+   *
+   * OPTIONAL since 2026-08-03: the creation flow narrates these stages in the TERMINAL now (owner —
+   * the splash used to cover install+serve and no longer does), so it passes nothing. Required-ness
+   * here would force a caller that has nothing to say to pass a no-op, which reads as an oversight
+   * rather than as a decision.
+   */
+  onStage?: (stage: StarterReadyStage) => void;
 
   installTimeoutMs?: number;
   serveTimeoutMs?: number;
@@ -128,7 +135,7 @@ export async function awaitStarterRunning(options: StarterReadyOptions): Promise
 
   let elapsedMs = 0;
 
-  options.onStage('install');
+  options.onStage?.('install');
 
   let installed = options.installComplete();
 
@@ -139,7 +146,7 @@ export async function awaitStarterRunning(options: StarterReadyOptions): Promise
     installed = options.installComplete();
   }
 
-  options.onStage('serve');
+  options.onStage?.('serve');
 
   /*
    * The port half is `awaitRunningPreview` rather than a second loop written here. It already answers

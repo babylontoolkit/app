@@ -212,59 +212,59 @@ describe('ModelTierPanel — choosing a rung', () => {
   });
 });
 
-describe('ModelTierPanel — the first-build lock', () => {
+describe('ModelTierPanel — the first build turn is not a lock', () => {
   /**
-   * 🔴 EVERY PAID RUNG IS LOCKED ON THE FIRST BUILD (§4.4a), AND THE ROW MUST NOT MENTION CREDITS.
+   * 🔴 EVERY PAID RUNG IS PICKABLE ON THE FIRST BUILD (owner, 2026-08-03: "we can choose our model as
+   * long as we have enough credits and the additional models are enabled").
    *
-   * The user in this test holds 2,000 credits — they clear both thresholds. Telling them "unlocks at
-   * 1,500 credits" would be a lie that costs them money, and it is the exact wrong-sentence failure the
-   * lock-reason ORDER exists to prevent (creation_turn is reported before anything about the account).
+   * This block used to assert the exact opposite — every paid row locked, with copy reading "your first
+   * build always runs …". Inverted rather than deleted, because the panel is where a user goes to find
+   * out WHY a rung is unavailable, and a stale lock here would refuse a purchase on the biggest turn in
+   * the product while quoting a reason that no longer exists.
    */
-  it('locks every non-standard row and explains the creation lock without naming a threshold', () => {
+  it('leaves every row selectable on a first build turn', () => {
     creationTurnStore.set(true);
     openPanel();
     render(<ModelTierPanel />);
 
-    expect(isLocked(row('Standard')), 'Standard is always available — it is a real choice').toBe(false);
-
-    for (const label of ['Premium', 'SuperMax']) {
-      const locked = row(label);
-
-      expect(isLocked(locked), `${label} must be locked on a first build`).toBe(true);
-      expect(copyOf(locked)).toMatch(/first build/i);
-      expect(copyOf(locked), 'a funded user must not be sent to the billing page').not.toMatch(/credits/i);
-      expect(copyOf(locked)).not.toMatch(/1,200|1,500/);
-      expect(copyOf(locked), 'the creation lock is not an availability problem').not.toMatch(/unavailable/i);
+    for (const label of ['Standard', 'Premium', 'SuperMax']) {
+      expect(isLocked(row(label)), `${label} must be selectable on a first build`).toBe(false);
     }
   });
 
-  /** Clicking a locked row changes NOTHING — and leaves the panel open, because the copy is the answer. */
-  it('a click on a locked row selects nothing and keeps the panel open', () => {
+  it('selects a paid rung on a first build turn', () => {
     creationTurnStore.set(true);
     openPanel();
     render(<ModelTierPanel />);
-
-    press(row('SuperMax'));
-
-    expect(modelTierStore.get(), 'a locked row must never select').toBe('standard');
-    expect(modelTierPanelOpen.get(), 'the explanation it just revealed is the point of the click').toBe(true);
-  });
-
-  /**
-   * THE CONTROL. Without it every assertion above is satisfied by a panel whose rows are permanently
-   * locked, or which renders no rows at all.
-   */
-  it('CONTROL — the same rows are selectable once the turn is not a first build', () => {
-    creationTurnStore.set(false);
-    openPanel();
-    render(<ModelTierPanel />);
-
-    expect(isLocked(row('Premium'))).toBe(false);
-    expect(isLocked(row('SuperMax'))).toBe(false);
 
     press(row('SuperMax'));
 
     expect(modelTierStore.get()).toBe('supermax');
+  });
+
+  /** No row may still be telling the user to wait for a lock the server stopped applying. */
+  it('never mentions the retired first-build lock', () => {
+    creationTurnStore.set(true);
+    openPanel();
+    render(<ModelTierPanel />);
+
+    for (const label of ['Standard', 'Premium', 'SuperMax']) {
+      expect(copyOf(row(label)), `${label}`).not.toMatch(/first build/i);
+    }
+  });
+
+  /**
+   * THE CONTROL. Without it the assertions above are satisfied by a panel that renders no lock in any
+   * state at all — which would hide the threshold lock that is still very much real.
+   */
+  it('CONTROL — an unaffordable rung is still locked on that same turn', () => {
+    creationTurnStore.set(true);
+    sessionStore.set(ladder({ balance: 500 }));
+    openPanel();
+    render(<ModelTierPanel />);
+
+    expect(isLocked(row('SuperMax'))).toBe(true);
+    expect(copyOf(row('SuperMax'))).toMatch(/Unlocks at 1,500 credits/);
   });
 });
 
@@ -333,7 +333,8 @@ describe('ModelTierPanel — a locked row is not a dead end', () => {
    * unreachable the moment somebody "tidies" these rows by adding `disabled`.
    */
   it('renders locked rows as real, enabled buttons', () => {
-    creationTurnStore.set(true);
+    // A balance below BOTH thresholds — the first-build lock that used to drive this test is retired.
+    sessionStore.set(ladder({ balance: 10 }));
     openPanel();
     render(<ModelTierPanel />);
 
@@ -427,63 +428,59 @@ describe('lockReasonFor', () => {
   it('never locks standard, whatever else is true', () => {
     const standard = tier({ id: 'standard', minimumCredits: 0 });
 
-    expect(lockReasonFor(standard, session(0), true)).toBeNull();
-    expect(lockReasonFor(standard, session(0), false)).toBeNull();
-    expect(lockReasonFor({ ...standard, serveable: false }, session(0), true)).toBeNull();
+    expect(lockReasonFor(standard, session(0))).toBeNull();
+    expect(lockReasonFor({ ...standard, serveable: false }, session(0))).toBeNull();
   });
 
-  it('is null for a paid rung that is serveable, funded, and off the creation turn', () => {
-    expect(lockReasonFor(tier(), session(2_000), false)).toBeNull();
-    expect(lockReasonFor(tier(), session(1_500), false), 'the threshold is >=').toBeNull();
+  it('is null for a paid rung that is serveable and funded', () => {
+    expect(lockReasonFor(tier(), session(2_000))).toBeNull();
+    expect(lockReasonFor(tier(), session(1_500)), 'the threshold is >=').toBeNull();
   });
 
   it('reports below_minimum only when credits are the actual problem', () => {
-    expect(lockReasonFor(tier(), session(1_499), false)).toBe('below_minimum');
-    expect(lockReasonFor(tier(), session(0), false)).toBe('below_minimum');
+    expect(lockReasonFor(tier(), session(1_499))).toBe('below_minimum');
+    expect(lockReasonFor(tier(), session(0))).toBe('below_minimum');
   });
 
   it('reports unserveable regardless of balance', () => {
-    expect(lockReasonFor(tier({ serveable: false }), session(10_000_000, false), false)).toBe('unserveable');
-    expect(lockReasonFor(tier({ serveable: false }), session(0, false), false)).toBe('unserveable');
+    expect(lockReasonFor(tier({ serveable: false }), session(10_000_000, false))).toBe('unserveable');
+    expect(lockReasonFor(tier({ serveable: false }), session(0, false))).toBe('unserveable');
   });
 
   /**
-   * 🔴 THE ORDER IS THE POINT, because the order decides which SENTENCE the user reads.
-   *
-   * creation_turn outranks unserveable outranks below_minimum. Checking `serveable` first would tell a
-   * funded user on a first build that the rung is permanently unavailable, when it unlocks by itself in
-   * a minute; checking the balance first would tell them to buy credits for a lock money cannot open.
+   * 🔴 THE ORDER IS THE POINT, because the order decides which SENTENCE the user reads. Checking the
+   * balance first would tell a user to buy credits for a lock money cannot open.
    */
-  it('reports creation_turn ahead of BOTH other reasons', () => {
-    // Every reason true at once: unserveable, broke, and on a first build.
-    expect(lockReasonFor(tier({ serveable: false }), session(0, false), true)).toBe('creation_turn');
-
-    // Funded and serveable, but a first build.
-    expect(lockReasonFor(tier(), session(10_000_000), true)).toBe('creation_turn');
+  it('reports unserveable ahead of below_minimum', () => {
+    expect(lockReasonFor(tier({ serveable: false }), session(0, false))).toBe('unserveable');
   });
 
-  it('reports unserveable ahead of below_minimum', () => {
-    expect(lockReasonFor(tier({ serveable: false }), session(0, false), false)).toBe('unserveable');
+  /**
+   * 🔴 THE FIRST BUILD IS NOT A LOCK ANY MORE (owner, 2026-08-03).
+   *
+   * There used to be a `creation_turn` reason outranking both of these, mirroring a server rule that no
+   * longer exists. A funded, serveable rung is pickable on EVERY turn — asserted rather than merely
+   * deleted, because "the picker silently refuses on the biggest turn in the product" is precisely the
+   * kind of regression that reads as a UI quirk instead of as a broken purchase.
+   */
+  it('locks nothing merely because it is the first build turn', () => {
+    expect(lockReasonFor(tier(), session(10_000_000))).toBeNull();
   });
 
   /** The full grid, so a future edit cannot quietly change one cell. */
-  it('covers the whole {creationTurn} × {serveable} × {balance} grid', () => {
-    const cases: Array<[boolean, boolean, number, ReturnType<typeof lockReasonFor>]> = [
-      [true, true, 10_000_000, 'creation_turn'],
-      [true, true, 0, 'creation_turn'],
-      [true, false, 10_000_000, 'creation_turn'],
-      [true, false, 0, 'creation_turn'],
-      [false, true, 10_000_000, null],
-      [false, true, 1_500, null],
-      [false, true, 1_499, 'below_minimum'],
-      [false, false, 10_000_000, 'unserveable'],
-      [false, false, 0, 'unserveable'],
+  it('covers the whole {serveable} × {balance} grid', () => {
+    const cases: Array<[boolean, number, ReturnType<typeof lockReasonFor>]> = [
+      [true, 10_000_000, null],
+      [true, 1_500, null],
+      [true, 1_499, 'below_minimum'],
+      [false, 10_000_000, 'unserveable'],
+      [false, 0, 'unserveable'],
     ];
 
-    for (const [creationTurn, serveable, balance, expected] of cases) {
+    for (const [serveable, balance, expected] of cases) {
       expect(
-        lockReasonFor(tier({ serveable }), session(balance, serveable), creationTurn),
-        `creationTurn=${creationTurn} serveable=${serveable} balance=${balance}`,
+        lockReasonFor(tier({ serveable }), session(balance, serveable)),
+        `serveable=${serveable} balance=${balance}`,
       ).toBe(expected);
     }
   });

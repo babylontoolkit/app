@@ -45,7 +45,13 @@ import {
   type ModelTiersSessionHint,
   type ModelTierStatusLike,
 } from './premium';
-import { MODEL_TIER_IDS, PAID_MODEL_TIERS, STANDARD_TIER_LABEL, type ModelTierId } from './model-tiers';
+import {
+  MODEL_TIER_IDS,
+  PAID_MODEL_TIERS,
+  STANDARD_TIER_LABEL,
+  paidModelTierDefinition,
+  type ModelTierId,
+} from './model-tiers';
 import {
   DEFAULT_PREMIUM_MINIMUM_CREDITS,
   DEFAULT_PREMIUM_MODEL,
@@ -426,7 +432,14 @@ describe('decidePremium agrees with decideModelTier on a premium-only ladder', (
           const ladder = decideModelTier({
             requested: requested ? 'premium' : 'standard',
             balance,
-            tiers: [LADDER[0]],
+
+            /*
+             * The rung's REAL `firstBuildLocked`, not `LADDER[0]`'s. The fixture above deliberately
+             * pins the lock ON so the decision function's branch stays exercised after the owner
+             * unlocked every shipped rung (2026-08-03); this bridge is asserting that the two decision
+             * paths agree, so it has to feed them the same fact.
+             */
+            tiers: [{ ...LADDER[0], firstBuildLocked: paidModelTierDefinition('premium').firstBuildLocked }],
             isFirstBuildTurn,
           });
 
@@ -468,21 +481,23 @@ describe('decidePremium — the eligibility rule', () => {
   });
 
   /*
-   * A CREATION turn never runs premium, however rich the balance (2026-07-18, observed live): KIE
-   * serves Fable 5 with a buffered answer, and a creation-sized artifact cannot flush before KIE's
-   * gateway timeout — the generation died at finish=error after 449s with the artifact never arriving.
-   * Premium starts at the first edit turn.
+   * 🔴 A first build turn is an ordinary turn for pricing purposes (owner, 2026-08-03). It used to
+   * decline premium however rich the balance, on a rationale that has since been disproved: the
+   * buffered answer it blamed on Fable 5 is how KIE serves EVERY model (`agent/delivery.ts` keys
+   * `deliveryMode` on the provider for exactly that reason), so the lock singled out one rung for
+   * something all of them do. The pin asserts the unlock so a rung cannot re-lock itself unnoticed.
    */
-  it('declines premium on a first build turn regardless of balance', () => {
+  it('runs premium on a first build turn like any other turn', () => {
     expect(decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isFirstBuildTurn: true })).toEqual({
-      usePremium: false,
-      reason: 'creation_turn',
+      usePremium: true,
+      reason: 'sufficient_credits',
     });
 
-    // The same balance on an ordinary turn: premium runs. The control that pins the distinction.
-    expect(
-      decidePremium({ requested: true, balance: 50_000, minimumCredits: min, isFirstBuildTurn: false }).usePremium,
-    ).toBe(true);
+    // The threshold still binds on that turn — the unlock is about the TURN, never about the balance.
+    expect(decidePremium({ requested: true, balance: min - 1, minimumCredits: min, isFirstBuildTurn: true })).toEqual({
+      usePremium: false,
+      reason: 'below_minimum',
+    });
   });
 
   /*

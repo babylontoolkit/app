@@ -415,3 +415,50 @@ describe('withGenerationHeartbeat', () => {
     expect(writes).toEqual([]);
   });
 });
+
+/**
+ * The expectation fields (2026-08-03; `delivery.ts`).
+ *
+ * They exist because a healthy 244-second turn and a dead one looked identical on screen. They are
+ * optional on the wire, and the two tests that matter most are the ones proving an ABSENT option
+ * leaves the part byte-identical to the shape older clients already parse — the same rule the retry
+ * fields are held to directly above.
+ */
+describe('createHeartbeat — expectation fields', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('carries the delivery mode and the baseline when the route supplies them', () => {
+    const writes: AgentStatusPart[] = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), { deliveryMode: 'batched', typicalMs: 300_000 });
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+
+    expect(writes[0]).toMatchObject({ deliveryMode: 'batched', typicalMs: 300_000 });
+
+    hb.stop();
+  });
+
+  it('omits the KEYS entirely when not supplied, rather than sending undefined', () => {
+    /*
+     * `JSONValue` refuses `undefined`, and the client's "we were not told" degradation depends on the
+     * key genuinely being absent — a present-but-undefined field would serialise to a wire shape the
+     * route's own `writeData` cast quietly permits and nothing downstream expects.
+     */
+    const writes: AgentStatusPart[] = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s));
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS);
+
+    expect('deliveryMode' in writes[0]).toBe(false);
+    expect('typicalMs' in writes[0]).toBe(false);
+    expect(JSON.parse(JSON.stringify(writes[0]))).toEqual(writes[0]);
+
+    hb.stop();
+  });
+});

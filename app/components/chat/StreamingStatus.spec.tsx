@@ -102,3 +102,105 @@ describe('StreamingStatus — the render line', () => {
     });
   });
 });
+
+/**
+ * The expectation bar and the delivery note reach the DOM (2026-08-03).
+ *
+ * `agent-status.spec.ts` proves the strings and the fraction are correct; these prove they are
+ * actually RENDERED. That gap is where this repo keeps finding its defects — the §4.14 relay and the
+ * §4.5.6 chat work were both "correct by construction" with green unit suites and broken wiring — and
+ * it is a live risk here specifically because the new values arrive by destructuring, where a typo or
+ * a forgotten field costs nothing at typecheck and simply renders nothing.
+ */
+describe('StreamingStatus — what the user reads during a long silence', () => {
+  /** A batched-provider heartbeat mid-creation: the reported 2026-08-03 turn, at three minutes in. */
+  function batchedCreation(elapsedMs = 180_000, silentMs = 180_000) {
+    updateAgentStatus({
+      type: 'agent-status',
+      generationId: 'gen-1',
+      seq: 1,
+      phase: 'thinking',
+      kind: 'creation',
+      elapsedMs,
+      silentMs,
+      deliveryMode: 'batched',
+      typicalMs: 300_000,
+    });
+  }
+
+  it('renders the explanation for a silence the user cannot otherwise interpret', () => {
+    batchedCreation();
+    render(<StreamingStatus />);
+
+    expect(screen.getByText(/one batch/i)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing is stuck/i)).toBeInTheDocument();
+  });
+
+  it('renders the baseline caption, so elapsed time means something', () => {
+    batchedCreation();
+    render(<StreamingStatus />);
+
+    expect(screen.getByText('usually about 5m')).toBeInTheDocument();
+    expect(screen.getByText(/Building your project — 3m 0s/)).toBeInTheDocument();
+  });
+
+  it('draws a bar that is part-full — and never full', () => {
+    batchedCreation();
+
+    const { container } = render(<StreamingStatus />);
+
+    const bar = container.querySelector('[style*="width"]') as HTMLElement | null;
+    expect(bar).not.toBeNull();
+
+    const width = Number.parseInt(bar!.style.width, 10);
+    expect(width).toBeGreaterThan(0);
+    expect(width).toBeLessThan(100);
+  });
+
+  it('says it is still connected once past the baseline, instead of predicting', () => {
+    batchedCreation(600_000, 600_000);
+    render(<StreamingStatus />);
+
+    expect(screen.getByText(/longer than usual — still connected/)).toBeInTheDocument();
+  });
+
+  /*
+   * CONTROL. Without this, every assertion above would still pass if the component rendered the note
+   * unconditionally — which would put "your provider sends everything at the end" on a provider that
+   * streams, i.e. tell the user to stop expecting the output they are about to receive.
+   */
+  it('CONTROL: a streaming provider gets no batch explanation at all', () => {
+    updateAgentStatus({
+      type: 'agent-status',
+      generationId: 'gen-2',
+      seq: 1,
+      phase: 'thinking',
+      kind: 'creation',
+      elapsedMs: 180_000,
+      silentMs: 180_000,
+      deliveryMode: 'streamed',
+      typicalMs: 300_000,
+    });
+    render(<StreamingStatus />);
+
+    expect(screen.queryByText(/one batch/i)).not.toBeInTheDocument();
+  });
+
+  /* CONTROL: an older server sends no baseline, and the panel must fall back to exactly its old shape. */
+  it('CONTROL: no baseline from the server means no bar and no caption', () => {
+    updateAgentStatus({
+      type: 'agent-status',
+      generationId: 'gen-3',
+      seq: 1,
+      phase: 'thinking',
+      kind: 'creation',
+      elapsedMs: 180_000,
+      silentMs: 180_000,
+    });
+
+    const { container } = render(<StreamingStatus />);
+
+    expect(container.querySelector('[style*="width"]')).toBeNull();
+    expect(screen.queryByText(/usually about/)).not.toBeInTheDocument();
+  });
+});

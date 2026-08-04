@@ -18,6 +18,7 @@ import { claimProject } from '~/lib/.server/agent/inflight';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
 import { ProtocolTagStreamFilter } from '~/lib/.server/agent/protocol-strip';
+import { typicalDurationMs } from '~/lib/.server/agent/delivery';
 import { withGenerationHeartbeat } from '~/lib/.server/agent/heartbeat';
 import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
@@ -382,6 +383,15 @@ async function streamGeneration(
     {
       /* What the turn IS, so the panel can say "Building your project" instead of an anonymous "Thinking". */
       kind: generation.statusKind,
+
+      /*
+       * And what the user should EXPECT (`agent/delivery.ts`): whether this provider streams at all,
+       * and roughly how long a turn of this kind runs. Measured 2026-08-03 — KIE holds the entire
+       * answer and flushes it at the end — so on that provider a silent stretch is not a symptom, and
+       * the panel is only able to say so because these two facts reach it.
+       */
+      deliveryMode: generation.deliveryMode,
+      typicalMs: typicalDurationMs(generation.statusKind),
 
       /*
        * And what is happening to the REQUEST — a provider retry reads as a four-minute "Thinking" from

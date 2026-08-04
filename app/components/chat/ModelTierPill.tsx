@@ -23,20 +23,18 @@ import { IconButton } from '~/components/ui/IconButton';
 import { classNames } from '~/utils/classNames';
 import { canUseTier, sessionStore } from '~/lib/stores/session';
 import { modelTierStore } from '~/lib/stores/settings';
-import { creationTurnStore } from '~/lib/stores/chat';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
 import { EFFORT_LABELS, baseEffortStore } from '~/lib/stores/effort';
 import { hasModelChoice, modelTierPanelOpen, parseModel } from '~/lib/stores/model-tier';
 
 export function ModelTierPill() {
   /*
-   * ⚠️ EVERY hook runs before the early returns below — a hook after a conditional return crashed the
-   * whole chat ("Rendered more hooks than during the previous render") when `creationTurn` was first
+   * ⚠️ EVERY hook runs before the early returns below — a hook after a conditional return once crashed
+   * the whole chat ("Rendered more hooks than during the previous render") when a store subscription was
    * added mid-component. Rules of Hooks: unconditional, top of the component, always.
    */
   const session = useStore(sessionStore);
   const selected = useStore(modelTierStore);
-  const creationTurn = useStore(creationTurnStore);
   const effort = useStore(baseEffortStore);
   const byokUnlocked = useByokUnlocked();
 
@@ -55,11 +53,14 @@ export function ModelTierPill() {
 
   /*
    * The EFFECTIVE rung: what the server would actually run for this turn, mirroring `decideModelTier`.
-   * A paid rung is dropped on the first build turn (§4.4a) and whenever the live balance no longer
-   * clears its threshold — the same two rules, in the same order, as the server's decision.
+   * A paid rung is dropped whenever the live balance no longer clears its threshold.
+   *
+   * 🔴 The first-build drop is GONE (owner, 2026-08-03) — a rung you can afford runs on every turn,
+   * including the largest one. Mirrored here because the pill's whole job is naming what will ACTUALLY
+   * run; leaving it would have shown "Standard" on a turn the server now serves Premium.
    */
   const selectedRow = tiers.find((tier) => tier.id === selected);
-  const eligible = selected !== 'standard' && !creationTurn && canUseTier(session, selected);
+  const eligible = selected !== 'standard' && canUseTier(session, selected);
   const effective = eligible && selectedRow ? parseModel(selectedRow.model) : standard;
   const active = eligible;
 
@@ -92,9 +93,7 @@ export function ModelTierPill() {
   const title = !choosable
     ? `Running ${effective.full} — the model this platform serves.`
     : locked
-      ? creationTurn
-        ? `Running ${effective.full}. Your first build always runs the standard model; ${selectedLabel} unlocks once your project exists. Click to change.`
-        : `Running ${effective.full}. ${selectedLabel} is not available right now. Click to change.`
+      ? `Running ${effective.full}. ${selectedLabel} is not available right now. Click to change.`
       : `Running ${effective.full} (${selectedLabel}). Click to choose a different model.`;
 
   return (

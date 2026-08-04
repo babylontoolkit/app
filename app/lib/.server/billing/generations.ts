@@ -84,6 +84,19 @@ export interface GenerationRecord {
   toolRounds: number;
 
   /**
+   * WHAT KIND of turn this was — `creation` | `repair` | `plan` | `edit` (`statusKindFor`).
+   *
+   * Recorded because `durationMs` alone cannot answer "how long does a typical edit take?": without
+   * this, every duration lands in one undifferentiated pile where a five-minute creation sits beside
+   * a seven-second edit. That is not hypothetical — it is why the liveness panel's expectation
+   * baseline (`agent/delivery.ts`, 2026-08-03) had to ship as a hand-picked constant.
+   *
+   * ⚠️ Optional, and an unknown kind stays UNKNOWN. Defaulting it to `edit` (the most common) would
+   * silently poison the percentile this field exists to make possible — see migration 0019.
+   */
+  statusKind?: string;
+
+  /**
    * Wall-clock for the whole generation.
    *
    * Recorded because "it feels slow" is not actionable and the two causes have opposite fixes:
@@ -292,6 +305,9 @@ export class SupabaseGenerationStore implements GenerationStore {
 
         // Diagnostics (migration 0002).
         tool_rounds: row.toolRounds ?? 0,
+
+        /* NULL when unknown — never defaulted, or the percentile this enables is poisoned (0019). */
+        status_kind: row.statusKind ?? null,
         duration_ms: row.durationMs ?? null,
         finish_reason: row.finishReason ?? null,
         repair_of: row.repairOf ?? null,
@@ -356,6 +372,7 @@ export class SupabaseGenerationStore implements GenerationStore {
         cacheReadTokens: r.cached_input_tokens,
         cacheCreationTokens: r.cache_write_tokens,
         toolRounds: r.tool_rounds ?? 0,
+        statusKind: r.status_kind ?? undefined,
         durationMs: r.duration_ms ?? undefined,
         finishReason: r.finish_reason ?? undefined,
         repairOf: r.repair_of ?? undefined,

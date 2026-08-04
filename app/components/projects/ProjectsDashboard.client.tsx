@@ -533,16 +533,31 @@ export function ProjectsDashboard() {
         </div>
       )}
 
+      {/*
+       * 🔴 Structured to MATCH the Delete Chat dialog exactly (owner, 2026-08-03: "the project delete
+       * dialog does not look as good as the delete chat dialog").
+       *
+       * `Dialog` supplies no padding of its own, and this one only padded its BUTTON ROW — so the title
+       * and the sentence sat flush against the panel edge while the chat dialog next door had a padded
+       * body and a separated footer. Two dialogs asking the same question in the same product, drawn
+       * differently, because each was styled on its own. The body/footer split is what makes the footer
+       * read as actions rather than as more text, and the destructive action needs that separation most.
+       */}
       <DialogRoot open={confirmDelete !== null}>
         <Dialog onClose={() => setConfirmDelete(null)}>
-          <DialogTitle>Delete project?</DialogTitle>
-          <DialogDescription>
-            <p>
-              <strong className="text-bolt-elements-textPrimary">{confirmDelete?.name}</strong> and its saved
-              checkpoints will be permanently removed. This cannot be undone.
-            </p>
-          </DialogDescription>
-          <div className="px-5 pb-4 flex gap-2 justify-end">
+          <div className="p-6 bg-white dark:bg-gray-950">
+            <DialogTitle className="text-gray-900 dark:text-white">Delete Project?</DialogTitle>
+            <DialogDescription className="mt-2 text-gray-600 dark:text-gray-400">
+              <p>
+                You are about to delete{' '}
+                <span className="font-medium text-gray-900 dark:text-white">{confirmDelete?.name}</span>
+              </p>
+              <p className="mt-2">
+                Its saved checkpoints will be permanently removed. Are you sure you want to delete this project?
+              </p>
+            </DialogDescription>
+          </div>
+          <div className="flex justify-end gap-3 px-6 py-4 bg-gray-50 dark:bg-gray-900 border-t border-gray-100 dark:border-gray-800">
             <DialogButton type="secondary" onClick={() => setConfirmDelete(null)}>
               Cancel
             </DialogButton>

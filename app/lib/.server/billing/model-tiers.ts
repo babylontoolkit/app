@@ -83,14 +83,26 @@ export interface ModelTierDefinition {
   /**
    * Locked on the FIRST BUILD turn (§4.4a).
    *
-   * True for every paid rung today. The measured reason is Fable 5 on KIE: it serves a BUFFERED
-   * answer, and a creation-sized artifact (~25k output tokens, 4–7 minutes of decode) cannot flush
-   * before KIE's ~5-minute gateway timeout — observed live as 307.8s of streamed reasoning, 0 text,
-   * `finish=error` at 449s. That is a function of ARTIFACT SIZE, and the first build is the largest
-   * artifact in the product (SPEC §11 note 7), so the lock stays even for a rung that streams.
+   * 🔴 **FALSE for every rung since 2026-08-03 (owner: "remove the first-premium-build-always-runs-
+   * default-model rule — we can choose our model as long as we have enough credits and the additional
+   * models are enabled").** A user who has paid for a rung and can afford it gets it on every turn,
+   * including the biggest one.
    *
-   * It is a per-tier flag rather than a blanket rule so relaxing it for a streaming model later is a
-   * one-line config change with a test, not surgery on the decision function.
+   * ⚠️ **The reason it was introduced is RETIRED, not merely overruled.** The 2026-07-18 rationale was
+   * that Fable 5 on KIE serves a BUFFERED answer which a build-sized artifact may not flush before
+   * their gateway timeout — read at the time as a property of that MODEL. It is not: KIE buffers every
+   * answer on every model, which is why `agent/delivery.ts` keys `deliveryMode` on the PROVIDER and
+   * says so in its own doc ("the buffering lives in the adapter, so a `LLM_MODEL` swap must not
+   * silently flip it to streamed"), and why the panel has an expectation bar telling the user to wait.
+   * So the lock was singling out one rung for something all three do — it never bought what it was
+   * charging for.
+   *
+   * The residual risk is the gateway TIMEOUT on a very long generation, which is real for any rung and
+   * is handled where it belongs: a death there is a hard failure, so it refunds and retries
+   * (`MAX_PROVIDER_RETRY_ATTEMPTS`, whose last attempt drops thinking).
+   *
+   * The flag and its branch in `decideModelTier` STAY, so re-locking a single rung is one line and a
+   * test — not surgery on the decision function — the next time a provider misbehaves.
    */
   firstBuildLocked: boolean;
 }
@@ -104,7 +116,7 @@ export const PAID_MODEL_TIERS: readonly ModelTierDefinition[] = [
     minimumEnvKey: 'PREMIUM_MINIMUM_CREDITS',
     defaultModel: DEFAULT_PREMIUM_MODEL,
     defaultMinimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS,
-    firstBuildLocked: true,
+    firstBuildLocked: false,
   },
   {
     id: 'supermax',
@@ -113,7 +125,7 @@ export const PAID_MODEL_TIERS: readonly ModelTierDefinition[] = [
     minimumEnvKey: 'SUPERMAX_MINIMUM_CREDITS',
     defaultModel: DEFAULT_SUPERMAX_MODEL,
     defaultMinimumCredits: DEFAULT_SUPERMAX_MINIMUM_CREDITS,
-    firstBuildLocked: true,
+    firstBuildLocked: false,
   },
 ];
 

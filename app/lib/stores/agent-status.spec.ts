@@ -21,6 +21,12 @@ import {
   SILENCE_WORTH_MENTIONING_MS,
   countArtifactProgress,
   SILENCE_RESTATES_ELAPSED_MS,
+  elapsedFraction,
+  isOverdue,
+  formatTypical,
+  deliveryNote,
+  PROGRESS_CAP,
+  DELIVERY_NOTE_AFTER_MS,
 } from './agent-status';
 
 function part(overrides: Record<string, unknown> = {}) {
@@ -464,5 +470,168 @@ describe('the count belongs to THIS turn', () => {
       { written: 8, writing: 0 },
     );
     expect(thinking.progress).toBeUndefined();
+  });
+});
+
+/**
+ * The expectation bar and the delivery note (2026-08-03).
+ *
+ * Both exist because of one reported turn: 244 seconds of silence on a healthy generation, then 46KB
+ * of artifact at once, and a user who *"almost quit like 3 times"*. The generation was fine — KIE
+ * buffers the whole answer (`scripts/stream-probe.mjs`, 3/3 request shapes) — but the panel could only
+ * show a label and a rising number, which is identical to what it shows when something has died.
+ */
+describe('the expectation bar', () => {
+  const base = {
+    generationId: 'g1',
+    seq: 1,
+    kind: 'creation' as const,
+    phase: 'thinking' as const,
+    elapsedMs: 0,
+    receivedAt: 0,
+    typicalMs: 300_000,
+  };
+
+  it('is a fraction of a typical turn of this kind', () => {
+    expect(elapsedFraction({ ...base, elapsedMs: 150_000 }, 0)).toBeCloseTo(0.5);
+  });
+
+  it('NEVER fills, however long the turn runs', () => {
+    /*
+     * The whole point. A bar that hits 100% and keeps spinning tells the user the thing is stuck —
+     * converting a slow-but-healthy turn into an apparent hang, which is the failure this panel exists
+     * to prevent rather than to cause.
+     *
+     * ⚠️ Asserted against the LITERAL 1, never against `PROGRESS_CAP`. The first draft of this test
+     * read `toBe(PROGRESS_CAP)`, which moves both sides of the comparison together: mutation-verified
+     * on 2026-08-03, it passed with the cap raised to 1 — i.e. it went green on the exact regression
+     * it is named for. A test whose expectation is defined by the value under test cannot fail.
+     */
+    expect(PROGRESS_CAP).toBeLessThan(1);
+    expect(elapsedFraction({ ...base, elapsedMs: 300_000 }, 0)).toBeLessThan(1);
+    expect(elapsedFraction({ ...base, elapsedMs: 9_000_000 }, 0)).toBeLessThan(1);
+
+    // And it does saturate rather than growing without bound, so the bar stops moving at the ceiling.
+    expect(elapsedFraction({ ...base, elapsedMs: 9_000_000 }, 0)).toBe(
+      elapsedFraction({ ...base, elapsedMs: 300_000 }, 0),
+    );
+  });
+
+  it('is absent when the server sent no baseline, rather than guessed', () => {
+    // An older server. No honest bar is drawable, and a fake one is worse than none.
+    expect(elapsedFraction({ ...base, typicalMs: undefined }, 0)).toBeUndefined();
+    expect(describeAgentStatus({ ...base, typicalMs: undefined }, 0).fraction).toBeUndefined();
+    expect(describeAgentStatus({ ...base, typicalMs: undefined }, 0).expectation).toBeUndefined();
+  });
+
+  it('captions with the baseline, and does not repeat the elapsed time already in the label', () => {
+    const d = describeAgentStatus({ ...base, elapsedMs: 60_000 }, 0);
+    expect(d.expectation).toBe('usually about 5m');
+    expect(d.label).toContain('1m 0s');
+
+    // The same number twice reads as a rendering bug — this file's own history records it.
+    expect(d.expectation).not.toContain('1m 0s');
+  });
+
+  it('stops predicting once past the baseline and reports being connected instead', () => {
+    const d = describeAgentStatus({ ...base, elapsedMs: 400_000 }, 0);
+    expect(isOverdue({ ...base, elapsedMs: 400_000 }, 0)).toBe(true);
+    expect(d.expectation).toBe('longer than usual — still connected');
+    expect(d.fraction).toBe(PROGRESS_CAP);
+  });
+
+  it('formats a baseline coarsely — it is not a promise', () => {
+    expect(formatTypical(300_000)).toBe('about 5m');
+    expect(formatTypical(90_000)).toBe('about 90s');
+  });
+
+  it('drops a zero or negative baseline at ingest, because it is a divisor', () => {
+    /*
+     * A `0` from a future server would make every fraction `Infinity` and pin the bar full on the
+     * first tick — the one rendering that is worse than having no bar at all.
+     */
+    resetAgentStatus();
+    updateAgentStatus(part({ typicalMs: 0, kind: 'creation' }));
+    expect(agentStatusStore.get()?.typicalMs).toBeUndefined();
+
+    resetAgentStatus();
+    updateAgentStatus(part({ typicalMs: Number.POSITIVE_INFINITY }));
+    expect(agentStatusStore.get()?.typicalMs).toBeUndefined();
+  });
+});
+
+describe('the delivery note', () => {
+  const base = {
+    generationId: 'g1',
+    seq: 1,
+    kind: 'creation' as const,
+    phase: 'thinking' as const,
+    elapsedMs: 60_000,
+    receivedAt: 0,
+    deliveryMode: 'batched' as const,
+  };
+
+  it('explains the silence on a provider measured to deliver in one batch', () => {
+    const note = deliveryNote({ ...base, silentMs: 60_000 }, 0);
+    expect(note).toContain('one batch');
+    expect(note).toContain('Nothing is stuck');
+  });
+
+  it('says NOTHING on a streaming provider, where a long silence really might be a problem', () => {
+    expect(deliveryNote({ ...base, deliveryMode: 'streamed', silentMs: 60_000 }, 0)).toBeUndefined();
+  });
+
+  it('says nothing when the server never told us how it delivers', () => {
+    expect(deliveryNote({ ...base, deliveryMode: undefined, silentMs: 60_000 }, 0)).toBeUndefined();
+  });
+
+  it('waits for real silence, so a responsive turn carries no paragraph about waiting', () => {
+    expect(deliveryNote({ ...base, silentMs: DELIVERY_NOTE_AFTER_MS - 1 }, 0)).toBeUndefined();
+    expect(deliveryNote({ ...base, silentMs: DELIVERY_NOTE_AFTER_MS }, 0)).toBeDefined();
+  });
+
+  it('never claims to know how far along the turn is', () => {
+    const note = deliveryNote({ ...base, silentMs: 200_000 }, 0) ?? '';
+    expect(note).not.toMatch(/almost|nearly|soon|shortly/i);
+  });
+
+  it('suppresses the stall clause, so the symptom is not restated beside its explanation', () => {
+    /*
+     * On a batched provider "nothing from the model for 3m" is not news — it is how the transport
+     * works. Printed next to the note it reads as two pieces of bad news, and the alarming one is the
+     * line that reads first.
+     */
+    const batched = describeAgentStatus({ ...base, phase: 'generating', elapsedMs: 200_000, silentMs: 100_000 }, 0);
+    expect(batched.progress).toBeUndefined();
+    expect(batched.note).toBeDefined();
+
+    // CONTROL: the identical status on a streaming provider still reports the stall, as it always has.
+    const streamed = describeAgentStatus(
+      { ...base, deliveryMode: 'streamed', phase: 'generating', elapsedMs: 200_000, silentMs: 100_000 },
+      0,
+    );
+    expect(streamed.progress).toContain('nothing from the model');
+  });
+
+  it('is dropped during a retry, which has a truer story of its own', () => {
+    const d = describeAgentStatus({ ...base, silentMs: 60_000, activity: 'retrying', attempt: 2, maxAttempts: 3 }, 0);
+    expect(d.label).toContain('Reconnecting');
+    expect(d.note).toBeUndefined();
+
+    // A retry RESTARTS the work, so elapsed no longer measures progress through a typical turn.
+    expect(d.fraction).toBeUndefined();
+  });
+
+  it('ignores an unrecognised delivery mode rather than passing it through', () => {
+    resetAgentStatus();
+    updateAgentStatus(part({ deliveryMode: 'telepathy' }));
+    expect(agentStatusStore.get()?.deliveryMode).toBeUndefined();
+  });
+
+  it('carries a valid mode through ingest', () => {
+    resetAgentStatus();
+    updateAgentStatus(part({ deliveryMode: 'batched', typicalMs: 300_000 }));
+    expect(agentStatusStore.get()?.deliveryMode).toBe('batched');
+    expect(agentStatusStore.get()?.typicalMs).toBe(300_000);
   });
 });

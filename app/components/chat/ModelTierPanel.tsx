@@ -28,11 +28,18 @@ import { classNames } from '~/utils/classNames';
 import { IconButton } from '~/components/ui/IconButton';
 import { canUseTier, sessionStore, type ModelTierState } from '~/lib/stores/session';
 import { MODEL_TIER_IDS, modelTierStore, updateModelTier, type ModelTierId } from '~/lib/stores/settings';
-import { creationTurnStore } from '~/lib/stores/chat';
 import { MODEL_TIER_DESCRIPTIONS, hasModelChoice, modelTierPanelOpen, parseModel } from '~/lib/stores/model-tier';
 
-/** Why a row cannot be chosen right now — `null` means it can. */
-type LockReason = 'creation_turn' | 'unserveable' | 'below_minimum' | null;
+/**
+ * Why a row cannot be chosen right now — `null` means it can.
+ *
+ * 🔴 `creation_turn` is GONE (owner, 2026-08-03): a rung you can afford is a rung you get, including on
+ * the first build. The server's `firstBuildLocked` flag survives for a future per-rung re-lock, but it
+ * is `false` for every rung and is NOT on the wire — so if one is ever re-locked, this mirror needs the
+ * field sent to it rather than a re-hardcoded turn rule. A hardcoded one is what made the client claim
+ * a lock the server no longer applies.
+ */
+type LockReason = 'unserveable' | 'below_minimum' | null;
 
 /**
  * The client's read of the server's `decideModelTier`, in the same order and for the same reasons.
@@ -41,21 +48,9 @@ type LockReason = 'creation_turn' | 'unserveable' | 'below_minimum' | null;
  * MIRROR, never an authority: the server re-derives on every generation, so being wrong here can only
  * ever offer a rung the server then declines to Standard — the safe direction.
  */
-export function lockReasonFor(
-  tier: ModelTierState,
-  session: ReturnType<typeof sessionStore.get>,
-  creationTurn: boolean,
-): LockReason {
+export function lockReasonFor(tier: ModelTierState, session: ReturnType<typeof sessionStore.get>): LockReason {
   if (tier.id === 'standard') {
     return null;
-  }
-
-  /*
-   * The creation lock is reported FIRST because it is the only reason that is about the turn rather
-   * than about the account: a funded user on a first build must be told to wait, not to buy credits.
-   */
-  if (creationTurn) {
-    return 'creation_turn';
   }
 
   if (!tier.serveable) {
@@ -66,10 +61,8 @@ export function lockReasonFor(
 }
 
 /** The sentence a locked row shows. Never quotes a threshold for a lock credits cannot open. */
-function lockCopy(reason: Exclude<LockReason, null>, tier: ModelTierState, standardFull: string): string {
+function lockCopy(reason: Exclude<LockReason, null>, tier: ModelTierState): string {
   switch (reason) {
-    case 'creation_turn':
-      return `Your first build always runs ${standardFull}. This unlocks once your project exists.`;
     case 'unserveable':
       return 'Unavailable right now — this platform has no price configured for it.';
     default:
@@ -81,7 +74,6 @@ export function ModelTierPanel() {
   const open = useStore(modelTierPanelOpen);
   const session = useStore(sessionStore);
   const selected = useStore(modelTierStore);
-  const creationTurn = useStore(creationTurnStore);
 
   /*
    * Escape closes it — the same reasoning as the effort panel: a popup with only an X reads as stuck.
@@ -103,8 +95,11 @@ export function ModelTierPanel() {
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
 
-  const { standardModel, tiers } = session.credits.modelTiers;
-  const standardFull = parseModel(standardModel).full;
+  /*
+   * `standardModel` is no longer read here: the only copy that named it was the retired first-build
+   * lock ("your first build always runs <model>"). The pill is where the running model is named.
+   */
+  const { tiers } = session.credits.modelTiers;
 
   /*
    * Belt to the pill's braces: with one serveable rung there is nothing to choose, so the popup never
@@ -136,7 +131,7 @@ export function ModelTierPanel() {
           <div className="space-y-2">
             {tiers.map((tier) => {
               const active = tier.id === selected;
-              const reason = lockReasonFor(tier, session, creationTurn);
+              const reason = lockReasonFor(tier, session);
               const model = parseModel(tier.model);
 
               return (
@@ -185,9 +180,7 @@ export function ModelTierPanel() {
                     {reason ? <div className="i-ph:lock-simple text-sm" /> : null}
                   </div>
                   <div className="mt-1 text-[11px] leading-snug text-bolt-elements-textSecondary">
-                    {reason
-                      ? lockCopy(reason, tier, standardFull)
-                      : (MODEL_TIER_DESCRIPTIONS[tier.id as ModelTierId] ?? '')}
+                    {reason ? lockCopy(reason, tier) : (MODEL_TIER_DESCRIPTIONS[tier.id as ModelTierId] ?? '')}
                   </div>
                 </button>
               );

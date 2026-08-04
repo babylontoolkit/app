@@ -140,14 +140,15 @@ describe('the ladder table (model-tiers.ts)', () => {
   });
 
   /*
-   * Every paid rung is locked on the first build turn (§4.4a). The evidence is measured: KIE serves
-   * Fable 5 buffered, and a creation-sized artifact cannot flush before their ~5-minute gateway timeout
-   * (307.8s of reasoning, 0 text, finish=error at 449s). The lock is per-tier config, so this pin is
-   * what demands that question be re-answered before any rung is unlocked there.
+   * 🔴 No rung is locked on the first build turn any more (owner, 2026-08-03): a rung you can afford is
+   * a rung you get, on every turn. Asserted rather than deleted — the flag and its branch in
+   * `decideModelTier` deliberately survive so a single rung can be re-locked in one line if a provider
+   * misbehaves again, and the failure mode of one silently flipping back to `true` is a user paying for
+   * a model they do not receive on the most expensive turn in the product.
    */
-  it('locks every paid rung on the first build turn', () => {
+  it('locks no paid rung on the first build turn', () => {
     for (const definition of PAID_MODEL_TIERS) {
-      expect(definition.firstBuildLocked, `${definition.id}`).toBe(true);
+      expect(definition.firstBuildLocked, `${definition.id}`).toBe(false);
     }
   });
 });
@@ -252,7 +253,7 @@ describe('getModelTier — resolving a paid rung with no environment at all', ()
     expect(tier.model).toBe('claude-opus-5');
     expect(tier.minimumCredits).toBe(DEFAULT_PREMIUM_MINIMUM_CREDITS);
     expect(tier.minimumCredits).toBe(1200);
-    expect(tier.firstBuildLocked).toBe(true);
+    expect(tier.firstBuildLocked).toBe(false);
 
     expect(tier.rates.inputPerMTok).toBe(baked.inputPerMTok);
     expect(tier.rates.inputPerMTok).toBe(2);
@@ -276,7 +277,7 @@ describe('getModelTier — resolving a paid rung with no environment at all', ()
     expect(tier.model).toBe('claude-fable-5');
     expect(tier.minimumCredits).toBe(DEFAULT_SUPERMAX_MINIMUM_CREDITS);
     expect(tier.minimumCredits).toBe(1500);
-    expect(tier.firstBuildLocked).toBe(true);
+    expect(tier.firstBuildLocked).toBe(false);
 
     expect(tier.rates.inputPerMTok).toBe(baked.inputPerMTok);
     expect(tier.rates.inputPerMTok).toBe(4);

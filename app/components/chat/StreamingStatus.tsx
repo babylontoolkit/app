@@ -106,7 +106,7 @@ export const StreamingStatus = memo(({ progress: artifact }: { progress?: Artifa
     );
   }
 
-  const { label, detail, progress } = describeAgentStatus(status, now, artifact);
+  const { label, detail, progress, fraction, expectation, note } = describeAgentStatus(status, now, artifact);
 
   return (
     <div className="mt-4 w-full rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-1 px-3 py-2">
@@ -116,11 +116,45 @@ export const StreamingStatus = memo(({ progress: artifact }: { progress?: Artifa
       </div>
       <div className="mt-1 pl-6 text-xs text-bolt-elements-textSecondary">{detail}</div>
       {/*
+       * The expectation bar: how far through a TYPICAL turn of this kind we are.
+       *
+       * 🔴 It is not a completion bar and must never be mistaken for one — it never fills
+       * (`PROGRESS_CAP`), and its caption always names what it is measuring ("usually about 5m").
+       * The reason it exists at all is that an elapsed counter rises identically whether the turn is
+       * healthy or dead, so watching one is pure anxiety: this is the only element on screen that
+       * answers "is this normal?" rather than "how long has it been?".
+       *
+       * `aria-hidden`, with the same facts already carried as text in the caption beside it — a
+       * decorative meter repeated to a screen reader is noise, and the caption is the accessible copy.
+       */}
+      {fraction !== undefined && (
+        <div className="mt-2 pl-6">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-bolt-elements-background-depth-3" aria-hidden>
+            <div
+              className="h-full rounded-full bg-bolt-elements-item-contentAccent transition-[width] duration-1000 ease-linear"
+              style={{ width: `${Math.round(fraction * 100)}%` }}
+            />
+          </div>
+          {expectation && (
+            <div className="mt-1 text-xs text-bolt-elements-textTertiary tabular-nums">{expectation}</div>
+          )}
+        </div>
+      )}
+      {/*
        * The observed facts, on their own line and in tabular figures so the numbers do not shift the
        * text as they tick. Tertiary because it is the most concrete line here and also the one that
        * changes most — keeping it below the explanation keeps the eye on the sentence.
        */}
       {progress && <div className="mt-1 pl-6 text-xs text-bolt-elements-textTertiary tabular-nums">{progress}</div>}
+      {/*
+       * Why nothing is appearing, on a provider measured to deliver its answer in one batch.
+       *
+       * Placed LAST of the text lines and styled tertiary on purpose: it is the longest thing in the
+       * panel and it is read once, not watched. Above the label it would bury the two lines that
+       * change; below them it is there the moment the user starts wondering, which is when they go
+       * looking for it.
+       */}
+      {note && <div className="mt-2 pl-6 text-xs leading-relaxed text-bolt-elements-textTertiary">{note}</div>}
       {media && (
         <div className="mt-1 flex items-center gap-2 pl-6 text-xs text-bolt-elements-textSecondary">
           <div className="text-sm i-svg-spinners:90-ring-with-bg text-bolt-elements-item-contentAccent" />

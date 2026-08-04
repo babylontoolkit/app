@@ -35,6 +35,16 @@ export type AgentStatusKind = 'creation' | 'repair' | 'plan' | 'edit';
  */
 export type AgentStatusActivity = 'retrying';
 
+/**
+ * How the provider puts the answer on the wire — mirrors `agent/delivery.ts`, which holds the
+ * measurement and the reasoning.
+ *
+ * `batched` means nothing CAN appear until the turn ends. That is the difference between a silence
+ * the user should ignore and a silence they should worry about, and until 2026-08-03 the panel had no
+ * way to tell them which one they were looking at.
+ */
+export type AgentDeliveryMode = 'streamed' | 'batched';
+
 export interface AgentStatusSnapshot {
   generationId: string;
   seq: number;
@@ -60,6 +70,21 @@ export interface AgentStatusSnapshot {
   activity?: AgentStatusActivity;
   attempt?: number;
   maxAttempts?: number;
+
+  /**
+   * How this provider delivers (`agent/delivery.ts`). Absent from an older server, in which case the
+   * panel says NOTHING about delivery — never guesses a mode.
+   */
+  deliveryMode?: AgentDeliveryMode;
+
+  /**
+   * How long a turn of this kind usually runs. Absent → no bar and no expectation line.
+   *
+   * 🔴 The single number that answers "is 3m30s normal or is this stuck?". An elapsed counter alone
+   * cannot: it goes up at the same rate whether everything is fine or the provider died, so watching it
+   * is pure anxiety with no information in it.
+   */
+  typicalMs?: number;
 
   /** Client wall time when the part was first ingested — the anchor for live elapsed display. */
   receivedAt: number;
@@ -96,6 +121,8 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     activity?: unknown;
     attempt?: unknown;
     maxAttempts?: unknown;
+    deliveryMode?: unknown;
+    typicalMs?: unknown;
   };
 
   if (
@@ -142,6 +169,22 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
           ...(typeof status.attempt === 'number' ? { attempt: status.attempt } : {}),
           ...(typeof status.maxAttempts === 'number' ? { maxAttempts: status.maxAttempts } : {}),
         }
+      : {}),
+
+    /*
+     * Both carried only when the server sent something VALID. An unrecognised delivery mode is
+     * dropped rather than passed through, exactly like `activity`: the sentence it drives tells the
+     * user to expect nothing for minutes, which is reassuring when true and destructive when wrong.
+     *
+     * `typicalMs` must additionally be POSITIVE and FINITE — it is a divisor. A `0` from a future
+     * server would make every fraction `Infinity` and pin the bar full on the first tick, which is the
+     * one rendering that is worse than having no bar at all.
+     */
+    ...(status.deliveryMode === 'streamed' || status.deliveryMode === 'batched'
+      ? { deliveryMode: status.deliveryMode }
+      : {}),
+    ...(typeof status.typicalMs === 'number' && Number.isFinite(status.typicalMs) && status.typicalMs > 0
+      ? { typicalMs: status.typicalMs }
       : {}),
     receivedAt: now,
   });
@@ -191,6 +234,80 @@ export const SILENCE_WORTH_MENTIONING_MS = 15_000;
  * only has to be big enough to mean "something did arrive, and then it stopped".
  */
 export const SILENCE_RESTATES_ELAPSED_MS = 2_000;
+
+/**
+ * How full the expectation bar may ever get while the turn is still running.
+ *
+ * 🔴 Never 1. A bar that reaches the end and then keeps spinning is a broken promise rendered in a
+ * widget — it converts "this is taking a while" into "this is stuck", which is the exact conversion
+ * this whole panel exists to prevent. The bar's job is to show the turn moving through a normal range,
+ * not to predict the finish.
+ */
+export const PROGRESS_CAP = 0.95;
+
+/**
+ * How long the stream must have been quiet before the delivery note is worth showing.
+ *
+ * Deliberately EARLY — well before {@link SILENCE_WORTH_MENTIONING_MS}, which is tuned for the
+ * opposite job (naming an abnormal stall late enough that it still means something). This note has to
+ * land BEFORE the user starts doubting, because its whole content is "what you are about to
+ * experience is normal". Told at three minutes it is an excuse; told at ten seconds it is a heads-up.
+ */
+export const DELIVERY_NOTE_AFTER_MS = 10_000;
+
+/**
+ * How far through a typical turn of this kind we are, capped at {@link PROGRESS_CAP}.
+ *
+ * `undefined` when the server sent no baseline — there is no honest bar to draw, and drawing an
+ * indeterminate one that looks determinate is the failure this returns `undefined` to avoid.
+ */
+export function elapsedFraction(status: AgentStatusSnapshot, now = Date.now()): number | undefined {
+  if (status.typicalMs === undefined) {
+    return undefined;
+  }
+
+  return Math.min(PROGRESS_CAP, Math.max(0, currentElapsedMs(status, now) / status.typicalMs));
+}
+
+/** Past the baseline for this kind of turn. Not an error — turns vary — but worth saying plainly. */
+export function isOverdue(status: AgentStatusSnapshot, now = Date.now()): boolean {
+  return status.typicalMs !== undefined && currentElapsedMs(status, now) > status.typicalMs;
+}
+
+/** "about 5m" / "about 90s" — coarse on purpose: this is a baseline, and precision would imply a promise. */
+export function formatTypical(ms: number): string {
+  return ms < 120_000 ? `about ${Math.round(ms / 1000)}s` : `about ${Math.round(ms / 60_000)}m`;
+}
+
+/**
+ * The sentence that explains a silence the user cannot otherwise interpret.
+ *
+ * 🔴 Shown ONLY for `batched`, and that asymmetry is the point. On a streaming provider a long silence
+ * genuinely might be a problem and this panel should not talk the user out of noticing it. On a
+ * batched one the silence is a property of the transport we have measured
+ * (`scripts/stream-probe.mjs`: 26,539 chars, 100% delivered in the final second after 130s of quiet),
+ * so the honest thing — and the only thing that stops someone closing the tab — is to say so up front.
+ *
+ * It never says "nearly done" or any other guess about position: we do not know, and a reassurance
+ * that turns out to be wrong costs more trust than the silence did.
+ */
+export function deliveryNote(status: AgentStatusSnapshot, now = Date.now()): string | undefined {
+  if (status.deliveryMode !== 'batched') {
+    return undefined;
+  }
+
+  const silent = currentSilentMs(status, now);
+
+  /*
+   * Gated on measured silence, not merely on the provider, so an ordinary responsive turn never
+   * carries a paragraph explaining a wait that is not happening.
+   */
+  if (silent === undefined || silent < DELIVERY_NOTE_AFTER_MS) {
+    return undefined;
+  }
+
+  return 'Your model provider sends the whole answer in one batch, so the files all arrive together at the end rather than appearing as they are written. Nothing is stuck — keep this tab open.';
+}
 
 /**
  * What the CLIENT can see of the artifact, which the server cannot.
@@ -314,7 +431,20 @@ export function describeAgentStatus(
   status: AgentStatusSnapshot,
   now = Date.now(),
   progress?: ArtifactProgress,
-): { label: string; detail: string; progress?: string } {
+): {
+  label: string;
+  detail: string;
+  progress?: string;
+
+  /** 0–{@link PROGRESS_CAP} through a typical turn, or absent when the server sent no baseline. */
+  fraction?: number;
+
+  /** The bar's caption: "usually about 5m", or that we are past that and still connected. */
+  expectation?: string;
+
+  /** Why nothing is appearing, on a provider measured to deliver in one batch. */
+  note?: string;
+} {
   const elapsed = formatElapsed(currentElapsedMs(status, now));
   const copy = COPY[status.kind];
 
@@ -336,8 +466,18 @@ export function describeAgentStatus(
    * one line that is supposed to carry new information. A stall is only worth naming once something
    * HAS arrived and then stopped.
    */
+  /*
+   * 🔴 Never on a `batched` provider. There, silence is not evidence of anything — it is how the
+   * transport works, every single turn (`agent/delivery.ts`), and {@link deliveryNote} is already
+   * explaining that two lines below. Reporting "nothing from the model for 3m" beside "this provider
+   * sends everything at the end" states a symptom and its explanation as if they were two separate
+   * pieces of bad news, and the alarming one is the line that reads first.
+   */
   const stalled =
-    silent !== undefined && silent >= SILENCE_WORTH_MENTIONING_MS && silent < elapsedMs - SILENCE_RESTATES_ELAPSED_MS;
+    status.deliveryMode !== 'batched' &&
+    silent !== undefined &&
+    silent >= SILENCE_WORTH_MENTIONING_MS &&
+    silent < elapsedMs - SILENCE_RESTATES_ELAPSED_MS;
 
   /*
    * 🔴 No file count during `thinking`. That phase means NO TEXT has streamed this turn, so this turn
@@ -350,6 +490,8 @@ export function describeAgentStatus(
    * and self-correcting the instant it opens.
    */
   const counted = status.phase === 'generating' && progress ? formatArtifactProgress(progress) : undefined;
+
+  const note = deliveryNote(status, now);
 
   const clauses = [counted, stalled ? `nothing from the model for ${formatElapsed(silent)}` : undefined].filter(
     Boolean,
@@ -377,14 +519,39 @@ export function describeAgentStatus(
        * model for 30s" is the very thing being reported one line above, and saying it twice reads as
        * two problems. What survives is what the user still wants to know — whether the work already
        * done is still there.
+       *
+       * It also drops the expectation bar and the delivery note, for the same reason in the other
+       * direction: a retry RESTARTS the work, so elapsed no longer measures progress through a typical
+       * turn, and a bar drawn against it would be measuring nothing. "Reconnecting" is the whole story
+       * on this branch and it does not need decorating.
        */
       ...(counted ? { progress: counted } : {}),
     };
   }
 
+  /*
+   * The expectation caption. Elapsed is deliberately NOT repeated here — it is already in the label,
+   * and this file's own history records what happens when the same number is printed twice: it reads
+   * as a rendering bug and spends a line that was supposed to carry new information.
+   *
+   * Past the baseline the caption stops predicting and starts reporting: "longer than usual" is true,
+   * and "still connected" is PROVABLE rather than reassuring — this panel only renders while heartbeats
+   * are fresh (`isStatusFresh`), so its presence on screen is itself the evidence for the claim.
+   */
+  const fraction = elapsedFraction(status, now);
+  const expectation =
+    status.typicalMs === undefined
+      ? undefined
+      : isOverdue(status, now)
+        ? 'longer than usual — still connected'
+        : `usually ${formatTypical(status.typicalMs)}`;
+
   return {
     label: `${copy.label} — ${elapsed}`,
     detail: status.phase === 'thinking' ? copy.thinking : copy.generating,
     ...(progressLine ? { progress: progressLine } : {}),
+    ...(fraction === undefined ? {} : { fraction }),
+    ...(expectation ? { expectation } : {}),
+    ...(note ? { note } : {}),
   };
 }

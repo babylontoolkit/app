@@ -30,7 +30,13 @@
  * accepted. The same reasoning makes an unknown tier id resolve DOWN (see `resolveTierId`).
  */
 
-import { MODEL_TIER_IDS, PAID_MODEL_TIERS, STANDARD_TIER_LABEL, type ModelTierId } from './model-tiers';
+import {
+  MODEL_TIER_IDS,
+  PAID_MODEL_TIERS,
+  STANDARD_TIER_LABEL,
+  paidModelTierDefinition,
+  type ModelTierId,
+} from './model-tiers';
 
 export type { ModelTierId };
 
@@ -83,7 +89,13 @@ export function decidePremium(input: PremiumDecisionInput): PremiumDecision {
         id: 'premium',
         label: 'Premium',
         minimumCredits: input.minimumCredits,
-        firstBuildLocked: true,
+
+        /*
+         * Read from the DEFINITION rather than restated, so this deprecated shim cannot disagree with
+         * the live ladder about whether a rung is locked on the first build turn (owner removed that
+         * lock on 2026-08-03; a hardcoded `true` here would have quietly kept it for any caller left).
+         */
+        firstBuildLocked: paidModelTierDefinition('premium').firstBuildLocked,
         serveable: true,
       },
     ],

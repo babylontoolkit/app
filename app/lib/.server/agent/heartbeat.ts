@@ -35,6 +35,7 @@
  * The heartbeat is purely additive, on a timer that runs beside the drain loop.
  */
 
+import type { DeliveryMode } from './delivery';
 import type { AgentChunk } from './proxy';
 
 /** How often the quiet-check timer fires while a generation is in flight. */
@@ -138,6 +139,25 @@ export interface AgentStatusPart {
   attempt?: number;
   maxAttempts?: number;
 
+  /**
+   * How the configured provider delivers its answer (`agent/delivery.ts`).
+   *
+   * 🔴 The field that turns an unexplained four-minute silence into an expected one. On a `batched`
+   * provider — measured 2026-08-03: KIE withholds a whole 26KB answer and flushes it in the final
+   * second — nothing CAN appear before the turn ends, so the panel must stop implying that something
+   * is about to. Optional, because an older server does not send it and a client that never sees it
+   * must fall back to exactly the panel it rendered before, never to a guess.
+   */
+  deliveryMode?: DeliveryMode;
+
+  /**
+   * How long a turn of this kind usually takes, so the panel can answer "is this normal?".
+   *
+   * A baseline, never a promise — the client's copy says "usually" and its bar never fills, because a
+   * progress indicator that reaches 100% and keeps spinning is worse than none at all.
+   */
+  typicalMs?: number;
+
   [key: string]: string | number | undefined;
 }
 
@@ -158,6 +178,20 @@ export interface HeartbeatOptions {
 
   /** What the turn is. Defaults to `edit` — the copy that claims the least. */
   kind?: AgentStatusKind;
+
+  /**
+   * How the provider delivers its answer. Passed in by the route rather than resolved here, so this
+   * module stays a dumb timer over facts it is handed (and so `delivery.ts` can import this file's
+   * `AgentStatusKind` without a cycle).
+   *
+   * Omitted → the field is absent from the wire and the client says nothing about delivery. Silence is
+   * the correct degradation: claiming `streamed` on a provider we have not measured would promise the
+   * user output that never comes.
+   */
+  deliveryMode?: DeliveryMode;
+
+  /** Measured baseline for this turn kind (`typicalDurationMs`). Omitted → the client shows no bar. */
+  typicalMs?: number;
 
   /**
    * Pull the current provider-level activity at tick time. Pull, not push, so the heartbeat stays a
@@ -221,6 +255,15 @@ export function createHeartbeat(
         kind,
         elapsedMs: now - startedAt,
         silentMs,
+
+        /*
+         * Conditional spread, not `deliveryMode: options.deliveryMode` — an absent option must be a
+         * MISSING KEY on the wire, never a present-but-undefined one. `JSONValue` refuses undefined
+         * (the same constraint the retry fields are written under, one block up), and the client's
+         * "we did not say" degradation depends on the key genuinely not being there.
+         */
+        ...(options.deliveryMode ? { deliveryMode: options.deliveryMode } : {}),
+        ...(typeof options.typicalMs === 'number' ? { typicalMs: options.typicalMs } : {}),
       });
     } catch {
       // A status channel must never break the generation it narrates.

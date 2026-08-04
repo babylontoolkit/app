@@ -323,17 +323,23 @@ describe('a creation contacts no model at all', () => {
       seams.settleAfterCreation.mock.invocationCallOrder[0],
     );
 
-    /* And it is handed real readers plus a narrator, not defaults. */
+    /* And it is handed real readers, not defaults. */
     const options = seams.awaitStarterRunning.mock.calls[0][0];
     expect(typeof options.installComplete).toBe('function');
     expect(typeof options.runningPreviews).toBe('function');
-    expect(typeof options.onStage).toBe('function');
 
-    /* The narrator writes the two creation phases the splash renders. */
-    options.onStage('install');
-    expect(bootProgress.get()).toEqual({ step: 'creating-install' });
-    options.onStage('serve');
-    expect(bootProgress.get()).toEqual({ step: 'creating-serve' });
+    /*
+     * 🔴 NO NARRATOR, AND THE SPLASH IS ALREADY DOWN (owner, 2026-08-03: "at that stage we should see
+     * the workspace and the dependencies being installed in our Nodepod Terminal").
+     *
+     * This used to assert the opposite — an `onStage` that wrote `creating-install`/`creating-serve`
+     * over the splash while install and dev-server ran. The wait itself is unchanged and still gates
+     * creation (asserted above); it simply no longer covers the workspace, so the terminal is what
+     * narrates it. Asserted rather than deleted: a re-added narrator would silently restore a
+     * full-screen overlay over a workspace the user is already using.
+     */
+    expect(options.onStage).toBeUndefined();
+    expect(bootProgress.get()).toEqual({ step: 'idle' });
   });
 
   /**
