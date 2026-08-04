@@ -287,6 +287,33 @@ describe('runWarmCycle', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  /*
+   * 🔴 CLAUDE ONLY. Breakpoint warming is an Anthropic mechanism end to end — `buildWarmupRequest`
+   * speaks the Messages wire, so against a `gpt-*` or `gemini-*` platform model the request warms
+   * NOTHING (wrong endpoint for a model that is not running there) while spending real money. The
+   * other two families have nothing to warm anyway: OpenAI-style prefix caching is automatic and
+   * unwarmable, and KIE prices no Gemini caching at all (`cacheProfile: 'none'`).
+   *
+   * The guard is asserted HERE, on `runWarmCycle`, because that is the ONE choke point every door
+   * passes through — the interval, the kickoff AND `warmAfterPromptChange` (fired on every prompt
+   * promotion, and VITEST-guarded so it cannot be driven directly). Guarding only `ensureCacheWarmer`
+   * would leave the promotion path paying for a request that warms nothing, silently.
+   */
+  for (const model of ['gpt-5-6-sol', 'gemini-3-5-flash']) {
+    it(`skips with zero fetches when the platform model is ${model}`, async () => {
+      vi.stubEnv('KIE_API_KEY', 'k-123');
+      vi.stubEnv('LLM_MODEL', model);
+
+      const fetchFn = vi.fn();
+      const result = await runWarmCycle(undefined, { fetchFn, sleep: instantSleep });
+
+      expect(result.sent).toBe(0);
+      expect(result.skipped).toContain(model);
+      expect(result.skipped).toContain('not a Claude model');
+      expect(fetchFn).not.toHaveBeenCalled();
+    });
+  }
+
   it('sends fanout requests carrying the active prompt, and counts reads/writes from the usage block', async () => {
     vi.stubEnv('KIE_API_KEY', 'k-123');
     vi.stubEnv('CACHE_WARMER_FANOUT', '3');

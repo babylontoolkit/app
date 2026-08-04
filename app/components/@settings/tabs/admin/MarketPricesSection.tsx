@@ -14,6 +14,10 @@ import { toast } from 'react-toastify';
 interface LlmRow {
   inputPerMTok: number;
   outputPerMTok: number;
+
+  /** gpt-* rows only — KIE publishes both, and the pair is atomic (see `market-prices.ts`). */
+  cachedInputPerMTok?: number;
+  cacheWritePerMTok?: number;
 }
 interface MediaVariant {
   options: Record<string, string | number | boolean>;
@@ -201,7 +205,7 @@ export function MarketPricesSection() {
         {' · '}captured {active.list.capturedAt}
       </div>
 
-      {/* What LLM billing is using right now. Cache always derives: 0.1x read / 2.0x write (1h tier). */}
+      {/* What LLM billing is using right now. Cache handling is per FAMILY — see the footer below. */}
       <div className="mt-2 rounded-md border border-bolt-elements-borderColor overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
@@ -209,6 +213,8 @@ export function MarketPricesSection() {
               <th className="px-3 py-1.5 font-medium">LLM model</th>
               <th className="px-3 py-1.5 font-medium text-right">Input $/MTok</th>
               <th className="px-3 py-1.5 font-medium text-right">Output $/MTok</th>
+              <th className="px-3 py-1.5 font-medium text-right">Cached in $/MTok</th>
+              <th className="px-3 py-1.5 font-medium text-right">Cache write $/MTok</th>
             </tr>
           </thead>
           <tbody>
@@ -217,12 +223,28 @@ export function MarketPricesSection() {
                 <td className="px-3 py-1.5 text-bolt-elements-textPrimary">{model}</td>
                 <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">${row.inputPerMTok}</td>
                 <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">${row.outputPerMTok}</td>
+                <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">
+                  {row.cachedInputPerMTok === undefined ? 'derived' : `$${row.cachedInputPerMTok}`}
+                </td>
+                <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">
+                  {row.cacheWritePerMTok === undefined ? 'derived' : `$${row.cacheWritePerMTok}`}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
-        <div className="px-3 py-1.5 text-[11px] text-bolt-elements-textTertiary border-t border-bolt-elements-borderColor">
-          Cache prices derive per row: 0.1× input (reads) / 2.0× input (1-hour writes) — never quoted separately.
+        <div className="px-3 py-1.5 text-[11px] text-bolt-elements-textTertiary border-t border-bolt-elements-borderColor space-y-1">
+          <div>
+            Cache prices are per model FAMILY, derived from the model id. <strong>claude-*</strong>: derived per row
+            (0.1× input for reads, 2.0× input for 1-hour writes) — quoting them is refused. <strong>gpt-*</strong>: KIE
+            publishes both, so the row must quote <em>both</em> Cached in and Cache write — neither derives, and a
+            half-quoted row is refused. <strong>gemini-*</strong>: KIE quotes no cached rate, so cached tokens bill at
+            the full input rate — quoting them is refused.
+          </div>
+          <div>
+            Rows are keyed by the <strong>API model id</strong> (dashes: <code>gpt-5-6-sol</code>), never by the display
+            name in KIE's pricing feed (<code>gpt-5.6-sol</code>) — a feed name prices nothing real.
+          </div>
         </div>
       </div>
 

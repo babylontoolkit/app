@@ -93,4 +93,44 @@ describe('accumulateStepUsage', () => {
   it('handles a generation with no steps at all', () => {
     expect(accumulateStepUsage(emptyUsage(), undefined)).toEqual(emptyUsage());
   });
+
+  /**
+   * The family selects which `providerMetadata` namespace the cache columns are read from
+   * (`usage-metadata.ts`). Accumulation is the same fold either way — the failure this pins is a
+   * second family reading zeros across a whole tool loop while its input tokens keep summing, i.e.
+   * the same two-denominators bug the first test in this file exists for, one wire to the left.
+   */
+  it("accumulates the openai namespace across MULTIPLE steps when the family is 'codex'", () => {
+    const steps: UsageStep[] = [
+      { usage: { promptTokens: 4_000, completionTokens: 900 }, providerMetadata: { openai: {} } },
+      {
+        usage: { promptTokens: 1_200, completionTokens: 800 },
+        providerMetadata: { openai: { cachedPromptTokens: 24_576 } },
+      },
+      {
+        usage: { promptTokens: 1_400, completionTokens: 850 },
+        providerMetadata: { openai: { cachedPromptTokens: 24_576 } },
+      },
+    ];
+
+    const totals = accumulateStepUsage(emptyUsage(), steps, 'codex');
+
+    expect(totals.promptTokens).toBe(6_600);
+    expect(totals.completionTokens).toBe(2_550);
+    expect(totals.cacheReadTokens).toBe(49_152);
+
+    // There is no cache-WRITE counter on the Responses wire — it must stay zero, never be invented.
+    expect(totals.cacheCreationTokens).toBe(0);
+  });
+
+  /** An omitted family reads `anthropic` — byte-identical to every bill this function ever produced. */
+  it('reads the anthropic namespace when no family is passed', () => {
+    const steps = [step(1_000, 100, 5_000, 200)];
+
+    expect(accumulateStepUsage(emptyUsage(), steps)).toEqual(accumulateStepUsage(emptyUsage(), steps, 'claude'));
+    expect(accumulateStepUsage(emptyUsage(), steps).cacheReadTokens).toBe(5_000);
+
+    // ...and a codex-labelled generation must NOT bill from the anthropic keys.
+    expect(accumulateStepUsage(emptyUsage(), steps, 'codex').cacheReadTokens).toBe(0);
+  });
 });

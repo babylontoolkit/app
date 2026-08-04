@@ -121,6 +121,102 @@ describe('validation — the promotion wall', () => {
     expect(errorsOf(list).join()).toMatch(/cache rates derive/i);
   });
 
+  /*
+   * THE PAIR IS FAMILY POLICY, NOT A FLAT REFUSAL (2026-08-04, `model-families.ts`).
+   *
+   * The refusal above stays exactly right for `claude-*`, where the multipliers are MEASURED on KIE and
+   * a quoted number would be a second opinion about a derived one. It is wrong for `gpt-*`, where KIE
+   * PUBLISHES Cached Input and Cache Writes prices that are not multiples of input — deriving those
+   * would invent a discount we cannot verify, and nothing would fail; the invoices would just be wrong.
+   */
+  it('accepts a gpt row quoting BOTH cache rates — KIE publishes them and they do not derive', () => {
+    const list = validList();
+    list.llm['gpt-5-6-sol'] = {
+      inputPerMTok: 1.25,
+      outputPerMTok: 10,
+      cachedInputPerMTok: 0.125,
+      cacheWritePerMTok: 1.5625,
+    };
+
+    expect(validateMarketPriceList(list).ok).toBe(true);
+  });
+
+  /*
+   * 🔴 BOTH HALVES OR NEITHER. A row quoting only Cached Input leaves the write rate derived at 2.0x an
+   * input rate KIE does not use for writes — a row half-priced from each source, which is the
+   * `packMargin()` shape (two numbers, each locally sensible, disagreeing about what one thing costs).
+   * The error must name the MISSING half, or the admin fixing a pasted list is told a row is wrong
+   * without being told which number to type.
+   */
+  it.each([
+    ['cachedInputPerMTok', 'cacheWritePerMTok'],
+    ['cacheWritePerMTok', 'cachedInputPerMTok'],
+  ])('refuses a gpt row quoting only %s, naming the missing %s', (present, missing) => {
+    const list = validList();
+    list.llm['gpt-5-6-sol'] = { inputPerMTok: 1.25, outputPerMTok: 10, [present]: 0.125 };
+
+    const joined = errorsOf(list).join();
+    expect(joined).toMatch(/must quote both cache rates/i);
+    expect(joined).toContain(missing);
+  });
+
+  /* Neither half is the same bug with both halves derived, and is refused for the same reason. */
+  it('refuses a gpt row quoting NEITHER cache rate — deriving both is the bug, not the fallback', () => {
+    const list = validList();
+    list.llm['gpt-5-6-sol'] = { inputPerMTok: 1.25, outputPerMTok: 10 };
+
+    expect(errorsOf(list).join()).toMatch(/must quote both cache rates/i);
+  });
+
+  /*
+   * Gemini quotes no cached rate on KIE and their wire returns no cached-token counter, so there is no
+   * discount to grant and no surcharge to observe — cached tokens bill at the FULL input rate. A row
+   * quoting a pair would be inventing an economics we cannot verify, so the refusal must SAY that
+   * rather than repeating claude's "cache rates derive" wording, which would send an operator looking
+   * for a multiplier that does not exist for this family.
+   */
+  it('refuses a gemini row quoting the pair, explaining that cached tokens bill at full input rate', () => {
+    const list = validList();
+    list.llm['gemini-3-pro'] = {
+      inputPerMTok: 2,
+      outputPerMTok: 12,
+      cachedInputPerMTok: 0.2,
+      cacheWritePerMTok: 4,
+    };
+
+    expect(errorsOf(list).join()).toMatch(/full input rate/i);
+  });
+
+  /*
+   * An id no prefix claims is REFUSED rather than defaulted — the other side of `requireFamily`'s
+   * throw: we would be pricing a model whose wire, and therefore whose cache economics, we cannot name.
+   *
+   * ⚠️ KIE's pricing FEED display name `gpt-5.6-sol` is NOT this case — it starts with `gpt-`, so it is
+   * a known family and is caught by the atomic-pair rule above instead. The dots matter at the wire
+   * (the API id is `gpt-5-6-sol`), not here.
+   */
+  it.each([['llama-3'], ['o3-mini'], ['sonnet-5']])('refuses an llm row of no known family: %s', (id) => {
+    const list = validList();
+    list.llm[id] = { inputPerMTok: 2, outputPerMTok: 10 };
+
+    expect(errorsOf(list).join()).toMatch(/known model family/i);
+  });
+
+  /*
+   * Every cache error is PUSHED, never thrown. An admin fixing a pasted list needs the whole picture:
+   * a half-paired gpt row AND a quoted claude pair must both be reported on the SAME pass, or fixing
+   * one just reveals the other one refresh later.
+   */
+  it('reports a half-paired gpt row AND a quoted claude pair in ONE pass', () => {
+    const list = validList();
+    list.llm['gpt-5-6-sol'] = { inputPerMTok: 1.25, outputPerMTok: 10, cachedInputPerMTok: 0.125 };
+    (list.llm[DEFAULT_MODEL] as unknown as Record<string, number>).cacheReadPerMTok = 0.2;
+
+    const joined = errorsOf(list).join();
+    expect(joined, 'the gpt half-pair').toMatch(/must quote both cache rates/i);
+    expect(joined, 'the claude quote').toMatch(/cache rates derive/i);
+  });
+
   it('rejects a media model with no variants — unpriced means it cannot run', () => {
     const list = validList();
     list.media['nano-banana-2'].variants = [];

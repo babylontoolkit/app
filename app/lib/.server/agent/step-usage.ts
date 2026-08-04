@@ -18,6 +18,9 @@
  * a user's finished generation over our own bookkeeping would cost us the generation.
  */
 
+import { extractStepCacheTokens } from './usage-metadata';
+import type { ModelFamily } from '~/lib/modules/llm/model-families';
+
 /** What one generation cost, in the four token classes Anthropic bills separately (§4.6). */
 export interface GenerationUsage {
   /** UNCACHED input. `@ai-sdk/anthropic` maps only `input_tokens` here — cache classes are separate. */
@@ -44,12 +47,13 @@ export interface UsageStep {
     completionTokens?: number;
     totalTokens?: number;
   };
-  providerMetadata?: {
-    anthropic?: {
-      cacheReadInputTokens?: number;
-      cacheCreationInputTokens?: number;
-    };
-  };
+
+  /**
+   * Deliberately OPAQUE since 2026-08-04: the cache counters live under a family-specific namespace
+   * (`anthropic` / `openai` / `google`) and are read by `usage-metadata.ts`, which owns the mapping.
+   * Naming one vendor's shape here is what let two call sites hardcode `anthropic` independently.
+   */
+  providerMetadata?: unknown;
 }
 
 export function emptyUsage(): GenerationUsage {
@@ -73,15 +77,26 @@ function n(value: unknown): number {
  * Mutates and returns `totals` so a generation that streams more than once (the forced-answer
  * continuation when the tool cap is hit) accumulates across both drains rather than clobbering.
  */
-export function accumulateStepUsage(totals: GenerationUsage, steps: readonly UsageStep[] | undefined): GenerationUsage {
+export function accumulateStepUsage(
+  totals: GenerationUsage,
+  steps: readonly UsageStep[] | undefined,
+  family?: ModelFamily,
+): GenerationUsage {
   for (const step of steps ?? []) {
     totals.promptTokens += n(step.usage?.promptTokens);
     totals.completionTokens += n(step.usage?.completionTokens);
     totals.totalTokens += n(step.usage?.totalTokens);
 
-    const anthropic = step.providerMetadata?.anthropic;
-    totals.cacheReadTokens += n(anthropic?.cacheReadInputTokens);
-    totals.cacheCreationTokens += n(anthropic?.cacheCreationInputTokens);
+    /*
+     * ⚠️ `family` is OPTIONAL and an omitted one reads the `anthropic` namespace — byte-identical to
+     * what this function did before families existed. A required parameter would have been the
+     * stricter design and the wrong one here: this is settlement, which can never refuse (§4.6), so a
+     * caller that cannot name the family must still bill SOMETHING correct for the common case rather
+     * than throw. `proxy.ts` passes `familyOf(config.model)` and is the only production caller.
+     */
+    const cache = extractStepCacheTokens(step.providerMetadata, family);
+    totals.cacheReadTokens += cache.cacheReadTokens;
+    totals.cacheCreationTokens += cache.cacheCreationTokens;
   }
 
   return totals;

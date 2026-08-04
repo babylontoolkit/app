@@ -20,6 +20,7 @@ import { extendedModelsEnabled } from './extended-models';
 import type { MarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { activeMarketPrices } from './market-price-store';
+import { FAMILY_POLICY, familyOf } from '~/lib/modules/llm/model-families';
 import {
   PAID_MODEL_TIERS,
   STANDARD_TIER_LABEL,
@@ -143,10 +144,46 @@ export const MODEL_RATES: Record<string, ModelRates> = {
  */
 export const KIE_MODEL_RATES: Record<string, ModelRates> = llmRatesFromList(BAKED_MARKET_PRICES);
 
-/** A full `ModelRates` table from a price list's llm rows — cache always derives from each row's base. */
+/**
+ * A full `ModelRates` table from a price list's llm rows, with cache resolved by FAMILY POLICY.
+ *
+ * The three profiles (`model-families.ts`, validated into the list by `market-prices.ts`):
+ *
+ *  - `derived` (claude-*) — the historical behavior, byte-identical: 0.1x read / 2.0x 1h write off
+ *    each row's own input rate, measured on this vendor.
+ *  - `explicit-pair` (gpt-*) — KIE publishes both prices and neither is a multiple of input, so the
+ *    row's quotes are used verbatim. Validation guarantees both halves are present.
+ *  - `none` (gemini-*) — KIE quotes no cached rate and reports no cached-token counter, so cached
+ *    tokens bill at the FULL INPUT rate (read = write = input). Deliberately NOT a discount: we do
+ *    not grant one we cannot verify, and we do not add a surcharge we cannot observe. This is why the
+ *    admin margin report may show a Gemini warm edit costing what a cold one costs — by design, not a
+ *    caching regression (spec edge case).
+ *
+ * ⚠️ An UNKNOWN family falls back to `derived`. Validation refuses such a row on the way in, so this
+ * is only reachable for a baked/stored row that predates the family rules — deriving is the same
+ * answer the function has always given, which keeps this fallback a no-op rather than a new opinion.
+ */
 export function llmRatesFromList(list: MarketPriceList): Record<string, ModelRates> {
   return Object.fromEntries(
-    Object.entries(list.llm).map(([model, rate]) => [model, ratesFromBase(rate.inputPerMTok, rate.outputPerMTok)]),
+    Object.entries(list.llm).map(([model, rate]) => {
+      const profile = familyOf(model) ? FAMILY_POLICY[familyOf(model)!].cacheProfile : 'derived';
+
+      /*
+       * ⚠️ The `explicit-pair` branch passes `number | undefined`, and `ratesFromBase` treats
+       * `undefined` as "derive". Validation is the ONLY thing guaranteeing both halves are present —
+       * a gpt row that reached this table without passing `validateMarketPriceList` would silently
+       * fall back to claude's 0.1x/2.0x. That is why the pair is enforced atomically at the wall
+       * rather than defended here: there is no honest default for a price the vendor publishes.
+       */
+      const cache =
+        profile === 'explicit-pair'
+          ? { cacheReadPerMTok: rate.cachedInputPerMTok, cacheWritePerMTok: rate.cacheWritePerMTok }
+          : profile === 'none'
+            ? { cacheReadPerMTok: rate.inputPerMTok, cacheWritePerMTok: rate.inputPerMTok }
+            : undefined;
+
+      return [model, ratesFromBase(rate.inputPerMTok, rate.outputPerMTok, cache)];
+    }),
   );
 }
 

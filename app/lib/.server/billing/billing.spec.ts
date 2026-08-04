@@ -30,7 +30,9 @@ import {
   type TokenUsage,
 } from './rates';
 import { PAID_MODEL_TIERS } from './model-tiers';
+import { FAMILY_POLICY, familyOf, type CacheProfile } from '~/lib/modules/llm/model-families';
 import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
+import type { LlmMarketRate } from './market-prices';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import {
@@ -233,8 +235,22 @@ function memoryStore(): ObjectStore {
   };
 }
 
+/**
+ * A model's cache profile, so the rate-table loops below can assert the RULE THAT APPLIES rather than
+ * a single rule that only ever held while the platform served one family (`spec/billing.md`).
+ *
+ * An unrecognised id reports `derived`, matching `llmRatesFromList`'s own fallback — so a row that
+ * somehow escaped validation is still held to the historical claude assertion rather than silently
+ * excused from every one of them.
+ */
+function cacheProfileOf(model: string): CacheProfile {
+  const family = familyOf(model);
+
+  return family ? FAMILY_POLICY[family].cacheProfile : 'derived';
+}
+
 /** Promote the baked list plus extra/overridden LLM rows — the admin-panel path, in one line. */
-async function promoteLlmRows(rows: Record<string, { inputPerMTok: number; outputPerMTok: number }>) {
+async function promoteLlmRows(rows: Record<string, LlmMarketRate>) {
   const result = await promoteMarketPrices(memoryStore(), {
     ...BAKED_MARKET_PRICES,
     llm: { ...BAKED_MARKET_PRICES.llm, ...rows },
@@ -273,18 +289,60 @@ describe('rate table', () => {
    * five-minute rate is exactly the bug this pair exists to catch — and it would have walked straight
    * past a table these loops did not visit.
    */
-  it('bills cache WRITES at 2x input on every provider — the 1h tier, not the 1.25x default', () => {
+  it('bills cache WRITES at 2x input on every DERIVED (claude) row — the 1h tier, not the 1.25x default', () => {
     for (const [provider, table] of Object.entries(providerRates())) {
       for (const [model, rates] of Object.entries(table)) {
+        if (cacheProfileOf(model) !== 'derived') {
+          continue;
+        }
+
         expect(rates.cacheWritePerMTok, `${provider}/${model}`).toBeCloseTo(rates.inputPerMTok * 2, 5);
       }
     }
   });
 
-  it('bills cache READS at 0.1x input on every provider — the margin lever', () => {
+  it('bills cache READS at 0.1x input on every DERIVED (claude) row — the margin lever', () => {
     for (const [provider, table] of Object.entries(providerRates())) {
       for (const [model, rates] of Object.entries(table)) {
+        if (cacheProfileOf(model) !== 'derived') {
+          continue;
+        }
+
         expect(rates.cacheReadPerMTok, `${provider}/${model}`).toBeCloseTo(rates.inputPerMTok * 0.1, 5);
+      }
+    }
+  });
+
+  /*
+   * ⚠️ The two loops above SKIP rows, so a bug that reclassified every claude row out of `derived`
+   * would empty them and they would pass green on zero assertions — the vacuous-test shape this repo
+   * keeps rediscovering. This asserts they actually visited something.
+   */
+  it('actually visits derived rows — the skip above must not be able to empty the loops', () => {
+    const derived = Object.values(providerRates()).flatMap((table) =>
+      Object.keys(table).filter((model) => cacheProfileOf(model) === 'derived'),
+    );
+
+    expect(derived.length).toBeGreaterThan(0);
+  });
+
+  /*
+   * The other two profiles, asserted as themselves rather than skipped into silence.
+   *
+   *  - gemini-*: KIE quotes NO cached rate and returns no cached-token counter, so cached tokens bill
+   *    at the FULL input rate. A warm Gemini edit costing what a cold one costs is by design.
+   *  - gpt-*: KIE publishes both prices and neither is a multiple of input, so the row's own quotes
+   *    are used verbatim. Deriving them would invent a discount we cannot verify.
+   */
+  it('bills gemini cached tokens at the FULL input rate — read = write = input, no discount, no surcharge', () => {
+    for (const [provider, table] of Object.entries(providerRates())) {
+      for (const [model, rates] of Object.entries(table)) {
+        if (cacheProfileOf(model) !== 'none') {
+          continue;
+        }
+
+        expect(rates.cacheReadPerMTok, `${provider}/${model} cache read`).toBeCloseTo(rates.inputPerMTok, 9);
+        expect(rates.cacheWritePerMTok, `${provider}/${model} cache write`).toBeCloseTo(rates.inputPerMTok, 9);
       }
     }
   });
@@ -355,6 +413,10 @@ describe('rate table', () => {
   it('derives every baked row exactly, so the derivation is not a second opinion on a known price', () => {
     for (const [provider, table] of Object.entries(providerRates())) {
       for (const [model, rates] of Object.entries(table)) {
+        if (cacheProfileOf(model) !== 'derived') {
+          continue;
+        }
+
         const derived = ratesFromBase(rates.inputPerMTok, rates.outputPerMTok);
 
         /*
@@ -424,13 +486,65 @@ describe('KIE rates', () => {
       'claude-sonnet-4-5',
       'claude-sonnet-4-6',
       'claude-sonnet-5',
+      'gemini-3-5-flash',
+      'gpt-5-6-luna',
+      'gpt-5-6-sol',
+      'gpt-5-6-terra',
     ]);
   });
 
+  /*
+   * 🔴 THE GPT ROWS' CACHE PRICES ARE QUOTED, NOT DERIVED — and the WRITE is the one that proves it.
+   *
+   * KIE's feed prices Cache Writes at **1.25x input** on this family (the five-minute tier), where
+   * every Claude row derives **2.0x** (the 1-hour tier). Deriving these would over-charge the write
+   * class by 60% on every cold turn, silently. This asserts the feed's absolute numbers AND that they
+   * are not what derivation would have produced — a pin that only checked the values would still pass
+   * if someone re-derived them to the same numbers by coincidence.
+   */
+  it("bills the gpt rows at KIE's QUOTED cache prices — the write is 1.25x, NOT the derived 2x", () => {
+    expect(KIE_MODEL_RATES['gpt-5-6-sol']).toEqual({
+      inputPerMTok: 1.4,
+      outputPerMTok: 8.4,
+      cacheReadPerMTok: 0.14,
+      cacheWritePerMTok: 1.75,
+    });
+
+    expect(KIE_MODEL_RATES['gpt-5-6-sol'].cacheWritePerMTok, 'NOT 2x input').not.toBeCloseTo(1.4 * 2, 5);
+    expect(KIE_MODEL_RATES['gpt-5-6-luna'].cacheWritePerMTok).toBeCloseTo(0.07, 9);
+    expect(KIE_MODEL_RATES['gpt-5-6-luna'].cacheReadPerMTok).toBeCloseTo(0.0056, 9);
+
+    expect(KIE_MODEL_RATES['gpt-5-6-terra'].cacheWritePerMTok).toBeCloseTo(0.7, 9);
+    expect(KIE_MODEL_RATES['gpt-5-6-terra'].cacheReadPerMTok).toBeCloseTo(0.056, 9);
+  });
+
+  /* Gemini: KIE quotes no cached rate at all, so cached tokens bill at the FULL input rate. */
+  it('bills gemini cached tokens at full input — KIE publishes no cached rate for it', () => {
+    expect(KIE_MODEL_RATES['gemini-3-5-flash']).toEqual({
+      inputPerMTok: 0.45,
+      outputPerMTok: 2.7,
+      cacheReadPerMTok: 0.45,
+      cacheWritePerMTok: 0.45,
+    });
+  });
+
   /* The baked table IS the baked market price list — one source, no second copy to drift. */
-  it('derives the baked table from BAKED_MARKET_PRICES.llm exactly', () => {
+  it('derives the baked table from BAKED_MARKET_PRICES.llm exactly, per family', () => {
     for (const [model, row] of Object.entries(BAKED_MARKET_PRICES.llm)) {
-      expect(KIE_MODEL_RATES[model]).toEqual(ratesFromBase(row.inputPerMTok, row.outputPerMTok));
+      /*
+       * The expectation is built from the row's OWN family policy, not from one hardcoded rule — the
+       * claude branch is byte-identical to what this test always asserted, and the other two would be
+       * silently wrong under it (gpt's write is 1.25x, gemini has no cached rate at all).
+       */
+      const profile = cacheProfileOf(model);
+      const cache =
+        profile === 'explicit-pair'
+          ? { cacheReadPerMTok: row.cachedInputPerMTok, cacheWritePerMTok: row.cacheWritePerMTok }
+          : profile === 'none'
+            ? { cacheReadPerMTok: row.inputPerMTok, cacheWritePerMTok: row.inputPerMTok }
+            : undefined;
+
+      expect(KIE_MODEL_RATES[model], model).toEqual(ratesFromBase(row.inputPerMTok, row.outputPerMTok, cache));
     }
 
     expect(Object.keys(KIE_MODEL_RATES).sort()).toEqual(Object.keys(BAKED_MARKET_PRICES.llm).sort());
@@ -479,18 +593,25 @@ describe('the KIE model selector + the marketplace price list', () => {
    * directions to the Admin panel.
    */
   it('refuses a KIE_DEFAULT_MODEL the active price list does not price', () => {
-    vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
+    vi.stubEnv('KIE_DEFAULT_MODEL', 'claude-opus-9-9');
     expect(() => kieDefaultModel()).toThrow(/Marketplace price list/);
   });
 
-  /* The admin-panel path: promote a list with the row, and the selector is accepted at THAT price. */
+  /*
+   * The admin-panel path: promote a list with the row, and the selector is accepted at THAT price.
+   *
+   * ⚠️ Deliberately a CLAUDE id. It used to name `gpt-5-6-sol` back when that was just an arbitrary
+   * unpriced string; it is a real `explicit-pair` family id now, whose cache rates do NOT derive — so
+   * asserting derivation against it would pin the wrong rule to a real model. The claim under test is
+   * about the DERIVED profile, so it is made against a model that has one.
+   */
   it('accepts the selector once a promoted list prices it, with cache derived from ITS base', async () => {
-    await promoteLlmRows({ 'gpt-5-6-sol': { inputPerMTok: 1.4, outputPerMTok: 8.4 } });
-    vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
+    await promoteLlmRows({ 'claude-opus-4-9': { inputPerMTok: 1.4, outputPerMTok: 8.4 } });
+    vi.stubEnv('KIE_DEFAULT_MODEL', 'claude-opus-4-9');
 
-    expect(kieDefaultModel()).toBe('gpt-5-6-sol');
+    expect(kieDefaultModel()).toBe('claude-opus-4-9');
 
-    const rates = ratesFor('gpt-5-6-sol', 'KIE');
+    const rates = ratesFor('claude-opus-4-9', 'KIE');
     expect(rates.inputPerMTok).toBe(1.4);
     expect(rates.outputPerMTok).toBe(8.4);
     expect(rates.cacheReadPerMTok, 'derived 0.1x').toBeCloseTo(0.14, 9);
@@ -509,6 +630,57 @@ describe('the KIE model selector + the marketplace price list', () => {
     expect(rates.inputPerMTok).toBe(1);
     expect(rates.cacheReadPerMTok, 'NOT the baked 0.2').toBeCloseTo(0.1, 5);
     expect(rates.cacheWritePerMTok, 'NOT the baked 4.0').toBeCloseTo(2.0, 5);
+  });
+
+  /*
+   * 🔴 A PROMOTED GPT ROW IS BILLED AT ITS QUOTED CACHE PRICES, VERBATIM (2026-08-04).
+   *
+   * KIE publishes Cached Input and Cache Writes for the 5.6 family and NEITHER is a multiple of input,
+   * so deriving them would invent a discount we cannot verify — silently, with the credit count going
+   * DOWN, which reads as a cheaper turn. The quoted numbers below are deliberately chosen so that the
+   * derived answers (0.125 read / 2.5 write) differ from the quoted ones (0.5 / 3.0): an assertion that
+   * both rules satisfy proves nothing about which one ran.
+   */
+  it('bills a promoted gpt row at its QUOTED cache rates — never 0.1x/2.0x of input', async () => {
+    await promoteLlmRows({
+      'gpt-5-6-sol': { inputPerMTok: 1.25, outputPerMTok: 10, cachedInputPerMTok: 0.5, cacheWritePerMTok: 3.0 },
+    });
+
+    const rates = ratesFor('gpt-5-6-sol', 'KIE');
+    expect(rates.inputPerMTok).toBe(1.25);
+    expect(rates.cacheReadPerMTok, 'quoted, NOT the derived 0.125').toBeCloseTo(0.5, 9);
+    expect(rates.cacheWritePerMTok, 'quoted, NOT the derived 2.5').toBeCloseTo(3.0, 9);
+  });
+
+  /*
+   * 🔴 A PROMOTED GEMINI ROW BILLS CACHED TOKENS AT THE FULL INPUT RATE — read = write = input.
+   *
+   * KIE quotes no cached rate for this family and their wire returns no cached-token counter, so there
+   * is neither a discount to grant nor a surcharge to observe (owner decision 2026-08-04). Input 2 is
+   * picked so the derived answers (0.2 / 4.0) cannot be mistaken for the full-rate ones.
+   */
+  it('bills a promoted gemini row at read = write = input — no discount we cannot verify', async () => {
+    await promoteLlmRows({ 'gemini-3-pro': { inputPerMTok: 2, outputPerMTok: 12 } });
+
+    const rates = ratesFor('gemini-3-pro', 'KIE');
+    expect(rates.cacheReadPerMTok, 'full input rate, NOT the derived 0.2').toBeCloseTo(2, 9);
+    expect(rates.cacheWritePerMTok, 'full input rate, NOT the derived 4.0').toBeCloseTo(2, 9);
+  });
+
+  /*
+   * The same rule where it actually spends money: a cache-read token and an uncached input token cost
+   * the SAME on gemini. This is what makes "a warm Gemini edit costs what a cold one costs" a design
+   * decision rather than a caching regression someone will later "fix".
+   */
+  it('prices a gemini cache-read token exactly like an uncached input token (rawCostUsd)', async () => {
+    await promoteLlmRows({ 'gemini-3-pro': { inputPerMTok: 2, outputPerMTok: 12 } });
+
+    const base = { promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+    const uncached = rawCostUsd({ ...base, promptTokens: 1_000_000 }, 'gemini-3-pro', 'KIE');
+    const cached = rawCostUsd({ ...base, cacheReadTokens: 1_000_000 }, 'gemini-3-pro', 'KIE');
+
+    expect(cached).toBeCloseTo(uncached, 9);
+    expect(cached, '$2 per million, the full input rate').toBeCloseTo(2, 9);
   });
 
   /*
@@ -531,7 +703,16 @@ describe('the KIE model selector + the marketplace price list', () => {
 
   /* The configured model becomes KIE's default — that is what "default" in the name means. */
   it('becomes the platform model on KIE, priced by its own row', async () => {
-    await promoteLlmRows({ 'gpt-5-6-sol': { inputPerMTok: 1.57, outputPerMTok: 8.4 } });
+    await promoteLlmRows({
+      'gpt-5-6-sol': {
+        inputPerMTok: 1.57,
+        outputPerMTok: 8.4,
+
+        // gpt-* is `explicit-pair`: KIE publishes both, and validation refuses a row that omits either.
+        cachedInputPerMTok: 0.157,
+        cacheWritePerMTok: 1.96,
+      },
+    });
     vi.stubEnv('LLM_PROVIDER', 'KIE');
     vi.stubEnv('LLM_MODEL', undefined as unknown as string);
     vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
@@ -554,7 +735,16 @@ describe('the KIE model selector + the marketplace price list', () => {
    * `y`'s rates, which is the precise failure this precedence chain could otherwise introduce.
    */
   it('never prices LLM_MODEL at KIE_DEFAULT_MODEL rates', async () => {
-    await promoteLlmRows({ 'gpt-5-6-sol': { inputPerMTok: 1.57, outputPerMTok: 8.4 } });
+    await promoteLlmRows({
+      'gpt-5-6-sol': {
+        inputPerMTok: 1.57,
+        outputPerMTok: 8.4,
+
+        // gpt-* is `explicit-pair`: KIE publishes both, and validation refuses a row that omits either.
+        cachedInputPerMTok: 0.157,
+        cacheWritePerMTok: 1.96,
+      },
+    });
     vi.stubEnv('LLM_PROVIDER', 'KIE');
     vi.stubEnv('KIE_DEFAULT_MODEL', 'gpt-5-6-sol');
 
@@ -582,8 +772,8 @@ describe('the KIE model selector + the marketplace price list', () => {
 
     expect(await provider.getDynamicModels(undefined, undefined, {})).toEqual([]);
 
-    const listed = await provider.getDynamicModels(undefined, undefined, { KIE_DEFAULT_MODEL: 'gpt-5-6-sol' });
-    expect(listed.map((m) => m.name)).toEqual(['gpt-5-6-sol']);
+    const listed = await provider.getDynamicModels(undefined, undefined, { KIE_DEFAULT_MODEL: 'claude-opus-9-9' });
+    expect(listed.map((m) => m.name)).toEqual(['claude-opus-9-9']);
 
     expect(
       await provider.getDynamicModels(undefined, undefined, { KIE_DEFAULT_MODEL: 'claude-opus-4-8' }),
@@ -726,7 +916,7 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
    * is that the OTHER rung's row is still standing.
    */
   it('skips an unpriceable premium rung without throwing, leaving SuperMax priced', () => {
-    stubTiers({ PREMIUM_MODEL: 'gpt-5-6-sol' });
+    stubTiers({ PREMIUM_MODEL: 'claude-opus-9-9' });
 
     // Control: the selector really is unpriceable, so the skip below is not vacuous.
     expect(() => getModelTier('premium', {})).toThrow(/Marketplace price list/);
@@ -734,19 +924,19 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
     expect(() => providerRates({})).not.toThrow();
 
     const anthropic = providerRates({}).Anthropic;
-    expect(anthropic['gpt-5-6-sol'], 'an unpriced selector must never be injected').toBeUndefined();
+    expect(anthropic['claude-opus-9-9'], 'an unpriced selector must never be injected').toBeUndefined();
     expect(anthropic[DEFAULT_SUPERMAX_MODEL], 'the healthy rung is dropped with the broken one').toBeDefined();
   });
 
   /* The mirror image — a broken SuperMax must not unprice Premium. */
   it('skips an unpriceable SuperMax rung without throwing, leaving Premium priced', () => {
-    stubTiers({ PREMIUM_MODEL: 'claude-fable-5', SUPERMAX_MODEL: 'gpt-5-6-sol' });
+    stubTiers({ PREMIUM_MODEL: 'claude-fable-5', SUPERMAX_MODEL: 'claude-opus-9-9' });
 
     expect(() => getModelTier('supermax', {})).toThrow(/Marketplace price list/);
     expect(() => providerRates({})).not.toThrow();
 
     const anthropic = providerRates({}).Anthropic;
-    expect(anthropic['gpt-5-6-sol']).toBeUndefined();
+    expect(anthropic['claude-opus-9-9']).toBeUndefined();
     expect(anthropic['claude-fable-5'], 'the healthy rung is dropped with the broken one').toBeDefined();
 
     /*
@@ -754,7 +944,7 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
      * know of, i.e. over-charging ourselves, which is the safe direction every fallback in `rates.ts`
      * takes. Never zero.
      */
-    expect(ratesFor('gpt-5-6-sol', 'Anthropic', {}).outputPerMTok).toBeGreaterThan(0);
+    expect(ratesFor('claude-opus-9-9', 'Anthropic', {}).outputPerMTok).toBeGreaterThan(0);
   });
 });
 

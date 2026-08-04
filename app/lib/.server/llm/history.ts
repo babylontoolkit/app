@@ -145,6 +145,50 @@ function compactTextParts(message: Message): Message {
  *
  * ⚠️ Do NOT "fix" this by adding a signature to `AgentChunk` and threading it to the client. That
  * re-introduces the per-turn cost this avoids, and the 400 comes back the moment any path drops it.
+ *
+ * ## ✅ AUDITED FOR THE GPT AND GEMINI FAMILIES (2026-08-04) — no extension needed, and WHY matters
+ *
+ * When KIE became three families, the question was whether either new wire round-trips a reasoning
+ * artifact this strip would miss — OpenAI Responses reasoning items / `encrypted_content`, or Gemini
+ * thought signatures. The answer is no, and it is guaranteed at THREE independent layers, any one of
+ * which is sufficient:
+ *
+ *   1. **Neither SDK's `doStream` emits anything but `{type:'reasoning', textDelta}`.**
+ *      `@ai-sdk/openai@1.3.24` maps only `response.reasoning_summary_text.delta`; reasoning output
+ *      ITEMS are parsed and then dropped (its `output_item.done` handler is gated on
+ *      `function_call`). `@ai-sdk/google@1.2.22` maps only `part.thought === true` to text. Neither
+ *      emits `reasoning-signature` or `redacted-reasoning`, though `@ai-sdk/provider@1.1.3`'s union
+ *      declares both. ⚠️ Scoped to `doStream` on purpose — openai's `doGenerate` DOES map a reasoning
+ *      summary into a `reasoning` array. `streamText` never calls it, and it still carries no
+ *      signature, but the claim above is about the path we actually use.
+ *   2. **Zod strips the fields before we ever see them — a per-vendor fact, not a shared one.**
+ *      Google's `contentSchema` declares a text part as exactly `{text, thought}` and that file
+ *      contains ZERO `.passthrough()` calls, so a `thoughtSignature` returned by KIE is discarded at
+ *      the parse boundary. ⚠️ The openai file DOES carry a `.passthrough()` unknown-chunk fallback, so
+ *      this layer does NOT hold for codex — an unrecognised chunk is admitted by the parse. It is
+ *      dropped one step later by the transform, which matches it against no branch and has no `else`;
+ *      layer 3 is the backstop. Separately, `encrypted_content` cannot even be REQUESTED: the
+ *      responses provider-options schema has no `include` field, and `codexFetch` writes only
+ *      `reasoning.effort`.
+ *   3. **Our own `drain` is a three-branch whitelist** (`proxy.ts`): `text-delta`, `reasoning`,
+ *      `error`. Every other stream part — and every `providerMetadata` — is dropped server-side, and
+ *      the route only ever writes the `g:` reasoning code, never `i:`/`j:`. So `details[].signature`
+ *      and `details[].type === 'redacted'` have no writer anywhere in this product.
+ *
+ * 🔴 **THE STRIP IS NOT FAMILY-CONDITIONAL, AND MUST NEVER BECOME SO.** That is exactly what makes the
+ * cross-family guarantee hold: a conversation's earlier turns may have run family A while this turn
+ * resolves to family B (any tier decline, any `LLM_MODEL` change, any resumed cross-device chat), so a
+ * strip keyed on "this turn's family" would fail on precisely the case the guarantee names. It is
+ * keyed on the message's ROLE and nothing else; `familyOf` is deliberately not imported here.
+ *
+ * ⚠️ ONE FUTURE TRIPWIRE, recorded so it is not rediscovered: Google has shipped `thoughtSignature`
+ * upstream, so a later `@ai-sdk/google` bump WILL start surfacing it and layer 2 above stops holding.
+ * Layers 1 and 3 still would — but re-run this audit on any bump of either vendor SDK.
+ *
+ * ⚠️ **WHAT THIS AUDIT DOES NOT COVER, stated plainly:** it is derived from the vendor SDKs' SOURCE,
+ * not from a live KIE capture. If KIE's gateway returns a chunk shape neither vendor SDK anticipates,
+ * layers 1 and 2 say nothing about it and only layer 3 catches it. T11's probe is what closes that,
+ * and its fixtures re-pin `history.spec.ts`.
  */
 function stripReasoning(message: Message): Message {
   const parts = message.parts?.filter((part) => part.type !== 'reasoning');

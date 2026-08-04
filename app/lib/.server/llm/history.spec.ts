@@ -10,6 +10,8 @@
  * model NEEDS (what the user asked for, which files it touched) makes the agent stupid in a way that
  * looks like a model problem, not a context problem.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Message } from 'ai';
 import {
@@ -475,5 +477,160 @@ describe('compactHistory — thinking never survives the turn', () => {
     const [out] = compactHistory([user]);
 
     expect(out).toBe(user);
+  });
+});
+
+/**
+ * The strip is FAMILY-INDEPENDENT, and that is the whole finding of the 2026-08-04 SDK audit
+ * (`stripReasoning`'s doc block).
+ *
+ * When KIE became three families, the open question was whether a codex (OpenAI Responses) or gemini
+ * turn round-trips a reasoning artifact this strip would miss. It does not — neither vendor SDK emits
+ * anything but `{type:'reasoning'}` parts, their zod schemas discard the vendor-specific fields at the
+ * parse boundary, and our `drain` is a three-branch whitelist. No code extension was needed. These
+ * tests pin that conclusion so a future change cannot quietly make the strip conditional.
+ *
+ * ⚠️ Every fixture here carries `details`, which the fixture above deliberately does not. `@ai-sdk/ui-utils`
+ * ALWAYS produces `details` on a reasoning part, so a strip that filtered on the CONTENTS of `details`
+ * instead of on `part.type` would pass every test above and fail every one below.
+ */
+describe('reasoning is stripped identically for every model family', () => {
+  /** Shape-identical across families: only the model named in `annotations` differs. */
+  const assistantWithReasoning = (model: string): Message =>
+    ({
+      id: 'a1',
+      role: 'assistant',
+      content: 'Built the boost pad.',
+      reasoning: 'The track mesh needs a trigger volume...',
+      annotations: [{ agentMeta: { model } }],
+      parts: [
+        { type: 'step-start' },
+        {
+          type: 'reasoning',
+          reasoning: 'The track mesh needs a trigger volume...',
+          details: [{ type: 'text', text: 'The track mesh needs a trigger volume...' }],
+        },
+        { type: 'text', text: 'Built the boost pad.' },
+      ],
+    }) as unknown as Message;
+
+  const compactOne = (message: Message) => compactHistory([message])[0] as Message & { reasoning?: string };
+
+  it.each(['gpt-5-6-sol', 'gemini-3-5-flash', 'claude-opus-5'])(
+    'leaves no reasoning artifact on a %s turn',
+    (model) => {
+      const out = compactOne(assistantWithReasoning(model));
+
+      expect(out.reasoning).toBeUndefined();
+      expect(out.parts?.some((part) => part.type === 'reasoning')).toBe(false);
+
+      // And the answer itself survives — the inverse regression.
+      expect(out.content).toBe('Built the boost pad.');
+    },
+  );
+
+  /*
+   * THE EQUIVALENCE IS THE FINDING. Three shape-identical turns differing only in which family produced
+   * them compact to byte-identical output, because the strip is keyed on ROLE and nothing else.
+   */
+  it('produces the SAME compacted message for codex, gemini and claude', () => {
+    const withoutModel = (model: string) => {
+      const out = compactOne(assistantWithReasoning(model)) as Message & { annotations?: unknown };
+      return { ...out, annotations: undefined };
+    };
+
+    const codex = withoutModel('gpt-5-6-sol');
+
+    expect(withoutModel('gemini-3-5-flash')).toEqual(codex);
+    expect(withoutModel('claude-opus-5')).toEqual(codex);
+  });
+
+  /*
+   * Structural pin on the NON-CONDITIONALITY. `compactHistory`'s signature takes only `{maxTurns}`, so
+   * the module has no way to learn this turn's family — and it must never grow one: a conversation's
+   * earlier turns may have run family A while this turn resolves to family B (a tier decline, an
+   * `LLM_MODEL` change, a resumed cross-device chat), which is precisely the case a family-keyed strip
+   * would break.
+   */
+  it('history.ts never references the model-family machinery', () => {
+    const source = readFileSync(fileURLToPath(new URL('./history.ts', import.meta.url)), 'utf8');
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+    // CONTROL: the scanner reads real code. A scan that silently matches nothing is not a test.
+    expect(code).toContain('function stripReasoning');
+    expect(code).not.toContain('/*');
+
+    for (const forbidden of ['familyOf', 'model-families', 'ModelFamily']) {
+      expect(code).not.toContain(forbidden);
+    }
+  });
+});
+
+/**
+ * States the product cannot currently produce, but that the SDK's `ReasoningUIPart` type permits — a
+ * `@ai-sdk/provider` bump or a change to `drain`'s three-branch whitelist could start producing any of
+ * them. Each must still be removed COMPLETELY, because a reasoning artifact that survives into the next
+ * turn is a hard 400 before a single token is generated.
+ */
+describe('defensive reasoning shapes are removed completely', () => {
+  const stringify = (message: Message) => JSON.stringify(message);
+
+  it('removes a reasoning part carrying a signature on its text detail', () => {
+    const message = {
+      id: 'a1',
+      role: 'assistant',
+      content: 'Done.',
+      parts: [
+        {
+          type: 'reasoning',
+          reasoning: 'thinking...',
+          details: [{ type: 'text', text: 'thinking...', signature: 'ErUBCkYIBRgCIkD0mfPz' }],
+        },
+        { type: 'text', text: 'Done.' },
+      ],
+    } as unknown as Message;
+
+    const [out] = compactHistory([message]);
+
+    expect(out.parts?.some((part) => part.type === 'reasoning')).toBe(false);
+    expect(stringify(out)).not.toContain('ErUBCkYIBRgCIkD0mfPz');
+  });
+
+  it('removes a REDACTED reasoning detail', () => {
+    const message = {
+      id: 'a1',
+      role: 'assistant',
+      content: 'Done.',
+      parts: [
+        { type: 'reasoning', reasoning: '', details: [{ type: 'redacted', data: 'EroBCkYIBRgCKkCq7x' }] },
+        { type: 'text', text: 'Done.' },
+      ],
+    } as unknown as Message;
+
+    const [out] = compactHistory([message]);
+
+    expect(out.parts?.some((part) => part.type === 'reasoning')).toBe(false);
+    expect(stringify(out)).not.toContain('EroBCkYIBRgCKkCq7x');
+  });
+
+  /*
+   * The reload path: `fillMessageParts` reconstructs `parts` from a persisted message, so a stored
+   * `reasoning` string can arrive with no reasoning PART at all. `hadReasoning` must still catch it —
+   * that field alone is enough to make the next request a 400.
+   */
+  it('removes a top-level `reasoning` field even with no reasoning part present', () => {
+    const message = {
+      id: 'a1',
+      role: 'assistant',
+      content: 'Done.',
+      reasoning: 'restored from storage...',
+      parts: [{ type: 'text', text: 'Done.' }],
+    } as unknown as Message;
+
+    const [out] = compactHistory([message]) as Array<Message & { reasoning?: string }>;
+
+    expect(out.reasoning).toBeUndefined();
+    expect(stringify(out)).not.toContain('restored from storage');
+    expect(out.content).toBe('Done.');
   });
 });

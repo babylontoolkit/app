@@ -3,7 +3,13 @@
  * wait and an error where the product should have worked.
  */
 import { describe, expect, it } from 'vitest';
-import { MAX_PROVIDER_RETRY_ATTEMPTS, retryThinkingMode, retryToolMode, shouldRetryGeneration } from './retry-policy';
+import {
+  EMPTY_RESPONSE_ERROR,
+  MAX_PROVIDER_RETRY_ATTEMPTS,
+  retryThinkingMode,
+  retryToolMode,
+  shouldRetryGeneration,
+} from './retry-policy';
 
 const base = { error: new Error('Internal error, please try again later'), outTokens: 0, aborted: false, attempts: 0 };
 
@@ -103,6 +109,96 @@ describe('shouldRetryGeneration', () => {
     expect(shouldRetryGeneration({ ...base, error: new Error('something weird happened') })).toBe(false);
     expect(shouldRetryGeneration({ ...base, error: undefined })).toBe(false);
     expect(shouldRetryGeneration({ ...base, error: new Error('') })).toBe(false);
+  });
+});
+
+/**
+ * HARVESTED FROM LIVE KIE PROBES, 2026-08-04 (T10/T11) — real measured strings, not documentation.
+ *
+ * KIE's gateway reports faults with **HTTP 200 and a JSON envelope** (`{"code":N,"msg":"…"}`), so the
+ * status line carries no 5xx and the digits sit in a `code` field the message text never shows. Every
+ * status-shaped pattern in `RETRYABLE` misses them, which is why they are matched on their own words.
+ */
+const HARVESTED_TRANSIENT = [
+  /* The dominant fault — seen on the claude AND gemini surfaces. */
+  'Server exception, please try again later',
+
+  /* codex; note the trailing tilde, which is theirs and must not be relied on. */
+  'The server is currently being maintained, please try again later~',
+
+  /* Already covered by /internal error/i — kept here so the harvest is asserted in full. */
+  'Internal error, please try again later',
+];
+
+/**
+ * The fatal half of the same harvest. Both are requests that will be exactly as wrong next time.
+ *
+ * `The page does not exist` is KIE's answer to an UNKNOWN MODEL ID, and its envelope `code` is **500** —
+ * so anything reasoning from "5xx means transient" would burn every retry attempt on a typo in
+ * `LLM_MODEL`. It is fatal because of what it says, never because of the number beside it.
+ */
+const HARVESTED_FATAL = [
+  'The page does not exist',
+  'Unauthorized – Authentication failed. Please check that your Authorization and Content-Type headers are correctly set.',
+];
+
+describe('shouldRetryGeneration — the 2026-08-04 KIE harvest', () => {
+  it.each(HARVESTED_TRANSIENT)('retries the harvested transient fault (%s)', (message) => {
+    expect(
+      shouldRetryGeneration({ ...base, error: new Error(message), outTokens: 0, aborted: false, attempts: 0 }),
+    ).toBe(true);
+  });
+
+  it.each(HARVESTED_FATAL)('never retries the harvested fatal fault (%s)', (message) => {
+    expect(
+      shouldRetryGeneration({ ...base, error: new Error(message), outTokens: 0, aborted: false, attempts: 0 }),
+    ).toBe(false);
+  });
+
+  /**
+   * FATAL is checked FIRST and holds two deliberately broad patterns, `/invalid/i` and `/not found/i`.
+   * A transient string that happened to contain either word would be silently refused a retry forever —
+   * so the harvest is asserted against those two patterns directly, not merely by outcome.
+   */
+  it.each(HARVESTED_TRANSIENT)("is not swallowed by FATAL's broad patterns (%s)", (message) => {
+    expect(/invalid/i.test(message)).toBe(false);
+    expect(/not found/i.test(message)).toBe(false);
+  });
+
+  /* The pre-existing refusals still outrank a harvested transient string — nothing here is a bypass. */
+  it('still refuses a harvested transient fault when aborted or out of attempts', () => {
+    const error = new Error('Server exception, please try again later');
+    expect(shouldRetryGeneration({ ...base, error, aborted: true })).toBe(false);
+    expect(shouldRetryGeneration({ ...base, error, attempts: MAX_PROVIDER_RETRY_ATTEMPTS })).toBe(false);
+  });
+});
+
+/**
+ * THE `outTokens` DISCRIMINATOR — the safety property that makes `/returned an empty response/i` safe.
+ *
+ * One sentence, thrown by `proxy.ts`'s `!producedText` guard, covers two completely different events:
+ *
+ *  - KIE answered 200 with a fault envelope and no SSE body at all. The SDK raises nothing, finishes
+ *    cleanly with empty text, and **nothing was billed**.
+ *  - The model returned a clean `stop` with no text and **10,054 output tokens billed** — the pathology
+ *    in `proxy.ts`'s comment, which must be refunded and never re-run.
+ *
+ * The distinction is NOT in the message; the two are byte-identical. It is entirely in whether anything
+ * was billed, which is the one question that decides whether a second attempt is honest or a double charge.
+ */
+describe('shouldRetryGeneration — the empty-response message is decided by billing, not by wording', () => {
+  const EMPTY_RESPONSE = EMPTY_RESPONSE_ERROR;
+
+  it('retries when nothing was billed (the KIE 200-envelope case)', () => {
+    expect(shouldRetryGeneration({ error: new Error(EMPTY_RESPONSE), outTokens: 0, aborted: false, attempts: 0 })).toBe(
+      true,
+    );
+  });
+
+  it('refuses the SAME message once output was billed (the clean-stop case — refund, never re-run)', () => {
+    expect(
+      shouldRetryGeneration({ error: new Error(EMPTY_RESPONSE), outTokens: 10054, aborted: false, attempts: 0 }),
+    ).toBe(false);
   });
 });
 

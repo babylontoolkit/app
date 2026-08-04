@@ -36,6 +36,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { env, envFlag, envNumber } from '~/lib/.server/env';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { getPlatformModel, getPlatformProvider } from '~/lib/.server/agent/config';
+import { familyOf } from '~/lib/modules/llm/model-families';
 import { KIE_DEFAULT_BASE_URL } from '~/lib/modules/llm/providers/kie-wire';
 import { getActivePrompt } from './active';
 
@@ -229,6 +230,30 @@ export async function runWarmCycle(context?: unknown, deps?: WarmCycleDeps): Pro
      * so the warmer staying quiet about it adds no new failure mode.
      */
     const model = getPlatformModel(context);
+
+    /*
+     * 🔴 CLAUDE ONLY — and the guard sits HERE, not in `ensureCacheWarmer`, on purpose.
+     *
+     * Breakpoint warming is an Anthropic mechanism end to end: it works by re-sending a prefix marked
+     * with `cache_control` so the vendor materialises the entry, and `buildWarmupRequest` speaks the
+     * Messages wire (`/claude/v1/messages` + `anthropic-version`) to do it. Against a `gpt-*` or
+     * `gemini-*` platform model that request warms NOTHING — it is a POST to the wrong endpoint for a
+     * model that is not running there — and the other two families have nothing to warm anyway:
+     * OpenAI-style prefix caching is automatic and unwarmable, and KIE prices no Gemini caching at all
+     * (`model-families.ts` `cacheProfile: 'none'`).
+     *
+     * ⚠️ `runWarmCycle` is the guard point rather than `ensureCacheWarmer` because it is the ONE choke
+     * point every door passes through — the interval, the kickoff, AND `warmAfterPromptChange` (fired
+     * on every prompt promotion). Guarding only the starter would leave the promotion path spending
+     * real money on a request that warms nothing, which is the exact false-comfort failure this
+     * module's own header warns about: "a warmer warming a prefix nobody sends fails silently".
+     */
+    const family = familyOf(model);
+
+    if (family !== 'claude') {
+      return none(`platform model "${model}" is not a Claude model — breakpoint warming is Anthropic-only`);
+    }
+
     const request = buildWarmupRequest({ model, promptText: active.content, apiKey });
     const fetchFn = deps?.fetchFn ?? fetch;
     const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));

@@ -486,26 +486,80 @@ describe('lockReasonFor', () => {
   });
 });
 
-describe('parseModel', () => {
-  it('renders the shipped ladder ids', () => {
-    expect(parseModel('claude-fable-5')).toEqual({ short: 'Fable', full: 'Fable 5' });
-    expect(parseModel('claude-opus-4-8')).toEqual({ short: 'Opus', full: 'Opus 4.8' });
-    expect(parseModel('claude-opus-5').full).toBe('Opus 5');
-    expect(parseModel('claude-sonnet-5').full).toBe('Sonnet 5');
+/**
+ * 🔴 EVERY ROW NAMES ITS OWN RUNG'S MODEL, ACROSS ALL THREE FAMILIES (§4.6.1a FR8, T11c).
+ *
+ * The rows are the only place a user can compare what the rungs actually ARE before spending on one, so
+ * a row that names the wrong model — or that renders an id verbatim because the parser only knew Claude
+ * — is a purchase made on wrong information. The parser's own derivation is pinned unit-side in
+ * `app/lib/stores/model-tier.spec.ts` (including the rule that it is derived from the id's shape and not
+ * from a client-side table); what is pinned HERE is that the resolved name reaches the screen, on the
+ * same row as its label, for a ladder whose rungs come from three different families.
+ *
+ * The ids are supplied by the FIXTURE, i.e. they arrive the way the server sends them
+ * (`modelTiersSessionHint`'s per-tier `model`) — the component is never given a family to look up.
+ */
+describe('ModelTierPanel — rung model names', () => {
+  /** A tri-family ladder: the shape T11 exists to serve. */
+  const triFamily = (): SessionState => {
+    const base = ladder({ balance: 50_000 });
+    const tiers = base.credits.modelTiers.tiers.map((tier) =>
+      tier.id === 'premium'
+        ? { ...tier, model: 'gpt-5-6-sol' }
+        : tier.id === 'supermax'
+          ? { ...tier, model: 'gemini-3-5-flash' }
+          : tier,
+    );
+
+    return { ...base, credits: { ...base.credits, modelTiers: { ...base.credits.modelTiers, tiers } } };
+  };
+
+  it('shows each rung’s resolved display name beside its label — "Premium — GPT 5.6 Sol"', () => {
+    sessionStore.set(triFamily());
+    openPanel();
+    render(<ModelTierPanel />);
+
+    expect(copyOf(row('Standard'))).toContain('Sonnet 5');
+    expect(copyOf(row('Premium'))).toContain('GPT 5.6 Sol');
+    expect(copyOf(row('SuperMax'))).toContain('Gemini 3.5 Flash');
+
+    // Never the raw id, and never the un-dotted version the id literally carries.
+    expect(copyOf(row('Premium')), 'a raw id on a row is the parser having failed silently').not.toContain(
+      'gpt-5-6-sol',
+    );
+    expect(copyOf(row('Premium'))).not.toContain('5 6');
   });
 
-  /**
-   * 🔴 AN UNRECOGNISED ID RETURNS ITSELF — it must never blank the pill or throw.
-   *
-   * `LLM_MODEL` and the rung selectors are operator config that can name a model this build has never
-   * heard of (§4.2a — swapping the platform model is a config operation, no redeploy). A parser that
-   * returned `''` for an unfamiliar id would leave the one control whose whole job is naming the model
-   * in use showing nothing at all.
+  /*
+   * The pill is the readout half of the same fact, and it is pinned in `ModelTierPill.spec.tsx` — the
+   * always-visible control is what a user reads on every turn, not the panel.
    */
-  it('returns an unrecognised id verbatim rather than throwing or blanking', () => {
-    expect(parseModel('gpt-5')).toEqual({ short: 'gpt-5', full: 'gpt-5' });
-    expect(parseModel('')).toEqual({ short: '', full: '' });
-    expect(parseModel('claude')).toEqual({ short: 'claude', full: 'claude' });
-    expect(parseModel('some-vendor/model:1')).toEqual({ short: 'some-vendor/model:1', full: 'some-vendor/model:1' });
+
+  /**
+   * CONTROL — the same assertions against the CLAUDE ladder, unchanged by the tri-family parser.
+   *
+   * Without it, generalising `parseModel` could rename every Claude rung and every assertion above would
+   * still pass: they only ever look at the two rungs the fixture moved.
+   */
+  it('CONTROL — an all-Claude ladder still reads exactly as it did', () => {
+    openPanel();
+    render(<ModelTierPanel />);
+
+    expect(copyOf(row('Standard'))).toContain('Sonnet 5');
+    expect(copyOf(row('Premium'))).toContain('Opus 5');
+    expect(copyOf(row('SuperMax'))).toContain('Fable 5');
+  });
+});
+
+/**
+ * `parseModel`'s own derivation — the families, the dash-to-dot rule, the verbatim fallthrough and the
+ * no-hardcoded-table source scan — lives with the unit in `app/lib/stores/model-tier.spec.ts`. Kept here
+ * only as the seam this file depends on: the panel renders whatever that function returns.
+ */
+describe('parseModel', () => {
+  it('is the single source of the names rendered above', () => {
+    expect(parseModel('claude-sonnet-5').full).toBe('Sonnet 5');
+    expect(parseModel('gpt-5-6-sol').full).toBe('GPT 5.6 Sol');
+    expect(parseModel('gemini-3-5-flash').full).toBe('Gemini 3.5 Flash');
   });
 });

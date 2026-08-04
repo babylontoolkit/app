@@ -125,6 +125,107 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
     'claude-sonnet-4-6': { inputPerMTok: 0.85, outputPerMTok: 4.275 },
     'claude-sonnet-4-5': { inputPerMTok: 0.85, outputPerMTok: 4.275 },
     'claude-opus-4-5': { inputPerMTok: 1.425, outputPerMTok: 7.15 },
+
+    /*
+     * 🔴 THE GPT FAMILY — the ONLY rows that quote their cache prices, and the reason that became
+     * possible (2026-08-04, feed-captured the same day; keys are the API ids with DASHES, never the
+     * feed's display names `gpt-5.6-sol`, which price nothing real).
+     *
+     * KIE publishes four numbers for each of these, and one of them is NOT a multiple our derivation
+     * produces:
+     *
+     *   | model        | Input  | Output | Cached Input     | Cache Writes      |
+     *   |--------------|--------|--------|------------------|-------------------|
+     *   | gpt-5-6-sol  | $1.4   | $8.4   | $0.14  = 0.1x    | $1.75 = **1.25x** |
+     *   | gpt-5-6-luna | $0.056 | $0.336 | $0.0056 = 0.1x   | $0.07 = **1.25x** |
+     *
+     * The read multiplier coincides with Claude's 0.1x; the WRITE is **1.25x, not the 2.0x** every
+     * Claude row derives. That 1.25x is the FIVE-MINUTE cache tier — KIE does not resell the 1-hour
+     * tier on this surface — so deriving these would have over-charged the write class by 60% on every
+     * cold turn, silently, with nothing throwing. This single divergence is the whole justification for
+     * the `explicit-pair` cache profile (`market-prices.ts`): a rule that holds for one family is not a
+     * rule, and the only way to find that out was to read the vendor's own numbers.
+     *
+     * ✅ **RECONCILED AGAINST KIE'S OWN BILLING, 2026-08-04** — not feed-only, unlike the late Claude
+     * rows above. Method: read the account credit balance, run a real generation, read it again, and
+     * compare the delta against what these rates compute from the reported usage. KIE prices every
+     * CHAT/TOKEN row at exactly $0.005/credit (`creditPrice` 280 = `usdPrice` 1.40 on sol input; 70 of
+     * 71 feed rows checked are exact to 8 decimals), which is what makes a balance delta convertible
+     * to USD. ⚠️ Not universal — the one outlier found was a MEDIA row (veo 3.1 4K, 380cr/$1.85 =
+     * 0.004868), so do not carry this conversion over to §4.16 pricing without re-deriving it.
+     *
+     *     gpt-5-6-sol      0 input / 546 output tokens → KIE $0.004600 · ours $0.004586 · ratio 0.997
+     *
+     * 🔴 **That run confirms the OUTPUT rate ONLY, and the reason is worth stating so nobody reads it
+     * as more:** KIE reported ZERO input tokens, so the input rate is multiplied by zero and ANY input
+     * price reproduces $0.004586 to the digit. The input and cache rates are untested by it. (Gemini's
+     * run below does weakly constrain its input rate — 385 prompt tokens are ~1.2% of that charge, so
+     * a 0.1% match bounds it to roughly ±8%.)
+     *
+     * It is still the second source `claude-opus-4-7` and `claude-fable-5` never got, and that check is
+     * what disqualified them (both report ZERO cache-write tokens while being charged the 2x). Measure
+     * a row's CACHE accounting before making it a default rung — the run above cached nothing.
+     *
+     * ✅ `gpt-5-6-terra` was held back pending a probe (FR9) and PROBED CLEAN on 2026-08-04 — HTTP
+     * 200, streamed, usage captured — so it ships priced AND listed, in the same edit, which is the
+     * only way the two can never drift into the priced-but-unlisted silent mis-bill.
+     *
+     * 🔴 Note the shape of all three rows: the READ is 0.1x input on every one (coinciding with
+     * Claude's derived multiplier) while the WRITE is 1.25x on every one. If a future row breaks that
+     * pattern, quote it — do not infer it. That is the whole point of `explicit-pair`.
+     */
+    'gpt-5-6-sol': {
+      inputPerMTok: 1.4,
+      outputPerMTok: 8.4,
+      cachedInputPerMTok: 0.14,
+      cacheWritePerMTok: 1.75,
+    },
+    'gpt-5-6-luna': {
+      inputPerMTok: 0.056,
+      outputPerMTok: 0.336,
+      cachedInputPerMTok: 0.0056,
+      cacheWritePerMTok: 0.07,
+    },
+    'gpt-5-6-terra': {
+      inputPerMTok: 0.56,
+      outputPerMTok: 3.36,
+      cachedInputPerMTok: 0.056,
+      cacheWritePerMTok: 0.7,
+    },
+
+    /*
+     * 🔴 THE GEMINI FAMILY — priced with NO cache row, because KIE publishes none.
+     *
+     * Verified against the live feed 2026-08-04: filtering it returns EXACTLY TWO rows, "Gemini 3.5
+     * Flash, chat, input" ($0.45) and "…, output" ($2.7). No Cached Input, no Cache Writes — unlike
+     * every gpt-5.6 row, which carries all four. Their wire reports no cached-token counter either
+     * (`usageMetadata` is `{promptTokenCount, candidatesTokenCount, thinkingTokenCount,
+     * totalTokenCount}`), so there is nothing to discount and nothing to observe.
+     *
+     * Hence `cacheProfile: 'none'`: cached tokens bill at the FULL input rate. Never a discount we
+     * cannot verify KIE grants, never a surcharge we cannot observe. **The consequence is real and
+     * intended — a warm Gemini edit costs what a cold one costs**, so the Admin margin report must not
+     * read this family as a caching regression (owner decision, flagged and accepted 2026-08-04).
+     *
+     * ✅ **RECONCILED AGAINST KIE'S OWN BILLING, 2026-08-04 — and it exposed a token-class subtlety
+     * worth more than the row itself.** Three generations, 385 prompt / 5,349 candidates / 3,639
+     * thinking tokens, KIE charged **$0.014600**:
+     *
+     *     counting candidates + thinking as output   → $0.024441   ratio 1.674  ❌
+     *     counting CANDIDATES ONLY as output          → $0.014616   ratio **1.001** ✅
+     *
+     * **KIE does not bill Gemini thinking tokens.** We match to 0.1% — but only because
+     * `@ai-sdk/google@1.2.22` maps `completionTokens` from `candidatesTokenCount` alone (dist L562,
+     * L621) and drops `thinkingTokenCount` on the floor. Our correctness here is INHERITED from that
+     * choice, not asserted by us.
+     *
+     * 🔴 **TRIPWIRE: if a future `@ai-sdk/google` bump starts folding thinking into `completionTokens`
+     * — which is the natural thing for it to do, since Google reports the counter — every Gemini
+     * generation would immediately over-charge the user by ~1.67x, silently, with nothing throwing.**
+     * That is the wrong direction to be wrong in (`rates.ts`: every fallback errs in OUR disfavour).
+     * Re-run this reconciliation on any bump of that SDK.
+     */
+    'gemini-3-5-flash': { inputPerMTok: 0.45, outputPerMTok: 2.7 },
   },
 
   /**

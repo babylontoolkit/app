@@ -14,12 +14,47 @@
  * variant that matches nothing refuses work the operator believes is priced.
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
+import { FAMILY_POLICY, familyOf, type CacheProfile } from '~/lib/modules/llm/model-families';
 
-/** USD per million tokens. Cache rates deliberately absent — they DERIVE (0.1x read / 2.0x 1h write). */
+/**
+ * USD per million tokens.
+ *
+ * ## The cache pair is OPTIONAL, and which rows may carry it is FAMILY POLICY (2026-08-04)
+ *
+ * The standing rule was flat: "cache rates are never quoted in the list — they derive (0.1x read /
+ * 2.0x 1h write)". That was measured on KIE's Claude gateway and it stays exactly true there. It is
+ * not true of the other two families KIE serves, so the rule is EXTENDED rather than broken:
+ *
+ *  - `claude-*` — the pair is REFUSED. Derivation is measured on this vendor
+ *    (`rates.ts`'s "HOW THE CACHE MULTIPLIERS STOPPED BEING AN ASSUMPTION"), so a quoted number is a
+ *    second opinion about a derived one and the two WILL drift.
+ *  - `gpt-*` — the pair is REQUIRED, both halves or neither. KIE PUBLISHES Cached Input and Cache
+ *    Writes prices for the 5.6 family, and they are not 0.1x/2.0x of input. Deriving them would
+ *    invent a discount we cannot verify; quoting one half would leave the other derived off a rate it
+ *    no longer matches — the `packMargin()` shape (two numbers, each locally sensible, disagreeing
+ *    about what one thing costs), which is why atomicity is enforced rather than assumed.
+ *  - `gemini-*` — the pair is REFUSED and cached tokens bill at FULL INPUT rate. KIE quotes no cached
+ *    rate and their wire returns no cached-token counter, so there is no discount to grant and no
+ *    surcharge to observe. Owner decision 2026-08-04: ship it, flagged, at full rate.
+ *
+ * `rates.ts` (`llmRatesFromList`) is the only reader of these two fields; it applies exactly the
+ * policy above via `FAMILY_POLICY[...].cacheProfile`.
+ */
 export interface LlmMarketRate {
   inputPerMTok: number;
   outputPerMTok: number;
+
+  /** GPT rows only (`cacheProfile: 'explicit-pair'`) — KIE's published Cached Input price. */
+  cachedInputPerMTok?: number;
+
+  /** GPT rows only (`cacheProfile: 'explicit-pair'`) — KIE's published Cache Writes price. */
+  cacheWritePerMTok?: number;
 }
+
+/** The two optional cache keys, named once so validation and `rates.ts` cannot disagree about them. */
+export const LLM_CACHE_RATE_KEYS = ['cachedInputPerMTok', 'cacheWritePerMTok'] as const;
+
+const LLM_BASE_RATE_KEYS = ['inputPerMTok', 'outputPerMTok'] as const;
 
 export type MediaKind = 'image' | 'video';
 
@@ -181,20 +216,7 @@ export function validateMarketPriceList(value: unknown): ValidationResult {
         errors.push(`llm["${model}"].outputPerMTok must be a positive number of USD per million tokens.`);
       }
 
-      const extras = Object.keys(rate).filter((k) => k !== 'inputPerMTok' && k !== 'outputPerMTok');
-
-      if (extras.length) {
-        /*
-         * Cache rates are DERIVED (0.1x read / 2.0x 1h write, measured on KIE — rates.ts). A list
-         * that quotes them is stating a second opinion about a derived number, and the two WILL
-         * drift. Refused rather than ignored: ignored config is how `KIE_CACHED_INPUT` half-bugs
-         * were born.
-         */
-        errors.push(
-          `llm["${model}"] has unsupported keys [${extras.join(', ')}] — only inputPerMTok/outputPerMTok; ` +
-            'cache rates derive (0.1x read, 2.0x write) and cannot be quoted here.',
-        );
-      }
+      validateLlmCachePolicy(model, rate, errors);
     }
   }
 
@@ -241,6 +263,77 @@ export function validateMarketPriceList(value: unknown): ValidationResult {
   }
 
   return errors.length ? { ok: false, errors } : { ok: true, list: value as unknown as MarketPriceList };
+}
+
+/**
+ * Per-family cache-rate policy for one llm row — see `LlmMarketRate` for why the flat rule became
+ * a family one.
+ *
+ * Every error is PUSHED, never thrown: an admin fixing a pasted list needs the whole picture, and a
+ * half-pair on a gpt row plus a quoted pair on a claude row must both be reported on the same pass.
+ */
+function validateLlmCachePolicy(model: string, rate: Record<string, unknown>, errors: string[]): void {
+  const family = familyOf(model);
+
+  if (!family) {
+    /*
+     * An unknown family is refused rather than defaulted, for the same reason `requireFamily` throws
+     * at model resolution: we would be pricing a model whose wire — and therefore whose cache
+     * economics — we cannot name. A priced-but-unserveable row is the "priced but not LISTED" trap
+     * (kie-wire.ts) approached from the other side.
+     */
+    errors.push(
+      `llm["${model}"] does not name a known model family — ids must start with claude-, gpt- or gemini-. ` +
+        "KIE's pricing FEED uses display names (gpt-5.6-sol); the price list is keyed by the API id (gpt-5-6-sol).",
+    );
+
+    return;
+  }
+
+  const profile: CacheProfile = FAMILY_POLICY[family].cacheProfile;
+  const quoted = LLM_CACHE_RATE_KEYS.filter((key) => rate[key] !== undefined);
+  const allowed: readonly string[] =
+    profile === 'explicit-pair' ? [...LLM_BASE_RATE_KEYS, ...LLM_CACHE_RATE_KEYS] : LLM_BASE_RATE_KEYS;
+
+  const extras = Object.keys(rate).filter((key) => !allowed.includes(key));
+
+  if (extras.length) {
+    const why =
+      profile === 'derived'
+        ? 'cache rates derive (0.1x read, 2.0x write) and cannot be quoted here'
+        : profile === 'none'
+          ? 'this family has no cached rate on KIE, so cache rates cannot be quoted here — cached tokens ' +
+            'bill at the full input rate'
+          : `only ${[...LLM_BASE_RATE_KEYS, ...LLM_CACHE_RATE_KEYS].join('/')} are supported`;
+
+    errors.push(`llm["${model}"] has unsupported keys [${extras.join(', ')}] — ${why}.`);
+  }
+
+  if (profile !== 'explicit-pair') {
+    return;
+  }
+
+  /*
+   * BOTH, ATOMICALLY. A row quoting only Cached Input would leave the write rate derived at 2.0x of an
+   * input rate KIE does not use for writes — a row half-priced from each source, which is exactly the
+   * failure the old flat refusal was protecting against, surviving into the family that needs quotes.
+   * A row quoting NEITHER is the same bug with both halves derived, and is refused for the same reason.
+   */
+  for (const key of LLM_CACHE_RATE_KEYS) {
+    if (rate[key] !== undefined && !isPrice(rate[key])) {
+      errors.push(`llm["${model}"].${key} must be a positive number of USD per million tokens.`);
+    }
+  }
+
+  if (quoted.length !== LLM_CACHE_RATE_KEYS.length) {
+    const missing = LLM_CACHE_RATE_KEYS.filter((key) => rate[key] === undefined);
+
+    errors.push(
+      `llm["${model}"] must quote both cache rates — missing [${missing.join(', ')}]. KIE publishes ` +
+        'Cached Input and Cache Writes prices for this family and neither derives from input, so a ' +
+        'partly-quoted row bills a cache class against a rate that does not apply to it.',
+    );
+  }
 }
 
 /** A whole, non-negative number of credits (search's flat toll — 0 allowed, unlike a USD price). */

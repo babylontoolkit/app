@@ -56,12 +56,47 @@ if (!KEY) {
   throw new Error('no KIE_API_KEY in .env.local');
 }
 
-const BASE = env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
+const CLAUDE_BASE = env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
+const CODEX_BASE = env.KIE_CODEX_BASE_URL || 'https://api.kie.ai/codex/v1';
+const GEMINI_BASE = env.KIE_GEMINI_BASE_URL || 'https://api.kie.ai/gemini/v1';
+
+/**
+ * The family a model id belongs to — the same prefix rule as `app/lib/modules/llm/model-families.ts`.
+ * Duplicated rather than imported because this is a plain `.mjs` script with no TS pipeline; keep the
+ * two in step. A probe that guessed the wrong wire would report a healthy model as dead.
+ */
+function familyOf(model) {
+  if (model.startsWith('claude-')) {
+    return 'claude';
+  }
+
+  if (model.startsWith('gpt-')) {
+    return 'codex';
+  }
+
+  if (model.startsWith('gemini-')) {
+    return 'gemini';
+  }
+
+  throw new Error(`unknown family for "${model}" — add its prefix here and in model-families.ts`);
+}
 const ROUNDS = Number(process.argv[2] ?? 6);
 
 /**
- * Every Claude model the baked price list carries — keep in step with `baked-market-prices.ts`.
- * A model priced but never probed is a model nobody has checked the provider will serve.
+ * Every model the baked price list carries, ACROSS ALL THREE FAMILIES — keep in step with
+ * `baked-market-prices.ts`. A model priced but never probed is a model nobody has checked the
+ * provider will serve, and FR9 (the verified-ids rule) says such a model does not ship.
+ *
+ * ## The 2026-08-04 run (2 rounds x 13 models), which is why the non-Claude families exist
+ *
+ * `gpt-5-6-sol` 2/2 and `gpt-5-6-luna` 2/2 with ZERO failures; `gemini-3-5-flash` 1 ok / 1 timeout.
+ * Meanwhile the CLAUDE catalogue was failing 25–100% with `Server exception, please try again later`
+ * — including `claude-sonnet-5`, the platform default, at **0/4**. Same key, same minute, same script:
+ * that is what makes it a vendor incident on one adapter rather than a fault in the request shape.
+ *
+ * `gpt-5-6-terra` was added to the list on the strength of its own probe that day (HTTP 200,
+ * streamed, usage captured). Keep this array in step with `KIE_MODELS` + `baked-market-prices.ts`:
+ * a shipped id missing here is an id nobody re-checks.
  */
 const MODELS = [
   'claude-opus-5',
@@ -74,30 +109,104 @@ const MODELS = [
   'claude-sonnet-4-5',
   'claude-haiku-4-5',
   'claude-fable-5',
+
+  /* The GPT family — OpenAI Responses wire. */
+  'gpt-5-6-sol',
+  'gpt-5-6-luna',
+
+  'gpt-5-6-terra', // PROBED CLEAN 2026-08-04 (HTTP 200, streamed, usage captured) — ships.
+
+  /* The Gemini family — native wire. */
+  'gemini-3-5-flash',
 ];
 
-async function attempt(model, thinkingFlag) {
-  const body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ok' }] };
+/**
+ * The endpoint and body for one probe, derived from the model's FAMILY.
+ *
+ * Each family speaks a different protocol, so "is this model serveable?" cannot be asked with one
+ * request shape. `thinkingFlag` is KIE-proprietary and Claude-only (`kie-wire.ts`); the other two
+ * families get their own minimal reasoning field so the probe exercises the same shape the platform
+ * actually sends.
+ */
+function probeRequest(model, thinkingFlag) {
+  const family = familyOf(model);
+
+  if (family === 'codex') {
+    return {
+      url: `${CODEX_BASE}/responses`,
+      body: {
+        model,
+        input: [{ role: 'user', content: 'ok' }],
+        max_output_tokens: 16,
+        reasoning: { effort: 'low' },
+        stream: true,
+      },
+    };
+  }
+
+  if (family === 'gemini') {
+    return {
+      url: `${GEMINI_BASE}/models/${model}:streamGenerateContent?alt=sse`,
+      body: {
+        contents: [{ role: 'user', parts: [{ text: 'ok' }] }],
+        generationConfig: {
+          maxOutputTokens: 16,
+          thinkingConfig: { includeThoughts: true, thinkingLevel: 'low' },
+        },
+      },
+    };
+  }
+
+  const body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ok' }], stream: true };
 
   if (thinkingFlag) {
     body.thinkingFlag = true;
   }
 
+  return { url: `${CLAUDE_BASE}/messages`, body };
+}
+
+async function attempt(model, thinkingFlag) {
+  /* `thinkingFlag` is Claude-only, so the two passes are identical elsewhere — probe once. */
+  if (thinkingFlag && familyOf(model) !== 'claude') {
+    return { skip: true };
+  }
+
+  const { url, body } = probeRequest(model, thinkingFlag);
+
   try {
-    const response = await fetch(`${BASE}/messages`, {
+    const response = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${KEY}` },
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${KEY}`,
+        ...(familyOf(model) === 'claude' ? { 'anthropic-version': '2023-06-01' } : {}),
+      },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(60_000),
     });
 
     if (response.ok) {
-      return { ok: true };
+      /*
+       * A 200 is not enough: KIE returns one and then streams an error event on some failures. Read
+       * the body so a model that accepts the request and cannot answer is not counted healthy.
+       */
+      const text = await response.text();
+      const streamError = text.match(/"error"\s*:\s*\{[^}]*"message"\s*:\s*"([^"]+)"/);
+
+      if (streamError) {
+        return { ok: false, note: `200-then-error: ${streamError[1]}`.slice(0, 90) };
+      }
+
+      return { ok: true, sample: text.slice(0, 400) };
     }
 
     const text = await response.text();
 
-    return { ok: false, note: `${response.status} ${(text.match(/"message":"([^"]+)"/) ?? [])[1] ?? ''}`.trim() };
+    return {
+      ok: false,
+      note: `${response.status} ${(text.match(/"message":"([^"]+)"/) ?? [])[1] ?? text.slice(0, 90)}`.trim(),
+    };
   } catch (error) {
     return { ok: false, note: String(error?.message ?? error).slice(0, 60) };
   }
@@ -117,6 +226,12 @@ for (let round = 0; round < ROUNDS; round++) {
 
     for (const flag of [true, false]) {
       const result = await attempt(model, flag);
+
+      /* Non-Claude families have no `thinkingFlag`, so their two passes would be identical. */
+      if (result.skip) {
+        roundOk++;
+        continue;
+      }
 
       if (result.ok) {
         roundOk++;

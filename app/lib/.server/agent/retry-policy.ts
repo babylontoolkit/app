@@ -69,10 +69,79 @@ const RETRYABLE = [
   /ECONNRESET/,
   /EPIPE/,
   /fetch failed/i,
+
+  /*
+   * 🔴 HARVESTED FROM LIVE KIE PROBES, 2026-08-04 (T11) — and NOT reachable via the `\b5\d\d\b` rule.
+   *
+   * KIE's gateway reports faults with **HTTP 200 and a JSON envelope** — `{"code":500,"msg":"..."}` —
+   * so the status line carries no 5xx and the digits live in a `code` field, not in the message text.
+   * Every pattern above would miss these:
+   *
+   *   "Server exception, please try again later"                          (the dominant fault; seen on
+   *                                                                        claude AND gemini surfaces)
+   *   "The server is currently being maintained, please try again later~" (codex; note the trailing ~)
+   *   "Internal error, please try again later"                            (already matched, above)
+   *
+   * Checked against FATAL below, as the plan requires: neither new string contains `invalid` or
+   * `not found`, so neither is swallowed by those broad patterns.
+   */
+  /server exception/i,
+  /being maintained/i,
+
+  /*
+   * ⚠️ OUR OWN message (`EMPTY_RESPONSE_ERROR`), and — stated plainly — **UNREACHABLE FROM PRODUCTION
+   * TODAY**. Defence-in-depth, exactly like `/does not exist/i` below, not a live behaviour change.
+   *
+   * Measured 2026-08-04 by replaying KIE's exact 200-plus-envelope shape through the real SDKs: on
+   * ALL THREE families it **raises no error at all**. The SDK sees a 200, finds no SSE events in the
+   * body, and finishes cleanly with empty text and `finishReason: 'unknown'`. So the two patterns
+   * above are never consulted for the most common KIE failure there is; what catches it is the
+   * `!producedText` guard in `proxy.ts`, which throws this sentence, marks the generation `failed`
+   * and refunds.
+   *
+   * 🔴 **But that throw sits AFTER the retry loop closes**, so `shouldRetryGeneration` never sees it.
+   * An earlier draft of this comment claimed matching it here "upgrades the outcome from an error card
+   * to a quiet retry" — that was FALSE as wired, and a false claim in a comment is how a defect
+   * survives review in this repo (the shell-strip and `/does not exist/i` are the same lesson).
+   *
+   * It is kept because the CLASSIFICATION is correct and worth pinning: an empty response that billed
+   * nothing is a transient provider fault. **Moving the `!producedText` check inside the retry loop is
+   * a real behaviour change with its own money implications and belongs in its own task**, not here.
+   *
+   * 🔴 If that is ever done, it is safe ONLY because of the `outTokens > 0` gate in
+   * `shouldRetryGeneration`. The other generation that produces this message is the one in `proxy.ts`'s
+   * comment — a clean `stop` with no text and **10,054 output tokens billed**. That one has
+   * `outTokens > 0`, so it would still be refused a retry and refunded. The distinction is not in the
+   * message; it is in whether anything was billed.
+   */
+  /returned an empty response/i,
 ];
 
-/** Never retryable, whatever else the message says — checked FIRST so `429` can't match a 5xx pattern. */
-const FATAL = [/\b4\d\d\b/i, /rate limit/i, /too many requests/i, /invalid/i, /not found/i, /unauthorized/i];
+/**
+ * Never retryable, whatever else the message says — checked FIRST so `429` can't match a 5xx pattern.
+ *
+ * `does not exist` is the 2026-08-04 harvest's fatal shape: KIE answers an UNKNOWN MODEL ID (or an
+ * unknown endpoint) with `{"code":500,"msg":"The page does not exist"}` — a 500 code on a request that
+ * will be wrong every time. It matches neither `not found` nor `\b4\d\d\b`.
+ *
+ * ⚠️ **DEFENCE-IN-DEPTH, not load-bearing today — mutation-verified, so the comment says so.** Deleting
+ * this entry currently fails NO test, because no RETRYABLE pattern matches the string either: the 500
+ * lives in the envelope's `code` field and never in the message text, so the function already returns
+ * false by falling off the end. An earlier draft of this comment claimed a typo in `LLM_MODEL` would
+ * otherwise burn all three attempts; that was wrong, and a false claim in a comment is how a defect
+ * survives review here. What the entry actually buys is protection against a FUTURE broader transient
+ * pattern — most obviously anyone matching the envelope's numeric `code`, which is the exact trap the
+ * harvested-strings note above describes.
+ */
+const FATAL = [
+  /\b4\d\d\b/i,
+  /rate limit/i,
+  /too many requests/i,
+  /invalid/i,
+  /not found/i,
+  /unauthorized/i,
+  /does not exist/i,
+];
 
 /**
  * How many times a generation may be re-attempted after a provider-side failure that billed nothing.
@@ -103,6 +172,22 @@ const FATAL = [/\b4\d\d\b/i, /rate limit/i, /too many requests/i, /invalid/i, /n
  * told it did not work. Raise it only with a measurement, never on a hunch.
  */
 export const MAX_PROVIDER_RETRY_ATTEMPTS = 3;
+
+/**
+ * The sentence `proxy.ts` throws when a generation produced no text at all (its `!producedText` guard).
+ *
+ * Exported as a CONSTANT because `RETRYABLE` matches a substring of it, and the two used to be
+ * independently-typed literals in two files: a reword in `proxy.ts` would have silently stopped the
+ * pattern matching, and no test would have failed — the specs asserted against their own copies of the
+ * string, so all three could drift apart while staying green. One writer, imported by the thrower and
+ * by the spec.
+ *
+ * ⚠️ It is USER-FACING copy (it renders on the error card with Retry), so it is worded for a person,
+ * not for a matcher. `RETRYABLE`'s pattern deliberately keys on the stable middle clause rather than
+ * the whole sentence, so the surrounding reassurance can be reworded without breaking the match.
+ */
+export const EMPTY_RESPONSE_ERROR =
+  'The model returned an empty response. You have not been charged for this generation — please try again.';
 
 export interface RetryDecisionInput {
   /** The error that killed the stream. */

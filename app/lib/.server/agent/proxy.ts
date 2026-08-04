@@ -51,8 +51,14 @@ import { getPlatformConfig, getPlatformModel, getTierModel, NotConfiguredError, 
 import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
 import { mediaProtocolNote } from './media-note';
-import { MAX_PROVIDER_RETRY_ATTEMPTS, retryThinkingMode, retryToolMode, shouldRetryGeneration } from './retry-policy';
-import { providerDeliveryMode, type DeliveryMode } from './delivery';
+import {
+  EMPTY_RESPONSE_ERROR,
+  MAX_PROVIDER_RETRY_ATTEMPTS,
+  retryThinkingMode,
+  retryToolMode,
+  shouldRetryGeneration,
+} from './retry-policy';
+import { deliveryModeFor, type DeliveryMode } from './delivery';
 import type { AgentActivitySnapshot, AgentStatusKind } from './heartbeat';
 import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
 import { createWebFetchTool } from './web-fetch-tool';
@@ -83,6 +89,8 @@ import { sharedFailureRate } from '~/lib/.server/monitoring/failure-rate';
 import { recordRefundOutcome, recordRescueMarkers } from '~/lib/.server/monitoring/paid-path-rates';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
+import { extractStepCacheTokens, shouldWarnMissingUsageNamespace, usageNamespaceFor } from './usage-metadata';
+import { familyOf } from '~/lib/modules/llm/model-families';
 
 const logger = createScopedLogger('agent-proxy');
 
@@ -761,6 +769,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const model =
     byokModel ?? (tierDecision.tier === 'standard' ? standardModel : getTierModel(tierDecision.tier, request.context));
 
+  /**
+   * Which wire this generation is on, derived from the model id (`model-families.ts`).
+   *
+   * Read by BOTH usage call sites below — settlement's accumulator and the persisted step log — so the
+   * two numbers can never disagree about which namespace a cache counter lives under. `undefined` for
+   * a BYOK model of some other vendor, which reads the historical `anthropic` namespace.
+   */
+  const modelFamily = familyOf(model);
+
   /*
    * A user who asked for a paid rung but was short of ITS threshold gets told, softly — never blocked
    * (§4.6.1). The notice names the rung they actually asked for: a hardcoded "premium" would quote a
@@ -1200,6 +1217,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * than letting the request fail, and it degrades exactly where it hurts least: the LAST breakpoint
    * is the project files, whose entry is the most volatile and therefore the cheapest to lose. Loud,
    * because a silent drop here is a permanent 2x on someone's bill.
+   *
+   * ⚠️ Deliberately NOT family-gated (checked 2026-08-04 when the KIE provider gained three families).
+   * The four-breakpoint ceiling is an Anthropic API limit, and on a `gpt-*`/`gemini-*` turn the
+   * `providerOptions` this counts are `anthropic`-NAMESPACED, so the other vendors' SDKs ignore them
+   * outright — they cost nothing and can never 400. The guard therefore neither refuses nor mis-measures
+   * a non-Claude turn; it just never fires on one, because the count is driven by prompt ASSEMBLY, which
+   * is family-independent. Adding a family branch here would be a second rule to keep in step with the
+   * assembly above, for zero behavioural difference.
    */
   if (countCacheBreakpoints(system) > MAX_CACHE_BREAKPOINTS) {
     logger.error(
@@ -1421,6 +1446,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const startedAt = Date.now();
   let stepClock = startedAt;
   let stepIndex = 0;
+
+  /** One warning per generation when the family's usage namespace is absent — see the step handler. */
+  let warnedMissingUsageNamespace = false;
   const stepLog: NonNullable<GenerationRecord['steps']> = [];
 
   /**
@@ -1453,9 +1481,28 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
         const tools = (step.toolCalls ?? []).flatMap((c) => (c?.toolName ? [String(c.toolName)] : []));
         const out = step.usage?.completionTokens ?? 0;
-        const meta = step.providerMetadata?.anthropic as
-          | { cacheReadInputTokens?: number; cacheCreationInputTokens?: number }
-          | undefined;
+
+        /*
+         * The SAME reader settlement bills from (`usage-metadata.ts`) — never a second literal. The
+         * step log is what the Admin dashboard diagnoses margin from, so a log that reads a different
+         * namespace than the bill would make every cache investigation start from a wrong number.
+         */
+        const cache = extractStepCacheTokens(step.providerMetadata, modelFamily);
+
+        if (!cache.sawNamespace && shouldWarnMissingUsageNamespace(modelFamily) && !warnedMissingUsageNamespace) {
+          /*
+           * ONCE per generation, and only on a family whose cache we PRICE. "Nothing was cached" is
+           * silent-zero and ordinary; "the counter we bill from is not there" means every generation
+           * on this family is under-reporting cache tokens with the credit total going DOWN, which
+           * reads as a cheaper turn. Per-step would be noise; never would be the §4.2.8 silent failure.
+           */
+          warnedMissingUsageNamespace = true;
+          logger.warn(
+            `Usage metadata has no "${usageNamespaceFor(modelFamily)}" namespace for ${model} ` +
+              `(family ${modelFamily}) — cache tokens are being billed as zero. This is NOT "nothing was ` +
+              'cached": the counter itself is absent, so the provider adapter may have changed shape.',
+          );
+        }
 
         /*
          * What this step's output actually BECAME. `outTokens` alone cannot answer that: it bundles
@@ -1468,8 +1515,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           ms,
           outTokens: out,
           inTokens: step.usage?.promptTokens ?? 0,
-          cacheRead: meta?.cacheReadInputTokens ?? 0,
-          cacheWrite: meta?.cacheCreationInputTokens ?? 0,
+          cacheRead: cache.cacheReadTokens,
+          cacheWrite: cache.cacheCreationTokens,
           tools,
           textChars,
           reasoningChars,
@@ -1491,8 +1538,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         logger.info(
           `  step ${++stepIndex}: ${ms}ms · ${out} out (${rate} tok/s · ${textChars} chars text = ${density} ch/tok` +
             `${reasoningChars ? `, ${reasoningChars} chars reasoning` : ''}) · ` +
-            `${step.usage?.promptTokens ?? 0} in (+${meta?.cacheReadInputTokens ?? 0} cached, ` +
-            `${meta?.cacheCreationInputTokens ?? 0} written)` +
+            `${step.usage?.promptTokens ?? 0} in (+${cache.cacheReadTokens} cached, ` +
+            `${cache.cacheCreationTokens} written)` +
             `${tools.length ? ` · tools: ${tools.join(', ')}` : ' · ANSWER'}`,
         );
       },
@@ -1580,7 +1627,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * against one round of cache. `steps` is the only surface where both are per-step (§4.6).
      */
     const steps = await result.steps;
-    accumulateStepUsage(totals, steps as unknown as UsageStep[]);
+    accumulateStepUsage(totals, steps as unknown as UsageStep[], modelFamily);
 
     finishReason = await result.finishReason;
     lastStepToolCalls = steps?.[steps.length - 1]?.toolCalls?.length ?? 0;
@@ -1929,9 +1976,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        */
       if (!producedText) {
         failed = true;
-        throw new Error(
-          'The model returned an empty response. You have not been charged for this generation — please try again.',
-        );
+        throw new Error(EMPTY_RESPONSE_ERROR);
       }
     } catch (error) {
       /*
@@ -2169,11 +2214,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     statusKind: statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: Boolean(discussNote) }),
 
     /*
-     * A property of the configured PROVIDER, resolved once here where `config` is in hand. Keyed by
-     * provider rather than model deliberately (`delivery.ts`) — the buffering lives in the adapter, so
-     * a model swap must not silently flip this to "streamed".
+     * A property of the (PROVIDER, FAMILY) pair, resolved once here where both are in hand. The
+     * buffering lives in the ADAPTER in front of the family's endpoint — KIE runs three of them and
+     * they do not agree (claude buffers, codex streams) — so provider alone can no longer answer it.
+     * Still never keyed by the raw MODEL id: a model swap within a family must not silently flip this
+     * to "streamed". See `delivery.ts`.
      */
-    deliveryMode: providerDeliveryMode(config.provider),
+    deliveryMode: deliveryModeFor(config.provider, model),
     toolContext,
     usage: usagePromise,
     settlement: settlementPromise,

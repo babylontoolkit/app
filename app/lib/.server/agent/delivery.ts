@@ -38,6 +38,7 @@
  */
 import type { AgentStatusKind } from './heartbeat';
 import type { PlatformProviderName } from './config';
+import { familyOf, type ModelFamily } from '~/lib/modules/llm/model-families';
 
 /**
  * How the configured provider puts the model's answer on the wire.
@@ -49,29 +50,85 @@ import type { PlatformProviderName } from './config';
 export type DeliveryMode = 'streamed' | 'batched';
 
 /**
- * 🔴 Keyed by PROVIDER, never by model.
+ * 🔴 Keyed by (PROVIDER, FAMILY) — still never by a raw model id.
  *
- * The probe ran `claude-opus-5` and the buffering was invariant across all three request shapes, so
- * the boundary that predicts it is the adapter in front of the model. Keying this by model would
- * silently report `streamed` the day someone sets `LLM_MODEL` to anything else on the same buffering
- * provider — a wrong sentence during exactly the wait it exists to explain.
+ * **It was keyed by provider alone, and that was right until KIE stopped being one API.** The
+ * reasoning has not changed, only the boundary it lands on: the thing that buffers is the ADAPTER in
+ * front of the endpoint, and KIE runs three of them. The 2026-08-03 probe was invariant across three
+ * request shapes on `claude-opus-5` — which proved the model was not the variable — and the 2026-08-04
+ * probe then measured KIE's GPT surface STREAMING on the same account and the same key (first delta at
+ * 3.7s, ~1,400 evenly-spread deltas). Same provider, opposite behavior, so provider alone can no
+ * longer answer the question.
+ *
+ * The rule that survives intact is the one that matters: **never keyed by MODEL**. A per-model table
+ * would silently report `streamed` the day someone points `LLM_MODEL` at another Claude model on the
+ * same buffering adapter — a wrong sentence during exactly the wait it exists to explain. A family is
+ * a property of the endpoint; a model id is not.
  */
-const DELIVERY: Record<PlatformProviderName, DeliveryMode> = {
-  /* Measured streaming live during the window (`KIE_BUG_REPORT.md`, 2026-07-24 control). */
+const DELIVERY: Record<PlatformProviderName, DeliveryMode | Record<ModelFamily, DeliveryMode>> = {
+  /* Measured streaming live during the window (`KIE_BUG_REPORT.md`, 2026-07-24 control). ALL families. */
   Anthropic: 'streamed',
 
-  /* Measured 3/3 buffered, 2026-08-03. See the table above. */
-  KIE: 'batched',
+  KIE: {
+    /* Measured 3/3 buffered, 2026-08-03. See the table above. */
+    claude: 'batched',
+
+    /*
+     * ✅ Measured streaming, twice. 2026-08-04 big-answer run on `gpt-5-6-sol`: 46,498ms total,
+     * **2,382 deltas**, first delta at 3,016ms (6% in), spread over 42,865ms, and **1.0% of chars in
+     * the final second**. That last number is the one that matters — it is what separates "streamed
+     * for 46s" from "buffered for 46s and arrived at 46s", which no server-side total can tell apart.
+     */
+    codex: 'streamed',
+
+    /*
+     * ✅ CONFIRMED 2026-08-04 by the big-answer probe this entry was provisional pending (T11).
+     * `gemini-3-5-flash`, 12,542ms total, 19 deltas, 6,828 chars, first delta at 5,650ms (45% in),
+     * **6.8% of chars in the final second** — progressive, not a final-second flush.
+     *
+     * Fewer, fatter deltas than codex's 2,382, so the panel's expectation bar will move in coarser
+     * steps; that is a streaming shape, not a batched one. **This entry is DATA — re-measure with
+     * `scripts/stream-probe.mjs gemini-3-5-flash` and flip the one word if KIE's adapter changes.**
+     */
+    gemini: 'streamed',
+  },
 };
 
+/**
+ * How this turn's answer will be delivered, from the provider and the model's family.
+ *
+ * Two independent unknowns, both resolving to `streamed`, and for the same reason: the `batched`
+ * sentence tells the user to expect nothing for minutes. Saying that about a surface we have not
+ * measured would manufacture the very despair this module exists to prevent, and it is unfalsifiable
+ * from the user's side. **Claim the quieter thing when we do not know.**
+ */
+export function deliveryModeFor(provider: PlatformProviderName, model: string | undefined): DeliveryMode {
+  const entry = DELIVERY[provider];
+
+  if (entry === undefined) {
+    return 'streamed';
+  }
+
+  if (typeof entry === 'string') {
+    return entry;
+  }
+
+  const family = familyOf(model);
+
+  return family ? entry[family] : 'streamed';
+}
+
+/**
+ * @deprecated Use `deliveryModeFor(provider, model)` — a provider can front more than one adapter.
+ *
+ * Kept as a delegate rather than deleted: it answers the provider-wide question honestly for a
+ * provider whose families agree, and returns the SAFE `streamed` for one whose families differ, so a
+ * stray caller can never be told to expect silence on a surface that streams.
+ */
 export function providerDeliveryMode(provider: PlatformProviderName): DeliveryMode {
-  /*
-   * An unknown provider is assumed to STREAM. The batched sentence tells the user to expect nothing
-   * for minutes; saying that about a provider we have not measured would manufacture the very despair
-   * this module exists to prevent, and it is unfalsifiable from the user's side. Claim the quieter
-   * thing when we do not know.
-   */
-  return DELIVERY[provider] ?? 'streamed';
+  const entry = DELIVERY[provider];
+
+  return typeof entry === 'string' ? entry : 'streamed';
 }
 
 /**

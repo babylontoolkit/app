@@ -323,6 +323,60 @@ describe('ModelTierPill — the first-build lock', () => {
    * here, so a copy string left behind would tell a funded user to wait for a lock that no longer
    * exists — and, on a first build, would be the only thing on screen contradicting the pill itself.
    */
+  /**
+   * 🔴 THE PILL NAMES A NON-CLAUDE RUNG PROPERLY (§4.6.1a FR8, T11c).
+   *
+   * The ladder can now put a GPT or Gemini model on a paid rung, and the pill's whole job is naming the
+   * model actually in use. Before the parser was generalised it read `claude-*` only, so any other id
+   * fell through to itself and the toolbar's most-read control showed a raw API id — which is not a
+   * model name to a user, and reads as a bug in the product rather than as the model they picked.
+   *
+   * The id comes from the FIXTURE, i.e. the way the server sends it (`modelTiersSessionHint`'s per-tier
+   * `model`). Nothing here tells the component which family it is looking at.
+   */
+  it('names a GPT rung as "GPT 5.6 Sol", in the label and in the tooltip', () => {
+    sessionStore.set({
+      ...funded,
+      credits: {
+        ...funded.credits,
+        modelTiers: {
+          ...funded.credits.modelTiers,
+          tiers: funded.credits.modelTiers.tiers.map((tier) =>
+            tier.id === 'premium' ? { ...tier, model: 'gpt-5-6-sol' } : tier,
+          ),
+        },
+      },
+    });
+    modelTierStore.set('premium');
+    render(<ModelTierPill />);
+
+    expect(locked()).toBe(false);
+    expect(label()).toContain('GPT 5.6 Sol');
+    expect(label(), 'a raw API id on the pill is the parser having failed silently').not.toContain('gpt-5-6-sol');
+    expect(pill().getAttribute('title')).toContain('GPT 5.6 Sol');
+  });
+
+  /** The same for Gemini — a second family, so one family's shape cannot be special-cased into passing. */
+  it('names a Gemini rung as "Gemini 3.5 Flash"', () => {
+    sessionStore.set({
+      ...funded,
+      credits: {
+        ...funded.credits,
+        modelTiers: {
+          ...funded.credits.modelTiers,
+          tiers: funded.credits.modelTiers.tiers.map((tier) =>
+            tier.id === 'supermax' ? { ...tier, model: 'gemini-3-5-flash' } : tier,
+          ),
+        },
+      },
+    });
+    modelTierStore.set('supermax');
+    render(<ModelTierPill />);
+
+    expect(label()).toContain('Gemini 3.5 Flash');
+    expect(label()).not.toContain('3 5');
+  });
+
   it('explains the threshold lock and never claims a first-build one', () => {
     modelTierStore.set('premium');
     creationTurnStore.set(true);

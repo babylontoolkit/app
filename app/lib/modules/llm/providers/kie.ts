@@ -1,5 +1,22 @@
 /**
- * KIE.ai — the same Claude models, served through an Anthropic-native passthrough (SPEC §4.2a).
+ * KIE.ai — ONE provider, THREE model families, dispatched on the model id (SPEC §4.2a).
+ *
+ * ## The dispatcher (2026-08-04)
+ *
+ * KIE fronts three completely different text APIs behind one key: Anthropic Messages
+ * (`claude/v1/messages`), OpenAI **Responses** (`codex/v1/responses`) and native Gemini
+ * (`gemini/v1/models/<id>:streamGenerateContent`). They are one PROVIDER and three PROTOCOLS, so
+ * `getModelInstance` picks the wire from the family of `model` — see `model-families.ts` for why the
+ * family cannot come from `LLM_PROVIDER` (the three tier rungs may point at different families at
+ * once, while the provider is one value per deploy).
+ *
+ * 🔴 **The Claude wrappers below wrap the CLAUDE branch ONLY** (FR3). `thinkingFetch`, `kieFetch`,
+ * `stripSamplingParams` and `dropOrphanReasoningSignatures` all encode Anthropic wire facts; applying
+ * any of them to another family puts Anthropic-shaped fields in a foreign request body, which is a
+ * hard 400 before a token. The branch structure is what makes that impossible rather than merely
+ * unlikely, and `kie-dispatch.spec.ts` pins it dead with a default-deny source scan.
+ *
+ * Everything below this line describes the CLAUDE family, unchanged.
  *
  * ## Why this is a baseURL swap and not a new integration
  *
@@ -54,7 +71,12 @@ import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { createOpenAI } from '@ai-sdk/openai';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { kieEnvModel, kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
+import { codexFetch, KIE_CODEX_BASE_URL } from './kie-codex-wire';
+import { geminiFetch, KIE_GEMINI_BASE_URL } from './kie-gemini-wire';
+import { codexEffort, geminiThinkingLevel, requireFamily } from '~/lib/modules/llm/model-families';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 
 export default class KieProvider extends BaseProvider {
@@ -92,8 +114,35 @@ export default class KieProvider extends BaseProvider {
     apiKeys?: Record<string, string>;
     providerSettings?: Record<string, IProviderSetting>;
     effort?: EffortLevel;
+
+    /**
+     * Force thinking off for THIS request — the proxy's last-resort retry (`proxy.ts`, `retry-policy.ts`).
+     *
+     * 🔴 **This parameter was MISSING until 2026-08-04, and its absence was a silent no-op on the
+     * default platform provider.** `proxy.ts` has been passing `thinkingMode: 'disabled'` on the final
+     * retry attempt since KIE's ~30s silent-step timeout was diagnosed (2026-07-27) — the whole point
+     * of that attempt is that with no think, text starts flowing in ~1s, so KIE's gateway can never kill
+     * the step for silence. It reached `anthropic.ts` (which declares it) and was dropped on the floor
+     * here as an excess property across the function-type boundary. So on KIE — the provider the
+     * mitigation was written FOR — the third attempt was byte-identical to the first two, and a
+     * generation that had already burned two 30-second timeouts re-rolled the same coin a third time.
+     */
+    thinkingMode?: ThinkingMode;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
+
+    /*
+     * 🔴 FIRST, BEFORE ANYTHING ELSE — before the key lookup, before any wire is built.
+     *
+     * An id we cannot place has no correct protocol, and the alternative to refusing is guessing one.
+     * Guessing used to happen implicitly: `capabilities.ts`'s tables default to modern-Claude, so a
+     * `gpt-*` id would have been handed an Anthropic `thinking` block inside an OpenAI request body —
+     * a hard 400 before a token, on a model the operator believes is configured. Refusing at model
+     * resolution turns that into one loud, immediate, free error naming the id and the accepted
+     * prefixes (FR1).
+     */
+    const family = requireFamily(model);
+
     const { apiKey, baseUrl } = this.getProviderBaseUrlAndKey({
       apiKeys,
       providerSettings,
@@ -107,9 +156,48 @@ export default class KieProvider extends BaseProvider {
     }
 
     // Identical policy to `anthropic.ts` — same models, same reasons. See that file for the rationale.
-    const thinkingMode: ThinkingMode = (serverEnv as any)?.THINKING_MODE === 'disabled' ? 'disabled' : 'adaptive';
+    const thinkingMode: ThinkingMode =
+      options.thinkingMode ?? ((serverEnv as any)?.THINKING_MODE === 'disabled' ? 'disabled' : 'adaptive');
     const effort: EffortLevel = options.effort ?? parseEffort((serverEnv as any)?.THINKING_EFFORT) ?? DEFAULT_EFFORT;
 
+    if (family === 'codex') {
+      /*
+       * The GPT surface (`kie-codex-wire.ts`). NONE of the Claude wrappers appear here, and that is the
+       * FR3 guarantee rather than an omission: `thinkingFetch` would write an Anthropic `thinking`
+       * block and an `output_config` into an OpenAI Responses body, `kieFetch` would add KIE's
+       * Claude-adapter-specific `thinkingFlag`, and `dropOrphanReasoningSignatures` filters a stream
+       * shape this wire does not produce. `stripSamplingParams` is absent too — the Responses model
+       * strips them itself for `gpt-5*` ids (see `kie-codex-wire.ts`'s temperature note).
+       */
+      const codex = createOpenAI({
+        apiKey,
+        baseURL: KIE_CODEX_BASE_URL,
+        headers: { Authorization: `Bearer ${apiKey}` },
+        fetch: codexFetch(codexEffort(thinkingMode, effort), rateLimitFetch({ provider: this.name })),
+      });
+
+      return codex.responses(model);
+    }
+
+    if (family === 'gemini') {
+      /* The Gemini surface (`kie-gemini-wire.ts`). Same FR3 guarantee — no Claude wrapper touches it. */
+      const gemini = createGoogleGenerativeAI({
+        apiKey,
+        baseURL: KIE_GEMINI_BASE_URL,
+        headers: { Authorization: `Bearer ${apiKey}` },
+        fetch: geminiFetch(geminiThinkingLevel(thinkingMode, effort), rateLimitFetch({ provider: this.name })),
+      });
+
+      return gemini(model);
+    }
+
+    /*
+     * The CLAUDE family — byte-identical to what this provider has always done (§4.2a's regression
+     * bar). `baseUrl`/`KIE_BASE_URL` stays CLAUDE-SCOPED, deliberately: it has always meant "the Claude
+     * endpoint", an operator who set it meant that, and the other two families carry their own base
+     * constants. One override that silently repointed all three would be a config value whose meaning
+     * changed under the operator.
+     */
     const kie = createAnthropic({
       apiKey,
       baseURL: baseUrl || KIE_DEFAULT_BASE_URL,

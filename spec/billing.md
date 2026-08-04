@@ -186,6 +186,67 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
 - **Cache rates are never quoted in the list** — validation refuses the keys. They derive per row
   (0.1× read / 2.0× 1-hour write, measured on KIE), so a promoted reprice moves the whole row and a
   half-repriced row cannot be expressed.
+- **🔴 …AND THAT RULE IS NOW PER-FAMILY — EXTENDED, NOT BROKEN (2026-08-04, `spec/model-families.md`).**
+  The rule above protected against a row half-priced from two sources. It still does. What changed is
+  that "derive it" stopped being a correct answer for every family, so the refusal became a policy
+  keyed on the model id's family (`model-families.ts` `cacheProfile`), enforced by
+  `validateLlmCachePolicy` and consumed by `llmRatesFromList`:
+  - **`claude-*` → `derived`.** Unchanged, byte-identical. `cachedInputPerMTok`/`cacheWritePerMTok`
+    are **REFUSED** on these rows; read/write derive 0.1×/2.0× from the row's own input rate.
+  - **`gpt-*` → `explicit-pair`.** The row must quote **BOTH** rates, **atomically** — both or
+    neither, never one. A row quoting only Cached Input would leave the write derived at 2.0× of an
+    input rate KIE does not use for writes, which is the *original* half-priced-row bug surviving
+    into the family that needs quotes; a row quoting neither is the same bug with both halves
+    derived. ⚠️ `llmRatesFromList` passes `number | undefined` straight through and `ratesFromBase`
+    reads `undefined` as "derive", so **validation at the wall is the ONLY thing standing between a
+    gpt row and Claude's 0.1×/2.0×** — there is no honest default for a price the vendor publishes.
+  - **`gemini-*` → `none`.** The pair is REFUSED, and cached tokens bill at the **FULL INPUT RATE**
+    (read = write = input). Never a discount we cannot verify KIE grants, never a surcharge we cannot
+    observe. **The consequence is real and intended — a warm Gemini edit costs what a cold one costs
+    — so the Admin margin report must not read that as a caching regression** (owner decision,
+    flagged and accepted 2026-08-04).
+  - An **unknown family** on an `llm` key is REFUSED with an error naming the accepted prefixes and
+    the dashes-not-dots id rule — the same reasoning as `requireFamily` throwing at model resolution:
+    pricing a model whose wire (and therefore whose cache economics) we cannot name is the
+    "priced but not LISTED" trap approached from the other side. (`llmRatesFromList` falls back to
+    `derived` for such a row, which is unreachable through validation and is deliberately the answer
+    the function has always given rather than a new opinion.)
+
+  **The evidence that forced this — one number.** KIE's feed publishes four prices for each gpt-5.6
+  row, and the WRITE is **1.25× input, not the 2.0×** every Claude row derives (sol $1.4 input /
+  $1.75 write; luna $0.056 / $0.07; terra $0.56 / $0.70 — the READ is 0.1× on all three, coinciding
+  with Claude). 1.25× is the **five-minute** cache tier; KIE does not resell the 1-hour tier on that
+  surface. Deriving these would have over-charged the write class by **60% on every cold turn**,
+  silently, with nothing throwing. **A rule that holds for one family is not a rule** — and the only
+  way to find that out was to read the vendor's own numbers. If a future row breaks the 0.1× read
+  pattern too, **quote it, do not infer it**.
+
+  **✅ RECONCILED AGAINST KIE'S OWN BILLING, 2026-08-04** — the second source the late Claude rows
+  never got. Method (reproducible, `spec/model-families.md` §9.4): read the account credit balance,
+  run a real generation, read it again, convert at **$0.005/credit** (KIE prices every CHAT/TOKEN row
+  at exactly that — 70 of 71 feed rows exact to 8 decimals), compare against our computed raw cost.
+  ⚠️ **Not universal — the one outlier found was a MEDIA row** (veo 3.1 4K, 380cr/$1.85 = 0.004868),
+  so do not carry this conversion into §4.16 pricing without re-deriving it.
+  - `gpt-5-6-sol`: ours $0.004586 vs KIE $0.004600 → **ratio 0.997**. 🔴 **This confirms the OUTPUT
+    rate ONLY** — KIE reported ZERO input tokens, so any input price reproduces that figure to the
+    digit, and the run cached nothing. **Measure a row's CACHE accounting before making it a default
+    rung** (that check is exactly what disqualified `claude-opus-4-7` and `claude-fable-5`, both of
+    which report zero cache-write tokens while being charged the 2×).
+  - `gemini-3-5-flash`: counting **candidates only** as output → ratio **1.001** ✅; counting
+    candidates **+ thinking** → 1.674 ❌. **KIE does not bill Gemini thinking tokens**, and we match
+    only because `@ai-sdk/google@1.2.22` maps `completionTokens` from `candidatesTokenCount` alone
+    and drops `thinkingTokenCount`. Our correctness is INHERITED from that SDK's choice, not asserted
+    by us. 🔴 **TRIPWIRE: an SDK bump that folds thinking into `completionTokens` — the natural thing
+    for it to do — would immediately over-charge every Gemini generation by ~1.67×, silently, with
+    nothing throwing. Re-run this reconciliation on any bump of `@ai-sdk/google`.**
+
+  **🔴 The gpt Cache Writes price is quoted and, today, never applied.** KIE returns
+  `input_tokens_details.cache_write_tokens` and `@ai-sdk/openai@1.3.24` maps it to no
+  `providerMetadata` key at all, so `cacheCreationTokens` is **structurally always 0 on codex**. That
+  is an UNDER-charge — the safe direction, per `rates.ts`'s rule that every fallback errs in our own
+  disfavour — so it is recorded rather than worked around, and it is deliberately NOT "fixed" in
+  `usage-metadata.ts`, which receives the SDK's normalized metadata and not KIE's response body.
+  Both captured values were 0; revisit only when a real generation reports a non-zero one.
 - **Media lookup has NO most-expensive fallback**, unlike `ratesFor`: LLM settlement runs AFTER
   spend (over-charging ourselves is the safe direction); media debits run BEFORE spend (§4.16 debits
   the known price up-front), where the safe direction is refusing to run. Unknown model, unmatched

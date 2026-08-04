@@ -7,6 +7,7 @@
  * importable on their own, and `kie.ts` consumes them.
  */
 import type { ModelInfo } from '~/lib/modules/llm/types';
+import { FAMILY_POLICY, familyOf } from '~/lib/modules/llm/model-families';
 
 /**
  * The `/v1` suffix is REQUIRED — `@ai-sdk/anthropic` appends `/messages` to whatever it is given, and
@@ -267,6 +268,68 @@ export const KIE_MODELS: ModelInfo[] = [
     maxTokenAllowed: 1_000_000,
     maxCompletionTokens: 128_000,
   },
+
+  /*
+   * 🔴 THE NON-CLAUDE FAMILIES (2026-08-04) — same list, different WIRE. See `kie.ts`'s dispatcher.
+   *
+   * The listed↔priced invariant above applies to these identically: an id listed here without a
+   * Marketplace row is `ratesFor`'s most-expensive fallback, and a priced id missing from here is
+   * `stream-text.ts`'s `modelsList[0]` fallback. `model-tiers.spec.ts` pins both directions.
+   *
+   * ⚠️ **EVERY ID HERE IS LIVE-PROBED (FR9, the no-rabbit-hole rule)** — accepted by its family
+   * endpoint, streaming observed, usage metadata captured. KIE's pricing FEED is not evidence that an
+   * id exists: the feed's display names are not the API ids (`gpt-5.6-sol` with dots vs the real
+   * `gpt-5-6-sol` with dashes), so a row copied from the feed prices a model that cannot be called —
+   * which is exactly why the probe is the gate and the feed is only the price.
+   *
+   * PROBE RESULTS, 2026-08-04 (`scripts/kie-model-health.mjs`, 2 rounds, plus a big-answer capture):
+   *   gpt-5-6-sol      2/2 OK, 0 failures · streamed 2,382 deltas / 1.0% in the final second
+   *   gpt-5-6-luna     2/2 OK, 0 failures
+   *   gpt-5-6-terra    HTTP 200, streamed, usage captured — ADDED on the strength of that probe
+   *   gemini-3-5-flash streamed 19 deltas / 6.8% in the final second (one timeout in 2 health rounds)
+   *
+   * ⚠️ For contrast, the CLAUDE family was failing badly on the same run — `claude-sonnet-5` (the
+   * platform default) 0/4, and every other Claude model 25–75%, all `Server exception, please try
+   * again later`. That is a live vendor incident, not a property of this list; re-probe before reading
+   * it as a reason to move a rung.
+   *
+   * The GPT family is also why this work happened: KIE's Claude gateway regressed to fully BATCHED
+   * delivery around 2026-08-01, while these stream properly (`agent/delivery.ts`).
+   */
+  {
+    name: 'gpt-5-6-sol',
+    label: 'GPT 5.6 Sol (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'gpt-5-6-luna',
+    label: 'GPT 5.6 Luna (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'gpt-5-6-terra',
+    label: 'GPT 5.6 Terra (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+
+  /*
+   * ⚠️ Gemini ships with NO cache economics on KIE — their feed quotes exactly two rows for this model
+   * (input + output, verified against the live feed 2026-08-04) and their wire returns no cached-token
+   * counter, so cached tokens bill at the FULL input rate. Owner decision, taken with the flag up.
+   */
+  {
+    name: 'gemini-3-5-flash',
+    label: 'Gemini 3.5 Flash (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
 ];
 
 /**
@@ -309,11 +372,26 @@ export function kieEnvModel(serverEnv?: Record<string, string>): ModelInfo | und
     return undefined;
   }
 
+  /*
+   * The token limits come from the model's FAMILY, not from a pair of literals repeated here.
+   *
+   * They were `1_000_000`/`128_000` inline — the Claude numbers — which was correct while the provider
+   * served one family and would have silently attributed Claude's context window to a `gpt-*` or
+   * `gemini-*` operator override. `FAMILY_POLICY` is the one place those numbers live now, so raising a
+   * family's limit is one edit rather than a hunt.
+   *
+   * An UNKNOWN family still gets a `ModelInfo`, deliberately: refusing here would make the operator's
+   * error surface as "your model silently isn't in the list" (which is the `modelsList[0]` mis-bill
+   * this function exists to prevent), whereas `getModelInstance` refuses it LOUDLY at the moment of
+   * use, naming the id. One refusal, at the point where it can be explained.
+   */
+  const policy = FAMILY_POLICY[familyOf(name) ?? 'claude'];
+
   return {
     name,
     label: `${name} (KIE)`,
     provider: 'KIE',
-    maxTokenAllowed: 1_000_000,
-    maxCompletionTokens: 128_000,
+    maxTokenAllowed: policy.maxTokenAllowed,
+    maxCompletionTokens: policy.maxCompletionTokens,
   };
 }
