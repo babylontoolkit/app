@@ -19,7 +19,7 @@ export const meta: MetaFunction = () => [
 ];
 
 export async function loader({ context }: LoaderFunctionArgs) {
-  const games = await listGallery(getProjectStore(context), 48);
+  const games = await listGallery(getProjectStore(context), 48, context);
   return json({ games });
 }
 
@@ -55,7 +55,7 @@ export default function Gallery() {
                 </div>
                 <div className="flex border-t border-bolt-elements-borderColor">
                   <a
-                    href={`/play/${game.shareId}`}
+                    href={game.url}
                     target="_blank"
                     rel="noreferrer"
                     className="flex-1 text-center py-2.5 text-sm font-medium text-white bg-accent-500 hover:bg-bolt-elements-button-primary-backgroundHover flex items-center justify-center gap-1.5"

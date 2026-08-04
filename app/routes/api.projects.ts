@@ -35,7 +35,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
      */
     const withCounts = await Promise.all(
       projects.map(async (project) => ({
-        ...toWireProject(project),
+        ...toWireProject(project, context),
         chatCount: await countChats(project.id, context).catch(() => undefined),
       })),
     );
@@ -150,7 +150,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
      * was charged — zero is a real balance, and reporting it would wipe the displayed number for every
      * unmetered/BYOK/free-price creation.
      */
-    return json({ project: toWireProject(project), ...(balance !== undefined ? { balance } : {}) }, { status: 201 });
+    return json(
+      { project: toWireProject(project, context), ...(balance !== undefined ? { balance } : {}) },
+      { status: 201 },
+    );
   } catch (error) {
     return errorResponse(error);
   }

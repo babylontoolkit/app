@@ -64,7 +64,7 @@ describe('when the binding is needed and the version is pinnable', () => {
 
     expect(decision.needed).toBe(true);
     expect(decision.version).toBe('1.2.2');
-    expect(decision.install).toBe(`npm install ${WASM_BINDING}@1.2.2 --no-audit --no-fund`);
+    expect(decision.install).toBe(`npm install ${WASM_BINDING}@1.2.2 --no-save --no-audit --no-fund`);
   });
 
   it('reads a lockfileVersion 1 flat dependency map too', () => {
@@ -185,5 +185,28 @@ describe('everything it can emit is allow-list legal', () => {
      */
     const chained = `npm install --no-audit --no-fund && ${install}`;
     expect(isAllowedShellCommand(chained).allowed, `"${chained}" would be blocked`).toBe(true);
+  });
+});
+
+/**
+ * 🔴 `--no-save`, asserted as a RULE rather than as part of one expected string.
+ *
+ * This binding is a PLATFORM workaround — a browser sandbox cannot load rolldown's native addon — so
+ * it must never be written into the user's `package.json` or `package-lock.json`, where their next
+ * commit would carry it into their own repository.
+ *
+ * It is also a hard limit on the blast radius of a package manager that mishandles lockfiles.
+ * MEASURED 2026-08-03: this chained install turned a real project's 220,682-byte / 365-package
+ * `package-lock.json` into 2,127 bytes describing only this package, whereupon the caret ranges
+ * re-resolved, a duplicate `@babylonjs/core` appeared, and `tsc` failed with 33 errors on a project
+ * that builds perfectly. Fixed at source in @babylonjs-toolkit/nodepod 1.9.18-btk.6; this is the
+ * half we control, and it holds whatever the package manager does.
+ */
+describe('the platform workaround stays out of the user’s repository', () => {
+  it('installs the binding with --no-save', () => {
+    const decision = decideRolldownWasm([VITE_8, LOCK_122], BROWSER);
+
+    expect(decision.install).toBeDefined();
+    expect(decision.install, 'a saved install puts our workaround in the user’s repo').toContain('--no-save');
   });
 });

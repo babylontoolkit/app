@@ -50,7 +50,7 @@ describe('buildHealthReport', () => {
     'SUPABASE_SERVICE_ROLE_KEY',
     'SUPABASE_ANON_KEY',
     'STRIPE_SECRET_KEY',
-    'PLAY_URL',
+    'SHARE_DOMAIN',
     'MONITORING_WEBHOOK_URL',
     'ANALYTICS_WEBHOOK_URL',
 
@@ -190,7 +190,7 @@ describe('buildHealthReport', () => {
   it('flips a dependency to ok once its env is present', async () => {
     process.env.LLM_PROVIDER = 'Anthropic';
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
-    process.env.PLAY_URL = 'https://play.example.com';
+    process.env.SHARE_DOMAIN = 'codewrx.app';
 
     const report = await buildHealthReport(undefined);
 
@@ -283,7 +283,7 @@ describe('buildHealthReport', () => {
       process.env.SUPABASE_ANON_KEY = 'anon-test';
       process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-test';
       process.env.STRIPE_SECRET_KEY = 'sk_test';
-      process.env.PLAY_URL = 'https://play.example.com';
+      process.env.SHARE_DOMAIN = 'codewrx.app';
       process.env.MONITORING_WEBHOOK_URL = 'https://collector.example.com/errors';
       process.env.ANALYTICS_WEBHOOK_URL = 'https://collector.example.com/events';
 

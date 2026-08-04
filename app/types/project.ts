@@ -27,8 +27,22 @@ export interface Project {
   /** The `game_registry` entry this project was seeded from (§4.4). */
   templateId: string;
 
-  /** Set once published (§4.8) — the public `/play/:shareId` key. */
+  /** Set once published (§4.8) — the key a share resolves by. */
   shareId?: string;
+
+  /**
+   * The project's public URL, MINTED BY THE SERVER (§4.8, SPEC §2.5 rule 2). Absent until published.
+   *
+   * 🔴 **The client must render this and must never construct it.** The share address depends on
+   * `SHARE_DOMAIN`, which the browser provably cannot see: there is no root loader, `/api/me` carries
+   * no origin, and `brand.ts` forbids `process.env` in the brand module because it is client-imported
+   * and a read there inlines a build-time value. `ShareDialog` used to build
+   * `window.location.origin + '/play/' + shareId`, which is the right answer on one developer's
+   * machine and the wrong one from any deployed instance — the config it needed was simply not
+   * reachable from where it stood. Absolute in production, a relative `/app/<id>` in local dev; either
+   * way it is a finished string.
+   */
+  shareUrl?: string;
 
   /**
    * When a remix seed was deposited for this project (§4.8) — absent on almost every project.

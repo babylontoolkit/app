@@ -53,7 +53,7 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
     const user = await requireUser(request, context);
     const project = await requireOwnedProject(user, params.projectId!, context);
 
-    return json({ project: toWireProject(project) });
+    return json({ project: toWireProject(project, context) });
   } catch (error) {
     return errorResponse(error);
   }
@@ -96,7 +96,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       ...('creationHandoff' in body ? { creationHandoff: parseCreationHandoff(body.creationHandoff) } : {}),
     });
 
-    return json({ project: toWireProject(updated) });
+    return json({ project: toWireProject(updated, context) });
   } catch (error) {
     return errorResponse(error);
   }

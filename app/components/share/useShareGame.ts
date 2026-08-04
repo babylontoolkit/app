@@ -65,7 +65,19 @@ export interface PublishOptions {
  * editor.
  */
 export type ShareOutcome =
-  | { status: 'published'; shareId: string; remixBlockedReason?: string }
+  | {
+      status: 'published';
+      shareId: string;
+
+      /**
+       * The public URL, exactly as the server minted it (`shareUrl`, from `SHARE_DOMAIN`). Absolute in
+       * production, a relative `/app/<id>` in local dev — either way a finished string this client
+       * renders and never rebuilds. See `ShareDialog`'s `existingShareUrl` for why it cannot be
+       * computed here.
+       */
+      url?: string;
+      remixBlockedReason?: string;
+    }
   | { status: 'blocked'; findings: ChecklistFinding[] }
   | { status: 'needs-acknowledgement'; findings: ChecklistFinding[] }
 
@@ -219,6 +231,7 @@ export function useShareGame() {
 
       const data = (await response.json()) as {
         shareId?: string;
+        url?: string;
         remixable?: boolean;
         remixBlockedReason?: string;
         findings?: ChecklistFinding[];
@@ -227,7 +240,12 @@ export function useShareGame() {
       };
 
       if (response.status === 201 && data.shareId) {
-        return { status: 'published', shareId: data.shareId, remixBlockedReason: data.remixBlockedReason };
+        return {
+          status: 'published',
+          shareId: data.shareId,
+          url: data.url,
+          remixBlockedReason: data.remixBlockedReason,
+        };
       }
 
       // A secret — a refusal, not a warning (§4.8).

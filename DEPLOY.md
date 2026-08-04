@@ -77,7 +77,7 @@ aws ssm put-parameter --name /btk/staging/GITHUB_WEBHOOK_SECRET --type SecureStr
 aws ssm put-parameter --name /btk/staging/S3_SNAPSHOTS_BUCKET --type String --value 'btk-snapshots-staging'
 aws ssm put-parameter --name /btk/staging/S3_PLAY_BUCKET --type String --value 'btk-play-builds-staging'
 aws ssm put-parameter --name /btk/staging/APP_URL --type String --value 'https://staging.app.babylontoolkit.com'
-aws ssm put-parameter --name /btk/staging/PLAY_URL --type String --value 'https://play.<playdomain>'
+aws ssm put-parameter --name /btk/staging/SHARE_DOMAIN --type String --value '<sharedomain>'   # e.g. codewrx.app — wildcard *.<sharedomain> must point here
 
 # Sandbox provider (CodeSandbox). The KEY is a platform secret — server-only, never VITE_-prefixed.
 aws ssm put-parameter --name /btk/staging/CODESANDBOX_API_KEY --type SecureString --value 'csb_...'
@@ -192,7 +192,7 @@ Create `deployment-staging.json` (CI renders this template with SSM values):
       "environment": {
         "NODE_ENV": "production",
         "APP_URL": "https://staging.app.babylontoolkit.com",
-        "PLAY_URL": "https://play.<playdomain>",
+        "SHARE_DOMAIN": "<sharedomain>",
         "ANTHROPIC_API_KEY": "<from SSM>",
         "SUPABASE_URL": "<from SSM>",
         "SUPABASE_ANON_KEY": "<from SSM>",

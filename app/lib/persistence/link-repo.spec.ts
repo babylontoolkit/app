@@ -92,6 +92,40 @@ describe('the request it actually sends', () => {
     expect(body).toContain('"gitlab"');
   });
 
+  /**
+   * 🔴 The commit an import already holds must reach the wire, or every later open of that project
+   * mounts as `diverged` against the commit it was cloned from (measured live 2026-08-03; see
+   * `mount-source.spec.ts` for the rule and for what the false divergence costs downstream).
+   *
+   * Asserted on the raw body for the same reason `provider` is: `head: undefined` vanishes through
+   * `JSON.stringify`, so a deep-equal against an object that also omits it agrees with a wrapper that
+   * silently dropped the field.
+   */
+  it('carries the cloned head when the caller has one', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+
+    await linkProjectToRepo('proj-42', {
+      repo: 'group/my-game',
+      branch: 'trunk',
+      provider: 'github',
+      head: 'a'.repeat(40),
+    });
+
+    const body = (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string;
+
+    expect(body).toContain('"head"');
+    expect(JSON.parse(body)).toMatchObject({ head: 'a'.repeat(40) });
+  });
+
+  /* The CONTROL: a bare link has no head, and must not invent one. */
+  it('omits head entirely when the caller has none', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+
+    await link();
+
+    expect((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string).not.toContain('"head"');
+  });
+
   it('carries github just as explicitly', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
 

@@ -452,7 +452,7 @@ export interface LinkOutcome {
  */
 export async function linkProjectToRepo(
   projectId: string,
-  input: { repo: string; branch: string; provider: 'github' | 'gitlab' },
+  input: { repo: string; branch: string; provider: 'github' | 'gitlab'; head?: string },
 ): Promise<LinkOutcome> {
   let response: Response;
 

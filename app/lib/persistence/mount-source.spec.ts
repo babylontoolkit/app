@@ -114,6 +114,53 @@ describe('both moved — the platform never picks a winner (§4.13)', () => {
 });
 
 /**
+ * 🔴 A FRESHLY CLONED PROJECT IS NOT DIVERGED FROM THE COMMIT IT WAS CLONED FROM.
+ *
+ * MEASURED live 2026-08-03, in a browser with IndexedDB, localStorage and the service worker all
+ * wiped: cloning `burn-the-asphalt-demo` logged `Mounting project … from: diverged` and put up the
+ * two-versions dialog for a project that had existed for four seconds.
+ *
+ * The cause is entirely in the FACTS, not in the rule below — `remoteMoved` is
+ * `remoteHead !== lastSyncedCommitSha`, and the import recorded no `lastSyncedCommitSha`, so a real
+ * sha was compared against `undefined` and every clone "moved". These tests pin the two halves the
+ * importer now supplies, because the damage was three layers downstream and read as unrelated bugs:
+ * the redundant restore rewrote `vite.config.ts`, Vite restarted, and a restart CLEARS the terminal —
+ * so the `npm install` log and the dev-server banner vanished and the workspace looked inert.
+ */
+describe('a fresh clone (§4.13) — recorded at the commit it took', () => {
+  const justCloned = { linked: true, lastSyncedCommitSha: 'abc123', remoteHead: 'abc123' } as const;
+
+  it('mounts local rather than reporting a divergence against itself', () => {
+    expect(selectMountSource({ ...justCloned, localSeq: 0, syncedSeq: 0 })).toEqual({
+      source: 'local',
+      unsavedWork: false,
+    });
+  });
+
+  /*
+   * The half that is easy to drop, because it costs no dialog: without `markSynced` the import's own
+   * checkpoint outranks a `syncedSeq` that was never written, so a project nobody has touched opens
+   * claiming it has changes to commit. That trains the user to ignore the one badge that tells them
+   * their work is at risk.
+   */
+  it('does not report the import checkpoint as unsaved work', () => {
+    expect(selectMountSource({ ...justCloned, localSeq: 0 })).toMatchObject({ unsavedWork: true });
+    expect(selectMountSource({ ...justCloned, localSeq: 0, syncedSeq: 0 })).toMatchObject({ unsavedWork: false });
+  });
+
+  /*
+   * The CONTROL, and the reason this file cannot claim more than it proves: recording the sha must not
+   * blind the rule to a genuine divergence. A real commit landing after the clone still has to stop.
+   */
+  it('still reports a divergence once the repo actually moves', () => {
+    expect(selectMountSource({ ...justCloned, remoteHead: 'def456', localSeq: 3, syncedSeq: 0 })).toEqual({
+      source: 'diverged',
+      remoteHead: 'def456',
+    });
+  });
+});
+
+/**
  * 🔴 `undefined` (could not ask) is not `null` (the branch is empty).
  *
  * Collapsing them means a reload on a flaky connection reads the repo as empty, concludes the browser

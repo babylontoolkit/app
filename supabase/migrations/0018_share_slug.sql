@@ -1,0 +1,25 @@
+-- Share slug — the readable half of a published project's public host (SPEC §4.8).
+--
+-- `arcade-racer-k7m2p9qx4nrt.codewrx.app`
+--  └── share_slug ──┘└─ share_id ─┘
+--
+-- 🔴 NO UNIQUE INDEX, AND THAT IS THE DESIGN, NOT AN OVERSIGHT.
+--
+-- Identity is carried entirely by `share_id`, which already holds the only unique constraint on this
+-- table's URL keys (`projects_share_id_key`, migration 0001). The slug is decoration that the serve
+-- layer never reads — `shareIdFromHost` takes the label's trailing 12 characters and ignores
+-- everything in front of them.
+--
+-- Making it unique would manufacture every problem this design exists to avoid: fifty users will call
+-- a project "Arcade Racer", and a unique slug means a queue, a `-2` suffix walk, a reserved-word deny
+-- list, a squatting policy, and a decision about whether a name frees up on unpublish (it must not —
+-- whoever claimed it next would inherit every link still pointing at the old game, which is subdomain
+-- takeover of our own users).
+--
+-- It also means the slug can be re-derived on every publish without consequence: a renamed project
+-- gets a better-reading URL next time it ships, and the link its author already pasted into a chat
+-- keeps resolving through the id.
+--
+-- Length is enforced in application code (`MAX_SHARE_SLUG_LENGTH`), derived from the 63-octet DNS
+-- label limit minus the id and its separator, rather than pinned here as a second hand-picked number.
+alter table public.projects add column if not exists share_slug text;

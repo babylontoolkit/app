@@ -215,27 +215,27 @@ describe('content keys — the same wall on the read side', () => {
   });
 });
 
-describe('play origin isolation (§5)', () => {
-  it('reports NOT isolated when PLAY_URL is unset (local dev is not the security boundary)', () => {
+describe('share origin isolation (§5)', () => {
+  it('reports NOT isolated when SHARE_DOMAIN is unset (local dev is not the security boundary)', () => {
     expect(resolvePlayOrigin({}).isolated).toBe(false);
   });
 
-  it('reports isolated and trims a trailing slash when PLAY_URL is set', () => {
-    const origin = resolvePlayOrigin({ cloudflare: { env: { PLAY_URL: 'https://play.example.com/' } } });
+  it('reports isolated once SHARE_DOMAIN names a domain', () => {
+    const origin = resolvePlayOrigin({ cloudflare: { env: { SHARE_DOMAIN: 'codewrx.app' } } });
 
-    expect(origin).toEqual({ origin: 'https://play.example.com', isolated: true });
+    expect(origin).toEqual({ origin: 'https://codewrx.app', isolated: true });
   });
 
-  it('serves in local dev even without PLAY_URL (dev is not the boundary)', () => {
+  it('serves in local dev even without SHARE_DOMAIN (dev is not the boundary)', () => {
     expect(isPlayServableInProduction({ cloudflare: { env: { NODE_ENV: 'development' } } })).toBe(true);
   });
 
-  it('REFUSES to serve in production when PLAY_URL is unset (fail closed)', () => {
+  it('REFUSES to serve in production when SHARE_DOMAIN is unset (fail closed)', () => {
     expect(isPlayServableInProduction({ cloudflare: { env: { NODE_ENV: 'production' } } })).toBe(false);
   });
 
-  it('serves in production once PLAY_URL points at a separate origin', () => {
-    const context = { cloudflare: { env: { NODE_ENV: 'production', PLAY_URL: 'https://play.example.com' } } };
+  it('serves in production once SHARE_DOMAIN names a separate domain', () => {
+    const context = { cloudflare: { env: { NODE_ENV: 'production', SHARE_DOMAIN: 'codewrx.app' } } };
     expect(isPlayServableInProduction(context)).toBe(true);
   });
 });
@@ -286,22 +286,61 @@ describe('resolvePlayRequest — asset vs game document vs wrapper (T17b)', () =
 });
 
 describe('the play wrapper iframe src (T17b)', () => {
-  const input = { shareId: 'abc123def456', title: 'Kart Racer', solo: false, playOrigin: '' };
+  /** Local dev: the wrapper is served by the app, so the game sits under the platform's `/app` route. */
+  const input = {
+    shareId: 'abc123def456',
+    title: 'Kart Racer',
+    solo: false,
+    gameBase: '/app/abc123def456',
+    appOrigin: '',
+  };
+
+  /** Deployed: the project owns its whole vanity origin, so the game is at that origin's ROOT. */
+  const onVanityHost = { ...input, gameBase: '', appOrigin: 'https://app.codewrx.ai' };
 
   it('loads the DIRECTORY URL with ?embed=1 — same-origin (local dev)', () => {
-    expect(renderPlayWrapper(input)).toContain('src="/play/abc123def456/?embed=1&__nodepod=host"');
+    expect(renderPlayWrapper(input)).toContain('src="/app/abc123def456/?embed=1&__nodepod=host"');
   });
 
   it('appends &solo=true for a network-capable game', () => {
     expect(renderPlayWrapper({ ...input, solo: true })).toContain(
-      'src="/play/abc123def456/?embed=1&__nodepod=host&solo=true"',
+      'src="/app/abc123def456/?embed=1&__nodepod=host&solo=true"',
     );
   });
 
-  it('crosses to the play origin when one is configured', () => {
-    const html = renderPlayWrapper({ ...input, playOrigin: 'https://play.example.com' });
+  /*
+   * On a vanity host the game is at the ROOT of the project's own origin, so the src is bare `/`.
+   * That is the whole point of a label per project: there is no share prefix left to be under.
+   */
+  it('loads the origin root on a vanity host', () => {
+    expect(renderPlayWrapper(onVanityHost)).toContain('src="/?embed=1&__nodepod=host"');
+  });
 
-    expect(html).toContain('src="https://play.example.com/abc123def456/?embed=1&__nodepod=host"');
+  /*
+   * 🔴 The Remix link must be ABSOLUTE to the app, and only on a vanity host does that matter.
+   * `/remix/<id>` there resolves to the PROJECT's origin — our app answers (the wildcard points at
+   * it) but the session cookie does not, because it is host-only and set on the app origin. The
+   * visitor would arrive logged out of an account they are signed into, on the one link §4.8's growth
+   * loop depends on.
+   */
+  it('sends Remix back to the app origin from a vanity host', () => {
+    expect(renderPlayWrapper(onVanityHost)).toContain('href="https://app.codewrx.ai/remix/abc123def456"');
+  });
+
+  /* CONTROL: served by the app itself, the relative link is already correct and must stay relative. */
+  it('keeps the Remix link relative when the app serves the wrapper', () => {
+    expect(renderPlayWrapper(input)).toContain('href="/remix/abc123def456"');
+  });
+
+  /*
+   * The Report POST stays relative on BOTH shapes: it is anonymous, the wildcard points at this same
+   * Remix app, and making it absolute would buy a cross-origin preflight for a request that needs no
+   * identity at all.
+   */
+  it('keeps the anonymous report POST relative on both shapes', () => {
+    for (const html of [renderPlayWrapper(input), renderPlayWrapper(onVanityHost)]) {
+      expect(html).toContain("fetch('/api/play/abc123def456/report'");
+    }
   });
 
   /*
@@ -319,12 +358,7 @@ describe('the play wrapper iframe src (T17b)', () => {
    * multiplayer games nobody tests locally.
    */
   it('marks the frame as the HOST’s on every variant, so the sandbox worker cannot adopt it', () => {
-    for (const variant of [
-      input,
-      { ...input, solo: true },
-      { ...input, playOrigin: 'https://play.example.com' },
-      { ...input, solo: true, playOrigin: 'https://play.example.com' },
-    ]) {
+    for (const variant of [input, { ...input, solo: true }, onVanityHost, { ...onVanityHost, solo: true }]) {
       const src = /src="([^"]*embed=1[^"]*)"/.exec(renderPlayWrapper(variant))?.[1];
 
       expect(src, 'no iframe src matched — the wrapper markup changed shape').toBeDefined();
@@ -333,15 +367,12 @@ describe('the play wrapper iframe src (T17b)', () => {
   });
 
   /**
-   * 🔴 Never `/index.html`: the game is a BrowserRouter SPA whose basename is `/play/<id>/`, so a
+   * 🔴 Never `/index.html`: the game is a BrowserRouter SPA whose basename it resolves at runtime, so a
    * document URL ending in `index.html` leaves `index.html` as the route path — which matches nothing
    * and renders a blank page.
    */
   it('does NOT point the iframe at index.html', () => {
-    for (const html of [
-      renderPlayWrapper(input),
-      renderPlayWrapper({ ...input, playOrigin: 'https://play.example.com' }),
-    ]) {
+    for (const html of [renderPlayWrapper(input), renderPlayWrapper(onVanityHost)]) {
       const src = html.match(/src="([^"]+)"/)?.[1];
 
       expect(src).toBeDefined();

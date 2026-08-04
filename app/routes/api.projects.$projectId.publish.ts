@@ -19,6 +19,7 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { errorResponse } from '~/lib/.server/http';
 import { runPublishingChecklist } from '~/lib/.server/share/checklist';
 import { maxPublishBodyBytes, publishBodyFloorBytes, publishBuild, unpublish } from '~/lib/.server/share/publish';
+import { shareUrl } from '~/lib/.server/share/serve';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import { buildRemixSeed } from '~/lib/.server/share/remix-seed';
 import { SeedTooLargeError, putRemixSeed } from '~/lib/.server/share/seed-store';
@@ -212,8 +213,21 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       gallery: Boolean(body.submitToGallery),
     });
 
+    /*
+     * 🔴 THE URL IS MINTED HERE, BY THE SERVER, AND HANDED OVER FINISHED (SPEC §2.5 rule 2).
+     *
+     * The client cannot build it: there is no root loader, `/api/me` carries no origin, and `brand.ts`
+     * forbids `process.env` in the brand module because it is client-imported and a read there would
+     * inline a build-time value. That is exactly why `ShareDialog` used to string-build
+     * `window.location.origin + '/play/' + id` and therefore handed out an app-origin link from a
+     * deployed instance — the config it needed was unreachable from where it was standing.
+     *
+     * This request has just published the build, so it knows the share id, the slug and the configured
+     * domain. Sending a string costs nothing and removes the only reason a component would ever
+     * construct one again.
+     */
     // `remix` rides along: the publish succeeded either way, but the user must SEE it if it cannot be remixed.
-    return json({ ...result, ...remix }, { status: 201 });
+    return json({ ...result, ...remix, url: shareUrl(result, context) }, { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

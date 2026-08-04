@@ -19,7 +19,7 @@ const registry = vi.hoisted(() => ({
 }));
 
 const projects = vi.hoisted(() => ({ cloneRepoIntoProject: vi.fn(), linkProjectToRepo: vi.fn() }));
-const snapshots = vi.hoisted(() => ({ createLocalSnapshot: vi.fn() }));
+const snapshots = vi.hoisted(() => ({ createLocalSnapshot: vi.fn(), markSynced: vi.fn() }));
 const workbench = vi.hoisted(() => ({ restoreFiles: vi.fn(), files: { get: vi.fn(() => ({})) } }));
 const settle = vi.hoisted(() => ({ settleAfterCreation: vi.fn() }));
 
@@ -47,7 +47,16 @@ vi.mock('~/lib/persistence/projects', () => ({
   cloneRepoIntoProject: projects.cloneRepoIntoProject,
   linkProjectToRepo: projects.linkProjectToRepo,
 }));
-vi.mock('~/lib/persistence/local-snapshots', () => ({ createLocalSnapshot: snapshots.createLocalSnapshot }));
+vi.mock('~/lib/persistence/local-snapshots', () => ({
+  createLocalSnapshot: snapshots.createLocalSnapshot,
+
+  /*
+   * ⚠️ A partial module mock makes every un-mocked export `undefined`, and the importer's calls to
+   * this one are wrapped in a best-effort `catch` — so omitting it here does not fail a test, it
+   * turns the call into a swallowed TypeError and reports green for behaviour that never happens.
+   */
+  markSynced: snapshots.markSynced,
+}));
 vi.mock('~/lib/persistence/useChatHistory', () => ({ db: {} }));
 vi.mock('~/lib/stores/workbench', () => ({ workbenchStore: workbench }));
 
@@ -456,6 +465,89 @@ describe('an imported project is born linked', () => {
       branch: 'trunk',
       provider: 'gitlab',
     });
+  });
+
+  /**
+   * 🔴 IT ALSO RECORDS *WHICH COMMIT* IT TOOK — and dropping that is silent, expensive and reads as
+   * three unrelated bugs.
+   *
+   * `selectMountSource` computes `remoteMoved = remoteHead !== lastSyncedCommitSha`, so a link that
+   * omits the head leaves `undefined` where a real sha belongs and the project mounts as `diverged`
+   * against the very commit it was cloned from. MEASURED live 2026-08-03 in a browser with every
+   * store wiped: the two-versions dialog on a project four seconds old, a redundant full restore that
+   * rewrote `vite.config.ts`, a Vite restart, and a terminal cleared of the `npm install` log and the
+   * dev-server banner — reported as *"there is no proper npm install and npm run dev"*.
+   *
+   * Asserted as its own test rather than folded into the tuple above, because the tuple assertion
+   * uses `toEqual` semantics and therefore PASSES for `head: undefined`. A check that cannot fail for
+   * the value it is named after is not a weak test, it is no test.
+   */
+  it('records the commit the clone actually read', async () => {
+    const head = 'f'.repeat(40);
+
+    projects.cloneRepoIntoProject.mockResolvedValue({
+      ok: true,
+      files: FILES,
+      repo: 'octocat/Hello-World',
+      branch: 'develop',
+      provider: 'github',
+      head,
+      skippedSecrets: [],
+    });
+
+    await run();
+
+    expect(projects.linkProjectToRepo).toHaveBeenCalledWith('prj_1', expect.objectContaining({ head }));
+  });
+
+  /**
+   * The other half, which costs no dialog and is therefore the easier one to drop: the checkpoint the
+   * import just wrote IS the repo's bytes, so `syncedSeq` must move with it. Leave it and
+   * `localSeq > syncedSeq` makes a project nobody has touched open claiming it has changes to commit,
+   * which teaches the user to ignore the one badge that says their work is at risk.
+   */
+  it('marks the import checkpoint as already synced', async () => {
+    projects.cloneRepoIntoProject.mockResolvedValue({
+      ok: true,
+      files: FILES,
+      repo: 'octocat/Hello-World',
+      branch: 'develop',
+      provider: 'github',
+      head: 'f'.repeat(40),
+      skippedSecrets: [],
+    });
+
+    await run();
+
+    expect(snapshots.markSynced).toHaveBeenCalledWith({}, 'prj_1');
+  });
+
+  /*
+   * CONTROLS. "Already synced" is a claim about agreeing with a specific commit, so it must not be
+   * made when there is no commit to agree with, nor when the link never landed — in both cases the
+   * project is honestly unlinked and the mark would be a durability claim the platform cannot back.
+   */
+  it('does not claim synced when the clone reported no head', async () => {
+    await run();
+
+    expect(snapshots.markSynced).not.toHaveBeenCalled();
+  });
+
+  it('does not claim synced when the link failed', async () => {
+    projects.cloneRepoIntoProject.mockResolvedValue({
+      ok: true,
+      files: FILES,
+      repo: 'octocat/Hello-World',
+      branch: 'develop',
+      provider: 'github',
+      head: 'f'.repeat(40),
+      skippedSecrets: [],
+    });
+    projects.linkProjectToRepo.mockResolvedValue({ ok: false, message: 'nope' });
+
+    await run();
+
+    expect(snapshots.markSynced).not.toHaveBeenCalled();
   });
 
   /*

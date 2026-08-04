@@ -4,7 +4,10 @@
 
 - **App (`app.babylontoolkit.com`): AWS Lightsail Container Service**, deploying the fork's Docker image (bolt.diy ships a Dockerfile). Rationale: the server agent proxy holds long SSE streams through multi-round tool loops (minutes per generation) — an always-on container has no function-duration limits. Lightsail chosen over ECS Fargate to avoid the mandatory ALB cost/ceremony at this scale; migration path to ECS exists if scale demands it. WebContainers are unaffected by host choice (they run in the user's browser).
 - **Files: S3 (existing account)** — project snapshots bucket + shared-builds bucket. Supabase's role narrows to **Postgres + Auth + RLS only**; Supabase Storage is not used.
-- **Play origin (SPEC §5 isolation requirement): CloudFront distribution over the shared-builds S3 bucket on a SEPARATE registrable domain** (e.g., `btkplay.example` — separate domain, not a subdomain, so user-authored game HTML can never touch app cookies/sessions).
+- **Share domain (SPEC §5 isolation requirement): a SEPARATE registrable WILDCARD domain** — `SHARE_DOMAIN`, e.g. `codewrx.app`. Separate domain, not a subdomain of the app's, so user-authored game HTML can never touch app cookies/sessions. **Each published project gets its own label** (`arcade-racer-k7m2p9qx4nrt.<domain>`), which additionally means one published game cannot read another's `localStorage`/`IndexedDB` — a boundary a single flat play origin could not offer. Needs wildcard DNS `*.<domain>` and a wildcard TLS certificate (ACM is free and auto-renewing; a wildcard covers exactly ONE label, which is why the slug and id share one).
+  - The readable half is `projects.share_slug`, and it is **decoration with no unique constraint**: identity is the trailing 12-char `share_id`, recovered with `label.slice(-12)`. That is what removes the whole naming problem — fifty "Arcade Racer" projects all get working URLs, with no reservation queue, no squatting policy, no reserved-word deny list, and no link that breaks when a project is renamed.
+  - Start by pointing the wildcard at the Lightsail app and letting the existing `ObjectStore` path serve the bytes — it reuses everything and needs no edge function. CloudFront-over-S3 is a later optimisation; note `storage/index.ts` uses ONE bucket with a `builds/` prefix, so a distribution would need an origin path of `/builds`.
+  - `PLAY_URL` is RETIRED and refused loudly if set (`resolveShareDomain`) — it named a single flat origin and cannot be reinterpreted as a wildcard base.
 - **DNS:** wherever babylontoolkit.com is managed today (Route 53 optional, not required). `app` → CNAME/ALIAS to the Lightsail container endpoint.
 - **AVOID for this app:** Amplify Hosting / Lambda SSR and App Runner — Lambda duration limits and App Runner response-buffering behavior are poor fits for multi-minute SSE. Do not migrate the agent proxy onto them.
 
@@ -19,7 +22,7 @@
 
 - Lightsail Container Service per env (power: nano→small as needed; scale = bump power/node count).
 - S3: `btk-snapshots-{env}` (private; server-only access) and `btk-play-builds-{env}` (private + CloudFront OAC — never public-listable).
-- CloudFront: distribution per env over the play bucket, custom domain (separate registrable domain), default root behavior serving each build under `/{shareId}/`.
+- CloudFront (optional, later): distribution per env over the play bucket, wildcard custom domain (separate registrable domain), origin path `/builds`. Host→path routing lives at the server entry (`functions/[[path]].ts` in production, `vite.config.ts`'s `shareHostPlugin` in dev), never in a route — a Remix route cannot decide it should have been a different route, and putting the check in the loader silently served the app's landing page on every vanity host (measured 2026-08-03).
 - IAM: one deploy user/role for CI (ECR-less Lightsail push permissions) and one runtime role/credentials for the app (scoped: put/get on the two buckets only). Long-term: least-privilege policies; never account-root keys.
 - SSM Parameter Store (or Lightsail container env vars) for secrets: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `LICENSE_SERVICE_URL`, `LICENSE_SERVICE_SECRET`, `SESSION_SECRET`, `S3_SNAPSHOTS_BUCKET`, `S3_PLAY_BUCKET`, GitHub webhook secret, admin allowlist.
 - CloudWatch alarms: container restarts, 5xx rate; logs shipped to the error-tracking stack (SPEC §5A).
@@ -81,7 +84,7 @@
 
 If the app domain ever changes (e.g., away from app.babylontoolkit.com):
 1. DNS: new record → Lightsail endpoint; issue Lightsail-managed TLS cert for the new domain.
-2. Env: update `APP_URL` (and `PLAY_URL` if the play domain changes); redeploy. All share links, emails, and meta URLs follow automatically (brand-module rule).
+2. Env: update `APP_URL` (and `SHARE_DOMAIN` if the share domain changes); redeploy. All share links, emails, and meta URLs follow automatically (brand-module rule).
 3. **The three tentacles (15 min each; forgetting one silently breaks a flow):**
    a. OAuth redirect URLs — Google console, GitHub OAuth app, AND Supabase Auth URL configuration.
    b. Stripe webhook endpoint URLs (per env) — re-register + new signing secrets into SSM.

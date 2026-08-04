@@ -69,6 +69,9 @@ interface SandboxStatus {
 interface Submission {
   projectId: string;
   shareId: string;
+
+  /** The public URL, minted server-side from `SHARE_DOMAIN`. Never built here. */
+  url?: string;
   title: string;
   description?: string;
 }
@@ -809,9 +812,10 @@ export function AdminTab() {
                     <div className="text-xs text-bolt-elements-textSecondary truncate">{s.description}</div>
                   )}
                 </div>
+                {/* `url` is server-minted (`api.admin.gallery`) — a curator previews the real public URL. */}
                 <a
                   className="i-ph:play text-bolt-elements-textSecondary"
-                  href={`/play/${s.shareId}`}
+                  href={s.url}
                   target="_blank"
                   rel="noreferrer"
                   title="Preview"
@@ -851,9 +855,15 @@ export function AdminTab() {
                   </div>
                   <div className="text-xs text-bolt-elements-textTertiary">{rep.shareId}</div>
                 </div>
+                {/*
+                 * The PLATFORM route, not a minted share URL: a report carries only a share id (it is
+                 * filed anonymously against `play_reports`), and resolving each one to a project just to
+                 * pretty up an admin link is a lookup per row for no benefit. `/app/:id` 301s to the
+                 * canonical address in production, so this lands in the right place either way.
+                 */}
                 <a
                   className="i-ph:play text-bolt-elements-textSecondary"
-                  href={`/play/${rep.shareId}`}
+                  href={`/app/${rep.shareId}`}
                   target="_blank"
                   rel="noreferrer"
                   title="View"

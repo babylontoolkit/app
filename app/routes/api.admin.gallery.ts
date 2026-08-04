@@ -12,6 +12,7 @@
 import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireAdmin } from '~/lib/.server/supabase/auth';
 import { getProjectStore } from '~/lib/.server/projects/store';
+import { shareUrl } from '~/lib/.server/share/serve';
 import { errorResponse } from '~/lib/.server/http';
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
@@ -25,6 +26,12 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       submissions: submissions.map((p) => ({
         projectId: p.id,
         shareId: p.shareId,
+
+        /*
+         * Minted here, like every other share link — the panel renders in a browser that cannot see
+         * `SHARE_DOMAIN`, and a curator previewing the wrong origin is how a bad game gets approved.
+         */
+        url: p.shareId ? shareUrl({ shareId: p.shareId, shareSlug: p.shareSlug }, context) : undefined,
         title: p.shareTitle || p.name,
         description: p.shareDescription,
         sharedAt: p.sharedAt,

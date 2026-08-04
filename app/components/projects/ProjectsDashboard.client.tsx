@@ -486,9 +486,10 @@ export function ProjectsDashboard() {
                   >
                     <span className="i-ph:arrow-square-out" /> Open
                   </button>
-                  {project.shareId && (
+                  {/* `shareUrl` is server-minted (`toWireProject`) — the browser cannot know `SHARE_DOMAIN`. */}
+                  {project.shareUrl && (
                     <a
-                      href={`/play/${project.shareId}`}
+                      href={project.shareUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="px-3 py-2.5 text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-3 flex items-center justify-center border-l border-bolt-elements-borderColor"

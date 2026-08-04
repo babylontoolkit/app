@@ -265,7 +265,22 @@ export function decideRolldownWasm(files: TextFile[], options: { nativeAddons: b
     version,
 
     // `--no-audit --no-fund` mirror the main install; both are plain flags the allow-list accepts.
-    install: `npm install ${WASM_BINDING}@${version} --no-audit --no-fund`,
+    /*
+     * 🔴 `--no-save` — this install must not touch `package.json` or `package-lock.json`.
+     *
+     * The binding is a PLATFORM workaround (a browser sandbox cannot load rolldown's native addon),
+     * not something the user chose, so writing it into their manifest puts our workaround into their
+     * repository the next time they commit.
+     *
+     * It also closes the blast radius of a real defect found 2026-08-03: our importer chains this
+     * onto the initial install, and Nodepod's `npm` wrote each invocation's tree as the WHOLE
+     * lockfile — turning a 220,682-byte / 365-package `package-lock.json` into a 2,127-byte file
+     * describing only this package. The versions then re-resolved off the caret ranges, a duplicate
+     * `@babylonjs/core` appeared, and `tsc` failed with 33 errors on a project that builds fine.
+     * Fixed properly in the fork (@babylonjs-toolkit/nodepod 1.9.18-btk.6); this keeps the platform
+     * from writing to a file it has no business writing to, whatever the package manager does.
+     */
+    install: `npm install ${WASM_BINDING}@${version} --no-save --no-audit --no-fund`,
     note:
       `This project bundles with rolldown (Vite 8), whose native binding cannot load in a ` +
       `browser-based workspace, so I am also installing ${WASM_BINDING}@${version} — rolldown ` +

@@ -157,7 +157,7 @@ describe('rolldown’s WASM binding on a browser runtime', () => {
     const commands = await detectProjectCommands([vite8, lock], BROWSER);
 
     expect(commands.setupCommand).toBe(
-      'npm install --no-audit --no-fund && npm install @rolldown/binding-wasm32-wasi@1.2.2 --no-audit --no-fund',
+      'npm install --no-audit --no-fund && npm install @rolldown/binding-wasm32-wasi@1.2.2 --no-save --no-audit --no-fund',
     );
 
     const verdict = isAllowedShellCommand(commands.setupCommand!);

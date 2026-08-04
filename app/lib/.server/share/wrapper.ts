@@ -10,8 +10,11 @@
  * `escapeHtml` is applied to every interpolated value without exception; there is no "this one is
  * safe" case, because the moment there is, someone adds a second one that isn't.
  *
- * The badge/report links are RELATIVE — the shell is served from the app origin, so `/remix/:id` and
- * `/api/play/:id/report` resolve to us. Only the iframe `src` crosses to the play origin.
+ * **Two links, two different rules, and the difference is the session cookie.** The Remix link is
+ * ABSOLUTE to `APP_URL` because it needs the visitor's signed-in session, which lives on the app
+ * origin and nowhere else. The Report POST stays RELATIVE because it is anonymous — the wildcard
+ * points at this same Remix app, so `/api/play/:id/report` is answered on a vanity host too, and
+ * keeping it relative avoids a cross-origin preflight for a request that needs no identity.
  */
 import { escapeHtml } from '~/utils/escapeHtml';
 import { brand } from '~/config/brand';
@@ -24,16 +27,31 @@ export interface PlayWrapperInput {
   /** Network-capable game → append `?solo=true` so it launches without waiting for a peer (§4.8). */
   solo: boolean;
 
-  /** Absolute play origin, or '' for same-origin (local dev). */
-  playOrigin: string;
+  /**
+   * Where the game document lives, relative to this wrapper. `''` on a vanity host (the project owns
+   * the whole origin, so the game is at the root); `/app/<shareId>` on the app origin in local dev.
+   */
+  gameBase: string;
+
+  /**
+   * Absolute app origin (`APP_URL`), or `''` when the wrapper is served by the app itself.
+   *
+   * 🔴 **The Remix link is the one thing that MUST cross back to the app, and only an absolute URL
+   * can.** On a vanity host `/remix/<id>` would resolve to `arcade-racer-x.codewrx.app/remix/<id>` —
+   * our app answers there (the wildcard points at it), but the session cookie does not: it is
+   * host-only, set on the app origin, so the visitor would arrive logged out of an account they are
+   * signed into. Remix is the growth loop §4.8 exists for; sending it to a phantom logged-out state is
+   * the kind of failure nobody reports, they just leave.
+   */
+  appOrigin: string;
 }
 
 export function renderPlayWrapper(input: PlayWrapperInput): string {
-  const { shareId, solo, playOrigin } = input;
+  const { shareId, solo, gameBase, appOrigin } = input;
   const title = escapeHtml(input.title);
   const description = input.description ? escapeHtml(input.description) : '';
 
-  const base = playOrigin ? `${playOrigin}/${encodeURIComponent(shareId)}` : `/play/${encodeURIComponent(shareId)}`;
+  const base = gameBase;
 
   /*
    * The iframe loads the DIRECTORY URL, never `/index.html` (T17b). The game is a BrowserRouter app
@@ -52,9 +70,9 @@ export function renderPlayWrapper(input: PlayWrapperInput): string {
    * console warning about routes not matching. Every asset still 200s, so it looks like a working
    * publish.
    *
-   * Production is unaffected — `PLAY_URL` makes this iframe cross-origin, and the worker passes
-   * cross-origin straight through — which is exactly why this could hide: it breaks only where the
-   * game is developed, never where it is shipped.
+   * Production is unaffected — the builder's dev server and its service worker do not exist there —
+   * which is exactly why this could hide: it breaks only where the game is developed, never where it
+   * is shipped.
    *
    * The parameter is answered by the worker BEFORE any claim rule (`static/__sw__.js` rule 1b in our
    * fork). It must survive on the DIRECTORY url the iframe loads; the game's own subresources need no
@@ -102,7 +120,7 @@ ${description ? `<meta property="og:description" content="${description}" />` : 
 <div id="badge">
   <span class="made">${escapeHtml(brand.playBadgeAttribution)}</span>
   <span class="sep">·</span>
-  <a href="/remix/${encodeURIComponent(shareId)}">${escapeHtml(brand.playBadgeRemixLabel)}</a>
+  <a href="${appOrigin}/remix/${encodeURIComponent(shareId)}">${escapeHtml(brand.playBadgeRemixLabel)}</a>
   <span class="sep">·</span>
   <button id="report" type="button">Report</button>
 </div>

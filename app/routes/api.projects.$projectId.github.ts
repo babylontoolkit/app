@@ -72,11 +72,35 @@ interface Body {
   files?: SerializedFileMap;
   summary?: string;
   choice?: string;
+
+  /** `link` only: the commit the caller already holds — see the `link` branch for why it matters. */
+  head?: unknown;
 }
 
 function parseProviderId(raw: string | undefined): GitProviderId {
   // GitHub remains the default so projects linked before §4.5.4b keep working untouched.
   return raw === 'gitlab' ? 'gitlab' : 'github';
+}
+
+/** A full 40-hex git object id, or `undefined` — never a half-trusted string. */
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * The caller-supplied commit sha, validated at the boundary.
+ *
+ * This value decides whether a later mount reports a divergence, so a junk string does not merely
+ * fail to help — it pins the project to a commit that does not exist and makes EVERY future open
+ * diverge, permanently and silently. Refused rather than coerced, for the `parseUserEffort` reason:
+ * it arrives in a browser body, and inventing a plausible-looking answer is the costly direction.
+ */
+function parseCommitSha(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+
+  const sha = raw.trim().toLowerCase();
+
+  return COMMIT_SHA.test(sha) ? sha : undefined;
 }
 
 /** A provider failure becomes an HTTP shape the client can act on — `reconnect` drives the re-auth UI. */
@@ -236,11 +260,37 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
        */
       const providerId = parseProviderId(body.provider);
 
+      /*
+       * 🔴 A CLONE KNOWS WHICH COMMIT IT TOOK, AND NOT RECORDING IT MANUFACTURES A DIVERGENCE.
+       *
+       * `undefined` is the right answer for a bare link — the user named a repo they had not read, so
+       * the platform has never agreed with it about anything. It is the WRONG answer for an import,
+       * which just read the tree at a known head, and the difference is not cosmetic:
+       * `selectMountSource` computes `remoteMoved = remoteHead !== lastSyncedCommitSha`, so a
+       * freshly-cloned project mounts as `diverged` against the very commit it was cloned from
+       * (MEASURED live 2026-08-03 in a browser with every store wiped).
+       *
+       * What that costs is invisible from here and was reported as three unrelated bugs: the user is
+       * asked to choose between two byte-identical versions; whichever they pick runs a FULL restore
+       * that rewrites every file including `vite.config.ts`; Vite sees its config change and RESTARTS,
+       * and a restart clears the terminal — so the `npm install` log and the dev-server banner scroll
+       * away and the workspace looks like nothing ever ran. Owner: *"There is no proper npm install and
+       * npm run dev."* Correct observation, three layers downstream of its cause.
+       *
+       * Optional, and validated: the sha arrives in a browser body, and a caller that does not know
+       * its head must still be able to link.
+       */
+      const head = parseCommitSha(body.head);
+
+      if (body.head !== undefined && head === undefined) {
+        return json({ error: true, message: 'That is not a commit sha.' }, { status: 400 });
+      }
+
       await projects.update(project.id, {
         provider: providerId,
         linkedRepo: body.repo,
         linkedBranch: body.branch,
-        lastSyncedCommitSha: undefined,
+        lastSyncedCommitSha: head,
       });
 
       return json({ ok: true, provider: providerId, linkedRepo: body.repo, linkedBranch: body.branch });

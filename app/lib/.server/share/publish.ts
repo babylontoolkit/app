@@ -29,6 +29,10 @@ import { getProjectStore } from '~/lib/.server/projects/store';
 import { deleteRemixSeed, maxSeedBytes } from './seed-store';
 import type { Project } from '~/lib/.server/projects/types';
 import { createScopedLogger } from '~/utils/logger';
+import { MAX_DNS_LABEL, MAX_SHARE_SLUG_LENGTH, SHARE_ID_LENGTH } from '~/lib/share-host';
+
+/* Re-exported for the tests and callers that reason about publishing; the RULE lives in `share-host`. */
+export { MAX_DNS_LABEL, MAX_SHARE_SLUG_LENGTH, SHARE_ID_LENGTH };
 
 const logger = createScopedLogger('share.publish');
 
@@ -43,7 +47,6 @@ const logger = createScopedLogger('share.publish');
  * a session token is.
  */
 const ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
-const SHARE_ID_LENGTH = 12;
 
 export function generateShareId(): string {
   let id = '';
@@ -410,8 +413,38 @@ export interface PublishInput {
 
 export interface PublishResult {
   shareId: string;
+  shareSlug?: string;
   fileCount: number;
   totalBytes: number;
+}
+
+/**
+ * A project title reduced to something legal in a DNS label: `"Arcade Racer!"` → `arcade-racer`.
+ *
+ * Purely decorative — `shareIdFromHost` reads the trailing id and never this — so it is allowed to
+ * collide, allowed to be empty, and allowed to go stale after a rename. That freedom is the entire
+ * reason the naming problem has no policy attached to it: nothing here has to be unique, reserved, or
+ * defended.
+ *
+ * Returns `undefined` rather than a placeholder when nothing survives (a title that is entirely emoji
+ * or punctuation). An empty slug must produce `k7m2p9qx4nrt.codewrx.app`, never `-k7m2p9qx4nrt.…`,
+ * which is an illegal label and would take the share offline for the sake of a decoration.
+ */
+export function slugifyForHost(title: string | undefined): string | undefined {
+  const slug = (title ?? '')
+    .toLowerCase()
+    .normalize('NFKD')
+
+    // Strip combining marks so `Café` becomes `cafe` rather than losing the letter entirely.
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MAX_SHARE_SLUG_LENGTH)
+
+    // Re-trim: the cap can land mid-separator and leave a trailing hyphen, which is an illegal label.
+    .replace(/-+$/, '');
+
+  return slug || undefined;
 }
 
 /**
@@ -559,9 +592,19 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
     }
   }
 
+  const shareTitle = input.title?.trim() || project.name;
+
+  /*
+   * Re-derived on every publish, so a renamed project's link reads correctly next time it ships —
+   * and safe to re-derive precisely because the slug carries no identity: the previous URL still
+   * resolves through the trailing share id, so nobody's pasted link breaks when this changes.
+   */
+  const shareSlug = slugifyForHost(shareTitle);
+
   await getProjectStore(context).update(project.id, {
     shareId,
-    shareTitle: input.title?.trim() || project.name,
+    shareSlug,
+    shareTitle,
     shareDescription: input.description?.trim() || undefined,
     sharedAt: new Date().toISOString(),
     soloLaunch: input.soloLaunch ?? false,
@@ -572,7 +615,7 @@ export async function publishBuild(input: PublishInput, context?: unknown): Prom
 
   logger.info(`Published ${project.id} as ${shareId}: ${planned.length} files, ${totalBytes} bytes`);
 
-  return { shareId, fileCount: planned.length, totalBytes };
+  return { shareId, shareSlug, fileCount: planned.length, totalBytes };
 }
 
 /**

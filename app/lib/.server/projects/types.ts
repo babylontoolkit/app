@@ -31,8 +31,18 @@ export interface Project {
   /** The `game_registry` entry this project was created from (§4.4). */
   templateId: string;
 
-  /** Set when published (§4.8). Unique across the platform; the public `/play/[shareId]` key. */
+  /** Set when published (§4.8). Unique across the platform; the public key a share resolves by. */
   shareId?: string;
+
+  /**
+   * The readable half of the public host — `arcade-racer` in `arcade-racer-k7m2p9qx4nrt.codewrx.app`.
+   *
+   * 🔴 **DECORATION, AND DELIBERATELY NOT UNIQUE.** Identity is `shareId` alone, which is why there is
+   * no unique index on this column and never should be: fifty projects may be called "Arcade Racer"
+   * and all fifty get a working URL. It also means a stale slug still resolves, so re-deriving it on
+   * every publish cannot break a link somebody already pasted.
+   */
+  shareSlug?: string;
 
   /** Public-facing title/blurb for the play page and gallery card. Sanitised on the way in (§5). */
   shareTitle?: string;

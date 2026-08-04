@@ -30,15 +30,18 @@ interface ShareDialogProps {
 
   /** If the project is already shared, its id — so the dialog opens on the "live" state. */
   existingShareId?: string;
-}
 
-/** Absolute play URL. `PLAY_URL` is server config; the client builds a same-origin URL as the default. */
-function playUrl(shareId: string): string {
-  if (typeof window === 'undefined') {
-    return `/play/${shareId}`;
-  }
-
-  return `${window.location.origin}/play/${shareId}`;
+  /**
+   * The already-shared project's public URL, as the server minted it (`toWireProject`).
+   *
+   * 🔴 **Never rebuilt here.** This dialog used to compute
+   * `window.location.origin + '/play/' + shareId`, which is the correct answer on a developer's
+   * machine and the wrong one from every deployed instance — the share address depends on
+   * `SHARE_DOMAIN`, and the browser has no channel to it (no root loader, nothing on `/api/me`, and
+   * `brand.ts` forbids `process.env` in a client-imported module). The URL is a value that arrives,
+   * not a string this component knows how to make (SPEC §2.5 rule 2).
+   */
+  existingShareUrl?: string;
 }
 
 /**
@@ -70,12 +73,13 @@ function BuildFailurePanel({ message, detail }: { message: string; detail?: stri
   );
 }
 
-export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: ShareDialogProps) {
+export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId, existingShareUrl }: ShareDialogProps) {
   const { isPublishing, publish, unpublish } = useShareGame();
   const [title, setTitle] = useState(defaultTitle ?? '');
   const [description, setDescription] = useState('');
   const [submitToGallery, setSubmitToGallery] = useState(false);
   const [shareId, setShareId] = useState<string | undefined>(existingShareId);
+  const [shareUrl, setShareUrl] = useState<string | undefined>(existingShareUrl);
   const [findings, setFindings] = useState<ChecklistFinding[]>([]);
   const [awaitingAck, setAwaitingAck] = useState(false);
 
@@ -110,11 +114,17 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
     if (existingShareId) {
       setShareId(existingShareId);
     }
-  }, [existingShareId]);
+
+    // Same one-way rule, same reason: the URL and the id are two halves of one fact and must not drift.
+    if (existingShareUrl) {
+      setShareUrl(existingShareUrl);
+    }
+  }, [existingShareId, existingShareUrl]);
 
   const handleOutcome = (outcome: ShareOutcome) => {
     if (outcome.status === 'published') {
       setShareId(outcome.shareId);
+      setShareUrl(outcome.url);
       setFindings([]);
       setAwaitingAck(false);
       setFailure(undefined);
@@ -148,6 +158,7 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
   const doUnpublish = async () => {
     if (await unpublish()) {
       setShareId(undefined);
+      setShareUrl(undefined);
       setRemixBlockedReason(undefined);
       toast.success('Your game is no longer shared.');
     } else {
@@ -156,8 +167,15 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
   };
 
   const copyLink = () => {
-    if (shareId) {
-      navigator.clipboard.writeText(playUrl(shareId)).then(() => toast.success('Link copied.'));
+    if (shareUrl) {
+      /*
+       * Absolute in production (the server minted it from `SHARE_DOMAIN`), relative in local dev — and
+       * a relative path on the clipboard is useless, so it is resolved against this origin, which IS
+       * the machine serving it. `new URL` is the resolution; it is never string concatenation, because
+       * concatenation is how the old bug got written.
+       */
+      const absolute = new URL(shareUrl, window.location.origin).toString();
+      navigator.clipboard.writeText(absolute).then(() => toast.success('Link copied.'));
     }
   };
 
@@ -182,7 +200,7 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
           {shareId ? (
             <div className="flex flex-col gap-3">
               <div className="flex items-center gap-2 rounded-lg border border-bolt-elements-borderColor px-3 py-2 bg-bolt-elements-background-depth-2">
-                <span className="text-sm text-bolt-elements-textPrimary truncate flex-1">{playUrl(shareId)}</span>
+                <span className="text-sm text-bolt-elements-textPrimary truncate flex-1">{shareUrl}</span>
                 <button
                   className="i-ph:copy text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary"
                   onClick={copyLink}
@@ -190,7 +208,7 @@ export function ShareDialog({ isOpen, onClose, defaultTitle, existingShareId }: 
                 />
                 <a
                   className="i-ph:arrow-square-out text-bolt-elements-textSecondary hover:text-bolt-elements-textPrimary"
-                  href={playUrl(shareId)}
+                  href={shareUrl}
                   target="_blank"
                   rel="noreferrer"
                   title="Open"

@@ -40,7 +40,7 @@ import type { Message } from 'ai';
 import { toast } from 'react-toastify';
 import { generateId } from '~/utils/fileUtils';
 import { cloneRepoIntoProject, linkProjectToRepo } from '~/lib/persistence/projects';
-import { createLocalSnapshot } from '~/lib/persistence/local-snapshots';
+import { createLocalSnapshot, markSynced } from '~/lib/persistence/local-snapshots';
 import { db } from '~/lib/persistence/useChatHistory';
 import { openImportWorkspace } from '~/lib/registry/import-project';
 import { settleAfterCreation, IMPORT_SETTLE_OPTIONS } from '~/lib/registry/settle';
@@ -265,10 +265,37 @@ export async function importRepositoryIntoWorkspace(input: {
           repo: cloned.repo,
           branch: cloned.branch,
           provider: cloned.provider,
+
+          /*
+           * The commit these files ARE. Omitting it made every fresh clone mount as `diverged`
+           * against itself — see the `link` branch of `api.projects.$projectId.github.ts` for the
+           * measurement and for the three user-visible symptoms it produced.
+           */
+          head: cloned.head,
         });
 
         if (!linked.ok) {
           logger.error(`Imported ${cloned.repo} but could not record the link: ${linked.message}`);
+        } else if (db && cloned.head) {
+          /*
+           * The checkpoint written above IS the repo's bytes, so it is not unsaved work.
+           *
+           * `markSynced`'s contract — "ONLY after a push actually lands" — is about not claiming
+           * durability the platform has not achieved. That concern is satisfied here in the other
+           * direction: these bytes were READ from the commit we just recorded, so the browser and the
+           * repo genuinely agree. Skipping it leaves `localSeq > syncedSeq`, i.e. `unsavedWork`, and a
+           * project that has never been touched opens saying it has changes to commit — which trains
+           * the user to ignore the one indicator that tells them their work is at risk.
+           *
+           * Gated on the link having LANDED and on a head existing: without either, the project is
+           * honestly unlinked and there is nothing for this to be true against.
+           */
+          try {
+            await markSynced(db, workspace.projectId);
+          } catch (error) {
+            // A missing sync mark costs an inaccurate badge, never bytes. Never fail an import for it.
+            logger.error(`Imported ${cloned.repo} but could not mark the checkpoint synced`, error);
+          }
         }
       } catch (error) {
         logger.error(`Imported ${cloned.repo} but could not record the link`, error);

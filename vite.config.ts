@@ -6,6 +6,7 @@ import { nodePolyfills } from 'vite-plugin-node-polyfills';
 import { optimizeCssModules } from 'vite-plugin-optimize-css-modules';
 import tsconfigPaths from 'vite-tsconfig-paths';
 import * as dotenv from 'dotenv';
+import { normalizeShareDomain, shareHostRewrite } from './app/lib/share-host';
 
 // Load environment variables from multiple files
 dotenv.config({ path: '.env.local' });
@@ -20,7 +21,31 @@ export default defineConfig((config) => {
     build: {
       target: 'esnext',
     },
+    server: {
+      /*
+       * Let the share domain's subdomains reach the dev server (SPEC §4.8).
+       *
+       * A published project is addressed by HOST — `arcade-racer-k7m2p9qx4nrt.<SHARE_DOMAIN>` — and
+       * Vite's dev server rejects any Host it was not told about with a plain-text 403 ("Blocked
+       * request. This host is not allowed"). That guard is right and is DEV-ONLY (production serves
+       * the built Remix app, not Vite), but without this the vanity host cannot be exercised locally
+       * at all: every probe answers 403 from Vite before a single line of our routing runs, which
+       * looks exactly like the share machinery being broken.
+       *
+       * The leading dot is Vite's own subdomain wildcard. Scoped to the CONFIGURED domain and nothing
+       * else — the guard exists to stop DNS-rebinding against a developer's machine, and opening it
+       * to `true` would trade a real protection for a convenience.
+       */
+      allowedHosts: shareDomain() ? ['localhost', `.${shareDomain()}`] : undefined,
+    },
     plugins: [
+      /*
+       * FIRST in the list, and that is load-bearing: Vite registers `configureServer` middleware in
+       * plugin order, so anything after the Remix plugin runs AFTER Remix has already answered the
+       * request. Measured — with this sitting next to `chrome129IssuePlugin()` at the end, a vanity
+       * host still got the app's landing page.
+       */
+      shareHostPlugin(),
       nodePolyfills({
         include: ['buffer', 'process', 'util', 'stream'],
         globals: {
@@ -90,6 +115,62 @@ export default defineConfig((config) => {
     },
   };
 });
+
+/**
+ * The configured share domain, read straight from the process environment.
+ *
+ * Not `~/lib/.server/env`'s `env()`: this runs in the Vite CONFIG, long before a request context
+ * exists, and importing a server module here would pull the whole server graph into the config load.
+ * `vite.config.ts` is also where `.env` files are read FROM, so `process.env` is the only source that
+ * is meaningfully available at this point.
+ */
+function shareDomain(): string | undefined {
+  return normalizeShareDomain(process.env.SHARE_DOMAIN);
+}
+
+/**
+ * The DEV half of vanity-host routing (SPEC §4.8). Production's half is `functions/[[path]].ts`; both
+ * are three lines around the same pure `shareHostRewrite`, which is where the rule actually lives.
+ *
+ * 🔴 It must run BEFORE Remix. MEASURED live 2026-08-03: with the host check inside the share route's
+ * own loader, `arcade-racer-<id>.<domain>/` matched Remix's `_index` route and served the app's
+ * LANDING PAGE with a confident 200 — the share loader never ran, because a route cannot decide it
+ * should have been a different route.
+ */
+function shareHostPlugin() {
+  return {
+    name: 'share-host-rewrite',
+    configureServer(server: ViteDevServer) {
+      server.middlewares.use((req, _res, next) => {
+        const domain = shareDomain();
+
+        if (req.url && domain) {
+          /*
+           * Rewrite the PATH and leave the Host alone: the visitor must stay on the project's own
+           * origin (that origin is the isolation boundary, and it is the address they were given).
+           */
+          const url = new URL(req.url, 'http://localhost');
+          const rewritten = shareHostRewrite(url.pathname, req.headers.host, domain);
+
+          if (rewritten) {
+            const target = `${rewritten}${url.search}`;
+            req.url = target;
+
+            /*
+             * `originalUrl` too, and it is not belt-and-braces: connect stamps it on the way in and
+             * Remix's dev handler builds its `Request` from it, so rewriting only `req.url` rewrites
+             * nothing that Remix can see. Measured — the middleware logged a correct rewrite while the
+             * response was still the app's landing page.
+             */
+            (req as { originalUrl?: string }).originalUrl = target;
+          }
+        }
+
+        next();
+      });
+    },
+  };
+}
 
 function chrome129IssuePlugin() {
   return {

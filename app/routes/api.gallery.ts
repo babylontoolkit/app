@@ -18,7 +18,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     const url = new URL(request.url);
     const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 48, 1), 96);
 
-    const entries = await listGallery(getProjectStore(context), limit);
+    const entries = await listGallery(getProjectStore(context), limit, context);
 
     return json({ games: entries }, { headers: { 'cache-control': 'public, max-age=60' } });
   } catch (error) {

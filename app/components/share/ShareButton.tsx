@@ -43,6 +43,9 @@ export function ShareButton({ disabled }: ShareButtonProps = {}) {
    */
   const [existingShareId, setExistingShareId] = useState<string | undefined>();
 
+  /** Minted by the server (`toWireProject`) — this component must never build one. */
+  const [existingShareUrl, setExistingShareUrl] = useState<string | undefined>();
+
   const openDialog = useCallback(() => {
     setOpen(true);
 
@@ -57,7 +60,10 @@ export function ShareButton({ disabled }: ShareButtonProps = {}) {
      * user a link that may not exist.
      */
     getProject(activeProjectId)
-      .then((project) => setExistingShareId(project.shareId))
+      .then((project) => {
+        setExistingShareId(project.shareId);
+        setExistingShareUrl(project.shareUrl);
+      })
       .catch((error) => logger.warn(`Could not read the project's share state: ${(error as Error).message}`));
   }, [activeProjectId]);
 
@@ -89,6 +95,7 @@ export function ShareButton({ disabled }: ShareButtonProps = {}) {
           onClose={() => setOpen(false)}
           defaultTitle={projectName ?? undefined}
           existingShareId={existingShareId}
+          existingShareUrl={existingShareUrl}
         />
       )}
     </>

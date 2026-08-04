@@ -98,7 +98,7 @@ export async function buildHealthReport(context: unknown): Promise<HealthReport>
      * one "degraded" that is a genuine security concern in prod, which `share/serve.ts` enforces at the
      * serve path.
      */
-    playOrigin: playUrlPresent(context) ? 'ok' : 'degraded',
+    playOrigin: shareDomainPresent(context) ? 'ok' : 'degraded',
 
     monitoringErrors: isMonitoringConfigured(context).errors ? 'ok' : 'degraded',
     monitoringAnalytics: isMonitoringConfigured(context).analytics ? 'ok' : 'degraded',
@@ -159,8 +159,8 @@ function usesCodeSandbox(): boolean {
   );
 }
 
-/** `PLAY_URL` is a URL string, not a flag — presence is what matters, so read it directly. */
-function playUrlPresent(context: unknown): boolean {
-  const value = (context as { cloudflare?: { env?: Record<string, string> } })?.cloudflare?.env?.PLAY_URL;
-  return Boolean(value || process.env.PLAY_URL);
+/** `SHARE_DOMAIN` is a domain string, not a flag — presence is what matters, so read it directly. */
+function shareDomainPresent(context: unknown): boolean {
+  const value = (context as { cloudflare?: { env?: Record<string, string> } })?.cloudflare?.env?.SHARE_DOMAIN;
+  return Boolean(value || process.env.SHARE_DOMAIN);
 }
