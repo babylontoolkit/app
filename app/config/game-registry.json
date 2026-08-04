@@ -7,7 +7,7 @@
       "id": "gm_racing_v1",
       "title": "Arcade Racing",
       "genre": "racing",
-      "description": "Drive fast. Karts, cars, drifting, laps and boost — a racer you can play in a minute.",
+      "description": "An arcade racer with drift, boost, lap timing and a themed track — polished HUD, countdown start, finish celebration.",
       "source_class": "VehicleControllerDemo.ts",
       "scene_url": "https://repo.babylontoolkit.com/playground/openterrain.gz.gltf",
       "match_keywords": [
@@ -44,7 +44,7 @@
       "id": "gm_adventure_v1",
       "title": "Third-Person Adventure",
       "genre": "adventure",
-      "description": "Explore a 3D world as a character you control — run, jump and discover.",
+      "description": "A third-person character controller with jump, run, and camera orbit. Explore a scene with obstacles, collectibles, and enemies.",
       "source_class": "PlayerControllerDemo.ts",
       "scene_url": "https://repo.babylontoolkit.com/playground/samplescene.gz.gltf",
       "match_keywords": [
@@ -82,7 +82,7 @@
       "id": "gm_fps_explorer_v1",
       "title": "First-Person Explorer",
       "genre": "fps",
-      "description": "See the world through your own eyes — walk around, look at things, open doors.",
+      "description": "A first-person controller with free camera movement. Explore a scene with obstacles, collectibles, and enemies.",
       "source_class": "FreeCameraMode.ts",
       "scene_url": "https://repo.babylontoolkit.com/playground/samplescene.gz.gltf",
       "match_keywords": [
@@ -113,7 +113,7 @@
       "id": "gm_physics_v1",
       "title": "Physics Playground",
       "genre": "physics",
-      "description": "Stack it, smash it, swing it. Real physics you can push around.",
+      "description": "A physics sandbox with destructible objects, ragdolls, and interactive elements. Stack, smash, and experiment with gravity and collisions.",
       "source_class": "PlaygroundDemoScene.ts",
       "match_keywords": [
         "physics",
@@ -144,7 +144,7 @@
       "id": "gm_blank_v1",
       "title": "Blank Canvas",
       "genre": "blank",
-      "description": "An empty scene that always compiles. Total creative freedom.",
+      "description": "A blank scene with no preloaded assets. Start from scratch and build your own game or experience.",
       "source_class": "DefaultGameMode.ts",
       "match_keywords": [],
       "icon": "i-ph:square-half",
