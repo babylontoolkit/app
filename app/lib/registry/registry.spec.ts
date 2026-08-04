@@ -83,47 +83,52 @@ describe('game registry data', () => {
   });
 });
 
-describe('prompt seeding (§4.4a Path A)', () => {
-  it('seeds a kart racer from Racing and runs — the acceptance case', () => {
-    const decision = decideSeed('make me a kart racer where the cars are shopping carts', ENTRIES);
+describe('prompt seeding (§4.4a Path A — no genre inference, owner directive 2026-08-04)', () => {
+  /*
+   * 🔴 THE REGRESSION THAT RETIRED THE KEYWORD TABLE, pinned verbatim: "top down twin stick shooter"
+   * matched the single word `shooter` (owned by First-Person Explorer) and mounted a free-look FPS
+   * camera under a project named "Top Down Twin Stick". A typed prompt now ALWAYS seeds the generic
+   * fallback shell and the MODEL decides what to build — the genre demos are reachable only through
+   * the cards and the wizard, which are explicit choices.
+   */
+  it('never genre-guesses — the twin-stick prompt that shipped the wrong starter seeds Blank Canvas', () => {
+    const decision = decideSeed('top down twin stick shooter', ENTRIES);
 
-    expect(decision.kind).toBe('matched');
-    expect(decision.kind === 'matched' && decision.entry.id).toBe('gm_racing_v1');
+    expect(decision.kind).toBe('fallback');
+    expect(decision.kind === 'fallback' && decision.entry.id).toBe('gm_blank_v1');
   });
 
   it.each([
-    ['a first person walk through a haunted museum', 'gm_fps_explorer_v1'],
-    ['a platformer where a robot jumps around a maze', 'gm_adventure_v1'],
-    ['physics sandbox where you smash towers of blocks', 'gm_physics_v1'],
-    ['drift racing on a mountain circuit', 'gm_racing_v1'],
-  ])('%s → %s', (prompt, expected) => {
+    'make me a kart racer where the cars are shopping carts',
+    'a first person walk through a haunted museum',
+    'a platformer where a robot jumps around a maze',
+    'physics sandbox where you smash towers of blocks',
+    'drift racing on a mountain circuit',
+  ])('even a prompt dripping with genre keywords seeds the fallback: %s', (prompt) => {
     const decision = decideSeed(prompt, ENTRIES);
-    expect(decision.kind === 'matched' && decision.entry.id).toBe(expected);
+
+    expect(decision.kind).toBe('fallback');
+    expect(decision.kind === 'fallback' && decision.entry.id).toBe('gm_blank_v1');
   });
 
   /*
-   * The whole reason keywords are matched as WHOLE WORDS. Substring matching would seed a racing
-   * project from the word "cartoon", and the user would watch a car demo boot for no reason.
+   * §4.4a: "Never block on ambiguity when intent is clear." A specific prompt must seed and RUN.
+   * Routing it to the wizard would be the bug.
    */
-  it('does not fire on words that merely contain a keyword', () => {
-    const decision = decideSeed('a cartoon about tracking parcels', ENTRIES);
-    expect(decision.kind).not.toBe('matched');
-  });
-
-  it('prefers the entry whose more specific phrase fired', () => {
-    const [best] = rankEntries('a first person game', ENTRIES);
-    expect(best.entry.id).toBe('gm_fps_explorer_v1');
-  });
-
-  /*
-   * §4.4a: "Never block on ambiguity when intent is clear." A specific prompt with no genre match
-   * must still seed (Blank Canvas) and RUN. Routing it to the wizard would be the bug.
-   */
-  it('seeds Blank Canvas and runs when a specific prompt matches no genre', () => {
+  it('seeds Blank Canvas and runs for any specific prompt', () => {
     const decision = decideSeed('a game where you knit sweaters for penguins', ENTRIES);
 
     expect(decision.kind).toBe('fallback');
     expect(decision.kind === 'fallback' && decision.entry.id).toBe('gm_blank_v1');
+  });
+
+  /*
+   * CONTROL: `rankEntries` survives for the seed chip's runner-up affordance — the retirement is in
+   * `decideSeed` no longer consulting it, not in the ranking being deleted.
+   */
+  it('rankEntries still ranks (kept for the chip), it just no longer decides', () => {
+    const [best] = rankEntries('a first person game', ENTRIES);
+    expect(best.entry.id).toBe('gm_fps_explorer_v1');
   });
 
   it.each(['I want to make a game', 'help', 'something fun', 'make me something cool', 'idk'])(

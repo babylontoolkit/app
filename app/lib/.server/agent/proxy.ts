@@ -39,6 +39,8 @@ import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getModelTiers } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
+import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
+import { buildAssetLibraryIndex } from '~/lib/.server/assets/library-manifest';
 import {
   decideModelTier,
   tierDeclinedNotice,
@@ -557,6 +559,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   await ensureMarketPrices(request.context);
 
   /*
+   * Same doorway: refresh the pinned Synty asset library so the prompt assembly below can read it
+   * synchronously (`activeAssetLibrary`). Never throws; an unreadable store degrades to "no library"
+   * and the prompt simply emits no block (§4.4d).
+   */
+  await ensureAssetLibraryForContext(request.context);
+
+  /*
    * Same doorway, same posture: fire-and-forget, can never throw, keeps block 1 of every user's
    * prompt reading at 0.1x instead of writing at 2x (`prompt/cache-warmer.ts`).
    */
@@ -950,6 +959,21 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       content: `# Current Project Files (1/2) — starter framework\n\nThe starter's framework zones (read-only library, app shell, vendored runtimes, config). The project's game code follows in part 2/2, after the reference material.\n\n${createFilesContext(stableFiles, true)}`,
       providerOptions: CACHE_CONTROL,
     });
+  }
+
+  /*
+   * The Synty asset library index (§4.4d) — platform-stable bytes that change only when an admin
+   * PROMOTES a manifest, exactly like a prompt promotion. Placed after the starter files and before
+   * the per-conversation doc blocks (sharedness ordering: this is identical for every user, project
+   * and conversation), and deliberately with NO breakpoint of its own — it is covered by whichever
+   * breakpoint follows (docs/skills or the game-code entry), so `MAX_CACHE_BREAKPOINTS` is untouched.
+   * When nothing is pinned there is NO block at all: telling the model about a library it cannot see
+   * is how invented asset paths ship (`library-manifest.ts`).
+   */
+  const assetLibraryIndex = buildAssetLibraryIndex(activeAssetLibrary());
+
+  if (assetLibraryIndex) {
+    system.push({ role: 'system', content: assetLibraryIndex });
   }
 
   blocks.forEach((block, i) => {

@@ -406,8 +406,8 @@ function buildCreationBrief(options: {
    * a blank `/play` — see the module header.
    */
   const gameModeFacts = scaffolded
-    ? `- Its starting GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. Launch it first — and freely add more GameModes in \`src/scripts/\` later; any registered GameMode class may be launched through the play contract.`
-    : `- ⚠️ Its starting GameMode has NOT been scaffolded — you must create it yourself before anything can be played. Copy \`${CLASS_LIBRARY_DIR}/${entry.source_class}\` into \`src/scripts/${className}.ts\` (never edit the library original), rename the class AND its \`RegisterClass\` string to \`${className}\`, re-base its relative imports for the new directory (\`'../globals'\` → \`'../babylon/globals'\`), and add \`await import("../scripts/${className}");\` to the registration block in \`${GLOBALS_PATH}\` — without that last step the class never registers and \`/play\` dead-ends. Then freely add more GameModes in \`src/scripts/\` later.`;
+    ? `- Its starting GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. It is a minimal starting SHELL, not a design: reshape or completely rewrite its contents into whatever the request needs. The project needs AT LEAST ONE registered GameMode to be playable — this is it, and you may freely add more in \`src/scripts/\`; any registered GameMode class may be launched through the play contract.`
+    : `- ⚠️ Its starting GameMode has NOT been scaffolded — you must create it yourself before anything can be played (the project needs AT LEAST ONE registered GameMode). Copy \`${CLASS_LIBRARY_DIR}/${entry.source_class}\` into \`src/scripts/${className}.ts\` (never edit the library original), rename the class AND its \`RegisterClass\` string to \`${className}\`, re-base its relative imports for the new directory (\`'../globals'\` → \`'../babylon/globals'\`), and add \`await import("../scripts/${className}");\` to the registration block in \`${GLOBALS_PATH}\` — without that last step the class never registers and \`/play\` dead-ends. Then freely add more GameModes in \`src/scripts/\` later.`;
 
   /*
    * The opening sentence is a CONTRACT, not prose: the agent proxy matches `CREATION_BRIEF_MARKER` to
@@ -418,12 +418,17 @@ function buildCreationBrief(options: {
 
 **This project**
 - Title: ${title}
-- Seeded from: ${entry.title} (${entry.genre})
+- Starter shell: ${entry.title} (${entry.genre}) — the mounted TEMPLATE, not the game's genre. The user's request decides what this project is.
 ${gameModeFacts}
 - Launch it with: \`${play}\`
 ${entry.scene_url ? '' : '- This genre has no preload scene; the GameMode builds its own content.\n'}
 **Images on disk** (import from these or none — never invent an asset path):
 ${images.map((path) => `- ${path}`).join('\n')}
+
+**Game content — models, levels and examples.** Build what the request asks for with your own creativity — the starter's demo scenes are examples, never a boundary.
+- If a **Prototype Asset Library (Synty)** block is present in your context, it is this project's model library: when the user has not specified which models or packs to use, source your 3D models, characters and levels from it, referencing assets by their EXACT listed paths (never invent or guess a library path). Fall back to primitives ONLY when you cannot find a suitable model there or in a pack the user named.
+- If no such block is present, build with the starter's own content and primitives — do not reference a library you cannot see.
+- When you want a working GameMode or Script Component example, read the demo classes in \`src/babylon/classes/\` first, then the component reference docs in your context, then the training examples they cite.
 
 **Built-in media generation — use it to make this design beautiful.** You have \`generate_image\` and \`generate_video\` tools available on this turn (if they are absent from your tool list, skip this section and design with CSS + the images on disk). Be creative: generate any bespoke art you need to give *${title}* a frontend that matches the shape and mood of the game — a hero background, a logo/wordmark, splash art, texture accents for the chrome (16:9 for wide heroes and splash, 1:1 for badges/logos). If the design truly benefits, ONE short looping hero video clip is allowed — video costs the user hundreds of credits, so use it sparingly and never more than one. Rules:
 - The \`generate_*\` tools are the ONLY tools this turn. \`<boltArtifact>\` / \`<boltAction>\` are plain-text tags you write in your reply — NEVER call them as tools.

@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import { MarketPricesSection } from './MarketPricesSection';
+import { AssetLibrarySection } from './AssetLibrarySection';
 
 interface UsageReport {
   generations: number;
@@ -1123,6 +1124,12 @@ export function AdminTab() {
        * tokens and media generation. Versioned + promoted here; the env price vars are retired.
        */}
       <MarketPricesSection />
+
+      {/*
+       * Asset library (§4.4d). The Synty prototype manifest the model is told about — versioned +
+       * promoted here from the master at repo.babylontoolkit.com, never fetched at generation time.
+       */}
+      <AssetLibrarySection />
     </div>
   );
 }

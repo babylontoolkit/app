@@ -478,29 +478,28 @@ describe('consumer 6 — the model pill locks on a first build', () => {
   });
 
   /*
-   * ⚠️ Repointed from `PremiumToggle` to `ModelTierPill` with the code it guards (§4.6.1a, T11). The
-   * wiring asserted is unchanged and the stake is HIGHER: the expression now gates THREE rungs rather
-   * than one boolean, so a `creationTurn` that stopped reaching it would unlock every paid model on the
-   * largest artifact in the product.
+   * ⚠️ INVERTED 2026-08-03 (owner: "remove the First Premium Build Always Run Default Model — we can
+   * choose our model as long as we have enough credits and the additional models are enabled"). The
+   * pill must NOT consult the first-build store any more: a paid rung on a first build is a choice
+   * the user is allowed to make. The scans now pin the ABSENCE of the lock — reintroducing
+   * `creationTurn` into the eligibility expression is the regression.
    */
-  it('is wired: the pill reads the store and lets it BLOCK eligibility', () => {
-    expect(toggle).toContain('useStore(creationTurnStore)');
-    expect(toggle).toMatch(
-      /const eligible = selected !== 'standard' && !creationTurn && canUseTier\(session, selected\)/,
-    );
+  it('is wired: the pill decides eligibility WITHOUT the first-build store', () => {
+    expect(toggle).not.toContain('creationTurnStore');
+    expect(toggle).toMatch(/const eligible = selected !== 'standard' && canUseTier\(session, selected\)/);
   });
 
   /*
-   * The PANEL is the second renderer of the same rule, and it must not drift from the pill: a picker
-   * that let a user select SuperMax on a first build would leave the pill correctly showing Standard
-   * while the row it just accepted claims otherwise. Its lock decision is a named pure function so the
-   * two surfaces read one rule.
+   * The PANEL is the second renderer of the same rule, and it must not drift from the pill: neither
+   * surface applies a first-build lock. `unserveable` and `below_minimum` remain the only lock
+   * reasons — the CONTROL half proving the panel still locks at all.
    */
-  it('is wired: the picker panel applies the same first-build lock', () => {
+  it('is wired: the picker panel carries no first-build lock (and still locks on the threshold)', () => {
     const panel = strip(readFileSync(join(REPO, 'app/components/chat/ModelTierPanel.tsx'), 'utf-8'));
 
-    expect(panel).toContain('useStore(creationTurnStore)');
-    expect(panel).toMatch(/if \(creationTurn\) \{\s*return 'creation_turn';/);
+    expect(panel).not.toContain('creationTurnStore');
+    expect(panel).not.toContain('creation_turn');
+    expect(panel).toContain("'below_minimum'");
   });
 
   /*

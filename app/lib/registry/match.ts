@@ -224,19 +224,30 @@ export function deriveProjectTitle(prompt: string, fallback = 'My Game'): string
   return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
 }
 
-/** One keyword is enough. A prompt saying "kart" has told us everything we need to pick a starting point. */
-const SEED_THRESHOLD = 1;
-
+/**
+ * 🔴 A TYPED PROMPT IS NEVER GENRE-GUESSED (owner directive, 2026-08-04).
+ *
+ * This function used to rank the prompt against `match_keywords` and seed whichever demo entry
+ * scored — and on a real creation, "top down twin stick shooter" matched the single word `shooter`
+ * (owned by First-Person Explorer) and mounted the wrong starter with the wrong camera class. That
+ * was the THIRD keyword-table failure in this codebase (`'ui'` matching b-**ui**-ld in the skills
+ * router; the landing-pass keyword idea rejected in §4.4a), and the owner's rule is now uniform:
+ * *"don't interfere or restrict the prompt — let the model do its thing."*
+ *
+ * So every typed prompt with anything in it to act on seeds the FALLBACK entry (Blank Canvas — a
+ * generic shell whose scaffolded `<Title>Mode` keeps the play contract wired), and the MODEL decides
+ * what to build from the request on the first build turn, with the creation brief pointing it at the
+ * `src/babylon/classes/` demos, the Agent Reference, and the pinned asset library for material. The
+ * genre CARDS and the wizard are untouched — those are explicit choices, not inference, and they
+ * still pass their entry directly to `startProject` without ever calling this.
+ *
+ * `rankEntries`/`scoreEntry` survive exported (the seed chip's runner-up affordance reads them, and
+ * hide-don't-delete is the standing rule) but no longer decide anything.
+ */
 export function decideSeed(prompt: string, entries: GameRegistryEntry[]): SeedDecision {
-  const [best] = rankEntries(prompt, entries);
-
-  if (best && best.score >= SEED_THRESHOLD) {
-    return { kind: 'matched', ...best };
-  }
-
   /*
-   * No genre fired. The question is now ONLY whether there is anything to act on at all — and if
-   * there is, we seed Blank Canvas and run. The wizard does not get a say.
+   * The ONLY automatic route to the wizard: a prompt with nothing in it to act on at all. Anything
+   * with a discernible subject runs immediately — never block on ambiguity when intent is clear.
    */
   if (isVague(prompt)) {
     return { kind: 'vague' };

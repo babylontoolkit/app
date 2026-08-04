@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "generated": "2026-08-04T00:00:00Z",
+  "baseUrl": "https://repo.babylontoolkit.com/",
+  "toolkitVersion": "2.4.1",
+  "units": "meters",
+  "packs": [
+    {
+      "id": "synty-military-level",
+      "title": "Polygon Military — Base Map",
+      "kind": "level",
+      "description": "Complete military base level: perimeter wall, watchtowers, barracks, vehicle yard and open training ground. Built for FPS and third-person combat.",
+      "tags": ["military", "modern", "fps", "outdoor"],
+      "assets": [
+        {
+          "path": "levels/military/military_base.gz.gltf",
+          "name": "MilitaryBase",
+          "kind": "level",
+          "load": "scene",
+          "sceneUrl": "levels/military/military_base.gz.gltf",
+          "description": "The full base. Playable area ~400x400m, fenced. Interiors on the barracks and command post.",
+          "bounds": { "size": [420, 60, 420], "center": [0, 30, 0] },
+          "playableArea": { "size": [400, 40, 400], "center": [0, 20, 0] },
+          "navMesh": true,
+          "lighting": "baked",
+          "environment": { "skybox": true, "fog": false, "timeOfDay": "noon" },
+          "recommendedModes": ["fps", "third-person", "exploration"],
+          "spawnPoints": [
+            { "name": "Player_Spawn_01", "position": [0, 0.1, -180], "rotationY": 0, "purpose": "player" },
+            { "name": "Player_Spawn_02", "position": [12, 0.1, -180], "rotationY": 0, "purpose": "player" },
+            { "name": "Vehicle_Spawn_01", "position": [45, 0.1, -120], "rotationY": 90, "purpose": "vehicle" },
+            { "name": "Enemy_Spawn_Tower_A", "position": [-150, 12.5, 150], "rotationY": 135, "purpose": "enemy" },
+            { "name": "Enemy_Spawn_Yard", "position": [60, 0.1, 40], "rotationY": 180, "purpose": "enemy" },
+            { "name": "Item_Spawn_Armory", "position": [-22, 1.0, 85], "purpose": "item" }
+          ],
+          "nodes": [
+            {
+              "name": "Gate_Main",
+              "path": "Root/Perimeter/Gate_Main",
+              "components": [
+                {
+                  "script": "TOOLKIT.AnimationState",
+                  "properties": { "states": ["Closed", "Opening", "Open"], "default": "Closed" }
+                }
+              ]
+            },
+            {
+              "name": "Tower_A_CameraMount",
+              "path": "Root/Towers/Tower_A/CameraMount",
+              "purpose": "camera-mount"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "synty-military-characters",
+      "title": "Polygon Military — Characters",
+      "kind": "characters",
+      "description": "Humanoid soldiers in faction colorways, rigged and animated. Ready for player or NavigationAgent-driven NPC use.",
+      "tags": ["military", "soldier", "humanoid", "npc"],
+      "assets": [
+        {
+          "path": "characters/military/soldier_alpha.gz.gltf",
+          "name": "SoldierAlpha",
+          "kind": "character",
+          "load": "container",
+          "description": "Standard rifleman, green faction. Idle/locomotion/combat clips included.",
+          "bounds": { "size": [0.6, 1.85, 0.6] },
+          "pivot": "bottom-center",
+          "rig": "humanoid",
+          "controller": "ThirdPersonPlayerController",
+          "animations": [
+            { "name": "Idle", "loop": true },
+            { "name": "Walk", "loop": true },
+            { "name": "Run", "loop": true },
+            { "name": "Sprint", "loop": true },
+            { "name": "Jump", "loop": false },
+            { "name": "Crouch_Idle", "loop": true },
+            { "name": "Aim_Rifle", "loop": true },
+            { "name": "Fire_Rifle", "loop": false },
+            { "name": "Reload", "loop": false },
+            { "name": "Hit_Reaction", "loop": false },
+            { "name": "Death_A", "loop": false }
+          ],
+          "attachPoints": [
+            { "name": "RightHand_Attach", "path": "Root/Armature/RightHand/Attach", "purpose": "attach-point" },
+            { "name": "Back_Attach", "path": "Root/Armature/Spine2/BackAttach", "purpose": "attach-point" }
+          ],
+          "nodes": [
+            {
+              "name": "SoldierAlpha",
+              "components": [
+                {
+                  "script": "TOOLKIT.CharacterController",
+                  "properties": { "capsuleHeight": 1.85, "capsuleRadius": 0.3 }
+                },
+                { "script": "TOOLKIT.AnimationState", "properties": { "machine": "SoldierLocomotion" } }
+              ]
+            }
+          ]
+        },
+        {
+          "path": "characters/military/soldier_heavy.gz.gltf",
+          "name": "SoldierHeavy",
+          "kind": "character",
+          "load": "container",
+          "description": "Heavy gunner variant — same rig and clip set as SoldierAlpha, bulkier silhouette.",
+          "bounds": { "size": [0.7, 1.9, 0.7] },
+          "pivot": "bottom-center",
+          "rig": "humanoid",
+          "controller": "none",
+          "animations": [
+            { "name": "Idle", "loop": true },
+            { "name": "Walk", "loop": true },
+            { "name": "Run", "loop": true },
+            { "name": "Fire_Heavy", "loop": true },
+            { "name": "Death_A", "loop": false }
+          ],
+          "nodes": [
+            {
+              "name": "SoldierHeavy",
+              "components": [
+                { "script": "TOOLKIT.NavigationAgent", "properties": { "speed": 3.2, "radius": 0.35 } }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "synty-street-racer-vehicles",
+      "title": "Polygon Street Racer — Vehicles",
+      "kind": "vehicles",
+      "description": "Arcade street cars with tuned StandardCarController setups. Drivable on instantiation.",
+      "tags": ["racing", "car", "street", "arcade"],
+      "assets": [
+        {
+          "path": "vehicles/street-racer/racer_gt.gz.gltf",
+          "name": "RacerGT",
+          "kind": "vehicle",
+          "load": "container",
+          "description": "Balanced GT coupe — the default pick. Grippy, forgiving drift.",
+          "bounds": { "size": [1.9, 1.3, 4.4] },
+          "pivot": "bottom-center",
+          "vehicleType": "car",
+          "wheels": ["Wheel_FL", "Wheel_FR", "Wheel_RL", "Wheel_RR"],
+          "seats": [{ "name": "Seat_Driver", "path": "Root/Body/Seat_Driver", "purpose": "seat" }],
+          "nodes": [
+            {
+              "name": "RacerGT",
+              "components": [
+                {
+                  "script": "TOOLKIT.StandardCarController",
+                  "properties": {
+                    "topSpeedKph": 220,
+                    "mass": 1350,
+                    "enginePower": 420,
+                    "brakingForce": 900,
+                    "driftFactor": 0.55
+                  }
+                },
+                { "script": "TOOLKIT.AudioSource", "properties": { "clip": "engine_loop", "spatial": true } }
+              ]
+            },
+            { "name": "Exhaust_L", "path": "Root/Body/Exhaust_L", "purpose": "exhaust" },
+            { "name": "CameraMount_Chase", "path": "Root/CameraMount_Chase", "purpose": "camera-mount" }
+          ]
+        },
+        {
+          "path": "vehicles/street-racer/drift_king.gz.gltf",
+          "name": "DriftKing",
+          "kind": "vehicle",
+          "load": "container",
+          "description": "Rear-heavy drift build — fast steering, low grip, high drift factor.",
+          "bounds": { "size": [1.85, 1.25, 4.5] },
+          "pivot": "bottom-center",
+          "vehicleType": "car",
+          "wheels": ["Wheel_FL", "Wheel_FR", "Wheel_RL", "Wheel_RR"],
+          "nodes": [
+            {
+              "name": "DriftKing",
+              "components": [
+                {
+                  "script": "TOOLKIT.StandardCarController",
+                  "properties": { "topSpeedKph": 205, "mass": 1200, "enginePower": 380, "driftFactor": 0.85 }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "synty-apocalypse-props",
+      "title": "Polygon Apocalypse — Props",
+      "kind": "props",
+      "description": "One container of post-apocalyptic set dressing: barricades, wrecks, loot and cover. Load once as an AssetContainer and instantiate prefabs by name.",
+      "tags": ["apocalypse", "props", "cover", "loot"],
+      "assets": [
+        {
+          "path": "props/apocalypse/apocalypse_props.gz.gltf",
+          "name": "ApocalypsePropsContainer",
+          "kind": "prop-container",
+          "load": "container",
+          "description": "All pack props in one file. Instantiate individual prefabs from the loaded container — never load this per prop.",
+          "prefabs": [
+            { "name": "Barrel_Rusty", "kind": "prop", "tags": ["barrel", "cover"], "bounds": { "size": [0.6, 0.9, 0.6] } },
+            {
+              "name": "Barrel_Explosive",
+              "kind": "prop",
+              "tags": ["barrel", "explosive"],
+              "bounds": { "size": [0.6, 0.9, 0.6] },
+              "components": [
+                { "script": "TOOLKIT.RigidbodyPhysics", "properties": { "mass": 40 } }
+              ]
+            },
+            { "name": "Barricade_Sandbags", "kind": "structure", "tags": ["cover", "barricade"], "bounds": { "size": [2.2, 1.0, 0.8] } },
+            { "name": "CarWreck_Sedan", "kind": "prop", "tags": ["wreck", "cover", "car"], "bounds": { "size": [1.9, 1.3, 4.3] } },
+            { "name": "Crate_Supply", "kind": "prop", "tags": ["loot", "crate"], "bounds": { "size": [0.8, 0.8, 0.8] } },
+            { "name": "Fence_Chainlink_2m", "kind": "structure", "tags": ["fence"], "bounds": { "size": [2.0, 1.8, 0.1] } },
+            { "name": "Tire_Stack", "kind": "prop", "tags": ["cover"], "bounds": { "size": [0.9, 1.1, 0.9] } },
+            { "name": "Dumpster", "kind": "prop", "tags": ["cover", "container"], "bounds": { "size": [1.8, 1.2, 1.0] } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "synty-nature-biomes-props",
+      "title": "Polygon Nature — Biome Props",
+      "kind": "props",
+      "description": "Forest and desert biome dressing in one container: trees, rocks, foliage clusters. Instantiate and scatter.",
+      "tags": ["nature", "forest", "desert", "foliage", "rocks"],
+      "assets": [
+        {
+          "path": "props/nature/biome_props.gz.gltf",
+          "name": "BiomePropsContainer",
+          "kind": "prop-container",
+          "load": "container",
+          "description": "Scatterable natural props. Vary Y-rotation and ±15% uniform scale for natural results.",
+          "prefabs": [
+            { "name": "Tree_Pine_Large", "kind": "foliage", "tags": ["tree", "forest"], "bounds": { "size": [4.0, 12.0, 4.0] } },
+            { "name": "Tree_Pine_Small", "kind": "foliage", "tags": ["tree", "forest"], "bounds": { "size": [2.5, 7.0, 2.5] } },
+            { "name": "Tree_Dead", "kind": "foliage", "tags": ["tree", "desert", "apocalypse"], "bounds": { "size": [3.0, 8.0, 3.0] } },
+            { "name": "Rock_Boulder_A", "kind": "rock", "tags": ["rock", "cover"], "bounds": { "size": [2.2, 1.8, 2.0] } },
+            { "name": "Rock_Cluster_Small", "kind": "rock", "tags": ["rock", "scatter"], "bounds": { "size": [1.2, 0.6, 1.1] } },
+            { "name": "Cactus_Saguaro", "kind": "foliage", "tags": ["desert"], "bounds": { "size": [1.5, 4.5, 1.5] } },
+            { "name": "Grass_Clump", "kind": "foliage", "tags": ["scatter", "grass"], "bounds": { "size": [0.8, 0.5, 0.8] } },
+            { "name": "Stump_Cut", "kind": "prop", "tags": ["forest"], "bounds": { "size": [1.0, 0.6, 1.0] } }
+          ]
+        }
+      ]
+    }
+  ]
+}
