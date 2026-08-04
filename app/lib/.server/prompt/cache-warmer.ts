@@ -80,6 +80,14 @@ export function cacheWarmerFanout(context?: unknown): number {
  * The wire request, PURE so the spec can pin every byte-identity property without a network:
  * Bearer auth (KIE's quirk — not `x-api-key`), the GA `anthropic-version`, `max_tokens: 1`, and the
  * system block carrying the exact prompt text under the exact `CACHE_CONTROL` tier the proxy sends.
+ *
+ * 🔴 `stream: true` IS LOAD-BEARING, NOT A STYLE CHOICE (2026-08-04, measured live). KIE's Claude
+ * endpoint 500s every NON-streaming request ("Server exception") while serving the identical body
+ * with `stream: true` normally — probed directly with a 16-token request during an incident where
+ * every warm cycle read 6 sent / 6 failures while user generations (which stream) ran fine. The
+ * warmer therefore speaks the SAME mode as the traffic it warms for, which is the safer shape even
+ * if KIE's non-streaming 500 turns out to be transient: a warmer exercising a request shape no
+ * generation sends is one more way to warm a prefix nobody uses.
  */
 export function buildWarmupRequest(input: { model: string; promptText: string; apiKey: string }): {
   url: string;
@@ -96,6 +104,7 @@ export function buildWarmupRequest(input: { model: string; promptText: string; a
     body: {
       model: input.model,
       max_tokens: 1,
+      stream: true,
       system: [
         {
           type: 'text',
@@ -106,6 +115,67 @@ export function buildWarmupRequest(input: { model: string; promptText: string; a
       messages: [{ role: 'user', content: 'ok' }],
     },
   };
+}
+
+/**
+ * Pull the cache counters out of an SSE response body. PURE (string in, counters out) so the spec
+ * can pin it against real captured wire shapes.
+ *
+ * With `stream: true` the usage arrives inside `message_start`'s `message.usage` (and later deltas
+ * may update it), not as a JSON body. Two wire variants observed on KIE, both handled: the classic
+ * top-level `cache_creation_input_tokens`, and the tiered `cache_creation: { ephemeral_1h_input_tokens,
+ * ephemeral_5m_input_tokens }` object (what their adapter actually sends — a parser reading only the
+ * classic field would report every warm WRITE as zero, silently). Every `data:` event is scanned and
+ * the MAX per counter kept, so it does not matter which event carries the final number.
+ */
+export function parseWarmupStreamUsage(sseText: string): { cacheReadTokens: number; cacheWriteTokens: number } {
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+
+  for (const line of sseText.split('\n')) {
+    if (!line.startsWith('data:')) {
+      continue;
+    }
+
+    try {
+      const event = JSON.parse(line.slice(5).trim()) as {
+        message?: { usage?: Record<string, unknown> };
+        usage?: Record<string, unknown>;
+      };
+
+      for (const usage of [event.message?.usage, event.usage]) {
+        if (!usage) {
+          continue;
+        }
+
+        const read = usage.cache_read_input_tokens;
+
+        if (typeof read === 'number') {
+          cacheReadTokens = Math.max(cacheReadTokens, read);
+        }
+
+        const classicWrite = usage.cache_creation_input_tokens;
+
+        if (typeof classicWrite === 'number') {
+          cacheWriteTokens = Math.max(cacheWriteTokens, classicWrite);
+        }
+
+        const tiered = usage.cache_creation as Record<string, unknown> | undefined;
+
+        if (tiered && typeof tiered === 'object') {
+          const tieredTotal = Object.values(tiered).reduce<number>(
+            (sum, value) => sum + (typeof value === 'number' ? value : 0),
+            0,
+          );
+          cacheWriteTokens = Math.max(cacheWriteTokens, tieredTotal);
+        }
+      }
+    } catch {
+      // Partial or non-JSON event data ("[DONE]", a split frame) — skip, never abort the scan.
+    }
+  }
+
+  return { cacheReadTokens, cacheWriteTokens };
 }
 
 interface WarmCycleDeps {
@@ -184,15 +254,17 @@ export async function runWarmCycle(context?: unknown, deps?: WarmCycleDeps): Pro
           continue;
         }
 
-        const payload = (await response.json()) as {
-          usage?: { cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
-        };
+        /*
+         * The response is an SSE stream (`stream: true` — see `buildWarmupRequest`); a 1-token answer
+         * is a handful of events, so buffering the whole body is fine HERE (never in a user path).
+         */
+        const usage = parseWarmupStreamUsage(await response.text());
 
-        if ((payload.usage?.cache_read_input_tokens ?? 0) > 0) {
+        if (usage.cacheReadTokens > 0) {
           result.reads += 1;
         }
 
-        if ((payload.usage?.cache_creation_input_tokens ?? 0) > 0) {
+        if (usage.cacheWriteTokens > 0) {
           result.writes += 1;
         }
       } catch {

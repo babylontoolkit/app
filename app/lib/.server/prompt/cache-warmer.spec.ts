@@ -26,6 +26,7 @@ import {
   DEFAULT_CACHE_WARMER_FANOUT,
   DEFAULT_CACHE_WARMER_INTERVAL_MINUTES,
   ensureCacheWarmer,
+  parseWarmupStreamUsage,
   PROMPT_CACHE_TTL,
   resetCacheWarmerForTests,
   runWarmCycle,
@@ -56,11 +57,21 @@ const WARMER_ENV = [
 /** An immediate sleep so a fanout of N does not take 2N seconds of wall clock. */
 const instantSleep = vi.fn(() => Promise.resolve());
 
-/** A KIE-shaped OK response with the given usage block. */
-function okResponse(usage: Record<string, number>): Response {
+/**
+ * A KIE-shaped OK response: an SSE stream whose `message_start` carries the usage (the warmer sends
+ * `stream: true` — KIE 500s non-streaming requests, see `buildWarmupRequest`).
+ */
+function okResponse(usage: Record<string, unknown>): Response {
+  const sse =
+    `event: message_start\n` +
+    `data: ${JSON.stringify({ type: 'message_start', message: { usage } })}\n\n` +
+    `event: content_block_delta\n` +
+    `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n\n` +
+    `event: message_stop\ndata: {"type":"message_stop"}\n\n`;
+
   return {
     ok: true,
-    json: async () => ({ usage }),
+    text: async () => sse,
   } as unknown as Response;
 }
 
@@ -100,6 +111,16 @@ describe('buildWarmupRequest — byte-identity with the proxy block 1', () => {
 
   it('spends the minimum: max_tokens 1', () => {
     expect(request().body.max_tokens).toBe(1);
+  });
+
+  /*
+   * 🔴 The shape KIE actually serves (2026-08-04, measured live): their Claude endpoint 500s every
+   * NON-streaming request while serving `stream: true` normally, so a warmer without this flag fails
+   * 6/6 on every cycle while user generations run fine — false alarm on the monitor, and no prefix
+   * warmed. Also the mode the traffic it warms for actually uses.
+   */
+  it('streams — the request mode KIE serves and the one generations use', () => {
+    expect(request().body.stream).toBe(true);
   });
 
   it('carries exactly one system block: the prompt text under the 1h ephemeral cache_control', () => {
@@ -167,6 +188,56 @@ describe('config: interval, fanout, enabled', () => {
     expect(cacheWarmerEnabled()).toBe(true);
     vi.stubEnv('CACHE_WARMER_ENABLED', 'false');
     expect(cacheWarmerEnabled()).toBe(false);
+  });
+});
+
+describe('parseWarmupStreamUsage — the SSE usage reader', () => {
+  /*
+   * The REAL wire shape captured from KIE 2026-08-04 (a live `stream: true` probe): usage rides in
+   * `message_start`'s `message.usage`, and cache WRITES arrive as the TIERED `cache_creation` object,
+   * not the classic `cache_creation_input_tokens` — a parser reading only the classic field reports
+   * every warm write as zero, silently.
+   */
+  it('reads the tiered cache_creation object KIE actually sends', () => {
+    const sse =
+      `event: message_start\n` +
+      `data: {"type":"message_start","message":{"id":"chatcompl_x","type":"message","role":"assistant",` +
+      `"model":"claude-opus-5","content":[],"usage":{"input_tokens":10,"output_tokens":0,` +
+      `"cache_read_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":101794,` +
+      `"ephemeral_5m_input_tokens":0},"service_tier":"standard"}}}\n\n`;
+
+    expect(parseWarmupStreamUsage(sse)).toEqual({ cacheReadTokens: 0, cacheWriteTokens: 101_794 });
+  });
+
+  it('reads the classic cache_creation_input_tokens field too', () => {
+    const sse = `data: {"type":"message_start","message":{"usage":{"cache_creation_input_tokens":5000}}}\n`;
+
+    expect(parseWarmupStreamUsage(sse)).toEqual({ cacheReadTokens: 0, cacheWriteTokens: 5_000 });
+  });
+
+  it('reads cache reads, and takes the MAX across events when a later delta updates usage', () => {
+    const sse =
+      `data: {"type":"message_start","message":{"usage":{"cache_read_input_tokens":0}}}\n\n` +
+      `data: {"type":"message_delta","usage":{"cache_read_input_tokens":101794}}\n\n`;
+
+    expect(parseWarmupStreamUsage(sse)).toEqual({ cacheReadTokens: 101_794, cacheWriteTokens: 0 });
+  });
+
+  it('survives [DONE], split frames and non-JSON data without aborting the scan', () => {
+    const sse =
+      `data: [DONE]\n` +
+      `data: {"broken json\n` +
+      `data: {"type":"message_start","message":{"usage":{"cache_read_input_tokens":7}}}\n`;
+
+    expect(parseWarmupStreamUsage(sse)).toEqual({ cacheReadTokens: 7, cacheWriteTokens: 0 });
+  });
+
+  it('returns zeros for an empty or usage-less stream', () => {
+    expect(parseWarmupStreamUsage('')).toEqual({ cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(parseWarmupStreamUsage('data: {"type":"message_stop"}\n')).toEqual({
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    });
   });
 });
 
@@ -239,6 +310,7 @@ describe('runWarmCycle', () => {
     expect(body.system[0].text).toBe('THE BASE PROMPT');
     expect(body.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: PROMPT_CACHE_TTL });
     expect(body.max_tokens).toBe(1);
+    expect(body.stream).toBe(true);
 
     // Spaced between touches (concurrent probes land on the same backend) — but only BETWEEN them.
     expect(instantSleep).toHaveBeenCalledTimes(2);
