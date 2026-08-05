@@ -75,27 +75,42 @@ export function SupabaseConnection() {
     }
   }, [isConnected, supabaseConn.selectedProjectId, supabaseConn.token, supabaseConn.credentials]);
 
+  /*
+   * 🔴 THE TRIGGER IS HIDDEN; THE COMPONENT IS NOT (owner, 2026-08-04).
+   *
+   * The green Supabase mark sat alone on the right of the composer row and is now reached from the ⋯
+   * main menu instead — connecting a backend is something a user goes LOOKING for, which is exactly
+   * §4.1a's rule for what belongs behind the ⋯ rather than in the row.
+   *
+   * ⚠️ **Do not "finish the job" by removing this component from `ChatBox`.** Everything that makes the
+   * connection work lives here and none of it is the button: the `open-supabase-connection` listener
+   * the menu item now fires, the per-chat `supabase-project-<chatId>` persistence (three effects), the
+   * stats fetch, and the API-key fetch. Unmounting it would leave a menu item that opens nothing and
+   * silently drop the project selection when the chat changes. Hide-don't-delete, as everywhere else.
+   */
   return (
     <div className="relative">
-      <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden mr-2 text-sm">
-        <Button
-          active
-          disabled={connecting}
-          onClick={() => setIsDialogOpen(!isDialogOpen)}
-          className="hover:bg-bolt-elements-item-backgroundActive !text-white flex items-center gap-2"
-        >
-          <img
-            className="w-4 h-4"
-            height="20"
-            width="20"
-            crossOrigin="anonymous"
-            src="https://cdn.simpleicons.org/supabase"
-          />
-          {isConnected && supabaseConn.project && (
-            <span className="ml-1 text-xs max-w-[100px] truncate">{supabaseConn.project.name}</span>
-          )}
-        </Button>
-      </div>
+      {false && (
+        <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden mr-2 text-sm">
+          <Button
+            active
+            disabled={connecting}
+            onClick={() => setIsDialogOpen(!isDialogOpen)}
+            className="hover:bg-bolt-elements-item-backgroundActive !text-white flex items-center gap-2"
+          >
+            <img
+              className="w-4 h-4"
+              height="20"
+              width="20"
+              crossOrigin="anonymous"
+              src="https://cdn.simpleicons.org/supabase"
+            />
+            {isConnected && supabaseConn.project ? (
+              <span className="ml-1 text-xs max-w-[100px] truncate">{supabaseConn.project?.name}</span>
+            ) : null}
+          </Button>
+        </div>
+      )}
 
       <DialogRoot open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         {isDialogOpen && (

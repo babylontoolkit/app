@@ -21,7 +21,8 @@
  *   1. **Session** — what am I doing with this conversation? (`New chat`)
  *   2. **Take it with you** — how do I get a copy of my game out of this session? (`Export as ZIP`,
  *      `Remix project` — a ZIP on disk, or a new owned clone).
- *   3. **Help & diagnostics** — something is wrong, or I want to tell you about it.
+ *   3. **Connections** — what else does this game talk to? (`Game backend`, §4.15)
+ *   4. **Help & diagnostics** — something is wrong, or I want to tell you about it.
  *
  * A menu that grows by appending becomes an undifferentiated list of a dozen items, which is the same
  * failure the toolbar itself just came back from: enough individually-reasonable additions and the
@@ -29,7 +30,8 @@
  * the signal to add a new group with its own separator — not to drop it at the end.
  *
  * Likely future groups, so the shape is obvious rather than guessed: **Project** (settings, rename,
- * delete), **Connections** (Unity bridge, game backend, MCP), **View** (theme, layout).
+ * delete), **View** (theme, layout). The Unity bridge and MCP still have their own composer-row
+ * controls and join **Connections** if they ever leave the row.
  *
  * Export ZIP is in group 2 because it had no header home at all despite being, under repo-primary
  * persistence, one of the few ways to get your game out of the browser — and it is available to ALL
@@ -126,7 +128,36 @@ export function OverflowMenu() {
 
           <DropdownMenu.Separator className={SEPARATOR} />
 
-          {/* ── 3. Help & diagnostics ──────────────────────────────────────────────── */}
+          {/*
+           * ── 3. Connections ───────────────────────────────────────────────────────
+           *
+           * The Game Backend (§4.15). It used to be a green Supabase mark alone on the right of the
+           * composer row; connecting a backend is something a user goes LOOKING for, which is this
+           * menu's stated rule for what belongs here rather than in the row (§4.1a).
+           *
+           * ⚠️ It opens the dialog by DISPATCHING the event `SupabaseConnection` already listens for —
+           * that component owns the dialog, the per-chat project persistence and the token state, and
+           * it lives in `ChatBox`, which is a different tree. Lifting its state to reach it from the
+           * header would put a second writer on a connection that is written from the Settings tab as
+           * well. The event is the seam that already existed (`SupabaseAlert` uses the same one).
+           *
+           * The label is the fixed noun "Game Backend" (owner, 2026-08-04) — it names the thing the row
+           * opens, in both states, rather than describing what pressing it will do. The dialog itself
+           * already reports whether you are connected and to what.
+           */}
+          <DropdownMenu.Group>
+            <DropdownMenu.Item
+              className={TOOLBAR_MENU_ITEM}
+              onSelect={() => document.dispatchEvent(new CustomEvent('open-supabase-connection'))}
+            >
+              <div className="i-ph:database" />
+              <span>Game Backend</span>
+            </DropdownMenu.Item>
+          </DropdownMenu.Group>
+
+          <DropdownMenu.Separator className={SEPARATOR} />
+
+          {/* ── 4. Help & diagnostics ──────────────────────────────────────────────── */}
           <DropdownMenu.Group>
             <DropdownMenu.Item
               className={TOOLBAR_MENU_ITEM}

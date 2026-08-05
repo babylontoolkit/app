@@ -65,9 +65,16 @@ export function ModelTierPill() {
   const active = eligible;
 
   /*
-   * The lock glyph means "the rung you SELECTED is not what will run" — it is about a mismatch, not
-   * about the pill's own state. A user on Standard by choice has nothing locked; a user who picked
-   * SuperMax and cannot currently have it does, and the pill is where they find that out.
+   * "The rung you SELECTED is not what will run" — a mismatch, not a state of the pill itself. A user
+   * on Standard by choice has nothing withheld; a user who picked SuperMax and cannot currently have
+   * it does, and the pill is where they find that out.
+   *
+   * 🔴 IT NO LONGER RENDERS A PADLOCK (owner, 2026-08-04). The row is crowded and the model NAME is
+   * this control's entire reason to exist (§4.1a) — a glyph that is absent on the common path was
+   * taking width from the one thing that is always needed. The state is still carried, by the dimming
+   * and by the tooltip, which says which rung is unavailable and that a click will explain; the picker
+   * itself spells out the threshold. Do NOT re-add a glyph here to "make it more visible" without
+   * taking the width from somewhere else.
    */
   const locked = selected !== 'standard' && !eligible;
 
@@ -96,10 +103,20 @@ export function ModelTierPill() {
       ? `Running ${effective.full}. ${selectedLabel} is not available right now. Click to change.`
       : `Running ${effective.full} (${selectedLabel}). Click to choose a different model.`;
 
+  /*
+   * 🔴 `px-1`, NOT `px-1.5` — the pill is the LAST child of the composer row, so its own padding IS the
+   * row's right-hand margin (owner, 2026-08-04).
+   *
+   * The row is `p-4` on both sides. On the left the first control is a stock `IconButton`, whose base
+   * class is `p-1`, so the Unity glyph sits 16 + 4 = 20px from the border. The pill was overriding to
+   * `px-1.5`, putting its glyph at 16 + 6 = 22px — the row read off-centre by 2px with nothing in the
+   * layout to blame it on. Anything that changes this must change `IconButton`'s base padding with it,
+   * or the asymmetry comes straight back. Pinned in `ModelTierPill.spec.tsx`.
+   */
   return (
     <IconButton
       title={title + effortLine}
-      className={classNames('transition-all flex items-center gap-1 px-1.5', {
+      className={classNames('transition-all flex items-center gap-1 px-1', {
         '!bg-bolt-elements-item-backgroundAccent !text-bolt-elements-item-contentAccent': active,
         'opacity-50': locked,
 
@@ -108,10 +125,14 @@ export function ModelTierPill() {
       })}
       onClick={choosable ? () => modelTierPanelOpen.set(!modelTierPanelOpen.get()) : undefined}
     >
+      {/*
+       * Name first, glyph after (owner, 2026-08-04). The model NAME is what this control exists to
+       * report — leading with a decorative bolt put the one piece of information behind an icon that
+       * says nothing, and at the right end of the row the text now starts where the eye arrives.
+       */}
       <>
-        <div className="i-ph:lightning-fill text-lg" />
         <span className="text-xs whitespace-nowrap">{effective.full}</span>
-        {locked ? <div className="i-ph:lock-simple text-sm" /> : null}
+        <div className="i-ph:lightning-fill text-lg" />
       </>
     </IconButton>
   );

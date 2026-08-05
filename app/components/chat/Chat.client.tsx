@@ -1226,8 +1226,15 @@ export const ChatImpl = memo(
       prompt?: string;
       visiblePrompt?: string;
       matched?: string[];
+
+      /**
+       * Did the user PICK this entry, or is it just where a typed prompt lands? Defaults to
+       * `explicit` because every path except Path A is a choice the user made; only the typed-prompt
+       * path passes `inferred`. See `ProjectSeed.seedSource`.
+       */
+      seedSource?: 'explicit' | 'inferred';
     }): Promise<boolean> => {
-      const { entry, prompt, visiblePrompt, matched } = options;
+      const { entry, prompt, visiblePrompt, matched, seedSource = 'explicit' } = options;
       const title = prompt ? deriveProjectTitle(prompt, entry.title) : entry.title;
 
       // ================= PHASE 1 — CREATE THE PROJECT. Nothing below may be skipped or deferred. ====
@@ -1345,7 +1352,7 @@ export const ChatImpl = memo(
       let created: Awaited<ReturnType<typeof createProjectFromRegistry>>;
 
       try {
-        created = await createProjectFromRegistry({ entry, title, projectId: registeredProjectId });
+        created = await createProjectFromRegistry({ entry, title, projectId: registeredProjectId, seedSource });
       } catch (error) {
         /*
          * The only genuinely fatal outcome: the starter never arrived, or it did not land on disk.
@@ -1414,7 +1421,7 @@ export const ChatImpl = memo(
         // The rest of the splash's story: the mount-visibility wait below.
         bootProgress.set({ step: 'creating-finalize' });
 
-        setProjectSeed({ entry, className, title, prompt, visiblePrompt, matched });
+        setProjectSeed({ entry, className, title, prompt, visiblePrompt, matched, seedSource });
 
         /*
          * The project exists and has never been built in — enter New Project mode, carrying the brief the
@@ -2048,6 +2055,13 @@ export const ChatImpl = memo(
           entry: decision.entry,
           prompt: finalMessageContent,
           matched: decision.kind === 'matched' ? decision.matched : undefined,
+
+          /*
+           * The ONE inferred path. `decideSeed` no longer guesses a genre, so this entry is the
+           * fallback row rather than anything the user asked for — the surfaces downstream must not
+           * report it back as a starter they chose (`ProjectSeed.seedSource`).
+           */
+          seedSource: 'inferred',
         });
 
         if (seeded) {

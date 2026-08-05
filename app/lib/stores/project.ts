@@ -32,6 +32,20 @@ export interface ProjectSeed {
 
   /** Keywords that fired, for the chip's tooltip — the seed should never feel like magic. */
   matched?: string[];
+
+  /**
+   * 🔴 WHETHER THE USER CHOSE THIS ENTRY, OR IT IS JUST WHERE A TYPED PROMPT LANDS (2026-08-04).
+   *
+   * `explicit` — a genre card, the wizard, "just start from a blank scene", or the chip's own change:
+   * the user picked this starter and naming it back to them is a confirmation.
+   *
+   * `inferred` — a typed prompt. Since genre inference was retired (`decideSeed`), EVERY typed prompt
+   * seeds the fallback row, so "Started from: Blank Canvas" is not a fact about their request; it is
+   * an implementation detail that reads as *we ignored what you asked for*. Reported live on exactly
+   * the prompt that retired the keyword table ("top-down twin-stick shooter" → Blank Canvas). The
+   * surfaces below therefore do not name the entry on this path.
+   */
+  seedSource?: 'explicit' | 'inferred';
 }
 
 export const projectSeedStore = atom<ProjectSeed | null>(null);

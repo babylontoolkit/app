@@ -157,8 +157,16 @@ export async function createProjectFromRegistry(options: {
    * anonymous. The caller enforces which of those it is; this function just passes it to the boot.
    */
   projectId?: string;
+
+  /**
+   * Whether the user CHOSE this entry (card / wizard / blank-scene offer / re-seed) or it is merely
+   * where a typed prompt lands now that genre inference is retired (`decideSeed`, §4.4a).
+   *
+   * It changes exactly one thing: whether the creation line names the starter. See `ProjectSeed`.
+   */
+  seedSource?: 'explicit' | 'inferred';
 }): Promise<CreatedProject> {
-  const { entry, title, projectId } = options;
+  const { entry, title, projectId, seedSource = 'explicit' } = options;
 
   /*
    * The creation splash (`WorkspaceSplash`) narrates these phases — set as each await is reached, so
@@ -314,7 +322,18 @@ export async function createProjectFromRegistry(options: {
       `(${projectFiles.length - binaryCount} text, ${binaryCount} binary, 0 inlined)`,
   );
 
-  const assistantMessage = `Setting up your project from the ${entry.title} starter.
+  /*
+   * 🔴 NAME THE STARTER ONLY WHEN THE USER PICKED IT (2026-08-04, reported live).
+   *
+   * On a card/wizard/blank-scene creation the entry title is a confirmation of a choice they made.
+   * On a TYPED prompt it is not: `decideSeed` no longer guesses a genre, so every typed prompt seeds
+   * the fallback row — and telling someone who asked for a twin-stick shooter that we are "setting up
+   * your project from the Blank Canvas starter" reads as the product having thrown their words away,
+   * when in fact those words are carried onto the handoff card and build the game on the next turn.
+   */
+  const assistantMessage = `${
+    seedSource === 'inferred' ? 'Setting up your project.' : `Setting up your project from the ${entry.title} starter.`
+  }
 
 <boltArtifact id="project-setup" title="${title}" type="bundled">
 <boltAction type="shell">npm install</boltAction>

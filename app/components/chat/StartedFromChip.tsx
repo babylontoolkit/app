@@ -33,6 +33,18 @@ export function StartedFromChip({ onReseed, canChange = false }: StartedFromChip
 
   const alternatives = entries.filter((entry) => entry.id !== seed.entry.id);
 
+  /*
+   * 🔴 A TYPED PROMPT DID NOT "START FROM" ANYTHING THE USER CHOSE (2026-08-04, reported live).
+   *
+   * This chip exists to make INFERENCE visible and reversible — but since `decideSeed` stopped
+   * guessing a genre there is no inference left to show: every typed prompt lands on the fallback row.
+   * Naming it ("Started from: Blank Canvas" on a twin-stick-shooter prompt) attributes a choice the
+   * user never made and reads as their request being discarded. So on that path the chip states what
+   * is actually true — the project is a blank scene — and keeps the affordance that IS still useful:
+   * swapping to a genre starter before anything has been built on.
+   */
+  const inferred = seed.seedSource === 'inferred';
+
   return (
     <div className="relative inline-flex items-center gap-1.5 text-xs">
       <span
@@ -41,17 +53,23 @@ export function StartedFromChip({ onReseed, canChange = false }: StartedFromChip
           'bg-bolt-elements-background-depth-2 border border-bolt-elements-borderColor',
           'text-bolt-elements-textSecondary',
         )}
-        title={seed.matched?.length ? `Matched: ${seed.matched.join(', ')}` : undefined}
+        title={!inferred && seed.matched?.length ? `Matched: ${seed.matched.join(', ')}` : undefined}
       >
         {seed.entry.icon && <span className={seed.entry.icon} />}
-        Started from: <span className="text-bolt-elements-textPrimary">{seed.entry.title}</span>
+        {inferred ? (
+          <span className="text-bolt-elements-textPrimary">Starting from a blank scene</span>
+        ) : (
+          <>
+            Started from: <span className="text-bolt-elements-textPrimary">{seed.entry.title}</span>
+          </>
+        )}
         {canChange && onReseed && (
           <button
             type="button"
             onClick={() => setOpen(!open)}
             className="ml-1 underline underline-offset-2 hover:text-bolt-elements-textPrimary"
           >
-            change
+            {inferred ? 'pick a starter' : 'change'}
           </button>
         )}
       </span>

@@ -402,3 +402,42 @@ describe('createProjectFromRegistry — the two failures that ARE fatal', () => 
     );
   });
 });
+
+/**
+ * 🔴 THE CREATION LINE NAMES THE STARTER ONLY WHEN THE USER PICKED IT (2026-08-04, reported live).
+ *
+ * Since `decideSeed` retired genre inference, every TYPED prompt seeds the fallback row — so
+ * "top-down twin-stick shooter in a neon arena" produced *"Setting up your project from the Blank
+ * Canvas starter."* That sentence is not wrong about the filesystem and is completely wrong about the
+ * user: it attributes a choice they never made and reads as their request having been discarded,
+ * moments before the handoff card carries those exact words into the build.
+ *
+ * The failure is pure copy — nothing throws, the project is correct — which is why it needs a test:
+ * the next person to touch this template string has no signal telling them the entry title is
+ * conditional. Both directions are asserted, because collapsing either way is a one-word edit.
+ */
+describe('createProjectFromRegistry — the starter is named only when it was chosen', () => {
+  it('names it on an explicit pick (card / wizard / blank-scene offer / re-seed)', async () => {
+    const created = await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer', seedSource: 'explicit' });
+
+    expect(created.assistantMessage).toContain('from the Arcade Racing starter');
+  });
+
+  it('defaults to explicit — every path except a typed prompt is a choice the user made', async () => {
+    const created = await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer' });
+
+    expect(created.assistantMessage).toContain('from the Arcade Racing starter');
+  });
+
+  it('never names it on the inferred path — a typed prompt did not choose a starter', async () => {
+    const created = await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer', seedSource: 'inferred' });
+
+    expect(created.assistantMessage).toContain('Setting up your project.');
+    expect(created.assistantMessage).not.toContain('Arcade Racing');
+    expect(created.assistantMessage).not.toMatch(/starter/i);
+
+    // The artifact itself is untouched — this is a copy change, not a creation change.
+    expect(created.assistantMessage).toContain('<boltAction type="shell">npm install</boltAction>');
+    expect(created.assistantMessage).toContain('<boltAction type="start">npm run dev</boltAction>');
+  });
+});

@@ -1120,16 +1120,16 @@ export function AdminTab() {
       )}
 
       {/*
-       * Marketplace prices (§4.6). The platform's cost basis — what we believe KIE charges for LLM
-       * tokens and media generation. Versioned + promoted here; the env price vars are retired.
-       */}
-      <MarketPricesSection />
-
-      {/*
        * Asset library (§4.4d). The Synty prototype manifest the model is told about — versioned +
        * promoted here from the master at repo.babylontoolkit.com, never fetched at generation time.
        */}
       <AssetLibrarySection />
+
+      {/*
+       * Marketplace prices (§4.6). The platform's cost basis — what we believe KIE charges for LLM
+       * tokens and media generation. Versioned + promoted here; the env price vars are retired.
+       */}
+      <MarketPricesSection />
     </div>
   );
 }

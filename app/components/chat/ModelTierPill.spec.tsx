@@ -99,8 +99,16 @@ const pill = () => screen.getByRole('button');
 /** The pill NAMES the model actually in use, so the label is the honest read of "am I locked?". */
 const label = () => pill().textContent ?? '';
 
-/** The lock glyph the component renders for every ineligible state (`!eligible`). */
-const locked = () => pill().querySelector('.i-ph\\:lock-simple') !== null;
+/**
+ * The pill's "the rung you selected is not what runs" state (`!eligible`).
+ *
+ * ⚠️ This used to read the padlock glyph, which was REMOVED on 2026-08-04 (owner: the row is crowded
+ * and the model name needs the width). The property those assertions protect is unchanged — the pill
+ * must show the mismatch — so the helper was repointed at the signal that survived rather than the
+ * assertions being deleted. Dropping them with the glyph would have silently retired the whole
+ * affordability half of this file, which is the half a live balance change exercises every generation.
+ */
+const locked = () => pill().className.includes('opacity-50');
 
 beforeEach(() => {
   sessionStore.set(funded);
@@ -375,6 +383,27 @@ describe('ModelTierPill — the first-build lock', () => {
 
     expect(label()).toContain('Gemini 3.5 Flash');
     expect(label()).not.toContain('3 5');
+  });
+
+  /**
+   * 🔴 THE PILL'S HORIZONTAL PADDING IS THE COMPOSER ROW'S RIGHT MARGIN (owner, 2026-08-04).
+   *
+   * It is the LAST child of a `p-4` row, so its own `px` is what stands between its glyph and the
+   * border. The left end of that row starts with a stock `IconButton` (base `p-1`), so the two ends
+   * only line up while these agree — the pill shipped at `px-1.5` and the row read 2px off-centre with
+   * nothing in the layout to blame it on.
+   *
+   * Asserted here rather than left to a comment because it is invisible to every other test in this
+   * file and to typecheck, and the tempting edit (giving the label a little more breathing room) is
+   * exactly the one that breaks it.
+   */
+  it('pads to `px-1`, matching the IconButton at the other end of the row', () => {
+    render(<ModelTierPill />);
+
+    expect(pill().className).toContain('px-1');
+    expect(pill().className, 'px-1.5 puts the pill 2px further from the border than the Unity button').not.toContain(
+      'px-1.5',
+    );
   });
 
   it('explains the threshold lock and never claims a first-build one', () => {

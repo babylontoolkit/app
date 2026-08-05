@@ -17,7 +17,8 @@
  * doc comment records.
  */
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText } from 'ai';
+import { streamText, tool } from 'ai';
+import { z } from 'zod';
 import { describe, expect, it } from 'vitest';
 import type { EffortLevel, ThinkingMode } from '~/lib/modules/llm/capabilities';
 import { codexEffort } from '~/lib/modules/llm/model-families';
@@ -57,8 +58,10 @@ function sseResponse(): Response {
 }
 
 /** Drive the REAL provider stack the way `kie.ts` wires the codex family, and capture what lands on the wire. */
-async function capture(options: { wrap?: boolean; mode?: ThinkingMode; effort?: EffortLevel } = {}) {
-  const { wrap = true, mode = 'adaptive', effort = 'medium' } = options;
+async function capture(
+  options: { wrap?: boolean; mode?: ThinkingMode; effort?: EffortLevel; withTools?: boolean } = {},
+) {
+  const { wrap = true, mode = 'adaptive', effort = 'medium', withTools = false } = options;
   const seen: { url?: string; headers?: Record<string, string>; body?: any } = {};
 
   const spy: typeof fetch = async (input, init) => {
@@ -76,7 +79,27 @@ async function capture(options: { wrap?: boolean; mode?: ThinkingMode; effort?: 
     fetch: wrap ? codexFetch(codexEffort(mode, effort), spy) : spy,
   });
 
-  const result = streamText({ model: kie.responses(MODEL), messages: [{ role: 'user', content: 'hi' }] });
+  /*
+   * A real tool, declared the way the proxy declares `load_skill` — a zod schema through the `ai`
+   * helper. It matters that this goes through the SDK's own serializer rather than being hand-written:
+   * `strict: true` is something the SDK ADDS (`isStrict`, defaulting true on the Responses model), so
+   * a hand-built tools array would never carry the field the fix removes.
+   */
+  const tools = withTools
+    ? {
+        load_skill: tool({
+          description: 'Load the full instructions for a skill.',
+          parameters: z.object({ name: z.string().describe('The skill name.') }),
+          execute: async () => 'ok',
+        }),
+      }
+    : undefined;
+
+  const result = streamText({
+    model: kie.responses(MODEL),
+    messages: [{ role: 'user', content: 'hi' }],
+    tools,
+  });
 
   // Drain — the request is not sent until the stream is consumed.
   for await (const _ of result.textStream) {
@@ -153,7 +176,78 @@ describe('the KIE codex (OpenAI Responses) wire format', () => {
   });
 });
 
+/**
+ * 🔴 `strict: true` ON A FUNCTION TOOL IS A DEAD GENERATION ON KIE'S CODEX GATEWAY (measured live,
+ * 2026-08-04) — and it broke EVERY tool-bearing generation on this family from the day it shipped.
+ *
+ * KIE answers it with **HTTP 200 and `{"code":400,"msg":"The server is currently being maintained,
+ * please try again later~"}`** — no SSE events. The SDK sees a 200 with an empty stream and finishes
+ * cleanly, so nothing throws: the user gets `proxy.ts`'s *"The model returned an empty response"*,
+ * `NaN` token counts (no `response.completed` to read `usage` from), and a refund. Bisected from a
+ * captured production body at 6 samples per variant: no tools 6/6 ok, `strict: true` **0/6**,
+ * `strict: false` 6/6, `strict` absent 6/6, and `strict: true` with `$schema` removed still 0/6 — so
+ * it is the flag, not the schema dialect.
+ *
+ * The CONTROL below is the load-bearing half. `strict: true` is added by the SDK, not by us, so a test
+ * that only asserts its absence passes just as well against an SDK that stopped emitting it, a tools
+ * array that never reached the wire, or a `capture()` that quietly dropped the tool. The control
+ * proves the field is really there to be stripped.
+ */
+describe('the `strict` flag KIE rejects', () => {
+  it('never sends `strict` on a tool, through the real SDK serializer', async () => {
+    const seen = await capture({ withTools: true });
+
+    expect(seen.body.tools, 'the tool must actually reach the wire, or this asserts nothing').toHaveLength(1);
+    expect(seen.body.tools[0].name).toBe('load_skill');
+    expect(seen.body.tools[0]).not.toHaveProperty('strict');
+
+    // The rest of the tool is untouched — this is a surgical key removal, not a rewrite.
+    expect(seen.body.tools[0].type).toBe('function');
+    expect(seen.body.tools[0].parameters?.properties?.name).toBeDefined();
+  });
+
+  it('CONTROL — the unwrapped SDK really does send `strict: true` (so the strip is load-bearing)', async () => {
+    const seen = await capture({ withTools: true, wrap: false });
+
+    expect(seen.body.tools[0].strict).toBe(true);
+  });
+
+  it('leaves a body with no tools completely alone', async () => {
+    const seen = await capture();
+
+    expect(seen.body.tools).toBeUndefined();
+  });
+});
+
 describe('codexFetch', () => {
+  /*
+   * The strip is defensive about SHAPE for the same reason the JSON parse is: a body we do not
+   * understand is passed through rather than guessed at. A `tools` value that is not an array, or an
+   * entry that is not an object, must not throw — that would turn a wire quirk into a dead generation,
+   * which is precisely what this function exists to prevent.
+   */
+  it('tolerates a non-array `tools` and entries that are not objects', async () => {
+    let sent: any;
+    const pass: typeof fetch = async (_i, init) => {
+      sent = JSON.parse(init!.body as string);
+      return new Response('ok');
+    };
+
+    await codexFetch('medium', pass)('https://x.test', {
+      method: 'POST',
+      body: JSON.stringify({ model: MODEL, tools: 'not-an-array' }),
+    });
+    expect(sent.tools).toBe('not-an-array');
+
+    await codexFetch('medium', pass)('https://x.test', {
+      method: 'POST',
+      body: JSON.stringify({ model: MODEL, tools: [null, 'x', { type: 'function', strict: true, name: 'a' }] }),
+    });
+    expect(sent.tools[0]).toBeNull();
+    expect(sent.tools[1]).toBe('x');
+    expect(sent.tools[2]).toEqual({ type: 'function', name: 'a' });
+  });
+
   /* MERGED, never replaced — a body already carrying `reasoning.summary` keeps it. */
   it('merges into an existing reasoning object rather than replacing it', async () => {
     let sentBody: any;

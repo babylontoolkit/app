@@ -80,7 +80,61 @@ export function codexFetch(effort: string, baseFetch: typeof fetch = fetch): typ
     }
 
     body.reasoning = { ...((body.reasoning as Record<string, unknown>) ?? {}), effort };
+    stripStrictTools(body);
 
     return baseFetch(input, { ...init, body: JSON.stringify(body) });
   };
+}
+
+/**
+ * 🔴 KIE'S CODEX GATEWAY REJECTS `strict: true` ON A FUNCTION TOOL — AND CALLS IT MAINTENANCE
+ * (measured 2026-08-04, and it broke EVERY tool-bearing generation on this family).
+ *
+ * `@ai-sdk/openai@1.3.24`'s Responses model defaults `strictSchemas` to `true` (`isStrict`), so every
+ * function tool it serializes carries `strict: true`. KIE's gateway answers that with **HTTP 200 and
+ * `{"code":400,"msg":"The server is currently being maintained, please try again later~"}`** — no SSE
+ * events at all. The SDK sees a 200 with an empty stream and finishes cleanly, so `proxy.ts`'s
+ * `!producedText` guard is what fires: *"The model returned an empty response"*, `finish=error`,
+ * `NaN` token counts (there is no `response.completed` to read `usage` from), and a refund.
+ *
+ * Bisected from a captured production body, 6 samples per variant:
+ *
+ *   no tools at all                        6/6 ok
+ *   strict: true   (as the SDK ships it)   0/6
+ *   strict: false                          6/6 ok
+ *   strict absent                          6/6 ok
+ *   strict: true, `$schema` removed        0/6      ← so it is `strict`, not the schema dialect
+ *
+ * ⚠️ **The message is a lie in the most expensive direction.** "Being maintained… try again later"
+ * describes a transient outage, so the honest response to it is to wait — but this is deterministic
+ * and waiting never fixes it. It is also, verbatim, one of the strings `retry-policy.ts` classifies as
+ * RETRYABLE. It never actually reached that policy here (the 200 raises no error, so the retry loop
+ * sees nothing and the `!producedText` throw happens after it closes), which is the only reason this
+ * failed loudly instead of burning three attempts on an unwinnable request.
+ *
+ * Stripped here rather than via `providerOptions.openai.strictSchemas` in `proxy.ts`, for the reason
+ * this file's temperature note already set out: the proxy must not learn family-specific quirks, and a
+ * body rewrite at the wire survives an SDK that renames or re-defaults its setting. **We lose nothing
+ * real** — strict mode has the provider validate tool args against the schema, and this platform
+ * deliberately validates in `execute` instead (a schema-level violation kills a generation *after* the
+ * tokens are spent, `spec/context-budget.md`).
+ *
+ * The key is DELETED, not set to `false`. Both pass, and absent is the smaller claim: it makes the
+ * body identical to one from a client that never heard of strict mode, rather than betting that KIE's
+ * validator reads the value rather than the key.
+ */
+function stripStrictTools(body: Record<string, unknown>): void {
+  if (!Array.isArray(body.tools)) {
+    return;
+  }
+
+  body.tools = body.tools.map((tool) => {
+    if (!tool || typeof tool !== 'object' || !('strict' in tool)) {
+      return tool;
+    }
+
+    const { strict: _strict, ...rest } = tool as Record<string, unknown>;
+
+    return rest;
+  });
 }
