@@ -9,8 +9,9 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseFrontmatter, validateSkill } from './frontmatter';
+import { DEFAULT_EXCLUDED_SKILLS, excludedSkillNames, isExcludedSkill } from './exclusions';
 import { buildSkillsIndex } from './sync';
 import { MAX_SKILL_LOADS } from '~/lib/.server/agent/tools';
 import { SkillVersionStore } from './store';
@@ -224,5 +225,104 @@ describe('skill store — manifest-only resource resolution', () => {
   it('refuses to activate a version under the wrong skill name', async () => {
     const version = await put();
     await expect(store.activate('bt-spec', version.id)).rejects.toThrow(/belongs to/i);
+  });
+});
+
+/*
+ * Platform-excluded skills (exclusions.ts, spec/skills.md §"Platform-excluded skills").
+ *
+ * bt-gauntlet is authored for native-client hosts (Claude Code): its loop needs subagent fan-out,
+ * running-game screenshot evidence, and blind A/B against reference media — none of which the
+ * server-side tool loop has. The guard under test is the STORE's read seam, because a deployed store
+ * may already hold a synced version: a sync-time skip alone would leave it active and loadable.
+ *
+ * ⚠️ Every test stubs `SKILLS_EXCLUDE` explicitly — `env()` falls back to `process.env`, so a
+ * developer with the var set in their shell would otherwise fail the default-case assertions with CI
+ * green (the `oauth.spec.ts` trap).
+ */
+describe('platform-excluded skills', () => {
+  let root: string;
+  let store: SkillVersionStore;
+
+  beforeEach(async () => {
+    vi.stubEnv('SKILLS_EXCLUDE', undefined as unknown as string);
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-excl-'));
+    store = new SkillVersionStore(new FsObjectStore(root));
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const putAndActivate = async (name: string) => {
+    const version = await store.put({
+      name,
+      description: `${name} description.`,
+      body: `${name} instructions.`,
+      sourceCommitSha: 'sha',
+      resources: { 'references/guide.md': `${name} GUIDE` },
+    });
+    await store.activate(name, version.id);
+  };
+
+  it('bakes bt-gauntlet into the default exclusion list', () => {
+    expect(DEFAULT_EXCLUDED_SKILLS).toContain('bt-gauntlet');
+    expect(isExcludedSkill('bt-gauntlet')).toBe(true);
+  });
+
+  it('an already-synced excluded skill is unreachable at the read seam, resources included', async () => {
+    // Simulates a store that synced bt-gauntlet BEFORE the exclusion existed.
+    await putAndActivate('bt-gauntlet');
+    await putAndActivate('bt-design');
+
+    expect(await store.getActive('bt-gauntlet')).toBeNull();
+    expect(await store.readResource('bt-gauntlet', 'references/guide.md')).toBeNull();
+    expect((await store.listActive()).map((s) => s.name)).toEqual(['bt-design']);
+  });
+
+  it('CONTROL — a non-excluded skill in the same store is fully served', async () => {
+    await putAndActivate('bt-gauntlet');
+    await putAndActivate('bt-design');
+
+    expect((await store.getActive('bt-design'))?.body).toBe('bt-design instructions.');
+    expect(await store.readResource('bt-design', 'references/guide.md')).toBe('bt-design GUIDE');
+  });
+
+  it('the baked index never advertises an excluded skill', async () => {
+    await putAndActivate('bt-gauntlet');
+    await putAndActivate('bt-design');
+
+    const index = buildSkillsIndex(await store.listActive());
+
+    expect(index).toContain('bt-design');
+    expect(index).not.toContain('bt-gauntlet');
+  });
+
+  it('listAll still shows the stored version — the admin UI sees what exists', async () => {
+    await putAndActivate('bt-gauntlet');
+
+    expect((await store.listAll()).map((s) => s.name)).toContain('bt-gauntlet');
+  });
+
+  it('SKILLS_EXCLUDE REPLACES the default list — it never merges', () => {
+    vi.stubEnv('SKILLS_EXCLUDE', 'bt-design, bt-hero');
+
+    expect(excludedSkillNames()).toEqual(new Set(['bt-design', 'bt-hero']));
+
+    // Replacement means the baked name is back in service when the operator takes over the list.
+    expect(isExcludedSkill('bt-gauntlet')).toBe(false);
+  });
+
+  it('an empty SKILLS_EXCLUDE behaves as unset — env() collapses it, so the default applies', () => {
+    vi.stubEnv('SKILLS_EXCLUDE', '');
+
+    expect(isExcludedSkill('bt-gauntlet')).toBe(true);
+  });
+
+  it('a placeholder no skill is named after clears every exclusion', () => {
+    vi.stubEnv('SKILLS_EXCLUDE', 'none');
+
+    expect(isExcludedSkill('bt-gauntlet')).toBe(false);
   });
 });

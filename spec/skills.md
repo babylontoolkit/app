@@ -1,6 +1,6 @@
 # spec/skills.md — Skills Subsystem (governs SPEC §4.11)
 
-Claude Code-style skill support in the platform chat: the workflow skills in `github.com/babylontoolkit/skills` (bt-spec, bt-plan, bt-design, …) are slash-invocable (`/bt-spec <task>`) and auto-loadable by description. agentskills.io-compliant progressive disclosure; we conform to the open spec, we do not extend it. All repo skills sync and are invocable by default.
+Claude Code-style skill support in the platform chat: the workflow skills in `github.com/babylontoolkit/skills` (bt-spec, bt-plan, bt-design, …) are slash-invocable (`/bt-spec <task>`) and auto-loadable by description. agentskills.io-compliant progressive disclosure; we conform to the open spec, we do not extend it. All repo skills sync and are invocable by default — except the platform exclusion list (§"Platform-excluded skills" below).
 
 ## Sync (extends doc-sync)
 
@@ -9,6 +9,16 @@ Claude Code-style skill support in the platform chat: the workflow skills in `gi
 3. Upsert `skills` (by name) + insert `skill_versions` (body, `resources_manifest` of all bundled files, `storage_prefix`); upload `references/`/`scripts/`/assets to S3 under the prefix (spec/hosting.md).
 4. Rebuild the skills index text (sorted by name for stable bytes) and hand to doc-sync → new prompt version.
 5. Per-skill rollback: activate any prior `skill_versions` row; triggers index rebuild.
+
+## Platform-excluded skills (2026-08-05)
+
+Some skills in the repo are authored for native-client hosts (Claude Code, VS Code agent plugins) and depend on capabilities the platform's server-side tool loop does not have. **`bt-gauntlet` is the canonical case (owner decision 2026-08-05):** its Gauntlet Loop requires subagent fan-out (fresh-context critics), running-game evidence (browser screenshots into `evidence/`), and blind A/B against reference media — none of which exist on the platform, so every "PASS" it produced here would be self-graded narration, the exact failure the skill's own instructions forbid. The owner runs it from Claude Code against a GitHub-synced clone of the project instead (§4.13 makes that a first-class workflow).
+
+- **This is a capability rule, not a router.** It never picks a skill for a turn (`skill-selection.spec.ts`'s ban is untouched); it defines which skills exist on this host at all.
+- `DEFAULT_EXCLUDED_SKILLS` in `app/lib/.server/skills/exclusions.ts` bakes the list; **`SKILLS_EXCLUDE` (comma-separated names) REPLACES it when set** — replacement, never merge (one writer per list). `env()` collapses an empty string to unset, so "no exclusions" is expressed with a placeholder no skill is named after (e.g. `SKILLS_EXCLUDE=none`).
+- **Enforced at the STORE's read seam** (`getActive`/`listActive`/`readResource`), not only in sync — a deployed store may already hold a synced version, and a sync-time skip alone would leave it active, indexed, and loadable. Sync ALSO skips the bundle before any fetch (reported in `skipped` as "excluded on this platform"). `listAll` stays unfiltered so the admin UI sees what is stored.
+- Downstream invisibility follows by construction: absent from the baked index (`buildSkillsIndex` reads `listActive`), from `/` autocomplete (`api.skills`), and from `load_skill`'s available-skills strings; `/bt-gauntlet` falls through to the unknown-skill path.
+- ⚠️ **After excluding an already-synced skill, resync (Admin → prompt refresh)** so the baked index stops advertising it. Until then the cached prompt lists a skill `load_skill` will refuse — the refusal is the friendly recoverable string ("No skill named …"), not a dead generation, but it is still a dangling instruction the resync removes.
 
 ## Runtime tools (server agent proxy only)
 

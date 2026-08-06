@@ -13,6 +13,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { githubJson, githubText } from '~/lib/.server/prompt/github';
 import { SKILLS_REPO } from '~/lib/.server/prompt/sources';
 import { validateSkill } from './frontmatter';
+import { isExcludedSkill } from './exclusions';
 import { getSkillStore, type SkillVersion } from './store';
 import { MAX_SKILL_LOADS } from '~/lib/.server/agent/tools';
 
@@ -128,6 +129,17 @@ export async function syncSkills(githubToken?: string): Promise<SyncResult> {
   const skipped: Array<{ name: string; reason: string }> = [];
 
   for (const [name, files] of [...bundles.entries()].sort()) {
+    /*
+     * Platform-excluded (exclusions.ts): skip before any fetch, so the bundle's bytes are never
+     * even downloaded. The store's read seam enforces the same rule for versions synced BEFORE the
+     * skill was excluded — this branch just keeps the sync honest about what it brought in.
+     */
+    if (isExcludedSkill(name)) {
+      logger.info(`Skipping skill "${name}": excluded on this platform (see skills/exclusions.ts)`);
+      skipped.push({ name, reason: 'excluded on this platform' });
+      continue;
+    }
+
     if (!files.includes('SKILL.md')) {
       skipped.push({ name, reason: 'no SKILL.md' });
       continue;

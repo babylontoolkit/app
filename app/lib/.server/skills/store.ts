@@ -15,6 +15,7 @@
  */
 import { getObjectStore, type ObjectStore } from '~/lib/.server/storage';
 import { sha256 } from '~/lib/.server/prompt/store';
+import { isExcludedSkill } from './exclusions';
 
 export interface SkillVersionMeta {
   id: string;
@@ -231,6 +232,17 @@ export class SkillVersionStore implements SkillStore {
   }
 
   async getActive(name: string): Promise<SkillVersion | null> {
+    /*
+     * Platform-excluded skills (exclusions.ts) do not exist as far as the runtime is concerned —
+     * this is the read seam that keeps an ALREADY-SYNCED excluded version unreachable, not just
+     * unsynced. `listActive` inherits the filter (it goes through here), so the index, the `/`
+     * autocomplete, and `load_skill`'s available-list all agree by construction. `listAll` stays
+     * unfiltered on purpose: the admin rollback UI should see what is stored.
+     */
+    if (isExcludedSkill(name)) {
+      return null;
+    }
+
     const active = await this._activeMap();
     const id = active[name];
 
@@ -260,6 +272,11 @@ export class SkillVersionStore implements SkillStore {
   }
 
   async readResource(name: string, resourcePath: string): Promise<string | null> {
+    // Same rule as `getActive` — an excluded skill's bundle is unreachable, resources included.
+    if (isExcludedSkill(name)) {
+      return null;
+    }
+
     const active = await this._activeMap();
     const id = active[name];
 
