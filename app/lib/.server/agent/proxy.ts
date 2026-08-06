@@ -91,6 +91,8 @@ import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
 import { extractStepCacheTokens, shouldWarnMissingUsageNamespace, usageNamespaceFor } from './usage-metadata';
 import { familyOf } from '~/lib/modules/llm/model-families';
+import { drainStopReasons, peekStopReasons } from '~/lib/modules/llm/stop-reason-tap';
+import { describeRefusal, drainFallbackHandoffs } from '~/lib/modules/llm/refusal-fallback';
 
 const logger = createScopedLogger('agent-proxy');
 
@@ -1976,7 +1978,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        */
       if (!producedText) {
         failed = true;
-        throw new Error(EMPTY_RESPONSE_ERROR);
+
+        /*
+         * When the wire tap saw a REFUSAL end this generation, say so — "empty response" sends the
+         * user hunting for a transient fault, and the retry ladder keys on that sentence, so a
+         * refusal (which a same-model retry only repeats) must carry different copy. With the
+         * server-side fallback wired, reaching here on a refusal means every model in the chain
+         * declined. Peek, not drain: the `finally` below still records the raw stops.
+         */
+        const refusal = peekStopReasons().find((s) => s.stopReason === 'refusal');
+
+        throw new Error(refusal ? describeRefusal(refusal) : EMPTY_RESPONSE_ERROR);
       }
     } catch (error) {
       /*
@@ -2065,6 +2077,18 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       );
 
       /*
+       * A refusal fallback that fired is worth a loud line the moment it happens, not just a field
+       * in the record: it means the requested model declined this turn and another model served it.
+       */
+      const fallbackHandoffs = drainFallbackHandoffs();
+
+      for (const handoff of fallbackHandoffs) {
+        logger.warn(
+          `Generation ${generationId}: ${handoff.from} declined via safety classifier — served by ${handoff.to} (server-side fallback)`,
+        );
+      }
+
+      /*
        * Enriches the row `settleGeneration` already anchored (it had to — the debit's foreign key
        * points at it). Everything the anchor could not know until the generation was over lands here:
        * which skills fired, which doc snapshot answered, where the time actually went.
@@ -2114,6 +2138,23 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           (unproductiveRescue ? '+unproductive-rescue' : '') +
           (retried ? '+provider-retry' : ''),
         status: failed ? 'failed' : 'completed',
+
+        /*
+         * The RAW wire stop_reasons for this turn (stop-reason-tap). `@ai-sdk/anthropic` collapses
+         * every stop_reason it does not know into `finishReason: 'unknown'` and discards the raw
+         * value — which left the Fable 5 first-build hang (3–4-token steps, finish=unknown,
+         * 2026-08-06) undiagnosable from this record. Order-only diagnostic: entries are process-
+         * global, so concurrent generations may interleave on a busy deployment.
+         */
+        rawStops: drainStopReasons().map((s) => (s.detail ? `${s.stopReason} ${s.detail}` : s.stopReason)),
+
+        /*
+         * Refusal fallbacks that served (part of) this turn (`refusal-fallback.ts`): the requested
+         * model declined via safety classifier and the named model answered on the same stream. The
+         * turn still BILLS at the requested model's rates (settlement never re-derives the model
+         * mid-turn) — this field is what makes that visible instead of silent.
+         */
+        fallbackHandoffs: fallbackHandoffs.length ? fallbackHandoffs.map((h) => `${h.from}→${h.to}`) : undefined,
       });
 
       /*

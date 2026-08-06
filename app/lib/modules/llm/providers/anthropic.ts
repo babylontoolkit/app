@@ -14,6 +14,8 @@ import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
+import { refusalFallbackFetch } from '~/lib/modules/llm/refusal-fallback';
+import { tapStopReasons } from '~/lib/modules/llm/stop-reason-tap';
 
 export default class AnthropicProvider extends BaseProvider {
   name = 'Anthropic';
@@ -189,9 +191,21 @@ export default class AnthropicProvider extends BaseProvider {
      * actually sends) and reports every absorbed 429, so throttling on a shared platform key is visible
      * rather than something we infer from failed generations (§5A).
      */
+    /*
+     * `refusalFallbackFetch` sits INSIDE `thinkingFetch` so it sees the finished body (the fallback
+     * attempt inherits thinking + output_config) — and on the way back it strips the `fallback`
+     * content block the beta splices into the stream, which the SDK's chunk schema would reject.
+     * `tapStopReasons` stays innermost-but-one so the diagnostic records the RAW wire, including a
+     * final refusal when every model in the chain declined.
+     */
     const anthropic = createAnthropic({
       apiKey,
-      fetch: thinkingFetch(thinkingMode, effort, model, rateLimitFetch({ provider: this.name })),
+      fetch: thinkingFetch(
+        thinkingMode,
+        effort,
+        model,
+        refusalFallbackFetch(model, tapStopReasons(rateLimitFetch({ provider: this.name }))),
+      ),
     });
 
     const instance = supportsSamplingParams(model) ? anthropic(model) : stripSamplingParams(anthropic(model));

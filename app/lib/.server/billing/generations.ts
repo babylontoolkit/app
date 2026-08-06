@@ -97,6 +97,22 @@ export interface GenerationRecord {
   statusKind?: string;
 
   /**
+   * RAW wire `stop_reason` strings observed during this turn (stop-reason-tap), in order.
+   * Exists because `@ai-sdk/anthropic` collapses unrecognized stop reasons (pause_turn, refusal, …)
+   * into `finishReason: 'unknown'`, which made the Fable 5 first-build hang undiagnosable (2026-08-06).
+   * FS store only — the Supabase store maps named columns and drops it.
+   */
+  rawStops?: string[];
+
+  /**
+   * Refusal-fallback handoffs (`refusal-fallback.ts`), as `from→to` strings: the requested model
+   * declined via safety classifier and the named model served the turn on the same stream. The
+   * turn bills at the REQUESTED model's rates, so this field is what keeps that visible.
+   * FS store only — the Supabase store maps named columns and drops it.
+   */
+  fallbackHandoffs?: string[];
+
+  /**
    * Wall-clock for the whole generation.
    *
    * Recorded because "it feels slow" is not actionable and the two causes have opposite fixes:
