@@ -81,10 +81,12 @@ off", and no code path in it ever turns the mark on — so a default of `true` c
 here. It also removes the race outright rather than narrowing it, which re-posting the message on
 every registration would not (the worker can serve one page before the message lands).
 
-⚠️ **NOT FIXED YET — it needs a fork edit plus an npm publish, which is the owner's call.** There is
-no supported workaround from this repo: `RequestProxy` is `private _proxy` on the `Nodepod` class, so
-`setWatermark` cannot be re-asserted from here, and hiding the badge with `setPreviewScript` would be
-exactly the patching the adoption decision rejected.
+✅ **FIXED in the fork — `1.9.18-btk.5` defaults `watermarkEnabled` to `false`** (fork commit
+`15be100`), and the app has pinned that version family since. The paragraphs above stay as the record
+of why a one-shot message can never configure a service worker. (Historical note: there was no
+supported workaround from this repo — `RequestProxy` is `private _proxy` on the `Nodepod` class, so
+`setWatermark` could not be re-asserted from here, and hiding the badge with `setPreviewScript` would
+have been exactly the patching the adoption decision rejected.)
 
 Confirmed from the preview's own resource log: `@babylonjs-toolkit/next/lib/scenemanager.js`
 (**12.2 MB**, 1,244 ms), `@babylonjs/havok/lib/esm/HavokPhysics_es.js` (277 KB), `havokPlugin`
@@ -143,6 +145,9 @@ Provenance is readable from the version string — `<upstream base>-btk.<n>`.
 | `1.9.18-btk.0` | **pure repackage** — name, version, repository URL. No functional change, so the 1.9.12 → 1.9.18 runtime upgrade could be judged on its own. |
 | `1.9.18-btk.1` | the two polyfill fixes below. |
 | `1.9.18-btk.2/3/4` | the service-worker host opt-out below. Three versions because the first two each fixed a real hole and left another; that shape is the lesson, not an accident. |
+| `1.9.18-btk.5` | watermark defaults OFF in the SW — closes §"That verification was true when taken" above. |
+| `1.9.18-btk.6/7` | npm installer honours `package-lock.json` (stops destroying it; the lockfile feeds the resolver, not only the cache key). |
+| `1.9.18-btk.8` | SW host-passthrough fetch failures degrade to `Response.error()` instead of escaping `respondWith()` as uncaught rejections — see §"Console noise" below. ⚠️ **Committed in the fork, NOT yet published**; the app pin stays at `btk.7` until the owner publishes. |
 
 **Two `node:` polyfill defects, both of which made shipping a game impossible.** Neither is a
 regression we introduced — both were latent from the day Nodepod was adopted:
@@ -220,6 +225,30 @@ imports every `react-icons` symbol the app uses and asserts each resolves, so a 
 test rather than white-screening the product at module-eval time. ⚠️ **`pnpm install --frozen-lockfile`
 exits 0 on an integrity mismatch** while leaving the package uninstalled behind an
 `ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE` line — read the output, never the exit code.
+
+### Console noise: `Uncaught (in promise) TypeError: Failed to fetch` at `__sw__.js:853` (diagnosed + fixed in the fork, 2026-08-05, `btk.8`)
+
+Reported as hundreds of repeating console errors: `waitForSuccessfulPing @ client:755`, then
+`GET http://localhost:5173/ net::ERR_FAILED`, then an uncaught TypeError inside `__sw__.js`, on a
+loop. **The pinging client is the BUILDER TAB's own Vite HMR client, not the preview** — the failing
+SW frame is the top-level host passthrough (`return fetch(request)` in claims branch 5), a branch
+only a top-level client reaches; a preview iframe is `nested` and gets proxied to its pod (which
+already degrades to a synthetic 502/503/504 page, never a rejection). The sequence: the app's dev
+server on :5173 goes down or restarts while a tab is open → Vite's client loses its websocket and
+polls the origin once per second → the SW (which sees every request on the origin, because the
+builder's pod claims `/`) passes the ping through to the network → the fetch fails → the rejection
+escapes `respondWith()` as an uncaught error PER POLL, stacked on the browser's own `net::ERR_FAILED`
+line.
+
+Two facts to keep, each a wrong "fix" someone will reach for: **the polling itself is correct and
+must not be silenced** — when the dev server returns, the ping succeeds and the tab auto-reloads,
+which is Vite's recovery working; and **a synthetic HTTP response is the wrong quieting** — Vite's
+ping treats ANY response as "server is back" and reloads into a server that is still dead.
+`Response.error()` is the transparent form: the page sees the identical network failure, the console
+does not fill with uncaught rejections. The remaining one-line-per-second `net::ERR_FAILED` while
+the server is down is stock Vite reconnect behaviour, dev-only (a production build carries no HMR
+client), and stops the moment the server is back. Pinned in the fork by
+`sw-host-passthrough.test.ts` (no bare `return fetch(request)` may return to the fetch handler).
 
 ## Gaps to close in the adapter — each of these fails silently if skipped
 
