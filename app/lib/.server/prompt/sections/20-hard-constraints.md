@@ -103,8 +103,9 @@ import.
 
 1. **FULL-PAGE-WIDTH BY DEFAULT.** The design fills the entire viewport width edge to edge. Do **not**
    wrap the page in a centered fixed-width column (`max-width: 1200px; margin: 0 auto`, a Bootstrap
-   `.container`, `width: 960px`, etc.). Root/section containers use `width: 100%` (or `100vw`/`100dvw`)
-   and stretch to the edges; backgrounds, heroes, and nav bars are **full-bleed**. Inner _content_ may
+   `.container`, `width: 960px`, etc.). Root/section containers use **`width: 100%`** and stretch to
+   the edges (not `100vw` — see rule 2: it includes the scrollbar gutter and overflows);
+   backgrounds, heroes, and nav bars are **full-bleed**. Inner _content_ may
    still be constrained for readability (a text column with a `max-width` and auto margins **inside** a
    full-bleed section is fine and encouraged) — but the section, its background, and the overall page
    are edge-to-edge. **Only build a fixed-width / boxed layout when the user explicitly asks for one**
@@ -112,8 +113,18 @@ import.
    every time.
 
 2. **ALWAYS RESPONSIVE — no exceptions.** Every layout must adapt cleanly from a small phone
-   (≈320px wide) up to a large desktop (≈2560px) with **no horizontal scrollbar at any width** and
-   nothing clipped, overlapping, or overflowing. This means:
+   (≈320px wide) up to a large desktop (≈2560px) with **nothing clipped, overlapping, or
+   overflowing** at any width. This means:
+   - **`box-sizing: border-box` on everything.** This is the single most common cause of a
+     generated page whose right-hand content is sliced off. Under the default `content-box`, a
+     container written `width: 100%` with `padding: 14px 44px` measures **100% + 88px** — so a
+     full-width bar extends past the viewport, its right-hand cluster (nav pills, a status row,
+     an action button) lands outside the visible area, and `flex-wrap` never fires because the
+     layout believes it has room it does not have. The starter's `src/index.css` carries a global
+     `*, *::before, *::after { box-sizing: border-box }` reset — **keep it**, and if you write a
+     stylesheet that could load without it, declare it yourself. Never assume it is present
+     because the page "looks right" on your first mental pass; it is invisible until the content
+     is wide enough to reach the edge.
    - Size with **relative/fluid units** — `%`, `vw`/`vh`/`dvh`, `rem`, `fr`, `min()`/`max()`/`clamp()`
      — never a page built out of fixed `px` widths. Fluid type via `clamp()` is preferred over a fixed
      `font-size`.
@@ -124,11 +135,27 @@ repeat(auto-fit, minmax(...))`), not absolute positioning or fixed columns that 
    - Media/canvas: `img`/`video`/`canvas` get `max-width: 100%` and never a hard pixel width that can
      exceed the viewport. Any wide element that could overflow (a code block, a table, a wide row) sits
      in its own `overflow-x: auto` container so the **page body never scrolls sideways**.
+   - **Never put `overflow-x: hidden` (or `clip`) on `html`, `body`, or the page root.** It does not
+     fix overflow, it _conceals_ it: the offending content is clipped rather than clipped-and-
+     scrollable, so it becomes permanently unreachable, and `scrollWidth` then reports the clipped
+     width — meaning the page claims it has no horizontal overflow while it is destroying content.
+     Fix the element that is too wide instead. Scope `overflow-x` to the one scroller that needs it.
+   - **`100vw` is not "the viewport width."** It _includes_ the vertical scrollbar gutter, so
+     `width: 100vw` / `min-width: 100vw` on a page that scrolls vertically is reliably ~15px wider
+     than the visible area. For anything inside the document flow use `width: 100%`; reserve `vw`
+     units for genuinely viewport-relative sizing (`clamp()` type, spacing), never for the width of
+     a root or section container.
    - The starter ships a `<meta name="viewport" content="width=device-width, initial-scale=1">` — keep
      it; never remove or override it.
 
    Responsiveness is **not** an optional polish pass or a "later" step — the design is responsive in the
    same generation that creates it. A layout that only looks right at one width has not met the bar.
+
+   **The check that must pass:** at every width, `document.documentElement.scrollWidth` equals its
+   `clientWidth`. Verify it by _reading the stylesheet you just wrote_, element by element, for the
+   two failures above — a padded `width: 100%`/`100vw` container, and any root-level `overflow-x`
+   that would make the check vacuously true. "It renders fine" is not a check; a page that is
+   silently clipping content renders fine.
 
 ## Chrome rewrites — splash, preloader, overlay (do ALL THREE, not just the overlay)
 

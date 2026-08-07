@@ -5,7 +5,7 @@ import React from 'react';
  * §2.3 removes generic-website example prompts), so every example seeds a game the registry can match.
  */
 const EXAMPLE_PROMPTS = [
-  { text: 'Make me a kart racer where the cars are shopping carts' },
+  { text: 'Make me a mario kart racer clone complete with drifting mechanics' },
   { text: 'Build a third-person platformer with double-jump and collectibles' },
   { text: 'Create a top-down twin-stick shooter in a neon arena' },
   { text: 'Make a first-person maze explorer with a flashlight' },
