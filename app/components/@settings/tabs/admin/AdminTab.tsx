@@ -13,7 +13,6 @@ import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import { MarketPricesSection } from './MarketPricesSection';
 import { AssetLibrarySection } from './AssetLibrarySection';
-import { AdminFeaturesSection } from './AdminFeaturesSection';
 
 interface UsageReport {
   generations: number;
@@ -449,12 +448,6 @@ export function AdminTab() {
 
   return (
     <div className="flex flex-col gap-6 p-1">
-      {/*
-       * Features (first, deliberately): platform-wide capability switches. Server-persisted operator
-       * decisions, enforced at server read seams — currently "Use Asset Library" (§4.4d).
-       */}
-      <AdminFeaturesSection />
-
       {/*
        * The provider pool every user's generation draws from (§4.10). The ledger says what users owe
        * US; this says what WE have left with KIE — and when it hits zero the product stops for

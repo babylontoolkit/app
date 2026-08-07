@@ -283,6 +283,13 @@ const SETTINGS_KEYS = {
 
   /** The user's chosen rung of the MODEL TIER LADDER (§4.6.1a). `'standard'` unless they pick up. */
   MODEL_TIER: 'modelTier',
+
+  /**
+   * The "Use Asset Library" preference (§4.4d, Control Panel → Features, default ON): whether THIS
+   * user's generations are told about the admin-pinned Synty prototype library. Rides in the agent
+   * request body; the server gate only honors an explicit `false`, so absent = ON.
+   */
+  USE_ASSET_LIBRARY: 'useAssetLibrary',
 } as const;
 
 // Initialize settings from localStorage or defaults
@@ -310,6 +317,7 @@ const getInitialSettings = () => {
     autoSelectTemplate: getStoredBoolean(SETTINGS_KEYS.AUTO_SELECT_TEMPLATE, true),
     contextOptimization: getStoredBoolean(SETTINGS_KEYS.CONTEXT_OPTIMIZATION, true),
     eventLogs: getStoredBoolean(SETTINGS_KEYS.EVENT_LOGS, true),
+    useAssetLibrary: getStoredBoolean(SETTINGS_KEYS.USE_ASSET_LIBRARY, true),
     promptId: isBrowser ? localStorage.getItem(SETTINGS_KEYS.PROMPT_ID) || 'default' : 'default',
     developerMode: getStoredBoolean(SETTINGS_KEYS.DEVELOPER_MODE, false),
 
@@ -381,6 +389,13 @@ export const latestBranchStore = atom<boolean>(initialSettings.latestBranch);
 export const autoSelectStarterTemplate = atom<boolean>(initialSettings.autoSelectTemplate);
 export const enableContextOptimizationStore = atom<boolean>(initialSettings.contextOptimization);
 export const isEventLogsEnabled = atom<boolean>(initialSettings.eventLogs);
+
+/**
+ * The "Use Asset Library" preference (§4.4d) — a per-user request preference like `modelTierStore`,
+ * never enforcement: the agent proxy reads it off the request body and simply omits the library
+ * block when it is false. Default ON.
+ */
+export const useAssetLibraryStore = atom<boolean>(initialSettings.useAssetLibrary);
 export const promptStore = atom<string>(initialSettings.promptId);
 
 /**
@@ -420,6 +435,11 @@ export const updateContextOptimization = (enabled: boolean) => {
 export const updateEventLogs = (enabled: boolean) => {
   isEventLogsEnabled.set(enabled);
   localStorage.setItem(SETTINGS_KEYS.EVENT_LOGS, JSON.stringify(enabled));
+};
+
+export const updateUseAssetLibrary = (enabled: boolean) => {
+  useAssetLibraryStore.set(enabled);
+  localStorage.setItem(SETTINGS_KEYS.USE_ASSET_LIBRARY, JSON.stringify(enabled));
 };
 
 /**

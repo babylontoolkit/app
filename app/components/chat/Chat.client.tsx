@@ -215,7 +215,7 @@ export const ChatImpl = memo(
       (project) => project.id === supabaseConn.selectedProjectId,
     );
     const supabaseAlert = useStore(workbenchStore.supabaseAlert);
-    const { activeProviders, promptId, contextOptimizationEnabled } = useSettings();
+    const { activeProviders, promptId, contextOptimizationEnabled, useAssetLibrary } = useSettings();
     const [llmErrorAlert, setLlmErrorAlert] = useState<LlmErrorAlertType | undefined>(undefined);
 
     // New Project routing (§4.4a). `vaguePrompt` is set ONLY when there is genuinely nothing to act on.
@@ -477,6 +477,13 @@ export const ChatImpl = memo(
         promptId,
         contextOptimization: contextOptimizationEnabled,
         chatMode,
+
+        /*
+         * The "Use Asset Library" preference (§4.4d, Control Panel → Features, default ON). The
+         * proxy omits the pinned Synty library block when this is false; only an explicit false opts
+         * out, so a stale bundle that never sends the field keeps the shipped default.
+         */
+        useAssetLibrary,
         designScheme,
         supabase: {
           isConnected: supabaseConn.isConnected,

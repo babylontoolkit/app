@@ -110,10 +110,12 @@ export default function FeaturesTab() {
     isLatestBranch,
     contextOptimizationEnabled,
     eventLogs,
+    useAssetLibrary,
     setAutoSelectTemplate,
     enableLatestBranch,
     enableContextOptimization,
     setEventLogs,
+    setUseAssetLibrary,
     setPromptId,
     promptId,
   } = useSettings();
@@ -169,15 +171,40 @@ export default function FeaturesTab() {
           break;
         }
 
+        case 'useAssetLibrary': {
+          setUseAssetLibrary(enabled);
+          toast.success(
+            enabled
+              ? 'Use Asset Library enabled — your games prototype with the Synty Asset Library'
+              : 'Use Asset Library disabled — your games build without the asset library',
+          );
+          break;
+        }
+
         default:
           break;
       }
     },
-    [enableLatestBranch, setAutoSelectTemplate, enableContextOptimization, setEventLogs],
+    [enableLatestBranch, setAutoSelectTemplate, enableContextOptimization, setEventLogs, setUseAssetLibrary],
   );
 
   const features = {
     stable: [
+      {
+        /*
+         * Per-user, and REAL (unlike the inert inherited toggles below): the value rides in every
+         * /api/agent request body, and the proxy omits the §4.4d Synty library block when it is false
+         * — so switching this off makes the pinned library behave as if it never existed for THIS
+         * user's projects. Default ON.
+         */
+        id: 'useAssetLibrary',
+        title: 'Use Asset Library',
+        description: 'Prototype your games with our Synty Asset Library',
+        icon: 'i-ph:cube',
+        enabled: useAssetLibrary,
+        tooltip:
+          'When enabled, the AI prefers real 3D models, characters and levels from our curated Synty prototype library whenever you have not supplied your own assets - falling back to simple primitive shapes only when nothing suitable exists. Disable to build without the library.',
+      },
       {
         id: 'latestBranch',
         title: 'Main Branch Updates',
@@ -241,7 +268,8 @@ export default function FeaturesTab() {
       <FeatureSection
         title="Core Features"
         features={features.stable.filter(
-          (feature) => feature.id === 'eventLogs' || feature.id === 'contextOptimization',
+          (feature) =>
+            feature.id === 'useAssetLibrary' || feature.id === 'eventLogs' || feature.id === 'contextOptimization',
         )}
         icon="i-ph:check-circle"
         description="Essential features that are enabled by default for optimal performance"

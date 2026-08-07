@@ -23,10 +23,8 @@ import {
   ensureAssetLibrary,
   listAssetVersions,
   promoteAssetLibrary,
-  readAssetLibrarySettings,
   readAssetPointer,
   rollbackAssetLibrary,
-  setAssetLibraryEnabled,
   unpinAssetLibrary,
 } from '~/lib/.server/assets/library-store';
 
@@ -37,21 +35,13 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
     await requireAdmin(request, context);
 
     const store = getObjectStore(context);
-    const [active, pointer, versions, settings] = await Promise.all([
+    const [active, pointer, versions] = await Promise.all([
       ensureAssetLibrary(store),
       readAssetPointer(store),
       listAssetVersions(store),
-      readAssetLibrarySettings(store),
     ]);
 
     return json({
-      /**
-       * The "Use Asset Library" feature switch (Settings → Admin → Features). When false, `active`
-       * below is empty EVEN IF a pin exists — that is the gate working, not a missing pin; the UI
-       * reads `pointer` to show what is pinned-but-dormant.
-       */
-      enabled: settings.enabled,
-
       /** What the prompt is using RIGHT NOW. `versionId: null` = no library pinned, no block emitted. */
       active: {
         versionId: activeAssetLibraryVersionId(),
@@ -73,7 +63,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 }
 
 interface AssetLibraryActionBody {
-  action: 'promote' | 'rollback' | 'unpin' | 'fetch-master' | 'set-enabled';
+  action: 'promote' | 'rollback' | 'unpin' | 'fetch-master';
 
   /** promote: the candidate manifest (untrusted — fully validated before it can reach the prompt). */
   manifest?: unknown;
@@ -84,9 +74,6 @@ interface AssetLibraryActionBody {
 
   /** fetch-master: override the URL (defaults to the repo master). */
   url?: string;
-
-  /** set-enabled: the Use-Asset-Library feature switch. Must be exactly a boolean. */
-  enabled?: unknown;
 }
 
 export async function action({ request, context }: ActionFunctionArgs) {
@@ -126,18 +113,6 @@ export async function action({ request, context }: ActionFunctionArgs) {
     if (body.action === 'unpin') {
       await unpinAssetLibrary(store);
       return json({ ok: true });
-    }
-
-    if (body.action === 'set-enabled') {
-      // Refuse anything but a real boolean — "truthy" from a request body is how a typo enables a feature.
-      if (typeof body.enabled !== 'boolean') {
-        return json({ error: true, message: 'enabled must be true or false' }, 400);
-      }
-
-      const settings = await setAssetLibraryEnabled(store, body.enabled);
-      logger.info(`Use Asset Library switched ${settings.enabled ? 'ON' : 'OFF'}`);
-
-      return json({ ok: true, enabled: settings.enabled });
     }
 
     if (body.action === 'fetch-master') {

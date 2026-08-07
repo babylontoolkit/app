@@ -40,7 +40,7 @@ import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.serv
 import { getModelTiers } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
-import { buildAssetLibraryIndex } from '~/lib/.server/assets/library-manifest';
+import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
 import {
   decideModelTier,
   tierDeclinedNotice,
@@ -252,6 +252,17 @@ export interface AgentRequest {
    * Ignored on the creation turn (`discussModeNote`).
    */
   chatMode?: 'discuss' | 'build';
+
+  /**
+   * The user's "Use Asset Library" preference (§4.4d, Control Panel → Features, default ON).
+   *
+   * ONLY an explicit `false` opts out — absent/undefined means ON, so older clients and non-browser
+   * callers keep the shipped default. When false, the §4.4d library block is not pushed for this
+   * generation, and since the creation brief's sourcing rule is conditional on that block's presence,
+   * the pinned library behaves as if it never existed for THIS user's project — nothing about it can
+   * leak into their game. A preference, not security: it spends nothing and reveals nothing.
+   */
+  useAssetLibrary?: boolean;
 
   /**
    * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
@@ -983,13 +994,20 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /*
    * The Synty asset library index (§4.4d) — platform-stable bytes that change only when an admin
    * PROMOTES a manifest, exactly like a prompt promotion. Placed after the starter files and before
-   * the per-conversation doc blocks (sharedness ordering: this is identical for every user, project
-   * and conversation), and deliberately with NO breakpoint of its own — it is covered by whichever
+   * the per-conversation doc blocks (sharedness ordering: this is identical for every user with the
+   * feature on), and deliberately with NO breakpoint of its own — it is covered by whichever
    * breakpoint follows (docs/skills or the game-code entry), so `MAX_CACHE_BREAKPOINTS` is untouched.
    * When nothing is pinned there is NO block at all: telling the model about a library it cannot see
    * is how invented asset paths ship (`library-manifest.ts`).
+   *
+   * PER-USER GATE (§4.4d, Control Panel → Features → "Use Asset Library", default ON): a user who
+   * switched the feature off gets NO block — and because the creation brief's sourcing rule is
+   * conditional on the block's presence, the library then behaves as if it never existed for their
+   * project. Only an explicit `false` opts out; absent means ON (older clients keep the default) —
+   * the decision is `assetLibraryIndexForRequest`, pure + pinned in `library-manifest.spec.ts`.
+   * The prefix simply has two stable shapes (with/without the block), both cache-warm on real traffic.
    */
-  const assetLibraryIndex = buildAssetLibraryIndex(activeAssetLibrary());
+  const assetLibraryIndex = assetLibraryIndexForRequest(request.useAssetLibrary, activeAssetLibrary());
 
   if (assetLibraryIndex) {
     system.push({ role: 'system', content: assetLibraryIndex });
@@ -1089,6 +1107,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const startedMedia: MediaTaskEvent[] = [];
   mediaListeners.push((event) => startedMedia.push(event));
 
+  /*
+   * The media round budget (`MAX_MEDIA_ROUNDS`, media-tools.ts): incremented in `onStepFinish` for
+   * every finished step that made a generate_* call, read by the tools' execute BEFORE debiting.
+   * Per-generation state — a retry gets a fresh tracker along with its fresh (tool-free) policy.
+   */
+  const mediaRounds = { used: 0 };
+
   const mediaTools =
     request.projectId && config.kieApiKey
       ? createMediaTools({
@@ -1102,6 +1127,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
               listener(event);
             }
           },
+          rounds: mediaRounds,
         })
       : {};
 
@@ -1483,6 +1509,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
         const tools = (step.toolCalls ?? []).flatMap((c) => (c?.toolName ? [String(c.toolName)] : []));
         const out = step.usage?.completionTokens ?? 0;
+
+        /*
+         * The media round budget's clock (`MAX_MEDIA_ROUNDS`, media-tools.ts): a finished step that
+         * made a generate_* call was a media round. Counted here — not inside execute — so a burst of
+         * PARALLEL calls in one step is one round, which is the exact shape the brief instructs.
+         */
+        if (tools.some((name) => name.startsWith('generate_'))) {
+          mediaRounds.used += 1;
+        }
 
         /*
          * The SAME reader settlement bills from (`usage-metadata.ts`) — never a second literal. The

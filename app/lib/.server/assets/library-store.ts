@@ -30,13 +30,6 @@ const logger = createScopedLogger('asset-library-store');
 const VERSION_PREFIX = 'assets/library/versions';
 const POINTER_KEY = 'assets/library/active.json';
 
-/**
- * The admin "Use Asset Library" feature switch (Settings → Admin → Features). Stored NEXT TO the pin,
- * not inside it, because they answer different questions: the pointer is "which manifest", the
- * setting is "does the library exist at all right now". Absent → enabled (the shipped default).
- */
-const SETTINGS_KEY = 'assets/library/settings.json';
-
 /** How long a loaded manifest is trusted before the next ensure re-reads the pointer. */
 const CACHE_TTL_MS = 60_000;
 
@@ -47,12 +40,6 @@ export interface AssetLibraryPointer {
 
   /** Optional operator note ("August Synty export"), shown in the version history. */
   note?: string;
-}
-
-export interface AssetLibrarySettings {
-  /** Whether the pinned library is served to the model AT ALL. Default true. */
-  enabled: boolean;
-  updatedAt?: string;
 }
 
 export interface AssetLibraryVersionListing {
@@ -75,24 +62,14 @@ interface CacheState {
   /** undefined = no library is pinned (or the store was unreadable) — the prompt emits no block. */
   manifest: AssetLibraryManifest | undefined;
   versionId: string | null;
-
-  /**
-   * The Use-Asset-Library switch, folded into the SAME cache as the manifest so the synchronous
-   * prompt-side read can never see a manifest the setting forbids. When false, `manifest` above is
-   * ALWAYS undefined — the gate lives in `ensureAssetLibrary`, the one writer of a real manifest.
-   */
-  enabled: boolean;
   loadedAt: number;
 }
 
 let cache: CacheState | undefined;
 
 /**
- * The active manifest, synchronously — or undefined when nothing is pinned OR the admin has switched
- * "Use Asset Library" off. This is THE read the prompt builder uses; it can never throw, never
- * returns a manifest that failed validation, and never returns one the feature gate forbids —
- * `ensureAssetLibrary` is the only writer of a real manifest and it consults the setting first, so
- * a disabled library is indistinguishable from no library at every seam downstream of this call.
+ * The active manifest, synchronously — or undefined when nothing is pinned. This is THE read the
+ * prompt builder uses; it can never throw and never returns a manifest that failed validation.
  */
 export function activeAssetLibrary(): AssetLibraryManifest | undefined {
   return cache?.manifest;
@@ -119,23 +96,10 @@ export async function ensureAssetLibrary(store: ObjectStore): Promise<AssetLibra
   }
 
   try {
-    /*
-     * The Use-Asset-Library feature gate runs BEFORE the pointer is even read. When the admin has
-     * switched the library off, the pinned manifest must behave as if it never existed — no block,
-     * no version id, nothing for any downstream reader to leak into a project. The pin itself is
-     * left untouched (re-enabling serves it again without a re-promotion).
-     */
-    const settings = await readAssetLibrarySettings(store);
-
-    if (!settings.enabled) {
-      cache = { manifest: undefined, versionId: null, enabled: false, loadedAt: Date.now() };
-      return undefined;
-    }
-
     const pointer = await readAssetPointer(store);
 
     if (!pointer) {
-      cache = { manifest: undefined, versionId: null, enabled: true, loadedAt: Date.now() };
+      cache = { manifest: undefined, versionId: null, loadedAt: Date.now() };
       return undefined;
     }
 
@@ -147,17 +111,17 @@ export async function ensureAssetLibrary(store: ObjectStore): Promise<AssetLibra
        * repoint anything — that is the admin's call with the version history in front of them.
        */
       logger.error(`Asset library pointer names ${pointer.versionId}, which is missing or invalid; no library serves.`);
-      cache = { manifest: undefined, versionId: null, enabled: true, loadedAt: Date.now() };
+      cache = { manifest: undefined, versionId: null, loadedAt: Date.now() };
 
       return undefined;
     }
 
-    cache = { manifest, versionId: pointer.versionId, enabled: true, loadedAt: Date.now() };
+    cache = { manifest, versionId: pointer.versionId, loadedAt: Date.now() };
 
     return manifest;
   } catch (error) {
     logger.warn(`Could not load the asset library; generations run without one: ${(error as Error).message}`);
-    cache = { manifest: undefined, versionId: null, enabled: true, loadedAt: Date.now() };
+    cache = { manifest: undefined, versionId: null, loadedAt: Date.now() };
 
     return undefined;
   }
@@ -173,55 +137,10 @@ export async function ensureAssetLibraryForContext(context?: unknown): Promise<A
     return await ensureAssetLibrary(getObjectStore(context));
   } catch (error) {
     logger.warn(`Asset library unavailable (storage unresolvable): ${(error as Error).message}`);
-    cache = { manifest: undefined, versionId: null, enabled: true, loadedAt: Date.now() };
+    cache = { manifest: undefined, versionId: null, loadedAt: Date.now() };
 
     return undefined;
   }
-}
-
-/*
- * ------------------------------------------------------------------------------------------------ *
- * The "Use Asset Library" feature switch (Settings → Admin → Features)
- * ------------------------------------------------------------------------------------------------
- */
-
-/**
- * Read the feature switch. Absent or unreadable → enabled (the shipped default is ON). Only an
- * explicitly-written `enabled: false` disables the library: a corrupt settings object is not an
- * admin decision, and the truly broken-store case already serves "no library" because the manifest
- * lives in the same store.
- */
-export async function readAssetLibrarySettings(store: ObjectStore): Promise<AssetLibrarySettings> {
-  try {
-    const bytes = await store.get(SETTINGS_KEY);
-
-    if (!bytes) {
-      return { enabled: true };
-    }
-
-    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as AssetLibrarySettings;
-
-    return { enabled: parsed?.enabled !== false, updatedAt: parsed?.updatedAt };
-  } catch {
-    return { enabled: true };
-  }
-}
-
-/**
- * Flip the feature switch, then rebuild the cache under the new setting so the very next
- * `activeAssetLibrary()` read — in THIS process — already agrees with what the admin just chose.
- * (Other instances converge within CACHE_TTL_MS, the same propagation promotion has.)
- */
-export async function setAssetLibraryEnabled(store: ObjectStore, enabled: boolean): Promise<AssetLibrarySettings> {
-  const settings: AssetLibrarySettings = { enabled, updatedAt: new Date().toISOString() };
-  await store.put(SETTINGS_KEY, new TextEncoder().encode(JSON.stringify(settings, null, 2)), 'application/json');
-
-  cache = undefined;
-  await ensureAssetLibrary(store);
-
-  logger.warn(`Asset library feature switched ${enabled ? 'ON' : 'OFF — the pinned library is not served'}.`);
-
-  return settings;
 }
 
 /*
@@ -323,15 +242,7 @@ export async function promoteAssetLibrary(
   };
   await writePointer(store, pointer);
 
-  /*
-   * A promotion moves the PIN; whether the model sees it is the feature switch's call. Promoting
-   * while "Use Asset Library" is off must leave the model's view empty — the admin was told the
-   * library is disabled, and a promotion silently overriding that is the leak this gate forbids.
-   */
-  const { enabled } = await readAssetLibrarySettings(store);
-  cache = enabled
-    ? { manifest: checked.manifest, versionId, enabled: true, loadedAt: Date.now() }
-    : { manifest: undefined, versionId: null, enabled: false, loadedAt: Date.now() };
+  cache = { manifest: checked.manifest, versionId, loadedAt: Date.now() };
 
   const assetCount = checked.manifest.packs.reduce((sum, pack) => sum + pack.assets.length, 0);
   logger.info(`Promoted asset library ${versionId} (${checked.manifest.packs.length} packs, ${assetCount} assets)`);
@@ -359,11 +270,7 @@ export async function rollbackAssetLibrary(store: ObjectStore, versionId: string
   };
   await writePointer(store, pointer);
 
-  // Same rule as promote: moving the pin never overrides the feature switch.
-  const { enabled } = await readAssetLibrarySettings(store);
-  cache = enabled
-    ? { manifest, versionId, enabled: true, loadedAt: Date.now() }
-    : { manifest: undefined, versionId: null, enabled: false, loadedAt: Date.now() };
+  cache = { manifest, versionId, loadedAt: Date.now() };
   logger.warn(`Rolled the asset library back to ${versionId}`);
 
   return { ok: true, pointer };
@@ -375,9 +282,7 @@ export async function rollbackAssetLibrary(store: ObjectStore, versionId: string
  */
 export async function unpinAssetLibrary(store: ObjectStore): Promise<void> {
   await store.delete(POINTER_KEY);
-
-  const { enabled } = await readAssetLibrarySettings(store);
-  cache = { manifest: undefined, versionId: null, enabled, loadedAt: Date.now() };
+  cache = { manifest: undefined, versionId: null, loadedAt: Date.now() };
   logger.warn('Asset library unpinned — generations run without one.');
 }
 

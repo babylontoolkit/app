@@ -91,6 +91,13 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     chatMode?: 'discuss' | 'build';
 
     /**
+     * The user's "Use Asset Library" preference (§4.4d, Control Panel → Features, default ON).
+     * Only an explicit `false` opts this generation out of the pinned Synty library block —
+     * absent means ON, so an older client silently keeps the shipped default.
+     */
+    useAssetLibrary?: boolean;
+
+    /**
      * A connected Game Backend (§4.15). The client sends only the PUBLIC facts — connected? which
      * project ref? RLS confirmed? — never the management PAT (that stays in the browser). The proxy
      * turns this into an RLS-first system note; it is never used to reach the user's Supabase from here.
@@ -180,6 +187,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       premium: body.premium,
       effort: body.effort,
       chatMode: body.chatMode,
+      useAssetLibrary: body.useAssetLibrary,
 
       /*
        * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".

@@ -301,11 +301,12 @@ export function buildAssetLibraryIndex(manifest: AssetLibraryManifest | undefine
     'complete levels and characters/props ready to load. Asset `path`s below resolve against:',
     `${manifest.baseUrl.replace(/\/+$/, '')}/`,
     '',
-    '**ALWAYS PREFER THIS LIBRARY. Whenever the user has not supplied or named specific assets, your',
-    'FIRST step for any 3D model, character, prop or level is to search this library (or a pack the',
-    'user named) for something suitable — building geometry out of primitives is the LAST resort,',
-    'permitted only after that search has found nothing usable, never a default you reach for first.**',
-    'Reference assets by their EXACT path below — never invent or guess a library path.',
+    '**ALWAYS PREFER THIS LIBRARY for 3D content. Whenever the user has not supplied or named specific',
+    'assets, take your 3D models, characters, props and levels from this library (or a pack the user',
+    'named) — building geometry out of primitives is the LAST resort, only for what the library truly',
+    'lacks, never a default you reach for first.** The index below is already part of your context:',
+    'choosing from it costs nothing, is NOT a tool call, and must never delay or displace anything else',
+    'you do this turn. Reference assets by their EXACT path below — never invent or guess a library path.',
     '',
   ];
 
@@ -367,4 +368,23 @@ export function buildAssetLibraryIndex(manifest: AssetLibraryManifest | undefine
   compact.push('(Asset-name lists omitted for size — packs are listed with their asset counts.)');
 
   return compact.join('\n').slice(0, ASSET_INDEX_CHAR_BUDGET);
+}
+
+/**
+ * The per-request form of the index — the ONE call the proxy makes (§4.4d).
+ *
+ * `useAssetLibrary` is the user's Control Panel → Features preference, straight off an untrusted
+ * request body. Only an explicit `false` opts out: absent/undefined (an older client that never
+ * sends the field, a non-browser caller) keeps the shipped default of ON, and any non-boolean junk
+ * fails toward the default rather than toward a surprise opt-out. When it IS false, returning
+ * undefined makes the caller emit NO block — and since the creation brief's sourcing rule is
+ * conditional on the block's presence, the pinned library behaves as if it never existed for this
+ * user's project. Pure and exported because the failure mode is silent either way: a leaked block
+ * ignores the user's choice, a wrongly-omitted one silently degrades every game they build.
+ */
+export function assetLibraryIndexForRequest(
+  useAssetLibrary: boolean | undefined,
+  manifest: AssetLibraryManifest | undefined | null,
+): string | undefined {
+  return useAssetLibrary === false ? undefined : buildAssetLibraryIndex(manifest);
 }

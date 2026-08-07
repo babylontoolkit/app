@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ASSET_INDEX_CHAR_BUDGET,
+  assetLibraryIndexForRequest,
   buildAssetLibraryIndex,
   validateAssetLibraryManifest,
   type AssetLibraryManifest,
@@ -267,5 +268,30 @@ describe('buildAssetLibraryIndex', () => {
 
     // Awareness of WHAT EXISTS survives the cut — the per-asset names are what get summarized.
     expect(index).toContain('pack-00');
+  });
+});
+
+/*
+ * The per-user "Use Asset Library" gate (Control Panel -> Features, SPEC 4.4d). The owner's rule:
+ * switched off, the pinned library MUST NEVER leak into that user's project. This function is the
+ * one call the proxy makes, so these tests are the leak pin -- a regression fails silently (the
+ * block just reappears in the prompt; nothing throws).
+ */
+describe('assetLibraryIndexForRequest — the per-user feature gate', () => {
+  it('an explicit false yields NO block, even with a valid pinned manifest', () => {
+    expect(assetLibraryIndexForRequest(false, manifest())).toBeUndefined();
+  });
+
+  it('absent (an older client that never sends the field) keeps the shipped default: ON', () => {
+    expect(assetLibraryIndexForRequest(undefined, manifest())).toContain('Prototype Asset Library');
+  });
+
+  it('true serves the block', () => {
+    expect(assetLibraryIndexForRequest(true, manifest())).toContain('ALWAYS PREFER THIS LIBRARY');
+  });
+
+  it('ON with nothing pinned is still NO block — the preference cannot invent a library', () => {
+    expect(assetLibraryIndexForRequest(true, undefined)).toBeUndefined();
+    expect(assetLibraryIndexForRequest(undefined, null)).toBeUndefined();
   });
 });

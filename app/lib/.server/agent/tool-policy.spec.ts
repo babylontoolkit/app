@@ -13,11 +13,18 @@ import { MAX_TOOL_ROUNDS } from './tools';
 const base = { isFirstBuildTurn: false, hasMcpTools: false, hasMediaTools: false, preloadedCount: 0, isSlash: false };
 
 describe('toolPolicyForTurn — first build turns', () => {
-  it('opens a MEDIA-ONLY loop with a small cap when media tools exist (§4.16 design art)', () => {
+  it('opens a MEDIA-ONLY loop with a small cap PLUS a reserved answer step (§4.16, 2026-08-07)', () => {
+    /*
+     * The `+ 1` is the answer step, and it is load-bearing: without it a model that tool-calls on
+     * every step (measured, gen_msixapaq_i871b6 — 3+1+1 sequential images) ends the generation with
+     * the game unwritten and hands the work to the forced continuation, which re-bills the whole
+     * prefix at 2x. The MAX_MEDIA_ROUNDS budget in the tools' execute is what keeps this extra step
+     * from becoming a fourth render round.
+     */
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true })).toEqual({
       allowTools: true,
       toolset: 'media-only',
-      maxSteps: CREATION_MEDIA_STEPS,
+      maxSteps: CREATION_MEDIA_STEPS + 1,
     });
   });
 
@@ -42,8 +49,8 @@ describe('toolPolicyForTurn — first build turns', () => {
     expect(noMedia.allowTools).toBe(false);
   });
 
-  it('caps the media loop far below the ordinary tool cap — one round + answer + slack', () => {
-    expect(CREATION_MEDIA_STEPS).toBeLessThan(MAX_TOOL_ROUNDS + 1);
+  it('caps the media loop far below the ordinary tool cap — one round + slack + a reserved answer', () => {
+    expect(CREATION_MEDIA_STEPS + 1).toBeLessThan(MAX_TOOL_ROUNDS + 1);
     expect(CREATION_MEDIA_STEPS).toBeGreaterThanOrEqual(2); // a tool round with no answer step is a truncation
   });
 });
@@ -145,7 +152,7 @@ describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (�
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true, hasMediaTools: true })).toEqual({
       allowTools: true,
       toolset: 'media-only',
-      maxSteps: CREATION_MEDIA_STEPS,
+      maxSteps: CREATION_MEDIA_STEPS + 1,
     });
   });
 

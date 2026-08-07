@@ -92,8 +92,21 @@ export interface ToolPolicy {
 
 export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
   if (input.isFirstBuildTurn) {
+    /*
+     * 🔴 `+ 1` — THE ANSWER STEP IS SEPARATE FROM THE MEDIA BUDGET (2026-08-07, gen_msixapaq_i871b6).
+     *
+     * `CREATION_MEDIA_STEPS` was documented as "1 round + the answer + 1 slack", but nothing stopped
+     * the model spending ALL of them on tool rounds. Measured: a first build turn made generate_image
+     * calls on every step (3+1+1 sequential images), hit the cap mid-tool-call with the game unwritten,
+     * and the forced-continuation rescue re-billed the whole ~212k prefix at the 2× cache-write rate to
+     * deliver 31 tokens of nothing — 1,489 credits, no game. Same rule as `MAX_TOOL_ROUNDS + 1`: the
+     * answer must have a step the tools cannot consume. The media-round BUDGET (`MAX_MEDIA_ROUNDS`,
+     * enforced inside the tools' execute) is what makes the extra step unspendable on a 3rd render
+     * round — policy cap and execute budget work as a pair, and an in-generation answer step re-reads
+     * the warm prefix at 0.1× where the forced continuation rewrites it at 2×.
+     */
     return input.hasMediaTools
-      ? { allowTools: true, toolset: 'media-only', maxSteps: CREATION_MEDIA_STEPS }
+      ? { allowTools: true, toolset: 'media-only', maxSteps: CREATION_MEDIA_STEPS + 1 }
       : { allowTools: false, toolset: 'all', maxSteps: 1 };
   }
 
