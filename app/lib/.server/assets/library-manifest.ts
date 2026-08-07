@@ -301,8 +301,10 @@ export function buildAssetLibraryIndex(manifest: AssetLibraryManifest | undefine
     'complete levels and characters/props ready to load. Asset `path`s below resolve against:',
     `${manifest.baseUrl.replace(/\/+$/, '')}/`,
     '',
-    '**When the user has not specified which models to use, source your models from this library.**',
-    'Use primitives only when neither this library nor a user-named pack has anything suitable.',
+    '**ALWAYS PREFER THIS LIBRARY. Whenever the user has not supplied or named specific assets, your',
+    'FIRST step for any 3D model, character, prop or level is to search this library (or a pack the',
+    'user named) for something suitable — building geometry out of primitives is the LAST resort,',
+    'permitted only after that search has found nothing usable, never a default you reach for first.**',
     'Reference assets by their EXACT path below — never invent or guess a library path.',
     '',
   ];

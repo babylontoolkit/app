@@ -205,14 +205,17 @@ describe('buildAssetLibraryIndex', () => {
     expect(buildAssetLibraryIndex(manifest({ packs: [] }) as AssetLibraryManifest)).toBeUndefined();
   });
 
-  it('carries every pack, the default-to-library rule, and exact asset paths', () => {
+  it('carries every pack, the ALWAYS-PREFER rule, and exact asset paths', () => {
     const index = buildAssetLibraryIndex(manifest());
 
     expect(index).toBeDefined();
     expect(index).toContain('Polygon Military');
     expect(index).toContain('Polygon City');
     expect(index).toContain('packs/military/Soldier_01.gltf');
-    expect(index).toContain('source your models from this library');
+
+    // The owner's rule (2026-08-07): the library is the FIRST stop, primitives the LAST resort.
+    expect(index).toContain('ALWAYS PREFER THIS LIBRARY');
+    expect(index).toContain('LAST resort');
     expect(index).toContain('never invent or guess a library path');
   });
 

@@ -16,8 +16,10 @@ import {
   invalidateAssetLibraryCache,
   listAssetVersions,
   promoteAssetLibrary,
+  readAssetLibrarySettings,
   readAssetPointer,
   rollbackAssetLibrary,
+  setAssetLibraryEnabled,
   unpinAssetLibrary,
 } from './library-store';
 
@@ -178,6 +180,98 @@ describe('rollback', () => {
     const missing = await rollbackAssetLibrary(store, 'al_19700101000000');
     expect(missing.ok).toBe(false);
   }, 10_000);
+});
+
+/*
+ * The "Use Asset Library" feature switch (Settings → Admin → Features). The owner's rule is absolute:
+ * switched OFF, the pinned library must behave as if it never existed — it MUST NEVER leak into a
+ * project. `activeAssetLibrary()` is the single read the prompt builder uses, so every test here
+ * pins that seam. A regression fails silently (the block just reappears; nothing throws).
+ */
+describe('the Use-Asset-Library feature switch', () => {
+  it('defaults ON: absent settings serve the pinned library', async () => {
+    const store = memoryStore();
+    await promoteAssetLibrary(store, manifest());
+    invalidateAssetLibraryCache();
+
+    await expect(readAssetLibrarySettings(store)).resolves.toEqual({ enabled: true });
+    await expect(ensureAssetLibrary(store)).resolves.toBeDefined();
+    expect(activeAssetLibrary()).toBeDefined();
+  });
+
+  it('OFF hides a valid pin completely — no manifest, no version id, exactly like no library', async () => {
+    const store = memoryStore();
+    await promoteAssetLibrary(store, manifest());
+
+    await setAssetLibraryEnabled(store, false);
+
+    expect(activeAssetLibrary()).toBeUndefined();
+    expect(activeAssetLibraryVersionId()).toBeNull();
+
+    // A fresh process reading the same store arrives at the same answer.
+    invalidateAssetLibraryCache();
+    await expect(ensureAssetLibrary(store)).resolves.toBeUndefined();
+    expect(activeAssetLibrary()).toBeUndefined();
+
+    // The pin itself survives, dormant — re-enabling must not need a re-promotion.
+    expect(await readAssetPointer(store)).not.toBeNull();
+  });
+
+  it('promoting WHILE OFF moves the pin but leaks nothing to the model', async () => {
+    const store = memoryStore();
+    await setAssetLibraryEnabled(store, false);
+
+    const result = await promoteAssetLibrary(store, manifest());
+
+    expect(result.ok).toBe(true);
+    expect(activeAssetLibrary()).toBeUndefined();
+    expect(activeAssetLibraryVersionId()).toBeNull();
+  });
+
+  it('rolling back WHILE OFF moves the pin but leaks nothing to the model', async () => {
+    const store = memoryStore();
+    const first = await promoteAssetLibrary(store, manifest('first'));
+
+    expect(first.ok).toBe(true);
+    await setAssetLibraryEnabled(store, false);
+
+    if (first.ok) {
+      const rolled = await rollbackAssetLibrary(store, first.pointer.versionId);
+      expect(rolled.ok).toBe(true);
+    }
+
+    expect(activeAssetLibrary()).toBeUndefined();
+  });
+
+  it('switching back ON serves the dormant pin again, immediately, without a re-promotion', async () => {
+    const store = memoryStore();
+    await promoteAssetLibrary(store, manifest('kept'));
+    await setAssetLibraryEnabled(store, false);
+
+    expect(activeAssetLibrary()).toBeUndefined();
+
+    await setAssetLibraryEnabled(store, true);
+
+    expect(activeAssetLibrary()?.note).toBe('kept');
+    expect(activeAssetLibraryVersionId()).toMatch(/^al_\d{14}$/);
+  });
+
+  it('corrupt settings are not an admin decision — they default ON, never silently disable', async () => {
+    const store = memoryStore();
+    await promoteAssetLibrary(store, manifest());
+    await store.put('assets/library/settings.json', new TextEncoder().encode('{not json'), 'application/json');
+    invalidateAssetLibraryCache();
+
+    await expect(readAssetLibrarySettings(store)).resolves.toEqual({ enabled: true });
+    await expect(ensureAssetLibrary(store)).resolves.toBeDefined();
+  });
+
+  it('only an explicit false disables — a missing `enabled` field reads as ON', async () => {
+    const store = memoryStore();
+    await store.put('assets/library/settings.json', new TextEncoder().encode('{}'), 'application/json');
+
+    await expect(readAssetLibrarySettings(store)).resolves.toMatchObject({ enabled: true });
+  });
 });
 
 describe('unpin', () => {

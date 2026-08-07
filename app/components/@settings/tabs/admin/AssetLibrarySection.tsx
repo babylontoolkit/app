@@ -13,6 +13,8 @@ import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 
 interface AssetLibraryState {
+  /** The Use-Asset-Library feature switch (Settings → Admin → Features). */
+  enabled: boolean;
   active: {
     versionId: string | null;
     packCount: number;
@@ -20,6 +22,7 @@ interface AssetLibraryState {
     baseUrl: string | null;
     index: string | null;
   };
+  pointer: { versionId: string } | null;
   versions: Array<{ versionId: string; size: number; storedAt?: string; active: boolean }>;
   masterUrl: string;
   storage: string;
@@ -97,7 +100,13 @@ export function AssetLibrarySection() {
       }
 
       const pointer = data.pointer as { versionId: string };
-      toast.success(`Asset library promoted — ${pointer.versionId} is what the model now sees.`);
+
+      // While the feature switch is off, a promotion moves the pin but the model still sees nothing.
+      toast.success(
+        state?.enabled === false
+          ? `Asset library promoted — ${pointer.versionId} is pinned, but stays dormant until "Use Asset Library" is switched on.`
+          : `Asset library promoted — ${pointer.versionId} is what the model now sees.`,
+      );
       setEditing(false);
       setNote('');
       load();
@@ -179,7 +188,7 @@ export function AssetLibrarySection() {
           >
             {editing ? 'Close editor' : 'Edit manifest'}
           </button>
-          {active.versionId && (
+          {(active.versionId || state.pointer) && (
             <button
               className="text-xs px-2 py-1 rounded bg-red-500/10 text-red-500 disabled:opacity-50"
               disabled={busy}
@@ -191,10 +200,21 @@ export function AssetLibrarySection() {
         </div>
       </div>
 
+      {/*
+       * Three honest states, not two: serving, pinned-but-DISABLED (the feature switch above is off —
+       * without this line a disabled library reads as "no library pinned", and the admin re-promotes
+       * a manifest that was there all along), and genuinely unpinned.
+       */}
       <div className="mt-2 text-xs text-bolt-elements-textTertiary">
-        {active.versionId
-          ? `Active version ${active.versionId} · ${active.packCount} packs, ${active.assetCount} assets · ${active.baseUrl ?? ''} · stored in ${state.storage}`
-          : `No library pinned — generations run without one. Master: ${state.masterUrl}`}
+        {active.versionId ? (
+          `Active version ${active.versionId} · ${active.packCount} packs, ${active.assetCount} assets · ${active.baseUrl ?? ''} · stored in ${state.storage}`
+        ) : !state.enabled && state.pointer ? (
+          <span className="text-amber-500">
+            {`Version ${state.pointer.versionId} is pinned but DORMANT — "Use Asset Library" is switched off in Features above, so the model is not told about it.`}
+          </span>
+        ) : (
+          `No library pinned — generations run without one. Master: ${state.masterUrl}`
+        )}
       </div>
 
       {/* The exact block the model sees — reading what was just bought, not a summary of it. */}

@@ -445,7 +445,7 @@ ${entry.scene_url ? '' : '- This genre has no preload scene; the GameMode builds
 ${images.map((path) => `- ${path}`).join('\n')}
 
 **Game content — models, levels and examples.** Build what the request asks for with your own creativity — the starter's demo scenes are examples, never a boundary.
-- If a **Prototype Asset Library (Synty)** block is present in your context, it is this project's model library: when the user has not specified which models or packs to use, source your 3D models, characters and levels from it, referencing assets by their EXACT listed paths (never invent or guess a library path). Fall back to primitives ONLY when you cannot find a suitable model there or in a pack the user named.
+- If a **Prototype Asset Library (Synty)** block is present in your context, it is this project's model library and it is ALWAYS PREFERRED: whenever the request does not supply or name specific assets — even a bare prompt like "make me a kart racing game" — your FIRST step for every 3D model, character, prop and level is to search that library (or a pack the user named) for something suitable, referencing assets by their EXACT listed paths (never invent or guess a library path). Building geometry out of primitives is the LAST resort, allowed only after that search finds nothing usable — never the default you start from.
 - If no such block is present, build with the starter's own content and primitives — do not reference a library you cannot see.
 - When you want a working GameMode or Script Component example, read the demo classes in \`src/babylon/classes/\` first, then the component reference docs in your context, then the training examples they cite.
 
