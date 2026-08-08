@@ -125,6 +125,28 @@ t=90min** (`node scripts/cache-probe.mjs 3 2700000`). Without refresh-on-hit the
 after the WRITE and the t=90 read misses; with it, the t=45 read resets the clock and t=90 hits.
 Decisive either way, ~4 requests of spend.
 
+**ANSWERED 2026-08-08 — a read REFRESHES the TTL:**
+
+```
+  #   ms      write     read    fresh   verdict
+   1   2245          0     5420        6   HIT     (t=0,   entry written minutes earlier)
+   2   2750          0     5420        6   HIT     (t=45m)
+   3   2560          0     5420        6   HIT     (t=90m, ~1h43m after the write)
+```
+
+3/3, with nothing but reads keeping it alive well past the 1h window. So the optimistic row of the
+step-4 table is the real one — a warmer would cost ~$0.30/day, not $5.95.
+
+🔴 **And that makes the warmer worth LESS, not more, which is the opposite of how it reads.** If a
+read refreshes the entry, then *any* organic turn inside the window keeps the prefix warm for free —
+the warmer can only ever pay during genuinely idle gaps. That is exactly what
+`shouldSkipWarmCycle`/`recordCacheRead` encode, and it is the measured reason the module ships
+`CACHE_WARMER_ENABLED=false`: its value is inversely proportional to how much the platform is being
+used, so it is worth most when you have no users and least once you do. **Do not enable it on this
+measurement alone** — it establishes the mechanism, not the demand. Count real cold starts first
+(`cacheCreationTokens > 0`, `scripts/compare-generations.mjs`); 3/day nets ~$7/month and 20/day nets
+~$100/month.
+
 CLAUDE.md's standing rule applies verbatim — *"No warmer-shaped code gets written before this number
 exists"*, and *"never diagnose the cache from production turns whose prefix changed between them."*
 
@@ -159,7 +181,9 @@ markers, not bytes) ≈ **31k of the ~40k prefix, 78%**. Residual unwarmable ≈
 | absorbing cold starts instead, at N idle gaps/day | N × $0.24 |
 
 **Hard budget stands: ≤ $2/day, or it is not built.** The optimistic case is 15× inside it; the
-pessimistic case is 3× outside it. Step 3 says which.
+pessimistic case is 3× outside it. Step 3 says which — and it said **optimistic**: $0.30/day, inside
+the budget. The warmer is therefore BUILT and correct, and still ships **off**, because clearing a
+cost budget is not the same as demonstrating a benefit (see the step-3 answer above).
 
 ## Step 5 — Correct the superseded Phase 3
 
