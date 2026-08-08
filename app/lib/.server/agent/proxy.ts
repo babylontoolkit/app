@@ -52,6 +52,7 @@ import { getModelTiers } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
+import { parseCreationPhaseId } from '~/lib/agent/creation-plan';
 import { toolkitSystemsNoteForRequest } from '~/lib/agent/toolkit-systems';
 import {
   decideModelTier,
@@ -286,6 +287,20 @@ export interface AgentRequest {
    * nothing, it only decides whether the model reaches for the built-in controllers.
    */
   toolkitSystems?: string;
+
+  /**
+   * Which phase of the creation plan this turn is (§4.4e, `~/lib/agent/creation-plan`).
+   *
+   * Raw and untyped for the `toolkitSystems` reason: it arrives in a browser body and
+   * `parseCreationPhaseId` owns the parse. Unrecognised resolves DOWN to `null` — "no phase" — which
+   * behaves exactly as creation did before phases existed. That direction is deliberate: the `art`
+   * phase carries the media tools, and inventing a more capable phase than the caller named is the
+   * expensive direction.
+   *
+   * 🔴 Only consulted on a FIRST BUILD TURN. A forged value on an ordinary edit is ignored outright,
+   * so this field can never widen a turn's tool set on its own.
+   */
+  creationPhase?: string;
 
   /**
    * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
@@ -716,6 +731,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * its artifact can flush (see `premium.ts`). The tool policy below reuses the same value.
    */
   const isFirstBuildTurn = carriesCreationBrief(messages0);
+
+  /*
+   * WHICH PHASE of the creation plan this is (§4.4e), or `null` for the pre-phase single turn.
+   *
+   * 🔴 **`isFirstBuildTurn` stays TRUE for every phase, and that is the design.** Every phase message
+   * carries `CREATION_BRIEF_MARKER`, so all ten protections above apply to all of them — including
+   * `owesFiles` (which makes a phase that writes nothing a FAILURE rather than a billed success) and
+   * `describeTurnOutcome`, which returns `finished` for any turn that is not a first build turn. A
+   * phase that dropped the marker would silently become an ordinary edit: unable to report
+   * `incomplete`, unable to be refunded for writing nothing.
+   *
+   * So this is ORTHOGONAL, not a replacement. Ten behaviours ask "is this a creation turn?"; exactly
+   * two ask "what is this turn FOR?" — the tool policy (only `art` gets media) and the media note.
+   *
+   * 🔴 **Parsed only when `isFirstBuildTurn`.** A forged `creationPhase` on an ordinary edit is
+   * ignored outright, so this field can never widen a turn's tool set on its own — the same
+   * containment as the forged-marker analysis above.
+   */
+  const creationPhase = isFirstBuildTurn ? parseCreationPhaseId(request.creationPhase) : null;
 
   /*
    * 2. Credit gate — once, up front, and only for platform-paid generations. In-flight generations
@@ -1196,6 +1230,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   const toolPolicy = toolPolicyForTurn({
     isFirstBuildTurn,
+    creationPhase,
     hasMcpTools,
     hasMediaTools: Object.keys(mediaTools).length > 0,
     preloadedCount: preloaded.length,
@@ -1256,14 +1291,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * it varies per turn (a project without a KIE key gets no media tools), so anywhere earlier would
    * re-write the ~110k-token file-context entry at 2x whenever it appeared or vanished.
    *
-   * Creation is excluded twice over: media tools are no longer in its toolset at all
-   * (`CREATION_ALLOWS_MEDIA`), and `mediaProtocolNote` independently returns null for it. Both are
-   * deliberate — this predicate must be a TRUE statement about the tool set, never a proxy for it, or
-   * the next turn shape that reads it inherits a lie.
+   * ⚠️ **This predicate WAS `toolPolicy.toolset === 'all' && …`, and the art phase made it a lie** —
+   * exactly what the previous version of this comment warned would happen to a proxy for the tool set
+   * ("the next turn shape that reads it inherits a lie"). The art phase is `creation` AND has media,
+   * so the re-derived answer said no while the tool object said yes: the model would have been handed
+   * `generate_image` with no statement of the protocol. It reads the policy's OWN answer now, which is
+   * the single value the tool object is also built from, so the two cannot disagree.
    */
   const mediaNote = mediaProtocolNote({
-    hasMediaTools: toolPolicy.toolset === 'all' && Object.keys(mediaTools).length > 0,
+    hasMediaTools: toolPolicy.allowsMedia,
     isFirstBuildTurn,
+    creationPhase,
   });
 
   if (mediaNote && allowTools) {
@@ -1394,8 +1432,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const referenceTools = createReferenceTools(referenceContext);
 
   /*
-   * 🔴 NO MEDIA ON THE CREATION TURN (`CREATION_ALLOWS_MEDIA`, tool-policy.ts — the full reasoning and
-   * the live step log are there). Creation writes the project; art is a later turn or the Media panel.
+   * 🔴 MEDIA ON EXACTLY ONE CREATION PHASE (`phaseAllowsMedia`, tool-policy.ts — the full reasoning
+   * and the live step log are there). The build phases write the project; the `art` phase renders the
+   * art the design asked for. A creation with NO plan gets no media at all, exactly as before phases.
    */
   /*
    * 🔴 `read_file` IS IN EVERY TOOLSET, INCLUDING THE READ-ONLY ONE. The project files are no longer
@@ -1408,7 +1447,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   const tools = (
     toolPolicy.toolset === 'creation'
-      ? { ...fileTools, ...referenceTools, ...createRepairTool() }
+      ? /*
+         * `allowsMedia` is the policy's own answer, not a re-derivation from the toolset name: two
+         * turns can both be `creation` and differ on it, so a predicate reconstructed here is one
+         * that drifts from what the policy decided — and this one decides whether the turn can spend
+         * credits on renders.
+         */
+        { ...fileTools, ...referenceTools, ...createRepairTool(), ...(toolPolicy.allowsMedia ? mediaTools : {}) }
       : toolPolicy.toolset === 'skills-only'
         ? { ...fileTools, ...createSkillTools(toolContext), ...referenceTools, ...researchTools, ...createRepairTool() }
         : {

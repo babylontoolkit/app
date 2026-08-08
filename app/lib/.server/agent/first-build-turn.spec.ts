@@ -394,6 +394,50 @@ describe('the four rule-tested consumers are still WIRED to the flag', () => {
   );
 });
 
+/* ------------------------------------------------- 7b. the phase, which is ORTHOGONAL to the flag */
+
+/**
+ * 🔴 `creationPhase` IS NOT A REPLACEMENT FOR `isFirstBuildTurn` — it rides alongside it (§4.4e).
+ *
+ * Every phase message carries `CREATION_BRIEF_MARKER`, so `isFirstBuildTurn` is TRUE for all of them
+ * and all ten protections above stay live on every phase. That is the design, and it is what keeps
+ * `owesFiles` (a phase that writes nothing is a FAILURE, not a billed success) and
+ * `describeTurnOutcome` (which returns `finished` for any turn that is not a first build turn) working
+ * on phases 2..N. Exactly TWO consumers ask the different question — "what is this turn FOR?" — and
+ * they are the two that decide whether the turn may spend credits on renders.
+ *
+ * Both failures are silent and point in opposite directions: unwired, the art phase gets no media and
+ * the model writes a shopping list it cannot act on; wired to the wrong thing, a build phase gets the
+ * media tools back and creation returns to spending its attention on art.
+ */
+describe('the phase is wired to the two consumers that decide what a turn is FOR', () => {
+  it.each(['toolPolicyForTurn', 'mediaProtocolNote'])('%s receives creationPhase from the proxy', (callee) => {
+    expect(callArgs(proxy, callee)).toMatch(/[{,]\s*creationPhase\s*[,}]/);
+  });
+
+  /*
+   * 🔴 PARSED ONLY ON A FIRST BUILD TURN. This value arrives in a BROWSER BODY and one phase carries
+   * the media tools, so a forged `creationPhase` on an ordinary edit must buy nothing at all — the
+   * same containment the forged-marker analysis relies on. Asserted on the derivation statement
+   * itself, because there is no seam that drives `runAgentGeneration` end to end.
+   */
+  it('parses the phase ONLY when the turn is a first build turn', () => {
+    const derivation = statement(proxy, 'creationPhase');
+
+    expect(derivation).toContain('parseCreationPhaseId');
+    expect(derivation).toMatch(/isFirstBuildTurn\s*\?/);
+    expect(derivation).toMatch(/:\s*null/);
+  });
+
+  /*
+   * CONTROL: the extraction really found the derivation. Without this, every assertion above passes
+   * against an empty string forever — the scan reporting a clean bill of health on code it never read.
+   */
+  it('CONTROL: the phase derivation exists and is non-trivial', () => {
+    expect(statement(proxy, 'creationPhase').length).toBeGreaterThan(40);
+  });
+});
+
 /* -------------------------------------------- 6. the client tier lock (Chat.client / ModelTierPill) */
 
 /**

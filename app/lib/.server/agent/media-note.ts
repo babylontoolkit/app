@@ -46,10 +46,22 @@ export interface MediaNoteInput {
 
   /** The creation brief owns its own, richer copy of these rules. */
   isFirstBuildTurn: boolean;
+
+  /**
+   * Which phase of the creation plan this is (§4.4e), or `null` for the pre-phase single turn.
+   *
+   * 🔴 The suppression above exists because SOMETHING ELSE already carries this copy — the creation
+   * brief did. A PHASE does not: the art phase's task is two sentences about reading `DESIGN.md`, not
+   * the protocol. So a creation phase gets the note, and only the old single-turn creation is
+   * suppressed. Getting this backwards is silent in the expensive direction: the model would be
+   * handed `generate_image` with no statement of how paths come back, and the §4.16 rule it most
+   * reliably breaks without one is "do not wait for the render".
+   */
+  creationPhase?: string | null;
 }
 
 export function mediaProtocolNote(input: MediaNoteInput): string | null {
-  if (!input.hasMediaTools || input.isFirstBuildTurn) {
+  if (!input.hasMediaTools || (input.isFirstBuildTurn && !input.creationPhase)) {
     return null;
   }
 

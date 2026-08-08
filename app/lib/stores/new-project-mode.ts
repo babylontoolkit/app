@@ -18,17 +18,32 @@
  * overwrite the first one's brief, and the first project would reopen with no banner and no brief, with
  * nothing anywhere reporting that anything was lost.
  *
- * 🔴 **CLEARED ON SEND, NOT ON FINISH.** The mode ends the moment the build turn is POSTED. Waiting for
- * it to succeed sounds safer and is not: a generation that fails is one the user will retry, and if the
- * mode were still set the brief would be appended a second time — while a mode that outlives its send
- * makes a double-send double-append. The brief is a fact about the FIRST message, not about the first
- * successful one.
+ * 🔴 **THE BRIEF IS CLEARED ON SEND, NOT ON FINISH.** It stops riding on messages the moment the build
+ * turn is POSTED. Waiting for it to succeed sounds safer and is not: a generation that fails is one the
+ * user will retry, and if the brief were still attached it would be appended a second time — while a
+ * mode that outlives its send makes a double-send double-append, into an UNCACHED history that
+ * re-sends forever. The brief is a fact about the FIRST message, not about the first successful one.
+ *
+ * 🔴 **THE PLAN OUTLIVES IT, AND THAT IS THE ONE THING HERE THAT CHANGED (§4.4e, 2026-08-08).** A
+ * creation is now several phases (Game → Frontend → Art → Verify), because one turn asking for all of
+ * it hit the provider's 64,000-token output ceiling and shipped a project with nine files welded into
+ * one. So `plan` is the record of which phases are still owed, and it must survive the send that
+ * clears the brief — otherwise a tab that dies mid-build strands a half-written project with nothing
+ * able to resume it, after the user has paid for the phases that ran. The mode therefore ends at the
+ * LAST PHASE, not the first send; only the brief ends at the send.
+ *
+ * ⚠️ **The row is the SOURCE, this is the CACHE.** `projects.creation_handoff` survives a device
+ * switch and a cleared browser; this copy exists so the common case paints without a round trip. Two
+ * writers of "is creation over" is the drift this codebase keeps rediscovering, so: the row wins, the
+ * merge is monotonic and happens SERVER-side (`api.projects.$projectId.ts`), and nothing here may
+ * decide that a plan is further along than the row says.
  *
  * ⚠️ **A slash command must never clear it.** `/context` on a freshly created project is an ordinary
  * thing to type, and client commands are intercepted before anything is posted — so the clear belongs
  * strictly after that interception, beside the send, never at the top of the handler.
  */
 import { atom } from 'nanostores';
+import { parseCreationPlan, type CreationPlan } from '~/lib/agent/creation-plan';
 
 export const NEW_PROJECT_MODE_PREFIX = 'bt_new_project_mode:';
 
@@ -77,6 +92,15 @@ export interface NewProjectMode {
    * Deliberately absent from the persisted record and never read back by `readNewProjectMode`.
    */
   handoffDismissed?: boolean;
+
+  /**
+   * The phase plan, once the build has started (`~/lib/agent/creation-plan`).
+   *
+   * A CACHE of `projects.creation_handoff.plan` — see the module header. Absent means "no plan",
+   * which every reader treats as the pre-phase single-turn creation, so a project made before phases
+   * and a project whose build never started behave identically and correctly.
+   */
+  plan?: CreationPlan;
 }
 
 /**
@@ -148,6 +172,7 @@ export function readNewProjectMode(
       projectId,
       brief: parsed.brief,
       userPrompt: typeof parsed.userPrompt === 'string' ? parsed.userPrompt : undefined,
+      plan: parseCreationPlan(parsed.plan),
     };
   } catch {
     /*
@@ -211,7 +236,50 @@ export function dismissCreationHandoff(projectId: string): void {
 }
 
 /**
- * Leave the mode — the build turn has been sent.
+ * Record the plan's progress locally, mirroring what has just been written to the row.
+ *
+ * ⚠️ **The row is the source; this only mirrors it.** The server merge is what guarantees `next`
+ * never goes backwards, so this must be called with the plan the server ACCEPTED, never with a plan
+ * this tab computed and hoped for. Writing an optimistic value here would give the runner a local
+ * copy that is ahead of the truth, and it would skip a phase the user paid for.
+ *
+ * A no-op when the project is not the one in the mode — the same scoping rule as every other writer
+ * here, so a background tab cannot advance the plan of the project actually open.
+ */
+export function updateCreationPlan(
+  projectId: string,
+  plan: CreationPlan,
+  storage: ModeStorage | null = defaultStorage(),
+): void {
+  const mode = newProjectModeStore.get();
+
+  if (!mode || mode.projectId !== projectId) {
+    return;
+  }
+
+  const next: NewProjectMode = { ...mode, plan };
+  newProjectModeStore.set(next);
+
+  if (!projectId) {
+    return;
+  }
+
+  try {
+    /*
+     * `handoffDismissed` is a session fact and must not reach storage (see its doc comment) — the
+     * persisted record is rebuilt from the fields `readNewProjectMode` reads back, nothing more.
+     */
+    storage?.setItem(
+      newProjectModeKey(projectId),
+      JSON.stringify({ projectId, brief: mode.brief, userPrompt: mode.userPrompt, plan }),
+    );
+  } catch {
+    // Best-effort, as everywhere else here: the in-memory store still carries the plan this session.
+  }
+}
+
+/**
+ * Leave the mode — the plan is complete (or the user has taken the wheel).
  *
  * Takes the project id explicitly rather than reading the open project: the caller knows which project
  * it just posted for, and a clear that resolves its own target can clear the wrong one after a switch.

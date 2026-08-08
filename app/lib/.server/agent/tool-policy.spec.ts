@@ -8,7 +8,6 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  CREATION_ALLOWS_MEDIA,
   CREATION_FILE_READ_ROUNDS,
   CREATION_MEDIA_STEPS,
   CREATION_TOOL_ROUNDS,
@@ -31,6 +30,7 @@ describe('toolPolicyForTurn — first build turns', () => {
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true })).toEqual({
       allowTools: true,
       toolset: 'creation',
+      allowsMedia: false,
       maxSteps: CREATION_TOOL_ROUNDS + 1,
     });
   });
@@ -48,6 +48,7 @@ describe('toolPolicyForTurn — first build turns', () => {
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true })).toEqual({
       allowTools: true,
       toolset: 'creation',
+      allowsMedia: false,
       maxSteps: CREATION_TOOL_ROUNDS + 1,
     });
   });
@@ -82,19 +83,68 @@ describe('toolPolicyForTurn — first build turns', () => {
   });
 
   /*
-   * 🔴 MEDIA IS OFF THE CREATION TURN (2026-08-08) — `CREATION_ALLOWS_MEDIA`, and the live step log in
-   * `tool-policy.ts` explaining why. `hasMediaTools` is the platform saying "a KIE key exists"; it must
-   * no longer widen this turn in ANY way, because a creation that renders art is a creation that spent
-   * its attention on art. Asserted as an equality between the two branches rather than against a
-   * literal: a literal passes if someone re-adds media and re-derives the cap to match.
+   * 🔴 MEDIA IS OFF EVERY CREATION TURN EXCEPT THE ART PHASE (§4.4e, 2026-08-08).
+   *
+   * The rule this replaces was a flat `CREATION_ALLOWS_MEDIA = false`, and the live step log in
+   * `tool-policy.ts` explains why it existed: a creation that renders art is a creation that spent its
+   * attention on art (measured — 268s reasoning inside one media round, then one file and "Writing the
+   * full project now."). Phases fix that structurally rather than by budget — `art` is its OWN step, so
+   * no number of renders can starve a build that already happened two steps ago.
+   *
+   * The protection that mattered is therefore PRESERVED and asserted here as an equality between the
+   * two branches: on a build phase, `hasMediaTools` (the platform saying "a KIE key exists") must not
+   * widen the turn in ANY way. A literal would pass for a policy that re-adds media and re-derives the
+   * cap to match.
    */
-  it('does not let media widen the creation turn — the two branches are identical', () => {
-    const withMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true });
-    const withoutMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true });
+  it('does not let media widen a BUILD phase — the two branches are identical', () => {
+    for (const creationPhase of ['game', 'frontend', 'verify'] as const) {
+      const withMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase, hasMediaTools: true });
+      const withoutMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase });
 
-    expect(withMedia).toEqual(withoutMedia);
-    expect(CREATION_ALLOWS_MEDIA).toBe(false);
+      expect(withMedia).toEqual(withoutMedia);
+      expect(withMedia.allowsMedia).toBe(false);
+    }
+
     expect(CREATION_TOOL_ROUNDS).toBe(MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROUNDS);
+  });
+
+  /*
+   * The other half. Without this the assertion above passes for a policy that gives NO phase media —
+   * i.e. for the very regression that left the model designing a page needing six images and writing a
+   * shopping list it could not act on.
+   */
+  it('gives the ART phase media, and the headroom to spend it', () => {
+    const art = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase: 'art', hasMediaTools: true });
+
+    expect(art.allowsMedia).toBe(true);
+    expect(art.toolset).toBe('creation');
+    expect(art.maxSteps).toBe(CREATION_TOOL_ROUNDS + MEDIA_IMAGE_ROUNDS + 1);
+  });
+
+  /*
+   * `hasMediaTools` is the platform's answer, and it still gates the art phase: a project with no KIE
+   * key cannot render, so buying it eight extra steps is buying rounds nothing can spend.
+   */
+  it('CONTROL: the art phase buys nothing when the platform cannot render', () => {
+    const art = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase: 'art' });
+
+    expect(art.allowsMedia).toBe(false);
+    expect(art.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
+  });
+
+  /*
+   * 🔴 The compatibility guarantee this whole stage rests on: a creation with NO plan — an older
+   * project, or a build that never started — behaves EXACTLY as it did before phases existed.
+   */
+  it('CONTROL: a creation with no phase is byte-identical to the pre-phase policy', () => {
+    const noPhase = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true });
+
+    expect(noPhase).toEqual({
+      allowTools: true,
+      toolset: 'creation',
+      allowsMedia: false,
+      maxSteps: CREATION_TOOL_ROUNDS + 1,
+    });
   });
 
   it('caps the creation loop below the ordinary tool cap', () => {
@@ -116,6 +166,7 @@ describe('toolPolicyForTurn — ordinary turns: the skill tools are ALWAYS offer
     expect(toolPolicyForTurn({ ...base })).toEqual({
       allowTools: true,
       toolset: 'all',
+      allowsMedia: false,
       maxSteps: MAX_TOOL_ROUNDS + 1,
     });
   });
@@ -124,11 +175,13 @@ describe('toolPolicyForTurn — ordinary turns: the skill tools are ALWAYS offer
     expect(toolPolicyForTurn({ ...base, preloadedCount: 2 })).toEqual({
       allowTools: true,
       toolset: 'all',
+      allowsMedia: false,
       maxSteps: MAX_TOOL_ROUNDS + 1,
     });
     expect(toolPolicyForTurn({ ...base, isSlash: true })).toEqual({
       allowTools: true,
       toolset: 'all',
+      allowsMedia: false,
       maxSteps: MAX_TOOL_ROUNDS + 1,
     });
   });
@@ -137,6 +190,7 @@ describe('toolPolicyForTurn — ordinary turns: the skill tools are ALWAYS offer
     expect(toolPolicyForTurn({ ...base, preloadedCount: 2, hasMcpTools: true })).toEqual({
       allowTools: true,
       toolset: 'all',
+      allowsMedia: false,
       maxSteps: MAX_TOOL_ROUNDS + 1,
     });
   });
@@ -201,6 +255,7 @@ describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (�
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true, hasMediaTools: true })).toEqual({
       allowTools: true,
       toolset: 'creation',
+      allowsMedia: false,
       maxSteps: CREATION_TOOL_ROUNDS + 1,
     });
   });
@@ -214,6 +269,7 @@ describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (�
     expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, hasMcpTools: true, preloadedCount: 2 })).toEqual({
       allowTools: false,
       toolset: 'skills-only',
+      allowsMedia: false,
       maxSteps: 1,
     });
   });
@@ -223,6 +279,7 @@ describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (�
     expect(toolPolicyForTurn({ ...base, hasMcpTools: true })).toEqual({
       allowTools: true,
       toolset: 'all',
+      allowsMedia: false,
       maxSteps: MAX_TOOL_ROUNDS + 1,
     });
   });
@@ -233,6 +290,7 @@ describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET,
     expect(toolPolicyForTurn({ ...base, isDiscussTurn: true })).toEqual({
       allowTools: true,
       toolset: 'skills-only',
+      allowsMedia: false,
       maxSteps: MAX_TOOL_ROUNDS + 1,
     });
   });
@@ -241,6 +299,7 @@ describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET,
     expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, preloadedCount: 2 })).toEqual({
       allowTools: false,
       toolset: 'skills-only',
+      allowsMedia: false,
       maxSteps: 1,
     });
   });
@@ -296,12 +355,14 @@ describe('an ordinary MEDIA turn has room for its images (2026-08-08)', () => {
   });
 
   /*
-   * Creation is unaffected — media is off that turn entirely (`CREATION_ALLOWS_MEDIA`), so the
-   * headroom must not leak into the most expensive and most fragile turn in the product.
+   * A creation BUILD phase is unaffected — the ordinary-turn headroom must not leak into the phases
+   * that write the project. Only the `art` phase buys it, and only because that is all it does.
    */
-  it('never widens the creation turn', () => {
-    const creation = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true });
+  it('never widens a creation build phase', () => {
+    for (const creationPhase of [undefined, 'game', 'frontend', 'verify'] as const) {
+      const creation = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase, hasMediaTools: true });
 
-    expect(creation.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
+      expect(creation.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
+    }
   });
 });

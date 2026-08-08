@@ -19,6 +19,7 @@
  *    round of slack. Media tools are async-enqueue (§4.16) — a round returns in seconds, never parks on
  *    a render — and each extra round re-reads the cached prefix at a tenth, so the slack is cheap.
  */
+import { phaseAllowsMedia, type CreationPhaseId } from '~/lib/agent/creation-plan';
 import { MAX_TOOL_ROUNDS } from './tools';
 import { MAX_REFERENCE_LOADS } from './reference-tools';
 
@@ -112,8 +113,28 @@ export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROU
  * ⚠️ Do NOT restore media here by raising a budget. The v2 fix is a QUEUE (`FRESH-START.md` §3.5):
  * serialized, spaced, per-image retry, returning paths instantly and never consuming a round at all.
  * Until that exists, off is correct.
+ *
+ * ---
+ *
+ * 🔴 **BOTH CONDITIONS THIS COMMENT SET HAVE NOW BEEN MET, so the flat `false` is retired (§4.4e).**
+ * Kept above verbatim because it is the evidence, and because it named its own exit criteria:
+ *
+ *   1. **The queue exists** (`c0fa312`): `MAX_MEDIA_ROUNDS` and its refusal branch are deleted, one
+ *      image per call, dispatched serially, spaced 1500ms, 3 attempts per IMAGE. The refusal text
+ *      that told the model its turn was going badly cannot be emitted any more.
+ *   2. **Media no longer shares a turn with the build.** That was the structural defect — "an async
+ *      render has no business inside the synchronous loop that also has to write the project" — and
+ *      phases fix it at the root rather than by budget: `art` is its OWN step, so no number of
+ *      renders can starve the build, because the build already happened two steps ago.
+ *
+ * The old rule also had a real cost, which is what forced this: with media off the creation turn
+ * ENTIRELY, the model designs a page needing six images and then writes a shopping list it cannot
+ * act on — the art simply never happened unless the user went and asked for it.
+ *
+ * `phaseAllowsMedia` is the replacement and it is TRUE FOR EXACTLY ONE PHASE. A creation with no plan
+ * (an older project, or a build that never started) has no phase, so it resolves to `false` and
+ * behaves precisely as this constant did.
  */
-export const CREATION_ALLOWS_MEDIA = false;
 
 /**
  * 🔴 HOW MANY IMAGE ROUNDS AN ORDINARY TURN CAN AFFORD (2026-08-08, replacing `MEDIA_TURN_STEPS`).
@@ -165,6 +186,15 @@ export interface ToolPolicyInput {
    * mutate the sandbox (a `write_file` MCP tool is ordinary, not exotic) — neither may be offered.
    */
   isDiscussTurn?: boolean;
+
+  /**
+   * Which phase of the creation plan this is (§4.4e), or `null` for the pre-phase single turn.
+   *
+   * Read ONLY inside the `isFirstBuildTurn` branch, and the proxy only parses it for such a turn — so
+   * it cannot widen an ordinary edit's tool set. `null` reproduces the old behaviour exactly, which is
+   * what keeps a project created before phases (and one whose build never started) working unchanged.
+   */
+  creationPhase?: CreationPhaseId | null;
 }
 
 export interface ToolPolicy {
@@ -181,6 +211,16 @@ export interface ToolPolicy {
    * is how someone later "restores" a document to the prefix that was never missing from the turn.
    */
   toolset: 'all' | 'creation' | 'skills-only';
+
+  /**
+   * May this turn call the media tools?
+   *
+   * An EXPLICIT flag rather than something the caller infers from `toolset`, because the answer stopped
+   * being a property of the toolset NAME when the art phase arrived: two turns can both be `creation`
+   * and differ on this. A predicate the caller has to re-derive is one that drifts from what the tool
+   * object actually contains, and this one decides whether a turn can spend credits on renders.
+   */
+  allowsMedia: boolean;
 
   /** Passed straight to `streamText` — counts EVERY round trip, so the answer step must fit inside. */
   maxSteps: number;
@@ -219,16 +259,33 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
      * model to load BEFORE it starts writing, and skills stay INLINED-and-untooled here, which is the
      * one combination ("inlined AND offered") that produced every recorded thrash.
      */
+    /*
+     * Media is on for EXACTLY ONE phase (`art`), and off entirely for a creation with no plan — which
+     * is what makes an older project behave precisely as it did before phases existed.
+     *
+     * `hasMediaTools` still gates it: it is the platform saying a KIE key and a project exist, so the
+     * art phase of a project that cannot render anything does not buy headroom it can never spend.
+     */
+    const allowsMedia = phaseAllowsMedia(input.creationPhase ?? null) && input.hasMediaTools;
+
     return {
       allowTools: true,
       toolset: 'creation',
+      allowsMedia,
 
       /*
-       * Only the budgets this turn can actually spend. Media is off here (`CREATION_ALLOWS_MEDIA`), so
-       * `load_reference` is the only budget in play and `hasMediaTools` no longer moves this number —
-       * `maxSteps` is the one number that must stay a true statement about the worst case.
+       * 🔴 DERIVED FROM THE BUDGETS THIS TURN CAN ACTUALLY SPEND — never hand-picked.
+       *
+       * `maxSteps` is the one number that must stay a true statement about the worst case, and this
+       * repo has broken that twice in one day: `read_file` joined the creation toolset without
+       * `CREATION_TOOL_ROUNDS` being re-derived (74,524 cache tokens written, `finish=length`, 1,175
+       * credits), and the media budget was deleted without its ceiling moving. Both times the sum was
+       * a literal that stopped describing the parts.
+       *
+       * So the art phase's headroom appears here BECAUSE it is the phase that can spend it, not
+       * because someone remembered to add it — and the `+ 1` answer step stays outside every budget.
        */
-      maxSteps: CREATION_TOOL_ROUNDS + 1,
+      maxSteps: CREATION_TOOL_ROUNDS + (allowsMedia ? MEDIA_IMAGE_ROUNDS : 0) + 1,
     };
   }
 
@@ -240,8 +297,8 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
    */
   if (input.isDiscussTurn) {
     return input.preloadedCount === 0 && !input.isSlash
-      ? { allowTools: true, toolset: 'skills-only', maxSteps: MAX_TOOL_ROUNDS + 1 }
-      : { allowTools: false, toolset: 'skills-only', maxSteps: 1 };
+      ? { allowTools: true, toolset: 'skills-only', allowsMedia: false, maxSteps: MAX_TOOL_ROUNDS + 1 }
+      : { allowTools: false, toolset: 'skills-only', allowsMedia: false, maxSteps: 1 };
   }
 
   /*
@@ -279,6 +336,7 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
   return {
     allowTools: true,
     toolset: 'all',
+    allowsMedia: input.hasMediaTools,
     maxSteps: MAX_TOOL_ROUNDS + (input.hasMediaTools ? MEDIA_IMAGE_ROUNDS : 0) + 1,
   };
 }

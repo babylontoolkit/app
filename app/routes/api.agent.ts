@@ -107,6 +107,20 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     toolkitSystems?: string;
 
     /**
+     * Which phase of the creation plan this turn is (§4.4e, `~/lib/agent/creation-plan`).
+     *
+     * Forwarded RAW for the `toolkitSystems` reason: the proxy owns the parse, and
+     * `parseCreationPhaseId` resolves an unrecognised value DOWN to "no phase" rather than to a
+     * default. That direction matters here because one phase (`art`) carries the media tools, which
+     * spend credits — inventing a more capable phase than the caller named is the expensive
+     * direction, and it throws nothing.
+     *
+     * Meaningless on any turn that is not a first build turn; the proxy ignores it there, so a forged
+     * value on an ordinary edit buys nothing at all.
+     */
+    creationPhase?: string;
+
+    /**
      * A connected Game Backend (§4.15). The client sends only the PUBLIC facts — connected? which
      * project ref? RLS confirmed? — never the management PAT (that stays in the browser). The proxy
      * turns this into an RLS-first system note; it is never used to reach the user's Supabase from here.
@@ -198,6 +212,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       chatMode: body.chatMode,
       useAssetLibrary: body.useAssetLibrary,
       toolkitSystems: body.toolkitSystems,
+      creationPhase: body.creationPhase,
 
       /*
        * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".

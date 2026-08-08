@@ -23,6 +23,7 @@
  */
 import { isSecretPath, normalizeRepoFileMap } from '~/lib/git/paths';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
+import type { CreationPlan } from '~/lib/agent/creation-plan';
 import type { Project } from '~/types/project';
 import type { ServerChat } from './chat-list';
 import { createScopedLogger } from '~/utils/logger';
@@ -116,7 +117,7 @@ export async function renameProject(projectId: string, name: string): Promise<Pr
  */
 export async function saveCreationHandoff(
   projectId: string,
-  handoff: { brief: string; userPrompt?: string } | null,
+  handoff: { brief: string; userPrompt?: string; plan?: CreationPlan } | null,
 ): Promise<void> {
   await api<{ project: Project }>(`/api/projects/${projectId}`, {
     method: 'PATCH',

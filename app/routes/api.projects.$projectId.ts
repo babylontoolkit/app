@@ -10,6 +10,8 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { toWireProject } from '~/lib/.server/projects/wire';
 import { purgeProject } from '~/lib/.server/projects/purge';
+import type { CreationHandoff } from '~/lib/.server/projects/types';
+import { mergeCreationPlan, parseCreationPlan } from '~/lib/agent/creation-plan';
 import { errorResponse } from '~/lib/.server/http';
 
 /**
@@ -25,27 +27,62 @@ const MAX_HANDOFF_BRIEF_CHARS = 24_000;
 const MAX_HANDOFF_PROMPT_CHARS = 8_000;
 
 /**
- * Validate a handoff sent by the browser. `null` CLEARS it — that is how the first build turn ends the
- * mode, so it must be expressible; anything malformed also clears rather than throwing, because a
- * corrupt handoff is exactly a project that should stop offering to build itself.
+ * Validate a handoff sent by the browser. `null` CLEARS it — that is how the plan ends, so it must be
+ * expressible; a malformed BRIEF also clears rather than throwing, because a corrupt handoff is
+ * exactly a project that should stop offering to build itself.
+ *
+ * 🔴 **A malformed PLAN does NOT clear — it is dropped, and the brief is kept.** The rule above is
+ * right for a brief and catastrophic for a plan: clearing on a corrupt plan strands a half-built
+ * project with no way to resume, after the user has already paid for the phases that ran. A dropped
+ * plan degrades to the pre-phase single turn, which is survivable; a dropped brief is not. Two fields
+ * with two failure modes, deliberately not one rule.
  */
-function parseCreationHandoff(value: unknown) {
+function parseCreationHandoff(value: unknown): CreationHandoff | undefined {
   if (!value || typeof value !== 'object') {
     return undefined;
   }
 
-  const { brief, userPrompt } = value as { brief?: unknown; userPrompt?: unknown };
+  const { brief, userPrompt, plan } = value as { brief?: unknown; userPrompt?: unknown; plan?: unknown };
 
   if (typeof brief !== 'string' || brief.length === 0) {
     return undefined;
   }
+
+  const parsedPlan = parseCreationPlan(plan);
 
   return {
     brief: brief.slice(0, MAX_HANDOFF_BRIEF_CHARS),
     ...(typeof userPrompt === 'string' && userPrompt.length > 0
       ? { userPrompt: userPrompt.slice(0, MAX_HANDOFF_PROMPT_CHARS) }
       : {}),
+    ...(parsedPlan ? { plan: parsedPlan } : {}),
   };
+}
+
+/**
+ * Fold an incoming handoff onto the one already stored.
+ *
+ * 🔴 **The plan's `next` may only move FORWARD** (`mergeCreationPlan`). The PATCH is a full replace,
+ * so without this a second tab, a stale bundle or an out-of-order retry could rewind the counter and
+ * re-run a phase that already ran — paying for it twice and overwriting files that were correct. It
+ * belongs HERE rather than in `parseCreationHandoff` because only the route can read the existing
+ * row, and it is the ledger's `seq` lesson applied to a counter that decides what gets rebuilt: a
+ * read-then-write check is a race, so the merge IS the write.
+ *
+ * An explicit clear (`null` → `undefined`) is honoured untouched. That is how a completed plan ends,
+ * and a merge that resurrected it would make the handoff unclearable.
+ */
+function mergeCreationHandoff(
+  existing: CreationHandoff | undefined,
+  incoming: CreationHandoff | undefined,
+): CreationHandoff | undefined {
+  if (!incoming || !existing) {
+    return incoming;
+  }
+
+  const plan = mergeCreationPlan(existing.plan, incoming.plan);
+
+  return { ...incoming, ...(plan ? { plan } : {}) };
 }
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
@@ -93,7 +130,9 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
     const updated = await store.update(project.id, {
       ...(body.name !== undefined ? { name: body.name.slice(0, 120) } : {}),
-      ...('creationHandoff' in body ? { creationHandoff: parseCreationHandoff(body.creationHandoff) } : {}),
+      ...('creationHandoff' in body
+        ? { creationHandoff: mergeCreationHandoff(project.creationHandoff, parseCreationHandoff(body.creationHandoff)) }
+        : {}),
     });
 
     return json({ project: toWireProject(updated, context) });

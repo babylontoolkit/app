@@ -178,6 +178,90 @@ describe('storing and reading back the handoff', () => {
   });
 });
 
+/**
+ * 🔴 THE PHASE PLAN (§4.4e, migration 0020) — two rules the brief's own rules get WRONG.
+ *
+ * Creation is now Game → Frontend → Art → Verify, driven by a plan stored in this same column. The
+ * plan is what says which phases are still owed, so it outlives the brief (which is still consumed on
+ * send) and the whole handoff is NULL only once the last phase completes.
+ *
+ * Both rules below shipped untested on the first pass, and a mutation proved it: removing the split
+ * malformed rule left all 18 assertions green.
+ */
+describe('the phase plan', () => {
+  const plan = (next: number, done: unknown[] = []) => ({ v: 1, phases: ['game', 'frontend', 'art'], next, done });
+
+  it('stores a plan alongside the brief and hands it back on the wire', async () => {
+    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(1, [{ id: 'game', state: 'finished' }]) } });
+
+    const handoff = await wireHandoff(mine.id);
+    expect(handoff?.plan?.next).toBe(1);
+    expect(handoff?.plan?.phases).toEqual(['game', 'frontend', 'art']);
+    expect(handoff?.plan?.done.map((d) => d.id)).toEqual(['game']);
+  });
+
+  /*
+   * 🔴 A MALFORMED PLAN DROPS THE PLAN AND KEEPS THE BRIEF.
+   *
+   * The brief's rule — "anything malformed clears, because a corrupt handoff is exactly a project
+   * that should stop offering to build itself" — is right for a brief and catastrophic for a plan:
+   * clearing on a corrupt plan strands a HALF-BUILT project with no way to resume, after the user has
+   * already paid for the phases that ran. Two fields, two failure modes, deliberately not one rule.
+   */
+  it('drops a malformed plan but KEEPS the brief — a corrupt plan must not strand a half-built project', async () => {
+    for (const bad of [{ v: 99 }, { v: 1, phases: [] }, { v: 1, phases: ['nope'] }, 'plan', 42, []]) {
+      await patch(mine.id, { creationHandoff: null });
+      await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: bad } });
+
+      const handoff = await storedHandoff(mine.id);
+      expect(handoff?.brief).toBe(BRIEF);
+      expect(handoff?.plan).toBeUndefined();
+    }
+  });
+
+  it('CONTROL: a malformed BRIEF still clears everything, plan included', async () => {
+    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(1) } });
+    await patch(mine.id, { creationHandoff: { brief: '', plan: plan(2) } });
+
+    expect(await storedHandoff(mine.id)).toBeUndefined();
+  });
+
+  /*
+   * 🔴 `next` ONLY EVER MOVES FORWARD.
+   *
+   * The PATCH is a full replace, so without a merge a second tab, a stale bundle or an out-of-order
+   * retry rewinds the counter and re-runs a phase that already ran — paying for it twice and
+   * overwriting files that were correct. The ledger's `seq` lesson applied to a counter that decides
+   * what gets rebuilt: a read-then-write check is a race, so the merge IS the write.
+   */
+  it('never rewinds the plan — a stale tab cannot re-run a finished phase', async () => {
+    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(2, [{ id: 'game', state: 'finished' }]) } });
+    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(0) } });
+
+    const handoff = await storedHandoff(mine.id);
+    expect(handoff?.plan?.next).toBe(2);
+    expect(handoff?.plan?.done.map((d) => d.id)).toEqual(['game']);
+  });
+
+  it('CONTROL: a plan that really is ahead still advances — the merge is not a freeze', async () => {
+    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(1) } });
+    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(2) } });
+
+    expect((await storedHandoff(mine.id))?.plan?.next).toBe(2);
+  });
+
+  /*
+   * The merge must never resurrect a cleared handoff, or a completed plan could not end — and the end
+   * of the plan is the only thing that stops the project offering to build itself forever.
+   */
+  it('an explicit null still clears a project mid-plan', async () => {
+    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(2) } });
+    await patch(mine.id, { creationHandoff: null });
+
+    expect(await storedHandoff(mine.id)).toBeUndefined();
+  });
+});
+
 describe('clearing it', () => {
   /*
    * 🔴 The end state. `null` is sent when the first build turn is SENT — not when it succeeds, because

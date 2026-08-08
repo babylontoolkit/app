@@ -8,6 +8,7 @@
  * the user's own repo (§4.5.4b); see the note above `ProjectStore` for why there is no snapshot store
  * here any more.
  */
+import type { CreationPlan } from '~/lib/agent/creation-plan';
 import type { GitProviderId } from '~/lib/.server/git/provider';
 
 /**
@@ -21,6 +22,20 @@ export interface CreationHandoff {
 
   /** The user's own words. Absent on the card path — there were none, and inventing some is worse. */
   userPrompt?: string;
+
+  /**
+   * The phase plan (`~/lib/agent/creation-plan`), present once the build has started.
+   *
+   * 🔴 **This is what moved the END of the handoff.** Migration 0016's rule was "NULL once the first
+   * build turn has been SENT"; it is now "NULL once the LAST PHASE has completed". The brief is still
+   * consumed on send — re-appending it would double-charge an uncached history forever — but the plan
+   * has to outlive that send, because it is the only record of which phases are still owed, and
+   * without it a tab that dies mid-build strands a half-written project with nothing able to resume.
+   *
+   * Absent on a project created before phases, and on one whose build never started. Both mean the
+   * same thing to every reader: no plan, so behave exactly as the single-turn creation did.
+   */
+  plan?: CreationPlan;
 }
 
 export interface Project {
