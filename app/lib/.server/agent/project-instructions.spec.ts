@@ -1,11 +1,13 @@
 /**
  * The project's `CLAUDE.md` as a system block (SPEC §4.2).
  *
- * Two classes of failure, both silent. **Authority**: the file is promoted but the model is not told
- * what outranks what — so a `CLAUDE.md` imported from another host tells it to fetch a URL it cannot
- * reach, or to write where the file zones forbid, and the project quietly breaks. **Duplication**: the
- * block is added but the file is not removed from the file context, so every turn pays for the same
- * bytes twice, forever, and the two copies disagree the moment it is edited.
+ * Three classes of failure, all silent. **Authority**: the file is promoted but the model is not told
+ * what outranks what — so a `CLAUDE.md` imported from another host has it scaffold a second project
+ * over the one that exists, or write where the file zones forbid. **Duplication**: the block is added
+ * but the file is not removed from the file context, so every turn pays for the same bytes twice,
+ * forever, and the two copies disagree the moment it is edited. **Over-suppression** (2026-08-08): the
+ * precedence text goes on describing a capability the platform no longer lacks, and neutralises a
+ * user instruction that would now work — see the `load_reference` test below.
  */
 import { describe, expect, it } from 'vitest';
 import type { FileMap } from '~/lib/.server/llm/constants';
@@ -80,14 +82,33 @@ describe('the instructions block', () => {
   });
 
   /*
-   * The concrete case this exists for: a CLAUDE.md written for Lovable/Claude Code says "always fetch
-   * the Agent Reference at <url> before doing anything else; if the fetch fails, stop and tell the
-   * user". Obeyed here, the agent stalls on turn one — there is no network at generation time.
+   * What still has to be inert: a host's SETUP steps — clone this starter, run the installer, copy
+   * skills into `.claude/skills`. Obeyed here they scaffold a second project over the one that exists.
    */
-  it('tells the model to disregard directives aimed at other hosts', () => {
+  it('tells the model to disregard SETUP directives aimed at other hosts', () => {
     expect(built.block).toMatch(/different tool or host/i);
     expect(built.block).toMatch(/already scaffolded/i);
     expect(built.block).toMatch(/host-setup/i);
+  });
+
+  /*
+   * 🔴 And what must NOT be inert any more. The single most common real `CLAUDE.md` for this stack is
+   * the Babylon Toolkit persona — "you must always fetch and read the Agent Reference at <url> before
+   * doing anything else" — and until 2026-08-08 this block told the model to disregard exactly that,
+   * on the grounds that the docs were already in the prompt and there was no fetch tool. Phase 2 made
+   * both false (`load_reference` serves the docs on demand; `web_fetch` reaches the open web), so the
+   * platform was suppressing the user's own instruction to protect against a dead failure mode.
+   *
+   * Nothing throws when this regresses — the model just skips the document it was told to read and
+   * writes worse code. Hence an assertion rather than a comment.
+   */
+  it('🔴 tells the model to FOLLOW an instruction to read the Agent Reference, via load_reference', () => {
+    expect(built.block).toMatch(/load_reference/);
+    expect(built.block).toMatch(/agent reference/i);
+
+    // The old wording, in either of its two halves. Neither may come back.
+    expect(built.block).not.toMatch(/already in this prompt/i);
+    expect(built.block).not.toMatch(/fetching a URL or an "Agent/i);
   });
 
   it('reports the file-map key so the caller can lift it out of the file context', () => {
