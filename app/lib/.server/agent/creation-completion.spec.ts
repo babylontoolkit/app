@@ -14,6 +14,7 @@ const base = {
   isDiscussTurn: false,
   aborted: false,
   alreadyContinued: false,
+  truncatedByLength: false,
   emittedAction: true,
 };
 
@@ -77,6 +78,38 @@ describe('shouldVerifyCreationCompleteness', () => {
   });
 });
 
+describe('truncation overrides every other guard', () => {
+  /*
+   * 🔴 MEASURED LIVE: step 5 ran 655,957ms and stopped at exactly 64,000 output tokens with
+   * finish=length+forced-continuation, mid-project. The forced continuation is usually WHERE the
+   * project gets written, so suppressing this pass after one means a truncated build ships — having
+   * already been charged 1,175 credits.
+   */
+  it('runs after a forced continuation when the output ceiling was hit', () => {
+    expect(shouldVerifyCreationCompleteness({ ...base, alreadyContinued: true, truncatedByLength: true })).toBe(true);
+  });
+
+  /*
+   * The CONTROL for the assertion above: without it, "length overrides alreadyContinued" passes for a
+   * function that ignores `alreadyContinued` entirely.
+   */
+  it('CONTROL: still defers to alreadyContinued when the turn was NOT truncated', () => {
+    expect(shouldVerifyCreationCompleteness({ ...base, alreadyContinued: true, truncatedByLength: false })).toBe(false);
+  });
+
+  /*
+   * A Stop still wins. The user asked us to stop spending; a truncated output is not a reason to
+   * spend more against their explicit instruction.
+   */
+  it('never overrides a user Stop, even on a truncated turn', () => {
+    expect(shouldVerifyCreationCompleteness({ ...base, aborted: true, truncatedByLength: true })).toBe(false);
+  });
+
+  it('never overrides the discuss-turn guarantee', () => {
+    expect(shouldVerifyCreationCompleteness({ ...base, isDiscussTurn: true, truncatedByLength: true })).toBe(false);
+  });
+});
+
 describe('CREATION_COMPLETION_PROMPT', () => {
   /*
    * The cost control, asserted because it is the difference between a cheap pass and a second whole
@@ -109,6 +142,11 @@ describe('CREATION_COMPLETION_PROMPT', () => {
    * It must not offer the model the option of asking permission — a creation that ends with "shall I
    * continue?" is the half-written turn wearing a question mark.
    */
+  it('tells a truncated turn to resume where it stopped', () => {
+    expect(CREATION_COMPLETION_PROMPT).toMatch(/cut off mid-sentence or mid-file/i);
+    expect(CREATION_COMPLETION_PROMPT).toMatch(/pick up exactly/i);
+  });
+
   it('forbids asking whether to continue', () => {
     expect(CREATION_COMPLETION_PROMPT).toMatch(/do not ask whether to continue/i);
   });

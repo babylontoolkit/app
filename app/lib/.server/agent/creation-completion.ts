@@ -64,6 +64,19 @@ export interface CreationCompletenessInput {
   alreadyContinued: boolean;
 
   /**
+   * 🔴 The provider stopped because the OUTPUT CEILING was reached (`finishReason: 'length'`), not
+   * because the model was done — measured live at exactly 64,000 output tokens / 111,403 chars of
+   * text, mid-project.
+   *
+   * This is the ONE case that overrides `alreadyContinued`, and the asymmetry is deliberate. Every
+   * other signal this file reads is circumstantial: a turn that wrote one file MIGHT be finished, so
+   * the pass asks. `length` is not circumstantial — the sentence was cut mid-word. Declining to
+   * continue there is choosing to ship a file that ends in the middle of a function, on the most
+   * expensive generation in the product, having already charged for it.
+   */
+  truncatedByLength: boolean;
+
+  /**
    * The turn wrote at least one file. When it wrote NONE, `shouldRescueUnproductiveTurn` owns the
    * failure and has the correct prompt for it — this pass would be a second writer on one decision.
    */
@@ -79,7 +92,20 @@ export function shouldVerifyCreationCompleteness(input: CreationCompletenessInpu
     return false;
   }
 
-  if (input.aborted || input.alreadyContinued) {
+  if (input.aborted) {
+    return false;
+  }
+
+  /*
+   * `length` overrides `alreadyContinued` — see `truncatedByLength`. A third stream is permitted here
+   * and nowhere else, because this is the only signal that PROVES the output is incomplete rather
+   * than merely suggesting it.
+   */
+  if (input.truncatedByLength) {
+    return true;
+  }
+
+  if (input.alreadyContinued) {
     return false;
   }
 
@@ -99,6 +125,8 @@ export function shouldVerifyCreationCompleteness(input: CreationCompletenessInpu
  */
 export const CREATION_COMPLETION_PROMPT = [
   'Before you finish: check the project you just wrote against the brief, and against your own message.',
+  'If your previous reply was cut off mid-sentence or mid-file, it hit an output limit — pick up exactly',
+  'where it stopped and re-emit that file in full. Nothing was lost that you cannot rewrite.',
   '',
   'If anything you intended is missing or unfinished — the landing page, the game chrome, further game',
   'code, a registration you did not add, an import that resolves to nothing — write it NOW, in this',

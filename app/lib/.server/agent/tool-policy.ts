@@ -48,7 +48,37 @@ export const CREATION_MEDIA_STEPS = 3;
  * at 0.1x (~$0.04 on the post-Phase-2 prefix), where the forced continuation it prevents rewrites it
  * at 2x. Slack here is roughly twenty times cheaper than the failure it insures against.
  */
-export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS;
+/**
+ * 🔴 `read_file` ROUNDS ARE PART OF THIS SUM (2026-08-08, live-caught on the first drive).
+ *
+ * The manifest replaced the file dump, so the model now READS files instead of being shown them — and
+ * every read round is a step. `read_file` was added to the creation toolset and this constant was not
+ * re-derived, which reproduced the exact failure the comment above describes, on the very next run:
+ *
+ *   step 1: read_file x3, load_reference x3
+ *   step 2: read_file x8
+ *   step 4: read_file x4
+ *   WARN  Tool-round cap (3) reached — forcing a final answer with tools disabled
+ *   step 5: 655,957ms · 64,000 out · finish=length+forced-continuation
+ *   Charged 1175 credits ($3.6450), 74,524 cache tokens WRITTEN (two full prefixes)
+ *
+ * The saving from the manifest was real (77,699 -> 37,713 written) and the step starvation ate all of
+ * it and more. The `+ 1` answer step exists so the model always has somewhere to write; it does not
+ * help when the model is still gathering context on the last step it has.
+ *
+ * Reads are cheap in TOKENS and expensive in STEPS: the model parallelises them (8 in one step above)
+ * but discovers what it needs incrementally, so it takes several rounds. Budgeted generously on
+ * purpose — an extra in-generation step re-reads the WARM prefix at 0.1x, where the forced
+ * continuation it prevents rewrites the whole thing at 2x AND risks a truncated project.
+ *
+ * ⚠️ Held at 3 so `CREATION_TOOL_ROUNDS + 1` stays equal to `MAX_TOOL_ROUNDS + 1` — a creation must
+ * never get MORE rounds than an ordinary turn, which `tool-policy.spec.ts` asserts as a relationship.
+ * The live run used exactly 3 read rounds (steps 1, 2 and 4), so this covers the observed shape; if it
+ * needs to grow, `MAX_TOOL_ROUNDS` grows with it or the invariant breaks.
+ */
+export const CREATION_FILE_READ_ROUNDS = 3;
+
+export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROUNDS;
 
 /**
  * 🔴 MEDIA IS OFF THE CREATION TURN (2026-08-08, owner-driven, live evidence below).

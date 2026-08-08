@@ -7,7 +7,13 @@
  * actually occurs.
  */
 import { describe, expect, it } from 'vitest';
-import { CREATION_ALLOWS_MEDIA, CREATION_MEDIA_STEPS, CREATION_TOOL_ROUNDS, toolPolicyForTurn } from './tool-policy';
+import {
+  CREATION_ALLOWS_MEDIA,
+  CREATION_FILE_READ_ROUNDS,
+  CREATION_MEDIA_STEPS,
+  CREATION_TOOL_ROUNDS,
+  toolPolicyForTurn,
+} from './tool-policy';
 import { MAX_REFERENCE_LOADS } from './reference-tools';
 import { MAX_TOOL_ROUNDS } from './tools';
 
@@ -41,7 +47,7 @@ describe('toolPolicyForTurn — first build turns', () => {
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true })).toEqual({
       allowTools: true,
       toolset: 'creation',
-      maxSteps: MAX_REFERENCE_LOADS + 1,
+      maxSteps: CREATION_TOOL_ROUNDS + 1,
     });
   });
 
@@ -87,7 +93,7 @@ describe('toolPolicyForTurn — first build turns', () => {
 
     expect(withMedia).toEqual(withoutMedia);
     expect(CREATION_ALLOWS_MEDIA).toBe(false);
-    expect(CREATION_TOOL_ROUNDS).toBe(MAX_REFERENCE_LOADS);
+    expect(CREATION_TOOL_ROUNDS).toBe(MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROUNDS);
   });
 
   it('caps the creation loop below the ordinary tool cap', () => {
@@ -183,13 +189,13 @@ describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (�
    */
   it('never offers Unity/MCP tools on a first build turn', () => {
     /*
-     * A creation turn always has tools now (it must be able to load documentation), so "MCP is not
-     * offered" is carried entirely by the TOOLSET — `creation` is media + references + the repair
+     * A creation turn always has tools now (it must read files and load documentation), so "MCP is not
+     * offered" is carried entirely by the TOOLSET — `creation` is read_file + references + the repair
      * bounce, and `proxy.ts` builds that set from this value.
      */
     const noMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true });
     expect(noMedia.toolset).toBe('creation');
-    expect(noMedia.maxSteps).toBe(MAX_REFERENCE_LOADS + 1);
+    expect(noMedia.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
 
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true, hasMediaTools: true })).toEqual({
       allowTools: true,

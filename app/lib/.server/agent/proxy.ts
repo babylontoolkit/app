@@ -2140,6 +2140,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           isDiscussTurn: Boolean(discussNote),
           aborted: Boolean(request.abortSignal?.aborted),
           alreadyContinued: forcedContinuation || unproductiveRescue,
+
+          /*
+           * `length` is the provider saying it stopped at the OUTPUT CEILING, not that the model
+           * finished — measured live at exactly 64,000 out / 111,403 chars, mid-project. It is the one
+           * signal that overrides `alreadyContinued`, because it PROVES truncation rather than
+           * suggesting it, and the forced continuation that precedes it is usually where the project
+           * was being written.
+           */
+          truncatedByLength: finishReason === 'length',
           emittedAction,
         })
       ) {
