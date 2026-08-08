@@ -213,6 +213,10 @@ Expected creation prompt: **~25–35k, not 170k.** Everything in `CLAUDE.md` abo
 stable zones and opaque-file classification becomes unnecessary. Keep **one** breakpoint on the base
 prompt.
 
+**This inversion and §3.3 are the same idea applied to the two halves of the prefix** — the file dump
+(~155k) and the baked doc corpus (~15k). Do both or neither: shrinking one while the other stays huge
+leaves the cold start, and the cold start is the whole complaint.
+
 ### Inversion 4 — Long-running work is a queue, never a tool
 
 Anything over ~5 seconds is enqueued and polled: media, builds, deploys, asset processing. The tool
@@ -350,32 +354,76 @@ rides on `subscription_data.metadata` — renewals have no session. **Credits ne
 
 **Shape:** an index in the prompt, bodies on demand.
 
+#### Start from the persona snippet, not from a corpus
+
+This is the version that demonstrably works. It is what the owner uses in Claude Code, Cursor and
+every other agent host, and **none of them have cold starts, TTL penalties or per-run cost variance**
+on the identical request:
+
+```markdown
+# Babylon Toolkit Agent Persona
+
+You are an expert web game developer using BabylonJS and the Babylon Toolkit. Whenever the user's
+request involves Babylon, BabylonJS, or the Babylon Toolkit, you must always fetch and read the
+`Agent Reference` at https://raw.githubusercontent.com/babylontoolkit/agent/main/reference.md before
+doing anything else. Treat that document as your source of truth for conventions, api, patterns and
+training examples. If the fetch fails, stop immediately and tell the user. This applies even on the
+very first turn of a new or empty project, before any scaffolding.
 ```
-Baked always:  reference index — ~30 rows, id + one-line description   (~3k tokens)
-On demand:     load_reference(id) → full doc body
-Arbitrary:     web_fetch(url) → any public page the USER references
+
+**Roughly 150 tokens.** The reference it names is an *index*; sub-documents come down only when the
+model decides it needs them. Nothing in that arrangement is large enough to have a cold start.
+
+Now the measured comparison, on the same prompt — *"make me a mario kart clone"*:
+
+| | prefix | cold start |
+|---|---|---|
+| bolt.diy / Claude Code, persona snippet | ~a few hundred tokens | none — **~133 credits** |
+| v1, this platform | **170,371 tokens** | ~600 credits, and it varies run to run |
+
+v1's prefix breaks down as ~15k of baked platform rules + index (59,325 bytes) and **~155k of dumped
+starter files.** A cold cache writes all of it at **2×** — about a dollar of input before one token
+of the game exists.
+
+**The lesson is exact: "cold vs warm" is not a fact about caching, it is a symptom of prefix size.**
+At 5k tokens the distinction is meaningless and no warmer, no breakpoint budget and no
+sharedness-ordered block layout is needed — the entire apparatus in v1's `spec/context-budget.md`
+exists to manage a number that should never have been large. Every other host avoided the problem by
+never creating it.
+
+#### The shape to build
+
+```
+System prompt:  persona + platform rules, kept SMALL and audited for size   (target <5k tokens)
+Index:          fetched or pinned — ~30 rows, id + one-line description     (~2-3k tokens)
+Bodies:         load_reference(id) — on demand, never baked
+Project files:  a manifest + read_file (Inversion 3), never a dump
+Arbitrary URLs: web_fetch(url) — pages the USER names
 ```
 
-**Three tools, three jobs — keep them distinct.** `load_reference` serves the pinned Toolkit corpus.
-`web_fetch` serves URLs the user names ("look at this doc"). They must not be confused, and the
-prompt must say which is which, or the model burns rounds fetching documents already in its context.
-
-**How the reference gets there — sync by SHA, promote explicitly.**
+**Fetch the reference at runtime, but cache it server-side by SHA.** This is the one refinement worth
+making over the raw snippet, and it costs nothing in prefix size:
 
 ```
-babylontoolkit/agent ──fetch @ commit SHA──▶ content-addressed blobs
-                                              │
-                                    admin promotes ──▶ active prompt version
+first request ──▶ GitHub raw @ SHA ──▶ content-addressed blob ──▶ served from cache thereafter
 ```
 
-**Generations never depend on GitHub at runtime.** This is not fussiness: a GitHub blip would
-otherwise fail paid generations, and a push to the docs repo would change every user's prompt with
-no review. Pin, promote, roll back — the same shape as the starter template (§4.2).
+You keep the snippet's economics (tiny prefix, no baked corpus, docs current) and you drop its single
+real weakness — a GitHub outage failing paid generations, or a docs push silently changing every
+user's behaviour mid-session. Pin the SHA per prompt version so a run is reproducible and an admin can
+roll back; refresh on promote. **If the cache is cold and GitHub is down, say so and stop** — which is
+exactly what the snippet already instructs.
 
-You asked to be able to **web-fetch the reference documents.** You can, and `web_fetch` is in the
-toolset for it — but make it the *escape hatch*, not the mechanism: pinned docs are free (already in
-the cached prefix), reproducible, and reviewable; a live fetch costs a round trip, a fresh cache
-write, and puts GitHub's uptime on your money path.
+> ⚠️ An earlier draft of this section said *"generations never depend on GitHub at runtime"* and made
+> `web_fetch` the escape hatch rather than the mechanism. That rule was written for a system whose
+> docs were baked into a 170k prefix — and **the baking is what caused the cost the rule was meant to
+> avoid.** It protected reproducibility at the price of the thing that actually hurt. Keep the SHA
+> cache for reproducibility; do not reintroduce the corpus to get it.
+
+**Budget the system prompt like money, because it is.** v1's base prompt reached 138,660 bytes before
+anyone measured it, and got to 59,325 only after a dedicated optimisation phase. Put a byte ceiling in
+CI, fail the build above it, and make every addition argue for its place. **A prompt section costs
+every generation, forever.**
 
 **Two rules learned the hard way:**
 
@@ -737,6 +785,8 @@ server-side. Under Inversion 2 this shrinks to validating the `exec` tool's argu
 | Server-side execution of user code | Ever. |
 | BYOK / provider pickers at launch | Credits-only. One operator-configured model ladder. Flag it for later. |
 | Five cache breakpoints | The API max is four. Under Inversion 3 you need one. |
+| A cache warmer | It exists only to hide a huge prefix. Fix the prefix (§3.3) and there is nothing to warm. v1's ran inert for months and nobody noticed. |
+| A baked documentation corpus | The persona snippet + a fetched index is what works everywhere else. §3.3. |
 | A metric defined as the shape of a known failure | See §5. |
 | Auto-push, auto-merge, or anything that writes to a user's account unasked | §4.3. |
 
@@ -788,7 +838,10 @@ The reliability bar, as tests:
 4. **Partial credit.** A job dying at step 3 of 6 bills 3 steps and says exactly that.
 5. **Media independence.** 10 images on a build → build completes on time, images land afterward with
    progress, **zero refusals**.
-6. **Cost.** A creation's prompt is under 40k tokens. Cold and warm runs bill within 10%.
+6. **Cost.** A creation's prompt is under 40k tokens, of which the system prompt is under 5k. **Cold
+   and warm runs bill within 10%** — if they don't, the prefix is still too big (§3.3). The reference
+   point is bolt.diy answering *"make me a mario kart clone"* in ~133 credits with no cold-start
+   concept at all.
 7. **Byte identity.** A 2MB binary survives mount → sandbox → GitHub → clone → mount, sha256-equal.
 8. **A stranger can play it.** Publish, open the link in a clean browser profile, play the game.
 9. **Auth.** Every `api.*` route names a wall or fails the default-deny scan.
