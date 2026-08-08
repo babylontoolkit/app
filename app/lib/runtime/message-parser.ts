@@ -168,8 +168,47 @@ export class StreamingMessageParser {
            * page rendered unstyled. The FIRST file in the same artifact was written fine, because its
            * </boltAction> was followed by more text; only the last one is exposed.
            */
-          const usesArtifactClose = artifactCloseIndex !== -1 && (closeIndex === -1 || artifactCloseIndex < closeIndex);
-          const actionEndIndex = usesArtifactClose ? artifactCloseIndex : closeIndex;
+
+          /*
+           * 🔴 A `<boltAction` OPEN WHILE ALREADY INSIDE AN ACTION IS AN IMPLICIT CLOSE (2026-08-08).
+           *
+           * The artifact-close fallback above covers ONE missing close tag — the last action in the
+           * artifact. It has no answer for MANY, and rather than failing it merges them, which is the
+           * worst available outcome because a merge looks exactly like a successful write.
+           *
+           * Measured on `gen_mskc4r0y` (opus-5, Anthropic direct — NOT a KIE defect): the model
+           * emitted **14 `<boltAction>` opens and 4 closes**, dropping ten in a row spread from char
+           * 2,230 to 88,657, i.e. throughout the response and well before the 64,000-token output
+           * ceiling truncated it. Searching only for `</boltAction>` found one 94,000 characters
+           * later, so nine files' bodies were concatenated into a single 93,856-byte
+           * `src/scripts/KartTrack.ts`; `Kart.ts` and `KartFactory.ts` never existed, `Home.tsx` and
+           * the chrome were left as untouched starter, and the user was charged 1,162 credits and
+           * shown "🎮 Your game is ready". Formatting discipline simply decays across a very long
+           * response — the sibling creation an hour earlier was 10-for-10 clean, so it is
+           * NONDETERMINISTIC and cannot be tested away, only defended against.
+           *
+           * ⚠️ The honest cost: a file whose body legitimately contains the literal text
+           * `<boltAction …>` is truncated there. That is why the candidate must be a COMPLETE tag
+           * (see `nextOpenIsComplete`) — mid-stream we must wait rather than close at a half-arrived
+           * tag, or the action closes and the open branch then fails to re-open it. Against nine
+           * files welded into one, silently, this trade is not close.
+           *
+           * `<boltAction` cannot match inside `</boltAction>` (position 1 is `/`, not `b`), so the
+           * three candidates below can never collide on the same index.
+           */
+          const nextOpenIndex = input.indexOf(ARTIFACT_ACTION_TAG_OPEN, i);
+          const nextOpenIsComplete = nextOpenIndex !== -1 && input.indexOf('>', nextOpenIndex) !== -1;
+          const implicitOpenIndex = nextOpenIsComplete ? nextOpenIndex : -1;
+
+          const endCandidates = [closeIndex, artifactCloseIndex, implicitOpenIndex].filter((n) => n !== -1);
+          const actionEndIndex = endCandidates.length > 0 ? Math.min(...endCandidates) : -1;
+
+          /*
+           * Only an explicit `</boltAction>` is CONSUMED. The other two endings leave `i` AT their tag
+           * so the next iteration re-reads it: the artifact close emits `onArtifactClose`, and an
+           * implicit open falls through to the open branch and starts the next action.
+           */
+          const consumesCloseTag = actionEndIndex !== -1 && actionEndIndex === closeIndex;
 
           if (actionEndIndex !== -1) {
             currentAction.content += input.slice(i, actionEndIndex);
@@ -177,8 +216,16 @@ export class StreamingMessageParser {
             let content = currentAction.content.trim();
 
             if ('type' in currentAction && currentAction.type === 'file') {
+              /*
+               * ⚠️ `filePath` is OPTIONAL-CHAINED because a `type="file"` tag carrying no `filePath`
+               * is malformed but reachable: `#parseActionTag` leaves the field `undefined` and the
+               * bare `.endsWith` threw, which aborts `parse` and takes the whole message render with
+               * it. Pre-existing, but the implicit-close rule above made it reachable from ordinary
+               * FILE CONTENT — a doc quoting the artifact syntax now opens a real action — so a
+               * malformed tag must degrade to "clean it like a non-markdown file", never crash.
+               */
               // Remove markdown code block syntax if present and file is not markdown
-              if (!currentAction.filePath.endsWith('.md')) {
+              if (!currentAction.filePath?.endsWith('.md')) {
                 content = cleanoutMarkdownSyntax(content);
                 content = cleanEscapedTags(content);
               }
@@ -206,11 +253,7 @@ export class StreamingMessageParser {
             state.currentAction = { content: '' };
             state.pendingActionTail = undefined;
 
-            /*
-             * Explicit close: consume the </boltAction>. Implicit (artifact) close: leave `i` AT the
-             * </boltArtifact> so the artifact-close branch fires next iteration and emits onArtifactClose.
-             */
-            i = usesArtifactClose ? actionEndIndex : actionEndIndex + ARTIFACT_ACTION_TAG_CLOSE.length;
+            i = consumesCloseTag ? actionEndIndex + ARTIFACT_ACTION_TAG_CLOSE.length : actionEndIndex;
           } else {
             if ('type' in currentAction && currentAction.type === 'file') {
               /*
@@ -223,7 +266,7 @@ export class StreamingMessageParser {
 
               let content = input.slice(i);
 
-              if (!currentAction.filePath.endsWith('.md')) {
+              if (!currentAction.filePath?.endsWith('.md')) {
                 content = cleanoutMarkdownSyntax(content);
                 content = cleanEscapedTags(content);
               }
@@ -422,7 +465,7 @@ export class StreamingMessageParser {
        */
       let content = (currentAction.content + (state.pendingActionTail ?? '')).trim();
 
-      if (!currentAction.filePath.endsWith('.md')) {
+      if (!currentAction.filePath?.endsWith('.md')) {
         content = cleanoutMarkdownSyntax(content);
         content = cleanEscapedTags(content);
       }

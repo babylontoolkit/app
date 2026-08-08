@@ -233,6 +233,166 @@ describe('StreamingMessageParser', () => {
   });
 
   /*
+   * 🔴 MANY CONSECUTIVE ACTIONS MISSING THEIR CLOSE — the shape that welded nine files into one.
+   *
+   * The fallback above handles ONE missing close (the last action, rescued by </boltArtifact>). It had
+   * no answer for MANY, and rather than failing it MERGED them — the worst available outcome, because
+   * a merge looks exactly like a successful write.
+   *
+   * Measured on `gen_mskc4r0y` (2026-08-08, opus-5, Anthropic direct — NOT a KIE defect): the model
+   * emitted 14 `<boltAction>` opens and 4 closes, dropping ten in a row spread from char 2,230 to
+   * 88,657 — throughout the response, well before the 64,000-token ceiling truncated it. Searching
+   * only for `</boltAction>` found one 94,000 chars later, so nine files' bodies were concatenated
+   * into a single 93,856-byte `src/scripts/KartTrack.ts`. `Kart.ts` and `KartFactory.ts` never
+   * existed; `Home.tsx` and the chrome stayed untouched starter. Settled `completed`, 1,162 credits,
+   * user shown "🎮 Your game is ready".
+   *
+   * A `<boltAction` open while already inside an action is now an implicit close of the previous one.
+   */
+  describe('many consecutive actions missing their </boltAction> (the nine-file weld)', () => {
+    const makeParser = () => {
+      const closed: { filePath: string; content: string }[] = [];
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn((d: any) => closed.push({ filePath: d.action.filePath, content: d.action.content })),
+      };
+
+      return { parser: new StreamingMessageParser({ artifactElement: () => '', callbacks }), callbacks, closed };
+    };
+
+    /** Ten file actions, ZERO closes, then the artifact closes. The live shape, scaled down. */
+    const TEN_OPENS_NO_CLOSES =
+      'Building it now. <boltArtifact title="t" id="a1">' +
+      Array.from({ length: 10 }, (_, n) => `<boltAction type="file" filePath="src/f${n}.ts">BODY_${n}\n`).join('') +
+      '</boltArtifact>\n\nDone.';
+
+    it('writes TEN distinct files, each containing only its own body', () => {
+      const { parser, callbacks, closed } = makeParser();
+      parser.parse('weld', TEN_OPENS_NO_CLOSES);
+
+      expect(callbacks.onActionOpen).toHaveBeenCalledTimes(10);
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(10); // was 1 before the fix — the weld
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+
+      expect(closed.map((c) => c.filePath)).toEqual(Array.from({ length: 10 }, (_, n) => `src/f${n}.ts`));
+
+      /*
+       * The containment assertion is the point. A parser that collapses everything into one entry
+       * would satisfy a bare count check, so each body must be proven to hold ITS OWN content and
+       * none of its neighbours' — that is precisely what the weld got wrong.
+       */
+      for (const [n, file] of closed.entries()) {
+        expect(file.content.trim()).toBe(`BODY_${n}`);
+      }
+    });
+
+    it('does not leak the next action tag or the artifact tag into a body', () => {
+      const { parser, closed } = makeParser();
+      parser.parse('weld2', TEN_OPENS_NO_CLOSES);
+
+      for (const file of closed) {
+        expect(file.content).not.toContain('<boltAction');
+        expect(file.content).not.toContain('</boltArtifact>');
+        expect(file.content).not.toContain('Done.');
+      }
+    });
+
+    it('behaves identically when streamed character-by-character', () => {
+      const { parser, callbacks, closed } = makeParser();
+
+      let message = '';
+
+      for (const ch of TEN_OPENS_NO_CLOSES) {
+        message += ch;
+        parser.parse('weld3', message);
+      }
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(10);
+
+      for (const [n, file] of closed.entries()) {
+        expect(file.content.trim()).toBe(`BODY_${n}`);
+      }
+    });
+
+    /*
+     * Mid-stream a `<boltAction` may have arrived only partially. Closing at a half-arrived tag would
+     * end the action and then leave the open branch unable to re-open it, so an incomplete tag must
+     * NOT count as an implicit close — the parser waits for the `>`.
+     */
+    it('waits for a COMPLETE next tag before treating it as an implicit close', () => {
+      const { parser, callbacks } = makeParser();
+      parser.parse(
+        'partial',
+        'x <boltArtifact title="t" id="a1">' +
+          '<boltAction type="file" filePath="a.ts">A_BODY\n' +
+          '<boltAction type="file" filePath="b.ts"',
+      );
+
+      // The second tag has no '>' yet, so nothing may close.
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(0);
+      expect(callbacks.onActionOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('CONTROL: a well-formed artifact is unchanged — every close is still the real one', () => {
+      const { parser, callbacks, closed } = makeParser();
+      const output = parser.parse(
+        'ctrl',
+        'Before <boltArtifact title="t" id="a1">' +
+          '<boltAction type="file" filePath="a.css">A</boltAction>' +
+          '<boltAction type="file" filePath="b.css">B</boltAction>' +
+          '<boltAction type="file" filePath="c.css">C</boltAction>' +
+          '</boltArtifact> After',
+      );
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(3);
+      expect(closed.map((c) => c.content.trim())).toEqual(['A', 'B', 'C']);
+      expect(output).toBe('Before  After');
+    });
+
+    /*
+     * CONTROL for the honest cost recorded on the fix: a body that legitimately contains the literal
+     * text `<boltAction …>` IS truncated there. Asserted rather than hidden — if this ever becomes a
+     * real problem in generated projects, this is the test that has to change, deliberately.
+     */
+    it('KNOWN COST: a body quoting a complete <boltAction> tag is truncated at the quote', () => {
+      const { parser, closed } = makeParser();
+      parser.parse(
+        'quote',
+        '<boltArtifact title="t" id="a1">' +
+          '<boltAction type="file" filePath="docs.md">Write files with ' +
+          '<boltAction type="file" filePath="x.ts"> tags.</boltAction>' +
+          '</boltArtifact>',
+      );
+
+      expect(closed[0].filePath).toBe('docs.md');
+      expect(closed[0].content.trim()).toBe('Write files with');
+    });
+
+    /*
+     * The implicit-close rule makes a `type="file"` tag with NO `filePath` reachable from ordinary
+     * file CONTENT — a doc quoting the artifact syntax now opens a real action. `#parseActionTag`
+     * leaves `filePath` undefined and the unguarded `.endsWith('.md')` threw, aborting `parse` and
+     * taking the whole message render down with it. A malformed tag must degrade, never crash.
+     */
+    it('a malformed <boltAction type="file"> with no filePath does not crash the parse', () => {
+      const { parser, closed } = makeParser();
+
+      expect(() =>
+        parser.parse(
+          'malformed',
+          '<boltArtifact title="t" id="a1">' +
+            '<boltAction type="file" filePath="docs.md">Use <boltAction type="file"> to write.</boltAction>' +
+            '</boltArtifact>',
+        ),
+      ).not.toThrow();
+
+      expect(closed[0].filePath).toBe('docs.md');
+    });
+  });
+
+  /*
    * 🔴 THE STREAM ENDS WITH NOTHING CLOSED — the third case, and the one the parser cannot see.
    *
    * The fallback above handles a missing `</boltAction>` when `</boltArtifact>` still arrives. Here
