@@ -11,6 +11,7 @@ while building.
 
 | | |
 |---|---|
+| §0.3 | **How v1 got here** — read before optimising anything |
 | §1 | Diagnosis — four root causes |
 | §2 | The five inversions |
 | §3 | The five pillars you asked for |
@@ -60,6 +61,54 @@ tool becomes a hosted multi-tenant product.
 routes to port with minimal edits), and lift the pieces named in §9 file-by-file. They are mostly
 pure functions with exhaustive tests and they carry the expensive knowledge. Rebuild the chat UI;
 it's a week and you get to design it around the step journal (§2.1) instead of around a stream.
+
+---
+
+### 0.3 How v1 got here — read this before you optimise anything
+
+The single most useful thing in this document, because it is the failure that produced all the
+others.
+
+**The prefix was never designed. It accreted, and then it got optimised.**
+
+- The **155k file dump** is bolt.diy's, inherited unexamined. Upstream puts the project's files in
+  the prompt; that is `createFilesContext` and it is how the fork works. What made it catastrophic
+  here is *our* starter: bolt.diy's templates are ~15 files of Vite + React, and the Babylon Toolkit
+  starter is **88**, including a read-only demo class library and a framework system directory. Same
+  mechanism, six times the payload.
+- The **15k baked doc corpus** was a deliberate decision, and the wrong one. It followed from the
+  rule "generations never depend on GitHub at runtime," and it reached **138,660 bytes** before
+  anyone measured it.
+
+Then — and this is the part to internalise — **a year went into making that prefix cheaper instead of
+asking why it was large.** Cache breakpoints ordered by sharedness. A stable-zone splitter. An
+opaque-file classifier. Sticky block routing. History compaction. A duplicate-key fix worth 22.5k
+tokens per turn. A cache warmer, and a probe to measure the warmup curve it needed. `MAX_MEDIA_ROUNDS`
+and `CREATION_MEDIA_STEPS` to stop the resulting turn eating itself.
+
+Every one of those is real engineering that produced a real, measurable saving. Together they took a
+creation from **1,100,188 to 111,659 input tokens** — a 90% cut, and it reads as a triumph.
+
+**It was a 90% cut on a number that should never have existed.** The measurements all pointed the
+right way, which is precisely why nobody stopped: an improving metric feels like evidence you are on
+the right branch, and it is not. It only tells you that you are moving.
+
+The comparison that would have ended the whole line of work was one line long — *what does every
+other agent host do with this exact prompt?* — and it was available from day one, in the next window,
+where the owner was using a 150-token persona snippet against the same reference with no cold starts
+at all. It was never run. A year of internal measurement, and no external baseline.
+
+**So, three rules for v2:**
+
+1. **Benchmark against the outside before optimising the inside.** Take the flagship prompt, run it
+   through a host you do not control, and write the number down. That number is your ceiling. If you
+   are 4× off it, you have a design problem and no amount of tuning will close it.
+2. **Question inherited mechanisms, especially the ones that work.** The file dump never failed. It
+   just cost, silently, on every turn, forever — and it was invisible precisely because it was
+   upstream's and therefore assumed correct.
+3. **A hard budget beats a clever optimisation.** A CI ceiling on prompt bytes would have caught this
+   in week two and forced the design conversation. Every mechanism listed above exists because there
+   was no ceiling — so the only available move was to make the overrun cheaper.
 
 ---
 
