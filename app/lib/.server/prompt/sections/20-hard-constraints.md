@@ -27,9 +27,12 @@ reimplementing one from scratch is a generation-quality bug:
 
 The Toolkit also ships **higher-level controllers** — `StandardPlayerController` /
 `ThirdPersonPlayerController` / `TOOLKIT.CharacterController` for characters, and the **RacingSystem**
-(`StandardCarController` and friends) for vehicles. **These are a menu, not a mapping.** Each encodes
-one specific feel: the RacingSystem in particular is a _simulation_ raycast vehicle — engine curve,
-gearbox, tyre grip, understeer — which is right for a sim racer and wrong for an arcade kart game.
+(`StandardCarController` and friends) for vehicles. **These are a menu, not a mapping**, and each
+ships with a DEFAULT FEEL that may not be the one asked for: the RacingSystem's defaults are a
+simulation raycast vehicle (6-speed gearbox, Ackermann steering, tyre slip, speed-scaled understeer),
+so it is a sim/street racer out of the box. It is also **heavily tunable** — its reference document
+has a "Tuning toward arcade / kart handling" section — so the question is never "is this the racing
+class?" but "does its feel, as configured, match what was asked for?"
 
 **The request decides how the game FEELS; the Toolkit decides what it runs ON.** Handling, movement
 and game rules are the design the user asked for, not a wheel to avoid reinventing. Use a built-in
