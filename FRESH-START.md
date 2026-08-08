@@ -644,8 +644,9 @@ must never be broken, stubbed or bypassed.
 deterministically; the prompt instructs the model for copies it makes later.
 
 **⚠️ The chrome path is a contract between the templates and the prompt, and a mismatch fails
-silently.** It was `src/babylon/**`, then `src/custom/**`, now `src/chrome/**`. The model writes
-`src/chrome/splash.tsx` into a starter whose file is `src/custom/splash.tsx` — the project builds,
+silently.** The chrome has moved twice — out of the framework directory, then renamed again to its
+current home at `src/chrome/**`. The model writes `src/chrome/splash.tsx` into a starter whose file
+still sits under the previous name — and the project builds,
 runs, and **ignores the redesign**. Repointing the prompt is half the change; the pinned starter
 snapshot still holds the old tree until an admin promotes the new template. Pin this with a test
 asserting the absence of the old path in every shipped file.

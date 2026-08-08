@@ -16,7 +16,6 @@ import {
   type StreamTextResult,
 } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
-import { splitFilesForContext } from '~/lib/context/stable-zones';
 import { getActivePrompt } from '~/lib/.server/prompt/active';
 import { ensureCacheWarmer, PROMPT_CACHE_TTL, recordCacheRead } from '~/lib/.server/prompt/cache-warmer';
 import { getPromptStore } from '~/lib/.server/prompt/store';
@@ -40,7 +39,8 @@ import {
   UNPRODUCTIVE_RESCUE_PROMPT,
 } from './unproductive';
 import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './creation-completion';
-import { createFilesContext } from '~/lib/.server/llm/utils';
+import { createFileTools } from './file-tools';
+import { buildFileManifest, renderFileManifest } from '~/lib/context/file-manifest';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
 import type { IProviderSetting } from '~/types/model';
@@ -904,7 +904,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     }
   }
 
-  const { stable: stableFiles, mutable: mutableFiles } = splitFilesForContext(contextFiles ?? {});
+  /*
+   * ⚠️ `splitFilesForContext` is no longer used here (Inversion 3): the starter/game-code split existed
+   * to shard a 36k-token dump across two cache breakpoints, and the manifest that replaced it is ~700
+   * tokens on one. The module stays (hide-don't-delete) but the prefix no longer has two file blocks.
+   */
+  const projectFiles = contextFiles ?? {};
 
   /*
    * 🔴 There is no skill ROUTER any more (2026-07-26). Only the creation turn pre-loads — a constant,
@@ -967,19 +972,29 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const system: CoreMessage[] = [{ role: 'system', content: promptVersion.content, providerOptions: CACHE_CONTROL }];
 
   /*
-   * The STARTER half of the file context (breakpoint 2 — `~/lib/context/stable-zones.ts`).
+   * 🔴 THE FILE MANIFEST — the model reads files, it is not shown them (Inversion 3, `FRESH-START.md`).
    *
-   * Placed BEFORE the routed doc blocks on purpose, and the placement is the whole value: these bytes
-   * are identical for every project on the same template pin (paths are project-relative; the split
-   * and the sort make the block a pure function of file content), but a cache entry covers the whole
-   * prefix up to its breakpoint — so behind the per-conversation doc blocks these same bytes could
-   * never hit across conversations, let alone across projects. Ahead of them, one project's traffic
-   * warms this entry for every other project on the pin, the way the base prompt warms for everyone.
+   * Measured on a real project: the dump this replaces cost 36,453 tokens per turn to show 70 files,
+   * of which the model reads about eight. The manifest is 704 — a 52x cut, and 47% of the entire
+   * 77,699-token cached prefix. Bodies come from `read_file` (`file-tools.ts`).
+   *
+   * ⚠️ THE TWO-PART SPLIT IS GONE, DELIBERATELY. `stable-zones.ts` divided the dump into a
+   * starter half and a game-code half so the starter bytes could sit ahead of the per-conversation
+   * doc blocks and warm across projects. That was the right answer to "this block is enormous and
+   * rewrites every turn" — and the block is now 704 tokens, so the whole apparatus (two entries, two
+   * breakpoints, a mutability classifier) is machinery for a number that no longer exists. ONE entry,
+   * sorted, on one breakpoint. Do not reintroduce the split "for cache reasons": at this size the
+   * split costs more in breakpoints than it can ever save in bytes.
    */
-  if (Object.keys(stableFiles).length > 0) {
+  if (Object.keys(projectFiles).length > 0) {
     system.push({
       role: 'system',
-      content: `# Current Project Files (1/2) — starter framework\n\nThe starter's framework zones (read-only library, app shell, vendored runtimes, config). The project's game code follows in part 2/2, after the reference material.\n\n${createFilesContext(stableFiles, true)}`,
+      content:
+        '# Project files\n\n' +
+        'Every file in the project, with its size in bytes. Call `read_file` for the ones you need ' +
+        "before you change them — do not guess at a file's contents, and do not assume a path that is " +
+        'not listed here exists. Files marked [binary] or [opaque] cannot be read and never need to be.\n\n' +
+        renderFileManifest(buildFileManifest(projectFiles)),
       providerOptions: CACHE_CONTROL,
     });
   }
@@ -1174,26 +1189,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     system.push({ role: 'system', content: instructions.block });
   }
 
-  if (Object.keys(mutableFiles).length > 0) {
-    /*
-     * The GAME-CODE half of the file context (breakpoint 4 — the starter half went out at
-     * breakpoint 2, before the reference material). Binaries and opaque files arrive here as
-     * `<boltFile>` markers — never bodies (§4.2.8).
-     *
-     * This block IS cached despite changing every build turn, and that is not a contradiction. A
-     * breakpoint caches the prefix UP TO itself, so the entries in front keep hitting regardless:
-     * when a file changes, only THIS entry misses. What the breakpoint buys is the multiplier —
-     * `maxSteps` re-sends the entire prefix on every step of the tool loop, so an uncached block
-     * here is paid up to seven times per generation at full price. Cached, steps 2..n read it at a
-     * tenth. Splitting the starter out of it (2026-07-30) is what shrank the per-turn rewrite from
-     * the whole project to just the code being worked on.
-     */
-    system.push({
-      role: 'system',
-      content: `# Current Project Files (2/2) — game code\n\nThe project's own code and assets — everything not shown in part 1/2.\n\n${createFilesContext(mutableFiles, true)}`,
-      providerOptions: CACHE_CONTROL,
-    });
-  }
+  /*
+   * ⚠️ The game-code file block used to go out here (breakpoint 4), carrying every mutable file's
+   * BODY. It is gone: the manifest above lists the whole project in ~700 tokens and `read_file`
+   * serves the bodies. That frees a cache breakpoint AND removes the per-turn rewrite this block's
+   * own comment was written to justify — the cheapest entry is the one that is not sent.
+   */
 
   /*
    * Volatile project-context notes (§4.9 assets, §4.14 MCP tools, §4.15 Game Backend).
@@ -1302,6 +1303,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     loadedThisTurn: new Set<string>(),
   };
 
+  /*
+   * `read_file` reads the SAME map the manifest was rendered from, so what the model is offered and
+   * what it can fetch can never disagree. The budgets are per-turn and live here, not in the tool,
+   * because the tool is recreated per call site and a budget on a fresh object is no budget at all.
+   */
+  const fileToolContext = {
+    files: projectFiles,
+    readThisTurn: new Set<string>(),
+    charsThisTurn: { total: 0 },
+  };
+
   const toolContext: SkillToolContext = {
     loaded: new Set([
       ...(slash ? [slash.skillName] : []),
@@ -1357,12 +1369,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * 🔴 NO MEDIA ON THE CREATION TURN (`CREATION_ALLOWS_MEDIA`, tool-policy.ts — the full reasoning and
    * the live step log are there). Creation writes the project; art is a later turn or the Media panel.
    */
+  /*
+   * 🔴 `read_file` IS IN EVERY TOOLSET, INCLUDING THE READ-ONLY ONE. The project files are no longer
+   * IN the prompt (Inversion 3) — the manifest lists them and this is the only way to see a body. A
+   * turn that can discuss code but not read it is the dangling-instruction failure in its purest
+   * form: the model is shown a list of files and refused every one of them. It is a pure read, so it
+   * is safe on a discuss turn by construction.
+   */
+  const fileTools = createFileTools(fileToolContext);
+
   const tools = (
     toolPolicy.toolset === 'creation'
-      ? { ...referenceTools, ...createRepairTool() }
+      ? { ...fileTools, ...referenceTools, ...createRepairTool() }
       : toolPolicy.toolset === 'skills-only'
-        ? { ...createSkillTools(toolContext), ...referenceTools, ...researchTools, ...createRepairTool() }
+        ? { ...fileTools, ...createSkillTools(toolContext), ...referenceTools, ...researchTools, ...createRepairTool() }
         : {
+            ...fileTools,
             ...createSkillTools(toolContext),
             ...referenceTools,
             ...mcpRelayTools,
