@@ -81,14 +81,6 @@ const funded: SessionState = {
           available: true,
           serveable: true,
         },
-        {
-          id: 'supermax',
-          label: 'SuperMax',
-          model: 'claude-fable-5',
-          minimumCredits: 1_500,
-          available: true,
-          serveable: true,
-        },
       ],
     },
   },
@@ -239,29 +231,29 @@ describe('ModelTierPill — the first-build lock', () => {
    * property, and the half that was NOT pinned.
    *
    * Measured: keeping the creation-turn branch and dropping only the `canUseTier` check left all 4,143
-   * tests green, while a user who had selected SuperMax and then spent down below its threshold saw
-   * "Fable 5" on the pill and got Sonnet 5 on their next build. That is the live mid-session case —
+   * tests green, while a user who had selected a paid rung and then spent down below its threshold saw
+   * that rung's model on the pill and got Sonnet 5 on their next build. That is the live mid-session case —
    * `applySettlement` re-locks a rung as the balance falls after every generation — so it is the more
    * likely of the two directions, and it is exactly what the component's own doc comment forbids.
    */
   it('names the STANDARD model once the balance no longer clears the selected rung', () => {
-    modelTierStore.set('supermax');
+    modelTierStore.set('premium');
     sessionStore.set({ ...funded, credits: { ...funded.credits, balance: 500 } });
 
     render(<ModelTierPill />);
 
     expect(label()).toContain('Sonnet 5');
-    expect(label(), 'the pill must never name a model the next build will not run').not.toContain('Fable');
+    expect(label(), 'the pill must never name a model the next build will not run').not.toContain('Opus');
     expect(locked(), 'and it must say so — the selected rung is not what runs').toBe(true);
   });
 
-  /* CONTROL — the same selection at a balance that DOES clear it really does name Fable 5. */
-  it('CONTROL — names the SuperMax model when the balance clears its threshold', () => {
-    modelTierStore.set('supermax');
+  /* CONTROL — the same selection at a balance that DOES clear it really does name the paid model. */
+  it('CONTROL — names the Premium model when the balance clears its threshold', () => {
+    modelTierStore.set('premium');
 
     render(<ModelTierPill />);
 
-    expect(label()).toContain('Fable 5');
+    expect(label()).toContain('Opus 5');
     expect(locked()).toBe(false);
   });
 
@@ -373,12 +365,12 @@ describe('ModelTierPill — the first-build lock', () => {
         modelTiers: {
           ...funded.credits.modelTiers,
           tiers: funded.credits.modelTiers.tiers.map((tier) =>
-            tier.id === 'supermax' ? { ...tier, model: 'gemini-3-5-flash' } : tier,
+            tier.id === 'premium' ? { ...tier, model: 'gemini-3-5-flash' } : tier,
           ),
         },
       },
     });
-    modelTierStore.set('supermax');
+    modelTierStore.set('premium');
     render(<ModelTierPill />);
 
     expect(label()).toContain('Gemini 3.5 Flash');

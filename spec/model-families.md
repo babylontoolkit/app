@@ -9,8 +9,9 @@
 > proxy on the `codex` or `gemini` families — the wires, the dispatcher, the billing and the delivery
 > table are unit-pinned and probe-measured, the full request path is not. Output QUALITY on those
 > families is **unevaluated**: every skill, brief and measurement in this repo is Claude-tuned, and
-> there are no output-quality evals at all. No rung has been reassigned; `LLM_MODEL`,
-> `PREMIUM_MODEL` and `SUPERMAX_MODEL` all still name Claude models.
+> there are no output-quality evals at all. No rung has been reassigned; `LLM_MODEL` and
+> `PREMIUM_MODEL` both still name Claude models. (`SUPERMAX_MODEL` was retired with its rung on
+> 2026-08-08 — §4.6.1a.)
 
 ---
 

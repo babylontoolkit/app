@@ -16,8 +16,13 @@
  *    the server's `resolveTierId`.
  *  - **Two stores disagreeing.** `premiumModelStore` is a `computed` VIEW of `modelTierStore`, not a
  *    second atom, so a picker and a pill cannot answer "what did the user pick?" differently. Test
- *    group 7 pins it as a view, including the case a naive `tier !== 'standard'` implementation gets
- *    wrong (SuperMax is not Premium).
+ *    group 7 pins it as a view.
+ *
+ * 🔴 **A STORED `'supermax'` IS NOW A HOSTILE VALUE (2026-08-08).** The rung was retired, so browsers
+ * that picked it still hold the string. `isModelTierId` reads the shipping `MODEL_TIER_IDS`, so it
+ * coerces to `'standard'` by construction — the safe direction, and pinned below in group 4 rather
+ * than left to be inferred, because the alternative reading ("map it to the nearest surviving paid
+ * rung") is the helpful-looking one that spends money the user did not ask for this session.
  *
  * ⚠️ THE SEAM. `getInitialSettings()` runs at MODULE LOAD, so the stored value is read exactly once,
  * when `settings.ts` is first imported. A test cannot seed `localStorage` after importing and expect
@@ -135,9 +140,9 @@ describe('the pre-ladder boolean migrates once, on first read', () => {
     }
   });
 
-  it('the migration never invents a rung above premium', async () => {
-    // The old boolean could only ever mean "premium". Nothing about it can select SuperMax.
-    expect(await tierFor({ [LEGACY_PREMIUM_KEY]: 'true' })).not.toBe('supermax');
+  it('the migration lands on premium exactly, never on another rung', async () => {
+    // The old boolean could only ever mean "premium" — it is not a licence to pick any paid rung.
+    expect(await tierFor({ [LEGACY_PREMIUM_KEY]: 'true' })).toBe('premium');
   });
 });
 
@@ -156,8 +161,21 @@ describe('the new key is authoritative whenever it exists', () => {
     expect(await tierFor({ [MODEL_TIER_KEY]: 'standard', [LEGACY_PREMIUM_KEY]: 'true' })).toBe('standard');
   });
 
-  it("modelTier: 'supermax' beats a stale premiumModelEnabled: 'true'", async () => {
-    expect(await tierFor({ [MODEL_TIER_KEY]: 'supermax', [LEGACY_PREMIUM_KEY]: 'true' })).toBe('supermax');
+  it("modelTier: 'premium' beats a stale premiumModelEnabled: '' (the new key wins either way)", async () => {
+    expect(await tierFor({ [MODEL_TIER_KEY]: 'premium', [LEGACY_PREMIUM_KEY]: '' })).toBe('premium');
+  });
+
+  /*
+   * 🔴 THE RETIRED RUNG, WHICH IS THE SHARPEST FORM OF THIS RULE (2026-08-08).
+   *
+   * A browser that picked SuperMax before it was retired holds BOTH a `modelTier: 'supermax'` and,
+   * quite possibly, a stale legacy `true`. The retired value is unrecognised, so the reader must land
+   * on `'standard'` — and specifically must NOT fall through to the legacy key and hand that user
+   * `'premium'`, which is a paid rung they did not choose, resurrected by a retirement.
+   */
+  it("a RETIRED modelTier: 'supermax' lands on standard — never back on the legacy premium", async () => {
+    expect(await tierFor({ [MODEL_TIER_KEY]: 'supermax', [LEGACY_PREMIUM_KEY]: 'true' })).toBe('standard');
+    expect(await tierFor({ [MODEL_TIER_KEY]: 'supermax' })).toBe('standard');
   });
 
   it("an UNRECOGNISED new key beats the legacy key too — it lands on standard, not on 'premium'", async () => {
@@ -192,7 +210,6 @@ describe('every rung on the ladder round-trips, bare or JSON-quoted', () => {
      * would be a silent DOWNGRADE of a value the user plainly meant — the one direction this reader is
      * allowed to be lenient in, because it can only ever land on a rung the ladder already names.
      */
-    expect(await tierFor({ [MODEL_TIER_KEY]: '"supermax"' })).toBe('supermax');
     expect(await tierFor({ [MODEL_TIER_KEY]: '"premium"' })).toBe('premium');
     expect(await tierFor({ [MODEL_TIER_KEY]: '"standard"' })).toBe('standard');
   });
@@ -213,6 +230,8 @@ describe('an unrecognised stored value falls to standard, never up and never fat
     ['an empty string', ''],
     ['whitespace', '   '],
     ['the right rung in the wrong case', 'PREMIUM'],
+    ['the RETIRED supermax rung', 'supermax'],
+    ['the retired rung, JSON-quoted', '"supermax"'],
     ['the right rung padded', ' premium '],
     ['malformed JSON', '{'],
     ['a truncated quoted string', '"premium'],
@@ -250,7 +269,7 @@ describe('an unrecognised stored value falls to standard, never up and never fat
      * health forever.
      */
     expect(await tierFor({ [MODEL_TIER_KEY]: 'premium' })).toBe('premium');
-    expect(await tierFor({ [MODEL_TIER_KEY]: 'supermax' })).toBe('supermax');
+    expect(await tierFor({ [MODEL_TIER_KEY]: 'standard' })).toBe('standard');
   });
 
   it('a prototype-pollution payload in the key does not pollute Object.prototype', async () => {
@@ -275,10 +294,10 @@ describe('updateModelTier persists, and writes the NEW key only', () => {
     const storage = fakeStorage();
     const { updateModelTier, modelTierStore } = await loadSettings(storage);
 
-    updateModelTier('supermax');
+    updateModelTier('premium');
 
-    expect(storage.getItem(MODEL_TIER_KEY)).toBe('supermax');
-    expect(modelTierStore.get()).toBe('supermax');
+    expect(storage.getItem(MODEL_TIER_KEY)).toBe('premium');
+    expect(modelTierStore.get()).toBe('premium');
   });
 
   it('leaves an existing legacy key exactly as it found it', async () => {
@@ -299,7 +318,7 @@ describe('updateModelTier persists, and writes the NEW key only', () => {
     const storage = fakeStorage();
     const { updateModelTier } = await loadSettings(storage);
 
-    for (const tier of ['premium', 'supermax', 'standard'] as const) {
+    for (const tier of ['premium', 'standard'] as const) {
       updateModelTier(tier);
       expect(storage.getItem(LEGACY_PREMIUM_KEY), `after updateModelTier('${tier}')`).toBeNull();
     }
@@ -327,21 +346,21 @@ describe('updateModelTier persists, and writes the NEW key only', () => {
  * ============================================================================================
  */
 describe('the chosen rung survives a reload', () => {
-  it('updateModelTier(supermax) → reload → supermax', async () => {
+  it('updateModelTier(premium) → reload → premium', async () => {
     const storage = fakeStorage();
 
     const first = await loadSettings(storage);
-    first.updateModelTier('supermax');
+    first.updateModelTier('premium');
 
     const reloaded = await loadSettings(storage);
 
     expect(reloaded).not.toBe(first); // CONTROL: the reload really produced a new module instance.
-    expect(reloaded.modelTierStore.get()).toBe('supermax');
-    expect(reloaded.premiumModelStore.get()).toBe(false);
+    expect(reloaded.modelTierStore.get()).toBe('premium');
+    expect(reloaded.premiumModelStore.get()).toBe(true);
   });
 
   it('every rung survives its own reload', async () => {
-    for (const tier of ['standard', 'premium', 'supermax'] as const) {
+    for (const tier of ['standard', 'premium'] as const) {
       const storage = fakeStorage();
 
       const first = await loadSettings(storage);
@@ -372,26 +391,24 @@ describe('the chosen rung survives a reload', () => {
  *
  * Kept only while `PremiumToggle`'s callers migrate (T11). The property that matters is that it cannot
  * hold an opinion of its own: it tracks `modelTierStore` live, and it is true for EXACTLY one rung.
- * A naive `tier !== 'standard'` reports SuperMax as premium — which is not a cosmetic mislabel, it is a
- * pill naming the wrong model and a legacy caller requesting the wrong rung.
+ *
+ * ⚠️ Its sharpest case went with the third rung (2026-08-08): `tier !== 'standard'` and
+ * `tier === 'premium'` are indistinguishable on a two-rung ladder, so the assertion that a naive
+ * implementation fails cannot currently be written. Stated in terms of the RUNG rather than of
+ * "not standard" anyway, so it starts discriminating again the moment a rung is added.
  * ============================================================================================
  */
 describe('premiumModelStore is a derived view of modelTierStore', () => {
-  it('is true for premium and false for BOTH standard and supermax', async () => {
-    const { modelTierStore, premiumModelStore } = await loadSettings(fakeStorage());
+  it('is true for exactly the premium rung', async () => {
+    const { MODEL_TIER_IDS, modelTierStore, premiumModelStore } = await loadSettings(fakeStorage());
 
-    modelTierStore.set('standard');
-    expect(premiumModelStore.get()).toBe(false);
+    for (const tier of MODEL_TIER_IDS) {
+      modelTierStore.set(tier);
+      expect(premiumModelStore.get(), `rung ${tier}`).toBe(tier === 'premium');
+    }
 
-    modelTierStore.set('premium');
-    expect(premiumModelStore.get()).toBe(true);
-
-    /*
-     * 🔴 The assertion a `tier !== 'standard'` implementation fails. SuperMax is a rung ABOVE premium,
-     * not a synonym for it.
-     */
-    modelTierStore.set('supermax');
-    expect(premiumModelStore.get()).toBe(false);
+    // CONTROL: the loop really ran over a ladder with a premium rung on it.
+    expect(MODEL_TIER_IDS as readonly string[]).toContain('premium');
   });
 
   it('tracks a change made through updateModelTier, without a second write', async () => {
@@ -399,9 +416,6 @@ describe('premiumModelStore is a derived view of modelTierStore', () => {
 
     updateModelTier('premium');
     expect(premiumModelStore.get()).toBe(true);
-
-    updateModelTier('supermax');
-    expect(premiumModelStore.get()).toBe(false);
 
     updateModelTier('standard');
     expect(premiumModelStore.get()).toBe(false);
@@ -420,7 +434,7 @@ describe('premiumModelStore is a derived view of modelTierStore', () => {
     const unsubscribe = premiumModelStore.subscribe((value) => seen.push(value));
 
     updateModelTier('premium');
-    updateModelTier('supermax');
+    updateModelTier('standard');
     unsubscribe();
 
     // The first entry is the subscribe-time value; what matters is that the changes arrived at all.
@@ -440,15 +454,15 @@ describe('premiumModelStore is a derived view of modelTierStore', () => {
     expect(premiumModelStore.get()).toBe(false);
   });
 
-  it('updatePremiumModel(false) from supermax lands on standard, not on a half-state', async () => {
+  it('updatePremiumModel(false) from a paid rung lands on standard, not on a half-state', async () => {
     /*
-     * A legacy caller switching "premium" off while the user is on SuperMax. The delegate is defined in
-     * terms of the ladder, so the answer is the bottom rung — the cheap direction, and the only one that
-     * leaves the two stores agreeing.
+     * A legacy caller switching "premium" off. The delegate is defined in terms of the ladder, so the
+     * answer is the bottom rung — the cheap direction, and the only one that leaves the two stores
+     * agreeing.
      */
     const { updateModelTier, updatePremiumModel, modelTierStore } = await loadSettings(fakeStorage());
 
-    updateModelTier('supermax');
+    updateModelTier('premium');
     updatePremiumModel(false);
 
     expect(modelTierStore.get()).toBe('standard');

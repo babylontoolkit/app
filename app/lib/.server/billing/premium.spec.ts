@@ -2,8 +2,9 @@
  * The PREMIUM model tier (SPEC §4.6.1) and the MODEL TIER LADDER decision (§4.6.1a) — money-path tests.
  *
  * Three things are pinned here, all of which fail SILENTLY:
- *  - `decideModelTier`, the pure eligibility rule for the three-rung ladder (Standard · Premium ·
- *    SuperMax). It spends a user's credits at a HIGHER rate without a second confirmation, so — like
+ *  - `decideModelTier`, the pure eligibility rule for the ladder (Standard · Premium since 2026-08-08;
+ *    a third rung, SuperMax, existed for a week before that). It spends a user's credits at a HIGHER
+ *    rate without a second confirmation, so — like
  *    `auto-repair` and `restore-target` — a wrong answer bills without asking. Its two silent
  *    directions are not symmetrical: refusing a rung the user paid for is annoying, while GRANTING a
  *    rung they did not choose (or could not afford) is money out of their balance with nothing
@@ -13,13 +14,24 @@
  *    so the pre-ladder cases stay exactly as they were and a bridging test pins the two in agreement.
  *  - `modelTiersSessionHint`, the `/api/me` rendering hint for the WHOLE ladder — the generalization of
  *    `premiumSessionHint`. It has the same two silent directions as its predecessor plus one the
- *    single-toggle version could not have: with three rungs there are three independent ways for an
- *    operator to reach the misconfigured state, and a hint that reports a broken rung as available
- *    renders an enabled picker row that hard-fails the moment it is used.
+ *    single-toggle version could not have: every rung is an independent way for an operator to reach
+ *    the misconfigured state, and a hint that reports a broken rung as available renders an enabled
+ *    picker row that hard-fails the moment it is used.
  *  - the premium price + threshold config: since 2026-07-18 the PRICE side lives in the marketplace
  *    price list (`market-price-store.ts`), so what is pinned is that the tier prices from the ACTIVE
  *    list, that a `PREMIUM_MODEL` the list does not price is REFUSED, and that the retired
  *    `PREMIUM_*_DOLLARS` vars stop the show rather than being silently ignored.
+ *
+ * ⚠️ **COVERAGE HONESTLY LOST WHEN THE THIRD RUNG WENT (2026-08-08).** Two properties here could only
+ * be stated against TWO paid rungs and are now unwritable: "1,499 credits clears Premium and misses
+ * SuperMax, so it declines to STANDARD and never steps down one rung", and "one broken selector does
+ * not take a healthy sibling rung down". Neither was replaced by a weaker version pretending to be the
+ * same test. A hypothetical fixture rung does not work either, and the reason is worth knowing:
+ * `decideModelTier` validates the requested id against `MODEL_TIER_IDS` BEFORE it consults the ladder
+ * it was handed — the table is the whitelist, deliberately, because that is what stops a browser body
+ * naming a rung into existence. So the ladder these functions accept is not free-form, and a fake rung
+ * resolves to `standard` no matter what the fixture says. What survives is every property expressible
+ * on one paid rung; if a rung ever returns, restore the two above.
  *
  * ⚠️ `decideModelTier` is PURE and reads no environment, so every ladder case below passes its ladder in
  * explicitly. That is not stylistic: this repo's `env()` falls back to `process.env` and vitest loads
@@ -68,13 +80,12 @@ import { getPremiumModel } from '~/lib/.server/agent/config';
 /**
  * Every LADDER var, so a case that means to test the DEFAULT is not reading `.env.local` (§oauth.spec).
  *
- * 🔴 THE `SUPERMAX_*` PAIR BELONGS HERE BECAUSE THE TWO RUNGS NOW SHARE ONE CODE PATH (§4.6.1a).
+ * 🔴 THE RETIRED VARS BELONG HERE TOO — MORE SO AFTER THEIR RETIREMENT (§4.6.1a, 2026-08-08).
  *
- * The list was written when premium was the only paid tier, so its four vars were the whole precedence
- * chain. `getPremiumTier` is now `getModelTier('premium', …)` over a ladder that `providerRates` walks
- * as a unit — one broken selector on either rung changes the injected rate tables that the price
- * assertions below grade against. Leaving SuperMax unscrubbed is the same trap the file header warns
- * about, one rung to the right: it fails on the machine of whoever configured SuperMax, with CI green.
+ * `ENABLE_EXTENDED_MODELS` and the `SUPERMAX_*` pair are no longer read; they are REFUSED. So one left
+ * over in a developer's `.env.local` — and an upgrading machine is precisely where they linger — makes
+ * `getModelTier` throw through every price assertion below, failing on that machine with CI green.
+ * Retiring a variable is the strongest reason to keep it in a scrub list, not a reason to drop it.
  *
  * When you add a variable to a precedence chain, add it to every scrub list that already names its
  * siblings.
@@ -85,8 +96,11 @@ function stubPremium(vars: Partial<Record<string, string>> = {}) {
     'PREMIUM_INPUT_DOLLARS',
     'PREMIUM_OUTPUT_DOLLARS',
     'PREMIUM_MINIMUM_CREDITS',
-    'SUPERMAX_MODEL',
+    'ENABLE_PREMIUM_MODEL',
+
+    // Retired 2026-08-08 and REFUSED if set — see the note above.
     'ENABLE_EXTENDED_MODELS',
+    'SUPERMAX_MODEL',
     'SUPERMAX_MINIMUM_CREDITS',
   ]) {
     vi.stubEnv(key, (vars[key] ?? undefined) as unknown as string);
@@ -119,24 +133,22 @@ afterEach(() => {
 /**
  * The ladder as the decision needs to see it, passed in explicitly by every case (see the file header).
  *
- * The numbers mirror the shipping defaults — premium 1200, supermax 1500, both first-build-locked, both
- * serveable — because the properties under test are RELATIVE (a balance that clears one rung and not the
- * other is only expressible against two different thresholds), and because the free signup grant (1000)
- * sitting below both is the arrangement the thresholds exist to protect.
+ * The number mirrors the shipping default (premium 1200, first-build-locked, serveable), and the free
+ * signup grant (1000) sitting below it is the arrangement the threshold exists to protect. `ABOVE` and
+ * `BELOW` are named rather than written inline so a boundary case says which side of the line it is on.
  */
 const PREMIUM_MINIMUM = 1200;
-const SUPERMAX_MINIMUM = 1500;
+const ABOVE_PREMIUM = PREMIUM_MINIMUM + 300;
+const BELOW_PREMIUM = PREMIUM_MINIMUM - 1;
 
 const LADDER: readonly ModelTierOption[] = [
   { id: 'premium', label: 'Premium', minimumCredits: PREMIUM_MINIMUM, firstBuildLocked: true, serveable: true },
-  { id: 'supermax', label: 'SuperMax', minimumCredits: SUPERMAX_MINIMUM, firstBuildLocked: true, serveable: true },
 ];
 
 /** `standard` is free and has no row — it is short-circuited before the ladder is ever consulted. */
 const THRESHOLDS: Record<ModelTierId, number> = {
   standard: 0,
   premium: PREMIUM_MINIMUM,
-  supermax: SUPERMAX_MINIMUM,
 };
 
 describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
@@ -154,16 +166,7 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
    *
    * The expectation is spelled out as an independent branch rather than by calling the function again.
    */
-  const BALANCES = [
-    0,
-    PREMIUM_MINIMUM - 1,
-    PREMIUM_MINIMUM,
-    PREMIUM_MINIMUM + 1,
-    SUPERMAX_MINIMUM - 1,
-    SUPERMAX_MINIMUM,
-    SUPERMAX_MINIMUM + 1,
-    10_000_000,
-  ];
+  const BALANCES = [0, BELOW_PREMIUM, PREMIUM_MINIMUM, PREMIUM_MINIMUM + 1, ABOVE_PREMIUM, 10_000_000];
 
   function expectedDecision(requested: ModelTierId, balance: number, isFirstBuildTurn: boolean): ModelTierDecision {
     if (requested === 'standard') {
@@ -196,32 +199,29 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
   /*
    * 🔴 THE RULE THE CROSS-PRODUCT EXISTS FOR, asserted on its own so a failure names itself.
    *
-   * 1,499 credits clears Premium (1200) and misses SuperMax (1500) by one. "Step down to the best rung
-   * they can afford" is the helpful-looking version of this decision and it is the expensive direction:
-   * the user did not ask for Premium, and running it bills them more than the standard model they would
-   * have accepted as the fallback. The tier is asserted BY NAME — `not.toBe('supermax')` would pass on
-   * the very bug this pins.
+   * A rung the user cannot afford declines to STANDARD, by name. "Step down to the best rung they can
+   * afford" is the helpful-looking version of this decision and it is the expensive direction: the user
+   * did not ask for the cheaper paid rung, and running it bills them more than the standard model they
+   * would have accepted as the fallback. The control below is what makes the refusal mean something —
+   * the same rung, the same ladder, one credit the other side of the line.
+   *
+   * ⚠️ This was a two-rung test until 2026-08-08 ("1,499 clears Premium and misses SuperMax, so it
+   * lands on Standard and not on Premium"), which stated the never-step-down rule directly. With one
+   * paid rung there is no rung to step down TO, so the strong form is unwritable — see the file header.
+   * What remains is the boundary, which is still the money question for a single rung.
    */
-  it('declines SuperMax at 1,499 credits to STANDARD — never down one rung to Premium', () => {
-    const decision = decideModelTier({ requested: 'supermax', balance: SUPERMAX_MINIMUM - 1, tiers: LADDER });
-
-    expect(decision.tier).toBe('standard');
-    expect(decision.tier).not.toBe('premium');
-    expect(decision.reason).toBe('below_minimum');
-  });
-
-  /*
-   * The same shape one rung down, so the rule is not accidentally satisfied by "supermax is the top".
-   * A balance below every threshold has no rung to step down to, and a balance above every threshold is
-   * the control proving the requested rung really can be granted from this same ladder.
-   */
-  it('declines Premium below its own threshold, and grants the rung actually requested above it', () => {
-    expect(decideModelTier({ requested: 'premium', balance: PREMIUM_MINIMUM - 1, tiers: LADDER })).toEqual({
+  it('declines a rung below its threshold to STANDARD, and grants it above', () => {
+    expect(decideModelTier({ requested: 'premium', balance: BELOW_PREMIUM, tiers: LADDER })).toEqual({
       tier: 'standard',
       reason: 'below_minimum',
     });
 
-    expect(decideModelTier({ requested: 'premium', balance: SUPERMAX_MINIMUM, tiers: LADDER })).toEqual({
+    expect(decideModelTier({ requested: 'premium', balance: PREMIUM_MINIMUM, tiers: LADDER })).toEqual({
+      tier: 'premium',
+      reason: 'sufficient_credits',
+    });
+
+    expect(decideModelTier({ requested: 'premium', balance: ABOVE_PREMIUM, tiers: LADDER })).toEqual({
       tier: 'premium',
       reason: 'sufficient_credits',
     });
@@ -234,8 +234,8 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
    * arriving. The balance is deliberately absurd here: this lock must not be purchasable.
    */
   it('locks every paid rung on a first build turn at ANY balance', () => {
-    for (const requested of ['premium', 'supermax'] as const) {
-      for (const balance of [0, PREMIUM_MINIMUM, SUPERMAX_MINIMUM, 10_000_000, Number.MAX_SAFE_INTEGER]) {
+    for (const requested of ['premium'] as const) {
+      for (const balance of [0, PREMIUM_MINIMUM, ABOVE_PREMIUM, 10_000_000, Number.MAX_SAFE_INTEGER]) {
         expect(decideModelTier({ requested, balance, tiers: LADDER, isFirstBuildTurn: true })).toEqual({
           tier: 'standard',
           reason: 'creation_turn',
@@ -247,8 +247,8 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
   /* The control for the lock: it is the TURN that refuses, not the rung being unreachable in general. */
   it('CONTROL — the same rung at the same balance runs on an edit turn', () => {
     expect(
-      decideModelTier({ requested: 'supermax', balance: 10_000_000, tiers: LADDER, isFirstBuildTurn: false }),
-    ).toEqual({ tier: 'supermax', reason: 'sufficient_credits' });
+      decideModelTier({ requested: 'premium', balance: 10_000_000, tiers: LADDER, isFirstBuildTurn: false }),
+    ).toEqual({ tier: 'premium', reason: 'sufficient_credits' });
   });
 
   /* A rung whose flag is false is not locked — the flag is per-tier so relaxing it is config, not surgery. */
@@ -273,10 +273,16 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
     ['an empty string', ''],
     ['undefined', undefined],
     ['a whitespace-only string', '   '],
-    ['the wrong case', 'SUPERMAX'],
+    ['the wrong case', 'PREMIUM'],
     ['a trailing space', 'premium '],
     ['a leading space', ' premium'],
-    ['a near-miss', 'super-max'],
+    ['a near-miss', 'premiun'],
+
+    /*
+     * The RETIRED rung id (2026-08-08). A tab open across the deploy still sends it, and it is now
+     * exactly what this table describes: a string that is not a tier id.
+     */
+    ['the retired supermax rung', 'supermax'],
     ['a truthy non-tier', 'true'],
   ])('resolves %s to standard rather than upward', (_label, requested) => {
     expect(decideModelTier({ requested, balance: 10_000_000, tiers: LADDER })).toEqual({
@@ -291,22 +297,28 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
    * at `standard`, so the user sees no difference and only the generation log can tell them apart.
    */
   it('reports unavailable for a valid rung that is absent from the ladder', () => {
-    expect(decideModelTier({ requested: 'supermax', balance: 10_000_000, tiers: [LADDER[0]] })).toEqual({
+    expect(decideModelTier({ requested: 'premium', balance: 10_000_000, tiers: [] })).toEqual({
       tier: 'standard',
       reason: 'unavailable',
     });
   });
 
+  /*
+   * ⚠️ The CONTROL this case used to carry — "the healthy sibling rung on the same ladder is
+   * unaffected, so one broken selector is not an outage" — needed a second paid rung and went with it
+   * (2026-08-08, see the file header). The property still holds structurally: `getModelTiers` resolves
+   * each rung inside its own try/catch, which `model-tiers.spec.ts` pins one layer up.
+   */
   it('reports unavailable for a rung present but not serveable', () => {
-    const broken: readonly ModelTierOption[] = [LADDER[0], { ...LADDER[1], serveable: false }];
+    const broken: readonly ModelTierOption[] = [{ ...LADDER[0], serveable: false }];
 
-    expect(decideModelTier({ requested: 'supermax', balance: 10_000_000, tiers: broken })).toEqual({
+    expect(decideModelTier({ requested: 'premium', balance: 10_000_000, tiers: broken })).toEqual({
       tier: 'standard',
       reason: 'unavailable',
     });
 
-    // CONTROL: the healthy rung on the same ladder is unaffected — one broken selector is not an outage.
-    expect(decideModelTier({ requested: 'premium', balance: 10_000_000, tiers: broken }).tier).toBe('premium');
+    // CONTROL: the same ladder with the rung healthy really does grant it — the refusal is `serveable`.
+    expect(decideModelTier({ requested: 'premium', balance: 10_000_000, tiers: LADDER }).tier).toBe('premium');
   });
 
   it('reports unavailable, not creation_turn, for a broken rung on a first build turn', () => {
@@ -317,9 +329,9 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
      */
     expect(
       decideModelTier({
-        requested: 'supermax',
+        requested: 'premium',
         balance: 10_000_000,
-        tiers: [LADDER[0], { ...LADDER[1], serveable: false }],
+        tiers: [{ ...LADDER[0], serveable: false }],
         isFirstBuildTurn: true,
       }),
     ).toEqual({ tier: 'standard', reason: 'unavailable' });
@@ -327,7 +339,7 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
 
   /* An empty ladder is the no-paid-rungs-configured deploy: every paid request degrades, nothing throws. */
   it('degrades every paid request on an empty ladder', () => {
-    for (const requested of ['premium', 'supermax'] as const) {
+    for (const requested of ['premium'] as const) {
       expect(decideModelTier({ requested, balance: 10_000_000, tiers: [] })).toEqual({
         tier: 'standard',
         reason: 'unavailable',
@@ -401,7 +413,7 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
   });
 
   it('a NaN balance is never rich enough', () => {
-    expect(decideModelTier({ requested: 'supermax', balance: NaN, tiers: LADDER })).toEqual({
+    expect(decideModelTier({ requested: 'premium', balance: NaN, tiers: LADDER })).toEqual({
       tier: 'standard',
       reason: 'below_minimum',
     });
@@ -516,11 +528,8 @@ describe('decidePremium — the eligibility rule', () => {
       decideModelTier({ requested: 'premium', balance: 320, tiers: [{ ...LADDER[0], minimumCredits: min }] }),
     ).toEqual({ tier: 'standard', reason: 'below_minimum' });
     expect(
-      decideModelTier({ requested: 'supermax', balance: 320, tiers: [{ ...LADDER[1], minimumCredits: min }] }),
-    ).toEqual({ tier: 'standard', reason: 'below_minimum' });
-    expect(
-      decideModelTier({ requested: 'supermax', balance: 0, tiers: [{ ...LADDER[1], minimumCredits: 0 }] }).tier,
-    ).toBe('supermax');
+      decideModelTier({ requested: 'premium', balance: 0, tiers: [{ ...LADDER[0], minimumCredits: 0 }] }).tier,
+    ).toBe('premium');
   });
 
   it('names the threshold in the declined notice', () => {
@@ -599,24 +608,27 @@ describe('no enforcement bypass exists to be taken (§4.6.1 structural tripwire)
 /**
  * `tierDeclinedNotice` — the message a user sees when they asked for a rung and got the standard model.
  *
- * It takes the LABEL because the ladder has more than one paid rung: a hardcoded "premium" would tell a
- * SuperMax user the wrong model AND the wrong threshold, which is worse than saying nothing at all.
+ * It takes the LABEL rather than reading one, because the ladder is a LIST whose length has changed
+ * twice: a hardcoded "premium" would tell a future rung's user the wrong model AND the wrong threshold,
+ * which is worse than saying nothing at all. The label is a plain string, so this property is still
+ * fully testable with one paid rung shipping — the pair of cases IS the test, since either one alone
+ * passes against a function that hardcodes whichever label that case happens to use.
  */
 describe('tierDeclinedNotice', () => {
   it('names the rung the user asked for and formats its threshold', () => {
-    const notice = tierDeclinedNotice('SuperMax', 1500);
-
-    expect(notice).toContain('SuperMax');
-    expect(notice).toContain('1,500');
-    expect(notice.toLowerCase()).not.toContain('premium');
-  });
-
-  it('names a different rung when a different rung was declined', () => {
     const notice = tierDeclinedNotice('Premium', 1200);
 
     expect(notice).toContain('Premium');
     expect(notice).toContain('1,200');
-    expect(notice.toLowerCase()).not.toContain('supermax');
+    expect(notice.toLowerCase()).not.toContain('turbo');
+  });
+
+  it('names a different rung when a different rung was declined', () => {
+    const notice = tierDeclinedNotice('Turbo', 1500);
+
+    expect(notice).toContain('Turbo');
+    expect(notice).toContain('1,500');
+    expect(notice.toLowerCase()).not.toContain('premium');
   });
 
   /* The deprecated wrapper is the premium-only callers' door until T6 migrates them — same string. */
@@ -627,9 +639,9 @@ describe('tierDeclinedNotice', () => {
 
 describe('the premium tier config', () => {
   /*
-   * Premium is the MIDDLE rung since the ladder shipped (§4.6.1a): Standard · Premium · SuperMax.
-   * Fable 5 moved up to SuperMax and Opus 5 took this slot, so the in-code default named here changed
-   * — the rules around it did not.
+   * Premium is the ONLY paid rung since 2026-08-08 (§4.6.1a). Its in-code default has moved twice —
+   * Fable 5, then Opus 5 — while the rules around it did not, which is why the value is pinned here
+   * literally and the rules are pinned separately.
    */
   it('defaults to Opus 5 at the list price with a 1200-credit minimum, from code — no env required', () => {
     stubPremium();
@@ -754,24 +766,24 @@ describe('the premium model is priceable on every provider', () => {
 
   /*
    * 🔴 THE INJECTION IS SCOPED TO THE RUNGS THE OPERATOR SELECTED — and this is the case that makes
-   * `stubPremium`'s `SUPERMAX_*` half load-bearing rather than decorative (§4.6.1a, T14).
+   * `stubPremium`'s scrub of `PREMIUM_MODEL` load-bearing rather than decorative (§4.6.1a, T14).
    *
-   * `providerRates` walks the WHOLE ladder and fills a gap for every rung, so SuperMax's selector can
-   * make a model priceable on Anthropic just as readily as Premium's can. That is correct behaviour and
-   * precisely why it is dangerous here: an unpriced model does not bill as free, it bills at the most
-   * expensive row we know of (`ratesFor`'s fallback), so "is this model priced?" is a question whose
-   * answer must never depend on which rung an operator happened to point where.
+   * `providerRates` walks the WHOLE ladder and fills a gap for every rung, so a rung's selector can make
+   * a model priceable on Anthropic. That is correct behaviour and precisely why it is dangerous here: an
+   * unpriced model does not bill as free, it bills at the most expensive row we know of (`ratesFor`'s
+   * fallback), so "is this model priced?" is a question whose answer must never depend on where an
+   * operator happened to point a selector.
    *
    * `claude-opus-4-7` is the probe because it is priced on the KIE-shaped Marketplace list and has NO
    * baked Anthropic row — the one shape where filling and overwriting are distinguishable. With the
    * ladder at its defaults nothing selects it, so no rung injects it and Anthropic still cannot price
-   * it. Set `SUPERMAX_MODEL=claude-opus-4-7` and the SuperMax rung injects the row, the assertion below
-   * inverts, and the failure lands on the machine of whoever configured SuperMax — with CI green,
-   * blaming code they never touched. That is the `oauth.spec.ts` trap one rung to the right, and the
-   * SAME leak `billing.spec.ts` records having fired twice already.
+   * it. Set `PREMIUM_MODEL=claude-opus-4-7` and the rung injects the row, the assertion below inverts,
+   * and the failure lands on the machine of whoever configured it — with CI green, blaming code they
+   * never touched. That is the `oauth.spec.ts` trap, and the SAME leak `billing.spec.ts` records having
+   * fired twice already.
    *
    * The control half runs second and is what stops this from being a test that passes because the
-   * injection is broken: pointed at the probe deliberately, SuperMax must genuinely price it.
+   * injection is broken: pointed at the probe deliberately, the rung must genuinely price it.
    */
   it('injects ONLY for rungs the operator selected — an unselected model stays unpriced on Anthropic', () => {
     stubPremium();
@@ -782,12 +794,12 @@ describe('the premium model is priceable on every provider', () => {
     expect(providerRates({}).Anthropic).not.toHaveProperty('claude-opus-4-7');
 
     /*
-     * CONTROL — the SuperMax rung really does inject, so the absence above is scope, not a dead lever.
+     * CONTROL — the paid rung really does inject, so the absence above is scope, not a dead lever.
      * The base rates are asserted exactly (they are the billed numbers); the cache rates are compared
      * loosely because they are DERIVED (0.1× read / 2.0× write) and `0.1 * 1.425` is not `0.1425` in
      * IEEE 754 — pinning the float artifact would be pinning arithmetic noise, not a price.
      */
-    stubPremium({ SUPERMAX_MODEL: 'claude-opus-4-7' });
+    stubPremium({ PREMIUM_MODEL: 'claude-opus-4-7' });
 
     const injected = providerRates({}).Anthropic['claude-opus-4-7'];
 
@@ -870,14 +882,13 @@ describe('premiumSessionHint (§4.6.1 — degrade to OFF, never to ON)', () => {
 });
 
 /**
- * `modelTiersSessionHint` (§4.6.1a) — the same `/api/me` guard, generalized to the three-rung ladder.
+ * `modelTiersSessionHint` (§4.6.1a) — the same `/api/me` guard, generalized to the whole ladder.
  *
  * ⚠️ Pure and reads NO environment, so every case below passes the whole ladder in explicitly. That is
  * not stylistic (see the file header): a case that resolved its ladder from config would test whichever
- * SuperMax model and threshold the developer happens to have in `.env.local` rather than the rung this
- * file is about — the `oauth.spec.ts` trap with a second rung's worth of surface area. `stubPremium`
- * now covers both rungs, but a scrub list is a floor under the config cases, not a substitute for a
- * pure function being handed its own inputs.
+ * model and threshold the developer happens to have in `.env.local` rather than the rung this file is
+ * about — the `oauth.spec.ts` trap. `stubPremium` is a floor under the config cases, not a substitute
+ * for a pure function being handed its own inputs.
  *
  * The incident this generalizes is 2026-07-25: `getPremiumTier` was called unguarded inside `/api/me`'s
  * response literal, so an unpriced `PREMIUM_MODEL` — the normal transient state while an operator moves
@@ -900,7 +911,6 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     const rows: ModelTierStatusLike[] = [
       { id: 'standard', label: 'Standard', model: STANDARD_MODEL, minimumCredits: 0, serveable: true },
       { id: 'premium', label: 'Premium', model: 'claude-opus-5', minimumCredits: PREMIUM_MINIMUM, serveable: true },
-      { id: 'supermax', label: 'SuperMax', model: 'claude-fable-5', minimumCredits: SUPERMAX_MINIMUM, serveable: true },
     ];
 
     return rows.map((row) => ({ ...row, ...(overrides[row.id] ?? {}) }));
@@ -924,7 +934,7 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     });
 
     expect(hint.standardModel).toBe(STANDARD_MODEL);
-    expect(hint.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'supermax']);
+    expect(hint.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
     expect(hint.tiers.every((row) => row.available)).toBe(true);
   });
 
@@ -937,20 +947,24 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
    * the moment it is used. Degrading a capability to "off" is honest; degrading it to "on" invents one.
    *
    * The balance is deliberately ENORMOUS — availability must not be recoverable by being rich — and
-   * Premium is asserted AVAILABLE in the same result. A blanket "if anything is broken, lock the
+   * STANDARD is asserted AVAILABLE in the same result. A blanket "if anything is broken, lock the
    * ladder" implementation passes a test that only looks at the broken rung, and it would take the
-   * paid tiers away from every user on the platform because one operator selector was mid-move.
+   * platform away from every user because one operator selector was mid-move.
+   *
+   * ⚠️ Until 2026-08-08 the "not collateral damage" half named a healthy SIBLING PAID rung, which is
+   * the stronger statement; it went with the third rung (see the file header). The free rung is what
+   * remains, and it is the half that matters most — a hint that locks Standard tells a user with no
+   * credits they cannot use the platform at all.
    */
-  it('reports a misconfigured SuperMax UNAVAILABLE at 10,000,000 credits while Premium stays available', () => {
+  it('reports a misconfigured rung UNAVAILABLE at 10,000,000 credits without locking Standard', () => {
     const hint = modelTiersSessionHint({
-      tiers: ladder({ supermax: { serveable: false } }),
+      tiers: ladder({ premium: { serveable: false } }),
       standardModel: STANDARD_MODEL,
       fallbackStandardModel: FALLBACK_STANDARD_MODEL,
       balance: 10_000_000,
     });
 
-    expect(rung(hint, 'supermax').available).toBe(false);
-    expect(rung(hint, 'premium').available, 'one broken selector is not a platform-wide outage').toBe(true);
+    expect(rung(hint, 'premium').available).toBe(false);
     expect(rung(hint, 'standard').available, 'the free rung is never collateral damage').toBe(true);
   });
 
@@ -961,17 +975,17 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
    */
   it('still names a misconfigured rung’s model and threshold so the locked row can be rendered', () => {
     const hint = modelTiersSessionHint({
-      tiers: ladder({ supermax: { serveable: false } }),
+      tiers: ladder({ premium: { serveable: false } }),
       standardModel: STANDARD_MODEL,
       fallbackStandardModel: FALLBACK_STANDARD_MODEL,
       balance: 0,
     });
 
-    expect(rung(hint, 'supermax')).toEqual({
-      id: 'supermax',
-      label: 'SuperMax',
-      model: 'claude-fable-5',
-      minimumCredits: SUPERMAX_MINIMUM,
+    expect(rung(hint, 'premium')).toEqual({
+      id: 'premium',
+      label: 'Premium',
+      model: 'claude-opus-5',
+      minimumCredits: PREMIUM_MINIMUM,
       available: false,
       serveable: false,
     });
@@ -1020,8 +1034,7 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     });
 
     expect(rung(hint, 'standard').available).toBe(true);
-    expect(rung(hint, 'premium').available, 'CONTROL — the paid rungs really are locked at zero').toBe(false);
-    expect(rung(hint, 'supermax').available).toBe(false);
+    expect(rung(hint, 'premium').available, 'CONTROL — the paid rung really is locked at zero').toBe(false);
   });
 
   /* A NaN balance compares false against every threshold, which is the SAFE direction: it locks. */
@@ -1034,7 +1047,6 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     });
 
     expect(rung(hint, 'premium').available).toBe(false);
-    expect(rung(hint, 'supermax').available).toBe(false);
   });
 
   /*
@@ -1157,8 +1169,8 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
       undefined,
       [],
       ladder(),
-      ladder({ premium: { serveable: false }, supermax: { serveable: false } }),
-      [{ ...ladder()[2], minimumCredits: NaN }],
+      ladder({ premium: { serveable: false } }),
+      [{ ...ladder()[1], minimumCredits: NaN }],
       [{ ...ladder()[1], label: '', model: '', minimumCredits: -1 }],
       [null, undefined] as unknown as readonly ModelTierStatusLike[],
       [ladder()[1], ladder()[1]],
@@ -1217,8 +1229,8 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
    */
   it('agrees with decideModelTier about which rungs a user may pick', () => {
     for (const serveable of [true, false]) {
-      for (const balance of [0, PREMIUM_MINIMUM - 1, PREMIUM_MINIMUM, SUPERMAX_MINIMUM, 10_000_000]) {
-        const rows = ladder({ supermax: { serveable } });
+      for (const balance of [0, BELOW_PREMIUM, PREMIUM_MINIMUM, ABOVE_PREMIUM, 10_000_000]) {
+        const rows = ladder({ premium: { serveable } });
         const hint = modelTiersSessionHint({
           tiers: rows,
           standardModel: STANDARD_MODEL,
@@ -1227,13 +1239,13 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
         });
 
         const decision = decideModelTier({
-          requested: 'supermax',
+          requested: 'premium',
           balance,
-          tiers: [{ ...LADDER[1], serveable }],
+          tiers: [{ ...LADDER[0], serveable }],
         });
 
-        expect(rung(hint, 'supermax').available, `serveable ${serveable}, balance ${balance}`).toBe(
-          decision.tier === 'supermax',
+        expect(rung(hint, 'premium').available, `serveable ${serveable}, balance ${balance}`).toBe(
+          decision.tier === 'premium',
         );
       }
     }

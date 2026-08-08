@@ -8,7 +8,7 @@
  * ## Labels come from the SERVER; descriptions are ours
  *
  * A rung's `label` and `model` are facts about the operator's configuration, so they ride the wire and
- * are never re-typed here — that is what stops the picker naming "Fable 5" on a deploy whose SuperMax
+ * are never re-typed here — that is what stops the picker naming "Fable 5" on a deploy whose Premium
  * rung was moved to something else. What the wire cannot carry is the CONSEQUENCE of choosing a rung in
  * the terms a user actually cares about, which is credits per turn. That copy is here, in one place, so
  * the pill's tooltip and the picker rows cannot say different things about the same choice — the
@@ -30,13 +30,12 @@ export const modelTierPanelOpen = atom<boolean>(false);
 export const MODEL_TIER_DESCRIPTIONS: Record<ModelTierId, string> = {
   standard: 'Default. Best value — full-quality builds and edits at the lowest credit burn.',
   premium: 'A stronger model for harder problems. Burns credits several times faster per turn.',
-  supermax: 'The most capable model available. The highest credit burn — reach for it deliberately.',
 };
 
 /**
  * Is there a CHOICE to present at all?
  *
- * On a deploy running `ENABLE_EXTENDED_MODELS=false` the server sends one rung, and a picker offering a
+ * On a deploy running `ENABLE_PREMIUM_MODEL=false` the server sends one rung, and a picker offering a
  * single option is a control that cannot do anything — it opens a panel whose only row is the one
  * already in use. Worse, the pill's tooltip would go on saying "Click to choose a different model",
  * which is a promise the deploy has deliberately withdrawn.
@@ -44,9 +43,9 @@ export const MODEL_TIER_DESCRIPTIONS: Record<ModelTierId, string> = {
  * The pill itself stays: naming the model actually in use is its whole job (§4.6.1a), and that matters
  * MORE when there is no choice, not less — the user still needs to know what they are spending on.
  *
- * Counts `serveable`, not rows: a rung the platform will refuse is not an option, so a ladder of three
- * with two unpriceable selectors is correctly "no choice" — the same fact the picker would otherwise
- * render as two rows nobody can pick.
+ * Counts `serveable`, not rows: a rung the platform will refuse is not an option, so a ladder whose
+ * paid selector is unpriceable is correctly "no choice" — the same fact the picker would otherwise
+ * render as a row nobody can pick.
  */
 export function hasModelChoice(tiers: readonly { serveable: boolean }[]): boolean {
   return tiers.filter((tier) => tier.serveable).length > 1;

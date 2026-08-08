@@ -134,8 +134,8 @@ export function kieFetch(baseFetch: typeof fetch = fetch): typeof fetch {
  * silently run a DIFFERENT model than the one settlement charges for — wrong model, wrong price, no
  * error. That is survivable for an operator override (`kieEnvModel` below synthesises a `ModelInfo`
  * from `LLM_MODEL`) and NOT survivable for an in-code default, where there is no env var to synthesise
- * from. The three rungs today: `claude-sonnet-5` (Standard), `claude-opus-5` (Premium),
- * `claude-fable-5` (SuperMax). Pinned by `model-tiers.spec.ts`.
+ * from. The two rungs today: `claude-sonnet-5` (Standard) and `claude-opus-5` (Premium). Pinned by
+ * `model-tiers.spec.ts`.
  *
  * ⚠️ Ordering is NOT meaningful except for index 0, which is the fallback above. Do not read the first
  * entry as "the default" — this comment used to sit on `claude-opus-4-7` and read exactly that way,
@@ -195,21 +195,23 @@ export const KIE_MODELS: ModelInfo[] = [
   },
 
   /*
-   * The SUPERMAX rung (`DEFAULT_SUPERMAX_MODEL`, §4.6.1a) — the top of the ladder since 2026-07-31;
-   * the default PREMIUM model before that. Listed AND priced (`KIE_MODEL_RATES['claude-fable-5']`,
-   * plus the `providerRates` tier injection): it is the strongest model KIE serves whose thinking text
-   * their adapter returns (224/223 chars, vs 4-8's 0), at 2x Opus's price. The proxy hands it straight
-   * to `getModelInstance`, so it runs as itself; listing it here keeps the enhancer's `modelsList[0]`
-   * fallback from ever standing in for it, and lets the Pro model selector show it.
+   * The strongest model KIE serves whose thinking text their adapter returns (224/223 chars, vs 4-8's
+   * 0), at 2x Opus's price. It was the SuperMax rung's in-code default until that rung was retired
+   * (2026-08-08), and it is what `PREMIUM_MODEL` names on the owner's deploy today — but that is ENV,
+   * not a fact about this build. Listed AND priced (`KIE_MODEL_RATES['claude-fable-5']`, plus the
+   * `providerRates` tier injection): the proxy hands it straight to `getModelInstance`, so it runs as
+   * itself; listing it here keeps the enhancer's `modelsList[0]` fallback from ever standing in for
+   * it, and lets the Pro model selector show it.
    *
-   * ⚠️ `label` is RENDERED (the Pro model selector), so the tier word in it is a live claim, not a
-   * comment — it read "· Premium" for a day after Fable 5 moved up a rung, disagreeing with
-   * `PAID_MODEL_TIERS[1].label`. It is the only label in this array carrying a tier word; if the rungs
-   * move again, move it too or drop the word.
+   * ⚠️ **The tier word is GONE from the label, deliberately.** `label` is RENDERED (the Pro model
+   * selector), so a tier word in it is a live claim, not a comment — it read "· Premium" for a day
+   * after Fable 5 moved up a rung, then "· SuperMax" after that rung was deleted. Which rung a model
+   * serves is `PREMIUM_MODEL`'s answer and it can change without a redeploy, so no label in this array
+   * may assert one. Do not re-add it.
    */
   {
     name: 'claude-fable-5',
-    label: 'Claude Fable 5 (KIE · SuperMax)',
+    label: 'Claude Fable 5 (KIE)',
     provider: 'KIE',
     maxTokenAllowed: 1_000_000,
     maxCompletionTokens: 128_000,

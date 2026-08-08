@@ -104,7 +104,7 @@ export function ModelTierPanel() {
   /*
    * Belt to the pill's braces: with one serveable rung there is nothing to choose, so the popup never
    * shows even if the atom is somehow true — a stale `true` surviving a session change (a deploy that
-   * turns `ENABLE_EXTENDED_MODELS` off while a tab is open, a future keyboard shortcut) would otherwise
+   * turns `ENABLE_PREMIUM_MODEL` off while a tab is open, a future keyboard shortcut) would otherwise
    * render a one-row picker whose only row is the model already running.
    *
    * The ANCHOR is still rendered unconditionally — see below; that is a layout rule, not a state one.

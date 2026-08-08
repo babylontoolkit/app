@@ -162,9 +162,9 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   refuses a list whose `llm` table lacks the `DEFAULT_MODEL` row — at PROMOTE and at LOAD
   (`loadVersion` re-validates stored bytes, so a legacy list missing the row fails to load and baked
   serves instead). Without this, an omitted default would bill every ordinary generation at the
-  most-expensive row's rates — the **SuperMax** rung's, and since the default moved to
-  `claude-sonnet-5` ($0.85/$4.275 baked on KIE) that is **~4.7×** the default rather than the 2× this
-  line said while Opus 5 was the default. A paid rung can never become the default's effective price
+  most-expensive row's rates — `claude-fable-5`'s (the retired SuperMax rung's model; still the top of
+  the baked table), and since the default moved to `claude-sonnet-5` ($0.85/$4.275 baked on KIE) that
+  is **~4.7×** the default rather than the 2× this line said while Opus 5 was the default. A paid rung can never become the default's effective price
   through any path (`market-prices.spec.ts` + `market-price-store.spec.ts` pin both doors).
 - **Admin-promoted active list** (`billing/market-price-store.ts`): immutable versions in the
   ObjectStore (`pricing/kie-market/versions/mp_*.json`) + an `active.json` pointer. Promote validates
@@ -178,9 +178,14 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
 - **The env price vars are RETIRED and REFUSED**: `KIE_INPUT_DOLLARS`, `KIE_OUTPUT_DOLLARS`,
   `KIE_CACHED_INPUT`, `KIE_CACHED_WRITES`, `PREMIUM_INPUT_DOLLARS`, `PREMIUM_OUTPUT_DOLLARS`.
   Setting any of them throws at config time with directions to the panel — a price var that nothing
-  reads is a mis-bill waiting to be believed. `KIE_DEFAULT_MODEL`, `PREMIUM_MODEL` **and
-  `SUPERMAX_MODEL`** survive as SELECTORS, accepted only if the active list prices them in their own
-  right (`kieDefaultModel`, `getModelTier`/`getModelTiers` — SPEC §4.6.1a). A selector is never a
+  reads is a mis-bill waiting to be believed. `KIE_DEFAULT_MODEL` and `PREMIUM_MODEL` survive as
+  SELECTORS, accepted only if the active list prices them in their own right (`kieDefaultModel`,
+  `getModelTier`/`getModelTiers` — SPEC §4.6.1a). ⚠️ **`SUPERMAX_MODEL`, `SUPERMAX_MINIMUM_CREDITS` and
+  `ENABLE_EXTENDED_MODELS` joined the retired-and-refused list on 2026-08-08** when the third rung was
+  removed and the master flag became `ENABLE_PREMIUM_MODEL` — same rule, different family of variable:
+  a var nothing reads is a configuration the operator believes they have. Their refusal lives in
+  `billing/premium-model-flag.ts` and is called from `getModelTier` (so `/api/me` degrades and only the
+  money path throws), never from `kieRates`, which runs on every settlement. A selector is never a
   price: naming a model the active list cannot price is a `NotConfiguredError` pointing at the panel,
   never a silent fallback to some other row's rates.
 - **Cache rates are never quoted in the list** — validation refuses the keys. They derive per row
@@ -492,7 +497,7 @@ what made Stage 3 buildable and testable before Supabase, S3, Stripe, or the lic
 
 ## Verified end-to-end (2026-07, local mode)
 
-- Signup grant fired **exactly once**: `grant +1000 → 1000` — which is also the LIVE `SIGNUP_GRANT_CREDITS` default (`rates.ts`; this line claimed 1000 was historical and 800 current until 2026-07-31, contradicting its own transcript one clause earlier). It sits deliberately below BOTH shipped tier thresholds (`.env.example` ships `PREMIUM_MINIMUM_CREDITS=1500` and `SUPERMAX_MINIMUM_CREDITS=1500`; the in-code defaults are 1200/1500), so a fresh grant cannot buy a paid rung — §4.6.1a.
+- Signup grant fired **exactly once**: `grant +1000 → 1000` — which is also the LIVE `SIGNUP_GRANT_CREDITS` default (`rates.ts`; this line claimed 1000 was historical and 800 current until 2026-07-31, contradicting its own transcript one clause earlier). It sits deliberately below BOTH shipped tier thresholds (`.env.example` ships `PREMIUM_MINIMUM_CREDITS=1500`; the in-code default is 1200), so a fresh grant cannot buy a paid rung — §4.6.1a.
 - A live generation settled against real usage: `generation −7 → 993` (raw cost $0.0184,
   `cacheReadTokens: 60121` — the 1h cache from §4.2.8 still hitting).
 - The `generations` record attributes the charge to a user, a model, and its four token classes.

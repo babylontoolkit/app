@@ -47,14 +47,14 @@ import { EMPTY_SESSION, sessionStore, type ModelTierState, type SessionState } f
 
 /**
  * The ladder as the server would describe it, with the two knobs every test below turns: how many
- * credits the user holds, and whether the operator's SuperMax selector can be priced.
+ * credits the user holds, and whether the operator's Premium selector can be priced.
  *
- * `minimumCredits` is fixed at the shipped defaults (premium 1,200 / supermax 1,500) because the
- * acceptance names 1,500 explicitly — a fixture that derived the number from the assertion would pass
- * against any threshold at all.
+ * `minimumCredits` is fixed at the shipped default (premium 1,200) because the assertions name 1,200
+ * explicitly — a fixture that derived the number from the assertion would pass against any threshold
+ * at all.
  */
-function ladder(options: { balance: number; supermaxServeable?: boolean; premiumServeable?: boolean }): SessionState {
-  const { balance, supermaxServeable = true, premiumServeable = true } = options;
+function ladder(options: { balance: number; premiumServeable?: boolean }): SessionState {
+  const { balance, premiumServeable = true } = options;
 
   return {
     ...EMPTY_SESSION,
@@ -81,14 +81,6 @@ function ladder(options: { balance: number; supermaxServeable?: boolean; premium
             minimumCredits: 1_200,
             available: true,
             serveable: premiumServeable,
-          },
-          {
-            id: 'supermax',
-            label: 'SuperMax',
-            model: 'claude-fable-5',
-            minimumCredits: 1_500,
-            available: true,
-            serveable: supermaxServeable,
           },
         ],
       },
@@ -160,15 +152,15 @@ afterEach(() => {
 
 describe('ModelTierPanel — choosing a rung', () => {
   /**
-   * 🔴 THE ACCEPTANCE, END TO END: 2,000 credits on an edit turn → all three rows selectable, and
-   * choosing SuperMax makes the PILL say "Fable 5".
+   * 🔴 THE ACCEPTANCE, END TO END: 2,000 credits on an edit turn → every row selectable, and choosing
+   * Premium makes the PILL say "Opus 5".
    *
    * The pill is rendered alongside the panel rather than the store write being asserted alone, because
    * the store write is the easy half. The claim that matters to a user is that the control they can see
-   * now names the model their next build will run — and a picker that writes `'supermax'` into a store
+   * now names the model their next build will run — and a picker that writes `'premium'` into a store
    * nothing reads would satisfy every assertion short of this one.
    */
-  it('offers all three rows at 2,000 credits on an edit turn, and selecting SuperMax renames the pill', () => {
+  it('offers every row at 2,000 credits on an edit turn, and selecting Premium renames the pill', () => {
     openPanel();
     render(
       <div>
@@ -179,24 +171,24 @@ describe('ModelTierPanel — choosing a rung', () => {
       </div>,
     );
 
-    expect(rows()).toHaveLength(3);
+    expect(rows()).toHaveLength(2);
 
-    for (const label of ['Standard', 'Premium', 'SuperMax']) {
+    for (const label of ['Standard', 'Premium']) {
       expect(isLocked(row(label)), `${label} must be selectable at 2,000 credits on an edit turn`).toBe(false);
     }
 
     // The unlocked rows say what the rung BUYS, never why it cannot be had.
-    expect(copyOf(row('SuperMax'))).toContain(MODEL_TIER_DESCRIPTIONS.supermax);
+    expect(copyOf(row('Premium'))).toContain(MODEL_TIER_DESCRIPTIONS.premium);
 
     const pill = () => within(screen.getByTestId('pill-slot')).getByRole('button');
 
     expect(pill().textContent).toContain('Sonnet 5');
 
-    press(row('SuperMax'));
+    press(row('Premium'));
 
-    expect(modelTierStore.get()).toBe('supermax');
+    expect(modelTierStore.get()).toBe('premium');
     expect(modelTierPanelOpen.get(), 'a successful choice closes the picker').toBe(false);
-    expect(pill().textContent, 'the pill must name the rung the user just chose').toContain('Fable 5');
+    expect(pill().textContent, 'the pill must name the rung the user just chose').toContain('Opus 5');
     expect(pill().textContent).not.toContain('Sonnet');
   });
 
@@ -227,7 +219,7 @@ describe('ModelTierPanel — the first build turn is not a lock', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    for (const label of ['Standard', 'Premium', 'SuperMax']) {
+    for (const label of ['Standard', 'Premium']) {
       expect(isLocked(row(label)), `${label} must be selectable on a first build`).toBe(false);
     }
   });
@@ -237,9 +229,9 @@ describe('ModelTierPanel — the first build turn is not a lock', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    press(row('SuperMax'));
+    press(row('Premium'));
 
-    expect(modelTierStore.get()).toBe('supermax');
+    expect(modelTierStore.get()).toBe('premium');
   });
 
   /** No row may still be telling the user to wait for a lock the server stopped applying. */
@@ -248,7 +240,7 @@ describe('ModelTierPanel — the first build turn is not a lock', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    for (const label of ['Standard', 'Premium', 'SuperMax']) {
+    for (const label of ['Standard', 'Premium']) {
       expect(copyOf(row(label)), `${label}`).not.toMatch(/first build/i);
     }
   });
@@ -263,38 +255,33 @@ describe('ModelTierPanel — the first build turn is not a lock', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    expect(isLocked(row('SuperMax'))).toBe(true);
-    expect(copyOf(row('SuperMax'))).toMatch(/Unlocks at 1,500 credits/);
+    expect(isLocked(row('Premium'))).toBe(true);
+    expect(copyOf(row('Premium'))).toMatch(/Unlocks at 1,200 credits/);
   });
 });
 
 describe('ModelTierPanel — the credits threshold', () => {
   /** At 500 credits the paid rows name their number — the one lock a user can actually act on. */
-  it('names 1,500 credits on the SuperMax row at a 500-credit balance', () => {
+  it('names 1,200 credits on the Premium row at a 500-credit balance', () => {
     sessionStore.set(ladder({ balance: 500 }));
     openPanel();
     render(<ModelTierPanel />);
-
-    const supermax = row('SuperMax');
-
-    expect(isLocked(supermax)).toBe(true);
-    expect(copyOf(supermax)).toMatch(/Unlocks at 1,500 credits/);
-    expect(copyOf(supermax), 'this is not a creation lock').not.toMatch(/first build/i);
-    expect(copyOf(supermax)).not.toMatch(/unavailable/i);
 
     const premium = row('Premium');
 
     expect(isLocked(premium)).toBe(true);
     expect(copyOf(premium)).toMatch(/Unlocks at 1,200 credits/);
+    expect(copyOf(premium), 'this is not a creation lock').not.toMatch(/first build/i);
+    expect(copyOf(premium)).not.toMatch(/unavailable/i);
   });
 
   /** The boundary is `>=`: exactly the threshold unlocks the rung. */
-  it('unlocks SuperMax at exactly 1,500 credits', () => {
-    sessionStore.set(ladder({ balance: 1_500 }));
+  it('unlocks Premium at exactly 1,200 credits', () => {
+    sessionStore.set(ladder({ balance: 1_200 }));
     openPanel();
     render(<ModelTierPanel />);
 
-    expect(isLocked(row('SuperMax'))).toBe(false);
+    expect(isLocked(row('Premium'))).toBe(false);
   });
 });
 
@@ -306,20 +293,35 @@ describe('ModelTierPanel — an unserveable rung', () => {
    * the platform will refuse it however rich the user is. Ten million credits is the assertion: a
    * threshold sentence here would have the user buy credits forever against a lock that is not theirs.
    */
-  it('locks an unserveable rung at any balance and says unavailable rather than quoting a threshold', () => {
-    sessionStore.set(ladder({ balance: 10_000_000, supermaxServeable: false }));
+  /*
+   * 🔴 ON A TWO-RUNG LADDER, AN UNSERVEABLE PAID RUNG MEANS THERE IS NO PICKER AT ALL (2026-08-08).
+   *
+   * This case used to render the panel and assert the unserveable row's COPY — "unavailable", never a
+   * threshold, because no amount of credits opens an operator's misconfiguration. With one paid rung
+   * that is unreachable through the panel by construction: `hasModelChoice` counts SERVEABLE rows, so
+   * a broken Premium leaves exactly one option and the picker correctly refuses to open on a choice
+   * that does not exist. Asserting that instead is the honest test of the current shape — and it is a
+   * real property, not a consolation: a one-row picker is a control that cannot do anything.
+   *
+   * ⚠️ The lock VOCABULARY it used to pin (unserveable beats below_minimum; the unserveable sentence
+   * never quotes a threshold) is not lost — `lockReasonFor` is pure and is exercised directly below,
+   * which is where it belonged anyway. What is genuinely gone is the rendered-copy assertion, and it
+   * comes back the moment a second paid rung does.
+   */
+  it('offers no picker at all when the only paid rung is unserveable, however rich the user', () => {
+    sessionStore.set(ladder({ balance: 10_000_000, premiumServeable: false }));
     openPanel();
     render(<ModelTierPanel />);
 
-    const supermax = row('SuperMax');
+    expect(rows(), 'one serveable rung is not a choice').toHaveLength(0);
 
-    expect(isLocked(supermax)).toBe(true);
-    expect(copyOf(supermax)).toMatch(/unavailable/i);
-    expect(copyOf(supermax), 'no amount of credits opens this lock').not.toMatch(/Unlocks at/);
-    expect(copyOf(supermax)).not.toMatch(/1,500/);
-    expect(copyOf(supermax)).not.toMatch(/first build/i);
+    // CONTROL: the same balance with the rung healthy really does open a two-row picker.
+    cleanup();
+    sessionStore.set(ladder({ balance: 10_000_000 }));
+    openPanel();
+    render(<ModelTierPanel />);
 
-    // The rung the operator DID configure is unaffected — this is a per-rung fact, not a panel mode.
+    expect(rows()).toHaveLength(2);
     expect(isLocked(row('Premium'))).toBe(false);
   });
 });
@@ -338,7 +340,7 @@ describe('ModelTierPanel — a locked row is not a dead end', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    for (const label of ['Premium', 'SuperMax']) {
+    for (const label of ['Premium']) {
       const locked = row(label);
 
       expect(isLocked(locked)).toBe(true);
@@ -352,7 +354,7 @@ describe('ModelTierPanel — a locked row is not a dead end', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    expect(row('SuperMax').disabled).toBe(false);
+    expect(row('Premium').disabled).toBe(false);
   });
 });
 
@@ -394,7 +396,7 @@ describe('ModelTierPanel — layout stability', () => {
     expect(wrapper.children, 'opening must not add a flex child to the row').toHaveLength(2);
     expect(wrapper.children[0]).toBe(anchorWhenClosed);
     expect(screen.getByTestId('sibling').previousElementSibling).toBe(anchorWhenClosed);
-    expect(rows()).toHaveLength(3);
+    expect(rows()).toHaveLength(2);
   });
 
   /** Escape closes it — a popup with only an X reads as stuck. */
@@ -402,7 +404,7 @@ describe('ModelTierPanel — layout stability', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    expect(rows()).toHaveLength(3);
+    expect(rows()).toHaveLength(2);
 
     fireEvent.keyDown(window, { key: 'Escape' });
 
@@ -413,16 +415,16 @@ describe('ModelTierPanel — layout stability', () => {
 
 describe('lockReasonFor', () => {
   const tier = (over: Partial<ModelTierState> = {}): ModelTierState => ({
-    id: 'supermax',
-    label: 'SuperMax',
-    model: 'claude-fable-5',
-    minimumCredits: 1_500,
+    id: 'premium',
+    label: 'Premium',
+    model: 'claude-opus-5',
+    minimumCredits: 1_200,
     available: true,
     serveable: true,
     ...over,
   });
 
-  const session = (balance: number, serveable = true) => ladder({ balance, supermaxServeable: serveable });
+  const session = (balance: number, serveable = true) => ladder({ balance, premiumServeable: serveable });
 
   /** Standard has no threshold and no selector to misconfigure — it can never be locked. */
   it('never locks standard, whatever else is true', () => {
@@ -438,7 +440,7 @@ describe('lockReasonFor', () => {
   });
 
   it('reports below_minimum only when credits are the actual problem', () => {
-    expect(lockReasonFor(tier(), session(1_499))).toBe('below_minimum');
+    expect(lockReasonFor(tier(), session(1_199))).toBe('below_minimum');
     expect(lockReasonFor(tier(), session(0))).toBe('below_minimum');
   });
 
@@ -471,8 +473,8 @@ describe('lockReasonFor', () => {
   it('covers the whole {serveable} × {balance} grid', () => {
     const cases: Array<[boolean, number, ReturnType<typeof lockReasonFor>]> = [
       [true, 10_000_000, null],
-      [true, 1_500, null],
-      [true, 1_499, 'below_minimum'],
+      [true, 1_200, null],
+      [true, 1_199, 'below_minimum'],
       [false, 10_000_000, 'unserveable'],
       [false, 0, 'unserveable'],
     ];
@@ -504,11 +506,7 @@ describe('ModelTierPanel — rung model names', () => {
   const triFamily = (): SessionState => {
     const base = ladder({ balance: 50_000 });
     const tiers = base.credits.modelTiers.tiers.map((tier) =>
-      tier.id === 'premium'
-        ? { ...tier, model: 'gpt-5-6-sol' }
-        : tier.id === 'supermax'
-          ? { ...tier, model: 'gemini-3-5-flash' }
-          : tier,
+      tier.id === 'premium' ? { ...tier, model: 'gpt-5-6-sol' } : { ...tier, model: 'gemini-3-5-flash' },
     );
 
     return { ...base, credits: { ...base.credits, modelTiers: { ...base.credits.modelTiers, tiers } } };
@@ -519,9 +517,8 @@ describe('ModelTierPanel — rung model names', () => {
     openPanel();
     render(<ModelTierPanel />);
 
-    expect(copyOf(row('Standard'))).toContain('Sonnet 5');
+    expect(copyOf(row('Standard'))).toContain('Gemini 3.5 Flash');
     expect(copyOf(row('Premium'))).toContain('GPT 5.6 Sol');
-    expect(copyOf(row('SuperMax'))).toContain('Gemini 3.5 Flash');
 
     // Never the raw id, and never the un-dotted version the id literally carries.
     expect(copyOf(row('Premium')), 'a raw id on a row is the parser having failed silently').not.toContain(
@@ -539,7 +536,7 @@ describe('ModelTierPanel — rung model names', () => {
    * CONTROL — the same assertions against the CLAUDE ladder, unchanged by the tri-family parser.
    *
    * Without it, generalising `parseModel` could rename every Claude rung and every assertion above would
-   * still pass: they only ever look at the two rungs the fixture moved.
+   * still pass: they only ever look at the rungs the fixture moved.
    */
   it('CONTROL — an all-Claude ladder still reads exactly as it did', () => {
     openPanel();
@@ -547,7 +544,6 @@ describe('ModelTierPanel — rung model names', () => {
 
     expect(copyOf(row('Standard'))).toContain('Sonnet 5');
     expect(copyOf(row('Premium'))).toContain('Opus 5');
-    expect(copyOf(row('SuperMax'))).toContain('Fable 5');
   });
 });
 

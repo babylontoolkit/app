@@ -13,7 +13,6 @@ import {
   COLD_CREATION_USAGE,
   creditsForUsage,
   DEFAULT_PREMIUM_MODEL,
-  DEFAULT_SUPERMAX_MODEL,
   getBillingConfig,
   getModelTier,
   grantHeadroom,
@@ -105,31 +104,35 @@ const KIE_ENV = [
 /**
  * The SAME trap, for the MODEL TIER LADDER's selectors and thresholds (§4.6.1a).
  *
- * 🔴 THIS ONE WAS MEASURED FAILING, not reasoned about. With `SUPERMAX_MODEL=claude-opus-4-7` in the
- * environment, the test at "validates against the CONFIGURED provider, not against models in general"
- * FAILS: it proves the `LLM_MODEL` knob is safe by picking a model with a KIE feed row and deliberately
- * NO Anthropic row — and `providerRates` now injects a row for whatever each paid rung names, so a
- * developer whose SuperMax rung happened to point at that model made a genuinely-unpriced model
- * priceable and `getPlatformModel` stopped throwing. On their machine only. CI green.
+ * 🔴 THIS ONE WAS MEASURED FAILING, not reasoned about. With a paid rung's selector pointed at
+ * `claude-opus-4-7`, the test at "validates against the CONFIGURED provider, not against models in
+ * general" FAILS: it proves the `LLM_MODEL` knob is safe by picking a model with a KIE feed row and
+ * deliberately NO Anthropic row — and `providerRates` injects a row for whatever each paid rung names,
+ * so a developer whose rung happened to point at that model made a genuinely-unpriced model priceable
+ * and `getPlatformModel` stopped throwing. On their machine only. CI green.
  *
- * It is dormant on the shipped defaults (opus-5 / fable-5 do not collide with the chosen id), which is
- * exactly why it needs a scrub rather than luck: the assertion's correctness rested on which models an
- * operator happened to have selected, and nothing said so.
+ * It is dormant on the shipped default (opus-5 does not collide with the chosen id), which is exactly
+ * why it needs a scrub rather than luck: the assertion's correctness rested on which model an operator
+ * happened to have selected, and nothing said so.
  *
  * Own list rather than appended to `KIE_ENV`, for the reason the sandbox list below states — these are
- * not KIE variables. The two RETIRED `PREMIUM_*_DOLLARS` vars moved here from `KIE_ENV` with them:
- * splitting one family across two lists is how a list stops describing its own contents, and they are
- * scrubbed for a sharper reason than the rest (`refuseRetiredPriceEnv` THROWS when they are set, so an
- * operator who never cleaned up an old `.env.local` would see every rate assertion here die at config
- * time rather than merely grade against the wrong number).
+ * not KIE variables. The RETIRED vars are scrubbed here for a sharper reason than the rest: the
+ * `*_DOLLARS` pair makes `refuseRetiredPriceEnv` THROW, and since 2026-08-08 `ENABLE_EXTENDED_MODELS`
+ * and the `SUPERMAX_*` pair make `refuseRetiredModelTierEnv` throw the same way — so an operator who
+ * never cleaned up an old `.env.local` would see every rate assertion here die at config time rather
+ * than merely grade against the wrong number.
  */
 const MODEL_TIER_ENV = [
   'PREMIUM_MODEL',
   'PREMIUM_MINIMUM_CREDITS',
-  'SUPERMAX_MODEL',
-  'SUPERMAX_MINIMUM_CREDITS',
+  'ENABLE_PREMIUM_MODEL',
   'PREMIUM_INPUT_DOLLARS',
   'PREMIUM_OUTPUT_DOLLARS',
+
+  // Retired 2026-08-08 and REFUSED if set.
+  'ENABLE_EXTENDED_MODELS',
+  'SUPERMAX_MODEL',
+  'SUPERMAX_MINIMUM_CREDITS',
 ] as const;
 
 /**
@@ -797,7 +800,7 @@ describe('the KIE model selector + the marketplace price list', () => {
  * test that relies on a file-level scrub to express its own inputs reads as if it had none.
  */
 describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
-  const TIER_ENV = ['PREMIUM_MODEL', 'PREMIUM_MINIMUM_CREDITS', 'SUPERMAX_MODEL', 'SUPERMAX_MINIMUM_CREDITS'] as const;
+  const TIER_ENV = ['PREMIUM_MODEL', 'PREMIUM_MINIMUM_CREDITS'] as const;
 
   /** Scrub the whole ladder, then set only what a test is about. Never a partial stub. */
   function stubTiers(vars: Partial<Record<(typeof TIER_ENV)[number], string>> = {}) {
@@ -807,22 +810,26 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
   }
 
   /*
-   * The generalisation itself: EVERY rung is injected, not just the first one. A loop that stopped at
-   * premium would leave SuperMax unpriced on Anthropic, where `ratesFor` bills it at the most expensive
-   * row it knows — silently, and in whichever direction that row happens to be wrong.
+   * The generalisation itself: EVERY rung is injected, driven off the table rather than off a name. A
+   * rung left uninjected is unpriced on Anthropic, where `ratesFor` bills it at the most expensive row
+   * it knows — silently, and in whichever direction that row happens to be wrong.
+   *
+   * ⚠️ With ONE paid rung "every" and "the first" are the same assertion, so this cannot currently fail
+   * for a loop that stops early (2026-08-08). It is written over `PAID_MODEL_TIERS` anyway so it starts
+   * discriminating again the moment a rung is added — the alternative, hardcoding the one rung we have,
+   * is a test that would have to be rewritten to notice the regression it is named for.
    */
-  it('injects EVERY rung of the ladder into Anthropic, not just the first', () => {
+  it('injects EVERY rung of the ladder into Anthropic, driven off the table', () => {
     stubTiers();
-
-    expect(DEFAULT_PREMIUM_MODEL, 'the two rungs must name different models or this proves nothing').not.toBe(
-      DEFAULT_SUPERMAX_MODEL,
-    );
 
     const anthropic = providerRates({}).Anthropic;
 
     for (const definition of PAID_MODEL_TIERS) {
       expect(anthropic[definition.defaultModel], `${definition.id} rung is unpriced on Anthropic`).toBeDefined();
     }
+
+    // CONTROL: the loop ran over a non-empty table, so "every rung is priced" is a finding.
+    expect(PAID_MODEL_TIERS.length).toBeGreaterThan(0);
   });
 
   /*
@@ -834,11 +841,9 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
    * defaults to exactly such a model, so this guard is the only thing standing between the table and a
    * 60% loss on every premium generation.
    *
-   * Both rungs are pointed at natively-priced models so BOTH iterations of the reduce are covered: a
-   * fix applied to one rung and not the other would pass a single-rung assertion.
    */
-  it('leaves a provider its OWN row for every rung it prices natively', () => {
-    stubTiers({ PREMIUM_MODEL: 'claude-opus-5', SUPERMAX_MODEL: 'claude-opus-4-8' });
+  it('leaves a provider its OWN row for a rung it prices natively', () => {
+    stubTiers({ PREMIUM_MODEL: 'claude-opus-5' });
 
     const anthropic = providerRates({}).Anthropic;
 
@@ -846,17 +851,20 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
       MODEL_RATES['claude-opus-5'],
     );
     expect(anthropic['claude-opus-5'].inputPerMTok).toBe(5);
-    expect(anthropic['claude-opus-4-8']).toEqual(MODEL_RATES['claude-opus-4-8']);
-    expect(anthropic['claude-opus-4-8'].outputPerMTok).toBe(25);
-
-    // Same ids, two providers, two correct prices. A provider that prices a model is the authority on it.
-    expect(ratesFor('claude-opus-5', 'Anthropic', {}).inputPerMTok).toBe(5);
-    expect(ratesFor('claude-opus-5', 'KIE', {}).inputPerMTok).toBe(2);
+    expect(anthropic['claude-opus-5'].outputPerMTok).toBe(25);
   });
 
-  /* The other half of the same rule: where the provider bakes nothing, the injection is the price. */
+  /*
+   * The other half of the same rule: where the provider bakes nothing, the injection is the price.
+   *
+   * The selector is set EXPLICITLY. It used to ride on the SuperMax rung's in-code default, so when
+   * that rung was retired (2026-08-08) nothing selected `claude-fable-5` and the injection this test is
+   * named for simply stopped happening — the assertion failed loudly, which is the good outcome, but
+   * the lesson is that a test resting on "some rung happens to default to this model" is a test whose
+   * subject can be removed by an unrelated change.
+   */
   it('fills the gap for a rung the provider bakes no row for', () => {
-    stubTiers();
+    stubTiers({ PREMIUM_MODEL: 'claude-fable-5' });
 
     expect(
       MODEL_RATES['claude-fable-5'],
@@ -872,28 +880,28 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
   });
 
   /*
-   * Both halves of the rule at once, on the EXACT configuration that ships (premium `claude-opus-5`,
-   * supermax `claude-fable-5`). The two tests above prove the rule with models chosen to isolate each
-   * half; this one proves it holds for the pair a deploy with no env actually gets, which is the only
-   * pair a regression would bill real money against.
+   * BOTH halves of the rule at once — fill and don't-overwrite — which needs two MODELS, not two rungs.
+   * The shipping default (`claude-opus-5`) is the don't-overwrite half because Anthropic prices it
+   * natively; `claude-fable-5` is the fill half because Anthropic bakes no row for it, and it is the
+   * model the owner's own deploy points `PREMIUM_MODEL` at. Between them they cover the only two shapes
+   * the reduce can meet.
    */
-  it('prices the shipping default pair correctly on both providers', () => {
+  it('fills a gap and refuses to overwrite, on both providers', () => {
     stubTiers();
-
-    expect([DEFAULT_PREMIUM_MODEL, DEFAULT_SUPERMAX_MODEL]).toEqual(['claude-opus-5', 'claude-fable-5']);
-
-    const { Anthropic: anthropic, KIE: kie } = providerRates({});
+    expect(DEFAULT_PREMIUM_MODEL).toBe('claude-opus-5');
 
     // Gap-fill must NOT overwrite: Anthropic prices Opus 5 itself at $5/$25, the list says $2/$10.
-    expect(anthropic['claude-opus-5'].inputPerMTok).toBe(5);
-    expect(anthropic['claude-opus-5'].outputPerMTok).toBe(25);
+    expect(providerRates({}).Anthropic['claude-opus-5'].inputPerMTok).toBe(5);
+    expect(providerRates({}).Anthropic['claude-opus-5'].outputPerMTok).toBe(25);
 
     // Gap-fill MUST fill: Anthropic bakes no fable-5 row, so the injection is its only price.
-    expect(anthropic['claude-fable-5'].outputPerMTok).toBe(20);
+    stubTiers({ PREMIUM_MODEL: 'claude-fable-5' });
+    expect(MODEL_RATES, 'the fill case needs a model Anthropic does NOT price').not.toHaveProperty('claude-fable-5');
+    expect(providerRates({}).Anthropic['claude-fable-5'].outputPerMTok).toBe(20);
 
     // KIE states both itself; the ladder introduces no second opinion.
-    expect(kie['claude-opus-5'].inputPerMTok).toBe(2);
-    expect(kie['claude-fable-5'].outputPerMTok).toBe(20);
+    expect(providerRates({}).KIE['claude-opus-5'].inputPerMTok).toBe(2);
+    expect(providerRates({}).KIE['claude-fable-5'].outputPerMTok).toBe(20);
   });
 
   /*
@@ -912,10 +920,13 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
    * `getModelTier` throws for a selector the active list cannot price — correct at the tier DECISION
    * (a loud config error before any spend) and wrong here, where this table also prices in-flight
    * settlement, which can never refuse (§4.6). The skip is PER RUNG: a try/catch around the whole loop
-   * would silently drop every injection because one variable had a typo, so the assertion that matters
-   * is that the OTHER rung's row is still standing.
+   * would silently drop every injection because one variable had a typo.
+   *
+   * ⚠️ The mirror-image case — "a broken rung leaves its healthy SIBLING priced" — needed two paid rungs
+   * and went with the third one (2026-08-08). What survives is the half that protects settlement, plus
+   * a control proving the injection is not simply dead.
    */
-  it('skips an unpriceable premium rung without throwing, leaving SuperMax priced', () => {
+  it('skips an unpriceable rung without throwing, and never injects its selector', () => {
     stubTiers({ PREMIUM_MODEL: 'claude-opus-9-9' });
 
     // Control: the selector really is unpriceable, so the skip below is not vacuous.
@@ -925,25 +936,22 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
 
     const anthropic = providerRates({}).Anthropic;
     expect(anthropic['claude-opus-9-9'], 'an unpriced selector must never be injected').toBeUndefined();
-    expect(anthropic[DEFAULT_SUPERMAX_MODEL], 'the healthy rung is dropped with the broken one').toBeDefined();
+    expect(anthropic['claude-sonnet-5'], 'the rest of the table is untouched').toBeDefined();
+
+    // CONTROL: a healthy selector on the same path IS injected, so the skip is scope and not a no-op.
+    stubTiers({ PREMIUM_MODEL: 'claude-fable-5' });
+    expect(providerRates({}).Anthropic['claude-fable-5']).toBeDefined();
   });
 
-  /* The mirror image — a broken SuperMax must not unprice Premium. */
-  it('skips an unpriceable SuperMax rung without throwing, leaving Premium priced', () => {
-    stubTiers({ PREMIUM_MODEL: 'claude-fable-5', SUPERMAX_MODEL: 'claude-opus-9-9' });
+  /*
+   * AND A GENERATION ALREADY IN FLIGHT ON THE BROKEN RUNG STILL SETTLES — at the most expensive row we
+   * know of, i.e. over-charging OURSELVES, which is the safe direction every fallback in `rates.ts`
+   * takes. Never zero: settlement runs after the model and can never refuse (§4.6), so a rate lookup
+   * that returned nothing here would bill the turn as free.
+   */
+  it('still settles a generation whose rung became unpriceable mid-flight', () => {
+    stubTiers({ PREMIUM_MODEL: 'claude-opus-9-9' });
 
-    expect(() => getModelTier('supermax', {})).toThrow(/Marketplace price list/);
-    expect(() => providerRates({})).not.toThrow();
-
-    const anthropic = providerRates({}).Anthropic;
-    expect(anthropic['claude-opus-9-9']).toBeUndefined();
-    expect(anthropic['claude-fable-5'], 'the healthy rung is dropped with the broken one').toBeDefined();
-
-    /*
-     * And a generation already in flight on the broken rung still settles — at the most expensive row we
-     * know of, i.e. over-charging ourselves, which is the safe direction every fallback in `rates.ts`
-     * takes. Never zero.
-     */
     expect(ratesFor('claude-opus-9-9', 'Anthropic', {}).outputPerMTok).toBeGreaterThan(0);
   });
 });

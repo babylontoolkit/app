@@ -10,7 +10,7 @@
  * It renders ONLY for credits users — BYOK users pick a model directly (§4.6.1), so it would be
  * redundant for them.
  *
- * The pill shows the EFFECTIVE rung, never the stored preference. A user who selected SuperMax and then
+ * The pill shows the EFFECTIVE rung, never the stored preference. A user who selected Premium and then
  * spent down below its threshold sees Standard, because Standard is what their next build will run.
  * Showing the preference instead would be the one thing this control must never do: report a model that
  * is not going to be used.
@@ -66,7 +66,7 @@ export function ModelTierPill() {
 
   /*
    * "The rung you SELECTED is not what will run" — a mismatch, not a state of the pill itself. A user
-   * on Standard by choice has nothing withheld; a user who picked SuperMax and cannot currently have
+   * on Standard by choice has nothing withheld; a user who picked Premium and cannot currently have
    * it does, and the pill is where they find that out.
    *
    * 🔴 IT NO LONGER RENDERS A PADLOCK (owner, 2026-08-04). The row is crowded and the model NAME is
@@ -89,7 +89,7 @@ export function ModelTierPill() {
   const selectedLabel = selectedRow?.label ?? 'Standard';
 
   /*
-   * A deploy with `ENABLE_EXTENDED_MODELS=false` sends ONE rung, so there is nothing to pick. The pill
+   * A deploy with `ENABLE_PREMIUM_MODEL=false` sends ONE rung, so there is nothing to pick. The pill
    * still renders — naming the model in use is its job, and that is if anything more useful when the
    * user has no say in it — but it stops behaving like a control: no picker, and a tooltip that does
    * not invite a click it will not honour.

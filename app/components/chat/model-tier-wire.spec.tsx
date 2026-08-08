@@ -229,14 +229,6 @@ function eligibleSession(balance = 100_000): SessionState {
             available: true,
             serveable: true,
           },
-          {
-            id: 'supermax',
-            label: 'SuperMax',
-            model: 'claude-fable-5',
-            minimumCredits: 2500,
-            available: true,
-            serveable: true,
-          },
         ],
       },
     },
@@ -378,7 +370,7 @@ describe('the composer carries the chosen rung', () => {
    * whole point of putting `tier` on the hook body rather than on any one call site.
    */
   it('carries the rung on an ORDINARY edit turn, not only on the first build', async () => {
-    modelTierStore.set('supermax');
+    modelTierStore.set('premium');
 
     mountChat();
     await click('new project');
@@ -388,7 +380,7 @@ describe('the composer carries the chosen rung', () => {
     const posts = agentPosts();
 
     expect(posts.length, 'the second send must have reached the wire as its own generation').toBeGreaterThan(1);
-    expect(posts[posts.length - 1].body!.tier).toBe('supermax');
+    expect(posts[posts.length - 1].body!.tier).toBe('premium');
   });
 
   it('sends `standard` by default', async () => {
@@ -411,13 +403,13 @@ describe('the composer carries the chosen rung', () => {
     await click('new project');
 
     await act(async () => {
-      modelTierStore.set('supermax');
+      modelTierStore.set('premium');
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     await click('send');
 
-    expect(agentPosts()[0].body!.tier).toBe('supermax');
+    expect(agentPosts()[0].body!.tier).toBe('premium');
   });
 
   /*
@@ -427,7 +419,7 @@ describe('the composer carries the chosen rung', () => {
    */
   it('narrows an unaffordable rung to `standard`, not to another paid rung', async () => {
     sessionStore.set(eligibleSession(0)); // balance below every paid rung's minimum
-    modelTierStore.set('supermax');
+    modelTierStore.set('premium');
 
     const posts = await createThenSend();
 
@@ -441,10 +433,10 @@ describe('the composer carries the chosen rung', () => {
   it('narrows an unserveable rung to `standard` even when the balance affords it', async () => {
     const session = eligibleSession();
     session.credits.modelTiers.tiers = session.credits.modelTiers.tiers.map((tier) =>
-      tier.id === 'supermax' ? { ...tier, serveable: false } : tier,
+      tier.id === 'premium' ? { ...tier, serveable: false } : tier,
     );
     sessionStore.set(session);
-    modelTierStore.set('supermax');
+    modelTierStore.set('premium');
 
     const posts = await createThenSend();
 
@@ -489,7 +481,7 @@ describe('the first build turn (reload) carries the rung', () => {
  */
 describe('the auto-repair turn carries the rung it never mentions', () => {
   /** Create → first build turn → arm the repair watch off its `agentMeta` → break the build. */
-  async function driveRepair(tier: 'standard' | 'premium' | 'supermax') {
+  async function driveRepair(tier: 'standard' | 'premium') {
     modelTierStore.set(tier);
 
     mountChat();
@@ -520,7 +512,7 @@ describe('the auto-repair turn carries the rung it never mentions', () => {
     expect(posts[1].body!.errors).toContain('Failed to resolve import "./Boost"');
   });
 
-  it.each(['standard', 'premium', 'supermax'] as const)(
+  it.each(['standard', 'premium'] as const)(
     'carries `%s` on the repair, merged over the per-call body',
     async (tier) => {
       const posts = await driveRepair(tier);
@@ -552,7 +544,7 @@ describe('the auto-repair turn carries the rung it never mentions', () => {
  * about the same choice is a mis-billed generation the server has no way to adjudicate.
  */
 describe('the retired `premium` boolean is off the wire', () => {
-  it.each(['standard', 'premium', 'supermax'] as const)('sends no `premium` field on a %s turn', async (tier) => {
+  it.each(['standard', 'premium'] as const)('sends no `premium` field on a %s turn', async (tier) => {
     modelTierStore.set(tier);
 
     const posts = await createThenSend();
@@ -684,7 +676,7 @@ describe('the source scan — the fallback rung, the render capture, and the unt
     const tierRequested = statement(chat, 'tierRequested');
 
     expect(tierRequested).toMatch(/canUseTier\(session, selectedTier\)\s*\?\s*selectedTier\s*:\s*'standard'/);
-    expect(tierRequested).not.toMatch(/:\s*'(premium|supermax)'/);
+    expect(tierRequested).not.toMatch(/:\s*'premium'/);
   });
 
   /*

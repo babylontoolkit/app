@@ -10,7 +10,7 @@
  *
  *   A user may run a paid rung only when they HOLD at least that rung's `minimumCredits`.
  *
- * The free signup grant (1000) sits below every paid minimum (1200 premium / 1500 supermax by default),
+ * The free signup grant (1000) sits below every paid minimum (1200 premium by default),
  * so a brand-new account CANNOT burn its grant on an expensive model out the gate — to cross a threshold
  * they must buy a credit pack or subscribe, which is the exact funnel the grant protects. There is
  * deliberately NO separate subscription check: holding the credits IS the proof of intent, and gating on
@@ -25,7 +25,7 @@
  * ## A DECLINED RUNG FALLS TO STANDARD, NEVER TO THE RUNG BELOW IT
  *
  * Every refusal here resolves to `standard`. Stepping down one rung would be the expensive direction
- * wearing a helpful face: a user who asked for SuperMax at 1,499 credits did not ask for Premium, and
+ * wearing a helpful face: a user who asked for a paid rung they cannot afford did not ask for a cheaper one, and
  * silently running the rung they did not choose bills them more than the fallback they would have
  * accepted. The same reasoning makes an unknown tier id resolve DOWN (see `resolveTierId`).
  */
@@ -246,7 +246,7 @@ export function decideModelTier(input: ModelTierDecisionInput): ModelTierDecisio
  * normally prevents the request reaching here, so this is the defense-in-depth message for the race
  * where a balance dropped between the page load and the send.
  *
- * It names the rung the user actually asked for. A single hardcoded "premium" would tell a SuperMax
+ * It names the rung the user actually asked for. A single hardcoded label would tell a future rung's
  * user the wrong threshold and the wrong model, which is worse than saying nothing.
  */
 export function tierDeclinedNotice(label: string, minimumCredits: number): string {

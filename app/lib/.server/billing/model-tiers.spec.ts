@@ -1,8 +1,9 @@
 /**
  * The MODEL TIER LADDER (SPEC §4.6.1a) — money-path tests for `model-tiers.ts` + its resolver in `rates.ts`.
  *
- * The ladder replaced a boolean premium toggle with three rungs (Standard · Premium · SuperMax). Every
- * property pinned here fails SILENTLY if it regresses, and each one is money:
+ * The ladder replaced a boolean premium toggle with a LIST of rungs — three for a week (Standard ·
+ * Premium · SuperMax), two since 2026-08-08 (Standard · Premium). Every property pinned here fails
+ * SILENTLY if it regresses, and each one is money:
  *
  *  - **A rung's model and its price are ONE fact.** A selector the ACTIVE Marketplace price list cannot
  *    price must be REFUSED, never guessed — `ratesFor` falls back to the most expensive row we know of,
@@ -21,8 +22,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_PREMIUM_MINIMUM_CREDITS,
   DEFAULT_PREMIUM_MODEL,
-  DEFAULT_SUPERMAX_MINIMUM_CREDITS,
-  DEFAULT_SUPERMAX_MODEL,
   MODEL_TIER_IDS,
   PAID_MODEL_TIERS,
   STANDARD_TIER_LABEL,
@@ -44,11 +43,14 @@ import type { ObjectStore } from '~/lib/.server/storage';
  *
  * ⚠️ This repo's `env()` falls back to `process.env` and vitest loads `.env.local`, so an "empty" context
  * silently resolves the developer's real configuration (the `oauth.spec.ts` trap). This developer's
- * `.env.local` sets `PREMIUM_MODEL`, `PREMIUM_MINIMUM_CREDITS` and `SUPERMAX_MODEL` today — a case that
- * forgets this passes in CI and fails only on the machine of whoever configured the feature.
+ * `.env.local` sets `PREMIUM_MODEL` and `PREMIUM_MINIMUM_CREDITS` today — a case that forgets this
+ * passes in CI and fails only on the machine of whoever configured the feature.
  *
- * The RETIRED price vars are in the list for the same reason: `getModelTier` refuses when any of them is
- * set, so one left over in a local env would fail every default case here for an unrelated reason.
+ * The RETIRED vars are in the list for the same reason, and there are now two families of them:
+ * `getModelTier` refuses when any retired PRICE var (`*_DOLLARS`) or any retired LADDER var
+ * (`ENABLE_EXTENDED_MODELS`, `SUPERMAX_*`) is set, so one left over in a developer's env — and an
+ * upgrading deploy is EXACTLY where they linger — would fail every default case here for an unrelated
+ * reason. Retiring a variable makes it MORE important to scrub, not less.
  */
 function stubTierEnv(vars: Partial<Record<string, string>> = {}) {
   for (const key of [
@@ -100,10 +102,24 @@ afterEach(() => {
  * definition — the branch that would have handled `undefined` is the one nobody tests.
  */
 describe('the ladder table (model-tiers.ts)', () => {
-  it('is Standard · Premium · SuperMax, and the paid table is that list minus the free rung, in order', () => {
-    expect([...MODEL_TIER_IDS]).toEqual(['standard', 'premium', 'supermax']);
-    expect(PAID_MODEL_TIERS.map((tier) => tier.id)).toEqual(['premium', 'supermax']);
+  it('is Standard · Premium, and the paid table is that list minus the free rung, in order', () => {
+    expect([...MODEL_TIER_IDS]).toEqual(['standard', 'premium']);
+    expect(PAID_MODEL_TIERS.map((tier) => tier.id)).toEqual(['premium']);
     expect(STANDARD_TIER_LABEL).toBe('Standard');
+  });
+
+  /*
+   * 🔴 `supermax` IS RETIRED AND MUST NOT COME BACK BY ACCIDENT (2026-08-08).
+   *
+   * A stale browser bundle, a `localStorage` value written before the change, or an in-flight request
+   * can still say `'supermax'`, and the ladder's standing rule handles it correctly: an unrecognised
+   * tier id resolves DOWN to Standard, never up. That resolution only stays correct while the id is
+   * genuinely absent from the table — re-adding the string without re-adding a priced, listed rung
+   * would make it *recognised* and unresolvable, which is the one direction that costs money.
+   */
+  it('no longer knows the retired supermax rung', () => {
+    expect([...MODEL_TIER_IDS] as string[]).not.toContain('supermax');
+    expect(PAID_MODEL_TIERS.map((tier) => tier.id) as string[]).not.toContain('supermax');
   });
 
   it('resolves a definition for every paid rung — total, so callers need no null check', () => {
@@ -129,12 +145,17 @@ describe('the ladder table (model-tiers.ts)', () => {
   });
 
   /*
-   * MONOTONIC THRESHOLDS. If SuperMax unlocked below Premium, the expensive rung would be the CHEAPER
-   * one to reach — the threshold ladder exists to keep the pricier model further from a fresh grant.
+   * MONOTONIC THRESHOLDS. If a dearer rung unlocked below a cheaper one, the expensive model would be
+   * the CHEAPER one to reach — the threshold ladder exists to keep the pricier model further from a
+   * fresh grant.
+   *
+   * ⚠️ With ONE paid rung this is trivially satisfied and cannot fail. It is kept, stated over the
+   * table rather than over two named constants, because the ladder is a list whose length has already
+   * changed twice: written this way it starts guarding again the moment a rung is added, whereas the
+   * `SUPERMAX >= PREMIUM` comparison it replaced had to be deleted with the rung and would have had to
+   * be remembered and re-derived by hand.
    */
   it('keeps the in-code thresholds non-decreasing up the ladder', () => {
-    expect(DEFAULT_SUPERMAX_MINIMUM_CREDITS).toBeGreaterThanOrEqual(DEFAULT_PREMIUM_MINIMUM_CREDITS);
-
     const minimums = PAID_MODEL_TIERS.map((tier) => tier.defaultMinimumCredits);
     expect(minimums).toEqual([...minimums].sort((a, b) => a - b));
   });
@@ -177,12 +198,11 @@ describe('the ladder table (model-tiers.ts)', () => {
  *  - **The prices must climb.** A rung that costs the user more must cost US more, or the ladder sells a
  *    downgrade at a premium.
  */
-describe('the three-rung ladder is coherent (Standard · Premium · SuperMax defaults)', () => {
+describe('the ladder is coherent (Standard · Premium defaults)', () => {
   /** The rungs' in-code default models, cheapest first — a bare deploy with no environment at all. */
   const ladder = [
     { rung: 'standard', model: DEFAULT_MODEL },
     { rung: 'premium', model: DEFAULT_PREMIUM_MODEL },
-    { rung: 'supermax', model: DEFAULT_SUPERMAX_MODEL },
   ] as const;
 
   /*
@@ -210,7 +230,7 @@ describe('the three-rung ladder is coherent (Standard · Premium · SuperMax def
   });
 
   /* The fallback list must never be refused by the validator every promotion passes through. */
-  it('leaves the baked list valid — it prices all three rungs AND passes its own validator', () => {
+  it('leaves the baked list valid — it prices every rung AND passes its own validator', () => {
     const result = validateMarketPriceList(BAKED_MARKET_PRICES);
     expect(result.ok, result.ok ? '' : result.errors.join('; ')).toBe(true);
   });
@@ -265,28 +285,6 @@ describe('getModelTier — resolving a paid rung with no environment at all', ()
     expect(tier.rates.cacheWritePerMTok).toBeCloseTo(baked.inputPerMTok * 2, 9);
   });
 
-  it('defaults SuperMax to Fable 5 at $4/$20 with a 1500-credit minimum', () => {
-    stubTierEnv();
-
-    const tier = getModelTier('supermax', {});
-    const baked = BAKED_MARKET_PRICES.llm['claude-fable-5'];
-
-    expect(tier.id).toBe('supermax');
-    expect(tier.label).toBe('SuperMax');
-    expect(tier.model).toBe(DEFAULT_SUPERMAX_MODEL);
-    expect(tier.model).toBe('claude-fable-5');
-    expect(tier.minimumCredits).toBe(DEFAULT_SUPERMAX_MINIMUM_CREDITS);
-    expect(tier.minimumCredits).toBe(1500);
-    expect(tier.firstBuildLocked).toBe(false);
-
-    expect(tier.rates.inputPerMTok).toBe(baked.inputPerMTok);
-    expect(tier.rates.inputPerMTok).toBe(4);
-    expect(tier.rates.outputPerMTok).toBe(baked.outputPerMTok);
-    expect(tier.rates.outputPerMTok).toBe(20);
-    expect(tier.rates.cacheReadPerMTok).toBeCloseTo(0.4, 9);
-    expect(tier.rates.cacheWritePerMTok).toBeCloseTo(8, 9);
-  });
-
   /* One implementation, so the premium door and the ladder cannot drift into two answers. */
   it("getPremiumTier is the ladder's premium rung, not a second code path", () => {
     stubTierEnv();
@@ -300,10 +298,10 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
    * matters because a trailing space in an SSM value would otherwise produce a model id nothing prices,
    * turning a cosmetic typo into a refused rung (or, before the refusal existed, a mis-billed one).
    */
-  it('honours SUPERMAX_MODEL and trims it, pricing it from the active list', () => {
-    stubTierEnv({ SUPERMAX_MODEL: '  claude-sonnet-5  ', SUPERMAX_MINIMUM_CREDITS: '3000' });
+  it('honours PREMIUM_MODEL and trims it, pricing it from the active list', () => {
+    stubTierEnv({ PREMIUM_MODEL: '  claude-sonnet-5  ', PREMIUM_MINIMUM_CREDITS: '3000' });
 
-    const tier = getModelTier('supermax', {});
+    const tier = getModelTier('premium', {});
     const baked = BAKED_MARKET_PRICES.llm['claude-sonnet-5'];
 
     expect(tier.model).toBe('claude-sonnet-5');
@@ -317,10 +315,10 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
    * fallback for dollars-per-token would be catastrophic. An unparseable value must land on the default
    * rather than on `NaN`, which compares false against every balance and would lock the rung for everyone.
    */
-  it('falls back to the default minimum on an unparseable SUPERMAX_MINIMUM_CREDITS', () => {
-    stubTierEnv({ SUPERMAX_MINIMUM_CREDITS: 'heaps' });
-    expect(getModelTier('supermax', {}).minimumCredits).toBe(DEFAULT_SUPERMAX_MINIMUM_CREDITS);
-    expect(getModelTier('supermax', {}).minimumCredits).toBe(1500);
+  it('falls back to the default minimum on an unparseable PREMIUM_MINIMUM_CREDITS', () => {
+    stubTierEnv({ PREMIUM_MINIMUM_CREDITS: 'heaps' });
+    expect(getModelTier('premium', {}).minimumCredits).toBe(DEFAULT_PREMIUM_MINIMUM_CREDITS);
+    expect(getModelTier('premium', {}).minimumCredits).toBe(1200);
   });
 
   /* The admin-promoted list is the authority — this is the path an operator actually reprices through. */
@@ -329,11 +327,11 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
 
     const result = await promoteMarketPrices(memoryStore(), {
       ...BAKED_MARKET_PRICES,
-      llm: { ...BAKED_MARKET_PRICES.llm, 'claude-fable-5': { inputPerMTok: 7, outputPerMTok: 35 } },
+      llm: { ...BAKED_MARKET_PRICES.llm, 'claude-opus-5': { inputPerMTok: 7, outputPerMTok: 35 } },
     });
     expect(result.ok).toBe(true);
 
-    const tier = getModelTier('supermax', {});
+    const tier = getModelTier('premium', {});
     expect(tier.rates.inputPerMTok).toBe(7);
     expect(tier.rates.outputPerMTok).toBe(35);
     expect(tier.rates.cacheWritePerMTok, 'cache re-derives from the promoted base').toBeCloseTo(14, 9);
@@ -350,15 +348,15 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
  */
 describe('getModelTier — an unpriceable selector is refused, never guessed', () => {
   it('throws NotConfiguredError naming the var and the model', () => {
-    stubTierEnv({ SUPERMAX_MODEL: 'some-unpriced-model' });
+    stubTierEnv({ PREMIUM_MODEL: 'some-unpriced-model' });
 
-    expect(() => getModelTier('supermax', {})).toThrow(/Marketplace price list/);
-    expect(() => getModelTier('supermax', {})).toThrow(/SUPERMAX_MODEL="some-unpriced-model"/);
+    expect(() => getModelTier('premium', {})).toThrow(/Marketplace price list/);
+    expect(() => getModelTier('premium', {})).toThrow(/PREMIUM_MODEL="some-unpriced-model"/);
 
     let thrown: unknown;
 
     try {
-      getModelTier('supermax', {});
+      getModelTier('premium', {});
     } catch (error) {
       thrown = error;
     }
@@ -374,12 +372,12 @@ describe('getModelTier — an unpriceable selector is refused, never guessed', (
    * replaced them and must not name them at all.
    */
   it('directs the operator to the Admin panel and never names the retired price vars', () => {
-    stubTierEnv({ SUPERMAX_MODEL: 'some-unpriced-model' });
+    stubTierEnv({ PREMIUM_MODEL: 'some-unpriced-model' });
 
     let message = '';
 
     try {
-      getModelTier('supermax', {});
+      getModelTier('premium', {});
     } catch (error) {
       message = (error as Error).message;
     }
@@ -389,7 +387,7 @@ describe('getModelTier — an unpriceable selector is refused, never guessed', (
     expect(message).not.toContain('PREMIUM_OUTPUT_DOLLARS');
 
     // ...and it names the way out that costs nothing: unset the selector, take the priced default.
-    expect(message).toContain(DEFAULT_SUPERMAX_MODEL);
+    expect(message).toContain(DEFAULT_PREMIUM_MODEL);
   });
 });
 
@@ -403,13 +401,14 @@ describe('getModelTier — an unpriceable selector is refused, never guessed', (
  * degrading it to "on" invents a capability that hard-fails the moment it is used.
  */
 describe('getModelTiers — the whole ladder, never throwing', () => {
-  it('returns exactly three rungs in ladder order, with a free, always-serveable Standard', () => {
+  it('returns exactly the declared rungs in ladder order, with a free, always-serveable Standard', () => {
     stubTierEnv();
 
     const tiers = getModelTiers('claude-sonnet-5', {});
 
-    expect(tiers).toHaveLength(3);
-    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium', 'supermax']);
+    expect(tiers).toHaveLength(1 + PAID_MODEL_TIERS.length);
+    expect(tiers.map((tier) => tier.id)).toEqual([...MODEL_TIER_IDS]);
+    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium']);
 
     const [standard] = tiers;
     expect(standard.model, 'the platform model is passed IN — this file must not resolve it').toBe('claude-sonnet-5');
@@ -426,13 +425,13 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
   });
 
   it('reports the configured models and thresholds for the paid rungs', () => {
-    stubTierEnv({ SUPERMAX_MODEL: 'claude-opus-4-8', SUPERMAX_MINIMUM_CREDITS: '4000' });
+    stubTierEnv({ PREMIUM_MODEL: 'claude-opus-4-8', PREMIUM_MINIMUM_CREDITS: '4000' });
 
-    const supermax = getModelTiers('claude-sonnet-5', {}).find((tier) => tier.id === 'supermax')!;
+    const premium = getModelTiers('claude-sonnet-5', {}).find((tier) => tier.id === 'premium')!;
 
-    expect(supermax.model).toBe('claude-opus-4-8');
-    expect(supermax.minimumCredits).toBe(4000);
-    expect(supermax.serveable).toBe(true);
+    expect(premium.model).toBe('claude-opus-4-8');
+    expect(premium.minimumCredits).toBe(4000);
+    expect(premium.serveable).toBe(true);
   });
 
   /*
@@ -446,21 +445,21 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
    * would take to unlock.
    */
   it('degrades an unpriceable rung to serveable:false without throwing, keeping the default model and the threshold', () => {
-    stubTierEnv({ SUPERMAX_MODEL: 'some-unpriced-model', SUPERMAX_MINIMUM_CREDITS: '2000' });
+    stubTierEnv({ PREMIUM_MODEL: 'some-unpriced-model', PREMIUM_MINIMUM_CREDITS: '2000' });
 
     const tiers = getModelTiers('claude-sonnet-5', {});
-    expect(tiers).toHaveLength(3);
+    expect(tiers).toHaveLength(1 + PAID_MODEL_TIERS.length);
 
-    const supermax = tiers.find((tier) => tier.id === 'supermax')!;
-    expect(supermax.serveable).toBe(false);
-    expect(supermax.reason).toMatch(/Marketplace price list/);
-    expect(supermax.model, 'the in-code default, NOT the selector we refuse to bill').toBe(DEFAULT_SUPERMAX_MODEL);
-    expect(supermax.model).not.toBe('some-unpriced-model');
-    expect(supermax.minimumCredits, 'still readable — a locked rung can state its own price').toBe(2000);
+    const premium = tiers.find((tier) => tier.id === 'premium')!;
+    expect(premium.serveable).toBe(false);
+    expect(premium.reason).toMatch(/Marketplace price list/);
+    expect(premium.model, 'the in-code default, NOT the selector we refuse to bill').toBe(DEFAULT_PREMIUM_MODEL);
+    expect(premium.model).not.toBe('some-unpriced-model');
+    expect(premium.minimumCredits, 'still readable — a locked rung can state its own price').toBe(2000);
 
-    // The CONTROL: one broken rung must not take the healthy ones with it.
-    expect(tiers.find((tier) => tier.id === 'premium')!.serveable).toBe(true);
+    // The CONTROL: a broken paid rung must not take the free one with it.
     expect(tiers[0].serveable).toBe(true);
+    expect(tiers[0].reason).toBeUndefined();
   });
 
   /*
@@ -473,7 +472,7 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
 
     const tiers = getModelTiers('claude-sonnet-5', {});
 
-    expect(tiers).toHaveLength(3);
+    expect(tiers).toHaveLength(1 + PAID_MODEL_TIERS.length);
     expect(tiers[0].serveable, 'the platform model is still serveable — it is not priced from these vars').toBe(true);
 
     for (const tier of tiers.slice(1)) {
@@ -566,11 +565,9 @@ describe('.env.example ships a working model tier ladder', () => {
   const LADDER_KEYS = [
     'LLM_PROVIDER',
     'LLM_MODEL',
+    'ENABLE_PREMIUM_MODEL',
     'PREMIUM_MODEL',
     'PREMIUM_MINIMUM_CREDITS',
-    'SUPERMAX_MODEL',
-    'ENABLE_EXTENDED_MODELS',
-    'SUPERMAX_MINIMUM_CREDITS',
   ] as const;
 
   /**
@@ -611,15 +608,14 @@ describe('.env.example ships a working model tier ladder', () => {
   /*
    * The literal shipping ladder. These are the values an operator gets by copying the file, so they are
    * pinned rather than derived: the in-code defaults deliberately DIFFER (Premium's fallback minimum is
-   * 1200 while the file ships 1500, so both rungs unlock together), and a test that derived from the
-   * constants would silently accept the file drifting to match a constant nobody meant to ship.
+   * 1200 while the file ships 1500), and a test that derived from the constants would silently accept
+   * the file drifting to match a constant nobody meant to ship.
    */
-  it('assigns the shipping three-rung ladder', () => {
+  it('assigns the shipping ladder', () => {
     expect(envExampleValue(example, 'LLM_MODEL')).toBe('claude-sonnet-5');
+    expect(envExampleValue(example, 'ENABLE_PREMIUM_MODEL')).toBe('true');
     expect(envExampleValue(example, 'PREMIUM_MODEL')).toBe('claude-opus-5');
-    expect(envExampleValue(example, 'SUPERMAX_MODEL')).toBe('claude-fable-5');
     expect(envExampleValue(example, 'PREMIUM_MINIMUM_CREDITS')).toBe('1500');
-    expect(envExampleValue(example, 'SUPERMAX_MINIMUM_CREDITS')).toBe('1500');
   });
 
   /* Standard is the rung every generation runs on; the file and the constant must not disagree. */
@@ -633,7 +629,7 @@ describe('.env.example ships a working model tier ladder', () => {
    * promoted yet. So an example naming an unpriced model hands the operator a rung that refuses on first
    * use, with the refusal blaming the Admin panel.
    */
-  it.each(['LLM_MODEL', 'PREMIUM_MODEL', 'SUPERMAX_MODEL'])('prices the model %s names, in the BAKED list', (key) => {
+  it.each(['LLM_MODEL', 'PREMIUM_MODEL'])('prices the model %s names, in the BAKED list', (key) => {
     const model = envExampleValue(example, key);
 
     expect(model, `${key} is not assigned exactly once`).toBeDefined();
@@ -645,30 +641,19 @@ describe('.env.example ships a working model tier ladder', () => {
    * the two numbers are only correct RELATIVE to each other, so deriving one from the other is the only
    * way the pair cannot drift apart unnoticed (the `storage/limits.ts` lesson).
    */
-  it.each(['PREMIUM_MINIMUM_CREDITS', 'SUPERMAX_MINIMUM_CREDITS'])(
-    'keeps %s a finite positive number at or above the signup grant',
-    (key) => {
-      const grantRaw = envExampleValue(example, 'SIGNUP_GRANT_CREDITS');
-      const grant = Number(grantRaw);
+  it.each(['PREMIUM_MINIMUM_CREDITS'])('keeps %s a finite positive number at or above the signup grant', (key) => {
+    const grantRaw = envExampleValue(example, 'SIGNUP_GRANT_CREDITS');
+    const grant = Number(grantRaw);
 
-      // Control: the grant really was read. A NaN here would make every comparison below vacuous.
-      expect(Number.isFinite(grant) && grant > 0, `SIGNUP_GRANT_CREDITS read as ${grantRaw}`).toBe(true);
+    // Control: the grant really was read. A NaN here would make every comparison below vacuous.
+    expect(Number.isFinite(grant) && grant > 0, `SIGNUP_GRANT_CREDITS read as ${grantRaw}`).toBe(true);
 
-      const minimum = Number(envExampleValue(example, key));
+    const minimum = Number(envExampleValue(example, key));
 
-      expect(Number.isFinite(minimum)).toBe(true);
-      expect(minimum).toBeGreaterThan(0);
-      expect(
-        minimum,
-        `${key}=${minimum} <= grant ${grant}: a fresh account unlocks this rung for free`,
-      ).toBeGreaterThan(grant);
-    },
-  );
-
-  /* Monotonic in the FILE too, not just in the code defaults — a copied ladder must still be a ladder. */
-  it('does not let the SuperMax rung unlock below the Premium rung', () => {
-    expect(Number(envExampleValue(example, 'SUPERMAX_MINIMUM_CREDITS'))).toBeGreaterThanOrEqual(
-      Number(envExampleValue(example, 'PREMIUM_MINIMUM_CREDITS')),
+    expect(Number.isFinite(minimum)).toBe(true);
+    expect(minimum).toBeGreaterThan(0);
+    expect(minimum, `${key}=${minimum} <= grant ${grant}: a fresh account unlocks this rung for free`).toBeGreaterThan(
+      grant,
     );
   });
 
@@ -684,14 +669,47 @@ describe('.env.example ships a working model tier ladder', () => {
 
   /*
    * The type declaration is the other half of "the variable exists": `worker-configuration.d.ts` is what
-   * makes `env(context, 'SUPERMAX_MODEL')` typecheck, so a var shipped in the example and missing here is
+   * makes `env(context, 'PREMIUM_MODEL')` typecheck, so a var shipped in the example and missing here is
    * a compile error waiting for whoever wires the next reader.
    */
-  it('declares both SuperMax variables in worker-configuration.d.ts, beside the Premium pair', () => {
+  it('declares every ladder variable in worker-configuration.d.ts', () => {
     const declarations = readFileSync(path.join(process.cwd(), 'worker-configuration.d.ts'), 'utf8');
 
-    for (const key of ['PREMIUM_MODEL', 'PREMIUM_MINIMUM_CREDITS', 'SUPERMAX_MODEL', 'SUPERMAX_MINIMUM_CREDITS']) {
+    for (const key of ['ENABLE_PREMIUM_MODEL', 'PREMIUM_MODEL', 'PREMIUM_MINIMUM_CREDITS']) {
       expect(declarations, `${key} is not declared`).toMatch(new RegExp(`^\\s*${key}\\s*:`, 'm'));
     }
+  });
+
+  /*
+   * 🔴 THE RETIRED LADDER VARS MUST NOT BE *ASSIGNED* ANYWHERE IN THE FILE (2026-08-08).
+   *
+   * `.env.example` is copied verbatim to make a real `.env`, and `refuseRetiredModelTierEnv` throws on
+   * any of these — so an example that assigns one hands the operator a deploy whose Premium rung is
+   * permanently locked with a message about a variable they never chose to set. The retirement note in
+   * the ladder block MENTIONS all three by name on purpose (that is how an upgrading operator learns
+   * what to delete); mentioning is fine, assigning is not, and `envExampleAssignments` is precisely the
+   * function that already knows the difference.
+   *
+   * ⚠️ The `_DOLLARS` sibling above scans by SHAPE (a regex over the line); this scans by NAME, because
+   * these three share no shape with each other. A shape-based scan is what would have to be invented if
+   * a fourth retired key arrived, and inventing it is how the two halves drift — keep them separate and
+   * keep both.
+   */
+  it.each(['ENABLE_EXTENDED_MODELS', 'SUPERMAX_MODEL', 'SUPERMAX_MINIMUM_CREDITS'])(
+    'never assigns the retired %s — mentioning it in the upgrade note is fine, assigning it is not',
+    (key) => {
+      expect(envExampleAssignments(example, key)).toEqual([]);
+    },
+  );
+
+  /*
+   * CONTROL for the three assertions above. They are all "expect empty", which is what a scanner that
+   * has silently stopped matching also returns — the failure mode this repo has hit more than once. So
+   * assert the file really does still talk about the retirement, and that the counter finds a synthetic
+   * assignment of the very key it is meant to catch.
+   */
+  it('control — the counter still catches a retired key when one IS assigned', () => {
+    expect(example).toContain('ENABLE_EXTENDED_MODELS');
+    expect(envExampleAssignments('# ENABLE_EXTENDED_MODELS=true', 'ENABLE_EXTENDED_MODELS')).toHaveLength(1);
   });
 });

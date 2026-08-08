@@ -51,8 +51,8 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  *
  * ## `claude-sonnet-5` — the STANDARD rung since 2026-07-31 (owner decision)
  *
- * The platform ships a three-class ladder (SPEC §4.6.1a): **Standard** (this constant) · **Premium**
- * (`PREMIUM_MODEL`, Opus 5) · **SuperMax** (`SUPERMAX_MODEL`, Fable 5). This is the rung every
+ * The platform ships a two-class ladder (SPEC §4.6.1a): **Standard** (this constant) · **Premium**
+ * (`PREMIUM_MODEL`). This is the rung every
  * generation runs on unless a user has deliberately bought their way up, so it is the one that decides
  * whether ordinary editing is affordable.
  *
@@ -106,7 +106,7 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * **A one-model probe cannot tell a model fault from an outage — probe the catalogue.**
  *
  * Consequences while it lasts: a deploy MUST set `LLM_MODEL=claude-opus-5` or every generation fails,
- * and two of the three §4.6.1a rungs (Standard and SuperMax) cannot run. The value of this constant is
+ * and the §4.6.1a Standard rung cannot run. The value of this constant is
  * a decision about where the platform sits when the provider is healthy; it is not a claim that the
  * provider is healthy today. Owner decision 2026-07-31: keep it, wait for KIE. Re-probe before
  * removing this note.

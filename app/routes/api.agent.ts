@@ -58,7 +58,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     model?: string;
 
     /**
-     * The rung of the MODEL TIER LADDER the user picked (§4.6.1a): `'standard' | 'premium' | 'supermax'`.
+     * The rung of the MODEL TIER LADDER the user picked (§4.6.1a): `'standard' | 'premium'`.
      *
      * An enum tier ID, never a model string — the server maps it to THAT rung's operator-configured,
      * operator-priced model, which is what keeps §4.2a's "model choice is config, never a user choice"
@@ -499,9 +499,9 @@ async function streamGeneration(
 
       /*
        * The rung that actually RAN, and why — never the one that was requested (§4.6.1a). A declined
-       * SuperMax turn and a plain Standard turn run the same model and are very different facts, so a
+       * Premium turn and a plain Standard turn can run the same model and are very different facts, so a
        * client reading only `model` cannot tell them apart; and once two rungs may name one model, the
-       * model string stops identifying a rung at all. This is what makes a SuperMax turn identifiable
+       * model string stops identifying a rung at all. This is what makes a Premium turn identifiable
        * in the generation log and lets the composer pill name what was really billed.
        */
       tier: generation.tier,

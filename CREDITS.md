@@ -34,7 +34,7 @@ BILLING_ENFORCED=true    # .env.local
 **Two things enforcement does NOT change (2026-07-18):** the **paid-tier thresholds** bind on the
 balance either way (settlement debits regardless, so a 320-credit balance cannot switch on an
 expensive rung even unmetered — a deploy that wants a free paid rung sets that rung's
-`PREMIUM_MINIMUM_CREDITS=0` / `SUPERMAX_MINIMUM_CREDITS=0` explicitly),
+`PREMIUM_MINIMUM_CREDITS=0` explicitly),
 and **media generation debits** (§4.16) are taken up-front either way and refuse at 402 rather than
 overdraw — the `media` ledger reason may never go negative.
 
@@ -120,7 +120,7 @@ credits  = ceil(raw_cost / CREDIT_UNIT_COST_USD × CREDIT_MARGIN)
 
 Current baked rates (per MTok, KIE), by SPEC §4.6.1a rung: Sonnet 5 (**Standard** — the platform
 default since 2026-07-31) **$0.85 / $4.275**; Opus 5 (**Premium** — the default 2026-07-27 →
-2026-07-31, at its predecessor Opus 4.8's exact price) **$2 / $10**; Fable 5 (**SuperMax**) **$4 / $20**. Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
+2026-07-31, at its predecessor Opus 4.8's exact price) **$2 / $10**; Fable 5 **$4 / $20** (the SuperMax rung's model until that rung was retired 2026-08-08; still priced, and reachable by pointing `PREMIUM_MODEL` at it, which the owner's deploy does). Cache rates always DERIVE from the row — 0.1× read, **2×** write (the 1-hour tier,
 §4.2.8; assuming the 1.25× headline number under-charges every generation and nothing throws).
 
 Measured on KIE (2026-07-16/17, `spec/context-budget.md` §MEASURED) **at the old margin 3.34** — at the
@@ -274,7 +274,7 @@ All are environment config, never hardcoded (`.env.local` locally, SSM → conta
 | `SANDBOX_EST_VM_HOURS_PER_KCREDIT` | `8.33` | The ESTIMATE: VM-hours dragged along by 1,000 billed credits (~120 credits per active build-hour, inverted). Replaced by measurement once the Admin VM-hours report has data |
 | `LLM_MODEL` | *`DEFAULT_MODEL`, `claude-sonnet-5`* | §4.6.1a **Standard** rung — the platform default. Always usable, no threshold |
 | `PREMIUM_MODEL` / `PREMIUM_MINIMUM_CREDITS` | `claude-opus-5` / `1200` *(`.env.example` ships `1500`)* | §4.6.1a **Premium** rung: a selector the ACTIVE price list must price + the balance a user must HOLD to unlock it (edit turns only) |
-| `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` | `claude-fable-5` / `1500` | §4.6.1a **SuperMax** rung, same rules. An unrecognised, unpriceable or unaffordable rung resolves DOWN to Standard — never up |
+| `ENABLE_PREMIUM_MODEL` | `true` | §4.6.1a master switch for the paid rung. `false` serves Standard alone. ⚠️ Renamed from `ENABLE_EXTENDED_MODELS` on 2026-08-08; the old name — and the retired `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` — are **REFUSED if set**, because this flag defaults ON and a stale `false` would silently start serving the paid rung to everyone. An unrecognised, unpriceable or unaffordable rung resolves DOWN to Standard — never up |
 | `PROJECT_CREATE_CREDITS` | `150` | Flat price of creating a project, charged at registration before anything is provisioned (`0` makes it free). Every generation turn — including the first build — bills cost-derived. See "Creating a project is FLAT" |
 | ~~`CREATION_FLAT_CREDITS`~~ | *retired* | **REFUSED if set** (including `0`), naming `PROJECT_CREATE_CREDITS`. There is no creation turn to flat-price any more |
 | `CACHE_WARMER_ENABLED` | `true` | Base-prompt cache warmer (KIE only): keeps the shared prompt block warm so generations read at 0.1× instead of writing at 2×. Platform-paid, no ledger rows |

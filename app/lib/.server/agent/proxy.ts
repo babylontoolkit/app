@@ -232,7 +232,7 @@ export interface AgentRequest {
 
   /**
    * The rung of the MODEL TIER LADDER the user picked for this generation (§4.6.1a) — a persisted
-   * per-user preference the client sends: `'standard' | 'premium' | 'supermax'`.
+   * per-user preference the client sends: `'standard' | 'premium'`.
    *
    * It is a REQUEST, never authorization: the server maps the ID to THAT rung's operator-configured,
    * operator-priced model and only honors it if `decideModelTier` clears the rung's threshold. Typed
@@ -359,7 +359,7 @@ export interface AgentGeneration {
    * Recorded alongside the model rather than inferred from it: the model string could tell you a tier
    * only while every rung named a different model, which stops being true the moment an operator points
    * two rungs at one id (ordinary during a migration) — and it could never distinguish "the user chose
-   * standard" from "the user chose SuperMax and was declined for credits". Both are the same model and
+   * standard" from "the user chose Premium and was declined for credits". Both can be the same model and
    * very different facts about the ladder.
    */
   tier: ModelTierId;
@@ -799,7 +799,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    *
    * ⚠️ It is otherwise called MORE often than before, and that is a deliberate divergence rather than
    * an accident. The old code reached it only when premium was declined; now every non-BYOK turn
-   * resolves the standard model, including a granted Premium/SuperMax one — because the standard rung
+   * resolves the standard model, including a granted Premium one — because the standard rung
    * is the fallback for EVERY decline path, so a ladder that cannot name it is not a working ladder.
    * The visible consequence: with an unpriced `LLM_MODEL`, a premium user who used to sail past the
    * fault now gets the same loud `NotConfiguredError` everyone else already got. An unbillable standard
@@ -812,10 +812,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /*
    * A rung whose selector cannot be priced is reported ONCE, loudly, here — not left to be noticed.
    *
-   * `getModelTiers` deliberately never throws (a broken rung must not take down the two that work, the
+   * `getModelTiers` deliberately never throws (a broken rung must not take down the ones that work, the
    * 2026-07-25 `/api/me` lesson), and that trade has a cost this line pays back: the previous code's
    * unconditional `getPremiumTier` was an outage, but it was also an unmissable ALARM. Without this,
-   * a misconfigured `SUPERMAX_MODEL` is invisible platform-wide until a user happens to pick that rung
+   * a misconfigured `PREMIUM_MODEL` is invisible platform-wide until a user happens to pick that rung
    * — and `ModelTierStatus.reason`, which explains exactly what the operator got wrong, would be
    * computed and read by nothing. Degrading a capability quietly is honest to the USER and must never
    * be quiet to the OPERATOR.
@@ -853,7 +853,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /*
    * A user who asked for a paid rung but was short of ITS threshold gets told, softly — never blocked
    * (§4.6.1). The notice names the rung they actually asked for: a hardcoded "premium" would quote a
-   * SuperMax user the wrong threshold, which is worse than saying nothing.
+   * Premium user the wrong threshold, which is worse than saying nothing.
    */
   const requestedRow = tiers.find((row) => row.id === requestedTier);
   const tierNotice =
@@ -2585,7 +2585,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * The rung that actually RAN, plus why. Recorded because a tier used to be inferable only from the
      * model string — which stops working the moment two rungs can name the same model (an operator
      * pointing Standard and Premium at one id during a migration is ordinary), and which could never
-     * distinguish "ran standard" from "asked for SuperMax and was declined". A generation log that
+     * distinguish "ran standard" from "asked for Premium and was declined". A generation log that
      * cannot answer which rung was billed cannot audit the ladder at all.
      */
     tier: tierDecision.tier,

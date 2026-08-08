@@ -88,10 +88,10 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
     'claude-opus-4-6': { inputPerMTok: 1.425, outputPerMTok: 7.15 },
 
     /*
-     * THE DEFAULT SUPERMAX RUNG (`DEFAULT_SUPERMAX_MODEL`, §4.6.1a) — the top of the ladder since
-     * 2026-07-31; the default PREMIUM model before that. 2x Opus 4.8 on KIE, not cheaper — it is
-     * the top rung because it
-     * is the strongest model KIE serves whose thinking text their adapter returns. MEASURED against
+     * The most expensive Claude row KIE serves — 2x Opus 4.8, not cheaper. It was the SuperMax rung's
+     * in-code default until that rung was retired (2026-08-08) and the PREMIUM default before that;
+     * it earns its place by being the strongest model KIE serves whose thinking text their adapter
+     * returns. Which rung (if any) names it is `PREMIUM_MODEL`'s answer, not this file's. MEASURED against
      * KIE's own `credits_consumed` (2026-07-17): a four-point input sweep converges on $4.006 and an
      * output probe on $19.99, with Opus 4.8 as the control reproducing its published $2/$10 exactly.
      */
@@ -101,7 +101,7 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
      * THE PLATFORM DEFAULT (`DEFAULT_MODEL`) — the Standard rung — since 2026-07-31. Row captured from
      * the feed 2026-07-18, ~0.283x of Anthropic's list. Every promoted price list MUST carry a row for
      * whatever `DEFAULT_MODEL` names (`validateMarketPriceList`), because an unpriced default bills at
-     * the most-expensive row instead — which is now the SuperMax rung, 4.7x this.
+     * the most-expensive row instead — which is `claude-fable-5`, 4.7x this.
      */
     'claude-sonnet-5': { inputPerMTok: 0.85, outputPerMTok: 4.275 },
 

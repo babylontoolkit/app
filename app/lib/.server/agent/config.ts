@@ -8,7 +8,7 @@
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
 import { getModelTier, kieDefaultModel, providerRates } from '~/lib/.server/billing/rates';
-import { EXTENDED_MODELS_ENV_KEY, extendedModelsEnabled } from '~/lib/.server/billing/extended-models';
+import { ENABLE_PREMIUM_MODEL_ENV_KEY, premiumModelEnabled } from '~/lib/.server/billing/premium-model-flag';
 import { paidModelTierDefinition, type PaidModelTierId } from '~/lib/.server/billing/model-tiers';
 
 /** Re-exported: this was the original home of the error, and several routes import it from here. */
@@ -199,12 +199,12 @@ export const ENHANCER_MODEL_ENV_KEY = 'ENHANCE_PROMPT_MODEL';
  * 503 the first time someone presses ✨ — loud, immediate, free — never a silent mis-bill in the
  * direction the operator was trying to move away from.
  *
- * 🔴 **It is NOT gated by `ENABLE_EXTENDED_MODELS`, and that is deliberate (owner, 2026-08-08).**
- * That flag exists to stop users opting into EXPENSIVE model classes on the platform's credits
- * (§4.6.1a's Premium/SuperMax rungs, `getTierModel`). This is the opposite motion in every respect: it
+ * 🔴 **It is NOT gated by `ENABLE_PREMIUM_MODEL`, and that is deliberate (owner, 2026-08-08).**
+ * That flag exists to stop users opting into the EXPENSIVE model class on the platform's credits
+ * (§4.6.1a's Premium rung, `getTierModel`). This is the opposite motion in every respect: it
  * is an operator setting, not a user choice; it is not a rung on the ladder; and its whole purpose is
  * to spend LESS. Routing it through the tier machinery would mean a deploy that had switched the paid
- * classes off — the cost-conscious deploy — was the one that could not have a cheap enhancer.
+ * class off — the cost-conscious deploy — was the one that could not have a cheap enhancer.
  *
  * Unset is the safe default: the platform model, i.e. exactly the behaviour that shipped before this
  * existed.
@@ -248,21 +248,21 @@ export function getEnhancerModel(context?: unknown): string {
  */
 export function getTierModel(id: PaidModelTierId, context?: unknown): string {
   /*
-   * 🔴 The SECOND wall behind `ENABLE_EXTENDED_MODELS` (§4.5.3's pattern applied to a money path).
-   * `getModelTiers` already drops the paid rungs from the ladder, so `decideModelTier` cannot authorize
-   * one and this is unreachable today — which is exactly why it is here. The first wall is a filter on a
+   * 🔴 The SECOND wall behind `ENABLE_PREMIUM_MODEL` (§4.5.3's pattern applied to a money path).
+   * `getModelTiers` already drops the paid rung from the ladder, so `decideModelTier` cannot authorize
+   * it and this is unreachable today — which is exactly why it is here. The first wall is a filter on a
    * list, and a future caller that assembles its own ladder, or resolves a model before the decision,
-   * would sail past it and bill an expensive model on a deploy that switched them off.
+   * would sail past it and bill an expensive model on a deploy that switched it off.
    *
    * It THROWS rather than degrading to the standard model: nothing should be asking, so an answer would
    * be a wrong answer given quietly. `NotConfiguredError` names the flag, because an operator seeing
    * this has one thing to change and it is not the selector.
    */
-  if (!extendedModelsEnabled(context)) {
+  if (!premiumModelEnabled(context)) {
     throw new NotConfiguredError(
-      `the ${id} model tier while ${EXTENDED_MODELS_ENV_KEY} is not "true"`,
-      `This deploy serves the standard model only. Set ${EXTENDED_MODELS_ENV_KEY}=true to offer the ` +
-        'Premium and SuperMax classes again.',
+      `the ${id} model tier while ${ENABLE_PREMIUM_MODEL_ENV_KEY} is not "true"`,
+      `This deploy serves the standard model only. Set ${ENABLE_PREMIUM_MODEL_ENV_KEY}=true to offer ` +
+        'the Premium class again.',
     );
   }
 
@@ -278,8 +278,9 @@ export function getTierModel(id: PaidModelTierId, context?: unknown): string {
      * operator to set a variable the platform will reject is worse than no error at all, and it
      * survived because nothing tests the text of a failure path. Prices live in the Admin panel.
      *
-     * It names the rung's OWN env key rather than a hardcoded `PREMIUM_MODEL`, because with three
-     * rungs the wrong variable name sends an operator to fix a setting that was never broken.
+     * It names the rung's OWN env key rather than a hardcoded `PREMIUM_MODEL`, because the ladder is a
+     * LIST whose length has changed twice, and the wrong variable name sends an operator to fix a
+     * setting that was never broken.
      */
     throw new NotConfiguredError(
       `${modelEnvKey}="${model}" (the ${label} tier) on provider ${provider}`,

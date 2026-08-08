@@ -169,7 +169,7 @@ One "make me a kart racer", the acceptance case, on the real starter:
 | **Total input tokens** | **1,100,188** | **111,659** |
 | Est. cost (Sonnet, in+out) | ≈ **$4.25** | ≈ **$1.35** |
 
-(Costs measured on Sonnet 5 — which is the platform default AGAIN since 2026-07-31, SPEC §4.6.1a, so these figures now describe the default directly. ⚠️ This line claimed "the platform default is now Opus 4.8" until 2026-07-31, two generations stale and disagreeing with every other document in the repo. On the paid rungs the same creation costs ~1.67x (Premium, Opus 5) and ~3.3x (SuperMax, Fable 5) — a uniform multiplier across every token class. The savings *ratio* the table demonstrates is model-independent.)
+(Costs measured on Sonnet 5 — which is the platform default AGAIN since 2026-07-31, SPEC §4.6.1a, so these figures now describe the default directly. ⚠️ This line claimed "the platform default is now Opus 4.8" until 2026-07-31, two generations stale and disagreeing with every other document in the repo. On the paid rung the same creation costs ~1.67x with Opus 5, or ~3.3x if `PREMIUM_MODEL` names Fable 5 (as the owner's deploy does; the SuperMax rung that used to own it was retired 2026-08-08) — a uniform multiplier across every token class. The savings *ratio* the table demonstrates is model-independent.)
 
 Output is now the dominant cost (~69%), which is the correct shape: we pay for what the model *writes*, not for what it *re-reads*.
 

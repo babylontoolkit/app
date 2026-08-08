@@ -16,7 +16,7 @@
  * | output         | 5x (model-specific)    | what the model writes                                  |
  */
 import { env, envFlag, envNumber, NotConfiguredError } from '~/lib/.server/env';
-import { extendedModelsEnabled } from './extended-models';
+import { premiumModelEnabled, refuseRetiredModelTierEnv } from './premium-model-flag';
 import type { MarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { activeMarketPrices } from './market-price-store';
@@ -318,18 +318,13 @@ export function kieRates(context?: unknown): Record<string, ModelRates> {
  * ⚠️ The thresholds stay env (`envNumber`): a credit THRESHOLD may have a fallback — unlike a price,
  * where a fallback is catastrophic.
  */
-export {
-  DEFAULT_PREMIUM_MINIMUM_CREDITS,
-  DEFAULT_PREMIUM_MODEL,
-  DEFAULT_SUPERMAX_MINIMUM_CREDITS,
-  DEFAULT_SUPERMAX_MODEL,
-} from './model-tiers';
+export { DEFAULT_PREMIUM_MINIMUM_CREDITS, DEFAULT_PREMIUM_MODEL } from './model-tiers';
 
 /** A paid rung, fully resolved: which model it runs, what that costs, and what it takes to unlock. */
 export interface ModelTier {
   id: PaidModelTierId;
 
-  /** The user-facing name (`Premium`, `SuperMax`) — from the tier table, never re-typed. */
+  /** The user-facing name (`Premium`) — from the tier table, never re-typed. */
   label: string;
 
   /** The model id, e.g. `claude-fable-5`. Reachable on any provider via the `providerRates` injection. */
@@ -355,6 +350,15 @@ export interface ModelTier {
  */
 export function getModelTier(id: PaidModelTierId, context?: unknown): ModelTier {
   refuseRetiredPriceEnv(context);
+
+  /*
+   * The retired LADDER vars (`ENABLE_EXTENDED_MODELS`, `SUPERMAX_*`) belong here rather than beside
+   * `refuseRetiredPriceEnv`'s other call sites, and the placement is the whole safety argument: this
+   * function is wrapped per-rung by `getModelTiers`, so a read path degrades to a locked row carrying
+   * the message, while the money path (`getTierModel` → here, before a generation) throws. `kieRates`
+   * runs on every settlement and must never learn about this.
+   */
+  refuseRetiredModelTierEnv(context);
 
   const definition = paidModelTierDefinition(id);
   const model = env(context, definition.modelEnvKey)?.trim() || definition.defaultModel;
@@ -428,16 +432,16 @@ export function getModelTiers(standardModel: string, context?: unknown): ModelTi
   };
 
   /*
-   * 🔴 `ENABLE_EXTENDED_MODELS=false` → the ladder IS the standard rung, and every downstream rule
-   * follows from that single fact rather than from a second code path (see `extended-models.ts`).
+   * 🔴 `ENABLE_PREMIUM_MODEL=false` → the ladder IS the standard rung, and every downstream rule
+   * follows from that single fact rather than from a second code path (see `premium-model-flag.ts`).
    * `decideModelTier` already resolves a rung it cannot find DOWN to standard, `/api/me` reports one
    * option so the picker has nothing to open, and `getTierModel` refuses independently.
    *
-   * Returning them as `serveable: false` instead would be wrong in a way that matters: that state means
+   * Returning it as `serveable: false` instead would be wrong in a way that matters: that state means
    * "misconfigured — an operator must fix something", and it renders a LOCKED row, i.e. the UI keeps
-   * advertising classes this deploy has deliberately withdrawn.
+   * advertising a class this deploy has deliberately withdrawn.
    */
-  if (!extendedModelsEnabled(context)) {
+  if (!premiumModelEnabled(context)) {
     return [standard];
   }
 
@@ -478,7 +482,7 @@ export function getModelTiers(standardModel: string, context?: unknown): ModelTi
 /** @deprecated Use `ModelTier`. Kept so existing premium-only callers keep their type name. */
 export type PremiumTier = ModelTier;
 
-/** The premium rung, by its old name. One implementation, so premium and SuperMax cannot drift. */
+/** The premium rung, by its old name. One implementation, so the two spellings cannot drift. */
 export function getPremiumTier(context?: unknown): ModelTier {
   return getModelTier('premium', context);
 }
@@ -526,8 +530,10 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
    * bakes NO row for — the case where filling and overwriting are the same thing. **That safe case is
    * over**: the premium rung now defaults to `claude-opus-5`, which Anthropic prices natively at
    * $5/$25, so the guard below is the ONLY thing standing between this table and the 231-vs-576
-   * regression. SuperMax (`claude-fable-5`) is still gap-filled on Anthropic and idempotent on KIE.
-   * A provider that prices a model itself is the authority on what it charges.
+   * regression. A rung pointed at `claude-fable-5` (which the owner's deploy runs) is still gap-filled
+   * on Anthropic and idempotent on KIE — the guard has to be correct for BOTH, which is exactly why it
+   * is a condition and not a choice of model. A provider that prices a model itself is the authority
+   * on what it charges.
    */
   const withTiers = (table: Record<string, ModelRates>): Record<string, ModelRates> =>
     tiers.reduce(

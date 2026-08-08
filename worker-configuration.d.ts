@@ -70,14 +70,16 @@ interface Env {
   LLM_MODEL: string;
 
   /**
-   * The paid rungs of the MODEL TIER LADDER (§4.6.1a). Each `*_MODEL` is a SELECTOR priced by the
-   * active Marketplace price list — never a price — and each `*_MINIMUM_CREDITS` is the balance a user
-   * must HOLD to unlock that rung.
+   * The paid rung of the MODEL TIER LADDER (§4.6.1a). `PREMIUM_MODEL` is a SELECTOR priced by the
+   * active Marketplace price list — never a price — and `PREMIUM_MINIMUM_CREDITS` is the balance a user
+   * must HOLD to unlock it. `ENABLE_PREMIUM_MODEL` is the master switch (default ON).
+   *
+   * ⚠️ `ENABLE_EXTENDED_MODELS`, `SUPERMAX_MODEL` and `SUPERMAX_MINIMUM_CREDITS` are RETIRED and
+   * REFUSED if set (`billing/premium-model-flag.ts`), so they are deliberately absent from this type.
    */
+  ENABLE_PREMIUM_MODEL: string;
   PREMIUM_MODEL: string;
   PREMIUM_MINIMUM_CREDITS: string;
-  SUPERMAX_MODEL: string;
-  SUPERMAX_MINIMUM_CREDITS: string;
 
   /** Credit economics (`spec/billing.md`). Never fudge these to fix a margin — see the file's own warning. */
   CREDIT_MARGIN: string;

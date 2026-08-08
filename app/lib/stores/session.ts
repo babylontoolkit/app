@@ -85,8 +85,8 @@ export interface ModelTiersState {
 /**
  * The ladder before (or without) a server answer: the platform default, every paid rung LOCKED.
  *
- * Locked is the safe direction — an optimistic default would render a selectable SuperMax row to a
- * signed-out visitor. The paid rows are still LISTED rather than omitted, so the picker has a stable
+ * Locked is the safe direction — an optimistic default would render a selectable Premium row to a
+ * signed-out visitor. The paid row is still LISTED rather than omitted, so the picker has a stable
  * shape and a user can see what exists and what it would take to unlock it.
  */
 export const LOCKED_MODEL_TIERS: ModelTiersState = {
@@ -98,14 +98,6 @@ export const LOCKED_MODEL_TIERS: ModelTiersState = {
       label: 'Premium',
       model: 'claude-opus-5',
       minimumCredits: 1200,
-      available: false,
-      serveable: false,
-    },
-    {
-      id: 'supermax',
-      label: 'SuperMax',
-      model: 'claude-fable-5',
-      minimumCredits: 1500,
       available: false,
       serveable: false,
     },

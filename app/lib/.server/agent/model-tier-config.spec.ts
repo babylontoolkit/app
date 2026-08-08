@@ -42,8 +42,9 @@
  * its inputs, which is this file's half.
  *
  * ⚠️ `env()` falls back to `process.env` and Vitest loads `.env.local` — which on a real developer's
- * machine sets `LLM_MODEL`, `LLM_PROVIDER`, `PREMIUM_MODEL`, `PREMIUM_MINIMUM_CREDITS`,
- * `SUPERMAX_MODEL` and `SUPERMAX_MINIMUM_CREDITS`. Every case that means to test a DEFAULT scrubs the
+ * machine sets `LLM_MODEL`, `LLM_PROVIDER`, `PREMIUM_MODEL` and `PREMIUM_MINIMUM_CREDITS` — plus, on
+ * an upgrading machine, the RETIRED `ENABLE_EXTENDED_MODELS` / `SUPERMAX_*`, which now make
+ * `getTierModel` throw outright. Every case that means to test a DEFAULT scrubs the
  * WHOLE precedence chain, not just the variable under test (the `oauth.spec.ts` trap, which fired a
  * second time in `billing.spec.ts` for want of one sibling in a scrub list).
  */
@@ -52,7 +53,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NotConfiguredError, getPremiumModel, getTierModel } from './config';
 import { invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
-import { DEFAULT_PREMIUM_MODEL, DEFAULT_SUPERMAX_MODEL } from '~/lib/.server/billing/model-tiers';
+import { DEFAULT_PREMIUM_MODEL } from '~/lib/.server/billing/model-tiers';
 import type { AgentGeneration } from './proxy';
 import { action as agentRouteAction } from '~/routes/api.agent';
 
@@ -90,8 +91,11 @@ const TIER_ENV = [
   'KIE_DEFAULT_MODEL',
   'PREMIUM_MODEL',
   'PREMIUM_MINIMUM_CREDITS',
-  'SUPERMAX_MODEL',
+  'ENABLE_PREMIUM_MODEL',
+
+  // Retired, and now REFUSED if set — a leftover on an upgrading machine fails every case here.
   'ENABLE_EXTENDED_MODELS',
+  'SUPERMAX_MODEL',
   'SUPERMAX_MINIMUM_CREDITS',
   'KIE_INPUT_DOLLARS',
   'KIE_OUTPUT_DOLLARS',
@@ -131,13 +135,11 @@ const configSource = readFileSync(join(REPO, 'app/lib/.server/agent/config.ts'),
 /* ============================================================ 1. getTierModel — the real seam */
 
 describe('getTierModel — every rung resolves its OWN model, from code, with no environment', () => {
-  it('resolves Premium to Opus 5 and SuperMax to Fable 5', () => {
+  it('resolves Premium to Opus 5', () => {
     stubTierEnv();
 
     expect(getTierModel('premium', {})).toBe(DEFAULT_PREMIUM_MODEL);
     expect(getTierModel('premium', {})).toBe('claude-opus-5');
-    expect(getTierModel('supermax', {})).toBe(DEFAULT_SUPERMAX_MODEL);
-    expect(getTierModel('supermax', {})).toBe('claude-fable-5');
   });
 
   /*
@@ -145,31 +147,46 @@ describe('getTierModel — every rung resolves its OWN model, from code, with no
    * is normally satisfied by construction — it is asserted because the thing it would catch is a rung
    * that resolves on the provider a developer happens to run and refuses on the one production uses.
    */
-  it.each(['KIE', 'Anthropic'])('resolves both paid rungs on %s', (provider) => {
+  it.each(['KIE', 'Anthropic'])('resolves the paid rung on %s', (provider) => {
     stubTierEnv({ LLM_PROVIDER: provider });
 
     expect(getTierModel('premium', {})).toBe('claude-opus-5');
-    expect(getTierModel('supermax', {})).toBe('claude-fable-5');
   });
 
   /* The env var is a SELECTOR: it names a model, and the ACTIVE price list prices it. */
-  it('honours each rung’s own selector, and trims it', () => {
-    stubTierEnv({ SUPERMAX_MODEL: '  claude-sonnet-5  ', PREMIUM_MODEL: 'claude-fable-5' });
+  it('honours the rung’s own selector, and trims it', () => {
+    stubTierEnv({ PREMIUM_MODEL: '  claude-fable-5  ' });
 
-    expect(getTierModel('supermax', {})).toBe('claude-sonnet-5');
     expect(getTierModel('premium', {})).toBe('claude-fable-5');
   });
 
   /*
-   * 🔴 THE RUNGS ARE INDEPENDENT. One broken selector must never take another rung down — the same
-   * property `getModelTiers` has, one layer up. A shared "resolve the ladder" step that throws would
-   * make a typo in `PREMIUM_MODEL` refuse a SuperMax request that is perfectly configured.
+   * 🔴 THE RUNGS ARE INDEPENDENT — asserted STRUCTURALLY, because with one paid rung it can no longer
+   * be asserted behaviourally (2026-08-08).
+   *
+   * The behavioural version read "resolve SuperMax while PREMIUM_MODEL names a model nothing can
+   * price", and it was the test that would have caught a shared resolve-the-ladder step throwing for
+   * every rung at once. It died with the rung, and the honest thing is to say so rather than quietly
+   * drop a property: what survives is the mechanism that made it true — the selector and the error
+   * text are read from THIS rung's definition, never from a literal.
+   *
+   * A hardcoded `'PREMIUM_MODEL'` here is correct today and wrong the moment a second rung returns,
+   * which is exactly the class of regression a source scan can still see and a one-rung behavioural
+   * test cannot.
    */
-  it('resolves SuperMax while PREMIUM_MODEL names a model nothing can price', () => {
-    stubTierEnv({ PREMIUM_MODEL: 'some-unpriced-model' });
+  it('reads the selector from the rung’s own definition, never from a literal', () => {
+    const body = configSource.slice(configSource.indexOf('export function getTierModel('));
 
-    expect(getTierModel('supermax', {})).toBe('claude-fable-5');
-    expect(() => getTierModel('premium', {})).toThrow(NotConfiguredError);
+    expect(body).toContain('paidModelTierDefinition(id)');
+    expect(body.slice(0, body.indexOf('export function getPremiumModel'))).not.toMatch(/'PREMIUM_MODEL'/);
+  });
+
+  /* CONTROL for the scan above — it is reading a real function body, not an empty string. */
+  it('control — the scanned body is really getTierModel', () => {
+    expect(configSource).toContain('export function getTierModel(');
+    expect(configSource.indexOf('export function getPremiumModel')).toBeGreaterThan(
+      configSource.indexOf('export function getTierModel('),
+    );
   });
 
   /*
@@ -188,31 +205,8 @@ describe('getTierModel — an unpriceable selector is refused, naming the rung�
   /*
    * ⚠️ The message text IS the behaviour here. It used to instruct the operator to set
    * `PREMIUM_INPUT_DOLLARS` / `PREMIUM_OUTPUT_DOLLARS` — variables the platform has REFUSED at config
-   * time since 2026-07-18 — and it survived because nothing tests the text of a failure path. With
-   * three rungs the second way to be wrong is naming the wrong rung's variable, which sends an
-   * operator to fix a setting that was never broken.
+   * time since 2026-07-18 — and it survived because nothing tests the text of a failure path.
    */
-  it('names SUPERMAX_MODEL — never PREMIUM_MODEL, never a retired price var', () => {
-    stubTierEnv({ SUPERMAX_MODEL: 'not-a-real-model' });
-
-    let thrown: unknown;
-
-    try {
-      getTierModel('supermax', {});
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBeInstanceOf(NotConfiguredError);
-
-    const message = String((thrown as Error).message);
-
-    expect(message).toContain('SUPERMAX_MODEL');
-    expect(message).toContain('not-a-real-model');
-    expect(message).not.toContain('PREMIUM_MODEL');
-    expect(message).not.toContain('_DOLLARS');
-    expect(message).not.toMatch(/PREMIUM_(INPUT|OUTPUT)/);
-  });
 
   /*
    * THE CONTROL, and it is what makes the assertion above mean something: the same failure one rung
@@ -242,8 +236,8 @@ describe('getTierModel — an unpriceable selector is refused, naming the rung�
 
   /* And it points at the one place prices actually live, so the instruction is followable. */
   it('directs the operator to the Marketplace price list', () => {
-    stubTierEnv({ SUPERMAX_MODEL: 'not-a-real-model' });
-    expect(() => getTierModel('supermax', {})).toThrow(/Marketplace price list/);
+    stubTierEnv({ PREMIUM_MODEL: 'not-a-real-model' });
+    expect(() => getTierModel('premium', {})).toThrow(/Marketplace price list/);
   });
 });
 
@@ -294,11 +288,11 @@ describe('getPremiumModel — a deprecated wrapper, not a second implementation'
   });
 
   /* It must not have quietly become "whatever rung is cheapest/most expensive" — it is PREMIUM. */
-  it('resolves the premium rung specifically, not whichever rung is configured', () => {
-    stubTierEnv({ PREMIUM_MODEL: 'claude-opus-5', SUPERMAX_MODEL: 'claude-fable-5' });
+  it('resolves the premium rung specifically, not the platform model', () => {
+    stubTierEnv({ PREMIUM_MODEL: 'claude-fable-5', LLM_MODEL: 'claude-opus-5' });
 
-    expect(getPremiumModel({})).toBe('claude-opus-5');
-    expect(getPremiumModel({})).not.toBe(getTierModel('supermax', {}));
+    expect(getPremiumModel({})).toBe('claude-fable-5');
+    expect(getPremiumModel({})).toBe(getTierModel('premium', {}));
   });
 });
 
@@ -748,7 +742,7 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
   });
 
   it('reports WHY — the reason comes from the decision, and a request has no reason to give', async () => {
-    const meta = agentMetaFromStream(await postToAgentRoute({ tier: 'supermax' }));
+    const meta = agentMetaFromStream(await postToAgentRoute({ tier: 'premium' }));
     expect(meta.tierReason).toBe('below_minimum');
   });
 
@@ -758,12 +752,12 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
    */
   it('CONTROL — a granted rung is reported as itself', async () => {
     routeMocks.runAgentGeneration.mockResolvedValue(
-      fakeGeneration({ tier: 'supermax', tierReason: 'sufficient_credits', model: 'claude-fable-5' }),
+      fakeGeneration({ tier: 'premium', tierReason: 'sufficient_credits', model: 'claude-fable-5' }),
     );
 
-    const meta = agentMetaFromStream(await postToAgentRoute({ tier: 'supermax' }));
+    const meta = agentMetaFromStream(await postToAgentRoute({ tier: 'premium' }));
 
-    expect(meta.tier).toBe('supermax');
+    expect(meta.tier).toBe('premium');
     expect(meta.tierReason).toBe('sufficient_credits');
     expect(meta.model).toBe('claude-fable-5');
   });
@@ -821,10 +815,10 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
    */
   it('CONTROL — a turn with nothing to say carries a null notice', async () => {
     routeMocks.runAgentGeneration.mockResolvedValue(
-      fakeGeneration({ tier: 'supermax', tierReason: 'sufficient_credits' }),
+      fakeGeneration({ tier: 'premium', tierReason: 'sufficient_credits' }),
     );
 
-    const credits = annotationFromStream(await postToAgentRoute({ tier: 'supermax' }), 'credits');
+    const credits = annotationFromStream(await postToAgentRoute({ tier: 'premium' }), 'credits');
 
     expect(credits.notice).toBeNull();
   });
@@ -930,8 +924,8 @@ describe('the request body accepts an UNTRUSTED tier, and keeps the legacy alias
      * in prose, so the raw file contains it and only the stripped file can refute it. Asserted as a
      * pair, because an assertion that would pass on the unstripped source is not testing the strip.
      */
-    expect(routeRaw).toContain("'premium' | 'supermax'");
-    expect(route).not.toContain("'premium' | 'supermax'");
+    expect(routeRaw).toContain("'standard' | 'premium'");
+    expect(route).not.toContain("'standard' | 'premium'");
   });
 
   /* The deprecated alias is still part of the accepted shape — dropping the field drops the alias. */

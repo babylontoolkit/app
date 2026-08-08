@@ -1,17 +1,22 @@
 /**
  * The MODEL TIER LADDER (SPEC §4.6.1a) — the vocabulary of model classes a credits user may choose.
  *
- * Three rungs, ordered by cost: **Standard** (the operator's platform model), **Premium**, and
- * **SuperMax**. Each paid rung names an operator-configured model through an env SELECTOR and unlocks
- * at a credit THRESHOLD the user must hold.
+ * Two rungs, ordered by cost: **Standard** (the operator's platform model) and **Premium**. The paid
+ * rung names an operator-configured model through an env SELECTOR and unlocks at a credit THRESHOLD the
+ * user must hold.
  *
- * ## Why this is a table and not three code paths
+ * ## Why this is a table and not two code paths
  *
- * This replaced a boolean (`PREMIUM_MODEL` or nothing). A boolean generalises to a third option in
- * exactly one honest way — an ordered list — and the alternative, copying the premium machinery into a
- * `SUPERMAX_*` twin, means every rule gets written twice and the two copies drift. The rules here are
- * money rules: the threshold that protects the free signup grant, the first-build lock, the
- * refuse-an-unpriced-selector check. A drifted copy of any of them fails silently.
+ * This replaced a boolean (`PREMIUM_MODEL` or nothing), briefly carried a third rung (`SuperMax`,
+ * 2026-07-31 → 2026-08-08), and is back to one paid rung by owner decision — the ladder is a LIST
+ * precisely so that number can change without the rules changing. The alternative, copying the premium
+ * machinery into a per-rung twin, means every rule gets written twice and the two copies drift. The
+ * rules here are money rules: the threshold that protects the free signup grant, the first-build lock,
+ * the refuse-an-unpriced-selector check. A drifted copy of any of them fails silently.
+ *
+ * ⚠️ **`SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` are RETIRED and REFUSED if set** — see
+ * `refuseRetiredModelTierEnv` in `premium-model-flag.ts`. A selector nothing reads is an operator
+ * believing they are serving a rung that does not exist, which is the `CREATION_FLAT_CREDITS` rule.
  *
  * ## This module holds DATA ONLY, and that is structural
  *
@@ -38,7 +43,7 @@
  */
 
 /** The rungs, cheapest first. Order is meaningful — it is the ladder. */
-export const MODEL_TIER_IDS = ['standard', 'premium', 'supermax'] as const;
+export const MODEL_TIER_IDS = ['standard', 'premium'] as const;
 
 export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
 
@@ -51,15 +56,13 @@ export type PaidModelTierId = Exclude<ModelTierId, 'standard'>;
 /**
  * The in-code defaults — what a deploy with NO environment at all gets.
  *
- * They must stay a monotonic ladder (standard ≤ premium ≤ supermax in both price and threshold), or a
- * bare deploy offers a rung that is cheaper than the one below it. The signup grant
- * (`SIGNUP_GRANT_CREDITS`, 1000) sits below every paid threshold, which is the whole point of the
- * thresholds: a brand-new account cannot burn its grant on the expensive models out the gate.
+ * They must stay a monotonic ladder (standard ≤ premium in both price and threshold), or a bare deploy
+ * offers a rung that is cheaper than the one below it. The signup grant (`SIGNUP_GRANT_CREDITS`, 1000)
+ * sits below every paid threshold, which is the whole point of the thresholds: a brand-new account
+ * cannot burn its grant on the expensive models out the gate.
  */
 export const DEFAULT_PREMIUM_MODEL = 'claude-opus-5';
 export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
-export const DEFAULT_SUPERMAX_MODEL = 'claude-fable-5';
-export const DEFAULT_SUPERMAX_MINIMUM_CREDITS = 1500;
 
 /** The static definition of a paid rung: where its config comes from and what it falls back to. */
 export interface ModelTierDefinition {
@@ -116,15 +119,6 @@ export const PAID_MODEL_TIERS: readonly ModelTierDefinition[] = [
     minimumEnvKey: 'PREMIUM_MINIMUM_CREDITS',
     defaultModel: DEFAULT_PREMIUM_MODEL,
     defaultMinimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS,
-    firstBuildLocked: false,
-  },
-  {
-    id: 'supermax',
-    label: 'SuperMax',
-    modelEnvKey: 'SUPERMAX_MODEL',
-    minimumEnvKey: 'SUPERMAX_MINIMUM_CREDITS',
-    defaultModel: DEFAULT_SUPERMAX_MODEL,
-    defaultMinimumCredits: DEFAULT_SUPERMAX_MINIMUM_CREDITS,
     firstBuildLocked: false,
   },
 ];

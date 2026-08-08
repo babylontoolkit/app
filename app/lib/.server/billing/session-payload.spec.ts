@@ -21,15 +21,16 @@
  * is why this sits in `billing/` next to the functions the payload is built from.
  *
  * ⚠️ `env()` falls back to `process.env` and Vitest loads `.env.local` — which on this machine sets
- * `LLM_MODEL`, `LLM_PROVIDER`, `PREMIUM_MODEL`, `PREMIUM_MINIMUM_CREDITS`, `SUPERMAX_MODEL`,
- * `SUPERMAX_MINIMUM_CREDITS`, `KIE_DEFAULT_MODEL` and both platform keys. Every case scrubs the WHOLE
+ * `LLM_MODEL`, `LLM_PROVIDER`, `PREMIUM_MODEL`, `PREMIUM_MINIMUM_CREDITS`, `KIE_DEFAULT_MODEL` and
+ * both platform keys — plus, on an upgrading machine, the RETIRED `ENABLE_EXTENDED_MODELS` and
+ * `SUPERMAX_*`, which now make the ladder refuse. Every case scrubs the WHOLE
  * precedence chain before saying what it means to say (the `oauth.spec.ts` trap, which has now fired
  * twice in this repo for want of one sibling in a scrub list).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
-import { DEFAULT_PREMIUM_MODEL, DEFAULT_SUPERMAX_MODEL } from '~/lib/.server/billing/model-tiers';
+import { DEFAULT_PREMIUM_MODEL } from '~/lib/.server/billing/model-tiers';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { loader as meLoader } from '~/routes/api.me';
 
@@ -113,8 +114,11 @@ const SESSION_ENV = [
   // the paid rungs
   'PREMIUM_MODEL',
   'PREMIUM_MINIMUM_CREDITS',
-  'SUPERMAX_MODEL',
+  'ENABLE_PREMIUM_MODEL',
+
+  // Retired 2026-08-08 and REFUSED if set — a leftover would degrade the ladder in every case here.
   'ENABLE_EXTENDED_MODELS',
+  'SUPERMAX_MODEL',
   'SUPERMAX_MINIMUM_CREDITS',
 
   // retired, and REFUSED — these throw inside every rung resolution
@@ -262,7 +266,7 @@ describe('CONTROLS — the drive reaches the loader and the payload is the real 
     expect(body.accountsEnabled).toBeTypeOf('boolean');
 
     // The ladder, in rung order — three rungs, standard first.
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'supermax']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
   });
 
   it('reports the balance the ledger actually returned, not a constant wearing its name', async () => {
@@ -332,26 +336,26 @@ describe('CONTROLS — the drive reaches the loader and the payload is the real 
   });
 });
 
-/* ============================================================ 2. A misconfigured SuperMax */
+/* ============================================================ 2. A misconfigured paid rung */
 
-describe('a misconfigured SUPERMAX_MODEL degrades that rung to off and takes nothing else down', () => {
+describe('a misconfigured PREMIUM_MODEL degrades that rung to off and takes nothing else down', () => {
   /** The acceptance case, at a balance that clears every threshold many times over. */
-  async function withBrokenSupermax() {
-    stubSessionEnv({ SUPERMAX_MODEL: UNPRICEABLE, SUPERMAX_MINIMUM_CREDITS: '1500' });
+  async function withBrokenPaidRung() {
+    stubSessionEnv({ PREMIUM_MODEL: UNPRICEABLE, PREMIUM_MINIMUM_CREDITS: '1500' });
     signedIn(10_000_000);
 
     return callMe();
   }
 
   it('still returns 200 — a rendering hint must never be an outage', async () => {
-    const { status } = await withBrokenSupermax();
+    const { status } = await withBrokenPaidRung();
     expect(status).toBe(200);
   });
 
-  it('reports SuperMax as unavailable, at a balance that clears its threshold a thousand times', async () => {
-    const { body } = await withBrokenSupermax();
+  it('reports the paid rung as unavailable, at a balance that clears its threshold a thousand times', async () => {
+    const { body } = await withBrokenPaidRung();
 
-    expect(tiersOf(body).supermax.available).toBe(false);
+    expect(tiersOf(body).premium.available).toBe(false);
   });
 
   /*
@@ -359,31 +363,35 @@ describe('a misconfigured SUPERMAX_MODEL degrades that rung to off and takes not
    * wire would show the user a model the platform has already refused to bill.
    */
   it('names the baked default rather than the selector it refused', async () => {
-    const { body } = await withBrokenSupermax();
+    const { body } = await withBrokenPaidRung();
 
-    expect(tiersOf(body).supermax.model).toBe(DEFAULT_SUPERMAX_MODEL);
+    expect(tiersOf(body).premium.model).toBe(DEFAULT_PREMIUM_MODEL);
     expect(JSON.stringify(body)).not.toContain(UNPRICEABLE);
   });
 
   it('still states what the locked rung would cost to unlock', async () => {
-    const { body } = await withBrokenSupermax();
+    const { body } = await withBrokenPaidRung();
 
-    expect(tiersOf(body).supermax.minimumCredits).toBe(1500);
+    expect(tiersOf(body).premium.minimumCredits).toBe(1500);
   });
 
-  it('leaves the other rungs alone — one broken selector is not a broken ladder', async () => {
-    const { body } = await withBrokenSupermax();
+  /*
+   * ⚠️ Until 2026-08-08 this also asserted that a healthy SIBLING PAID rung was untouched. That went
+   * with the third rung; the free rung is what remains, and it is the half that matters — a broken
+   * operator selector must never tell a signed-in user the platform itself is unavailable.
+   */
+  it('leaves the free rung alone — one broken selector is not a broken ladder', async () => {
+    const { body } = await withBrokenPaidRung();
     const tiers = tiersOf(body);
 
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'supermax']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.standard.model).toBe(DEFAULT_MODEL);
-    expect(tiers.premium.available).toBe(true);
-    expect(tiers.premium.model).toBe(DEFAULT_PREMIUM_MODEL);
+    expect(tiers.premium.available, 'the broken rung is the only one withdrawn').toBe(false);
   });
 
   it('leaves the rest of the payload intact', async () => {
-    const { body } = await withBrokenSupermax();
+    const { body } = await withBrokenPaidRung();
 
     expect(body.authenticated).toBe(true);
     expect(body.credits?.balance).toBe(10_000_000);
@@ -399,14 +407,14 @@ describe('a misconfigured SUPERMAX_MODEL degrades that rung to off and takes not
    * CONTROL. Without it, an `available: false` that is simply always false passes every assertion
    * above — the exact shape of a degraded-capability test that measures nothing.
    */
-  it('CONTROL — a priceable SuperMax selector is available at the same balance', async () => {
-    stubSessionEnv({ SUPERMAX_MODEL: DEFAULT_SUPERMAX_MODEL, SUPERMAX_MINIMUM_CREDITS: '1500' });
+  it('CONTROL — a priceable selector is available at the same balance', async () => {
+    stubSessionEnv({ PREMIUM_MODEL: DEFAULT_PREMIUM_MODEL, PREMIUM_MINIMUM_CREDITS: '1500' });
     signedIn(10_000_000);
 
     const { body } = await callMe();
 
-    expect(tiersOf(body).supermax.available).toBe(true);
-    expect(tiersOf(body).supermax.model).toBe(DEFAULT_SUPERMAX_MODEL);
+    expect(tiersOf(body).premium.available).toBe(true);
+    expect(tiersOf(body).premium.model).toBe(DEFAULT_PREMIUM_MODEL);
   });
 
   /*
@@ -414,13 +422,13 @@ describe('a misconfigured SUPERMAX_MODEL degrades that rung to off and takes not
    * threshold. `available` is "may this user pick it now", not "does it exist".
    */
   it('CONTROL — a healthy rung one credit below its threshold is locked, and available at it', async () => {
-    stubSessionEnv({ SUPERMAX_MINIMUM_CREDITS: '1500' });
+    stubSessionEnv({ PREMIUM_MINIMUM_CREDITS: '1500' });
     signedIn(1_499);
 
-    expect(tiersOf((await callMe()).body).supermax.available).toBe(false);
+    expect(tiersOf((await callMe()).body).premium.available).toBe(false);
 
     signedIn(1_500);
-    expect(tiersOf((await callMe()).body).supermax.available).toBe(true);
+    expect(tiersOf((await callMe()).body).premium.available).toBe(true);
   });
 
   /*
@@ -438,7 +446,7 @@ describe('a misconfigured SUPERMAX_MODEL degrades that rung to off and takes not
     expect(status).toBe(200);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.premium.available).toBe(false);
-    expect(tiers.supermax.available).toBe(false);
+    expect(tiers.premium.available).toBe(false);
   });
 });
 
@@ -455,7 +463,7 @@ describe('no billing configuration at all', () => {
     expect(body.credits?.modelTiers.standardModel).toBe(DEFAULT_MODEL);
     expect(tiers.standard).toMatchObject({ id: 'standard', minimumCredits: 0, available: true });
     expect(tiers.premium).toMatchObject({ id: 'premium', model: DEFAULT_PREMIUM_MODEL, available: true });
-    expect(tiers.supermax).toMatchObject({ id: 'supermax', model: DEFAULT_SUPERMAX_MODEL, available: true });
+    expect(tiers.premium).toMatchObject({ id: 'premium', model: DEFAULT_PREMIUM_MODEL, available: true });
   });
 
   /*
@@ -472,7 +480,7 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.enforced).toBe(true);
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'supermax']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
     expect(tiersOf(body).premium.model).toBe(DEFAULT_PREMIUM_MODEL);
   });
 
@@ -503,10 +511,10 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.modelTiers.standardModel).toBe(DEFAULT_MODEL);
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'supermax']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.premium.available).toBe(false);
-    expect(tiers.supermax.available).toBe(false);
+    expect(tiers.premium.available).toBe(false);
   });
 
   it('leaks nothing when the ladder itself cannot be resolved', async () => {
@@ -557,7 +565,7 @@ describe('an unresolvable platform model falls back rather than failing the sess
     const tiers = tiersOf((await callMe()).body);
 
     expect(tiers.premium).toMatchObject({ model: DEFAULT_PREMIUM_MODEL, available: true });
-    expect(tiers.supermax).toMatchObject({ model: DEFAULT_SUPERMAX_MODEL, available: true });
+    expect(tiers.premium).toMatchObject({ model: DEFAULT_PREMIUM_MODEL, available: true });
   });
 
   it('CONTROL — a priceable LLM_MODEL is reported as itself, not as the fallback', async () => {
@@ -573,8 +581,8 @@ describe('an unresolvable platform model falls back rather than failing the sess
    * Both halves broken at once. Each is individually guarded in the route, and a single try/catch
    * around the pair would pass every test above while collapsing here.
    */
-  it('survives an unpriceable platform model AND an unpriceable SuperMax together', async () => {
-    stubSessionEnv({ LLM_MODEL: UNPRICEABLE, SUPERMAX_MODEL: UNPRICEABLE });
+  it('survives an unpriceable platform model AND an unpriceable paid rung together', async () => {
+    stubSessionEnv({ LLM_MODEL: UNPRICEABLE, PREMIUM_MODEL: UNPRICEABLE });
     signedIn(10_000_000);
 
     const { status, body } = await callMe();
@@ -582,9 +590,8 @@ describe('an unresolvable platform model falls back rather than failing the sess
 
     expect(status).toBe(200);
     expect(body.credits?.modelTiers.standardModel).toBe(DEFAULT_MODEL);
-    expect(tiers.standard.available).toBe(true);
-    expect(tiers.premium.available).toBe(true);
-    expect(tiers.supermax.available).toBe(false);
+    expect(tiers.standard.available, 'the free rung falls back to the in-code default, not to nothing').toBe(true);
+    expect(tiers.premium.available, 'the unpriceable rung is withdrawn, not invented').toBe(false);
   });
 
   /*
@@ -661,7 +668,7 @@ function allStrings(value: unknown, into: string[] = []): string[] {
  * Every `key: number` pair anywhere in the payload.
  *
  * 🔴 A PRICE IS A NUMBER, and a scan that reads only strings cannot see one. Measured: planting
- * `standardInputDollars: 0.85` and `supermaxOutputDollars: 20` into the `credits` object passed the
+ * `standardInputDollars: 0.85` and `premiumOutputDollars: 20` into the `credits` object passed the
  * whole file — so "the response never contains a price" was pinned for five spellings of a key, in
  * string form, and nothing else. A rate that reaches the client is a rate a competitor reads and a
  * number a user will believe is what they were charged; it is exactly the kind of field a future
@@ -809,12 +816,12 @@ describe('the session payload carries no price, no key, and no server-only value
    * notices, and it is the only place the difference is observable.
    */
   it('a misconfigured rung leaks neither its operator reason nor the priced-model list', async () => {
-    stubWithSecrets({ SUPERMAX_MODEL: UNPRICEABLE });
+    stubWithSecrets({ PREMIUM_MODEL: UNPRICEABLE });
 
     const payload = await callMe();
 
     expect(payload.status).toBe(200);
-    expect(tiersOf(payload.body).supermax.available).toBe(false);
+    expect(tiersOf(payload.body).premium.available).toBe(false);
     assertNothingServerOnly(payload);
   });
 
@@ -861,7 +868,7 @@ describe('the session payload carries no price, no key, and no server-only value
     const planted = {
       body: {
         authenticated: true,
-        credits: { modelTiers: { tiers: [{ id: 'supermax', reason: SENTINELS.ANTHROPIC_API_KEY }] } },
+        credits: { modelTiers: { tiers: [{ id: 'premium', reason: SENTINELS.ANTHROPIC_API_KEY }] } },
       } as unknown as SessionPayload,
       wire: JSON.stringify({ nested: { deep: SENTINELS.ANTHROPIC_API_KEY } }),
     };
@@ -908,7 +915,7 @@ describe('the session payload carries no price, no key, and no server-only value
     const planted = {
       body: {
         authenticated: true,
-        credits: { balance: 100, standardInputDollars: 0.85, supermaxOutputDollars: 20 },
+        credits: { balance: 100, standardInputDollars: 0.85, premiumOutputDollars: 20 },
       } as unknown as SessionPayload,
       wire: '{}',
     };

@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { thinkingFetch } from '~/lib/modules/llm/capabilities';
 import { kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
 import { DEFAULT_MODEL } from '~/utils/constants';
-import { DEFAULT_PREMIUM_MODEL, DEFAULT_SUPERMAX_MODEL } from '~/lib/.server/billing/model-tiers'; // pure data, zero imports — safe from a spec
+import { DEFAULT_PREMIUM_MODEL } from '~/lib/.server/billing/model-tiers'; // pure data, zero imports — safe from a spec
 
 /** A minimal Anthropic SSE stream — enough for `streamText` to consume without erroring. */
 function sseResponse(): Response {
@@ -164,12 +164,11 @@ describe('the KIE wire format', () => {
    * 2026-07-27", which went stale on 07-31 when Sonnet 5 took the rung and Opus 5 became Premium.
    * A test title is a claim like any other.
    */
-  it('offers every model tier rung — Standard, Premium and SuperMax', () => {
+  it('offers every model tier rung — Standard and Premium', () => {
     const names = KIE_MODELS.map((m) => m.name);
 
     expect(names).toContain(DEFAULT_MODEL);
     expect(names).toContain(DEFAULT_PREMIUM_MODEL);
-    expect(names).toContain(DEFAULT_SUPERMAX_MODEL);
   });
 
   /*
