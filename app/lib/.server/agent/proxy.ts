@@ -52,6 +52,7 @@ import { getModelTiers } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
+import { toolkitSystemsNoteForRequest } from '~/lib/agent/toolkit-systems';
 import {
   decideModelTier,
   tierDeclinedNotice,
@@ -274,6 +275,17 @@ export interface AgentRequest {
    * leak into their game. A preference, not security: it spends nothing and reveals nothing.
    */
   useAssetLibrary?: boolean;
+
+  /**
+   * The user's "Toolkit systems" preference (§4.4e, Control Panel → Features, default `'auto'`).
+   *
+   * Raw and untyped on purpose: it arrives in a browser body, and `toolkitSystemsNoteForRequest` owns
+   * the parse so the client and the server can never disagree about what a value means. Anything
+   * unrecognised — junk, an older client that omits the field — resolves DOWN to `'auto'`, which
+   * pushes NO block and costs nothing. A preference, not security: it spends nothing and reveals
+   * nothing, it only decides whether the model reaches for the built-in controllers.
+   */
+  toolkitSystems?: string;
 
   /**
    * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
@@ -1027,6 +1039,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   if (assetLibraryIndex) {
     system.push({ role: 'system', content: assetLibraryIndex });
+  }
+
+  /*
+   * The "Toolkit systems" override (§4.4e) — the same sharedness class as the block above: a per-user
+   * preference with only three possible values, stable for the whole conversation, so it sits here
+   * rather than in the volatile tail and likewise carries NO breakpoint of its own.
+   *
+   * 🔴 The DEFAULT pushes NOTHING. `20-hard-constraints.md` already states the balanced position in
+   * the cached prefix ("a menu, not a mapping"), so an `auto` note would restate the cached prompt at
+   * full rate on every turn forever (§4.2.8) — a regression that throws nothing and just costs money.
+   * Only an explicit `prefer`/`own` adds bytes, and only for the user who asked for it.
+   */
+  const toolkitSystemsNote = toolkitSystemsNoteForRequest(request.toolkitSystems);
+
+  if (toolkitSystemsNote) {
+    system.push({ role: 'system', content: toolkitSystemsNote });
   }
 
   /*

@@ -37,6 +37,14 @@ controller when it genuinely matches the request, build on top of one when it is
 your own movement over `RigidbodyPhysics` when the request wants something it does not do. **None of
 those three is a defect**, and picking a controller that fights the requested feel is the real one.
 
+**If you intend to use one of these systems, LOAD ITS REFERENCE FIRST.** This section names the
+classes; it does not teach them, and you cannot write their API from memory — an invented method is
+worse than not using the system at all. Your reference budget is small, so decide early and spend it
+on what you will actually write against. **If you cannot load the document you need, do not half-use
+the system from memory: author that part yourself over `RigidbodyPhysics` / `ScriptComponent`
+instead, and say which system you skipped and why in your closing summary.** A working thing you
+wrote beats a broken call into a system you were guessing at.
+
 ## Demo assets are an EXAMPLE, never a default
 
 The reference documents and the classes in `src/babylon/classes/` teach APIs using specific playground

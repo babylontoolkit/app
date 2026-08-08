@@ -5,6 +5,11 @@ import type { TabVisibilityConfig, TabWindowConfig, UserTabConfig } from '~/comp
 import { DEFAULT_TAB_CONFIG } from '~/components/@settings/core/constants';
 import { toggleTheme } from './theme';
 import { create } from 'zustand';
+import {
+  DEFAULT_TOOLKIT_SYSTEMS,
+  parseToolkitSystems,
+  type ToolkitSystemsPreference,
+} from '~/lib/agent/toolkit-systems';
 
 export interface Shortcut {
   key: string;
@@ -290,6 +295,14 @@ const SETTINGS_KEYS = {
    * request body; the server gate only honors an explicit `false`, so absent = ON.
    */
   USE_ASSET_LIBRARY: 'useAssetLibrary',
+
+  /**
+   * The "Toolkit systems" preference (§4.4e, Control Panel → Features, default `'auto'`): whether the
+   * model should reach for the built-in controllers, decide for itself, or author its own
+   * architecture. Rides in the agent request body; an unrecognised value resolves DOWN to `'auto'`,
+   * which emits no block at all.
+   */
+  TOOLKIT_SYSTEMS: 'toolkitSystems',
 } as const;
 
 // Initialize settings from localStorage or defaults
@@ -318,6 +331,7 @@ const getInitialSettings = () => {
     contextOptimization: getStoredBoolean(SETTINGS_KEYS.CONTEXT_OPTIMIZATION, true),
     eventLogs: getStoredBoolean(SETTINGS_KEYS.EVENT_LOGS, true),
     useAssetLibrary: getStoredBoolean(SETTINGS_KEYS.USE_ASSET_LIBRARY, true),
+    toolkitSystems: getStoredToolkitSystems(),
     promptId: isBrowser ? localStorage.getItem(SETTINGS_KEYS.PROMPT_ID) || 'default' : 'default',
     developerMode: getStoredBoolean(SETTINGS_KEYS.DEVELOPER_MODE, false),
 
@@ -370,6 +384,31 @@ function getStoredModelTier(): ModelTierId {
   return safeParse(localStorage.getItem(SETTINGS_KEYS.PREMIUM_MODEL) ?? '') === true ? 'premium' : 'standard';
 }
 
+/**
+ * The stored "Toolkit systems" preference (§4.4e).
+ *
+ * `parseToolkitSystems` owns the whole decision, so the browser and the server can never disagree
+ * about what a value means — this reads `localStorage` and hands it straight over. Unrecognised,
+ * hand-edited and absent all land on `'auto'`, which is the shipped behaviour AND the free one.
+ *
+ * Both spellings are accepted for the same reason `getStoredModelTier` accepts both: `updateToolkitSystems`
+ * writes the JSON-quoted form, and refusing a bare `prefer` that a user or an older build wrote would
+ * silently revert a choice they made.
+ */
+function getStoredToolkitSystems(): ToolkitSystemsPreference {
+  if (!isBrowser) {
+    return DEFAULT_TOOLKIT_SYSTEMS;
+  }
+
+  const stored = localStorage.getItem(SETTINGS_KEYS.TOOLKIT_SYSTEMS);
+
+  if (stored === null) {
+    return DEFAULT_TOOLKIT_SYSTEMS;
+  }
+
+  return parseToolkitSystems(stored.startsWith('"') ? safeParse(stored) : stored);
+}
+
 function safeParse(raw: string): unknown {
   try {
     return JSON.parse(raw);
@@ -396,6 +435,14 @@ export const isEventLogsEnabled = atom<boolean>(initialSettings.eventLogs);
  * block when it is false. Default ON.
  */
 export const useAssetLibraryStore = atom<boolean>(initialSettings.useAssetLibrary);
+
+/**
+ * The "Toolkit systems" preference (§4.4e) — a per-user request preference like `useAssetLibraryStore`,
+ * never enforcement: the proxy reads it off the request body and pushes an override block for
+ * `'prefer'`/`'own'` only. The default `'auto'` pushes NOTHING, so the common case costs no tokens —
+ * the baked batteries-included rule already states the balanced position.
+ */
+export const toolkitSystemsStore = atom<ToolkitSystemsPreference>(initialSettings.toolkitSystems);
 export const promptStore = atom<string>(initialSettings.promptId);
 
 /**
@@ -440,6 +487,11 @@ export const updateEventLogs = (enabled: boolean) => {
 export const updateUseAssetLibrary = (enabled: boolean) => {
   useAssetLibraryStore.set(enabled);
   localStorage.setItem(SETTINGS_KEYS.USE_ASSET_LIBRARY, JSON.stringify(enabled));
+};
+
+export const updateToolkitSystems = (preference: ToolkitSystemsPreference) => {
+  toolkitSystemsStore.set(preference);
+  localStorage.setItem(SETTINGS_KEYS.TOOLKIT_SYSTEMS, JSON.stringify(preference));
 };
 
 /**

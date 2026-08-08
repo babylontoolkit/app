@@ -243,7 +243,7 @@ export const ChatImpl = memo(
       (project) => project.id === supabaseConn.selectedProjectId,
     );
     const supabaseAlert = useStore(workbenchStore.supabaseAlert);
-    const { activeProviders, promptId, contextOptimizationEnabled, useAssetLibrary } = useSettings();
+    const { activeProviders, promptId, contextOptimizationEnabled, useAssetLibrary, toolkitSystems } = useSettings();
     const [llmErrorAlert, setLlmErrorAlert] = useState<LlmErrorAlertType | undefined>(undefined);
 
     /*
@@ -519,6 +519,14 @@ export const ChatImpl = memo(
          * out, so a stale bundle that never sends the field keeps the shipped default.
          */
         useAssetLibrary,
+
+        /*
+         * The "Toolkit systems" preference (§4.4e, Control Panel → Features, default 'auto'). The proxy
+         * pushes an override block only for 'prefer'/'own'; 'auto' — and anything it does not recognise,
+         * including a stale bundle that omits the field — pushes nothing and costs no tokens.
+         */
+        toolkitSystems,
+
         designScheme,
         supabase: {
           isConnected: supabaseConn.isConnected,

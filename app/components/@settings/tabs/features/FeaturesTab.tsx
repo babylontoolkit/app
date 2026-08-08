@@ -5,6 +5,7 @@ import { Switch } from '~/components/ui/Switch';
 import { useSettings } from '~/lib/hooks/useSettings';
 import { classNames } from '~/utils/classNames';
 import { toast } from 'react-toastify';
+import type { ToolkitSystemsPreference } from '~/lib/agent/toolkit-systems';
 
 interface FeatureToggle {
   id: string;
@@ -66,6 +67,100 @@ const FeatureCard = memo(
   ),
 );
 
+/**
+ * The "Toolkit systems" choice (§4.4e) — three settings, so a `Switch` cannot carry it.
+ *
+ * Reported 2026-08-08: the same "mario kart clone" prompt produced a simulation-physics Mustang on one
+ * model and hand-written movement on another, and there was no way to steer either. *"There are times
+ * when I do want it to use the included interactive glTF script components and then there are times
+ * when I need it to be creative itself and make its architecture."* That is a control, not a wording
+ * problem — so it is a control.
+ *
+ * Each option states what it MEANS for the game rather than naming a mechanism: the person choosing
+ * is deciding how their game should feel, not configuring a prompt.
+ */
+const TOOLKIT_SYSTEM_OPTIONS: { id: ToolkitSystemsPreference; label: string; description: string }[] = [
+  {
+    id: 'prefer',
+    label: 'Prefer built-ins',
+    description:
+      "Reach for the Toolkit's ready-made controllers and interactive glTF script components wherever they fit. Fastest and most predictable, but the game inherits their feel.",
+  },
+  {
+    id: 'auto',
+    label: 'Let the model decide',
+    description:
+      'Judges from your request whether a built-in matches the feel you asked for, and writes its own where it does not. The default.',
+  },
+  {
+    id: 'own',
+    label: 'Author its own',
+    description:
+      'Designs movement, game rules and component structure from scratch for this project. Still uses the Toolkit for physics, animation, cameras, input and audio.',
+  },
+];
+
+const ToolkitSystemsCard = memo(
+  ({ value, onChange }: { value: ToolkitSystemsPreference; onChange: (next: ToolkitSystemsPreference) => void }) => (
+    <motion.div
+      className={classNames(
+        'relative bg-bolt-elements-background-depth-2',
+        'transition-colors duration-200',
+        'rounded-lg overflow-hidden',
+      )}
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+    >
+      <div className="p-4">
+        <div className="flex items-center gap-3">
+          <div className="i-ph:tree-structure w-5 h-5 text-bolt-elements-textSecondary" />
+          <h4 className="font-medium text-bolt-elements-textPrimary">Toolkit systems</h4>
+        </div>
+
+        <p className="mt-2 text-sm text-bolt-elements-textSecondary">
+          How much of your game should be built from the Toolkit&apos;s ready-made systems.
+        </p>
+
+        <div className="mt-4 flex flex-col gap-2" role="radiogroup" aria-label="Toolkit systems">
+          {TOOLKIT_SYSTEM_OPTIONS.map((option) => {
+            const selected = option.id === value;
+
+            return (
+              <button
+                key={option.id}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => onChange(option.id)}
+                className={classNames(
+                  'text-left rounded-md border p-3 transition-colors',
+                  selected
+                    ? 'border-purple-500 bg-purple-500/10'
+                    : 'border-bolt-elements-borderColor hover:bg-bolt-elements-background-depth-3',
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <div
+                    className={classNames(
+                      'w-4 h-4 shrink-0',
+                      selected
+                        ? 'i-ph:radio-button-fill text-purple-500'
+                        : 'i-ph:circle text-bolt-elements-textTertiary',
+                    )}
+                  />
+                  <span className="text-sm font-medium text-bolt-elements-textPrimary">{option.label}</span>
+                </div>
+                <p className="mt-1 pl-6 text-xs text-bolt-elements-textTertiary">{option.description}</p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </motion.div>
+  ),
+);
+
 const FeatureSection = memo(
   ({
     title,
@@ -106,6 +201,8 @@ const FeatureSection = memo(
 
 export default function FeaturesTab() {
   const {
+    toolkitSystems,
+    setToolkitSystems,
     autoSelectTemplate,
     isLatestBranch,
     contextOptimizationEnabled,
@@ -186,6 +283,25 @@ export default function FeaturesTab() {
       }
     },
     [enableLatestBranch, setAutoSelectTemplate, enableContextOptimization, setEventLogs, setUseAssetLibrary],
+  );
+
+  /*
+   * A toast on every change, like the asset-library toggle: this setting changes what the model
+   * builds on the NEXT turn and nothing else on screen would say so.
+   */
+  const handleToolkitSystems = useCallback(
+    (preference: ToolkitSystemsPreference) => {
+      setToolkitSystems(preference);
+
+      const said = {
+        prefer: 'Toolkit systems preferred — the AI will reach for the built-in controllers',
+        auto: 'Toolkit systems set to automatic — the AI decides from your request',
+        own: 'Toolkit systems off — the AI will author its own game architecture',
+      }[preference];
+
+      toast.success(said);
+    },
+    [setToolkitSystems],
   );
 
   const features = {
@@ -275,6 +391,34 @@ export default function FeaturesTab() {
         description="Essential features that are enabled by default for optimal performance"
         onToggleFeature={handleToggleFeature}
       />
+
+      {/*
+       * Placed AFTER Core Features deliberately: "Use Asset Library" is the owner-chosen first card
+       * (§4.4d) and this does not displace it. The two are siblings — one decides where a game's
+       * CONTENT comes from, this one decides where its ARCHITECTURE comes from — so they read as a
+       * pair, and this one gets its own heading because it is a choice rather than a switch.
+       */}
+      <motion.div
+        layout
+        className="flex flex-col gap-4"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3 }}
+      >
+        <div className="flex items-center gap-3">
+          <div className="i-ph:blueprint text-xl text-purple-500" />
+          <div>
+            <h3 className="text-lg font-medium text-bolt-elements-textPrimary">Game architecture</h3>
+            <p className="text-sm text-bolt-elements-textSecondary">
+              Whether the AI builds on the Toolkit&apos;s ready-made systems or designs its own
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <ToolkitSystemsCard value={toolkitSystems} onChange={handleToolkitSystems} />
+        </div>
+      </motion.div>
 
       {features.beta.length > 0 && (
         <FeatureSection

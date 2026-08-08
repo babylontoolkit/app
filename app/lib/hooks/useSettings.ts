@@ -17,7 +17,10 @@ import {
   updatePromptId,
   useAssetLibraryStore,
   updateUseAssetLibrary,
+  toolkitSystemsStore,
+  updateToolkitSystems,
 } from '~/lib/stores/settings';
+import type { ToolkitSystemsPreference } from '~/lib/agent/toolkit-systems';
 import { useCallback, useEffect, useState } from 'react';
 import Cookies from 'js-cookie';
 import type { IProviderSetting, ProviderInfo, IProviderConfig } from '~/types/model';
@@ -62,6 +65,8 @@ export interface UseSettingsReturn {
   enableContextOptimization: (enabled: boolean) => void;
   useAssetLibrary: boolean;
   setUseAssetLibrary: (enabled: boolean) => void;
+  toolkitSystems: ToolkitSystemsPreference;
+  setToolkitSystems: (preference: ToolkitSystemsPreference) => void;
 
   // Tab configuration
   tabConfiguration: TabWindowConfig;
@@ -83,6 +88,7 @@ export function useSettings(): UseSettingsReturn {
   const [activeProviders, setActiveProviders] = useState<ProviderInfo[]>([]);
   const contextOptimizationEnabled = useStore(enableContextOptimizationStore);
   const useAssetLibrary = useStore(useAssetLibraryStore);
+  const toolkitSystems = useStore(toolkitSystemsStore);
   const tabConfiguration = useStore(tabConfigurationStore);
   const [settings, setSettings] = useState<Settings>(() => {
     const storedSettings = getLocalStorage('settings');
@@ -153,6 +159,11 @@ export function useSettings(): UseSettingsReturn {
     logStore.logSystem(`Use Asset Library ${enabled ? 'enabled' : 'disabled'}`);
   }, []);
 
+  const setToolkitSystems = useCallback((preference: ToolkitSystemsPreference) => {
+    updateToolkitSystems(preference);
+    logStore.logSystem(`Toolkit systems preference set to "${preference}"`);
+  }, []);
+
   const setTheme = useCallback(
     (theme: Settings['theme']) => {
       saveSettings({ theme });
@@ -209,6 +220,8 @@ export function useSettings(): UseSettingsReturn {
     enableContextOptimization,
     useAssetLibrary,
     setUseAssetLibrary,
+    toolkitSystems,
+    setToolkitSystems,
     setTheme,
     setLanguage,
     setNotifications,

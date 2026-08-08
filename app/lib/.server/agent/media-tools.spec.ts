@@ -34,9 +34,26 @@ import { setMediaDispatcher } from '~/lib/.server/media/dispatch';
  */
 let tmp: string;
 
+/*
+ * 🔴 THE FIXTURE MUST BE FUNDED, or this file silently stops testing what it says it tests.
+ *
+ * A fresh `FsLedger` starts at ZERO, and `'media'` is absent from `mayGoNegative` — so every call was
+ * refused by the CREDIT GATE ("Not enough credits: this image costs 24 credits") and never reached the
+ * provider. The round-budget assertions still read as passing, because the gate's message says
+ * "was refused" in lower case while the budget's said "REFUSED"; only `wire.touched()` could tell the
+ * difference, and it was reporting a provider that had never been called for a reason that has nothing
+ * to do with this file's subject.
+ *
+ * That is the vacuous-test trap in its purest form: a spec whose inputs cannot reach the rule it names
+ * is not a weak test, it is no test. Fund it, and the refusal path under test is the only one left.
+ */
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'media-tools-'));
-  setLedger(new FsLedger(tmp));
+
+  const ledger = new FsLedger(tmp);
+  setLedger(ledger);
+  await ledger.append({ userId: 'user-1', delta: 10_000, reason: 'adjustment', note: 'spec fixture' });
+
   setGenerationStore({
     upsert: async (_row: GenerationUpsert) => undefined,
     list: async () => [],
@@ -120,13 +137,20 @@ describe('there is NO media round budget — a call is never refused (2026-08-08
   it('reaches the spend path on every call, however many have already been made', async () => {
     const { tools, wire } = toolsWith();
 
-    // The tripwire store throws once a call passes into `startMediaTask` — proving it got through.
+    /*
+     * The tripwire provider throws once a call passes into `startMediaTask` — proving it got through.
+     * Asserting on the absence of a BUDGET refusal specifically, not on the word "refused": the credit
+     * gate's own message contains "was refused" too, and matching that loosely is how this test spent
+     * its whole life passing while every call was being stopped for an unrelated reason.
+     */
     for (let call = 0; call < 6; call++) {
       const result = await callGenerateImage(tools);
-      expect(result, `call ${call + 1} was refused`).not.toContain('REFUSED');
+
+      expect(result, `call ${call + 1} hit a round budget`).not.toMatch(/round budget|calls? refused|budget spent/i);
+      expect(result, `call ${call + 1} never reached the spend path`).not.toMatch(/not enough credits/i);
     }
 
-    expect(wire.touched()).toBe(true);
+    expect(wire.touched(), 'the provider was never reached — the call was stopped before the spend path').toBe(true);
   });
 
   /*

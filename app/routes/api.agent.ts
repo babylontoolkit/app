@@ -99,6 +99,14 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     useAssetLibrary?: boolean;
 
     /**
+     * The user's "Toolkit systems" preference (§4.4e, Control Panel → Features, default `'auto'`).
+     * An unrecognised value — including absent, from an older client — resolves DOWN to `'auto'`,
+     * which pushes no block at all. Forwarded RAW: `toolkitSystemsNoteForRequest` owns the parse, so
+     * the browser and the server can never disagree about what a value means.
+     */
+    toolkitSystems?: string;
+
+    /**
      * A connected Game Backend (§4.15). The client sends only the PUBLIC facts — connected? which
      * project ref? RLS confirmed? — never the management PAT (that stays in the browser). The proxy
      * turns this into an RLS-first system note; it is never used to reach the user's Supabase from here.
@@ -189,6 +197,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       effort: body.effort,
       chatMode: body.chatMode,
       useAssetLibrary: body.useAssetLibrary,
+      toolkitSystems: body.toolkitSystems,
 
       /*
        * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
