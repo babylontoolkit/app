@@ -7,6 +7,7 @@
  * (§4.2 step 3).
  */
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
+import { describeTurnOutcome } from '~/lib/agent/turn-outcome';
 import { createDataStream, formatDataStreamPart, type DataStreamWriter, type Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import { runAgentGeneration } from '~/lib/.server/agent/proxy';
@@ -490,6 +491,20 @@ async function streamGeneration(
        * report and health dot read this, never a client-side estimate (§4.5.6).
        */
       history: generation.historyStats,
+
+      /*
+       * 🔴 HOW THIS TURN ENDED, FOR THE USER (`~/lib/agent/turn-outcome.ts`).
+       *
+       * Every marker for a truncated build already existed server-side — `finish_reason` carried
+       * `length+forced-continuation`, monitoring alerted on the rate, the Admin panel counted it — and
+       * the user was still shown `🎮 Your game is ready` on a project cut off mid-file. This is the
+       * user-visible half `spec/fail-loud.md`'s reporting corollary always required.
+       *
+       * It rides on `agentMeta` deliberately: annotations are persisted with the message, so the
+       * warning survives a reload. A toast would not, and a build the user walks away from broken is
+       * exactly the case that has to still be saying so when they come back.
+       */
+      outcome: { ...describeTurnOutcome(await generation.outcome) },
     },
   });
 

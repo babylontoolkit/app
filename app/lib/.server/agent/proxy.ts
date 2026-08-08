@@ -39,6 +39,7 @@ import {
   UNPRODUCTIVE_RESCUE_PROMPT,
 } from './unproductive';
 import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './creation-completion';
+import type { TurnOutcomeFacts } from '~/lib/agent/turn-outcome';
 import { createFileTools } from './file-tools';
 import { buildFileManifest, renderFileManifest } from '~/lib/context/file-manifest';
 import type { FileMap } from '~/lib/.server/llm/constants';
@@ -396,6 +397,13 @@ export interface AgentGeneration {
 
   /** Resolves once the stream is fully drained. */
   usage: Promise<GenerationUsage>;
+
+  /**
+   * The facts the USER needs about how this turn ended (`~/lib/agent/turn-outcome.ts`). Resolves with
+   * the usage. Written onto the `agentMeta` annotation so it is persisted with the message and
+   * survives a reload — a warning about a broken build that vanishes on refresh is not a warning.
+   */
+  outcome: Promise<TurnOutcomeFacts>;
 
   /** Resolves with what we charged, once settled. Drives the client's credit badge (§4.6). */
   settlement: Promise<{ creditsCharged: number; balanceAfter: number } | null>;
@@ -1743,6 +1751,20 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     toolRounds += Math.max(0, (steps?.length ?? 1) - 1);
   }
 
+  /*
+   * 🔴 The turn's OUTCOME, for the user (`~/lib/agent/turn-outcome.ts`).
+   *
+   * Deferred exactly like `usage`, and for the same reason: the flags that decide it
+   * (`forcedContinuation`, the completeness pass, the final `finishReason`) are only known once the
+   * stream has drained, but the handle is consumed before that. Without this the facts stayed local
+   * to `run()` and reached only the `generations` DB row — machine-visible, user-invisible, which is
+   * how a truncated build came to show `🎮 Your game is ready`.
+   */
+  let resolveOutcome: (facts: TurnOutcomeFacts) => void;
+  const outcomePromise = new Promise<TurnOutcomeFacts>((resolve) => {
+    resolveOutcome = resolve;
+  });
+
   let resolveUsage: (usage: GenerationUsage) => void;
   const usagePromise = new Promise<GenerationUsage>((resolve) => {
     resolveUsage = resolve;
@@ -2245,6 +2267,20 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       resolveUsage(totals);
 
       /*
+       * Resolved in the same `finally` as the usage, so it can never be missed on an error path — a
+       * turn that failed is exactly one whose outcome the user most needs told.
+       */
+      resolveOutcome({
+        isFirstBuildTurn,
+        finishReason,
+        forcedContinuation,
+        unproductiveRescue,
+        completionPassWroteFiles: creationCompletionPass && emittedAction,
+        wroteFiles: emittedAction,
+        aborted: Boolean(request.abortSignal?.aborted),
+      });
+
+      /*
        * Settle, then record — and do BOTH even when the generation threw or was stopped (§4.12).
        *
        * A user who hits Stop after thirty seconds consumed thirty seconds of real tokens. Anthropic
@@ -2513,6 +2549,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     deliveryMode: deliveryModeFor(config.provider, model),
     toolContext,
     usage: usagePromise,
+    outcome: outcomePromise,
     settlement: settlementPromise,
     notice: byok.notice ?? tierNotice,
     onMcpToolCall: (listener) => mcpListeners.push(listener),

@@ -18,6 +18,7 @@ import {
 import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { isCreationTurn } from '~/lib/chat/creation-turn';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { describeTurnOutcome, type TurnOutcome } from '~/lib/agent/turn-outcome';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
 import { applySettlement, canUseTier, sessionStore } from '~/lib/stores/session';
 import { modelTierStore } from '~/lib/stores/settings';
@@ -86,6 +87,33 @@ import {
 } from '~/lib/runtime/auto-repair';
 
 const logger = createScopedLogger('Chat');
+
+/**
+ * The server's verdict on how the turn ended, off the persisted `agentMeta` annotation.
+ *
+ * ⚠️ Read from the ANNOTATION, never re-derived here. The server owns the facts (`finishReason`, the
+ * rescue flags) and `describeTurnOutcome` is shared so both halves agree on what "finished" means —
+ * two independent definitions is the drift this codebase keeps rediscovering.
+ *
+ * Falls back to re-describing raw facts if a future server sends them un-described, so an older or
+ * newer client cannot lose the warning entirely.
+ */
+function readTurnOutcome(annotations: unknown[] | undefined): TurnOutcome | null {
+  const meta = annotations?.find(
+    (a): a is { type: string; value?: Record<string, unknown> } =>
+      Boolean(a) && typeof a === 'object' && (a as { type?: unknown }).type === 'agentMeta',
+  );
+
+  const outcome = meta?.value?.outcome as TurnOutcome | undefined;
+
+  if (outcome && typeof outcome.state === 'string') {
+    return outcome;
+  }
+
+  const facts = meta?.value?.outcomeFacts;
+
+  return facts ? describeTurnOutcome(facts as Parameters<typeof describeTurnOutcome>[0]) : null;
+}
 
 /*
  * How a mid-session sandbox failure reaches a person.
@@ -217,6 +245,13 @@ export const ChatImpl = memo(
     const supabaseAlert = useStore(workbenchStore.supabaseAlert);
     const { activeProviders, promptId, contextOptimizationEnabled, useAssetLibrary } = useSettings();
     const [llmErrorAlert, setLlmErrorAlert] = useState<LlmErrorAlertType | undefined>(undefined);
+
+    /*
+     * "This build did not finish" — persistent, dismissed only by the user or by a new turn. State
+     * rather than a toast, because the whole point is that it is still on screen when someone comes
+     * back to a project they walked away from.
+     */
+    const [turnOutcomeAlert, setTurnOutcomeAlert] = useState<TurnOutcome | undefined>(undefined);
 
     // New Project routing (§4.4a). `vaguePrompt` is set ONLY when there is genuinely nothing to act on.
     const { entries: registryEntries } = useGameRegistry();
@@ -565,6 +600,23 @@ export const ChatImpl = memo(
           creationCompleteRef.current = false;
 
           /*
+           * 🔴 NEVER CELEBRATE A BUILD THAT DID NOT FINISH (2026-08-08, owner-directed).
+           *
+           * Measured: a creation ended `length+forced-continuation` — cut off at the output ceiling,
+           * mid-project, 1,175 credits — and this branch showed `🎮 Your game is ready`. Every marker
+           * existed server-side and none of them reached the person looking at the broken project.
+           *
+           * The server now decides (`~/lib/agent/turn-outcome.ts`, shared so the two halves cannot
+           * disagree about what "finished" means) and rides the verdict on `agentMeta`, which is
+           * persisted with the message — so the warning survives a reload, which a toast would not.
+           */
+          const outcome = readTurnOutcome(message.annotations);
+
+          if (outcome && outcome.state !== 'finished') {
+            setTurnOutcomeAlert(outcome);
+          }
+
+          /*
            * 🔴 THE STREAM ENDING IS NOT THE BUILD FINISHING (reported live 2026-07-27).
            *
            * `onFinish` fires when the model stops TALKING. The work is the `<boltAction>`s it queued,
@@ -589,6 +641,15 @@ export const ChatImpl = memo(
                 ),
               ),
           }).then((result) => {
+            /*
+             * A truncated or rescued build gets the persistent alert above instead. Firing a success
+             * toast beside a "this build did not finish" panel is worse than either alone — it tells
+             * the user the two halves of the product disagree about whether their project works.
+             */
+            if (outcome && outcome.state === 'incomplete') {
+              return;
+            }
+
             if (result.settled) {
               toast.success('🎮 Your game is ready — open Preview to play it.');
             } else {
@@ -1108,6 +1169,12 @@ export const ChatImpl = memo(
 
     const clearApiErrorAlert = useCallback(() => {
       setLlmErrorAlert(undefined);
+
+      /*
+       * A stale "this build did not finish" panel sitting above a turn that has since fixed it is a
+       * lie the user can act on. Cleared whenever a new turn begins.
+       */
+      setTurnOutcomeAlert(undefined);
     }, []);
 
     useEffect(() => {
@@ -2377,6 +2444,8 @@ export const ChatImpl = memo(
         clearDeployAlert={() => workbenchStore.clearDeployAlert()}
         llmErrorAlert={llmErrorAlert}
         clearLlmErrorAlert={clearApiErrorAlert}
+        turnOutcomeAlert={turnOutcomeAlert}
+        clearTurnOutcomeAlert={() => setTurnOutcomeAlert(undefined)}
         data={chatData}
         chatMode={chatMode}
         setChatMode={setChatMode}

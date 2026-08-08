@@ -593,6 +593,21 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
       cacheCreationTokens: 0,
     }),
     settlement: Promise.resolve({ creditsCharged: 0, balanceAfter: 0 }),
+
+    /*
+     * The route AWAITS this before writing `agentMeta` (§fail-loud: how the turn ended, for the user).
+     * A fixture missing it leaves the annotation unwritten and every assertion in this file reads
+     * `undefined` — which is what happened when it was added.
+     */
+    outcome: Promise.resolve({
+      isFirstBuildTurn: false,
+      finishReason: 'stop',
+      forcedContinuation: false,
+      unproductiveRescue: false,
+      completionPassWroteFiles: false,
+      wroteFiles: true,
+      aborted: false,
+    }),
     onMcpToolCall: vi.fn(),
     onMediaTask: vi.fn(),
     ...overrides,

@@ -28,6 +28,8 @@ import type { WizardSelection } from '~/lib/registry/wizard';
 import type { ActionAlert, SupabaseAlert, DeployAlert, LlmErrorAlertType } from '~/types/actions';
 import DeployChatAlert from '~/components/deploy/DeployAlert';
 import ChatAlert from './ChatAlert';
+import { TurnOutcomeAlert } from './TurnOutcomeAlert';
+import type { TurnOutcome } from '~/lib/agent/turn-outcome';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import ProgressCompilation from './ProgressCompilation';
 import type { ProgressAnnotation } from '~/types/context';
@@ -79,6 +81,10 @@ interface BaseChatProps {
   clearDeployAlert?: () => void;
   llmErrorAlert?: LlmErrorAlertType;
   clearLlmErrorAlert?: () => void;
+
+  /** "This build did not finish" — persistent, from the server's verdict (§fail-loud). */
+  turnOutcomeAlert?: TurnOutcome;
+  clearTurnOutcomeAlert?: () => void;
   data?: JSONValue[] | undefined;
   chatMode?: 'discuss' | 'build';
   setChatMode?: (mode: 'discuss' | 'build') => void;
@@ -143,6 +149,8 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       clearSupabaseAlert,
       llmErrorAlert,
       clearLlmErrorAlert,
+      turnOutcomeAlert,
+      clearTurnOutcomeAlert,
       data,
       chatMode,
       setChatMode,
@@ -497,6 +505,20 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                     />
                   )}
                   {llmErrorAlert && <LlmErrorAlert alert={llmErrorAlert} clearAlert={() => clearLlmErrorAlert?.()} />}
+                  {/*
+                   * "This build did not finish" (§fail-loud). Last in the stack so a hard error, which is
+                   * the more urgent news, sits above it.
+                   */}
+                  {turnOutcomeAlert && (
+                    <TurnOutcomeAlert
+                      outcome={turnOutcomeAlert}
+                      clearAlert={() => clearTurnOutcomeAlert?.()}
+                      postMessage={(message) => {
+                        sendMessage?.({} as any, message);
+                        clearTurnOutcomeAlert?.();
+                      }}
+                    />
+                  )}
                 </div>
                 {progressAnnotations && <ProgressCompilation data={progressAnnotations} />}
                 <ChatBox
