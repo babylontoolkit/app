@@ -12,6 +12,7 @@ import {
   CREATION_FILE_READ_ROUNDS,
   CREATION_MEDIA_STEPS,
   CREATION_TOOL_ROUNDS,
+  MEDIA_IMAGE_ROUNDS,
   toolPolicyForTurn,
 } from './tool-policy';
 import { MAX_REFERENCE_LOADS } from './reference-tools';
@@ -261,5 +262,46 @@ describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET,
   it('the first build turn outranks discuss if both flags are ever set', () => {
     const policy = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, isDiscussTurn: true, hasMediaTools: true });
     expect(policy.toolset).toBe('creation');
+  });
+});
+
+describe('an ordinary MEDIA turn has room for its images (2026-08-08)', () => {
+  /*
+   * 🔴 THE PAIRING, and the reason this file asserts relationships rather than literals.
+   *
+   * `MAX_MEDIA_ROUNDS` is gone: the model asks for ONE image per call, when the design needs it, and
+   * is never refused. But one image per round means six images cost six steps, and an ordinary turn
+   * had `MAX_TOOL_ROUNDS + 1` = 7 in total — which also has to cover `read_file` rounds, a reference
+   * load, and the step that writes the files.
+   *
+   * Removing a budget without raising its ceiling trades a refusal for a STARVED turn, which is
+   * worse: the model spends every step on art and never writes the project. That is the exact bug
+   * shipped hours earlier when `read_file` joined the creation toolset and `CREATION_TOOL_ROUNDS` was
+   * not re-derived — 74,524 cache tokens written, `finish=length`, 1,175 credits.
+   */
+  it('gives a media turn enough steps for its images AND the reserved answer step', () => {
+    const media = toolPolicyForTurn({ ...base, hasMediaTools: true });
+
+    expect(media.maxSteps).toBeGreaterThan(MEDIA_IMAGE_ROUNDS);
+    expect(media.maxSteps).toBeGreaterThan(MAX_TOOL_ROUNDS);
+    expect(media.maxSteps).toBe(MAX_TOOL_ROUNDS + MEDIA_IMAGE_ROUNDS + 1);
+  });
+
+  /*
+   * The CONTROL. Without it, "a media turn gets more steps" passes for a policy that hands EVERY turn
+   * the media headroom — buying rounds a turn with no media tools can never spend, on every request.
+   */
+  it('CONTROL: a turn without media tools does not buy the headroom', () => {
+    expect(toolPolicyForTurn({ ...base }).maxSteps).toBe(MAX_TOOL_ROUNDS + 1);
+  });
+
+  /*
+   * Creation is unaffected — media is off that turn entirely (`CREATION_ALLOWS_MEDIA`), so the
+   * headroom must not leak into the most expensive and most fragile turn in the product.
+   */
+  it('never widens the creation turn', () => {
+    const creation = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true });
+
+    expect(creation.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
   });
 });

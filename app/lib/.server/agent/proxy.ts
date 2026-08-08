@@ -1122,13 +1122,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const startedMedia: MediaTaskEvent[] = [];
   mediaListeners.push((event) => startedMedia.push(event));
 
-  /*
-   * The media round budget (`MAX_MEDIA_ROUNDS`, media-tools.ts): incremented in `onStepFinish` for
-   * every finished step that made a generate_* call, read by the tools' execute BEFORE debiting.
-   * Per-generation state — a retry gets a fresh tracker along with its fresh (tool-free) policy.
-   */
-  const mediaRounds = { used: 0 };
-
   const mediaTools =
     request.projectId && config.kieApiKey
       ? createMediaTools({
@@ -1142,7 +1135,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
               listener(event);
             }
           },
-          rounds: mediaRounds,
         })
       : {};
 
@@ -1586,15 +1578,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
         const tools = (step.toolCalls ?? []).flatMap((c) => (c?.toolName ? [String(c.toolName)] : []));
         const out = step.usage?.completionTokens ?? 0;
-
-        /*
-         * The media round budget's clock (`MAX_MEDIA_ROUNDS`, media-tools.ts): a finished step that
-         * made a generate_* call was a media round. Counted here — not inside execute — so a burst of
-         * PARALLEL calls in one step is one round, which is the exact shape the brief instructs.
-         */
-        if (tools.some((name) => name.startsWith('generate_'))) {
-          mediaRounds.used += 1;
-        }
 
         /*
          * The SAME reader settlement bills from (`usage-metadata.ts`) — never a second literal. The

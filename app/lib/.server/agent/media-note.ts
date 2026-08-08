@@ -9,11 +9,13 @@
  * model three spending tools and no protocol whatsoever. Each missing rule has its own failure, and
  * they are the failures that were reported:
  *
- *  - **Batch the calls.** Without "all generate calls FIRST, in ONE parallel round", the model
- *    interleaves generating and writing across rounds. `MEDIA_TURN_STEPS` is 3 — one tool round, the
- *    answer, one round of slack — so a second or third generate round exhausts the loop and trips
- *    `shouldForceContinuation`, which re-runs a WHOLE generation to produce the answer. The user sees
- *    a very long silence and pays roughly twice.
+ *  - ⚠️ **This bullet used to say "batch the calls".** It instructed ONE parallel round because
+ *    `MEDIA_TURN_STEPS` was 3 and a second round exhausted the loop. Both halves are retired
+ *    (2026-08-08): `MEDIA_TURN_STEPS` was dead code with no reader, and the cap that enforced the
+ *    instruction (`MAX_MEDIA_ROUNDS`) refused three images a live design had asked for. A media turn
+ *    now gets its own ceiling (`MEDIA_IMAGE_ROUNDS`, tool-policy.ts) and the model requests one image
+ *    per call. **Never reinstate a batching instruction without re-checking that ceiling first** — the
+ *    instruction only ever existed because the ceiling was too low.
  *  - **Artifacts are TEXT, not tools.** This is the documented pathology that killed the first
  *    media-enabled creation: with tools in scope the model emits `<boltArtifact>` as a TOOL CALL,
  *    which is `NoSuchToolError` — historically a dead generation after the tokens were spent.
@@ -59,10 +61,11 @@ export function mediaProtocolNote(input: MediaNoteInput): string | null {
       'for art, or when bespoke art is clearly needed for the design you are building. Rules:',
     '',
     '- `<boltArtifact>` and `<boltAction>` are PLAIN-TEXT TAGS you write in your reply. NEVER call ' +
-      'them as tools — they are not tools, and doing so wastes a tool round.',
-    '- Make ALL your generate calls FIRST, in ONE parallel round, BEFORE writing any files. You have ' +
-      'very few tool rounds on this turn: a second round of generate calls can exhaust them and ' +
-      'prevent you from writing the answer at all.',
+      'them as tools — they are not tools, and the call fails.',
+    '- Ask for ONE image per call, at the point in the design where you need it. There is no batching ' +
+      'rule and no round budget: request a piece of art, get its path back immediately, keep ' +
+      'designing, and request the next one when the design calls for it. You have room for several — ' +
+      'just leave yourself a step to write the files in.',
     '- Each call returns the asset path IMMEDIATELY; the render finishes in the background. Do NOT ' +
       'wait for it, poll for it, or mention waiting.',
     '- The returned paths are the ONE exception to "never invent an asset path": reference them ' +

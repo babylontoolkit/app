@@ -30,10 +30,25 @@ describe('mediaProtocolNote', () => {
     expect(note).toContain('<boltArtifact>');
   });
 
-  it('tells the model to batch every generate call into ONE round before writing files', () => {
-    const note = mediaProtocolNote(base) ?? '';
-    expect(note).toMatch(/ONE parallel round/);
-    expect(note).toMatch(/BEFORE writing any files/);
+  /*
+   * 🔴 REPLACED (2026-08-08). This test used to assert /ONE parallel round/ and /BEFORE writing any
+   * files/. That instruction, and the `MAX_MEDIA_ROUNDS` cap enforcing it, refused three images a live
+   * design had asked for. The owner asked for one at a time; the note now says so, and the ceiling
+   * that bounds the turn is `MEDIA_IMAGE_ROUNDS` in tool-policy.ts — a step cap, never a refusal.
+   */
+  it('asks for ONE image per call and promises no round budget', () => {
+    const note = mediaProtocolNote({ hasMediaTools: true, isFirstBuildTurn: false })!;
+
+    expect(note).toMatch(/ONE image per call/);
+    expect(note).toMatch(/no round budget/);
+  });
+
+  it('no longer tells the model to batch its calls into one round', () => {
+    const note = mediaProtocolNote({ hasMediaTools: true, isFirstBuildTurn: false })!;
+
+    expect(note).not.toMatch(/ONE parallel round/i);
+    expect(note).not.toMatch(/BEFORE writing any files/i);
+    expect(note).not.toMatch(/very few tool rounds/i);
   });
 
   it('carves out the generated paths from the never-invent-an-asset-path rule', () => {

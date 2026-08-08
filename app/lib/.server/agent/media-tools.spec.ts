@@ -23,7 +23,8 @@ import type { ObjectStore } from '~/lib/.server/storage';
 import type { MediaProvider } from '~/lib/.server/media/kie-client';
 import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from '~/lib/.server/billing/generations';
-import { createMediaTools, MAX_MEDIA_ROUNDS } from './media-tools';
+import { createMediaTools } from './media-tools';
+import { setMediaDispatcher } from '~/lib/.server/media/dispatch';
 
 /*
  * ⚠️ The allowed-path tests reach `startMediaTask`, whose ledger/store seams FALL BACK to the real
@@ -74,7 +75,7 @@ const tripwireStore = new Proxy(
   },
 ) as unknown as ObjectStore;
 
-function toolsWith(rounds?: { used: number }) {
+function toolsWith() {
   const wire = tripwireProvider();
 
   const tools = createMediaTools({
@@ -83,7 +84,6 @@ function toolsWith(rounds?: { used: number }) {
     provider: wire.provider,
     objectStore: tripwireStore,
     emit: () => undefined,
-    rounds,
   });
 
   return { tools, wire };
@@ -96,44 +96,52 @@ async function callGenerateImage(tools: ReturnType<typeof toolsWith>['tools']): 
   return generate.execute!({ prompt: 'a kart hero image' }, { toolCallId: 'call-1', messages: [] });
 }
 
-describe('the media round budget', () => {
-  it('refuses a call past the budget BEFORE any debit or provider contact, and says what to do instead', async () => {
-    const { tools, wire } = toolsWith({ used: MAX_MEDIA_ROUNDS });
+/*
+ * The production dispatcher sleeps on a REAL timer (spacing + retry backoff), so a spec driving a
+ * failing provider would pay seconds per call — this file timed out at 5s on its first run. The
+ * queue's own behaviour is tested against an injected clock in `media/dispatch.spec.ts`; here it is
+ * a pass-through so these tests measure the TOOL, not the queue.
+ */
+beforeEach(() => setMediaDispatcher((_label, create) => create()));
+afterEach(() => setMediaDispatcher(undefined));
 
-    const result = await callGenerateImage(tools);
+describe('there is NO media round budget — a call is never refused (2026-08-08)', () => {
+  /*
+   * 🔴 The block this replaces asserted `MAX_MEDIA_ROUNDS === 2` and the REFUSED string. That cap, and
+   * the "make ALL your generate calls FIRST, in ONE parallel round" instruction it enforced, refused
+   * three images a live design had asked for:
+   *
+   *   WARN  media tool: round budget spent (2/2), call refused   x3
+   *
+   * The owner had asked more than once for images one at a time, spaced out. The ceiling that remains
+   * is `maxSteps` (`MEDIA_IMAGE_ROUNDS`, tool-policy.ts) — it bounds the TURN without ever telling the
+   * model no to a call it has already decided to make.
+   */
+  it('reaches the spend path on every call, however many have already been made', async () => {
+    const { tools, wire } = toolsWith();
 
-    expect(result).toContain('REFUSED');
-    expect(result).toContain('nothing was charged');
+    // The tripwire store throws once a call passes into `startMediaTask` — proving it got through.
+    for (let call = 0; call < 6; call++) {
+      const result = await callGenerateImage(tools);
+      expect(result, `call ${call + 1} was refused`).not.toContain('REFUSED');
+    }
 
-    // The recovery instruction — the model reading this is mid-thrash with the project unwritten.
-    expect(result).toContain('NOW');
+    expect(wire.touched()).toBe(true);
+  });
+
+  /*
+   * The CONTROL. "Never refuses" passes trivially for a tool that refuses NOTHING ever, including a
+   * genuinely bad request — so the empty-prompt guard must still be intact and still be a refusal.
+   */
+  it('CONTROL: a genuinely invalid call is still refused, without touching the provider', async () => {
+    const { tools, wire } = toolsWith();
+    const generate = (
+      tools as unknown as Record<string, { execute?: (args: unknown, opts: unknown) => Promise<string> }>
+    ).generate_image;
+
+    const result = await generate.execute!({ prompt: '   ' }, { toolCallId: 'c', messages: [] });
+
+    expect(result.toLowerCase()).toMatch(/prompt/);
     expect(wire.touched()).toBe(false);
-  });
-
-  it('allows calls while the budget has rounds left (the spend path is then reached)', async () => {
-    const { tools, wire } = toolsWith({ used: MAX_MEDIA_ROUNDS - 1 });
-
-    // The tripwire throws once the call passes the budget — proving the gate let it through.
-    const result = await callGenerateImage(tools);
-
-    expect(result).not.toContain('REFUSED —');
-    expect(wire.touched()).toBe(true);
-  });
-
-  it('an unwired tracker means unlimited — the cap binds only where the proxy wires it', async () => {
-    const { tools, wire } = toolsWith(undefined);
-
-    await callGenerateImage(tools);
-
-    expect(wire.touched()).toBe(true);
-  });
-
-  it('the budget is one intended round plus one retry round — not a knob to quietly widen', () => {
-    /*
-     * 2 is load-bearing arithmetic, not taste: with `maxSteps = CREATION_MEDIA_STEPS + 1`, allowing a
-     * 3rd round would let tool calls consume the reserved answer step again — the exact failure this
-     * budget exists to prevent. Widen it only together with the step cap, deliberately.
-     */
-    expect(MAX_MEDIA_ROUNDS).toBe(2);
   });
 });

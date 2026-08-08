@@ -17,6 +17,7 @@ import type { ObjectStore } from '~/lib/.server/storage';
 import type { CreateMediaTaskInput, MediaProvider, MediaTaskState } from './kie-client';
 import { parseTaskState } from './kie-client';
 import { getMediaTask } from './store';
+import { setMediaDispatcher } from './dispatch';
 import {
   buildProviderPayload,
   deriveDestPath,
@@ -100,6 +101,16 @@ beforeEach(async () => {
   }
 
   invalidateMarketPricesCache();
+
+  /*
+   * The production dispatch queue (`dispatch.ts`) sleeps on a REAL timer — spacing between renders and
+   * backoff between retries. The refund tests here drive a provider that always throws, so with the
+   * real queue each one paid MEDIA_MAX_ATTEMPTS real backoffs and timed out at 5s. The queue's own
+   * behaviour is covered against an injected clock in `dispatch.spec.ts`; these tests are about the
+   * MONEY, so it is a pass-through here — except in the wiring test below, which spies on it.
+   */
+  setMediaDispatcher((_label, create) => create());
+
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'media-'));
   ledger = new FsLedger(tmp);
   setLedger(ledger);
@@ -114,6 +125,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  setMediaDispatcher(undefined);
   setLedger(undefined);
   setGenerationStore(undefined);
   await fs.rm(tmp, { recursive: true, force: true });
@@ -219,6 +231,54 @@ describe('quoting', () => {
 
     expect(quote.usd).toBeCloseTo(0.675, 9);
     expect(quote.credits).toBe(270);
+  });
+});
+
+describe('the dispatch queue is actually wired in', () => {
+  beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+  /*
+   * 🔴 THE WIRING TEST. Every other test in this file installs a PASS-THROUGH dispatcher so it can
+   * measure the money without paying real backoff — which means none of them would notice if
+   * `startMediaTask` stopped routing through the queue at all. That is precisely the shape of defect
+   * this codebase keeps finding: correct units, correct integration, nothing exercising the seam
+   * between them (the MCP relay's three defects, and both of today's).
+   */
+  it('routes provider.create through the dispatcher, not directly', async () => {
+    await grant(100);
+
+    const seen: string[] = [];
+    setMediaDispatcher(async (label, create) => {
+      seen.push(label);
+      return create();
+    });
+
+    const provider = new FakeProvider();
+    const started = await startMediaTask(imageInput({ provider, objectStore: memoryStore() }));
+
+    expect(seen, 'startMediaTask called provider.create without going through the queue').toHaveLength(1);
+
+    // Labelled with the task id, so a live log line names the render that is being dispatched.
+    expect(seen[0]).toBe(started.taskId);
+    expect(provider.created).toHaveLength(1);
+  });
+
+  /*
+   * The debit precedes the queue, so a dispatcher that never calls `create` must still leave the
+   * charge and the refund path intact — this is what makes retrying inside the queue safe.
+   */
+  it('has already debited by the time the dispatcher runs', async () => {
+    await grant(100);
+
+    let balanceAtDispatch = -1;
+    setMediaDispatcher(async (_label, create) => {
+      balanceAtDispatch = await ledger.balance(USER);
+      return create();
+    });
+
+    await startMediaTask(imageInput({ provider: new FakeProvider(), objectStore: memoryStore() }));
+
+    expect(balanceAtDispatch).toBe(76);
   });
 });
 

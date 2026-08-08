@@ -213,7 +213,7 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
    * changes while the user is reading it is the defect this whole shape exists to avoid, and two
    * string literals a few lines apart is exactly how that comes back — someone improves one of them.
    */
-  const title = 'Initializing application preview';
+  const title = 'Preparing workspace preview';
 
   /*
    * Neither line promises anything unmeasured. An earlier version claimed the dev server was
@@ -221,6 +221,6 @@ export function previewBusyCopy(state: PreviewBusyState): { title: string; detai
    * of a ~15 s one-time pod init — and it survived review precisely because it was plausible.
    */
   return state === 'preparing'
-    ? { title, detail: 'Preparing your sandbox preview' }
-    : { title, detail: 'Loading project preview files' };
+    ? { title, detail: 'Starting your sandbox preview' }
+    : { title, detail: 'Loading project sandbox files' };
 }

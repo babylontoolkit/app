@@ -61,27 +61,34 @@ export interface MediaTaskEvent {
 }
 
 /**
- * 🔴 THE ONE-PARALLEL-ROUND RULE IS A BUDGET NOW, NOT PROSE (2026-08-07, gen_msixapaq_i871b6).
+ * 🔴 THERE IS NO MEDIA ROUND BUDGET — ONE IMAGE PER CALL, AS MANY CALLS AS THE DESIGN NEEDS
+ * (2026-08-08, owner decision, replacing `MAX_MEDIA_ROUNDS = 2`).
  *
- * The brief has always said "make ALL your generate calls FIRST, in ONE parallel round" — and a live
- * first build turn ignored it: 3 images, then 1, then 1, each in its own round, spending every step
- * of the media turn with the game never written. This repo's standing lesson (protocol-strip,
- * MAX_SKILL_LOADS): no prompt wording reliably stops a model — the pipeline has to refuse. Two rounds,
- * not one, because a failed/refused render legitimately earns one retry round (the "slack" the step
- * cap was designed with); the third round is where the measured thrash lived. The check runs BEFORE
- * `startMediaTask`, so a refused call debits nothing and costs one instant tool_result.
+ * The cap and the "make ALL your generate calls FIRST, in ONE parallel round" instruction it enforced
+ * are both gone. What they produced, live:
+ *
+ *   step 2: 268169ms · 25598 out · 0 chars text · tools: generate_image
+ *   WARN  media tool: round budget spent (2/2), call refused   x3
+ *   step 4: ANSWER
+ *
+ * Three images the design asked for, refused by our own budget, on a turn the user paid for. The
+ * owner had asked more than once for images to be made **one at a time and spaced out**; batching was
+ * argued for instead, and this is what batching cost.
+ *
+ * ⚠️ The justification for the cap contained a factual error worth recording, because it is why the
+ * wrong fix looked right: it claimed a render was blocking the loop. It never was — `startMediaTask`
+ * is async-enqueue and returns the destination path immediately (see the header). The 268 seconds
+ * were the model REASONING, not waiting on KIE. A budget was applied to a cost that did not exist.
+ *
+ * A model that discovers art needs while designing needs more than two rounds, and each round is
+ * cheap: the call returns in milliseconds and the step re-reads a WARM prefix at 0.1x. The ceiling
+ * that remains is `maxSteps` (`tool-policy.ts` — `MEDIA_IMAGE_ROUNDS`), which bounds the turn without
+ * ever refusing a call the model has already decided to make.
+ *
+ * ⚠️ Deleting the budget without raising that ceiling trades a refusal for a STARVED turn, which is
+ * strictly worse — the model spends every step on art and never writes the files. The two move
+ * together or not at all.
  */
-export const MAX_MEDIA_ROUNDS = 2;
-
-/**
- * Mutable round counter, owned by the proxy: incremented in `onStepFinish` for each finished step
- * that contained a generate_* call. Execute reads it, so calls in the SAME parallel round all see the
- * same count (the SDK runs a round's calls before any of their results advance the step) — a burst of
- * parallel calls in round one is always allowed, which is exactly the shape the brief asks for.
- */
-export interface MediaRoundTracker {
-  used: number;
-}
 
 export interface MediaToolContext {
   userId: string;
@@ -92,9 +99,6 @@ export interface MediaToolContext {
 
   /** Push the started task to the client (api.agent writes it as a data part). */
   emit: (event: MediaTaskEvent) => void;
-
-  /** Absent (tests, callers predating the budget) = unlimited rounds — the cap only binds when wired. */
-  rounds?: MediaRoundTracker;
 }
 
 interface CommonArgs {
@@ -112,22 +116,6 @@ export function createMediaTools(ctx: MediaToolContext) {
     durationSeconds?: number;
     fileName?: string;
   }): Promise<string> => {
-    /*
-     * The round budget, BEFORE any debit (see MAX_MEDIA_ROUNDS above). The refusal is instructive on
-     * purpose: the model that hits it is mid-thrash with the project unwritten, and "write the game
-     * NOW" is the recovery — the answer step (+1 in tool-policy) is still ahead of it.
-     */
-    if (ctx.rounds && ctx.rounds.used >= MAX_MEDIA_ROUNDS) {
-      logger.warn(`media tool: round budget spent (${ctx.rounds.used}/${MAX_MEDIA_ROUNDS}), call refused`);
-
-      return (
-        `REFUSED — you have already used your ${MAX_MEDIA_ROUNDS} media rounds this turn (nothing was charged ` +
-        `for this call). Do NOT call generate tools again. Write the COMPLETE project code NOW — the full ` +
-        `<boltArtifact> with every file — referencing the assets already started. More art can be generated ` +
-        `on a later turn if needed.`
-      );
-    }
-
     let started: StartedMediaTask;
 
     try {

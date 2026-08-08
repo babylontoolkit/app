@@ -17,6 +17,7 @@
  * against fakes.
  */
 import { createScopedLogger } from '~/utils/logger';
+import { dispatchMediaCreate } from './dispatch';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
 import { ALERT_SIGNALS } from '~/lib/.server/monitoring/events';
@@ -275,11 +276,19 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
   let kieTaskId: string;
 
   try {
-    kieTaskId = await input.provider.create({
-      endpoint: endpointFor(quote.model),
-      model: quote.model,
-      payload: buildProviderPayload(quote.model, input, quote.delivery),
-    });
+    /*
+     * 🔴 THROUGH THE QUEUE (`dispatch.ts`): one render dispatched at a time, spaced, with per-image
+     * retry. The debit above has already happened, so a retry here NEVER re-debits — one task, one
+     * charge, up to MEDIA_MAX_ATTEMPTS attempts at getting it accepted. Only a final failure reaches
+     * the catch below, which refunds exactly as it always did.
+     */
+    kieTaskId = await dispatchMediaCreate(id, () =>
+      input.provider.create({
+        endpoint: endpointFor(quote.model),
+        model: quote.model,
+        payload: buildProviderPayload(quote.model, input, quote.delivery),
+      }),
+    );
   } catch (error) {
     // The task never started, so the money comes straight back and the anchor says failed.
     await refundMediaTask(

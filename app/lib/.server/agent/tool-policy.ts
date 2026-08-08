@@ -116,31 +116,31 @@ export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROU
 export const CREATION_ALLOWS_MEDIA = false;
 
 /**
- * ⚠️ RETIRED for ordinary turns (2026-07-26) — kept because the reasoning below is still the reason
- * media tools may never be withheld, and because the creation path still uses this budget.
+ * 🔴 HOW MANY IMAGE ROUNDS AN ORDINARY TURN CAN AFFORD (2026-08-08, replacing `MEDIA_TURN_STEPS`).
  *
- * Ordinary turns now always get the FULL toolset (see `toolPolicyForTurn`), so there is no longer a
- * "closed loop that media has to prise back open": media, MCP and skill tools are all offered, and the
- * skill-thrash ceiling moved into `MAX_SKILL_LOADS` where it belongs.
+ * The model now asks for ONE image per call, when the design needs it (`media-note.ts`), because the
+ * batching instruction and the `MAX_MEDIA_ROUNDS` cap that enforced it refused three images a live
+ * design had asked for. Removing a refusal is only half a fix: one image per round means six images
+ * consume six steps, and an ordinary turn had `MAX_TOOL_ROUNDS + 1` = 7 in total — which also has to
+ * cover `read_file` rounds, a `load_reference`, and the step that writes the files.
  *
- * The historical note:
+ * ⚠️ **Deleting a budget without raising its ceiling trades a refusal for a STARVED turn**, and a
+ * starved turn is worse: the model spends every step on art and never writes the project. That is
+ * exactly the bug shipped hours earlier, when `read_file` joined the creation toolset and
+ * `CREATION_TOOL_ROUNDS` was not re-derived (74,524 cache tokens written, `finish=length`, 1,175
+ * credits). The cap and the ceiling move together or not at all.
  *
- * The same budget for an ORDINARY turn whose only reason to open the loop is media (§4.16).
+ * The headroom is cheap and bounded: an extra in-generation step re-reads the WARM prefix at 0.1x,
+ * against a forced continuation that rewrites the whole prefix at 2x and risks truncating the answer.
+ * It is a CEILING, never a refusal — the model is never told "no" to a call it has already decided to
+ * make; the turn simply cannot run forever.
  *
- * This exists because the original rule — "media tools never force the loop on for ordinary turns; the
- * Media panel covers the rest" — made an ADVERTISED capability unreachable on exactly the turns that
- * ask for it. The skill router fires on words like `design`, `landing`, `art`, `theme`, so "redesign
- * the landing page with new hero art" pre-loads a skill, `preloadedCount > 0` closed the loop, and the
- * model was left with no `generate_image` at all — it then narrated the absence ("Since I don't have
- * access to generation tools this turn…") and drew the art in CSS. Creation worked, every later turn
- * did not, which is precisely how it was reported.
- *
- * The §4.2.8 redrafting pathology cannot come back through this door: the toolset is MEDIA-ONLY, so
- * there is no `load_skill` to thrash on (the routed skills are already in the cached prefix), and the
- * cap is 3, not `MAX_TOOL_ROUNDS`. Media tools are async-enqueue — a round returns in seconds and never
- * parks on a render — and each extra round re-reads the cached prefix at a tenth.
+ * The retired `MEDIA_TURN_STEPS` it replaces was dead code with no reader anywhere (only its own
+ * definition and a stale mention in `media-note.ts`), and the reasoning it carried — that media tools
+ * may never be WITHHELD from a turn, because the model then narrates the absence and draws the art in
+ * CSS — now lives in the ordinary branch of `toolPolicyForTurn`, which always offers the full toolset.
  */
-export const MEDIA_TURN_STEPS = CREATION_MEDIA_STEPS;
+export const MEDIA_IMAGE_ROUNDS = 8;
 
 export interface ToolPolicyInput {
   /** The turn carries `CREATION_BRIEF_MARKER` — the expensive one-shot that writes the whole game. */
@@ -265,5 +265,20 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
    * advertise is only real if the model can act on it. Re-requesting the inlined skill costs one cheap
    * round and returns a single sentence (the already-loaded guard), not its body.
    */
-  return { allowTools: true, toolset: 'all', maxSteps: MAX_TOOL_ROUNDS + 1 };
+  /*
+   * 🔴 A MEDIA TURN GETS ROOM FOR ITS IMAGES (2026-08-08 — `MEDIA_IMAGE_ROUNDS`).
+   *
+   * One image per call means an art request needs a step per image ON TOP of the reads, the reference
+   * loads and the step that writes the files. Without this, removing `MAX_MEDIA_ROUNDS` would just
+   * move the failure: instead of a refusal the model would run out of steps mid-design and hand the
+   * answer to a forced continuation, which rewrites the whole prefix at 2x.
+   *
+   * `hasMediaTools` is the platform saying a KIE key and a project exist, i.e. the tools really are in
+   * this turn's set — so the headroom is only bought on turns that can actually spend it.
+   */
+  return {
+    allowTools: true,
+    toolset: 'all',
+    maxSteps: MAX_TOOL_ROUNDS + (input.hasMediaTools ? MEDIA_IMAGE_ROUNDS : 0) + 1,
+  };
 }
