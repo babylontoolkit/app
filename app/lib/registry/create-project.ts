@@ -404,7 +404,7 @@ export async function createProjectFromRegistry(options: {
  * KIND, never by reading the prompt, because a prose classifier puts the model in charge of the bill.
  * A `spec` test source-scans this path for exactly that regression.
  */
-function buildCreationBrief(options: {
+export function buildCreationBrief(options: {
   entry: GameRegistryEntry;
   title: string;
   className: string;
@@ -446,7 +446,7 @@ ${images.map((path) => `- ${path}`).join('\n')}
 
 **Game content — models, levels and examples.** Build what the request asks for with your own creativity — the starter's demo scenes are examples, never a boundary.
 - If a **Prototype Asset Library (Synty)** block is present in your context, it is this project's model library and it is ALWAYS PREFERRED: whenever the request does not supply or name specific assets — even a bare one-line prompt naming only a genre — take every 3D model, character, prop and level from that library (or a pack the user named), referencing assets by their EXACT listed paths (never invent or guess a library path). The library index is already in your context: using it costs no tool calls and must never delay the build itself. Building geometry out of primitives is the LAST resort, allowed only for what the library truly lacks — never the default you start from.
-- If no such block is present, build with the starter's own content and primitives — do not reference a library you cannot see.
+- If no such block is present, **AUTHOR THE CONTENT YOURSELF.** Build the game's own vehicle, characters, props, track and environment in code — composed primitives, procedural geometry (extrusions, lathes, ribbons, CSG, heightmaps) and materials you write — themed to what was asked for. Do not reference a library you cannot see, and **never substitute a demo asset for a model you were asked to make.** The playground models the reference documents use to demonstrate wiring (\`riggedmustang\`, \`openterrain\`, \`samplescene\`, \`playerarmature\`) are NOT a fallback content library: loading one because it is the nearest thing you have a URL for ships the wrong game — a kart request is not a request for a Mustang on a test map. Load a specific asset URL only when the user named that asset. A recognisable shape you built is always better than the wrong model. (You cannot generate 3D models on this turn, but you can BUILD them; bespoke 2D art comes from the Media panel on a later turn.)
 - When you want a working GameMode or Script Component example, read the demo classes in \`src/babylon/classes/\` first, then the component reference docs in your context, then the training examples they cite.
 
 **Art comes AFTER this turn — do not try to generate any now.** This turn has no image or video tools, deliberately: rendering art inside the build turn is what used to leave projects half-written. Design every surface with CSS (gradients, colour, type, layout) and the images already on disk, and make it look finished as it stands — never a blank box or a placeholder saying art goes here. Once the project is written, the user generates bespoke art from the Media panel or by simply asking on the next turn, and it drops into the design you built. In your closing suggestions, name two or three specific pieces of art this design would benefit from (for example a hero background, a logo/wordmark, splash art) so the user knows what to ask for.
