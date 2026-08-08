@@ -75,6 +75,38 @@ export function isSandboxAbsolutePath(rawPath: string): boolean {
 }
 
 /**
+ * The ONE spelling of a path that may be used as a `FilesStore` map key.
+ *
+ * 🔴 **The map is keyed sandbox-ABSOLUTE, and every writer must agree, byte for byte.** The watcher
+ * (`#processEventBuffer`) keys on the event's own absolute path and `refreshFiles` keys on
+ * `` `${WORK_DIR}/${relPath}` `` — so a writer that records a project-RELATIVE path does not overwrite
+ * the watcher's entry, it creates a SECOND one. Nothing throws: the file is simply in the map twice,
+ * and every consumer that walks the map walks both copies.
+ *
+ * That is not hypothetical. `recordAgentWrite` was handed `action.filePath` — which is
+ * project-relative, always, because that is the artifact format the model emits — through a parameter
+ * declared as `absoluteFilePath`, so **every file the model wrote was in the map, in the ZIP, in the
+ * working copy and in the model's own context TWICE**. Measured on a real project: 14 duplicated
+ * files, 90,092 chars ≈ 22.5k tokens, re-sent at the 2× cache-write rate on every turn for the life
+ * of the project (`_specs/cold-start-cost_plan.md` §2). It is also a correctness defect — the model is
+ * shown two copies of `Home.tsx` and can edit one while the other goes stale — and the relative twin
+ * is invisible to `#modifiedFiles`, lock state and `getFile()`, which all key on the absolute form.
+ *
+ * `#recordRestoredFiles` had already derived this rule for the restore door (its doc comment names
+ * this exact failure) and `recordAgentWrite`, which that comment says it "deliberately mirrors", never
+ * got it. Hence one exported function rather than two private lambdas: the same reasoning as
+ * `isSecretPath` and as this module's own header — a second, narrower copy of a path rule is how the
+ * rule drifts.
+ *
+ * Idempotent, because {@link toProjectRelativePath} is: an already-absolute key comes back unchanged,
+ * and a key carrying a FOREIGN provider's root is rebased onto this one (a working copy written under
+ * WebContainer, restored into a CodeSandbox project).
+ */
+export function toSandboxStoreKey(rawPath: string, workdir: string): string {
+  return `${workdir}/${toProjectRelativePath(rawPath)}`;
+}
+
+/**
  * Strip a sandbox root prefix and NOTHING else — a bare leading slash survives.
  *
  * The distinction matters exactly once, and it is a security boundary. `buildObjectKey` (§4.8) turns

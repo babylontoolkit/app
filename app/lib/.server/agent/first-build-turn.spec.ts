@@ -289,9 +289,45 @@ describe('consumer 4 — a first build that writes nothing gets one corrective p
    * the wall forbids — every time, for free, on the user's credits.
    */
   it('is wired to the first-build flag AND excludes plan turns', () => {
-    expect(callArgs(proxy, 'shouldRescueUnproductiveTurn')).toContain(
-      'requiresAction: isFirstBuildTurn && !discussNote',
-    );
+    /*
+     * Named `owesFiles` since 2026-08-07, because a SECOND consumer now reads it (`isFailedBuildTurn`,
+     * the terminal verdict below). Both halves are asserted: that the rescue receives that variable,
+     * and that the variable still means what the inline expression meant. Asserting only the name
+     * would pass if someone redefined it as `true`.
+     */
+    expect(callArgs(proxy, 'shouldRescueUnproductiveTurn')).toContain('requiresAction: owesFiles');
+    expect(proxy).toMatch(/const owesFiles = isFirstBuildTurn && !discussNote;/);
+  });
+
+  /*
+   * THE VERDICT, and it must share the rescue's predicate (2026-08-07, `gen_msixapaq_i871b6`).
+   *
+   * The rescue is a second chance; `isFailedBuildTurn` is what happens when the second chance is spent.
+   * If the two ever disagreed about which turns owe files, a turn could be rescued for not writing and
+   * then billed as a success for exactly that — which is the 1,489-credit failure, restored.
+   */
+  it('the zero-file VERDICT reads the same predicate as the rescue', () => {
+    expect(callArgs(proxy, 'isFailedBuildTurn')).toContain('requiresAction: owesFiles');
+  });
+
+  /*
+   * The verdict needs POSITIVE evidence the model was building, because the creation brief rides on
+   * whatever the user types first — so their first message can legitimately be a question, and a prose
+   * answer to it writes no files by design.
+   *
+   * ⚠️ `unproductiveRescue` must NOT appear in that expression: it fires on any first-turn prose, so
+   * including it lets our own reaction manufacture the evidence and the question case simply fails one
+   * pass later instead. Asserted as an ABSENCE, which is the only way to catch it being added back.
+   */
+  it('the verdict demands evidence of a build attempt, and never accepts its own rescue as that evidence', () => {
+    const args = callArgs(proxy, 'isFailedBuildTurn');
+
+    expect(args).toMatch(/attemptedBuild:\s*emittedArtifact \|\| toolCallCount > 0 \|\| forcedContinuation/);
+    expect(args).not.toContain('unproductiveRescue');
+  });
+
+  it('the verdict runs AFTER the rescue — it is the outcome, not a competing rescue', () => {
+    expect(proxy.indexOf('isFailedBuildTurn(')).toBeGreaterThan(proxy.indexOf('shouldRescueUnproductiveTurn('));
   });
 });
 

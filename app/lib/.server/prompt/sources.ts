@@ -13,7 +13,7 @@ export const SKILLS_REPO = 'babylontoolkit/skills';
 const RAW = (repo: string, path: string) => `https://raw.githubusercontent.com/${repo}/main/${path}`;
 
 export interface DocSource {
-  /** Stable id — used in logs and (for on-demand blocks) as the cache-block key. */
+  /** Stable id — used in logs, as the cache-block key, and as `load_reference`'s argument. */
   id: string;
   path: string;
   url: string;
@@ -24,62 +24,73 @@ export interface OnDemandBlock extends DocSource {
   title: string;
 
   /**
-   * Lowercase keywords routed against the user's request. A hit appends this block to the
-   * generation as a SEPARATE cached block, leaving the base prefix byte-identical (§4.3.6).
+   * 🔴 **THE TRIGGER. The MODEL reads this and decides — there is no keyword router (2026-08-08).**
+   *
+   * This replaces a `keywords: string[]` substring table, and it is the fourth time this codebase has
+   * removed one (skills router, landing-pass rule, genre inference, this). Every failure of the doc
+   * table was silent and measurable:
+   *
+   *   - it matched `'touch'` inside `"untouched defaults"` and `'video'` inside `generate_video`;
+   *   - it ran against the platform's own HIDDEN creation brief, not the user's request, so **every
+   *     creation received the same ten documents** — 61.6k tokens, `racing-system` included, whether
+   *     the user asked for a kart racer or a chess game. Measured 2026-08-07: routing on
+   *     `"mario kart racer clone"` and on `"a chess puzzle game"` produced byte-identical block sets;
+   *   - the phrase `"make me a kart racing game"`, added to that brief as an EXAMPLE on 2026-08-06,
+   *     pulled the racing corpus into every project on the platform by itself.
+   *
+   * So write this the way `SKILL.md` descriptions are written: state what the document covers and when
+   * a task needs it, in the language a model would use to describe its own task. A doc the model never
+   * loads almost always has a weak description — fix the description, not a table.
+   *
+   * ⚠️ It must NEVER become a machine-matched field. `no-prompt-classifier.spec.ts` fails the build if
+   * any code substring-matches user text to pick a document.
    */
-  keywords: string[];
+  description: string;
 }
 
 /**
- * Baked into the base prompt, in this order.
+ * 🔴 THE ONLY DOCUMENTS BAKED INTO EVERY PROMPT — two of them, and each earns it (Phase 2, 2026-08-08).
  *
- * `references/classic.md` is deliberately EXCLUDED — that is the UMD/`<script>`-tag style, and
- * this platform is ESM-only. Including it invites the model to emit UMD code.
+ * This list used to hold eight docs, ~106KB, welded into the cached prefix of every generation whether
+ * the turn was a creation, a one-line CSS tweak or a question. Measured on the live prompt version:
+ * the base prompt was **137,979 chars, only 27% of it the platform's own rules** — the rest was Babylon
+ * Toolkit documentation, including 13,731 bytes of guidance for platforms this is not (a **Next.js**
+ * full-stack guide and a **Lovable** TanStack adapter, in a Vite + React project — worse than waste,
+ * since it teaches patterns that do not apply here).
+ *
+ * ## What decided the design
+ *
+ * `reference.md` — the ROUTER INDEX below — was ALREADY baked, and it says, in capitals:
+ *
+ *   > ALWAYS READ THIS ENTIRE DOCUMENT TO THE END, THEN FETCH THE MATCHING SUB-DOCUMENTS.
+ *   > You MUST fetch and read the matching sub-document(s) below BEFORE answering…
+ *   > If any fetch fails, STOP immediately and tell the user.
+ *
+ * **The model had no fetch tool.** It was handed a mandatory routing table it could not act on, while
+ * the platform keyword-matched some of the same documents behind its back and pasted them in. So this
+ * is not a new architecture and there was no index to invent: the missing piece was one tool
+ * (`load_reference`, `agent/reference-tools.ts`), and the docs it reads are the SAME pinned, synced,
+ * admin-promoted snapshot the baked ones came from — strictly better than a live fetch, which can fail
+ * mid-generation.
+ *
+ * ## Why exactly these two stay
+ *
+ *   - **`reference`** is the index itself. It has to be in front of the model for any of the rest to be
+ *     reachable, and it is the document the Agent Reference repo maintains for precisely that purpose.
+ *   - **`platform-host`** answers "what host am I running on?", which is wrong by default and wrong
+ *     expensively: `project-installer.md` runs a BLOCKING platform-detection procedure whose table
+ *     resolves us to **Bolt.new** (its signal is "running in a StackBlitz WebContainer" — which is us),
+ *     pointing at a doc we do not sync and instructing a `StarterAssets.git` clone that cannot work
+ *     here. `web-app-builder.md` is OUR row: starter already mounted, nothing to clone, no network.
+ *     A doc that prevents a wrong action on every turn is not the same kind of thing as a doc that
+ *     helps when the task needs it, and only the second kind can be loaded on demand.
+ *
+ * `references/classic.md` remains deliberately EXCLUDED from the whole system — UMD/`<script>`-tag
+ * style, and this platform is ESM-only. Including it invites the model to emit UMD code.
  */
 export const BASE_DOCS: DocSource[] = [
   { id: 'reference', path: 'reference.md', url: RAW(AGENT_REPO, 'reference.md') },
-  { id: 'node-esm', path: 'references/node-esm.md', url: RAW(AGENT_REPO, 'references/node-esm.md') },
-  {
-    id: 'scene-components',
-    path: 'references/scene-components.md',
-    url: RAW(AGENT_REPO, 'references/scene-components.md'),
-  },
-  {
-    id: 'react-framework',
-    path: 'references/react-framework.md',
-    url: RAW(AGENT_REPO, 'references/react-framework.md'),
-  },
-  {
-    id: 'ui-design-system',
-    path: 'references/ui-design-system.md',
-    url: RAW(AGENT_REPO, 'references/ui-design-system.md'),
-  },
-  {
-    id: 'training-reference',
-    path: 'references/training-reference.md',
-    url: RAW(AGENT_REPO, 'references/training-reference.md'),
-  },
-
-  /*
-   * PLATFORM DETECTION (SPEC §4.3): `project-installer.md` runs a BLOCKING platform-detection
-   * procedure mapping each host to a reference doc. We used to bake GENERIC as a stand-in, which was
-   * wrong twice over: generic still says to clone `StarterAssets.git`, and the detection table
-   * resolved us to **Bolt.new** anyway (its signal is "running in a StackBlitz WebContainer" — which
-   * is us), pointing at a doc we do not sync.
-   *
-   * `web-app-builder.md` is OUR host row (agent repo, 2026-07-16): it says the starter is already
-   * mounted, there is nothing to clone, there is no network, and skills are pre-loaded. Cheap enough
-   * to bake and correct on every turn. The always-baked platform-identity section states the same
-   * no-clone rule independently — belt and braces, since this doc is authored in another repo.
-   */
   { id: 'platform-host', path: 'references/web-app-builder.md', url: RAW(AGENT_REPO, 'references/web-app-builder.md') },
-
-  // Component Reference OVERVIEW is baked; the 14 system docs below are on-demand.
-  {
-    id: 'components-overview',
-    path: 'training/components/README.md',
-    url: RAW(AGENT_REPO, 'training/components/README.md'),
-  },
 ];
 
 /**
@@ -101,6 +112,82 @@ export const BASE_DOCS: DocSource[] = [
  */
 export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
   /*
+   * ---------------------------------------------------------------------------------------------
+   * The six core references. UNBAKED 2026-08-08 (Phase 2) — they were ~106KB of every single prompt.
+   * -------------------------------------------------------------------------------------------
+   */
+
+  {
+    id: 'react-framework',
+    title: 'React Framework Integration',
+    path: 'references/react-framework.md',
+    url: RAW(AGENT_REPO, 'references/react-framework.md'),
+
+    /*
+     * ⚠️ This file also contains a **Next.js** full-stack guide (10,366 B) and a **Lovable** TanStack
+     * adapter (3,365 B) — 13,731 bytes describing platforms this is not, which used to ride in every
+     * prompt. Unbaking resolves it here; the SPLIT is worth reporting upstream, since the doc is
+     * authored in `babylontoolkit/agent` and is not ours to edit.
+     */
+    description:
+      'How a Babylon Toolkit scene lives inside a React app: BabylonSceneViewer, SceneController, ' +
+      'BabylonMount, createScene, the CustomOverlay layer, and how React UI talks to game code. ' +
+      'Load this before writing or changing any .tsx that mounts, wraps or overlays a 3D scene.',
+  },
+  {
+    id: 'ui-design-system',
+    title: 'User Interface Instructions',
+    path: 'references/ui-design-system.md',
+    url: RAW(AGENT_REPO, 'references/ui-design-system.md'),
+    description:
+      'The UI architecture: the Scene Viewer’s three layers, the z-index stack, CustomOverlay, and the ' +
+      'decision matrix for choosing DOM/React UI versus GPU GUI drawn into the scene. Load this for ' +
+      'any HUD, menu, landing page, overlay or on-screen interface work.',
+  },
+  {
+    id: 'scene-components',
+    title: 'Interactive Scene Content',
+    path: 'references/scene-components.md',
+    url: RAW(AGENT_REPO, 'references/scene-components.md'),
+    description:
+      'How scene content is authored and driven: entities, components, and the pieces that make a ' +
+      'loaded scene interactive. Load this when building or modifying what is IN the 3D scene.',
+  },
+  {
+    id: 'training-reference',
+    title: 'Agent Training Reference',
+    path: 'references/training-reference.md',
+    url: RAW(AGENT_REPO, 'references/training-reference.md'),
+    description:
+      'Index of the worked training examples and playgrounds, with guidance on checking for a matching ' +
+      'example before writing code from scratch. Load this when you want a known-good pattern to copy.',
+  },
+  {
+    id: 'components-overview',
+    title: 'Component Reference Overview',
+    path: 'training/components/README.md',
+    url: RAW(AGENT_REPO, 'training/components/README.md'),
+    description:
+      'Overview of the fourteen Toolkit system components and what each one is for. Load this when you ' +
+      'know you need a component but not which one — it is the map to the per-component references.',
+  },
+  {
+    id: 'node-esm',
+    title: 'Node & ESM Module Usage',
+    path: 'references/node-esm.md',
+    url: RAW(AGENT_REPO, 'references/node-esm.md'),
+    description:
+      'ESM import style, module resolution and package entry points for Toolkit code in a Vite ' +
+      'project. Load this when imports fail to resolve or when adding a new module boundary.',
+  },
+
+  /*
+   * ---------------------------------------------------------------------------------------------
+   * Everything below has always been on demand.
+   * -------------------------------------------------------------------------------------------
+   */
+
+  /*
    * UNBAKED 2026-07-16 — measured at 11,987 tokens, 19.8% of the entire cached prefix, on EVERY
    * request. Its STEP 0 is a BLOCKING platform-detection + `StarterAssets.git` cloning procedure that
    * this platform must never run: the starter template is mounted before the agent's first turn, and
@@ -108,219 +195,199 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
    * platform forbids — not dead weight but CONTRADICTION, the most expensive kind of token.
    *
    * It stays reachable because its package lists, version pins, and content-creation-tool sections
-   * are genuinely useful when a request is actually about installing something. Keywords are the
-   * agent repo's own Reference Index row, verbatim.
+   * are genuinely useful when a request is actually about installing something.
    *
-   * ⚠️ Routing alone does NOT resolve the contradiction — a creation turn ("new project", "scaffold")
-   * matches these keywords and pulls the clone procedure back in at the worst possible moment. The
-   * BAKED platform-identity section carries the standing "already scaffolded, never clone" rule, so
-   * the override is present on every turn whether or not this block routes in. Do not remove it.
+   * ⚠️ Loading it on demand does NOT resolve the contradiction — a build turn can legitimately want
+   * the package list and get the clone procedure with it. The BAKED platform-identity section carries
+   * the standing "already scaffolded, never clone" rule, so the override is present on every turn
+   * whether or not this doc is loaded. Do not remove it. The description below says so too, because
+   * the model choosing to load this should already know which half to ignore.
    */
   {
     id: 'project-installer',
     title: 'Project Installation & Packages',
     path: 'references/project-installer.md',
     url: RAW(AGENT_REPO, 'references/project-installer.md'),
-    keywords: [
-      'new project',
-      'scaffold',
-      'setup',
-      'install toolkit',
-      'npm package',
-      'npm install',
-      'package version',
-      'git submodule',
-      'starter asset',
-      'starter repo',
-      'starterassets',
-      'vercelassets',
-      'project deployment',
-      'add a package',
-      'dependency',
-    ],
+    description:
+      'Toolkit package names, version pins, dependency lists and content-creation tooling. Load this ' +
+      'when adding or upgrading a package. NOTE: its platform-detection and StarterAssets cloning ' +
+      'steps do not apply here — this project is already scaffolded and there is no network or git.',
   },
 
   /*
-   * `references/react-framework.md` is BAKED and tells the model to "always reference" this doc — so
-   * it must be reachable. Deliberately not baked itself: at ~55KB it is the largest prose doc in the
-   * repo, and the baked React reference already covers the common path.
+   * `references/react-framework.md` tells the model to "always reference" this doc — so it must be
+   * reachable. At ~55KB it is the largest prose doc in the repo.
    */
   {
     id: 'react-training',
     title: 'React Framework — Agentic AI Game Builder Reference',
     path: 'training/react/README.md',
     url: RAW(AGENT_REPO, 'training/react/README.md'),
-    keywords: [
-      'react',
-      'jsx',
-      'tsx',
-      'hook',
-      'scenecontroller',
-      'scene controller',
-      'babylonsceneviewer',
-      'scene viewer',
-      'babylonmount',
-      'createscene',
-      'gamemanager',
-      'game manager',
-      'custom overlay',
-      'hud',
-      'landing page',
-      'home screen',
-      'frontend',
-      'web app',
-    ],
+    description:
+      'The long-form React + Toolkit game-builder walkthrough: full worked examples of GameManager, ' +
+      'scene controllers, HUD wiring and page-to-gameplay navigation. Deeper than react-framework — ' +
+      'load it when building a frontend end to end rather than changing one component.',
   },
   {
     id: 'shader-materials',
     title: 'Shader Materials',
     path: 'references/shader-materials.md',
     url: RAW(AGENT_REPO, 'references/shader-materials.md'),
-    keywords: ['shader', 'glsl', 'wgsl', 'node material', 'custom material', 'vertex shader', 'fragment shader'],
+    description:
+      'Authoring custom shader materials: the CustomShaderMaterial + MaterialPluginBase pair, the ' +
+      'GLSL and WGSL injection points, and the shipped materials you should reuse instead of writing ' +
+      'a shader (terrain splatmaps, waving grass, tree branches, vertex-animated crowds, per-skin ' +
+      'texture arrays, water, sky). Load this for any custom material, shader effect or vegetation.',
   },
   {
     id: 'scene-manager',
     title: 'SceneManager',
     path: 'training/components/01-SceneManager.md',
     url: RAW(AGENT_REPO, 'training/components/01-SceneManager.md'),
-    keywords: ['scenemanager', 'scene manager', 'load scene', 'scene lifecycle', 'gamemode', 'game mode'],
+    description:
+      'SceneManager: loading scenes, the scene lifecycle, and how a GameMode is registered and ' +
+      'entered. Load this when creating a new game mode or changing how scenes are loaded or switched.',
   },
   {
     id: 'script-component',
     title: 'ScriptComponent',
     path: 'training/components/02-ScriptComponent.md',
     url: RAW(AGENT_REPO, 'training/components/02-ScriptComponent.md'),
-    keywords: ['script component', 'scriptcomponent', 'registerclass', 'lifecycle', 'awake', 'behavior', 'component'],
+    description:
+      'ScriptComponent: RegisterClass, the awake/start/update lifecycle, and exposed script ' +
+      'properties. This is the base class for essentially all gameplay code — load it before writing ' +
+      'anything in src/scripts/.',
   },
   {
     id: 'animation-state',
     title: 'AnimationState',
     path: 'training/components/03-AnimationState.md',
     url: RAW(AGENT_REPO, 'training/components/03-AnimationState.md'),
-    keywords: ['animation', 'animator', 'mecanim', 'animationstate', 'blend tree', 'state machine', 'walk cycle'],
+    description:
+      'AnimationState: Mecanim-style state machines, blend trees, transitions and driving character ' +
+      'animation from gameplay state. Load this for walk cycles, attack animations or any animator.',
   },
   {
     id: 'character-controller',
     title: 'CharacterController',
     path: 'training/components/04-CharacterController.md',
     url: RAW(AGENT_REPO, 'training/components/04-CharacterController.md'),
-    keywords: [
-      'character controller',
-      'charactercontroller',
-      'player controller',
-      'third person',
-      'first person',
-      'walk',
-      'jump',
-      'platformer',
-    ],
+    description:
+      'CharacterController: moving a player or NPC with collision — walking, running, jumping, ' +
+      'grounding, and first- or third-person camera rigs. Load this for any on-foot player movement.',
   },
   {
     id: 'navigation-agent',
     title: 'NavigationAgent',
     path: 'training/components/05-NavigationAgent.md',
     url: RAW(AGENT_REPO, 'training/components/05-NavigationAgent.md'),
-    keywords: ['navmesh', 'navigation', 'pathfinding', 'recast', 'detour', 'navigationagent', 'ai agent', 'enemy ai'],
+    description:
+      'NavigationAgent: navmesh generation (Recast/Detour), pathfinding and steering. Load this for ' +
+      'enemy AI that chases or patrols, or anything that must walk a path around obstacles.',
   },
   {
     id: 'rigidbody-physics',
     title: 'RigidbodyPhysics',
     path: 'training/components/06-RigidbodyPhysics.md',
     url: RAW(AGENT_REPO, 'training/components/06-RigidbodyPhysics.md'),
-    keywords: ['physics', 'rigidbody', 'havok', 'collider', 'collision', 'joint', 'gravity', 'ragdoll'],
+    description:
+      'RigidbodyPhysics on Havok: rigid bodies, colliders, triggers, joints, gravity, forces and ' +
+      'ragdolls. Load this for anything that falls, collides, bounces or is pushed.',
   },
   {
     id: 'audio-source',
     title: 'AudioSource',
     path: 'training/components/07-AudioSource.md',
     url: RAW(AGENT_REPO, 'training/components/07-AudioSource.md'),
-    keywords: ['audio', 'sound', 'music', 'audiosource', 'sfx', 'spatial audio'],
+    description:
+      'AudioSource: playing music and sound effects, spatial/3D audio, and audio lifecycle. Load this ' +
+      'for any sound work.',
   },
   {
     id: 'materials',
     title: 'Materials',
     path: 'training/components/08-Materials.md',
     url: RAW(AGENT_REPO, 'training/components/08-Materials.md'),
-    keywords: ['material', 'pbr', 'texture', 'lighting', 'skybox', 'reflection'],
+    description:
+      'Standard and PBR materials, textures, lighting, skyboxes and reflections. Load this to change ' +
+      'how something LOOKS without writing a custom shader.',
   },
   {
     id: 'input-controller',
     title: 'InputController',
     path: 'training/components/09-InputController.md',
     url: RAW(AGENT_REPO, 'training/components/09-InputController.md'),
-    keywords: ['input', 'keyboard', 'mouse', 'gamepad', 'controller', 'touch', 'mobile input', 'joystick'],
+
+    /*
+     * ⚠️ The doc this points at taught `GetKeyDown`/`GetKeyUp`/`GetKeyPress` — Unity `Input` names that
+     * have NEVER existed in the runtime — and three consecutive generations shipped games that crashed
+     * in `update()`. Fixed at source (`babylontoolkit/agent@2025c9c`, 2026-08-05). Naming the real API
+     * here is belt-and-braces, and it is also exactly what a description is for.
+     */
+    description:
+      'InputController: reading keyboard, mouse, gamepad and touch input — GetKeyboardInput, ' +
+      'IsKeyboardButtonHeld, WasKeyboardButtonTapped, virtual joysticks. Load this before wiring ANY ' +
+      'controls; the input API does not match Unity’s and guessing at it crashes at runtime.',
   },
   {
     id: 'pro-components',
     title: 'ProComponents',
     path: 'training/components/10-ProComponents.md',
     url: RAW(AGENT_REPO, 'training/components/10-ProComponents.md'),
-    keywords: ['terrain', 'video', 'pro component', 'procomponents'],
+    description:
+      'The Pro component set: terrain systems, video playback surfaces and other advanced components. ' +
+      'Load this for large outdoor terrain or in-world video.',
   },
   {
     id: 'enums-interfaces',
     title: 'Enums & Interfaces',
     path: 'training/components/11-Enums-Interfaces.md',
     url: RAW(AGENT_REPO, 'training/components/11-Enums-Interfaces.md'),
-    keywords: ['enum', 'interface', 'type definition'],
+    description:
+      'The Toolkit’s enums and TypeScript interfaces, with their exact member names. Load this when ' +
+      'you need the precise spelling of an enum value rather than an approximation.',
   },
   {
     id: 'starter-content',
     title: 'StarterContent',
     path: 'training/components/12-StarterContent.md',
     url: RAW(AGENT_REPO, 'training/components/12-StarterContent.md'),
-    keywords: ['starter content', 'starter asset', 'prefab', 'demo scene', 'sample'],
+    description:
+      'The starter content shipped with the template: demo scenes, prefabs and sample assets already ' +
+      'present in the project. Load this to reuse what is on disk instead of authoring from scratch.',
   },
   {
     id: 'racing-system',
     title: 'RacingSystem',
     path: 'training/components/13-RacingSystem.md',
     url: RAW(AGENT_REPO, 'training/components/13-RacingSystem.md'),
-    keywords: ['racing', 'race', 'car', 'vehicle', 'kart', 'drive', 'driving', 'wheel', 'track', 'lap'],
+    description:
+      'RacingSystem: vehicle physics, wheel colliders, steering and throttle, track layout, waypoints ' +
+      'and lap timing. Load this for cars, karts or any driven vehicle.',
   },
   {
     id: 'game-patterns',
     title: 'GamePatterns',
     path: 'training/components/14-GamePatterns.md',
     url: RAW(AGENT_REPO, 'training/components/14-GamePatterns.md'),
-    keywords: ['game pattern', 'game loop', 'score', 'health', 'inventory', 'menu', 'spawn', 'pickup', 'level'],
+    description:
+      'Common game structures: the game loop, score, health, lives, inventory, pickups, spawning, ' +
+      'level progression and menu flow. Load this for the rules and state around the gameplay itself.',
   },
 
   /*
-   * MCP image/video/texture generation (kie.ai). Keywords are the agent repo's OWN Reference Index
-   * row for this doc, copied verbatim — that table is the authoritative routing spec, and inventing
-   * our own would drift from it silently.
-   *
-   * MCP servers run in the USER's WebContainer (§4.14, §5) — never on platform infra.
+   * MCP image/video/texture generation (kie.ai). MCP servers run in the USER's WebContainer
+   * (§4.14, §5) — never on platform infra.
    */
   {
     id: 'kie-servers',
     title: 'Image And Video Generation (MCP)',
     path: 'references/web-kie-servers.md',
     url: RAW(AGENT_REPO, 'references/web-kie-servers.md'),
-    keywords: [
-      'mcp',
-      'mcp server',
-      '.mcp.json',
-      'model context protocol',
-      'kie.ai',
-      'kie_key',
-      '@babylonjs-toolkit/kie',
-      'kie-image-mcp',
-      'image generation',
-      'video generation',
-      'texture generation',
-      'generate an image',
-      'generate a texture',
-      'nano banana',
-      'imagen',
-      'flux',
-      'seedream',
-      'kling',
-      'seedance',
-      'grok imagine',
-      'veo',
-    ],
+    description:
+      'Configuring the kie.ai MCP servers in a project’s .mcp.json for image, video and texture ' +
+      'generation. NOTE: this platform already gives you built-in generate_image/generate_video ' +
+      'tools — load this only when the user is setting up their OWN MCP server.',
   },
 
   /*
@@ -340,115 +407,72 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
    * baked doc now ends with an explicit instruction: if you need the GPU GUI API and this reference is
    * not in front of you, SAY SO — never reconstruct the API from general BabylonJS knowledge.
    *
-   * Keywords are taken from the decision matrix's own rows, not invented: they are the situations the
-   * doc itself says require GPU GUI.
+   * The description names the situations the decision matrix itself says require GPU GUI, so the model
+   * can recognise its own task in them.
    */
   {
     id: 'babylon-gui',
     title: 'BabylonJS GUI (@babylonjs/gui) API Reference',
     path: 'references/babylon-gui.md',
     url: RAW(AGENT_REPO, 'references/babylon-gui.md'),
-    keywords: [
-      // The library and its API surface, by name.
-      'babylon gui',
-      '@babylonjs/gui',
-      'babylonjs/gui',
-      'gpu gui',
-      'advanceddynamictexture',
-      'fullscreen ui',
-      'createfullscreenui',
-      'createformesh',
-      'linkwithmesh',
-      'textblock',
-      'stackpanel',
-      'scrollviewer',
-      'virtualkeyboard',
-      'colorpicker',
-      'layermask',
-      'idealwidth',
-
-      // The situations the decision matrix says GPU GUI owns.
-      'health bar',
-      'healthbar',
-      'hp bar',
-      'name tag',
-      'nametag',
-      'nameplate',
-      'name plate',
-      'damage number',
-      'floating text',
-      'floating label',
-      'above the player',
-      'above the character',
-      'above their heads',
-      'world space ui',
-      'in-world ui',
-      'in-world screen',
-      'on a mesh',
-      'onto a mesh',
-      'cockpit',
-      'cockpit display',
-      'in-game monitor',
-      'in-game screen',
-      'billboard gui',
-      'minimap',
-
-      /*
-       * WebXR: DOM is invisible in VR, so a VR interface is ALWAYS GPU GUI — the one row in the matrix
-       * with no DOM option at all. Matching is `includes`, so a bare 'vr' is unusable (it fires on
-       * "vroom", "servers", "swerve"); these are the phrasings that carry the meaning.
-       */
-      'webxr',
-      'virtual reality',
-      'in vr',
-      'for vr',
-      'vr mode',
-      'vr ui',
-      'vr interface',
-      'vr headset',
-      'vr panel',
-    ],
+    description:
+      'The @babylonjs/gui API: AdvancedDynamicTexture, CreateFullscreenUI, CreateForMesh, ' +
+      'linkWithMesh, TextBlock, StackPanel and the rest. This is GPU GUI — UI drawn INSIDE the 3D ' +
+      'scene, which DOM cannot do: health bars and name plates above characters, damage numbers, ' +
+      'cockpit displays, in-world screens, minimaps, and any WebXR/VR interface (DOM is invisible in ' +
+      'VR). Load it before writing GPU GUI — never reconstruct this API from general BabylonJS ' +
+      'knowledge, and say so if you need it and do not have it.',
   },
 
   /*
-   * Playground examples. `references/training-reference.md` is BAKED, lists these five by URL, and
-   * says "Check for a matching example before writing code from scratch" — an instruction that was
-   * impossible to follow, since none of them were synced.
+   * Playground examples. `references/training-reference.md` lists these five by URL and says "Check
+   * for a matching example before writing code from scratch" — an instruction that was impossible to
+   * follow until they were synced, and that `load_reference` finally makes literally true.
    */
   {
     id: 'demo-rotator',
     title: 'Playground: DemoRotator (minimal ScriptComponent)',
     path: 'training/playgrounds/01-DemoRotator.md',
     url: RAW(AGENT_REPO, 'training/playgrounds/01-DemoRotator.md'),
-    keywords: ['rotator', 'rotate', 'spin', 'simplest script', 'minimal script', 'first script'],
+    description:
+      'Worked example: the simplest possible ScriptComponent, spinning a mesh in update(). The ' +
+      'smallest complete pattern for "make this thing move every frame".',
   },
   {
     id: 'demo-bobber',
     title: 'Playground: DemoBobber (parameterized motion)',
     path: 'training/playgrounds/02-DemoBobber.md',
     url: RAW(AGENT_REPO, 'training/playgrounds/02-DemoBobber.md'),
-    keywords: ['bobber', 'bob', 'oscillate', 'hover motion', 'script property', 'exposed property'],
+    description:
+      'Worked example: oscillating motion driven by exposed script properties — the pattern for a ' +
+      'component whose behaviour is tunable rather than hardcoded.',
   },
   {
     id: 'demo-user-input',
     title: 'Playground: DemoUserInput (input-driven movement)',
     path: 'training/playgrounds/03-DemoUserInput.md',
     url: RAW(AGENT_REPO, 'training/playgrounds/03-DemoUserInput.md'),
-    keywords: ['mouse look', 'user input', 'wasd', 'input driven', 'move the player'],
+    description:
+      'Worked example: moving an object from keyboard and mouse input (WASD, mouse look). The ' +
+      'shortest correct example of the real input API.',
   },
   {
     id: 'demo-player-scene',
     title: 'Playground: DemoPlayerScene (async load + physics + player)',
     path: 'training/playgrounds/04-DemoPlayerScene.md',
     url: RAW(AGENT_REPO, 'training/playgrounds/04-DemoPlayerScene.md'),
-    keywords: ['player scene', 'async scene', 'load a scene', 'sample scene', 'demo scene'],
+    description:
+      'Worked example: a complete playable scene — async scene load, physics, and a controllable ' +
+      'character wired together. The reference shape for an on-foot game mode.',
   },
   {
     id: 'demo-vehicle-scene',
     title: 'Playground: DemoVehicleScene (async load + physics + vehicle)',
     path: 'training/playgrounds/05-DemoVehicleScene.md',
     url: RAW(AGENT_REPO, 'training/playgrounds/05-DemoVehicleScene.md'),
-    keywords: ['vehicle scene', 'vehicle controller', 'car demo', 'vehicle demo'],
+    description:
+      'Worked example: a complete drivable scene — async load, physics and a working vehicle ' +
+      'controller. The reference shape for a racing or driving game mode.',
   },
 ];
 
@@ -471,68 +495,132 @@ export const DECLARATION_FILES: DocSource[] = [
 ];
 
 /**
- * Route a user request to the on-demand blocks it needs.
- * Substring match on a lowercased haystack — cheap, and a false positive only costs cached tokens.
+ * 🔴 THERE IS NO DOC ROUTER. `selectOnDemandBlocks` AND `selectStickyBlocks` ARE DELETED (2026-08-08).
  *
- * ⚠️ Per-MESSAGE routing is a money bug — see `selectStickyBlocks`, which is what the proxy calls.
- * This stays exported because it is the per-message primitive the sticky router is built from.
+ * This note is a headstone, not a TODO. Both functions existed to answer "which documents does this
+ * request need?" by substring-matching the conversation, and the answer is now the MODEL's, made from
+ * the `description` field above via `load_reference` (`agent/reference-tools.ts`) — the same fix this
+ * codebase applied to SKILLS on 2026-07-26, measured then at 6 rounds / 29,173 output tokens → 1 round
+ * / 122 tokens.
+ *
+ * ## Why the sticky-and-append-only machinery went with them
+ *
+ * `selectStickyBlocks` was a real fix to a real money bug: routed blocks sat in the CACHED PREFIX, so
+ * per-message routing let the user's choice of words set the price of their edit (measured: the same
+ * trivial change costing 12 credits and then 160, because the second phrasing said "racing track").
+ * Stickiness fixed that by making the set only ever grow, in first-seen order, so the prefix appended
+ * rather than rewrote.
+ *
+ * It was the correct fix to the wrong problem. The blocks were in the prefix because the platform was
+ * guessing at them ahead of time and had to guess EARLY — and a guess made from the platform's own
+ * hidden creation brief was never going to be about the user's request at all. Once the model asks for
+ * what it needs, mid-generation, there is no prefix churn to defend against, and stickiness moves to
+ * where it belongs: `carriedReferenceIds`, which carries what the model ACTUALLY loaded into the next
+ * turn's cached prefix, append-only and first-seen, for the same reasons and with the same rules.
+ *
+ * **Do not resurrect a keyword table here or anywhere else.** `no-prompt-classifier.spec.ts` fails the
+ * build if any code picks a document, a skill or a code path by substring-matching user text.
  */
-export function selectOnDemandBlocks(requestText: string): OnDemandBlock[] {
-  const haystack = requestText.toLowerCase();
-
-  return ON_DEMAND_BLOCKS.filter((block) => block.keywords.some((keyword) => haystack.includes(keyword)));
-}
 
 /**
- * 🔴 THE BLOCK SET IS STICKY AND APPEND-ONLY, BECAUSE THE PREFIX IS MONEY (2026-07-17).
+ * 🔴 A DOC THAT THE ROUTER INDEX POINTS AT AND THIS PLATFORM DELIBERATELY DOES NOT SERVE.
  *
- * The proxy used to route from the LAST user message alone. The routed blocks sit AHEAD of the ~110k
- * file context in the system array, so the block set is part of the cached prefix — which meant **the
- * user's choice of words silently set the price of their edit.** Measured live on one project, four
- * consecutive turns, same model, same provider:
+ * `reference.md` is authored in `babylontoolkit/agent` for every host, so its routing table names
+ * documents that are correct elsewhere and wrong here. It is BAKED into our prompt, and since Phase 2
+ * the model has a tool — so it will follow that table and ask. Answering "no reference named classic"
+ * is technically true and actively misleading: it reads as a platform fault, and the model's next move
+ * is to improvise the very thing the exclusion exists to prevent.
  *
- * | turn     | blocks               | cached  | written | credits |
- * |----------|----------------------|---------|---------|---------|
- * | creation | 6 blocks             | 0       | 157,983 | 233     |
- * | edit 1   | []                   | 0       |  92,385 | 130     |
- * | edit 2   | []                   | 92,385  |       0 | **12**  |
- * | edit 3   | [racing-system]      | 0       | 114,274 | **160** |
- *
- * Edits 2 and 3 are THE SAME trivial change ("make the boost pad glow"). Edit 3 merely said "racing
- * track" and "kart lap timing", which routed one extra block — and cost **13x** more. A cache WRITE
- * bills at 2x, so a churning turn is worse than never caching at all. At ~130 credits an edit a
- * $50/6,000-credit plan buys ~46 edits; at 12 it buys ~500.
- *
- * Two rules, and BOTH are load-bearing:
- *
- *  1. **Sticky** — route from every user message in the conversation, not the last. A block that was
- *     ever needed stays. The set only grows, so it converges after a turn or two and then every
- *     subsequent turn is a pure cache read.
- *  2. **First-seen order, NOT declaration order** — this is the half that is easy to miss and silently
- *     undoes the other. `selectOnDemandBlocks` filters `ON_DEMAND_BLOCKS` in DECLARATION order, so a
- *     newly-matched block that happens to be declared early gets INSERTED AT THE FRONT, shifting every
- *     block behind it and invalidating the prefix — the exact thing being fixed. Ordering by when a
- *     block entered the conversation is what makes "append-only" true at the byte level.
- *
- * Stateless by construction: the answer is a pure function of the message history, which only ever
- * grows, so there is no server-side session to keep in sync and a replay of the same conversation
- * routes identically. That is also why this cannot be memoised per-conversation in a Map — the proxy
- * is per-request, and a cache keyed on a conversation id would be a second source of truth.
- *
- * The cost of being wrong in this direction is bounded and cheap: a block that is no longer relevant
- * keeps costing cache READS at 0.1x. The cost of being wrong the other way is a 2x write of the whole
- * prefix, every turn, forever. Not close.
+ * So the exclusions are NAMED, with the reason the model needs in order to do the right thing instead.
+ * The alternative — syncing them so the id resolves — would defeat the point of excluding them.
  */
-export function selectStickyBlocks(userTexts: string[]): OnDemandBlock[] {
-  const seen = new Map<string, OnDemandBlock>();
+export const EXCLUDED_REFERENCES: Record<string, string> = {
+  classic:
+    'That document teaches the UMD / <script>-tag style. This platform is ESM-only (Vite + TypeScript), ' +
+    'so it is deliberately not available: follow the ES6 guidance instead and never emit UMD code or a ' +
+    'global BABYLON namespace.',
+  'skills-repository':
+    'That document tells an agent to copy skill folders into `.claude/skills`, which is a DIFFERENT ' +
+    "host's mechanism. Here the platform serves skills directly — see the Available Skills index in " +
+    'your context and call `load_skill(name)`. There is nothing to install.',
+};
 
-  for (const text of userTexts) {
-    for (const block of selectOnDemandBlocks(text)) {
-      if (!seen.has(block.id)) {
-        seen.set(block.id, block);
-      }
+/**
+ * Resolve whatever the model actually typed into a reference id.
+ *
+ * 🔴 **THIS EXISTS BECAUSE THE AGENT REFERENCE IS WRITTEN IN URLs, AND WE SERVE IDs.** Measured across
+ * the corpus: **90 cross-document references in 12 files**, every one of them phrased as *"Always
+ * reference the Babylon Toolkit Component Reference at https://raw.githubusercontent.com/…"*. Those
+ * instructions are correct in VS Code, where the model can fetch. On this platform the same sentence
+ * used to be unfollowable, and after Phase 2 it became *nearly* followable — the document is right
+ * there behind `load_reference`, under a name the doc never mentions.
+ *
+ * Accepting the URL closes that gap **without one byte changing in `babylontoolkit/agent`**, which is
+ * the whole point: the docs stay correct for VS Code, Copilot and every other host, and they become
+ * literally executable here. A model that reads "fetch <url>" and calls `load_reference('<url>')` is
+ * doing exactly as it was told.
+ *
+ * Four accepted spellings, in the order a model produces them: the id from our index; the full raw
+ * URL (copied from a doc); the repo-relative path; and the bare filename. Nothing clever — no fuzzy
+ * matching, no scoring, no nearest-neighbour. An argument that does not resolve exactly returns null
+ * and the tool lists what exists, because a WRONG document delivered confidently is worse than a
+ * refusal that names the alternatives.
+ *
+ * ⚠️ **This is not the banned prompt classifier and the distinction is exact:** it matches a string the
+ * MODEL supplied naming a document it explicitly asked for, against a fixed table of document names —
+ * the same operation as `store.getActive(name)` for skills. The ban is on reading the USER's words to
+ * decide what the model is TOLD. Nothing here ever sees a user's message.
+ */
+export function resolveReferenceId(wanted: string, blocks: OnDemandBlock[] = ON_DEMAND_BLOCKS): string | null {
+  const normalized = wanted
+    .trim()
+    .toLowerCase()
+    .replace(/^\/+|\/+$/g, '');
+
+  if (!normalized) {
+    return null;
+  }
+
+  for (const block of blocks) {
+    const path = block.path.toLowerCase();
+    const file = path.slice(path.lastIndexOf('/') + 1);
+    const stem = file.replace(/\.md$/, '');
+
+    /*
+     * The last clause catches a URL carrying the trailing punctuation of the sentence it sat in — the
+     * corpus really does contain `…/training/components/README.md.` at the end of a prose sentence, and
+     * a model quoting it verbatim would otherwise get a refusal for a document we hold.
+     */
+    const suffixMatch = normalized.replace(/[.,;:)\]]+$/, '').endsWith(`/${path}`);
+
+    if (
+      normalized === block.id.toLowerCase() ||
+      normalized === path ||
+      normalized === file ||
+      normalized === stem ||
+      normalized === block.url.toLowerCase() ||
+      suffixMatch
+    ) {
+      return block.id;
     }
   }
 
-  return [...seen.values()];
+  return null;
+}
+
+/**
+ * The reason this platform does not serve a document the router index names — or null if it is simply
+ * not a name we know. Same tolerant spelling as `resolveReferenceId`, because the model will ask for an
+ * excluded document using the URL the index gave it.
+ */
+export function excludedReferenceReason(wanted: string): string | null {
+  const normalized = wanted.trim().toLowerCase();
+
+  for (const [id, reason] of Object.entries(EXCLUDED_REFERENCES)) {
+    if (normalized === id || normalized.replace(/[.,;:)\]]+$/, '').endsWith(`/references/${id}.md`)) {
+      return reason;
+    }
+  }
+
+  return null;
 }

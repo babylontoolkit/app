@@ -77,8 +77,23 @@ describe('the skill router is gone, and cannot grow back', () => {
     expect(proxy).not.toMatch(/skillText/);
   });
 
-  it("routes doc blocks from the user's words only", () => {
-    expect(proxy).toMatch(/selectStickyBlocks\(userTexts\)/);
+  /*
+   * 🔴 The doc router is GONE (Phase 2, 2026-08-08), and this assertion inverted with it.
+   *
+   * It used to read `expect(proxy).toMatch(/selectStickyBlocks\(userTexts\)/)` — pinning that the doc
+   * router was fed the user's words and not the invoked skill's body. That was a real fix to a real
+   * defect, and it was still measuring the wrong thing: the input the router actually received on the
+   * turn that mattered was the platform's own HIDDEN creation brief, which swamped the user's words
+   * entirely and handed every creation the same ten documents. The test passed throughout.
+   *
+   * A router that cannot be fed a bad input is the only version of this guarantee that holds, so the
+   * assertion is now default-deny: no doc-selection function, and no `userTexts` haystack for one to
+   * be reintroduced against.
+   */
+  it('routes doc blocks from nothing at all — the model chooses them', () => {
+    expect(proxy).not.toMatch(/selectStickyBlocks|selectOnDemandBlocks/);
+    expect(proxy, 'the haystack a doc router would need no longer exists').not.toMatch(/allUserTexts/);
+    expect(proxy, 'documents are carried from what the model itself loaded').toMatch(/carriedReferenceIds\(messages\)/);
   });
 });
 

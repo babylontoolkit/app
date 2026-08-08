@@ -7,50 +7,76 @@
  * actually occurs.
  */
 import { describe, expect, it } from 'vitest';
-import { CREATION_MEDIA_STEPS, toolPolicyForTurn } from './tool-policy';
+import { CREATION_MEDIA_STEPS, CREATION_TOOL_ROUNDS, toolPolicyForTurn } from './tool-policy';
+import { MAX_MEDIA_ROUNDS } from './media-tools';
+import { MAX_REFERENCE_LOADS } from './reference-tools';
 import { MAX_TOOL_ROUNDS } from './tools';
 
 const base = { isFirstBuildTurn: false, hasMcpTools: false, hasMediaTools: false, preloadedCount: 0, isSlash: false };
 
 describe('toolPolicyForTurn — first build turns', () => {
-  it('opens a MEDIA-ONLY loop with a small cap PLUS a reserved answer step (§4.16, 2026-08-07)', () => {
+  it('opens the CREATION loop with a derived cap PLUS a reserved answer step (§4.16, Phase 2)', () => {
     /*
      * The `+ 1` is the answer step, and it is load-bearing: without it a model that tool-calls on
      * every step (measured, gen_msixapaq_i871b6 — 3+1+1 sequential images) ends the generation with
      * the game unwritten and hands the work to the forced continuation, which re-bills the whole
-     * prefix at 2x. The MAX_MEDIA_ROUNDS budget in the tools' execute is what keeps this extra step
-     * from becoming a fourth render round.
+     * prefix at 2x. The budgets in the tools' execute are what keep the extra step unspendable.
      */
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true })).toEqual({
       allowTools: true,
-      toolset: 'media-only',
-      maxSteps: CREATION_MEDIA_STEPS + 1,
+      toolset: 'creation',
+      maxSteps: CREATION_TOOL_ROUNDS + 1,
     });
   });
 
-  it('keeps the historic one-shot when the platform cannot render (no KIE key / no project)', () => {
+  /*
+   * 🔴 The historic one-shot is GONE, and that is Phase 2's most consequential single change.
+   *
+   * `{ allowTools: false, maxSteps: 1 }` was correct while ~106KB of Babylon Toolkit documentation was
+   * welded into every prompt: the model already had everything, so a tool could only cost rounds. With
+   * the docs unbaked, a tool-less creation would be asked to write a whole game holding the platform's
+   * rules, the router index, the reference INDEX — and none of the API documentation the index
+   * describes. Nothing would throw; the token count would go DOWN; the game would just be worse.
+   */
+  it('gives a creation the reference tools even when the platform cannot render', () => {
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true })).toEqual({
-      allowTools: false,
-      toolset: 'all',
-      maxSteps: 1,
+      allowTools: true,
+      toolset: 'creation',
+      maxSteps: MAX_REFERENCE_LOADS + 1,
     });
   });
 
   /*
    * Skill tools must NEVER be offered on a creation turn — that is the six-tool-round pathology the
-   * one-shot fix removed (§4.2.8: 29,173 redrafted output tokens to load ONE skill). MCP presence must
-   * not widen the set either: the creation brief routes design art, nothing else.
+   * one-shot fix removed (§4.2.8: 29,173 redrafted output tokens to load ONE skill), and the state
+   * that produced every recorded thrash was a skill INLINED while the tool was offered. MCP presence
+   * must not widen the set either.
    */
   it('never offers the full toolset on a first build turn, even with MCP tools present', () => {
     const policy = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true, hasMcpTools: true });
-    expect(policy.toolset).toBe('media-only');
+    expect(policy.toolset).toBe('creation');
 
     const noMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true });
-    expect(noMedia.allowTools).toBe(false);
+    expect(noMedia.toolset).toBe('creation');
   });
 
-  it('caps the media loop far below the ordinary tool cap — one round + slack + a reserved answer', () => {
-    expect(CREATION_MEDIA_STEPS + 1).toBeLessThan(MAX_TOOL_ROUNDS + 1);
+  /*
+   * 🔴 THE PAIRING, asserted as a RELATIONSHIP rather than as a literal.
+   *
+   * `maxSteps` is only a true statement about the worst case if it exceeds every tool round the turn
+   * can actually buy. Raising a budget without re-deriving the cap is exactly how a creation spent
+   * 1,489 credits and shipped nothing, so this fails if either number moves alone.
+   */
+  it('reserves a step the tool budgets cannot consume, whatever those budgets are', () => {
+    const withMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true });
+    const withoutMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true });
+
+    expect(withMedia.maxSteps).toBeGreaterThan(MAX_REFERENCE_LOADS + MAX_MEDIA_ROUNDS);
+    expect(withoutMedia.maxSteps).toBeGreaterThan(MAX_REFERENCE_LOADS);
+  });
+
+  it('caps the creation loop below the ordinary tool cap', () => {
+    expect(CREATION_TOOL_ROUNDS + 1).toBeLessThanOrEqual(MAX_TOOL_ROUNDS + 1);
     expect(CREATION_MEDIA_STEPS).toBeGreaterThanOrEqual(2); // a tool round with no answer step is a truncation
   });
 });
@@ -142,17 +168,18 @@ describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (�
    */
   it('never offers Unity/MCP tools on a first build turn', () => {
     /*
-     * Two shapes express "not offered", and the property is the CONJUNCTION — `toolset` is meaningless
-     * when `allowTools` is false, so asserting the field alone would pass on a policy that offered them.
+     * A creation turn always has tools now (it must be able to load documentation), so "MCP is not
+     * offered" is carried entirely by the TOOLSET — `creation` is media + references + the repair
+     * bounce, and `proxy.ts` builds that set from this value.
      */
     const noMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true });
-    expect(noMedia.allowTools).toBe(false);
-    expect(noMedia.maxSteps).toBe(1);
+    expect(noMedia.toolset).toBe('creation');
+    expect(noMedia.maxSteps).toBe(MAX_REFERENCE_LOADS + 1);
 
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMcpTools: true, hasMediaTools: true })).toEqual({
       allowTools: true,
-      toolset: 'media-only',
-      maxSteps: CREATION_MEDIA_STEPS + 1,
+      toolset: 'creation',
+      maxSteps: CREATION_TOOL_ROUNDS + 1,
     });
   });
 
@@ -212,6 +239,6 @@ describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET,
    */
   it('the first build turn outranks discuss if both flags are ever set', () => {
     const policy = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, isDiscussTurn: true, hasMediaTools: true });
-    expect(policy.toolset).toBe('media-only');
+    expect(policy.toolset).toBe('creation');
   });
 });

@@ -32,7 +32,7 @@ import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getGenerationStore } from '~/lib/.server/billing/generations';
-import { getPlatformModel, getPlatformProvider } from '~/lib/.server/agent/config';
+import { getEnhancerModel, getPlatformProvider } from '~/lib/.server/agent/config';
 
 export async function action(args: ActionFunctionArgs) {
   return enhancerAction(args);
@@ -98,10 +98,16 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
      * The model is OURS to choose, for everyone. `streamText` parses the `[Model:]`/`[Provider:]`
      * prefix below to pick a provider, so writing the platform's model into it is what takes the
      * choice away from the request body. Enhancement is a small fixed utility, not a place where
-     * model selection buys anyone anything — so even a Pro user gets the platform model here; their
-     * key simply pays for it.
+     * model selection buys anyone anything — so even a Pro user gets the platform's choice here;
+     * their key simply pays for it.
+     *
+     * And that choice is `ENHANCE_PROMPT_MODEL` when the operator has set one (`getEnhancerModel`).
+     * Rewriting ≤10k characters of English is not what the expensive model is for — it reads no
+     * project files, calls no tools, and shares no cached prefix with anything — so this is the one
+     * paid path in the product where a cheaper model costs the user nothing they can perceive. It
+     * still settles through the same gate and the same ledger, at that model's own rates.
      */
-    const model = getPlatformModel(context);
+    const model = getEnhancerModel(context);
     const provider = platformProvider;
 
     const generationId = `gen_enh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

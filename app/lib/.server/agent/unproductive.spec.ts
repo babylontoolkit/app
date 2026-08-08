@@ -8,12 +8,15 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  isFailedBuildTurn,
   MIN_BILLED_OUTPUT_TOKENS,
   MIN_PRODUCTIVE_TEXT_CHARS,
+  NO_FILES_WRITTEN_ERROR,
   shouldRescueUnproductiveTurn,
   UNPRODUCTIVE_RESCUE_PROMPT,
   type UnproductiveTurnInput,
 } from './unproductive';
+import { shouldRetryGeneration } from './retry-policy';
 
 /** The demo failure, verbatim: 524 output tokens bought 83 characters and stopped. */
 const DEMO_FAILURE: UnproductiveTurnInput = {
@@ -152,5 +155,132 @@ describe('shouldRescueUnproductiveTurn — a turn that had to WRITE', () => {
   it('respects abort and the one-pass cap on a creation', () => {
     expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, aborted: true })).toBe(false);
     expect(shouldRescueUnproductiveTurn({ ...CREATION_PROSE, alreadyContinued: true })).toBe(false);
+  });
+});
+
+/**
+ * `isFailedBuildTurn` — the VERDICT after every second chance is spent (2026-08-07).
+ *
+ * The generation it exists for is `gen_msixapaq_i871b6`: 1,489 credits, zero files, recorded
+ * `completed`. Every existing guard behaved correctly and the turn still billed as a success, so these
+ * tests are written around the exact combination that walked through all of them.
+ *
+ * ⚠️ The false-positive direction is the expensive one here — a wrong `true` REFUNDS a build that
+ * worked. Hence a case per guard, plus the pairing test that stops this and the rescue drifting apart.
+ */
+describe('isFailedBuildTurn', () => {
+  const FAILED_BUILD = { aborted: false, requiresAction: true, emittedAction: false, attemptedBuild: true };
+
+  /** The build turn that owed files and produced prose — same shape the rescue is tested against. */
+  const BUILD_PROSE: UnproductiveTurnInput = {
+    aborted: false,
+    alreadyContinued: false,
+    emittedAction: false,
+    toolCalls: 0,
+    textChars: 31_852,
+    outTokens: 12_215,
+    requiresAction: true,
+  };
+
+  it('fires on the shape that billed 1,489 credits for nothing', () => {
+    expect(isFailedBuildTurn(FAILED_BUILD)).toBe(true);
+  });
+
+  it('fires even after a forced continuation AND a rescue have run — it is the verdict, not a retry', () => {
+    /*
+     * The whole point. `shouldRescueUnproductiveTurn` correctly refuses once `alreadyContinued` is set;
+     * this must NOT, or the pipeline's own exhaustion becomes the reason the user is billed.
+     */
+    expect(shouldRescueUnproductiveTurn({ ...BUILD_PROSE, alreadyContinued: true })).toBe(false);
+    expect(isFailedBuildTurn(FAILED_BUILD)).toBe(true);
+  });
+
+  it('never on a user Stop — §4.12 says those tokens are genuinely owed', () => {
+    expect(isFailedBuildTurn({ ...FAILED_BUILD, aborted: true })).toBe(false);
+  });
+
+  it('never once a file was written, however little else happened', () => {
+    expect(isFailedBuildTurn({ ...FAILED_BUILD, emittedAction: true })).toBe(false);
+  });
+
+  it('never on a turn that owes no files — an edit may answer in prose, a plan turn must', () => {
+    expect(isFailedBuildTurn({ ...FAILED_BUILD, requiresAction: false })).toBe(false);
+  });
+
+  /**
+   * 🔴 THE QUESTION CASE — the false positive that `attemptedBuild` exists for.
+   *
+   * The creation brief is appended to WHATEVER the user types first out of New Project mode, so
+   * `isFirstBuildTurn` is true even when that first message is *"can I use my own 3D models?"*. A
+   * correct prose answer writes no files by design, and firing here would throw "the build finished
+   * without writing any project files" over an answer the user is looking straight at — and refund a
+   * turn that did exactly what was asked.
+   */
+  describe('a question asked as the first message is not a failed build', () => {
+    const FIRST_TURN_QUESTION = { aborted: false, requiresAction: true, emittedAction: false, attemptedBuild: false };
+
+    it('does NOT fire when the model never tried to build', () => {
+      expect(isFailedBuildTurn(FIRST_TURN_QUESTION)).toBe(false);
+    });
+
+    it('still fires the moment there is evidence of a build attempt', () => {
+      expect(isFailedBuildTurn({ ...FIRST_TURN_QUESTION, attemptedBuild: true })).toBe(true);
+    });
+  });
+
+  it('shares the rescue\'s notion of "owes files" — the two must never disagree', () => {
+    /*
+     * The rescue reads `requiresAction`; this reads the same field, fed from the same `owesFiles`
+     * expression in the proxy. Pinned as a PROPERTY over the whole cube, because the failure mode of a
+     * divergence is invisible: a turn rescued for not writing, then billed as a success for it.
+     */
+    for (const emittedAction of [true, false]) {
+      for (const requiresAction of [true, false]) {
+        for (const attemptedBuild of [true, false]) {
+          const rescued = shouldRescueUnproductiveTurn({ ...BUILD_PROSE, emittedAction, requiresAction });
+          const failedVerdict = isFailedBuildTurn({ aborted: false, requiresAction, emittedAction, attemptedBuild });
+
+          /* Where the rescue fires on the "owes files" ground AND the model was building, so must this. */
+          if (rescued && requiresAction && attemptedBuild) {
+            expect(failedVerdict).toBe(true);
+          }
+
+          /* A turn that wrote something is never either. */
+          if (emittedAction) {
+            expect(failedVerdict).toBe(false);
+          }
+
+          /* And the verdict is never STRICTER than the rescue: it cannot fire where the rescue would not. */
+          if (!requiresAction) {
+            expect(failedVerdict).toBe(false);
+          }
+        }
+      }
+    }
+  });
+});
+
+describe('NO_FILES_WRITTEN_ERROR', () => {
+  it('tells the user the money came back — the charge is settled before they read this', () => {
+    expect(NO_FILES_WRITTEN_ERROR).toMatch(/refunded/i);
+  });
+
+  it('does NOT trigger the automatic retry ladder', () => {
+    /*
+     * Load-bearing wording. A turn reaching this point has already had a forced continuation and a
+     * rescue; a third automatic stream against the same prompt is exactly the waste being fixed. If
+     * someone later rewords this to contain "returned an empty response", the ladder silently starts
+     * re-running the most expensive turn in the product.
+     */
+    expect(NO_FILES_WRITTEN_ERROR).not.toMatch(/returned an empty response/i);
+
+    expect(
+      shouldRetryGeneration({
+        error: new Error(NO_FILES_WRITTEN_ERROR),
+        outTokens: 0,
+        aborted: false,
+        attempts: 0,
+      }),
+    ).toBe(false);
   });
 });

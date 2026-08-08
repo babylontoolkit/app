@@ -171,6 +171,69 @@ export function getPlatformModel(context?: unknown): string {
   return model;
 }
 
+/** The env var that picks a cheaper model for prompt enhancement. Named once, read once. */
+export const ENHANCER_MODEL_ENV_KEY = 'ENHANCE_PROMPT_MODEL';
+
+/**
+ * The model that ENHANCES a prompt — `ENHANCE_PROMPT_MODEL`, validated, else the platform model.
+ *
+ * ## Why this is a separate knob at all
+ *
+ * Prompt enhancement is a small, fixed, self-contained utility: rewrite ≤10k characters of English
+ * into better English, with no project files, no history, no tools and no cache prefix. It was
+ * nonetheless running on whatever model builds the games, because the enhancer had exactly one
+ * question to answer — "which model?" — and exactly one answer available. The rates make the size of
+ * that mistake precise: on Anthropic, `claude-sonnet-5` is **3x** `claude-haiku-4-5` on BOTH input
+ * ($3 vs $1) and output ($15 vs $5), so every enhancement was billing triple for a task that does not
+ * use what the difference buys.
+ *
+ * It is deliberately NOT the same variable as `LLM_MODEL`. Enhancement quality and build quality are
+ * different problems with different price sensitivities, and folding them into one setting means an
+ * operator who wants a cheaper ✨ button has to make their games worse to get it.
+ *
+ * ## The rules it inherits, and the one it does not
+ *
+ * Validated against `providerRates` exactly like `getPlatformModel`, for exactly that reason: an
+ * unpriced model falls through `ratesFor` to the provider's MOST EXPENSIVE row, so "is this model
+ * configured?" and "do we know what it costs?" stay the same question. A typo here is a describable
+ * 503 the first time someone presses ✨ — loud, immediate, free — never a silent mis-bill in the
+ * direction the operator was trying to move away from.
+ *
+ * 🔴 **It is NOT gated by `ENABLE_EXTENDED_MODELS`, and that is deliberate (owner, 2026-08-08).**
+ * That flag exists to stop users opting into EXPENSIVE model classes on the platform's credits
+ * (§4.6.1a's Premium/SuperMax rungs, `getTierModel`). This is the opposite motion in every respect: it
+ * is an operator setting, not a user choice; it is not a rung on the ladder; and its whole purpose is
+ * to spend LESS. Routing it through the tier machinery would mean a deploy that had switched the paid
+ * classes off — the cost-conscious deploy — was the one that could not have a cheap enhancer.
+ *
+ * Unset is the safe default: the platform model, i.e. exactly the behaviour that shipped before this
+ * existed.
+ */
+export function getEnhancerModel(context?: unknown): string {
+  const configured = env(context, ENHANCER_MODEL_ENV_KEY)?.trim();
+
+  if (!configured) {
+    return getPlatformModel(context);
+  }
+
+  const provider = getPlatformProvider(context);
+  const priced = providerRates(context)[provider] ?? {};
+
+  if (!priced[configured]) {
+    throw new NotConfiguredError(
+      `${ENHANCER_MODEL_ENV_KEY}="${configured}" on provider ${provider}`,
+      `We have no rates for it, so we cannot bill it. ${
+        provider === 'KIE'
+          ? 'Add its row to the Marketplace price list (Settings → Admin → Marketplace prices) and promote.'
+          : 'Add it to MODEL_RATES in billing/rates.ts first.'
+      } Priced models: ${Object.keys(priced).join(', ') || '(none)'}. ` +
+        `Unset ${ENHANCER_MODEL_ENV_KEY} to enhance with the platform model.`,
+    );
+  }
+
+  return configured;
+}
+
 /**
  * A PAID RUNG's model on the active provider — the higher-cost tiers a user may opt into (§4.6.1a).
  *

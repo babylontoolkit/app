@@ -56,7 +56,25 @@ const env = Object.fromEntries(
     }),
 );
 
-const KEY = env.KIE_API_KEY;
+/**
+ * Which PROVIDER to probe — `PROBE_PROVIDER=Anthropic|KIE`, defaulting to whatever the platform is
+ * configured to use.
+ *
+ * 🔴 Added 2026-08-08, because this probe was KIE-only and the platform has been on Anthropic since
+ * before Opus 5, so **the one script that exists to answer cache questions could not be pointed at
+ * the provider actually being billed.** That is not a gap in coverage, it is a probe that quietly
+ * measures a different system than the one you are asking about — and `_specs/creation-cost_plan.md`
+ * §"Phase 3" spent a "delete the cache warmer" verdict on arithmetic this could have checked.
+ *
+ * The two wires differ only in base URL and auth header: KIE proxies the Messages API and takes a
+ * bearer token; Anthropic takes `x-api-key`. Everything below — the `cache_control` breakpoint, the
+ * tiered write counter, the hit pattern — is identical, which is the whole reason the platform can
+ * swap providers with a config change.
+ */
+const PROVIDER = (process.env.PROBE_PROVIDER?.trim() || env.LLM_PROVIDER || 'KIE').toLowerCase();
+const IS_ANTHROPIC = PROVIDER === 'anthropic';
+
+const KEY = IS_ANTHROPIC ? env.ANTHROPIC_API_KEY : env.KIE_API_KEY;
 
 /*
  * `PROBE_MODEL=<id>` overrides the configured model, and it is the whole reason this probe can
@@ -72,12 +90,14 @@ const KEY = env.KIE_API_KEY;
  */
 const MODEL = process.env.PROBE_MODEL?.trim() || env.LLM_MODEL || env.KIE_DEFAULT_MODEL || 'claude-sonnet-5';
 
-const CLAUDE_BASE = env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
+const CLAUDE_BASE = IS_ANTHROPIC
+  ? env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1'
+  : env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
 const CODEX_BASE = env.KIE_CODEX_BASE_URL || 'https://api.kie.ai/codex/v1';
 const GEMINI_BASE = env.KIE_GEMINI_BASE_URL || 'https://api.kie.ai/gemini/v1';
 
 if (!KEY) {
-  throw new Error('no KIE_API_KEY in .env.local');
+  throw new Error(`no ${IS_ANTHROPIC ? 'ANTHROPIC_API_KEY' : 'KIE_API_KEY'} in .env.local`);
 }
 
 /**
@@ -102,6 +122,15 @@ function familyOf(model) {
 }
 
 const FAMILY = familyOf(MODEL);
+
+/*
+ * Anthropic direct serves the Claude wire and nothing else. Refusing here beats posting a `gpt-*`
+ * body to `api.anthropic.com` and reporting "no cache" for a request that never reached a model —
+ * exactly the plausible-but-wrong answer this file's header is a monument to.
+ */
+if (IS_ANTHROPIC && FAMILY !== 'claude') {
+  throw new Error(`PROBE_PROVIDER=Anthropic serves claude models only; "${MODEL}" is ${FAMILY}. Use PROBE_PROVIDER=KIE.`);
+}
 
 // ~1.5k tokens of stable filler — the cacheable prefix.
 const PREFIX = 'The quick brown fox jumps over the lazy dog. '.repeat(300);
@@ -236,7 +265,8 @@ function countersFrom(family, raw) {
 const { url, headers, body } = cacheRequest();
 
 console.log(
-  `model=${MODEL}  family=${FAMILY}  requests=${N}  delay=${DELAY_MS}ms  prefix≈${Math.round(PREFIX.length / 4)} tokens\n`,
+  `provider=${IS_ANTHROPIC ? 'Anthropic' : 'KIE'}  model=${MODEL}  family=${FAMILY}  requests=${N}  ` +
+    `delay=${DELAY_MS}ms  prefix≈${Math.round(PREFIX.length / 4)} tokens\n`,
 );
 
 if (FAMILY === 'gemini') {
@@ -257,7 +287,15 @@ for (let i = 1; i <= N; i++) {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${KEY}`, ...headers },
+    /*
+     * Anthropic authenticates with `x-api-key`; KIE proxies the same wire behind a bearer token.
+     * Sending the wrong one is a 401 that reads like a dead model rather than a dead credential.
+     */
+    headers: {
+      'content-type': 'application/json',
+      ...(IS_ANTHROPIC ? { 'x-api-key': KEY } : { authorization: `Bearer ${KEY}` }),
+      ...headers,
+    },
     body: JSON.stringify(body),
   });
 

@@ -20,7 +20,11 @@ import { splitFilesForContext } from '~/lib/context/stable-zones';
 import { getActivePrompt } from '~/lib/.server/prompt/active';
 import { ensureCacheWarmer, PROMPT_CACHE_TTL } from '~/lib/.server/prompt/cache-warmer';
 import { getPromptStore } from '~/lib/.server/prompt/store';
-import { selectStickyBlocks } from '~/lib/.server/prompt/sources';
+import {
+  carriedReferenceIds,
+  createReferenceTools,
+  type ReferenceToolContext,
+} from '~/lib/.server/agent/reference-tools';
 import { getSkillStore } from '~/lib/.server/skills/store';
 import { parseSlashInvocation } from '~/lib/skills/slash';
 import {
@@ -29,7 +33,12 @@ import {
   stripTransportEnvelopes,
   stripTransportPrefix,
 } from '~/lib/chat/message-envelope';
-import { shouldRescueUnproductiveTurn, UNPRODUCTIVE_RESCUE_PROMPT } from './unproductive';
+import {
+  isFailedBuildTurn,
+  NO_FILES_WRITTEN_ERROR,
+  shouldRescueUnproductiveTurn,
+  UNPRODUCTIVE_RESCUE_PROMPT,
+} from './unproductive';
 import { createFilesContext } from '~/lib/.server/llm/utils';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
@@ -327,6 +336,18 @@ export interface AgentGeneration {
   tier: ModelTierId;
   tierReason: ModelTierDecisionReason;
 
+  /**
+   * The Agent Reference documents this turn had in context, carried + newly loaded (Phase 2).
+   *
+   * 🔴 **This field is the carry-forward wire.** It rides out on the `agentMeta` annotation, the AI SDK
+   * posts annotations back with the conversation, and `carriedReferenceIds` reads it on the NEXT turn to
+   * rebuild the cached prefix — so it is not a metric that happens to be persisted, it is the mechanism.
+   * A turn that under-reports here silently drops a document the model was relying on; one that
+   * re-orders breaks the append-only rule and rewrites the prefix at the 2x cache-write rate.
+   *
+   * Named `blocks` because it is the same column and the same annotation the keyword router used, and
+   * renaming it would have orphaned every conversation already in flight.
+   */
   blocksLoaded: string[];
 
   /**
@@ -442,23 +463,6 @@ export function statusKindFor(input: {
   }
 
   return input.isDiscussTurn ? 'plan' : 'edit';
-}
-
-/**
- * Every user message, oldest first — the routing input for the CACHED prefix (`selectStickyBlocks`).
- *
- * ⚠️ Deliberately NOT `lastUserText`. Routing the cached prefix from one message means the user's
- * wording sets the price of their turn: measured live, "make the boost pad glow dimmer" cost 12 credits
- * and "make the boost pad on the racing track glow brighter for the kart lap timing" cost 160 — the
- * same edit, 13x, because the second phrasing routed one extra block and invalidated ~114k behind it.
- *
- * Assistant turns are excluded on purpose. The model echoes topic words constantly ("I've updated the
- * racing line..."), so routing on them would let the MODEL's prose pull blocks into the prefix — an
- * unstable input we do not control, which is the same class of mistake as letting a prose classifier
- * pick the effort level (`effort-policy.ts`).
- */
-function allUserTexts(messages: Message[]): string[] {
-  return messages.filter((m) => m.role === 'user' && typeof m.content === 'string').map((m) => m.content as string);
 }
 
 /**
@@ -840,44 +844,32 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   /*
-   * 7. Route the on-demand doc blocks — from the WHOLE CONVERSATION, not the last message.
+   * 7. 🔴 THERE IS NO DOC ROUTER ANY MORE (Phase 2, 2026-08-08).
    *
-   * Keyed off every USER request. It used to also include the invoked skill's BODY, on the reasoning
-   * that `/bt-spec build a racing game` should pull the RacingSystem docs — but the user's own words
-   * ("build a racing game") already do that, and a skill body is thousands of words of machine-written
-   * prose that matches almost everything. Measured 2026-07-26: `/bt-spec add a gem counter to the HUD`
-   * routed TEN doc blocks including `racing-system` and `demo-rotator`, none of which the task implied,
-   * all of them into the cached prefix and (routing being sticky) pinned there for the conversation.
-   * Same defect as the skill router this file used to carry, one subsystem to the left.
+   * This step used to substring-match the whole conversation against a keyword table and paste the
+   * winners into the cached prefix. Measured on the live prompt version, the input it was actually
+   * matching was the platform's own HIDDEN creation brief, not the user's request — so
+   * `"mario kart racer clone"` and `"a chess puzzle game"` produced **byte-identical sets of ten
+   * documents, 61.6k tokens, `racing-system` included**, and the user's own words contributed nothing.
    *
-   * ⚠️ These blocks are part of the CACHED PREFIX, so routing them per-message made the user's phrasing
-   * set the price of their turn (12 credits vs 160 for the same edit — see `selectStickyBlocks`). The
-   * set is sticky and append-only.
+   * The model now chooses from the Reference Library index in the cached prompt and calls
+   * `load_reference` (`reference-tools.ts`) — the same fix applied to skills on 2026-07-26, and the
+   * fourth keyword table removed from this codebase. `sources.ts` carries the full post-mortem.
    *
-   * There is deliberately no single-message `routingText` left in this function. Everything routed from
-   * here lands in the cached prefix, so a per-message input is always wrong; if a future feature wants
-   * only the current ask, it must be something that sits AFTER the last breakpoint (the volatile tail),
-   * and it should say so where it is written rather than reviving a variable that reads as general.
-   */
-  const userTexts = allUserTexts(messages);
-
-  /*
-   * Is this the turn that BUILDS the project? (§4.4b)
-   *
-   * On a creation turn the brief is the whole workflow — there is nothing to look up — and letting the
-   * model try is what made creation slow: it drafted the game, abandoned the draft to call `load_skill`,
-   * and redrafted, six times, for 350s and 29,173 wasted output tokens. The system prompt forbids this
-   * in words and the model did it anyway. So the tools are taken away rather than argued about.
+   * What is carried here is only what the model ITSELF loaded on an earlier turn: a document fetched on
+   * turn 1 would otherwise be gone on turn 2, because the tool loop is server-side and its results never
+   * enter the saved conversation. Append-only in first-seen order, read from the FULL message list —
+   * see `carriedReferenceIds` for why each of those fails as a bigger bill rather than an error.
    */
   // `isFirstBuildTurn` is computed above the premium decision (raw request messages) and reused here.
   const store = getPromptStore();
-  const blocks: Array<{ id: string; title: string; body: string }> = [];
+  const carriedReferences: Array<{ id: string; body: string }> = [];
 
-  for (const block of selectStickyBlocks(userTexts)) {
-    const body = await store.readOnDemand(promptVersion.id, block.id);
+  for (const id of carriedReferenceIds(messages)) {
+    const body = await store.readOnDemand(promptVersion.id, id);
 
     if (body) {
-      blocks.push({ id: block.id, title: block.title, body });
+      carriedReferences.push({ id, body });
     }
   }
 
@@ -1013,18 +1005,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     system.push({ role: 'system', content: assetLibraryIndex });
   }
 
-  blocks.forEach((block, i) => {
+  /*
+   * References the model loaded on an EARLIER turn of this conversation (`carriedReferenceIds`).
+   *
+   * Same slot the routed doc blocks used to occupy, and the same breakpoint arithmetic — but the set is
+   * now a record of what the model asked for rather than a guess made before it spoke, so it grows by
+   * one document at a time and only when a document was genuinely used.
+   */
+  carriedReferences.forEach((reference, i) => {
     system.push({
       role: 'system',
-      content: `# Component Reference: ${block.title}\n\n${block.body}`,
+      content: `# Babylon Toolkit Reference: ${reference.id}\n\n${reference.body}`,
 
       /*
-       * Doc blocks and the skills block SHARE one breakpoint (the 2026-07-30 restructure spent the
-       * freed one on the starter files above): the set's breakpoint rides on the skills block when
-       * one exists, else on the last doc block. `skillBlocks` is computed above the push for exactly
-       * this decision.
+       * Reference blocks and the skills block SHARE one breakpoint (the 2026-07-30 restructure spent
+       * the freed one on the starter files above): the set's breakpoint rides on the skills block when
+       * one exists, else on the last reference block. `skillBlocks` is computed above the push for
+       * exactly this decision.
        */
-      ...(i === blocks.length - 1 && skillBlocks.length === 0 ? { providerOptions: CACHE_CONTROL } : {}),
+      ...(i === carriedReferences.length - 1 && skillBlocks.length === 0 ? { providerOptions: CACHE_CONTROL } : {}),
     });
   });
 
@@ -1284,6 +1283,21 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * for that reason: dropping them here would make the carried set flicker on and off between turns,
    * rewriting the cached prefix each time.
    */
+  /*
+   * The same two-set shape, for references (`reference-tools.ts`).
+   *
+   * `loaded` is seeded with what earlier turns pulled in — those bodies are in the cached prefix above,
+   * so a re-request must return one sentence rather than a second copy of a 55KB document. Whatever
+   * ends up in it is recorded as this generation's `referencesLoaded`, which is what `carriedReferenceIds`
+   * reads next turn; dropping the carried ids here would make the carried set flicker between turns and
+   * rewrite the prefix each time.
+   */
+  const referenceContext: ReferenceToolContext = {
+    versionId: promptVersion.id,
+    loaded: new Set(carriedReferences.map((r) => r.id)),
+    loadedThisTurn: new Set<string>(),
+  };
+
   const toolContext: SkillToolContext = {
     loaded: new Set([
       ...(slash ? [slash.skillName] : []),
@@ -1319,12 +1333,35 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     ...createWebFetchTool(),
   };
 
+  /*
+   * 🔴 `load_reference` IS IN EVERY TOOL SET, INCLUDING CREATION'S (Phase 2, 2026-08-08).
+   *
+   * The Babylon Toolkit documentation is no longer baked into the prompt — the base prompt carries the
+   * Reference Library INDEX and this tool returns a document by id. So withholding it from any turn
+   * means telling the model which documents exist and then refusing to hand any of them over, which is
+   * the dangling-instruction failure `spec/skills.md` records for `load_skill` and which the baked
+   * router index has been committing for months ("FETCH THE MATCHING SUB-DOCUMENTS" — with no tool).
+   *
+   * The six-round pathology cannot come back through it: `MAX_REFERENCE_LOADS` is enforced inside
+   * `execute` (never by withdrawing the tool, never as a zod constraint), the index instructs the model
+   * to load BEFORE it starts writing, and every turn's `maxSteps` is derived so the budget cannot eat
+   * the answer step.
+   */
+  const referenceTools = createReferenceTools(referenceContext);
+
   const tools = (
-    toolPolicy.toolset === 'media-only'
-      ? { ...mediaTools, ...createRepairTool() }
+    toolPolicy.toolset === 'creation'
+      ? { ...mediaTools, ...referenceTools, ...createRepairTool() }
       : toolPolicy.toolset === 'skills-only'
-        ? { ...createSkillTools(toolContext), ...researchTools, ...createRepairTool() }
-        : { ...createSkillTools(toolContext), ...mcpRelayTools, ...mediaTools, ...researchTools, ...createRepairTool() }
+        ? { ...createSkillTools(toolContext), ...referenceTools, ...researchTools, ...createRepairTool() }
+        : {
+            ...createSkillTools(toolContext),
+            ...referenceTools,
+            ...mcpRelayTools,
+            ...mediaTools,
+            ...researchTools,
+            ...createRepairTool(),
+          }
   ) as SkillTools;
 
   /*
@@ -1365,7 +1402,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       : `tier=${tierDecision.tier}(${tierDecision.reason})`;
 
   logger.info(
-    `Generation: model=${model} ${tierLog} prompt=${promptVersion.id} blocks=[${blocks.map((b) => b.id).join(',')}] ` +
+    `Generation: model=${model} ${tierLog} prompt=${promptVersion.id} refs=[${carriedReferences.map((r) => r.id).join(',')}] ` +
       `${slash ? `slash=/${slash.skillName} ` : ''}${isRepair ? `repair(${request.repairAttempt ?? 1}) ` : ''}` +
       `mode=${useByok ? 'byok' : 'platform'}${isFirstBuildTurn ? ' CREATION' : ''}${discussNote ? ' DISCUSS' : ''} ` +
       `tools=${allowTools ? (toolPolicy.toolset === 'all' ? 'on' : toolPolicy.toolset) : `off (${isFirstBuildTurn ? 'creation' : 'skills pre-loaded'})`} ` +
@@ -1634,6 +1671,18 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
         streamedChars += part.textDelta.length;
 
+        if (!emittedAction) {
+          const window = actionScanTail + part.textDelta;
+          emittedAction = window.includes(ACTION_TAG);
+          actionScanTail = window.slice(-(ACTION_TAG.length - 1));
+        }
+
+        if (!emittedArtifact) {
+          const window = artifactScanTail + part.textDelta;
+          emittedArtifact = window.includes(ARTIFACT_TAG);
+          artifactScanTail = window.slice(-(ARTIFACT_TAG.length - 1));
+        }
+
         if (assistantText.length < MAX_RECOVERED_CHARS) {
           assistantText += part.textDelta;
         }
@@ -1724,6 +1773,31 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   const MAX_RECOVERED_CHARS = 150_000;
   let assistantText = '';
+
+  /*
+   * Did this turn write anything? Tracked as a STICKY flag over the raw stream, not sniffed out of
+   * `assistantText` — that buffer stops growing at `MAX_RECOVERED_CHARS`, so a turn that narrated past
+   * the cap before finally emitting its artifact would read as "wrote nothing". Harmless while the only
+   * reader was the rescue (worst case: one extra pass); NOT harmless now that `isFailedBuildTurn`
+   * refunds on it, where the same miss gives a completed build away for free.
+   *
+   * The tail carries `ACTION_TAG.length - 1` chars between deltas because the provider is free to split
+   * `<boltAction` across two of them, and a containment test on each delta alone would never see it.
+   */
+  const ACTION_TAG = '<boltAction';
+  let emittedAction = false;
+  let actionScanTail = '';
+
+  /*
+   * Did the model COMMIT to producing files? An opened artifact is the strongest evidence a turn was a
+   * build rather than an answer, and `isFailedBuildTurn` needs that evidence: the creation brief rides
+   * on whatever the user types first, so their first message can legitimately be a question.
+   *
+   * Same rolling-tail scan, same reason — the tag can arrive split across two deltas.
+   */
+  const ARTIFACT_TAG = '<boltArtifact';
+  let emittedArtifact = false;
+  let artifactScanTail = '';
 
   /**
    * Write the plain transcript IF the client has not (`transcript-recovery.ts` decides).
@@ -1965,11 +2039,18 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       const visibleTextChars = stepLog.reduce((n, step) => n + (step.textChars ?? 0), 0);
       const toolCallCount = stepLog.reduce((n, step) => n + step.tools.length, 0);
 
+      /*
+       * A creation MUST write files (§4.4b). ONE predicate, read by both the rescue below and the
+       * terminal verdict after it — if those two ever disagreed about which turns owe files, a turn
+       * could be rescued for not writing and then billed as a success for the same thing.
+       */
+      const owesFiles = isFirstBuildTurn && !discussNote;
+
       if (
         shouldRescueUnproductiveTurn({
           aborted: Boolean(request.abortSignal?.aborted),
           alreadyContinued: forcedContinuation,
-          emittedAction: assistantText.includes('<boltAction'),
+          emittedAction,
           toolCalls: toolCallCount,
           textChars: visibleTextChars,
           outTokens: totals.completionTokens,
@@ -1980,7 +2061,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
            * never built and the user paid for a description of a game. Plan turns are excluded by
            * construction (they are prose by guarantee, §4.2.9) and so are ordinary edits.
            */
-          requiresAction: isFirstBuildTurn && !discussNote,
+          requiresAction: owesFiles,
         })
       ) {
         unproductiveRescue = true;
@@ -2024,6 +2105,45 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         const refusal = peekStopReasons().find((s) => s.stopReason === 'refusal');
 
         throw new Error(refusal ? describeRefusal(refusal) : EMPTY_RESPONSE_ERROR);
+      }
+
+      /*
+       * The sibling of the check above, and the one `gen_msixapaq_i871b6` walked straight through:
+       * a first build turn that produced plenty of TEXT and wrote no FILES (`unproductive.ts`).
+       *
+       * Deliberately LAST — after the forced continuation and after the rescue, so this is the verdict
+       * on a turn that has already been given every second chance the pipeline has. Reaching here means
+       * the user asked for a game, was billed in full, and has nothing. `failed` routes it to the §4.6
+       * auto-refund exactly like the empty-response case, and the error gives them something to Retry
+       * (§4.12) instead of a chat that claims success over an empty project.
+       */
+      if (
+        isFailedBuildTurn({
+          aborted: Boolean(request.abortSignal?.aborted),
+          requiresAction: owesFiles,
+          emittedAction,
+
+          /*
+           * Positive evidence the model was BUILDING rather than answering (`unproductive.ts`). The
+           * brief rides on whatever the user types first, so their first message can legitimately be a
+           * question — and without this that gets a "the build wrote no files" error over a good answer.
+           *
+           * `unproductiveRescue` is excluded on purpose: it fires on any first-turn prose, so counting
+           * it would let our own reaction manufacture the evidence it is supposed to test for.
+           */
+          attemptedBuild: emittedArtifact || toolCallCount > 0 || forcedContinuation,
+        })
+      ) {
+        failed = true;
+
+        logger.warn(
+          `Build turn ${generationId} wrote no files (${visibleTextChars} chars text, ` +
+            `${toolCallCount} tool calls, artifact=${emittedArtifact}, ` +
+            `forcedContinuation=${forcedContinuation}, rescue=${unproductiveRescue}) — ` +
+            'failing it so the §4.6 auto-refund fires',
+        );
+
+        throw new Error(NO_FILES_WRITTEN_ERROR);
       }
     } catch (error) {
       /*
@@ -2139,7 +2259,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         rawCostUsd: settlement?.rawCostUsd ?? 0,
         promptVersionId: promptVersion.id,
         skillsLoaded: [...toolContext.loaded],
-        blocksLoaded: blocks.map((b) => b.id),
+
+        /*
+         * The documents this turn HAD, carried + newly loaded (Phase 2). Same column that recorded the
+         * keyword router's picks, now recording the model's — and it is what `carriedReferenceIds`
+         * reads back on the next turn, so it must include the carried ids or the set flickers.
+         */
+        blocksLoaded: [...referenceContext.loaded],
         promptTokens: totals.promptTokens,
         completionTokens: totals.completionTokens,
         totalTokens: totals.totalTokens,
@@ -2273,7 +2399,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      */
     tier: tierDecision.tier,
     tierReason: tierDecision.reason,
-    blocksLoaded: blocks.map((b) => b.id),
+
+    /*
+     * Read at the END of the generation (the handle is built after the stream settles), so this is
+     * carried + newly loaded — which is exactly what the next turn must carry. `loadedThisTurn` alone
+     * would drop everything earlier turns had established.
+     */
+    blocksLoaded: [...referenceContext.loaded],
     historyStats,
     discussMode: discussNote !== null,
 

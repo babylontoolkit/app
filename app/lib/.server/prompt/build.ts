@@ -17,6 +17,7 @@ import projectSpecSection from './sections/25-project-spec.md?raw';
 import selfHealingSection from './sections/30-self-healing.md?raw';
 import skillUsageSection from './sections/40-skill-usage.md?raw';
 import { githubJson, githubText } from './github';
+import { buildReferenceIndex } from './reference-index';
 import { AGENT_REPO, BASE_DOCS, DECLARATION_FILES, ON_DEMAND_BLOCKS, type DocSource } from './sources';
 import { computeBuildHash, getPromptStore, sha256, type NewPromptVersion, type PromptVersionMeta } from './store';
 
@@ -76,17 +77,27 @@ function fence(source: DocSource, body: string): string {
 /**
  * Assemble the base prompt.
  *
- * Order is load-bearing. The platform identity section comes FIRST because it must override the
- * Agent Reference's router index, which instructs the reader to go fetch sub-documents over the
- * network — an instruction that is both wrong here (the sub-docs are pinned + pre-baked, never fetched
- * live, even though a `web_fetch` tool exists for arbitrary user URLs) and already satisfied (the
- * sub-docs are inlined right below it).
+ * Order is load-bearing. The platform identity section comes FIRST because it must override the parts
+ * of the Agent Reference's router index that describe a different host (a `StarterAssets.git` clone,
+ * a network that does not exist here).
+ *
+ * ⚠️ **`referenceIndex` goes immediately after the router index, and that adjacency is the point**
+ * (Phase 2, 2026-08-08). `reference.md` tells the reader in capitals to FETCH the matching
+ * sub-documents and to STOP if a fetch fails — an instruction the model could not act on, because
+ * there was no tool and the platform was keyword-matching the documents behind its back. The index
+ * that follows names every sub-document and the tool that returns it, so the mandatory instruction
+ * and the means of obeying it are read together instead of a screen apart.
  */
-export function assemblePrompt(docs: Array<{ source: DocSource; body: string }>, skillsIndex: string): string {
+export function assemblePrompt(
+  docs: Array<{ source: DocSource; body: string }>,
+  skillsIndex: string,
+  referenceIndex: string,
+): string {
   return [
     identitySection.trim(),
     '# Babylon Toolkit Agent Reference (synced snapshot)',
     ...docs.map(({ source, body }) => fence(source, body)),
+    referenceIndex.trim(),
     skillsIndex.trim(),
     actionProtocolSection.trim(),
     hardConstraintsSection.trim(),
@@ -142,7 +153,12 @@ export async function buildSystemPrompt(options: BuildOptions): Promise<BuildRes
     }),
   );
 
-  const content = assemblePrompt(docs, skillsIndex);
+  /*
+   * Built from the SOURCE MAP, not from what was fetched — the two are the same list by construction
+   * (the fetch above iterates `ON_DEMAND_BLOCKS`), and one missing doc fails the whole build before
+   * this line, so there is no state in which the index can advertise a document the version lacks.
+   */
+  const content = assemblePrompt(docs, skillsIndex, buildReferenceIndex(ON_DEMAND_BLOCKS));
   const fetched = docs.length + Object.keys(onDemand).length + Object.keys(declarations).length;
 
   const candidate: NewPromptVersion = {

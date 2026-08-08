@@ -20,9 +20,36 @@
  *    a render — and each extra round re-reads the cached prefix at a tenth, so the slack is cheap.
  */
 import { MAX_TOOL_ROUNDS } from './tools';
+import { MAX_MEDIA_ROUNDS } from './media-tools';
+import { MAX_REFERENCE_LOADS } from './reference-tools';
 
 /** 1 round of parallel generate_* calls + the ANSWER step + 1 round of slack (the +1 rule, §4.2.8). */
 export const CREATION_MEDIA_STEPS = 3;
+
+/**
+ * 🔴 THE CREATION TURN'S STEP CAP IS DERIVED FROM THE TOOL BUDGETS, NOT PICKED (Phase 2, 2026-08-08).
+ *
+ * `gen_msixapaq_i871b6` cost 1,489 credits and shipped no game because the model spent every step it
+ * had on tool calls and hit the cap mid-call with the project unwritten — the forced continuation then
+ * re-billed the whole prefix at the 2x write rate to deliver 31 tokens of nothing. The lesson recorded
+ * then was the `+ 1` rule: **the answer must have a step the tools cannot consume.**
+ *
+ * That rule is only true if `maxSteps` exceeds the WORST-CASE number of tool rounds, and Phase 2 added
+ * a second budget to the creation turn (`load_reference` — the documentation is no longer baked, so the
+ * build turn has to be able to ask for it). Worst case is every budgeted call landing in its own step:
+ * `MAX_REFERENCE_LOADS` + `MAX_MEDIA_ROUNDS`. Past that both budgets refuse inside `execute`, so the
+ * final step has nothing left to spend and can only answer.
+ *
+ * ⚠️ **Derived deliberately, so it cannot drift.** The old constant was a hand-maintained "1 round +
+ * the answer + slack" whose comment described a shape the code did not enforce; raising either budget
+ * without re-deriving this is precisely how that 1,489 happened. Both numbers now move together or not
+ * at all, and `tool-policy.spec.ts` asserts the relationship rather than the literal.
+ *
+ * The cost of the extra headroom is small and bounded: an in-generation step re-reads the WARM prefix
+ * at 0.1x (~$0.04 on the post-Phase-2 prefix), where the forced continuation it prevents rewrites it
+ * at 2x. Slack here is roughly twenty times cheaper than the failure it insures against.
+ */
+export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS + MAX_MEDIA_ROUNDS;
 
 /**
  * ⚠️ RETIRED for ordinary turns (2026-07-26) — kept because the reasoning below is still the reason
@@ -80,11 +107,16 @@ export interface ToolPolicy {
   allowTools: boolean;
 
   /**
-   * `media-only` strips skill + MCP tools from the offered set (creation only: the brief's design
-   * phase may buy art, and nothing else may burn a round). `skills-only` strips media + MCP
-   * (discussion turns: skill loads are read-only grounding; nothing offered may spend or mutate).
+   * `creation` = media + `load_reference` (+ the repair bounce). It strips SKILL and MCP tools: the
+   * brief's two skills are already inlined, and "inlined AND offered" is the exact combination that
+   * produced every recorded six-round thrash. `skills-only` strips media + MCP (discussion turns: skill
+   * and reference loads are read-only grounding; nothing offered may spend or mutate).
+   *
+   * ⚠️ Renamed from `media-only` in Phase 2 (2026-08-08), when `load_reference` joined it. The old name
+   * had become a false statement about what the set contains, and a comment that lies about a tool set
+   * is how someone later "restores" a document to the prefix that was never missing from the turn.
    */
-  toolset: 'all' | 'media-only' | 'skills-only';
+  toolset: 'all' | 'creation' | 'skills-only';
 
   /** Passed straight to `streamText` — counts EVERY round trip, so the answer step must fit inside. */
   maxSteps: number;
@@ -105,9 +137,35 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
      * round — policy cap and execute budget work as a pair, and an in-generation answer step re-reads
      * the warm prefix at 0.1× where the forced continuation rewrites it at 2×.
      */
-    return input.hasMediaTools
-      ? { allowTools: true, toolset: 'media-only', maxSteps: CREATION_MEDIA_STEPS + 1 }
-      : { allowTools: false, toolset: 'all', maxSteps: 1 };
+    /*
+     * 🔴 THE CREATION TURN HAS TOOLS NOW EVEN WITHOUT MEDIA — because the docs left the prefix.
+     *
+     * This branch used to be `{ allowTools: false, maxSteps: 1 }`: the historic one-shot that took a
+     * creation from 997k prompt tokens to a single step. That was correct while ~106KB of Babylon
+     * Toolkit documentation was welded into every prompt — the model already had everything, so a tool
+     * could only cost rounds.
+     *
+     * Phase 2 unbaked those documents. A creation with no tools at all would now be asked to write a
+     * complete game with the platform's rules, the router index, the reference INDEX — and not one line
+     * of the API documentation the index describes. That is the §4.2.8 silent failure in its purest
+     * form: nothing throws, the token count goes DOWN, and the game is simply worse.
+     *
+     * `load_reference` is in every toolset for that reason, and the six-round pathology cannot return
+     * through it: the budget is on BODIES inside `execute` (`MAX_REFERENCE_LOADS`), the index tells the
+     * model to load BEFORE it starts writing, and skills stay INLINED-and-untooled here, which is the
+     * one combination ("inlined AND offered") that produced every recorded thrash.
+     */
+    return {
+      allowTools: true,
+      toolset: 'creation',
+
+      /*
+       * Only the budgets this turn can actually spend. Without a KIE key there are no media rounds to
+       * buy, so handing the turn headroom for two of them would be paying for slack that cannot exist —
+       * and `maxSteps` is the one number that must stay a true statement about the worst case.
+       */
+      maxSteps: (input.hasMediaTools ? CREATION_TOOL_ROUNDS : MAX_REFERENCE_LOADS) + 1,
+    };
   }
 
   /*

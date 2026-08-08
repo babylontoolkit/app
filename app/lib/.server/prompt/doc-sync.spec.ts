@@ -11,7 +11,9 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PromptVersionStore, PROMPT_STORE_PREFIX, getPromptStore, setPromptStore, sha256 } from './store';
 import { FsObjectStore } from '~/lib/.server/storage';
-import { BASE_DOCS, DECLARATION_FILES, ON_DEMAND_BLOCKS, selectOnDemandBlocks } from './sources';
+import { BASE_DOCS, DECLARATION_FILES, ON_DEMAND_BLOCKS } from './sources';
+import { buildReferenceIndex } from './reference-index';
+import { MAX_REFERENCE_LOADS } from '~/lib/.server/agent/reference-tools';
 import { isOpaqueToModel } from '~/lib/context/opaque-files';
 
 /*
@@ -230,7 +232,7 @@ describe('every refresh still carries what the agent needs', () => {
    * this test fails the moment a section is authored but not wired.
    */
   it('assembles EVERY section file on disk into the prompt', () => {
-    const prompt = assemblePrompt([], 'skills index');
+    const prompt = assemblePrompt([], 'skills index', '');
     const files = readdirSync(dir).filter((f) => f.endsWith('.md'));
 
     expect(files.length).toBeGreaterThanOrEqual(6);
@@ -245,7 +247,7 @@ describe('every refresh still carries what the agent needs', () => {
 
   it('keeps the platform rules even when every fetched doc comes back empty-ish', () => {
     // Docs are inputs; the rules are not. Assembling with NO reference docs at all still yields them.
-    const prompt = assemblePrompt([], '');
+    const prompt = assemblePrompt([], '', '');
 
     expect(prompt).toMatch(/THE PLAY CONTRACT/);
     expect(prompt).toMatch(/never clone/i);
@@ -458,89 +460,141 @@ describe('build no-op', () => {
   });
 });
 
-describe('on-demand block routing', () => {
-  it('routes a racing request to the RacingSystem docs', () => {
-    const ids = selectOnDemandBlocks('build a kart racing game with lap times').map((b) => b.id);
-    expect(ids).toContain('racing-system');
-  });
-
-  it('routes a navmesh request to NavigationAgent, not to RacingSystem', () => {
-    const ids = selectOnDemandBlocks('make the enemies pathfind around obstacles using a navmesh').map((b) => b.id);
-
-    expect(ids).toContain('navigation-agent');
-    expect(ids).not.toContain('racing-system');
-  });
-
-  it('routes nothing for a request that needs no system docs', () => {
-    expect(selectOnDemandBlocks('change the title text to hello')).toEqual([]);
-  });
-
-  it('is case-insensitive', () => {
-    expect(selectOnDemandBlocks('Add HAVOK Physics').map((b) => b.id)).toContain('rigidbody-physics');
-  });
-
-  it('routes a React game-builder request to the React training reference', () => {
-    const ids = selectOnDemandBlocks('wire up the SceneController and a custom overlay HUD').map((b) => b.id);
-    expect(ids).toContain('react-training');
-  });
-
+/**
+ * 🔴 WHAT REPLACED THE ROUTING TESTS (Phase 2, 2026-08-08).
+ *
+ * The tests that stood here drove `selectOnDemandBlocks` — "a racing request routes to RacingSystem",
+ * "a navmesh request does not". Every one of them passed, and the feature was still broken, because
+ * they asserted the router's behaviour on the input they WISHED it had. The real input was the
+ * platform's own hidden creation brief, and measured against it the router returned the SAME ten
+ * documents for `"mario kart racer clone"` and `"a chess puzzle game"` alike.
+ *
+ * That is the lesson worth keeping: **a test that feeds a component a realistic-looking input its
+ * production caller never sends is not weak coverage, it is coverage of something else.** So there is
+ * nothing here that simulates a request. What is asserted instead is the two things the new mechanism
+ * genuinely rests on — that the model is TOLD what exists, and that telling it is free.
+ */
+/**
+ * 🔴 THE WIRING, which is where every defect in this codebase has actually lived.
+ *
+ * `buildReferenceIndex` being correct and `assemblePrompt` accepting it prove nothing on their own:
+ * `buildSystemPrompt` is what a real doc-sync calls, and an index that is built and then not passed is
+ * a silent regression of the whole change — the model would be told the documents exist by the Agent
+ * Reference's router index (baked, mandatory, in capitals) and given no way to name them. That is the
+ * exact dangling instruction Phase 2 exists to remove, restored by an omitted argument.
+ */
+describe('the built prompt actually CARRIES the index', () => {
   /**
-   * The `@babylonjs/gui` reference is on-demand (it was half of `ui-design-system.md`, which was 31% of
-   * the cached prefix). The RISK of that split is a FALSE NEGATIVE, and it is silent: the model decides
-   * from the still-baked decision matrix that it needs GPU GUI, does not have the API, and improvises an
-   * `AdvancedDynamicTexture` that does not exist. So the phrasings a user actually reaches for — none of
-   * which contain the word "gui" — are pinned here rather than trusted.
+   * ⚠️ **`setPromptStore` IS MANDATORY HERE, AND THE FIRST DRAFT OF THIS BLOCK OMITTED IT.**
+   *
+   * `buildSystemPrompt` calls `getPromptStore()`, which falls back to an `FsObjectStore` rooted at the
+   * developer's REAL `.data/` — so building a version without installing the temp store wrote three
+   * prompt versions into the live local store and re-pointed `active.json` at one assembled from
+   * MOCKED GitHub bodies (`BODY OF <url>`). Nothing failed. It was caught only because a later
+   * measurement read the active blob and found 40,420 chars where it expected 137,969.
+   *
+   * Exactly the `oauth.spec.ts` trap, and the third occurrence in this codebase: a seam that LOOKS
+   * empty and silently resolves to the real thing. Every other block in this file dodges it by using
+   * the local `store` variable; this one cannot, because its whole purpose is to drive the function a
+   * real doc-sync calls.
    */
-  describe.each([
-    ['show a health bar above each enemy', 'the matrix says linkWithMesh; a HUD bar in DOM would not'],
-    ['add floating damage numbers when you hit something', 'world-space text is GPU GUI only'],
-    ['put name tags over the other players', 'name tags track a mesh'],
-    ['render a speedometer onto the cockpit screen', 'texture mode on a mesh — DOM cannot do this at all'],
-    ['make the menu work in VR', 'DOM is invisible in WebXR'],
-    ['add a minimap', 'render-to-texture is a GPU GUI path'],
-    ['use AdvancedDynamicTexture for this', 'named outright'],
-  ])('routes %s to the GUI reference', (prompt) => {
-    it('— because guessing that API is worse than not having it', () => {
-      expect(selectOnDemandBlocks(prompt).map((b) => b.id)).toContain('babylon-gui');
-    });
+  beforeEach(() => setPromptStore(store));
+  afterEach(() => setPromptStore(undefined));
+
+  it('puts every reference id into the stored prompt version', async () => {
+    const { version } = await buildSystemPrompt({ skillsIndex: 'index' });
+    const stored = await store.get(version.id);
+
+    expect(stored?.content).toContain('Reference Library');
+
+    for (const block of ON_DEMAND_BLOCKS) {
+      expect(stored?.content, `${block.id} is fetched and stored but never named in the prompt`).toContain(
+        `**${block.id}**`,
+      );
+    }
   });
 
   /*
-   * The other half of the split: ordinary DOM/React UI must NOT drag 8.7k tokens of GPU GUI in. The
-   * decision matrix (baked) says these all belong in `CustomOverlay`.
+   * The other half of the same wiring: an id in the index must resolve through the tool. Together these
+   * two assertions are "advertised" and "reachable", and it is only the PAIR that means anything — an
+   * index naming a document the version does not hold is how a stale prompt version presents.
    */
-  it.each([
-    ['redesign the landing page with a hero section'],
-    ['add a pause menu with a settings panel'],
-    ['show the score and ammo in the corner'],
-  ])('does NOT route %s to the GUI reference', (prompt) => {
-    expect(selectOnDemandBlocks(prompt).map((b) => b.id)).not.toContain('babylon-gui');
-  });
+  it('stores a body for every id it advertises', async () => {
+    const { version } = await buildSystemPrompt({ skillsIndex: 'index' });
 
-  it('routes an image-generation request to the kie MCP docs', () => {
-    expect(selectOnDemandBlocks('generate a texture for the car using MCP').map((b) => b.id)).toContain('kie-servers');
+    for (const block of ON_DEMAND_BLOCKS) {
+      expect(await store.readOnDemand(version.id, block.id), `${block.id} is advertised but empty`).toBeTruthy();
+    }
   });
+});
 
-  it('routes an example request to the matching playground', () => {
-    expect(selectOnDemandBlocks('show me the simplest script that will rotate a cube').map((b) => b.id)).toContain(
-      'demo-rotator',
-    );
-  });
+describe('the reference index — what the model chooses from', () => {
+  it('lists every on-demand document, so nothing is unreachable', () => {
+    const index = buildReferenceIndex(ON_DEMAND_BLOCKS);
 
-  it('routes an install request to the project installer', () => {
-    expect(selectOnDemandBlocks('npm install a physics helper package').map((b) => b.id)).toContain(
-      'project-installer',
-    );
+    for (const block of ON_DEMAND_BLOCKS) {
+      expect(index, `${block.id} is synced but absent from the index — the model cannot ask for it`).toContain(
+        `**${block.id}**`,
+      );
+    }
   });
 
   /*
-   * The point of unbaking it: a turn that is not about installing anything must not pay ~12k tokens
-   * for the installer, on every request, forever.
+   * This text lands in the BASE PROMPT, which is byte-identical for every user on the platform and is
+   * the single most valuable cache entry we have. Sorting is what stops a reordered array from
+   * rewriting that prefix for everyone at the 2x cache-WRITE rate.
    */
-  it('does NOT route the installer into an ordinary gameplay edit', () => {
-    expect(selectOnDemandBlocks('the car flips over when it lands, fix the suspension').map((b) => b.id)).not.toContain(
-      'project-installer',
-    );
+  it('is sorted by id, so re-ordering the source array cannot rewrite the prefix', () => {
+    const ids = [...buildReferenceIndex(ON_DEMAND_BLOCKS).matchAll(/^- \*\*([\w.-]+)\*\*/gm)].map((m) => m[1]);
+
+    expect(ids.length).toBe(ON_DEMAND_BLOCKS.length);
+    expect(ids).toEqual([...ids].sort((a, b) => a.localeCompare(b)));
+  });
+
+  it('is byte-identical when the source order changes', () => {
+    const forwards = buildReferenceIndex(ON_DEMAND_BLOCKS);
+    const backwards = buildReferenceIndex([...ON_DEMAND_BLOCKS].reverse());
+
+    expect(backwards).toBe(forwards);
+  });
+
+  /*
+   * A description written across three source lines and one written on a single line must produce
+   * identical bytes, or a cosmetic reformat in `sources.ts` is a platform-wide cache write.
+   */
+  it('collapses whitespace, so reformatting a description costs nothing', () => {
+    const one = buildReferenceIndex([{ ...ON_DEMAND_BLOCKS[0], description: 'a  b\n   c' }]);
+    const two = buildReferenceIndex([{ ...ON_DEMAND_BLOCKS[0], description: 'a b c' }]);
+
+    expect(one).toBe(two);
+  });
+
+  it('states the load budget the tool actually enforces', () => {
+    expect(buildReferenceIndex(ON_DEMAND_BLOCKS)).toContain(String(MAX_REFERENCE_LOADS));
+  });
+
+  /*
+   * Never advertise a tool with nothing behind it — the dangling-instruction failure this whole change
+   * exists to remove, and exactly what the baked router index was doing before `load_reference`.
+   */
+  it('renders NOTHING when there are no documents, rather than an empty promise', () => {
+    expect(buildReferenceIndex([])).toBe('');
+  });
+
+  it('tells the model these are already local, so it never reports a failed fetch', () => {
+    const index = buildReferenceIndex(ON_DEMAND_BLOCKS);
+
+    expect(index).toMatch(/load_reference/);
+    expect(index).toMatch(/not fetched over the network|cannot fail to/i);
+  });
+
+  /*
+   * The load-bearing sentence, and the one most likely to be "tidied" out by someone shortening the
+   * header. The 29,173-token six-round measurement was the model DRAFTING between rounds and
+   * discarding, not the cost of loading — loading is ~50 tokens. Interleaving is what costs.
+   */
+  it('tells the model to load BEFORE it starts writing', () => {
+    expect(buildReferenceIndex(ON_DEMAND_BLOCKS)).toMatch(/BEFORE you begin writing/);
   });
 });
 
@@ -570,7 +624,7 @@ describe('project SPEC.md workflow', () => {
   });
 
   it('reaches the assembled prompt', () => {
-    const prompt = assemblePrompt([], 'skills index');
+    const prompt = assemblePrompt([], 'skills index', '');
 
     expect(prompt).toMatch(/# The Project's Own Documents/);
 
@@ -603,7 +657,7 @@ describe('project SPEC.md workflow', () => {
   ])('the CLAUDE.md rules state %s', (pattern) => {
     it('— and it reaches the assembled prompt', () => {
       expect(section).toMatch(pattern);
-      expect(assemblePrompt([], '')).toMatch(pattern);
+      expect(assemblePrompt([], '', '')).toMatch(pattern);
     });
   });
 
@@ -690,12 +744,25 @@ describe('reachability of docs the baked references point at', () => {
     expect(new Set(paths).size).toBe(paths.length);
   });
 
-  it('gives every on-demand block at least one routable keyword', () => {
+  /*
+   * The successor to "every block has at least one routable keyword" — and it is asserting the same
+   * property against the thing that now does the choosing. A document the model cannot recognise its
+   * own task in is unreachable exactly as surely as one with no keywords, and just as silently: the
+   * generation does not fail, it is simply written without the reference.
+   *
+   * The length floor is a proxy for "this says what the document is FOR". Ids are not: `materials` and
+   * `shader-materials` are indistinguishable from their names, and `pro-components` means nothing at
+   * all to a reader who has not already read it.
+   */
+  it('gives every on-demand document a description the model can choose from', () => {
     for (const block of ON_DEMAND_BLOCKS) {
-      expect(block.keywords.length, `${block.id} has no keywords and can never be routed in`).toBeGreaterThan(0);
-      expect(block.keywords, `${block.id} has a non-lowercase keyword; routing lowercases the haystack`).toEqual(
-        block.keywords.map((k) => k.toLowerCase()),
-      );
+      const description = block.description.replace(/\s+/g, ' ').trim();
+
+      expect(
+        description.length,
+        `${block.id} has no description — the model cannot know when to load it`,
+      ).toBeGreaterThan(60);
+      expect(description, `${block.id}'s description just restates its id; say what it is FOR`).not.toBe(block.title);
     }
   });
 });

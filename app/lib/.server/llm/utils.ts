@@ -74,6 +74,34 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
     return !ig.ignores(relPath);
   });
 
+  /*
+   * 🔴 ONE ENTRY PER FILE, keyed by the path the model is shown — a backstop on the money path.
+   *
+   * The map is supposed to arrive with a single spelling per file (`toSandboxStoreKey`, one writer,
+   * one rule), and since `recordAgentWrite` was rebased it does. But this map is CLIENT-SUPPLIED:
+   * a stale bundle, a working copy written before that fix, or a future ingest path can still hand
+   * us `src/pages/Home.tsx` AND `/home/project/src/pages/Home.tsx`. Emitting both costs the bytes
+   * TWICE at the 2× cache-write rate on every turn (measured on a real project: 14 files, ~22.5k
+   * tokens) and shows the model two copies of one file, which it can edit one of.
+   *
+   * The FIRST spelling wins — `filePaths` is already sorted, so the choice is deterministic and the
+   * cached block stays a pure function of the map's content. This is not a second copy of the key
+   * rule: it de-duplicates on `toProjectRelativePath`, the same normalisation every branch below
+   * already applies.
+   */
+  const seenRelativePaths = new Set<string>();
+  filePaths = filePaths.filter((x) => {
+    const relPath = toProjectRelativePath(x);
+
+    if (seenRelativePaths.has(relPath)) {
+      return false;
+    }
+
+    seenRelativePaths.add(relPath);
+
+    return true;
+  });
+
   const fileContexts = filePaths
     .filter((x) => files[x] && files[x].type == 'file')
     .map((path) => {

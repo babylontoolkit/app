@@ -154,3 +154,82 @@ export const UNPRODUCTIVE_RESCUE_PROMPT =
   'You have no skill-loading tools this turn — everything you need is already in the context above, ' +
   'including any invoked skill. Do not describe your plan or say you are about to start: carry out ' +
   'the request now, completely, in this response.';
+
+/**
+ * 🔴 A BUILD TURN THAT WROTE NO FILES IS A FAILURE, EVEN AFTER THE RESCUES RAN (2026-08-07, §4.6).
+ *
+ * The rescue above is a SECOND CHANCE. This is the verdict when the second chance is gone, and the two
+ * are not the same question — which is exactly how `gen_msixapaq_i871b6` billed **1,489 credits for
+ * zero files** and recorded a clean `completed`:
+ *
+ *   1. the media tools consumed every step of a first build turn (fixed — `MAX_MEDIA_ROUNDS`);
+ *   2. `shouldForceContinuation` fired and re-billed the whole ~212k prefix at the 2x write rate;
+ *   3. the continuation returned 31 tokens and stopped;
+ *   4. `shouldRescueUnproductiveTurn` refused — correctly! — because `alreadyContinued` was true;
+ *   5. `!producedText` refused too, because text HAD been produced.
+ *
+ * Every guard behaved exactly as designed and the turn still settled as a success. `spec/fail-loud.md`
+ * allows four terminal states for a paid request; "billed in full, wrote nothing, reported fine" is not
+ * one of them.
+ *
+ * ⚠️ **Scoped to `requiresAction` turns and nothing else.** An ordinary edit may legitimately answer in
+ * prose ("`globals.ts` already exports it"), a plan turn is prose *by guarantee* (§4.2.9 makes writing
+ * impossible), and refunding either would be paying people to ask questions. It is the same predicate
+ * the rescue already uses — `isFirstBuildTurn && !discussNote` — so the two can never disagree about
+ * which turns owe files.
+ *
+ * ⚠️ **A Stop is not a failure** (§4.12): the user chose to end it, and the tokens burned to that point
+ * are genuinely owed. Aborting is checked first for the same reason it is in the rescue.
+ *
+ * ⚠️ The false-positive direction here is REFUNDING A GENERATION THAT DID BUILD — the opposite of the
+ * rescue's, whose worst case is one cheap extra pass. Hence `emittedAction` is tracked as a sticky flag
+ * over the raw stream rather than sniffed from the length-capped recovery buffer.
+ *
+ * ## 🔴 `attemptedBuild` — why "this turn owed files" is not enough on its own
+ *
+ * `isFirstBuildTurn` means "this message carries the creation brief", and the brief is appended to
+ * WHATEVER the user types first out of New Project mode. So the very first thing someone types can
+ * legitimately be a QUESTION — *"can I use my own 3D models?"*, *"what does the play contract mean?"* —
+ * and a correct prose answer to it writes no files by design. `requiresAction` alone cannot tell that
+ * apart from a build that failed, and firing there would throw *"the build finished without writing any
+ * project files"* over a good answer the user is looking straight at.
+ *
+ * The rescue tolerates that ambiguity because its worst case is one cheap pass. A terminal verdict
+ * cannot, so this needs positive evidence the model was BUILDING:
+ *
+ *   - it opened a `<boltArtifact>` — a commitment to produce files, present in every build;
+ *   - it called a tool — on a first build turn the only tools are the §4.16 media ones, i.e. it
+ *     commissioned art for a game it then did not write (the more expensive failure, not a lesser one);
+ *   - a forced continuation ran — which fires only when the model's last act was a tool call
+ *     (`shouldForceContinuation`), so it is build-shaped by construction.
+ *
+ * ⚠️ **`unproductiveRescue` is deliberately NOT evidence.** It fires on any first-turn prose, questions
+ * included — so counting it would let the rescue manufacture the very proof this test demands, and the
+ * question case would fail on the second pass instead of the first. Evidence has to come from the
+ * MODEL's behaviour, never from our own reaction to it.
+ */
+export function isFailedBuildTurn(input: {
+  aborted: boolean;
+  requiresAction: boolean;
+  emittedAction: boolean;
+  attemptedBuild: boolean;
+}): boolean {
+  return !input.aborted && input.requiresAction && input.attemptedBuild && !input.emittedAction;
+}
+
+/**
+ * What the user is told, and it has to be honest about the money.
+ *
+ * `failed` routes this to the §4.6 auto-refund, so by the time anyone reads it the credits are already
+ * back. Saying so is the whole point: the failure this describes previously presented as a completed
+ * generation, and a user who has just watched a build produce nothing needs to know the charge did not
+ * stick before they go looking at their balance.
+ *
+ * ⚠️ Worded so it does NOT match `retry-policy.ts`'s `/returned an empty response/i` — deliberately, and
+ * pinned. A turn reaching here has already had a forced continuation AND a rescue; a third automatic
+ * stream against the same prompt is precisely the waste this whole change exists to stop. Retrying is
+ * the user's call, and it is one click.
+ */
+export const NO_FILES_WRITTEN_ERROR =
+  'The build finished without writing any project files, so nothing was created. ' +
+  'You have not been charged for this attempt — the credits have been refunded. Please try again.';

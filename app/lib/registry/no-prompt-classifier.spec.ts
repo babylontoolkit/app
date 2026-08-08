@@ -446,3 +446,84 @@ describe('the creation path classifies nothing — the model decides, from the r
     expect(brief).toMatch(/A single narrow change/);
   });
 });
+
+/**
+ * 🔴 WHO DECIDES WHICH DOCUMENTATION THE MODEL GETS (§4.3, Phase 2, 2026-08-08).
+ *
+ * The same rule, one subsystem over, and it is here because the doc router was the FOURTH instance of
+ * this bug and the only one that survived the previous three fixes. It also failed the most expensively:
+ *
+ *   - it matched `'touch'` inside `"untouched defaults"` and `'video'` inside `generate_video`;
+ *   - the text it actually ran against was the platform's own HIDDEN creation brief, not the user's
+ *     request — so measured on the live prompt version, `"mario kart racer clone"` and
+ *     `"a chess puzzle game"` received **byte-identical sets of ten documents, 61.6k tokens**, and the
+ *     user's own words contributed nothing at all;
+ *   - the phrase `"make me a kart racing game"`, added to that brief as an EXAMPLE, dragged the racing
+ *     corpus into every project on the platform by itself.
+ *
+ * Documents are now chosen by the model from `description` fields via `load_reference`. This scan is what
+ * stops a keyword table growing back — including the tempting "small" version, a fixed set of documents
+ * picked by matching a couple of words, which is how the last one started.
+ */
+const DOC_SELECTION_PATH = [
+  'app/lib/.server/prompt/sources.ts',
+  'app/lib/.server/prompt/reference-index.ts',
+  'app/lib/.server/agent/reference-tools.ts',
+];
+
+describe('the documentation path classifies nothing either — the model chooses from descriptions', () => {
+  it('CONTROL — reads real code from every file on the doc-selection path', () => {
+    for (const file of DOC_SELECTION_PATH) {
+      const code = codeOnly(read(file));
+
+      expect(code.length, file).toBeGreaterThan(200);
+      expect(code, file).toMatch(/export (async )?(function|const|interface)/);
+    }
+  });
+
+  for (const file of DOC_SELECTION_PATH) {
+    it(`${file} contains no keyword or regex classification of the user's request`, () => {
+      expect(findClassifiers(read(file))).toEqual([]);
+    });
+  }
+
+  /*
+   * The router's own remains. `keywords:` was a FIELD on every block, so its absence is the single
+   * cheapest proof that the table is gone and has not been rebuilt under a new name — and unlike the
+   * `findClassifiers` scan above, this one cannot be satisfied by moving the table to another file,
+   * because the blocks themselves live here.
+   */
+  it('holds no keyword field on any reference document', () => {
+    const code = codeOnly(read('app/lib/.server/prompt/sources.ts'));
+
+    expect(code).not.toMatch(/\bkeywords\b/);
+    expect(code).not.toMatch(/selectOnDemandBlocks|selectStickyBlocks/);
+  });
+
+  /*
+   * And the positive half, for the same reason the creation brief's instruction is asserted above: a scan
+   * proving only the ABSENCE of a keyword table would pass just as happily on a system that had lost the
+   * descriptions too — which is not "the model decides", it is "nobody decides", and the failure is
+   * silent (the model writes Toolkit code from general knowledge and nothing throws).
+   */
+  it('replaces it with a description the model reads, and a tool that returns the document', () => {
+    const sources = read('app/lib/.server/prompt/sources.ts');
+    const tools = read('app/lib/.server/agent/reference-tools.ts');
+
+    expect(codeOnly(sources)).toMatch(/\bdescription\b/);
+    expect(tools).toContain('load_reference');
+
+    /*
+     * The budget is enforced in `execute` (never a zod constraint — that kills the generation AFTER the
+     * tokens are spent) and CHECKED BEFORE the store read, so an over-budget call cannot even pay for a
+     * lookup. Asserting the ORDER is what makes this about the rule rather than about the message.
+     */
+    const code = codeOnly(tools);
+    const budget = code.indexOf('>= MAX_REFERENCE_LOADS');
+    const storeRead = code.indexOf('readOnDemand');
+
+    expect(budget, 'the budget check is gone').toBeGreaterThan(-1);
+    expect(storeRead, 'the store read is gone').toBeGreaterThan(-1);
+    expect(budget, 'the budget must be checked BEFORE the store read').toBeLessThan(storeRead);
+  });
+});

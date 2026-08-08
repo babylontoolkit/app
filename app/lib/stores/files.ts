@@ -8,7 +8,7 @@ import {
   writeSerializedFileMap,
   type SerializedFileMap,
 } from '~/lib/binary/binary-files';
-import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
+import { toProjectRelativePath, toSandboxStoreKey } from '~/lib/common/sandbox-paths';
 import { path } from '~/utils/path';
 import { bufferWatchEvents } from '~/utils/buffer';
 import { WORK_DIR } from '~/utils/constants';
@@ -650,15 +650,23 @@ export class FilesStore {
    * `Home.tsx` beside the STARTER's `Home.css`, which then reverted the landing page on reopen).
    * Same contract as `saveFile` above: "immediately update the file and don't rely on the `change`
    * event"; the watcher's later event simply confirms what is already here.
+   *
+   * 🔴 **The key is REBASED, and that is the whole point of the rebase existing.** The caller passes
+   * `action.filePath`, which is what the MODEL emitted — project-relative, always, because that is the
+   * artifact format (`action-runner.ts`) — into a parameter the runner declares as
+   * `absoluteFilePath`. The map is keyed sandbox-absolute, so recording the raw value did not
+   * overwrite the watcher's entry, it created a second one, and every file the model wrote sat in the
+   * map twice. See {@link toSandboxStoreKey} for the measurement and the cost.
    */
   recordAgentWrite(filePath: string, content: string) {
-    const current = this.files.get()[filePath];
+    const storeKey = toSandboxStoreKey(filePath, WORK_DIR);
+    const current = this.files.get()[storeKey];
 
     if (current?.type !== 'file') {
       this.#size++;
     }
 
-    this.files.setKey(filePath, {
+    this.files.setKey(storeKey, {
       type: 'file',
       content,
       isBinary: false,
@@ -1177,7 +1185,8 @@ export class FilesStore {
    * entry somewhere the file is not.
    */
   #recordRestoredFiles(files: SerializedFileMap, workdir: string) {
-    const toStoreKey = (filePath: string) => `${workdir}/${toProjectRelativePath(filePath)}`;
+    // Shared with `recordAgentWrite` — one definition of "what may be a map key", never two lambdas.
+    const toStoreKey = (filePath: string) => toSandboxStoreKey(filePath, workdir);
 
     for (const [rawPath, dirent] of Object.entries(files)) {
       if (!dirent) {

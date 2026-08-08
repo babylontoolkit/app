@@ -154,6 +154,42 @@ export interface Settlement {
 }
 
 /**
+ * 🔴 THE CUSTOMER IS NEVER BILLED FOR THE STATE OF OUR CACHE (owner rule, 2026-08-07).
+ *
+ * A cache WRITE bills at 2x input; a cache READ bills at 0.1x. That is a **20x swing on the identical
+ * request**, decided entirely by whether some *other* user happened to send the same prefix in the last
+ * hour. Measured: the same "mario kart racer" creation is 144 credits warm and 600 cold — and
+ * `gen_msixapaq_i871b6` reached **1,489** when a forced continuation wrote the ~212k prefix a second
+ * time. The user did not cause that, cannot observe it, cannot avoid it, and cannot be told a story
+ * about it that does not sound like a bug. One such invoice loses the account permanently.
+ *
+ * So the BILLED view of a turn prices cache-creation tokens at the READ rate — i.e. the customer always
+ * pays the warm price, and the platform absorbs the difference. That puts the cost of a cold cache on
+ * the only party that can actually do anything about it, which is the correct incentive: it is what
+ * makes shrinking the prefix (`spec/context-budget.md`) an engineering problem instead of a trust one.
+ *
+ * ⚠️ **This must NEVER be applied to `rawCostUsd`.** That number is what the generation genuinely cost
+ * us, and it is what the §4.10 Admin margin report is derived from. Route it through here and the
+ * platform loses its only view of what it is absorbing — silently, and in the direction where the
+ * dashboards look healthier than the bank account. `settleGeneration` deliberately computes `cost` from
+ * the TRUE usage and `credits` from this view; the ledger has stored the two separately since day one.
+ *
+ * ⚠️ Not applied to `grantHeadroom` either, and that is deliberate: sizing the free grant against the
+ * COLD price keeps that assertion conservative (it now understates the headroom, which is the safe
+ * direction for a floor).
+ */
+export function billedUsage(usage: TokenUsage): TokenUsage {
+  return {
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+
+    /* Priced as if the prefix had been warm — which, for everyone but the first caller, it was. */
+    cacheReadTokens: usage.cacheReadTokens + usage.cacheCreationTokens,
+    cacheCreationTokens: 0,
+  };
+}
+
+/**
  * What a generation is charged — cost-derived by default, overridden by the flat/cap fields.
  *
  * Pure and exported because a wrong answer here is a silent mis-bill in one direction or a silent
@@ -186,7 +222,12 @@ export function decideCredits(
     return flat;
   }
 
-  const derived = creditsForUsage(input.usage, input.model, input.provider, config, input.context);
+  /*
+   * `billedUsage`, not `input.usage` — the customer pays the warm price whether or not the cache was
+   * warm (see the note above). `consumed` above still reads the TRUE vector, so "this generation
+   * spent nothing" stays a question about reality rather than about pricing policy.
+   */
+  const derived = creditsForUsage(billedUsage(input.usage), input.model, input.provider, config, input.context);
   const cap = Math.floor(input.maxCredits ?? 0);
 
   return cap > 0 ? Math.min(derived, cap) : derived;
@@ -206,6 +247,11 @@ export function decideCredits(
  */
 export async function settleGeneration(input: SettleInput): Promise<Settlement | null> {
   const config = getBillingConfig(input.context);
+
+  /*
+   * TRUE usage — cache writes at the write rate. This is the honest cost, and the ONLY place the
+   * platform can see what it absorbed under `billedUsage`. Never route it through that view.
+   */
   const cost = rawCostUsd(input.usage, input.model, input.provider, input.context);
 
   /*
