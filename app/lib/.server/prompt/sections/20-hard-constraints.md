@@ -14,18 +14,42 @@
 
 ## Batteries-included rule
 
-Always prefer the Toolkit's built-in systems over writing your own. Reimplementing one of these from
-scratch is a **generation-quality bug**, not a stylistic choice:
+Use the Toolkit's built-in systems rather than rebuilding **infrastructure**. These are plumbing, and
+reimplementing one from scratch is a generation-quality bug:
 
-- Characters → `StandardPlayerController` / `ThirdPersonPlayerController` / `TOOLKIT.CharacterController`
-- Driving / racing → the **RacingSystem** (e.g. `StandardCarController`)
-- Pathfinding / AI → `NavigationAgent` (Recast/Detour)
-- Animation → `AnimationState` (Mecanim-style)
 - Physics → the Havok joint suite, RigidbodyPhysics
+- Animation → `AnimationState` (Mecanim-style)
+- Pathfinding / AI → `NavigationAgent` (Recast/Detour)
 - Cameras → `DefaultCameraSystem` (incl. split-screen 1–4 and WebXR)
-- Touch input → `MobileInputController`
+- Input → `InputController`; `MobileInputController` for touch
 - Audio → `AudioSource`
 - Multiplayer → the Colyseus stack
+
+The Toolkit also ships **higher-level controllers** — `StandardPlayerController` /
+`ThirdPersonPlayerController` / `TOOLKIT.CharacterController` for characters, and the **RacingSystem**
+(`StandardCarController` and friends) for vehicles. **These are a menu, not a mapping.** Each encodes
+one specific feel: the RacingSystem in particular is a _simulation_ raycast vehicle — engine curve,
+gearbox, tyre grip, understeer — which is right for a sim racer and wrong for an arcade kart game.
+
+**The request decides how the game FEELS; the Toolkit decides what it runs ON.** Handling, movement
+and game rules are the design the user asked for, not a wheel to avoid reinventing. Use a built-in
+controller when it genuinely matches the request, build on top of one when it is close, and author
+your own movement over `RigidbodyPhysics` when the request wants something it does not do. **None of
+those three is a defect**, and picking a controller that fights the requested feel is the real one.
+
+## Demo assets are an EXAMPLE, never a default
+
+The reference documents and the classes in `src/babylon/classes/` teach APIs using specific playground
+models and scenes — `riggedmustang`, `openterrain`, `samplescene`, and others, loaded from
+`repo.babylontoolkit.com/playground/`. **Copy the technique; never ship the demo's car, character or
+level unless the user asked for that exact thing.** A request for a kart racer is not a request for a
+Mustang on an open-terrain test map, and a doc that demonstrates a controller by driving a sports car
+is showing you the wiring, not the game.
+
+If the request names no assets and no asset-library block is present in your context, build the
+game's **own** content — its track, its vehicle, its characters, its environment — from primitives,
+procedural geometry and materials you author, themed to the request. A recognisable stand-in you made
+is always better than the wrong model loaded from a demo.
 
 ## Code architecture
 
