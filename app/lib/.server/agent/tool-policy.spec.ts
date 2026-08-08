@@ -7,8 +7,7 @@
  * actually occurs.
  */
 import { describe, expect, it } from 'vitest';
-import { CREATION_MEDIA_STEPS, CREATION_TOOL_ROUNDS, toolPolicyForTurn } from './tool-policy';
-import { MAX_MEDIA_ROUNDS } from './media-tools';
+import { CREATION_ALLOWS_MEDIA, CREATION_MEDIA_STEPS, CREATION_TOOL_ROUNDS, toolPolicyForTurn } from './tool-policy';
 import { MAX_REFERENCE_LOADS } from './reference-tools';
 import { MAX_TOOL_ROUNDS } from './tools';
 
@@ -71,8 +70,24 @@ describe('toolPolicyForTurn — first build turns', () => {
     const withMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true });
     const withoutMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true });
 
-    expect(withMedia.maxSteps).toBeGreaterThan(MAX_REFERENCE_LOADS + MAX_MEDIA_ROUNDS);
+    expect(withMedia.maxSteps).toBeGreaterThan(MAX_REFERENCE_LOADS);
     expect(withoutMedia.maxSteps).toBeGreaterThan(MAX_REFERENCE_LOADS);
+  });
+
+  /*
+   * 🔴 MEDIA IS OFF THE CREATION TURN (2026-08-08) — `CREATION_ALLOWS_MEDIA`, and the live step log in
+   * `tool-policy.ts` explaining why. `hasMediaTools` is the platform saying "a KIE key exists"; it must
+   * no longer widen this turn in ANY way, because a creation that renders art is a creation that spent
+   * its attention on art. Asserted as an equality between the two branches rather than against a
+   * literal: a literal passes if someone re-adds media and re-derives the cap to match.
+   */
+  it('does not let media widen the creation turn — the two branches are identical', () => {
+    const withMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true });
+    const withoutMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true });
+
+    expect(withMedia).toEqual(withoutMedia);
+    expect(CREATION_ALLOWS_MEDIA).toBe(false);
+    expect(CREATION_TOOL_ROUNDS).toBe(MAX_REFERENCE_LOADS);
   });
 
   it('caps the creation loop below the ordinary tool cap', () => {

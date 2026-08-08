@@ -39,6 +39,7 @@ import {
   shouldRescueUnproductiveTurn,
   UNPRODUCTIVE_RESCUE_PROMPT,
 } from './unproductive';
+import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './creation-completion';
 import { createFilesContext } from '~/lib/.server/llm/utils';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
@@ -1226,10 +1227,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * it varies per turn (a project without a KIE key gets no media tools), so anywhere earlier would
    * re-write the ~110k-token file-context entry at 2x whenever it appeared or vanished.
    *
-   * Creation is excluded because its brief already carries a richer copy — see `media-note.ts`.
+   * Creation is excluded twice over: media tools are no longer in its toolset at all
+   * (`CREATION_ALLOWS_MEDIA`), and `mediaProtocolNote` independently returns null for it. Both are
+   * deliberate — this predicate must be a TRUE statement about the tool set, never a proxy for it, or
+   * the next turn shape that reads it inherits a lie.
    */
   const mediaNote = mediaProtocolNote({
-    hasMediaTools: toolPolicy.toolset !== 'skills-only' && Object.keys(mediaTools).length > 0,
+    hasMediaTools: toolPolicy.toolset === 'all' && Object.keys(mediaTools).length > 0,
     isFirstBuildTurn,
   });
 
@@ -1349,9 +1353,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   const referenceTools = createReferenceTools(referenceContext);
 
+  /*
+   * 🔴 NO MEDIA ON THE CREATION TURN (`CREATION_ALLOWS_MEDIA`, tool-policy.ts — the full reasoning and
+   * the live step log are there). Creation writes the project; art is a later turn or the Media panel.
+   */
   const tools = (
     toolPolicy.toolset === 'creation'
-      ? { ...mediaTools, ...referenceTools, ...createRepairTool() }
+      ? { ...referenceTools, ...createRepairTool() }
       : toolPolicy.toolset === 'skills-only'
         ? { ...createSkillTools(toolContext), ...referenceTools, ...researchTools, ...createRepairTool() }
         : {
@@ -1476,6 +1484,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * cause is upstream of the rescue and the rescue is only paying for it.
    */
   let unproductiveRescue = false;
+
+  /**
+   * Did the creation completeness pass run (`creation-completion.ts`)?
+   *
+   * Unlike the two flags above this is expected on EVERY creation, so it is not a failure signal by
+   * itself — it is how the step log stays a true account of how many streams the turn ran. What is
+   * worth watching is the pass WRITING files: that means a creation ended half-written, which is the
+   * defect this pass covers rather than fixes, and the cause is upstream of it.
+   */
+  let creationCompletionPass = false;
 
   /**
    * Did we re-run this generation after a provider failure?
@@ -2081,6 +2099,42 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       }
 
       /*
+       * 🔴 A CREATION IS NEVER ALLOWED TO END HALF-WRITTEN (`creation-completion.ts`).
+       *
+       * The third sibling, and the one the other two could not see. Both guards above ask "did this turn
+       * do ANYTHING?" — a forced continuation needs `finishReason: 'tool-calls'`, the unproductive
+       * rescue needs zero actions. Measured: a creation wrote ONE file, said "Writing the full project
+       * now.", and stopped `stop` with 7,165 chars of text. It passed all three checks and billed as a
+       * success, leaving the user a stock starter with one orphan class in it.
+       *
+       * So the model is asked whether it finished, once, against a now-warm prefix. Complete → a short
+       * closing message (the one the brief already asks for). Incomplete → it finishes the project the
+       * user has already paid for. `alreadyContinued` keeps it mutually exclusive with both guards
+       * above, so no turn can ever run three streams.
+       */
+      if (
+        shouldVerifyCreationCompleteness({
+          isFirstBuildTurn,
+          isDiscussTurn: Boolean(discussNote),
+          aborted: Boolean(request.abortSignal?.aborted),
+          alreadyContinued: forcedContinuation || unproductiveRescue,
+          emittedAction,
+        })
+      ) {
+        creationCompletionPass = true;
+        logger.info('First build turn finished — running the completeness pass before closing the turn');
+
+        const priorMessages = (await first.response).messages;
+
+        const completion = startStream(
+          [...system, ...coreMessages, ...priorMessages, { role: 'user', content: CREATION_COMPLETION_PROMPT }],
+          false,
+        );
+
+        yield* drain(completion);
+      }
+
+      /*
        * A generation that produced NO TEXT is a failure, however cheerfully the provider says "stop".
        *
        * This is not hypothetical. The degenerate tool loop above ended exactly here: `finishReason`
@@ -2310,6 +2364,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         finishReason:
           (failed ? 'error' : forcedContinuation ? `${finishReason}+forced-continuation` : finishReason) +
           (unproductiveRescue ? '+unproductive-rescue' : '') +
+          (creationCompletionPass ? '+creation-completeness' : '') +
           (retried ? '+provider-retry' : ''),
         status: failed ? 'failed' : 'completed',
 

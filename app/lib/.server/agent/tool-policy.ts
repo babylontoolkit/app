@@ -20,7 +20,6 @@
  *    a render — and each extra round re-reads the cached prefix at a tenth, so the slack is cheap.
  */
 import { MAX_TOOL_ROUNDS } from './tools';
-import { MAX_MEDIA_ROUNDS } from './media-tools';
 import { MAX_REFERENCE_LOADS } from './reference-tools';
 
 /** 1 round of parallel generate_* calls + the ANSWER step + 1 round of slack (the +1 rule, §4.2.8). */
@@ -49,7 +48,42 @@ export const CREATION_MEDIA_STEPS = 3;
  * at 0.1x (~$0.04 on the post-Phase-2 prefix), where the forced continuation it prevents rewrites it
  * at 2x. Slack here is roughly twenty times cheaper than the failure it insures against.
  */
-export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS + MAX_MEDIA_ROUNDS;
+export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS;
+
+/**
+ * 🔴 MEDIA IS OFF THE CREATION TURN (2026-08-08, owner-driven, live evidence below).
+ *
+ * The `+ 1` answer-step rule above is necessary and was NOT sufficient. It guarantees the model a step
+ * the tools cannot consume; it cannot guarantee that step is worth anything. Measured on a real "mario
+ * kart racer clone" creation:
+ *
+ *   step 2: 268,169ms · 25,598 out · 0 chars text · 17,613 chars reasoning · tools: generate_image
+ *   WARN  media tool: round budget spent (2/2), call refused   x3
+ *   step 3:  11,779ms ·  1,076 out · tools: generate_image, generate_image, generate_image
+ *   step 4:  23,597ms ·  3,211 out ·  7,165 chars text · ANSWER
+ *
+ * The turn never hit `maxSteps` (it had 6, it used 4). It ended because the model spent FOUR AND A HALF
+ * MINUTES and 25,598 output tokens reasoning inside a media round, ate three refusals, then wrote a
+ * design note, ONE file, the sentence "Writing the full project now." — and stopped. No landing page, no
+ * chrome, no game. A step budget cannot fix that: the damage is to the model's own sense of the turn,
+ * and the refusal text (an error, mid-plan, three times) is what tells it the turn is going badly.
+ *
+ * The real defect is structural and is recorded in `FRESH-START.md` §1.4: an async render that takes
+ * 20s-4min has no business inside the synchronous loop that also has to write the project. Batching the
+ * calls into "ONE parallel round" (the brief's instruction) made media compete with the build for the
+ * one resource neither can share — the model's attention on a single turn — and then needed
+ * `MAX_MEDIA_ROUNDS` to stop media winning, which is why art gets REFUSED on the turn that designs it.
+ *
+ * So creation writes the PROJECT and nothing else. Art is requested on any later turn (media tools are
+ * in the full toolset and the loop opens for them, §4.16) or from the Media panel. This is strictly the
+ * safer direction: the failure mode of "no art yet" is a follow-up turn, and the failure mode of "no
+ * game" is the most expensive generation in the product delivering nothing.
+ *
+ * ⚠️ Do NOT restore media here by raising a budget. The v2 fix is a QUEUE (`FRESH-START.md` §3.5):
+ * serialized, spaced, per-image retry, returning paths instantly and never consuming a round at all.
+ * Until that exists, off is correct.
+ */
+export const CREATION_ALLOWS_MEDIA = false;
 
 /**
  * ⚠️ RETIRED for ordinary turns (2026-07-26) — kept because the reasoning below is still the reason
@@ -160,11 +194,11 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
       toolset: 'creation',
 
       /*
-       * Only the budgets this turn can actually spend. Without a KIE key there are no media rounds to
-       * buy, so handing the turn headroom for two of them would be paying for slack that cannot exist —
-       * and `maxSteps` is the one number that must stay a true statement about the worst case.
+       * Only the budgets this turn can actually spend. Media is off here (`CREATION_ALLOWS_MEDIA`), so
+       * `load_reference` is the only budget in play and `hasMediaTools` no longer moves this number —
+       * `maxSteps` is the one number that must stay a true statement about the worst case.
        */
-      maxSteps: (input.hasMediaTools ? CREATION_TOOL_ROUNDS : MAX_REFERENCE_LOADS) + 1,
+      maxSteps: CREATION_TOOL_ROUNDS + 1,
     };
   }
 
