@@ -19,17 +19,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KIE_DEFAULT_BASE_URL } from '~/lib/modules/llm/providers/kie-wire';
 import {
+  ANTHROPIC_DEFAULT_BASE_URL,
   buildWarmupRequest,
   cacheWarmerEnabled,
   cacheWarmerFanout,
   cacheWarmerIntervalMinutes,
+  DEFAULT_ANTHROPIC_FANOUT,
   DEFAULT_CACHE_WARMER_FANOUT,
   DEFAULT_CACHE_WARMER_INTERVAL_MINUTES,
   ensureCacheWarmer,
+  lastCacheReadAt,
   parseWarmupStreamUsage,
   PROMPT_CACHE_TTL,
+  recordCacheRead,
   resetCacheWarmerForTests,
   runWarmCycle,
+  shouldSkipWarmCycle,
 } from './cache-warmer';
 
 /*
@@ -49,6 +54,15 @@ const WARMER_ENV = [
   'LLM_MODEL',
   'KIE_DEFAULT_MODEL',
   'KIE_API_KEY',
+
+  /*
+   * ⚠️ `ANTHROPIC_API_KEY` is on this list for the reason CLAUDE.md records TWICE (`oauth.spec.ts`,
+   * `billing.spec.ts` `KIE_ENV`): `env()` falls back to `process.env`, vitest loads `.env.local`, and
+   * the developer running these tests has a REAL Anthropic key sitting there. Omit it and the
+   * "no key configured" assertions pass on CI and fail only on the machine of the person who
+   * configured the provider — blaming code they did not touch.
+   */
+  'ANTHROPIC_API_KEY',
   'CACHE_WARMER_ENABLED',
   'CACHE_WARMER_FANOUT',
   'CACHE_WARMER_INTERVAL_MINUTES',
@@ -93,7 +107,8 @@ afterEach(() => {
 });
 
 describe('buildWarmupRequest — byte-identity with the proxy block 1', () => {
-  const request = () => buildWarmupRequest({ model: 'claude-opus-5', promptText: 'THE BASE PROMPT', apiKey: 'k-123' });
+  const request = () =>
+    buildWarmupRequest({ model: 'claude-opus-5', promptText: 'THE BASE PROMPT', apiKey: 'k-123', provider: 'KIE' });
 
   it('targets /messages on the KIE base URL', () => {
     expect(request().url).toBe(`${KIE_DEFAULT_BASE_URL}/messages`);
@@ -164,7 +179,8 @@ describe('config: interval, fanout, enabled', () => {
     expect(cacheWarmerIntervalMinutes()).toBe(30);
   });
 
-  it('fanout defaults to 6', () => {
+  it('fanout defaults to 6 on KIE — its balancer needs covering', () => {
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
     expect(DEFAULT_CACHE_WARMER_FANOUT).toBe(6);
     expect(cacheWarmerFanout()).toBe(6);
   });
@@ -184,10 +200,141 @@ describe('config: interval, fanout, enabled', () => {
     expect(cacheWarmerFanout()).toBe(3);
   });
 
-  it('enabled defaults to true and honors CACHE_WARMER_ENABLED=false', () => {
-    expect(cacheWarmerEnabled()).toBe(true);
-    vi.stubEnv('CACHE_WARMER_ENABLED', 'false');
+  /*
+   * 🔴 The default INVERTED 2026-08-08. The warmer can only warm the SHARED prefix (~31k of ~40k), so
+   * one cold start avoided is worth ~$0.18 while a 45-minute cycle costs ~$0.30/day — and which side
+   * wins depends on how many cold starts a day the platform has, which nobody has measured. It ships
+   * off; `generations.cacheCreationTokens > 0` is a cold start, so counting them for a week turns a
+   * guess into a five-minute decision.
+   */
+  it('🔴 enabled defaults to FALSE — the warmer ships off until cold starts are counted', () => {
     expect(cacheWarmerEnabled()).toBe(false);
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
+    expect(cacheWarmerEnabled()).toBe(true);
+  });
+});
+
+describe('shouldSkipWarmCycle — do not pay to warm what traffic already warmed', () => {
+  const MIN = 60_000;
+
+  it('skips when organic traffic read the cache inside the interval', () => {
+    expect(shouldSkipWarmCycle({ nowMs: 100 * MIN, lastReadAtMs: 80 * MIN, intervalMinutes: 45 })).toBe(true);
+  });
+
+  it('runs when the last read is older than the interval', () => {
+    expect(shouldSkipWarmCycle({ nowMs: 100 * MIN, lastReadAtMs: 50 * MIN, intervalMinutes: 45 })).toBe(false);
+  });
+
+  /*
+   * 🔴 "Never seen a read" must mean RUN, not skip. A fresh process has warmed nothing, and treating
+   * unknown as warm is how a warmer silently never fires — the failure this whole module spent months
+   * in, reached through a different door.
+   *
+   * ⚠️ `nowMs` is deliberately SMALLER than the interval, and the first draft of this test got that
+   * wrong. With `nowMs: 100 * MIN` the arithmetic fallthrough (`now - 0 < interval`) happens to return
+   * false anyway, so the test passed with the `lastReadAtMs <= 0` guard DELETED — mutation testing
+   * caught it. A test whose input cannot reach the branch it names is not a weak test, it is no test.
+   *
+   * The small clock is also the honest scenario: with a real `Date.now()` the fallthrough is never
+   * reached, so this guard only bites under an injected or monotonic clock — which is exactly what the
+   * cycle test below uses, and what any future caller passing uptime instead of epoch would use.
+   */
+  it('RUNS when nothing has been recorded yet — unknown is not warm', () => {
+    expect(shouldSkipWarmCycle({ nowMs: 10 * MIN, lastReadAtMs: 0, intervalMinutes: 45 })).toBe(false);
+  });
+
+  it('runs exactly at the boundary rather than skipping it', () => {
+    expect(shouldSkipWarmCycle({ nowMs: 100 * MIN, lastReadAtMs: 55 * MIN, intervalMinutes: 45 })).toBe(false);
+  });
+
+  it('recordCacheRead only ever moves forward — an out-of-order stamp cannot rewind it', () => {
+    recordCacheRead(5_000);
+    expect(lastCacheReadAt()).toBe(5_000);
+
+    recordCacheRead(1_000);
+    expect(lastCacheReadAt()).toBe(5_000);
+
+    recordCacheRead(9_000);
+    expect(lastCacheReadAt()).toBe(9_000);
+  });
+
+  it('the cycle honours it — a recent read means zero fetches', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-123');
+
+    recordCacheRead(1_000_000);
+
+    const fetchFn = vi.fn();
+    const result = await runWarmCycle(undefined, { fetchFn, sleep: instantSleep, now: () => 1_060_000 });
+
+    expect(result.sent).toBe(0);
+    expect(result.skipped).toContain('organic traffic');
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL — the same cycle RUNS once that read is old enough', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-123');
+
+    recordCacheRead(1_000_000);
+
+    const fetchFn = vi.fn(async () => okResponse({ cache_read_input_tokens: 5420 }));
+
+    // 46 minutes later — past the 45-minute interval.
+    const result = await runWarmCycle(undefined, { fetchFn, sleep: instantSleep, now: () => 1_000_000 + 46 * MIN });
+
+    expect(result.sent).toBe(1);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('buildWarmupRequest — the Anthropic wire', () => {
+  const request = () =>
+    buildWarmupRequest({
+      model: 'claude-sonnet-5',
+      promptText: 'THE BASE PROMPT',
+      apiKey: 'sk-ant-123',
+      provider: 'Anthropic',
+    });
+
+  it('targets Anthropic /messages with x-api-key, never a Bearer', () => {
+    const { url, headers } = request();
+
+    expect(url).toBe(`${ANTHROPIC_DEFAULT_BASE_URL}/messages`);
+    expect(headers['x-api-key']).toBe('sk-ant-123');
+    expect(headers.authorization).toBeUndefined();
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+  });
+
+  /*
+   * 🔴 The BODY must not fork between providers. The warmer is worth nothing unless its bytes are
+   * identical to the proxy's block 1, and the proxy sends the same body on either provider — only the
+   * transport differs. A body that varied by provider would warm a prefix nobody sends, silently.
+   */
+  it('sends a body byte-identical to the KIE one — only the transport differs', () => {
+    const anthropic = request().body;
+    const kie = buildWarmupRequest({
+      model: 'claude-sonnet-5',
+      promptText: 'THE BASE PROMPT',
+      apiKey: 'k-123',
+      provider: 'KIE',
+    }).body;
+
+    expect(JSON.stringify(anthropic)).toBe(JSON.stringify(kie));
+  });
+
+  it('fanout defaults to ONE on Anthropic — there is no balancer to cover', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    expect(DEFAULT_ANTHROPIC_FANOUT).toBe(1);
+    expect(cacheWarmerFanout()).toBe(1);
+  });
+
+  it('an explicit CACHE_WARMER_FANOUT still wins on Anthropic', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('CACHE_WARMER_FANOUT', '3');
+    expect(cacheWarmerFanout()).toBe(3);
   });
 });
 
@@ -254,19 +401,65 @@ describe('runWarmCycle', () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it('skips when the platform provider is not KIE', async () => {
+  /*
+   * 🔴 This test used to assert the OPPOSITE — `skipped).toContain('not KIE')` — and it was green for
+   * the entire time the platform ran on Anthropic, faithfully pinning a module that did nothing. A
+   * test can only ever assert the behaviour someone wrote down; it cannot notice that the behaviour
+   * stopped being the one you wanted.
+   */
+  it('🔴 RUNS on the Anthropic provider — it used to bail there, which is why nothing was ever warm', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-123');
+
+    const fetchFn = vi.fn(async () => okResponse({ cache_read_input_tokens: 5420 }));
+    const result = await runWarmCycle(undefined, { fetchFn, sleep: instantSleep });
+
+    expect(result.skipped).toBeUndefined();
+    expect(result.sent).toBe(1);
+    expect(result.reads).toBe(1);
+
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${ANTHROPIC_DEFAULT_BASE_URL}/messages`);
+
+    // Anthropic authenticates with x-api-key; a Bearer here is a 401 on every cycle.
+    const headers = init.headers as Record<string, string>;
+    expect(headers['x-api-key']).toBe('sk-ant-123');
+    expect(headers.authorization).toBeUndefined();
+  });
+
+  /* One touch, not six: the fanout exists to cover KIE's balancer and Anthropic direct has none. */
+  it('sends ONE touch on Anthropic and six on KIE', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-123');
+
+    const anthropic = vi.fn(async () => okResponse({ cache_read_input_tokens: 1 }));
+    expect((await runWarmCycle(undefined, { fetchFn: anthropic, sleep: instantSleep })).sent).toBe(1);
+
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
     vi.stubEnv('KIE_API_KEY', 'k-123');
+
+    const kie = vi.fn(async () => okResponse({ cache_read_input_tokens: 1 }));
+    expect((await runWarmCycle(undefined, { fetchFn: kie, sleep: instantSleep })).sent).toBe(6);
+  });
+
+  it('skips when the configured provider has no key', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
 
     const fetchFn = vi.fn();
     const result = await runWarmCycle(undefined, { fetchFn, sleep: instantSleep });
 
     expect(result.sent).toBe(0);
-    expect(result.skipped).toContain('not KIE');
+    expect(result.skipped).toContain('ANTHROPIC_API_KEY');
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it('skips when KIE_API_KEY is not configured', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
+
     const fetchFn = vi.fn();
     const result = await runWarmCycle(undefined, { fetchFn, sleep: instantSleep });
 
@@ -276,6 +469,7 @@ describe('runWarmCycle', () => {
   });
 
   it('skips when there is no active prompt version', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
     vi.stubEnv('KIE_API_KEY', 'k-123');
     getActivePromptMock.mockResolvedValue(null);
 
@@ -301,6 +495,7 @@ describe('runWarmCycle', () => {
    */
   for (const model of ['gpt-5-6-sol', 'gemini-3-5-flash']) {
     it(`skips with zero fetches when the platform model is ${model}`, async () => {
+      vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
       vi.stubEnv('KIE_API_KEY', 'k-123');
       vi.stubEnv('LLM_MODEL', model);
 
@@ -315,6 +510,7 @@ describe('runWarmCycle', () => {
   }
 
   it('sends fanout requests carrying the active prompt, and counts reads/writes from the usage block', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
     vi.stubEnv('KIE_API_KEY', 'k-123');
     vi.stubEnv('CACHE_WARMER_FANOUT', '3');
 
@@ -345,6 +541,7 @@ describe('runWarmCycle', () => {
 
   /* NEVER throws: a warmer that can take down the doorway that started it inverts its purpose. */
   it('counts a throwing fetch as a failure and never throws itself', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
     vi.stubEnv('KIE_API_KEY', 'k-123');
     vi.stubEnv('CACHE_WARMER_FANOUT', '2');
 
@@ -358,6 +555,7 @@ describe('runWarmCycle', () => {
   });
 
   it('counts a non-ok response as a failure and keeps going', async () => {
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
     vi.stubEnv('KIE_API_KEY', 'k-123');
     vi.stubEnv('CACHE_WARMER_FANOUT', '2');
 
@@ -397,13 +595,28 @@ describe('the suite can never spend real money', () => {
    * network call — the default fetch is the REAL fetch, and this is the state every spec that
    * accidentally triggers a cycle would run in.
    */
+  /*
+   * TWO gates, asserted separately on purpose. Since 2026-08-08 the warmer defaults OFF, so the first
+   * assertion alone would pass for a build whose key handling was broken — and it would keep passing
+   * right up until someone flipped the default back, at which point this test would start spending the
+   * developer's real Anthropic credit from a unit run. The second assertion is the one that survives
+   * that change.
+   */
   it('runWarmCycle with no deps in a scrubbed env skips before touching the network', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
-    const result = await runWarmCycle();
+    const offByDefault = await runWarmCycle();
 
-    expect(result.sent).toBe(0);
-    expect(result.skipped).toContain('KIE_API_KEY');
+    expect(offByDefault.sent).toBe(0);
+    expect(offByDefault.skipped).toContain('disabled');
+
+    // ...and again with the flag ON, where only the missing key stands between the suite and real spend.
+    vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
+
+    const enabledButKeyless = await runWarmCycle();
+
+    expect(enabledButKeyless.sent).toBe(0);
+    expect(enabledButKeyless.skipped).toContain('API_KEY');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

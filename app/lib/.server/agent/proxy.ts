@@ -18,7 +18,7 @@ import {
 import { createScopedLogger } from '~/utils/logger';
 import { splitFilesForContext } from '~/lib/context/stable-zones';
 import { getActivePrompt } from '~/lib/.server/prompt/active';
-import { ensureCacheWarmer, PROMPT_CACHE_TTL } from '~/lib/.server/prompt/cache-warmer';
+import { ensureCacheWarmer, PROMPT_CACHE_TTL, recordCacheRead } from '~/lib/.server/prompt/cache-warmer';
 import { getPromptStore } from '~/lib/.server/prompt/store';
 import {
   carriedReferenceIds,
@@ -2241,6 +2241,19 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         logger.warn(
           `Generation ${generationId}: ${handoff.from} declined via safety classifier — served by ${handoff.to} (server-side fallback)`,
         );
+      }
+
+      /*
+       * Tell the cache warmer that ORGANIC traffic just warmed the shared prefix. Its next cycle then
+       * no-ops instead of paying a read to discover what this generation already did — which is what
+       * makes the warmer's steady-state cost proportional to how QUIET the platform is, rather than a
+       * flat toll it charges around the clock (`prompt/cache-warmer.ts` `shouldSkipWarmCycle`).
+       *
+       * Fire-and-forget and free: a module-level timestamp, no IO. It is deliberately stamped here
+       * rather than per-step — one read anywhere in the turn means the prefix is warm.
+       */
+      if (totals.cacheReadTokens > 0) {
+        recordCacheRead();
       }
 
       /*

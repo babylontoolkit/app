@@ -14,12 +14,19 @@
  * scaffold class, the project CLAUDE.md) is per-project BYTES that do not exist until the project
  * does. There is nothing to warm.
  *
- * ⚠️ That variance no longer has a user-facing absorber. It used to be the FLAT creation price
- * (`creationFlatCredits`), RETIRED 2026-07-29 (§4.4a): New Project runs no generation at all now, so
- * there is no creation turn to flat-price, and the first BUILD turn bills cost-derived like any
- * other. The flat charge that remains (`PROJECT_CREATE_CREDITS`) prices the clone/install/serve work,
- * not tokens — it absorbs nothing about cache warmth. This module is therefore the ONLY thing
- * standing between a cold prefix and the user's bill, which raises its value rather than lowering it.
+ * ⚠️ **The user's bill no longer depends on this** (2026-08-07, `_specs/creation-cost_plan.md` Phase 1):
+ * `decideCredits` prices cache-CREATION tokens at the READ rate, so a customer is charged the same
+ * whether their turn was warm or ice cold, while `raw_cost_usd` keeps recording the truth. That moved
+ * the cold start from a trust problem onto the platform's margin — which is exactly where it belongs,
+ * since the platform is the only party that can prevent it, and it is why this module is now a
+ * COST optimisation rather than a fairness mechanism. It ships OFF (see `cacheWarmerEnabled`).
+ *
+ * 🔴 **BOTH PROVIDERS since 2026-08-08.** `runWarmCycle` used to bail with
+ * `none('platform provider is not KIE')`, so it did nothing for the entire time the platform has run
+ * on Anthropic — the module was present, tested, green, and inert. Anthropic and KIE serve the SAME
+ * Messages API; they differ only in base URL and auth header, which is the whole reason the platform
+ * can swap providers with a config change. A guard that says "I only understand one provider" in a
+ * codebase built to swap providers is a guard that will be wrong by default.
  *
  * MONEY SHAPE (platform ops spend — deliberately NO `generations` row, NO ledger entry, NO user):
  *   - steady state: `fanout` cache READS at 0.1x per cycle ≈ cents per day;
@@ -35,12 +42,21 @@
 import { createScopedLogger } from '~/utils/logger';
 import { env, envFlag, envNumber } from '~/lib/.server/env';
 import { getMonitor } from '~/lib/.server/monitoring';
-import { getPlatformModel, getPlatformProvider } from '~/lib/.server/agent/config';
+import { getPlatformModel, getPlatformProvider, type PlatformProviderName } from '~/lib/.server/agent/config';
 import { familyOf } from '~/lib/modules/llm/model-families';
 import { KIE_DEFAULT_BASE_URL } from '~/lib/modules/llm/providers/kie-wire';
 import { getActivePrompt } from './active';
 
 const logger = createScopedLogger('cache-warmer');
+
+/**
+ * Anthropic's Messages API root — the twin of `KIE_DEFAULT_BASE_URL`.
+ *
+ * Declared here rather than imported because this module is the platform's only server-side RAW-wire
+ * caller for Anthropic; every other path goes through `@ai-sdk/anthropic`, which owns its own base URL.
+ * If a second raw caller ever appears, move this beside `KIE_DEFAULT_BASE_URL` rather than copying it.
+ */
+export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com/v1';
 
 /**
  * The ONE cache tier the platform uses (§4.2.8: 1h, because users stop to PLAY what we built — the
@@ -54,11 +70,43 @@ export const DEFAULT_CACHE_WARMER_INTERVAL_MINUTES = 45;
 /** KIE warms per backend; measured ~4-5 backends behind their balancer. Six touches covers the set. */
 export const DEFAULT_CACHE_WARMER_FANOUT = 6;
 
+/**
+ * Anthropic direct has NO balancer to cover, so one touch warms the prefix.
+ *
+ * Measured 2026-08-08 with `PROBE_PROVIDER=Anthropic node scripts/cache-probe.mjs 3 4000`: request 1
+ * wrote 5,420 tokens, requests 2 and 3 both read 5,420. **First-request warm**, against KIE's measured
+ * `1-4 MISS, 5-10 HIT` curve. Sending six is six times the bill for nothing — and the bill is real,
+ * because a fanout touch on a cold prefix is a 2x WRITE, not a read.
+ */
+export const DEFAULT_ANTHROPIC_FANOUT = 1;
+
 /** Spacing between fanout requests — concurrent probes measured as landing on the SAME backend. */
 const WARMUP_SPACING_MS = 2000;
 
+/**
+ * 🔴 **DEFAULT OFF since 2026-08-08 — owner decision, and the reason is arithmetic nobody had done.**
+ *
+ * The warmer can only warm blocks that are byte-identical for every user: the base prompt, and (not yet
+ * built) the starter file block. The per-project half of the prefix does not exist until the project
+ * does. So the saving is not "a cold start avoided", it is "the SHARED FRACTION of a cold start
+ * avoided" — measured live at ~31k of a ~40k prefix, worth about **$0.18** each.
+ *
+ * Against that, a cycle every 45 minutes costs ~$0.30/day. Which side wins depends entirely on **how
+ * many cold starts a day the platform actually has** — a number nobody has measured:
+ *
+ *   - 3/day  → the warmer nets ~$7/month.   Not worth a background timer.
+ *   - 20/day → the warmer nets ~$100/month. Clearly worth it.
+ *
+ * And the value moves the WRONG way with success: once there is organic traffic the shared prefix
+ * stays warm by itself, so the warmer matters most when there are no users and least when there are.
+ *
+ * So it ships off, correct and ready, and the decision waits for data instead of a guess.
+ * **`generations.cacheCreationTokens > 0` is a cold start** — count them for a week, then flip
+ * `CACHE_WARMER_ENABLED=true` if the number says so. That is a five-minute decision with a real
+ * input, which is what this default is buying.
+ */
 export function cacheWarmerEnabled(context?: unknown): boolean {
-  return envFlag(context, 'CACHE_WARMER_ENABLED', true);
+  return envFlag(context, 'CACHE_WARMER_ENABLED', false);
 }
 
 export function cacheWarmerIntervalMinutes(context?: unknown): number {
@@ -71,10 +119,60 @@ export function cacheWarmerIntervalMinutes(context?: unknown): number {
   return Number.isFinite(minutes) && minutes >= 1 && minutes <= 55 ? minutes : DEFAULT_CACHE_WARMER_INTERVAL_MINUTES;
 }
 
+/**
+ * How many touches per cycle — **defaulted PER PROVIDER**, because the number exists to cover KIE's
+ * load balancer and Anthropic direct has none (see {@link DEFAULT_ANTHROPIC_FANOUT}).
+ *
+ * ⚠️ An explicit `CACHE_WARMER_FANOUT` still wins on either provider. The provider only chooses the
+ * DEFAULT: a single constant meant one of the two providers was always wrong, and the wrong direction
+ * (6 on Anthropic) is the expensive one.
+ */
 export function cacheWarmerFanout(context?: unknown): number {
-  const fanout = envNumber(context, 'CACHE_WARMER_FANOUT', DEFAULT_CACHE_WARMER_FANOUT);
+  const fallback = getPlatformProvider(context) === 'KIE' ? DEFAULT_CACHE_WARMER_FANOUT : DEFAULT_ANTHROPIC_FANOUT;
+  const fanout = envNumber(context, 'CACHE_WARMER_FANOUT', fallback);
 
-  return Number.isFinite(fanout) && fanout >= 1 && fanout <= 16 ? Math.floor(fanout) : DEFAULT_CACHE_WARMER_FANOUT;
+  return Number.isFinite(fanout) && fanout >= 1 && fanout <= 16 ? Math.floor(fanout) : fallback;
+}
+
+/**
+ * When the platform last saw a cache READ on the shared prefix — stamped by the proxy after settlement.
+ *
+ * 🔴 The warmer exists to cover IDLE gaps, and during a busy hour every cycle is pure waste: the users'
+ * own traffic has already kept the entry warm, and the warmer pays a read to discover that. Skipping a
+ * cycle whose work organic traffic already did is what makes the steady-state cost proportional to how
+ * QUIET the platform is — which is the only shape under which warming is ever worth running.
+ *
+ * Module-level rather than persisted on purpose: it is a within-process hint about the last few
+ * minutes, and a stale value from another instance would suppress a cycle this one needed. Losing it
+ * on restart costs exactly one extra warm read.
+ */
+let lastCacheReadAtMs = 0;
+
+/** Stamp a successful cache read. Called by the proxy on any generation that read the cache (§4.2.8). */
+export function recordCacheRead(atMs: number = Date.now()): void {
+  if (atMs > lastCacheReadAtMs) {
+    lastCacheReadAtMs = atMs;
+  }
+}
+
+/** The last recorded cache read, for tests and for the cycle's own skip decision. */
+export function lastCacheReadAt(): number {
+  return lastCacheReadAtMs;
+}
+
+/**
+ * Pure so the skip rule is testable without a clock or a network: has organic traffic already warmed
+ * the prefix inside this cycle's window?
+ *
+ * `lastReadAt === 0` means "nothing seen yet" and must NOT count as recent — a fresh process has warmed
+ * nothing, and treating unknown as warm is how a warmer silently never runs.
+ */
+export function shouldSkipWarmCycle(input: { nowMs: number; lastReadAtMs: number; intervalMinutes: number }): boolean {
+  if (input.lastReadAtMs <= 0) {
+    return false;
+  }
+
+  return input.nowMs - input.lastReadAtMs < input.intervalMinutes * 60_000;
 }
 
 /**
@@ -90,17 +188,34 @@ export function cacheWarmerFanout(context?: unknown): number {
  * if KIE's non-streaming 500 turns out to be transient: a warmer exercising a request shape no
  * generation sends is one more way to warm a prefix nobody uses.
  */
-export function buildWarmupRequest(input: { model: string; promptText: string; apiKey: string }): {
+export function buildWarmupRequest(input: {
+  model: string;
+  promptText: string;
+  apiKey: string;
+
+  /**
+   * Which wire to speak. Anthropic direct and KIE serve the SAME Messages API — they differ only in
+   * base URL and auth header, which is exactly why the platform can swap providers with a config
+   * change. Hardcoding KIE here is what left this module dead for the whole time the platform has been
+   * on Anthropic (`runWarmCycle` bailed with `'platform provider is not KIE'` rather than sending a
+   * request to the wrong host, so it failed quietly and correctly — and did nothing).
+   */
+  provider: PlatformProviderName;
+}): {
   url: string;
   headers: Record<string, string>;
   body: Record<string, unknown>;
 } {
+  const anthropicDirect = input.provider === 'Anthropic';
+
   return {
-    url: `${KIE_DEFAULT_BASE_URL}/messages`,
+    url: anthropicDirect ? `${ANTHROPIC_DEFAULT_BASE_URL}/messages` : `${KIE_DEFAULT_BASE_URL}/messages`,
     headers: {
       'content-type': 'application/json',
       'anthropic-version': '2023-06-01',
-      authorization: `Bearer ${input.apiKey}`,
+
+      // Anthropic authenticates with `x-api-key`; KIE proxies the same wire behind a bearer token.
+      ...(anthropicDirect ? { 'x-api-key': input.apiKey } : { authorization: `Bearer ${input.apiKey}` }),
     },
     body: {
       model: input.model,
@@ -182,6 +297,9 @@ export function parseWarmupStreamUsage(sseText: string): { cacheReadTokens: numb
 interface WarmCycleDeps {
   fetchFn?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+
+  /** Injected clock, so the skip rule is testable without waiting out a 45-minute interval. */
+  now?: () => number;
 }
 
 export interface WarmCycleResult {
@@ -206,17 +324,26 @@ export async function runWarmCycle(context?: unknown, deps?: WarmCycleDeps): Pro
     }
 
     /*
-     * The warmer speaks KIE's wire directly; on the Anthropic provider the platform's own traffic
-     * shape differs (no per-backend balancer measured) and this module has no verified value there.
+     * 🔴 Skip a cycle organic traffic already did. The warmer covers IDLE gaps; during a busy hour the
+     * users' own generations have kept the entry warm and a cycle would pay a read to learn that. This
+     * is what makes the steady-state cost proportional to how QUIET the platform is — the only shape
+     * under which running a warmer is ever worth it.
      */
-    if (getPlatformProvider(context) !== 'KIE') {
-      return none('platform provider is not KIE');
+    if (
+      shouldSkipWarmCycle({
+        nowMs: deps?.now?.() ?? Date.now(),
+        lastReadAtMs: lastCacheReadAtMs,
+        intervalMinutes: cacheWarmerIntervalMinutes(context),
+      })
+    ) {
+      return none('organic traffic read the cache within the interval');
     }
 
-    const apiKey = env(context, 'KIE_API_KEY');
+    const provider = getPlatformProvider(context);
+    const apiKey = env(context, provider === 'KIE' ? 'KIE_API_KEY' : 'ANTHROPIC_API_KEY');
 
     if (!apiKey) {
-      return none('KIE_API_KEY is not configured');
+      return none(`${provider === 'KIE' ? 'KIE_API_KEY' : 'ANTHROPIC_API_KEY'} is not configured`);
     }
 
     const active = await getActivePrompt();
@@ -254,7 +381,7 @@ export async function runWarmCycle(context?: unknown, deps?: WarmCycleDeps): Pro
       return none(`platform model "${model}" is not a Claude model — breakpoint warming is Anthropic-only`);
     }
 
-    const request = buildWarmupRequest({ model, promptText: active.content, apiKey });
+    const request = buildWarmupRequest({ model, promptText: active.content, apiKey, provider });
     const fetchFn = deps?.fetchFn ?? fetch;
     const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const fanout = cacheWarmerFanout(context);
@@ -374,4 +501,10 @@ export function resetCacheWarmerForTests(): void {
   }
 
   warmerStarted = false;
+
+  /*
+   * The read stamp is module state too, and a leaked one makes the NEXT test's cycle skip for a reason
+   * that test never set up — a flake whose cause is in a different file.
+   */
+  lastCacheReadAtMs = 0;
 }
