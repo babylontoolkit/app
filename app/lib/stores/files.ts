@@ -1004,8 +1004,18 @@ export class FilesStore {
 
     let failed: string[] = [];
 
-    const serialized = await serializeFileMap(this.files.get(), sandbox.fs, toRelative, (filePath) => {
+    /*
+     * The CAUSE of the last failure, kept for the log line below. Without it a wholesale failure —
+     * every binary in the project at once, observed live 2026-08-08 during a GitHub save on Nodepod —
+     * logs WHICH files failed and not WHY, which is undiagnosable after the fact: an ENOENT (restore
+     * never wrote the file), a dead pod (page navigating away mid-serialize), and a transport defect
+     * in the provider's binary read all produce the identical line.
+     */
+    let lastError: unknown;
+
+    const serialized = await serializeFileMap(this.files.get(), sandbox.fs, toRelative, (filePath, error) => {
       failed.push(filePath);
+      lastError = error;
     });
 
     for (let attempt = 1; attempt <= SERIALIZE_RETRY_ATTEMPTS && failed.length > 0; attempt++) {
@@ -1021,14 +1031,19 @@ export class FilesStore {
             isBinary: true,
             size: bytes.byteLength,
           };
-        } catch {
+        } catch (error) {
           failed.push(filePath);
+          lastError = error;
         }
       }
     }
 
     if (failed.length > 0) {
-      logger.error(`Failed to read ${failed.length} binary file(s) for serialization: ${failed.join(', ')}`);
+      const cause = lastError instanceof Error ? `${lastError.name}: ${lastError.message}` : String(lastError);
+
+      logger.error(
+        `Failed to read ${failed.length} binary file(s) for serialization (last error: ${cause}): ${failed.join(', ')}`,
+      );
 
       if (options?.strict) {
         throw new IncompleteSerializationError(failed);

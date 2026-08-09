@@ -191,29 +191,16 @@ describe('acceptance 3 — one message, and it is not the user’s', () => {
   });
 
   /*
-   * The brief still EXISTS and is still READ here — `createProjectFromRegistry` builds it and creation
-   * hands it to New Project mode, which appends it hidden to the user's first send (T7/T10). What it may
-   * never be again is a MESSAGE.
-   *
-   * So the rule is about where it goes, not whether it is touched: it must reach `enterNewProjectMode`
-   * and nothing else. An earlier draft of this test asserted the string `userMessage` was absent
-   * entirely, which passed for one task and then failed the moment the brief was legitimately carried —
-   * a test pinned to the SHAPE of a deletion rather than to the rule it was protecting.
+   * The creation BRIEF is retired outright (owner, 2026-08-08): creation builds no machine message at
+   * all, and what reaches New Project mode is the user's own words. The identifier `creationBrief`
+   * must therefore be gone from this function entirely — its reappearance is the retired hidden-message
+   * layer growing back under whatever name.
    */
-  it('carries the creation brief into New Project mode rather than committing it', () => {
+  it('enters New Project mode with the user’s own words, and builds no brief', () => {
     expect(body).toContain('enterNewProjectMode(');
-
-    /*
-     * The brief must REACH the mode, in whatever composition the wizard path needs — it is
-     * `creationBrief` plus, on the guided-tour path, the compiled selections that would otherwise reach
-     * nobody (§4.7). Pinning the exact expression `brief: creationBrief` pinned a punctuation choice
-     * rather than the rule, and failed the moment a second machine-written fact was legitimately added.
-     */
-    expect(body).toMatch(/brief:\s*[^,\n]*creationBrief/);
-
-    // The only `setMessages` here is the artifact one, and the brief is not in it (asserted above).
-    expect(body).not.toMatch(/setMessages\([^)]*creationBrief/);
-    expect(body).not.toMatch(/content:\s*`?\$?\{?creationBrief/);
+    expect(body).toMatch(/userPrompt:/);
+    expect(body).not.toContain('creationBrief');
+    expect(body).not.toContain('buildCreationBrief');
   });
 
   /*

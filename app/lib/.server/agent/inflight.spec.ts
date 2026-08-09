@@ -78,4 +78,38 @@ describe('claimProject', () => {
 
     expect(() => claimProject('prj_1', USER)).not.toThrow();
   });
+
+  /**
+   * 🔴 A STOPPED generation must never refuse the next send (found live, 2026-08-08).
+   *
+   * The error's own copy says "press Stop, before starting another change" — and the user did, and was
+   * refused anyway: the release lives in the stream's `finally`, which can lag the abort by however
+   * long the provider tail and settlement take. The claim carries its request's abort signal precisely
+   * so that a holder whose request is DEAD yields immediately.
+   */
+  it('yields to a new send when the holder’s request was aborted (Stop)', () => {
+    const controller = new AbortController();
+    claimProject('prj_1', USER, controller.signal);
+
+    // Still running → still refused.
+    expect(() => claimProject('prj_1', USER, new AbortController().signal)).toThrow(GenerationInFlightError);
+
+    controller.abort(); // the Stop button
+
+    expect(() => claimProject('prj_1', USER, new AbortController().signal)).not.toThrow();
+  });
+
+  /** The takeover half of idempotent-release: the STOPPED generation's late `finally` must not free the new claim. */
+  it('a stopped holder’s late release does not free the takeover claim', () => {
+    const controller = new AbortController();
+    const releaseStopped = claimProject('prj_1', USER, controller.signal);
+
+    controller.abort();
+    claimProject('prj_1', USER, new AbortController().signal); // the takeover
+
+    releaseStopped(); // the stopped generation's settlement tail finally finishes
+
+    // The takeover's claim must still be standing.
+    expect(() => claimProject('prj_1', USER, new AbortController().signal)).toThrow(GenerationInFlightError);
+  });
 });

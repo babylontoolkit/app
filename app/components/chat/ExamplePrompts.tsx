@@ -10,7 +10,7 @@ const EXAMPLE_PROMPTS = [
   { text: 'Create a top-down twin-stick shooter in a neon arena' },
   { text: 'Make a first-person maze explorer with a flashlight' },
   { text: 'Build a physics playground where I can knock over stacks of boxes' },
-  { text: 'Create a split-screen local-multiplayer racing game' },
+  { text: 'Create a 3D pac-man with classic player and ghosts' },
 ];
 
 export function ExamplePrompts(sendMessage?: { (event: React.UIEvent, messageInput?: string): void | undefined }) {

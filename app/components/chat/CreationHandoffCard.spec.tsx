@@ -93,10 +93,8 @@ const PID = 'proj_kart_racer';
 /** Multi-line and padded on purpose: what the card shows and what Build sends must be these exact bytes. */
 const TYPED = '\n  a kart racer\n\n  with boost pads on the second lap  \n';
 
-const BRIEF = '<creation-brief>the play contract, the scaffolded class, the images on disk</creation-brief>';
-
 function mode(overrides: Partial<NewProjectMode> = {}): NewProjectMode {
-  return { projectId: PID, brief: BRIEF, userPrompt: TYPED, ...overrides };
+  return { projectId: PID, userPrompt: TYPED, ...overrides };
 }
 
 const buildButton = () => screen.queryByRole('button', { name: /build my game/i });
@@ -219,18 +217,18 @@ describe('CreationHandoffCard — the build path', () => {
   });
 
   /*
-   * 🔴 Dismissing the CARD is not leaving the MODE. The hidden creation brief must still ride on whatever
-   * the user sends next — `dismissCreationHandoff` is deliberately not `exitNewProjectMode`.
+   * 🔴 Dismissing the CARD is not leaving the MODE. The project is still unbuilt and the carried prompt
+   * must survive — `dismissCreationHandoff` is deliberately not `exitNewProjectMode`.
    */
   it.each([
     ['Edit brief', () => fireEvent.click(editButton()!)],
     ['X', () => fireEvent.click(closeButton()!)],
-  ])('keeps the mode (and its hidden brief) alive after %s', (_label, press) => {
+  ])('keeps the mode (and its carried prompt) alive after %s', (_label, press) => {
     renderCard();
     press();
 
-    expect(newProjectModeStore.get()).toMatchObject({ projectId: PID, brief: BRIEF });
-    expect(readNewProjectMode(PID, localStorage)?.brief).toBe(BRIEF);
+    expect(newProjectModeStore.get()).toMatchObject({ projectId: PID });
+    expect(readNewProjectMode(PID, localStorage)?.userPrompt).toBe(TYPED);
   });
 
   /*
@@ -298,7 +296,7 @@ describe('CreationHandoffCard — the describe path (a card was picked, nothing 
 
     expect(onDismiss).toHaveBeenCalledWith('');
     expect(card()).not.toBeInTheDocument();
-    expect(newProjectModeStore.get()).toMatchObject({ projectId: PID, brief: BRIEF });
+    expect(newProjectModeStore.get()).toMatchObject({ projectId: PID });
   });
 });
 

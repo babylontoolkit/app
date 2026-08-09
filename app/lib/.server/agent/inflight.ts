@@ -33,6 +33,15 @@ const CLAIM_TTL_MS = 15 * 60 * 1000;
 interface Claim {
   userId: string;
   claimedAt: number;
+
+  /**
+   * The claiming REQUEST's abort signal. A claim whose own request has been aborted (Stop, a closed
+   * tab) must never refuse a new send: the model can produce no further file actions once the signal
+   * fires, and the release in the stream's `finally` can lag the abort by however long settlement and
+   * the provider tail take — during which "press Stop, then send again" (exactly what the error copy
+   * tells the user to do) was bouncing off the corpse of the generation they had already stopped.
+   */
+  signal?: AbortSignal;
 }
 
 const claims = new Map<string, Claim>();
@@ -53,24 +62,31 @@ export class GenerationInFlightError extends Error {
  * Returns a release function. Call it in a `finally` — never on the success path only, or a failed
  * generation locks the project until the TTL expires.
  */
-export function claimProject(projectId: string, userId: string): () => void {
+export function claimProject(projectId: string, userId: string, signal?: AbortSignal): () => void {
   const existing = claims.get(projectId);
 
   if (existing) {
     const age = Date.now() - existing.claimedAt;
 
-    if (age < CLAIM_TTL_MS) {
+    if (existing.signal?.aborted) {
+      /*
+       * The holder was STOPPED (or its tab closed) — its provider call is aborted and no further file
+       * actions can come out of it; only its settlement tail is still unwinding. Refusing here made
+       * the error's own advice ("press Stop, before starting another change") false.
+       */
+      logger.info(`In-flight claim on project ${projectId} was aborted — taking it over`);
+    } else if (age < CLAIM_TTL_MS) {
       throw new GenerationInFlightError();
+    } else {
+      /*
+       * Stale. Something failed to release — that is a bug worth seeing in the logs, but the user's
+       * project must not stay locked because of it.
+       */
+      logger.warn(`Stale in-flight claim on project ${projectId} (${Math.round(age / 1000)}s old) — taking it over`);
     }
-
-    /*
-     * Stale. Something failed to release — that is a bug worth seeing in the logs, but the user's
-     * project must not stay locked because of it.
-     */
-    logger.warn(`Stale in-flight claim on project ${projectId} (${Math.round(age / 1000)}s old) — taking it over`);
   }
 
-  const claim: Claim = { userId, claimedAt: Date.now() };
+  const claim: Claim = { userId, claimedAt: Date.now(), signal };
   claims.set(projectId, claim);
 
   let released = false;

@@ -12,14 +12,15 @@ import type { CreationPlan } from '~/lib/agent/creation-plan';
 import type { GitProviderId } from '~/lib/.server/git/provider';
 
 /**
- * What an unbuilt project still owes its owner: the brief that will ride hidden on their first build
- * turn, and the words they typed. Capped on the way in (`api.projects.$projectId.ts`) — it arrives in a
- * browser body and it reaches the model, so an unbounded one is an unbounded per-turn bill (§4.2.8).
+ * What an unbuilt project still owes its owner: the words they typed at creation, carried until their
+ * first build turn. Capped on the way in (`api.projects.$projectId.ts`) — it arrives in a browser body
+ * and it reaches the model, so an unbounded one is an unbounded per-turn bill (§4.2.8).
+ *
+ * 🔴 The machine-written `brief` field is RETIRED (owner, 2026-08-08): the baked system prompt and the
+ * file context carry what it used to, and the first build turn is an ordinary turn. Old rows may still
+ * hold a `brief` key; readers ignore it. The row's PRESENCE is what means "created, never built".
  */
 export interface CreationHandoff {
-  /** The machine-written brief. Must contain `CREATION_BRIEF_MARKER` or ten server protections switch off. */
-  brief: string;
-
   /** The user's own words. Absent on the card path — there were none, and inventing some is worse. */
   userPrompt?: string;
 

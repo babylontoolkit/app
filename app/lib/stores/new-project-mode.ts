@@ -3,13 +3,14 @@
  *
  * Creation no longer sends anything to a model: it clones the starter, installs it, runs it, and hands
  * the user's own prompt back to them in the chat box. So there is a state between "the project exists"
- * and "the game has been built" that did not exist before, and two things depend on knowing it:
+ * and "the game has been built" that did not exist before, and the handoff card (plus the premium
+ * lock) depends on knowing it.
  *
- *   - the visible banner telling the user this next message is the one that builds their game, and
- *   - the hidden creation BRIEF appended to that message (the play contract, the scaffolded class name,
- *     the images actually on disk) — which is why the brief is CARRIED here rather than rebuilt at send
- *     time. It is a fact about the moment of creation; rebuilding it later from whatever the store
- *     happens to hold is how it comes to describe a project that has since changed.
+ * 🔴 **THERE IS NO CREATION BRIEF (owner, 2026-08-08).** This mode used to carry a machine-written
+ * hidden brief appended to the first build message. Retired: the baked system prompt plus the file
+ * context proved more reliable, so the first build turn is an ordinary turn carrying only the user's
+ * own words (`userPrompt`). The mode now exists to track "created but never built" — the card, the
+ * carried prompt, and the send that ends it.
  *
  * 🔴 **KEYED PER PROJECT, NOT PER USER OR PER TAB.** The key is `bt_new_project_mode:<projectId>`,
  * following the fix `SavingSurface` already needed for exactly this mistake: its "one-time" reminder
@@ -18,11 +19,8 @@
  * overwrite the first one's brief, and the first project would reopen with no banner and no brief, with
  * nothing anywhere reporting that anything was lost.
  *
- * 🔴 **THE BRIEF IS CLEARED ON SEND, NOT ON FINISH.** It stops riding on messages the moment the build
- * turn is POSTED. Waiting for it to succeed sounds safer and is not: a generation that fails is one the
- * user will retry, and if the brief were still attached it would be appended a second time — while a
- * mode that outlives its send makes a double-send double-append, into an UNCACHED history that
- * re-sends forever. The brief is a fact about the FIRST message, not about the first successful one.
+ * 🔴 **THE MODE IS CLEARED ON SEND, NOT ON FINISH.** A generation that fails is one the user will
+ * retry, and a mode that outlives its own send is a mode a second, fast send reads again.
  *
  * 🔴 **THE PLAN OUTLIVES IT, AND THAT IS THE ONE THING HERE THAT CHANGED (§4.4e, 2026-08-08).** A
  * creation is now several phases (Game → Frontend → Art → Verify), because one turn asking for all of
@@ -50,15 +48,6 @@ export const NEW_PROJECT_MODE_PREFIX = 'bt_new_project_mode:';
 export interface NewProjectMode {
   /** Whose mode this is. Read back on hydrate so one project can never answer for another. */
   projectId: string;
-
-  /**
-   * The machine-written creation brief, appended hidden to the first build message.
-   *
-   * Must contain `CREATION_BRIEF_MARKER` verbatim: the server recognises the first build turn by
-   * sniffing for it, and ten behavioural protections (premium lock, skill preload, the bounded
-   * media-only tool loop, `requiresAction`, the liveness copy) hang off that one string.
-   */
-  brief: string;
 
   /**
    * The user's OWN words — what they typed on the landing page, or the wizard's short summary.
@@ -135,8 +124,8 @@ function defaultStorage(): ModeStorage | null {
 /**
  * Read a project's stored mode. Returns `null` for anything that is not a well-formed record for THIS
  * project — a corrupt value, a truncated write, or (the one that matters) a record belonging to another
- * project. A stored brief is instructions that reach the model; a shape check is cheap and the failure
- * of not doing one is a different project's brief being sent as this one's.
+ * project. The stored prompt reaches the chat box and the model; a shape check is cheap and the failure
+ * of not doing one is a different project's prompt being offered as this one's.
  */
 export function readNewProjectMode(
   projectId: string,
@@ -155,7 +144,7 @@ export function readNewProjectMode(
 
     const parsed = JSON.parse(raw) as Partial<NewProjectMode>;
 
-    if (parsed?.projectId !== projectId || typeof parsed.brief !== 'string' || parsed.brief.length === 0) {
+    if (parsed?.projectId !== projectId) {
       return null;
     }
 
@@ -170,13 +159,12 @@ export function readNewProjectMode(
      */
     return {
       projectId,
-      brief: parsed.brief,
       userPrompt: typeof parsed.userPrompt === 'string' ? parsed.userPrompt : undefined,
       plan: parseCreationPlan(parsed.plan),
     };
   } catch {
     /*
-     * Swallowed on purpose. A banner and a hidden brief are not worth an exception on the mount path,
+     * Swallowed on purpose. A banner and a carried prompt are not worth an exception on the mount path,
      * and every failure here degrades to the honest answer: this project is not in New Project mode, so
      * it behaves like any ordinary project.
      */
@@ -190,9 +178,10 @@ export function enterNewProjectMode(mode: NewProjectMode, storage: ModeStorage |
 
   /*
    * An unregistered project (the WebContainer-only fallback, where the server could not be reached) has
-   * no id to key on. It still gets the mode for this session — the banner and the brief are exactly as
-   * useful there — it just cannot survive a reload. Writing it under the bare prefix instead would give
-   * every such project ONE shared record, which is the per-user-flag bug this module exists to avoid.
+   * no id to key on. It still gets the mode for this session — the banner and the carried prompt are
+   * exactly as useful there — it just cannot survive a reload. Writing it under the bare prefix instead
+   * would give every such project ONE shared record, which is the per-user-flag bug this module exists
+   * to avoid.
    */
   if (!mode.projectId) {
     return;
@@ -203,7 +192,7 @@ export function enterNewProjectMode(mode: NewProjectMode, storage: ModeStorage |
   } catch {
     /*
      * Persistence is best-effort (private browsing, a full quota). The in-memory store still carries the
-     * mode for this session, so the user gets the banner and the brief; only surviving a reload is lost.
+     * mode for this session, so the user gets the banner and the prompt; only surviving a reload is lost.
      */
   }
 }
@@ -212,10 +201,9 @@ export function enterNewProjectMode(mode: NewProjectMode, storage: ModeStorage |
  * Close the handoff card — the `X`, or any of its actions once they have done their work.
  *
  * 🔴 **This is NOT `exitNewProjectMode`, and the difference is the whole point.** Closing the card
- * hides one panel; the mode lives on, so the hidden brief still rides on whatever the user sends next.
- * Collapsing the two would mean that clicking `X` — the most casual gesture on the screen — silently
- * stripped the play contract, the scaffolded class name and the on-disk image list out of the first
- * build turn. The output would simply be worse, with nothing anywhere reporting why.
+ * hides one panel; the mode lives on — the project is still unbuilt, the carried prompt still exists,
+ * and only a SEND ends the mode. Collapsing the two would mean that clicking `X` — the most casual
+ * gesture on the screen — silently ended a state the rest of the flow still needs.
  *
  * A no-op when the project is not the one in the mode: same scoping rule as everywhere else here, so a
  * stale card in a background tab cannot dismiss the card of the project actually open.
@@ -269,10 +257,7 @@ export function updateCreationPlan(
      * `handoffDismissed` is a session fact and must not reach storage (see its doc comment) — the
      * persisted record is rebuilt from the fields `readNewProjectMode` reads back, nothing more.
      */
-    storage?.setItem(
-      newProjectModeKey(projectId),
-      JSON.stringify({ projectId, brief: mode.brief, userPrompt: mode.userPrompt, plan }),
-    );
+    storage?.setItem(newProjectModeKey(projectId), JSON.stringify({ projectId, userPrompt: mode.userPrompt, plan }));
   } catch {
     // Best-effort, as everywhere else here: the in-memory store still carries the plan this session.
   }

@@ -185,15 +185,10 @@ import { toast } from 'react-toastify';
 import { bootProgress } from '~/lib/stores/boot-progress';
 import { newProjectModeStore } from '~/lib/stores/new-project-mode';
 import { projectId } from '~/lib/persistence/useChatHistory';
-import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { ChatImpl } from './Chat.client';
 
 const toastSuccess = toast.success as unknown as ReturnType<typeof vi.fn>;
 const toastInfo = toast.info as unknown as ReturnType<typeof vi.fn>;
-
-const BRIEF = [CREATION_BRIEF_MARKER, '<creation-brief>the play contract, the scaffolded class</creation-brief>'].join(
-  '\n\n',
-);
 
 const GAME_READY = '🎮 Your game is ready — open Preview to play it.';
 
@@ -284,7 +279,6 @@ beforeEach(() => {
 
   seams.createProjectFromRegistry.mockResolvedValue({
     assistantMessage: '<boltArtifact id="project-setup" title="Arcade Racing"></boltArtifact>',
-    userMessage: BRIEF,
     className: 'ArcadeRacingMode',
   });
   seams.waitForMountVisible.mockResolvedValue(undefined);
@@ -342,7 +336,7 @@ async function createProject() {
   mountChat();
   await click('new project');
 
-  expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1', brief: BRIEF });
+  expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1' });
 }
 
 /* ------------------------------------------------------------------------------------------ creation */

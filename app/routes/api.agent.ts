@@ -184,9 +184,10 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
      * One in-flight generation per project (§4.12). Two generations against one project interleave
      * their file actions and leave a working tree that is a mix of two different ideas — a corruption
      * the user cannot see and cannot undo. Claimed here, released in `finally` so a Stop, a crash, or
-     * a closed tab all free it.
+     * a closed tab all free it — and the claim carries THIS request's signal, so a holder that was
+     * STOPPED yields to the next send immediately rather than only when its settlement tail finishes.
      */
-    releaseProject = body.projectId ? claimProject(body.projectId, user.id) : undefined;
+    releaseProject = body.projectId ? claimProject(body.projectId, user.id, request.signal) : undefined;
 
     const generation = await runAgentGeneration({
       messages: body.messages,

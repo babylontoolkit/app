@@ -15,8 +15,12 @@ import { getSkillStore } from '~/lib/.server/skills/store';
 
 const logger = createScopedLogger('agent-tools');
 
-/** Tool rounds per generation. On cap, the model proceeds with whatever it has loaded. */
-export const MAX_TOOL_ROUNDS = 6;
+/**
+ * Tool rounds per generation. On cap, the model proceeds with whatever it has loaded.
+ * 7 (raised from 6, owner, 2026-08-08) to keep `MAX_SKILL_LOADS < MAX_TOOL_ROUNDS` when the skill
+ * budget went to 6 — the strict inequality is what guarantees a round is left for the answer.
+ */
+export const MAX_TOOL_ROUNDS = 7;
 
 /**
  * How many skill BODIES one generation may pull in (§4.11, `spec/skills.md`).
@@ -30,15 +34,18 @@ export const MAX_TOOL_ROUNDS = 6;
  *
  * So the budget is spent on BODIES, enforced inside `execute` where a bad value is recoverable: past
  * the cap the tool stops handing over instructions and tells the model to proceed with what it has.
- * Two is deliberate — a task legitimately spans at most a domain skill and a procedure skill
- * (`bt-design` + `bt-landing`), which is exactly what the creation turn inlines — and going over it
- * has never once been the difference between a good answer and a bad one.
+ * Six (raised from two, owner, 2026-08-08): with the creation-brief preload disabled for the
+ * reliability debugging, the first build turn must CHOOSE `bt-design` + `bt-landing` itself rather
+ * than having them inlined, and the owner wants headroom for prompts that legitimately span more
+ * skills (and, later, user-authored ones). The ceiling's real job — bounding the six-round redraft
+ * pathology — is carried by the ROUNDS cap and the refusal wording, not by this number being small;
+ * the invariant that must survive any retune is `MAX_SKILL_LOADS < MAX_TOOL_ROUNDS` (test-pinned).
  *
  * Not counted: an already-loaded re-request (answered with one sentence) and an unknown name (answered
  * with the index). Neither hands over a body, and charging for them would spend the budget on the
  * model's mistakes rather than on its work.
  */
-export const MAX_SKILL_LOADS = 2;
+export const MAX_SKILL_LOADS = 6;
 
 export interface SkillToolContext {
   /** Skills loaded during this generation — recorded on the `generations` row (§4.11 metrics). */

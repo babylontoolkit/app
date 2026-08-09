@@ -22,11 +22,12 @@
  * without it and say so in the brief, because a mounted project with an unseeded GameMode is one
  * prompt away from correct, while a refused creation is not recoverable at all.
  *
- * The rule that makes the degraded path safe is that **the brief must describe what is actually on
- * disk**. A scaffold that failed while the brief still says "your GameMode is already copied and
- * registered" is worse than the failure: the model builds against a class that does not exist and the
- * project dead-ends at a blank `/play` — the exact silent failure §4.4b exists to prevent. So the
- * degraded brief tells the model to author and register the mode itself.
+ * 🔴 **THERE IS NO CREATION BRIEF (owner, 2026-08-08).** Creation used to build a machine-written
+ * brief (`buildCreationBrief`) that rode hidden on the first build message. Retired: the baked system
+ * prompt (`20-hard-constraints.md` — play contract, landing/chrome rewrite rules, Layout law) plus the
+ * file context the model reads every turn proved more reliable than the brief layer, and the first
+ * build turn is now an ordinary turn carrying only the user's own words. Do not reintroduce a hidden
+ * machine message on the send path.
  */
 import registryData from '~/config/game-registry.json';
 import type { GameRegistryEntry } from '~/types/game-registry';
@@ -38,7 +39,6 @@ import { writeSandboxIdentity } from '~/lib/sandbox/identity';
 import { createScopedLogger } from '~/utils/logger';
 import { applyProjectHygiene } from './hygiene';
 import { clearInheritedDevServer, mountTemplate } from './mount';
-import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import {
   CreationError,
   describeMountFailure,
@@ -64,9 +64,6 @@ export const STARTER_REPO = registryData.starter_repo;
 export interface CreatedProject {
   /** The assistant turn that mounts the files — replayed into the chat as a completed artifact. */
   assistantMessage: string;
-
-  /** The hidden user turn that briefs the model on what it must now build. */
-  userMessage: string;
 
   /** The project's starting GameMode class (§4.4b) — the seed, not a limit: any registered mode is launchable. */
   className: string;
@@ -119,23 +116,6 @@ async function fetchStarterFiles(): Promise<TemplateFile[]> {
   }
 
   return files as TemplateFile[];
-}
-
-/**
- * The images the project actually has on disk.
- *
- * Handed to the model explicitly because the alternative is it GUESSING an asset path — the exact
- * cause of the "Failed to resolve import" blank preview in Phase 1 (§4.4c). It may import any of
- * these or none of them; it may never import anything else.
- */
-function listAvailableImages(files: TemplateFile[]): string[] {
-  return files
-    .filter(
-      (file) =>
-        file.isBinary && /^(src\/assets|public)\//.test(file.path) && /\.(png|jpe?g|svg|webp)$/i.test(file.path),
-    )
-    .map((file) => file.path)
-    .sort();
 }
 
 /**
@@ -342,13 +322,6 @@ export async function createProjectFromRegistry(options: {
 
   return {
     assistantMessage,
-    userMessage: buildCreationBrief({
-      entry,
-      title,
-      className,
-      images: listAvailableImages(projectFiles),
-      scaffolded: scaffolded !== null,
-    }),
     className,
 
     /*
@@ -379,87 +352,4 @@ export async function createProjectFromRegistry(options: {
   };
 }
 
-/**
- * The hidden brief: what the model must know that it cannot see from the files alone.
- *
- * Kept short on purpose. The Hard Constraints (file zones, play contract, bundle integrity, the
- * landing-page rewrite rule) already live in the CACHED system prompt (§4.2) — repeating them here
- * would pay full input rates on every project creation to say what the model has already been told.
- * This message carries only the per-project FACTS: the class, the scene, the images.
- *
- * 🔴 **IT DOES NOT CARRY THE USER'S REQUEST, AND MUST NOT.** Creation no longer sends anything to a
- * model: this brief is stored with New Project mode and appended, hidden, to the first message the user
- * actually sends — and the user is free to edit that message first, which is the entire point of
- * carrying the prompt back to the textbox. A copy of the prompt as it stood at creation would therefore
- * be a STALE second request sitting underneath the real one, and the model would be asked to build two
- * different games in one turn with no way to know which is current.
- *
- * 🔴 **WHETHER TO DO THE LANDING/CHROME PASS IS THE MODEL'S CALL, MADE FROM THE REQUEST — never a
- * keyword table here.** The owner asked for the system to "detect by the context of the prompt", and in
- * this codebase that means an INSTRUCTION with a stated default, resolved by the model. The alternative
- * has been tried and cost real money twice: the skills router was a hardcoded substring map where `'ui'`
- * matched b-**ui**-ld, so "why is my build failing" inlined a 24KB design skill, while three synced
- * skills were unroutable at all — *"what we have now I'd be better off making a prompt library… which
- * defeats the whole point of skills"*. `effort-policy.ts` states the same rule for spend: decide by turn
- * KIND, never by reading the prompt, because a prose classifier puts the model in charge of the bill.
- * A `spec` test source-scans this path for exactly that regression.
- */
-export function buildCreationBrief(options: {
-  entry: GameRegistryEntry;
-  title: string;
-  className: string;
-  images: string[];
-
-  /** Did §4.4b's copy-rename-register actually run? When false the model must author the mode. */
-  scaffolded: boolean;
-}): string {
-  const { entry, title, className, images, scaffolded } = options;
-
-  const play = entry.scene_url
-    ? `navigate('/play', { gameMode: '${className}', sceneUrl: '${entry.scene_url}' })`
-    : `navigate('/play', { gameMode: '${className}' })`;
-
-  /*
-   * The brief must describe the DISK, not the intent. Telling the model its GameMode is already
-   * copied and registered when the scaffold failed produces a project that compiles and dead-ends at
-   * a blank `/play` — see the module header.
-   */
-  const gameModeFacts = scaffolded
-    ? `- Its starting GameMode is \`${className}\`, already copied to \`src/scripts/${className}.ts\`, renamed, and registered. It is a minimal starting SHELL, not a design: reshape or completely rewrite its contents into whatever the request needs. The project needs AT LEAST ONE registered GameMode to be playable — this is it, and you may freely add more in \`src/scripts/\`; any registered GameMode class may be launched through the play contract.`
-    : `- ⚠️ Its starting GameMode has NOT been scaffolded — you must create it yourself before anything can be played (the project needs AT LEAST ONE registered GameMode). Copy \`${CLASS_LIBRARY_DIR}/${entry.source_class}\` into \`src/scripts/${className}.ts\` (never edit the library original), rename the class AND its \`RegisterClass\` string to \`${className}\`, re-base its relative imports for the new directory (\`'../globals'\` → \`'../babylon/globals'\`), and add \`await import("../scripts/${className}");\` to the registration block in \`${GLOBALS_PATH}\` — without that last step the class never registers and \`/play\` dead-ends. Then freely add more GameModes in \`src/scripts/\` later.`;
-
-  /*
-   * The opening sentence is a CONTRACT, not prose: the agent proxy matches `CREATION_BRIEF_MARKER` to
-   * recognise a creation turn and run it without tools (§4.2). Change the wording here and you must
-   * change the constant — otherwise creation silently regresses to the slow, six-tool-round path.
-   */
-  return `${CREATION_BRIEF_MARKER} Do not re-create it.
-
-**This project**
-- Title: ${title}
-- Starter shell: ${entry.title} (${entry.genre}) — the mounted TEMPLATE, not the game's genre. The user's request decides what this project is.
-${gameModeFacts}
-- Launch it with: \`${play}\`
-${entry.scene_url ? '' : '- This genre has no preload scene; the GameMode builds its own content.\n'}
-**Images on disk** (import from these or none — never invent an asset path):
-${images.map((path) => `- ${path}`).join('\n')}
-
-**Game content — models, levels and examples.** Build what the request asks for with your own creativity — the starter's demo scenes are examples, never a boundary.
-- If a **Prototype Asset Library (Synty)** block is present in your context, it is this project's model library and it is ALWAYS PREFERRED: whenever the request does not supply or name specific assets — even a bare one-line prompt naming only a genre — take every 3D model, character, prop and level from that library (or a pack the user named), referencing assets by their EXACT listed paths (never invent or guess a library path). The library index is already in your context: using it costs no tool calls and must never delay the build itself. Building geometry out of primitives is the LAST resort, allowed only for what the library truly lacks — never the default you start from.
-- If no such block is present, **AUTHOR THE CONTENT YOURSELF.** Build the game's own vehicle, characters, props, track and environment in code — composed primitives, procedural geometry (extrusions, lathes, ribbons, CSG, heightmaps) and materials you write — themed to what was asked for. Do not reference a library you cannot see, and **never substitute a demo asset for a model you were asked to make.** The playground models the reference documents use to demonstrate wiring (\`riggedmustang\`, \`openterrain\`, \`samplescene\`, \`playerarmature\`) are NOT a fallback content library: loading one because it is the nearest thing you have a URL for ships the wrong game — a kart request is not a request for a Mustang on a test map. Load a specific asset URL only when the user named that asset. A recognisable shape you built is always better than the wrong model. (You cannot generate 3D models on this turn, but you can BUILD them; bespoke 2D art comes from the Media panel on a later turn.)
-- When you want a working GameMode or Script Component example, read the demo classes in \`src/babylon/classes/\` first, then the component reference docs in your context, then the training examples they cite.
-
-**Art comes AFTER this turn — do not try to generate any now.** This turn has no image or video tools, deliberately: rendering art inside the build turn is what used to leave projects half-written. Design every surface with CSS (gradients, colour, type, layout) and the images already on disk, and make it look finished as it stands — never a blank box or a placeholder saying art goes here. Once the project is written, the user generates bespoke art from the Media panel or by simply asking on the next turn, and it drops into the design you built. In your closing suggestions, name two or three specific pieces of art this design would benefit from (for example a hero background, a logo/wordmark, splash art) so the user knows what to ask for.
-
-**Your task now**
-This project is a freshly cloned, stock starter template. It is installed and running, and **nothing in it has been designed or built yet** — the landing page, the splash, the preloader and the overlay are all still the untouched defaults.
-
-The user's own message above is the request. It is authoritative: build what it asks for, and where it disagrees with anything inferred at creation, it wins. Read it and decide which of these two it is:
-
-- **A game, an experience, or anything that implies a whole project** — this is the common case, and it is the DEFAULT whenever the request is not plainly narrow. Build what was asked for AND design the complete frontend shell for *${title}* by following the **bt-landing skill** (pre-loaded in your Skills) EXACTLY, using the facts above (GameMode class, play contract, images) as its Step-0 inputs: the landing page (\`src/pages/Home.tsx\` + \`Home.css\`, rewritten completely, full-page-width per the Layout law) AND the game chrome in \`src/chrome/**\` (preloader, splash, overlay — redesigned to the same theme, never derived from the default splash, lightweight, wiring preserved). If the bt-landing skill is absent from your Skills, follow the same rules from the system prompt's "Layout law" and "Chrome rewrites" sections instead.
-- **A single narrow change** — something like *"just add a rotating cube"* or *"show me the FPS counter"*. Do only that, and leave the landing page and the chrome alone. A redesign nobody asked for is destructive, not generous.
-
-If the request above is empty or says nothing about what to build, treat it as the first case and build a complete, playable starting point for this genre.
-
-When you are done, suggest two or three concrete next steps (a new game mode, a menu, a mechanic).`;
-}
+// Mackey Kinard - Creation Brief: 2026-07-22

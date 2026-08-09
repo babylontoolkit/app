@@ -8,12 +8,10 @@
  * runnable project, because a project that exists is one prompt away from correct and a refused
  * creation is not recoverable at all.
  *
- * The second half matters as much as the first and is easier to get wrong: a degraded creation must
- * TELL THE MODEL IT IS DEGRADED. Mounting the template while the brief still claims the GameMode is
- * "already copied, renamed and registered" trades a loud failure for a silent one — the model builds
- * against a class that does not exist and the project compiles, boots, and dead-ends at a blank
- * `/play`, which is the exact failure §4.4b exists to prevent. So every assertion about "it still
- * creates" is paired with one about what the brief says.
+ * (The machine-written creation BRIEF these tests used to pin is retired — owner, 2026-08-08. The
+ * first build turn is an ordinary turn; the baked system prompt and the file context carry what the
+ * brief used to say, so a degraded creation is visible to the model as the absence of a scaffolded
+ * class in `src/scripts/` rather than as a sentence.)
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { GameRegistryEntry } from '~/types/game-registry';
@@ -44,7 +42,6 @@ vi.mock('~/lib/sandbox/identity', () => ({ writeSandboxIdentity }));
 
 import { createProjectFromRegistry } from './create-project';
 import { bootProgress } from '~/lib/stores/boot-progress';
-import { CREATION_BRIEF_MARKER } from '~/types/creation';
 
 const ENTRY: GameRegistryEntry = {
   id: 'gm_racing_v1',
@@ -95,7 +92,7 @@ beforeEach(() => {
 });
 
 describe('createProjectFromRegistry — the project is created first and foremost', () => {
-  it('scaffolds the GameMode and briefs the model that it is ready (the healthy path)', async () => {
+  it('scaffolds the GameMode (the healthy path)', async () => {
     const created = await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer' });
 
     expect(created.className).toBe('KartRacerMode');
@@ -108,7 +105,6 @@ describe('createProjectFromRegistry — the project is created first and foremos
     expect(globals.content).toContain('../scripts/KartRacerMode');
     expect(library.content).toContain('export class VehicleControllerDemo {}');
 
-    expect(created.userMessage).toContain('already copied');
     expect(created.mustBeVisible.some((path) => path.endsWith('src/scripts/KartRacerMode.ts'))).toBe(true);
   });
 
@@ -138,14 +134,7 @@ describe('createProjectFromRegistry — the project is created first and foremos
 
     // ...and nothing pretends the mode is there.
     expect(mountedPaths()).not.toContain('src/scripts/KartRacerMode.ts');
-    expect(created.userMessage).not.toContain('already copied');
-    expect(created.userMessage).toContain('has NOT been scaffolded');
-
-    /*
-     * The degraded brief must be ACTIONABLE, not just honest: the registration step is the one whose
-     * omission is invisible until run time.
-     */
-    expect(created.userMessage).toContain('src/babylon/globals.ts');
+    expect(created.mustBeVisible.some((path) => path.includes('/src/scripts/'))).toBe(false);
   });
 
   it('does not wait on a GameMode it never wrote (a degraded creation would burn the whole timeout)', async () => {
@@ -171,7 +160,7 @@ describe('createProjectFromRegistry — the project is created first and foremos
     const created = await createProjectFromRegistry({ entry: ENTRY, title: 'Kart Racer' });
 
     expect(mountTemplate).toHaveBeenCalledTimes(1);
-    expect(created.userMessage).toContain('has NOT been scaffolded');
+    expect(created.mustBeVisible.some((path) => path.includes('/src/scripts/'))).toBe(false);
   });
 
   it('STILL CREATES THE PROJECT when project hygiene throws', async () => {
@@ -214,143 +203,6 @@ describe('createProjectFromRegistry — the project is created first and foremos
 
     // The caller owns the reset — the last phase this function set must still be standing.
     expect(bootProgress.get().step).toBe('creating-mount');
-  });
-});
-
-/*
- * THE BRIEF IS THE FIRST BUILD TURN'S INSTRUCTIONS (§4.4c, T11).
- *
- * It is machine-written, the user never sees it, and it rides hidden on the most expensive turn in the
- * product — so every one of its failures is silent. Four properties are pinned here because each of them
- * breaks nothing, throws nothing, and simply produces a worse project:
- *
- *   - **The marker, verbatim.** `CREATION_BRIEF_MARKER` is how the server recognises a first build turn;
- *     ten protections hang off that one string (premium lock, skill preload, the bounded media-only tool
- *     loop, `requiresAction`, the liveness copy). Reword the opening sentence without moving the constant
- *     and creation silently regresses to the slow six-tool-round path.
- *   - **The play contract.** The one call gameplay is entered through (§4.4c). A model that has to guess
- *     it writes a project that compiles and dead-ends at a blank `/play`.
- *   - **The scaffolded-class facts.** The brief must describe the DISK. `src/scripts/<Class>.ts` was
- *     written by §4.4b; a brief that omits it hands the model a class it cannot see.
- *   - **BOTH branches of the landing/chrome decision.** The DEFAULT (build the whole frontend shell) and
- *     the EXCEPTION (a narrow request changes nothing else) only work as a pair: with only the default,
- *     "just add a rotating cube" destroys a landing page nobody asked it to touch; with only the
- *     exception, every game ships on the stock starter page.
- */
-describe('the creation brief — what the first build turn is told', () => {
-  const SCENE_ENTRY: GameRegistryEntry = { ...ENTRY, scene_url: 'scenes/track.gltf' };
-
-  async function brief(entry: GameRegistryEntry = ENTRY, title = 'Kart Racer'): Promise<string> {
-    const created = await createProjectFromRegistry({ entry, title });
-    return created.userMessage;
-  }
-
-  it('opens with CREATION_BRIEF_MARKER verbatim — the string the server sniffs for', async () => {
-    const text = await brief();
-
-    expect(text.startsWith(CREATION_BRIEF_MARKER)).toBe(true);
-  });
-
-  it('states the play contract exactly, with and without a preload scene', async () => {
-    expect(await brief()).toContain("navigate('/play', { gameMode: 'KartRacerMode' })");
-
-    const withScene = await brief(SCENE_ENTRY);
-    expect(withScene).toContain("navigate('/play', { gameMode: 'KartRacerMode', sceneUrl: 'scenes/track.gltf' })");
-
-    // The no-scene brief must SAY there is no scene, or the model invents one.
-    expect(await brief()).toContain('no preload scene');
-    expect(withScene).not.toContain('no preload scene');
-  });
-
-  it('states the scaffolded-class facts: the file on disk, the rename, the registration', async () => {
-    const text = await brief();
-
-    expect(text).toContain('`KartRacerMode`');
-    expect(text).toContain('src/scripts/KartRacerMode.ts');
-    expect(text).toContain('already copied');
-    expect(text).toContain('registered');
-  });
-
-  it('lists the images actually on disk, and forbids inventing any other path', async () => {
-    const text = await brief();
-
-    expect(text).toContain('public/babylon.png');
-    expect(text).toContain('never invent an asset path');
-  });
-
-  it('states the situation: a stock starter with nothing designed yet', async () => {
-    const text = await brief();
-
-    expect(text).toContain('stock starter template');
-    expect(text).toMatch(/nothing in it has been designed or built yet/i);
-
-    // The user's own message is the authority — the brief must never present itself as the request.
-    expect(text).toMatch(/user's own message above is the request/i);
-  });
-
-  it('carries the DEFAULT branch — a game brief gets the landing page AND the src/chrome chrome', async () => {
-    const text = await brief();
-
-    expect(text).toMatch(/a game, an experience, or anything that implies a whole project/i);
-    expect(text).toContain('DEFAULT');
-    expect(text).toContain('bt-landing');
-    expect(text).toContain('src/pages/Home.tsx');
-    expect(text).toContain('src/chrome/**');
-  });
-
-  it('carries the EXCEPTION branch — a narrow request leaves the landing page and chrome alone', async () => {
-    const text = await brief();
-
-    expect(text).toMatch(/a single narrow change/i);
-    expect(text).toMatch(/leave the landing page and the chrome alone/i);
-  });
-
-  /*
-   * The two branches are only meaningful together. This is the assertion that fails if a future edit
-   * "simplifies" the block down to whichever half it happened to be looking at.
-   */
-  it('states both branches, in that order — the default first, the exception after it', async () => {
-    const text = await brief();
-
-    const defaultAt = text.search(/a game, an experience, or anything that implies a whole project/i);
-    const exceptionAt = text.search(/a single narrow change/i);
-
-    expect(defaultAt).toBeGreaterThan(-1);
-    expect(exceptionAt).toBeGreaterThan(defaultAt);
-  });
-
-  it('treats an empty request as the default rather than doing nothing', async () => {
-    expect(await brief()).toMatch(/empty or says nothing about what to build/i);
-  });
-
-  /*
-   * 🔴 THE BRIEF CARRIES NO COPY OF THE USER'S REQUEST (§4.4a).
-   *
-   * Creation contacts no model: the prompt goes back to the TEXTBOX, where the user may edit it before
-   * sending. A copy taken at creation would therefore be a STALE second request sitting underneath the
-   * real one, and the model would be asked to build two different games in one turn with no way to know
-   * which is current. The `prompt` option was removed outright rather than ignored — a field nothing
-   * reads is how a deleted system comes back.
-   */
-  it('contains no copy of the user request, even when one is forced through the options', async () => {
-    const request = 'build me a neon cyberpunk hoverbike racer with a boost meter';
-
-    const baseline = await brief();
-
-    /*
-     * The cast is the point: `prompt` is not part of the signature any more. Forcing it through proves
-     * the removal is real — the brief is byte-identical, so nothing anywhere is still reading it.
-     */
-    const forced = await createProjectFromRegistry({
-      entry: ENTRY,
-      title: 'Kart Racer',
-      prompt: request,
-    } as unknown as Parameters<typeof createProjectFromRegistry>[0]);
-
-    expect(forced.userMessage).toBe(baseline);
-    expect(forced.userMessage).not.toContain(request);
-    expect(forced.userMessage).not.toContain('hoverbike');
-    expect(forced.assistantMessage).not.toContain(request);
   });
 });
 

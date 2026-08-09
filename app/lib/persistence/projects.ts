@@ -110,14 +110,13 @@ export async function renameProject(projectId: string, name: string): Promise<Pr
 /**
  * Store (or clear, with `null`) the creation handoff on the project row (§4.4a, migration 0016).
  *
- * 🔴 On the PROJECT, not in `localStorage`, because the brief is a fact about the project: it used to
- * live in one browser, so an unbuilt project opened on a second device sent its first build turn with
- * no play contract, no scaffolded class name and no list of the images on disk — a worse build, and
- * nothing anywhere said why.
+ * 🔴 On the PROJECT, not in `localStorage`, because "created but never built" is a fact about the
+ * project: held in one browser, an unbuilt project opened on a second device showed no handoff card
+ * and lost the carried prompt. The machine-written `brief` field is retired (owner, 2026-08-08).
  */
 export async function saveCreationHandoff(
   projectId: string,
-  handoff: { brief: string; userPrompt?: string; plan?: CreationPlan } | null,
+  handoff: { userPrompt?: string; plan?: CreationPlan } | null,
 ): Promise<void> {
   await api<{ project: Project }>(`/api/projects/${projectId}`, {
     method: 'PATCH',

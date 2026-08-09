@@ -23,35 +23,27 @@ import { errorResponse } from '~/lib/.server/http';
  * nothing about it would ever throw. Generous enough for the real brief (~4KB with the media section)
  * plus a wizard's compiled selections.
  */
-const MAX_HANDOFF_BRIEF_CHARS = 24_000;
 const MAX_HANDOFF_PROMPT_CHARS = 8_000;
 
 /**
- * Validate a handoff sent by the browser. `null` CLEARS it — that is how the plan ends, so it must be
- * expressible; a malformed BRIEF also clears rather than throwing, because a corrupt handoff is
- * exactly a project that should stop offering to build itself.
+ * Validate a handoff sent by the browser. `null` CLEARS it — that is how the handoff ends on the first
+ * build send, so it must be expressible; anything that is not an object also clears, because a corrupt
+ * handoff is exactly a project that should stop offering to build itself.
  *
- * 🔴 **A malformed PLAN does NOT clear — it is dropped, and the brief is kept.** The rule above is
- * right for a brief and catastrophic for a plan: clearing on a corrupt plan strands a half-built
- * project with no way to resume, after the user has already paid for the phases that ran. A dropped
- * plan degrades to the pre-phase single turn, which is survivable; a dropped brief is not. Two fields
- * with two failure modes, deliberately not one rule.
+ * The machine-written `brief` field is RETIRED (owner, 2026-08-08) — an old client still sending one
+ * has it silently dropped here. A malformed PLAN is likewise dropped rather than clearing the handoff:
+ * clearing on a corrupt plan strands a half-built project with no way to resume.
  */
 function parseCreationHandoff(value: unknown): CreationHandoff | undefined {
-  if (!value || typeof value !== 'object') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
 
-  const { brief, userPrompt, plan } = value as { brief?: unknown; userPrompt?: unknown; plan?: unknown };
-
-  if (typeof brief !== 'string' || brief.length === 0) {
-    return undefined;
-  }
+  const { userPrompt, plan } = value as { userPrompt?: unknown; plan?: unknown };
 
   const parsedPlan = parseCreationPlan(plan);
 
   return {
-    brief: brief.slice(0, MAX_HANDOFF_BRIEF_CHARS),
     ...(typeof userPrompt === 'string' && userPrompt.length > 0
       ? { userPrompt: userPrompt.slice(0, MAX_HANDOFF_PROMPT_CHARS) }
       : {}),

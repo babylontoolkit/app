@@ -118,9 +118,14 @@ navigate('/play', { gameMode: 'YourModeClassName', sceneUrl: 'optional/scene.glt
 
 ## Landing-page rewrites
 
-`src/pages/Home.tsx` and `Home.css` are **overwritten from scratch** for each project, designed for
-that specific game. Nothing from the starter page survives: no hero, no demo buttons, no Vite/React/
-Babylon links, no footer, and **no Toolkit or BabylonJS attribution or branding of any kind**.
+**When a project is FIRST BUILT OUT** — the first build turn on a freshly created project, or any
+later turn where the user explicitly asks for a redesign — `src/pages/Home.tsx` and `Home.css` are
+**overwritten from scratch**, designed for that specific game. Nothing from the starter page survives:
+no hero, no demo buttons, no Vite/React/Babylon links, no footer, and **no Toolkit or BabylonJS
+attribution or branding of any kind**.
+
+**On any other turn, leave the landing page alone.** A narrow request ("add an FPS counter", "fix the
+boost pads") touches only what it names — a redesign nobody asked for is destructive, not generous.
 
 Carry forward only the navigation **pattern** (`useUnifiedNavigation` → the play contract) — never its
 markup, copy, or links. Use whichever starter images the new design calls for and simply don't import
@@ -194,9 +199,10 @@ repeat(auto-fit, minmax(...))`), not absolute positioning or fixed columns that 
 
 ## Chrome rewrites — splash, preloader, overlay (do ALL THREE, not just the overlay)
 
-The landing page is not the only starter surface. On a new project you redesign the game's **chrome** in
-`src/chrome/**` to match that same design. **This is FIVE required files, and it is easy to do
-only the overlay and stop — do not.** The splash and preloader are the two that ship with the **Babylon
+The landing page is not the only starter surface. On the same first-build-out turn (or an explicitly
+requested redesign) you redesign the game's **chrome** in `src/chrome/**` to match that same design —
+and on any other turn you leave it alone, exactly like the landing page. **This is FIVE required
+files, and it is easy to do only the overlay and stop — do not.** The splash and preloader are the two that ship with the **Babylon
 logo and spinner**, so skipping them leaves BabylonJS branding sitting in the user's game (§2.3) — the
 exact thing the landing-page rewrite exists to prevent. Restyle freely, but keep each one's wiring,
 because all three are functional:

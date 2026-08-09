@@ -454,7 +454,7 @@ describe('the composer carries the chosen rung', () => {
  * that matters most.
  */
 describe('the first build turn (reload) carries the rung', () => {
-  it('sends the tier on the creation-brief send path', async () => {
+  it('sends the tier on the first build send — now an ordinary append (the brief is retired)', async () => {
     modelTierStore.set('premium');
 
     mountChat();
@@ -466,10 +466,10 @@ describe('the first build turn (reload) carries the rung', () => {
     expect(posts.length).toBe(1);
     expect(posts[0].body!.tier).toBe('premium');
 
-    /* CONTROL — this really was the brief path: the hidden brief travelled with the user's words. */
+    /* CONTROL — the user's words travelled, and nothing hidden travelled with them. */
     const contents = (posts[0].body!.messages as { content: string }[]).map((m) => m.content).join('\n');
-    expect(contents).toContain('CREATION BRIEF');
     expect(contents).toContain('add a boost pad');
+    expect(contents).not.toContain('CREATION BRIEF');
   });
 });
 

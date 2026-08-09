@@ -391,10 +391,10 @@ describe('the handoff card puts the prompt in the box only when asked', () => {
 
   /*
    * 🔴 Build goes through the ORDINARY `sendMessage`, so the first build turn keeps every protection
-   * that hangs off it. The one this test can see from outside is the hidden creation brief: exactly one
-   * `/api/agent` request, carrying the marker the server sniffs for.
+   * that hangs off it: exactly one `/api/agent` request, carrying the user's words and nothing hidden
+   * (the machine-written brief is retired — owner, 2026-08-08).
    */
-  it('Build my game posts exactly ONE turn, carrying the hidden creation brief', async () => {
+  it('Build my game posts exactly ONE turn, carrying the user’s words alone', async () => {
     await createThen('build my game');
 
     expect(agentRequests()).toHaveLength(1);
@@ -403,9 +403,9 @@ describe('the handoff card puts the prompt in the box only when asked', () => {
     const contents = (posted?.body?.messages ?? []).map((message: any) => message.content).join('\n');
 
     expect(contents).toContain(TYPED_PROMPT);
-    expect(contents).toContain(BRIEF);
+    expect(contents).not.toContain(BRIEF);
 
-    // Sent, so the mode is over — a second send must not append the brief again.
+    // Sent, so the mode is over — the card cannot come back offering to build a game already building.
     expect(newProjectModeStore.get()).toBeNull();
   });
 });

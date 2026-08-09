@@ -1,14 +1,17 @@
 /**
  * NEW PROJECT MODE — the state (T7).
  *
- * The mode carries the machine-written creation brief from the moment a project is cloned to the moment
- * its first build turn is posted. Everything it can get wrong is silent:
+ * The mode marks "this project exists and has never been built" from the moment a project is cloned to
+ * the moment its first build turn is posted, and carries the user's own prompt across reloads. (The
+ * machine-written creation BRIEF it used to carry is retired — owner, 2026-08-08: the first build turn
+ * is an ordinary turn, and the baked system prompt owns what the brief used to say.) Everything the
+ * mode can get wrong is silent:
  *
- *   - a mode that does not survive a reload loses the brief for a user who created a project, refreshed,
- *     and then typed — they get a build with no play contract, no scaffolded class name, no asset list;
- *   - a mode that leaks across projects sends project A's brief as project B's;
+ *   - a mode that does not survive a reload loses the carried prompt for a user who created a project,
+ *     refreshed, and then typed;
+ *   - a mode that leaks across projects offers project A's prompt as project B's;
  *   - a mode cleared by `/context` spends itself on a command that posted nothing;
- *   - a mode NOT cleared on send appends the brief twice.
+ *   - a mode NOT cleared on send lets a second, fast send read it again.
  *
  * None of those throw. So the storage is injected and every branch is driven directly, and the two
  * properties that depend on module-level state (surviving a reload, not leaking across an SPA navigate)
@@ -38,7 +41,7 @@ function memoryStorage(seed: Record<string, string> = {}) {
   } satisfies ModeStorage & { map: Map<string, string> };
 }
 
-const BRIEF = '<creation-brief>build the racing game</creation-brief>';
+const PROMPT = 'a kart racer with boost pads';
 
 beforeEach(() => {
   /* Module-level nanostore: without this the tests pass or fail on their order. */
@@ -53,13 +56,16 @@ describe('the key', () => {
 });
 
 describe('entering the mode', () => {
-  it('sets the live store and persists the brief under this project’s key', () => {
+  it('sets the live store and persists the prompt under this project’s key', () => {
     const storage = memoryStorage();
 
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
-    expect(newProjectModeStore.get()).toEqual({ projectId: 'proj_a', brief: BRIEF });
-    expect(JSON.parse(storage.map.get(newProjectModeKey('proj_a'))!)).toEqual({ projectId: 'proj_a', brief: BRIEF });
+    expect(newProjectModeStore.get()).toEqual({ projectId: 'proj_a', userPrompt: PROMPT });
+    expect(JSON.parse(storage.map.get(newProjectModeKey('proj_a'))!)).toEqual({
+      projectId: 'proj_a',
+      userPrompt: PROMPT,
+    });
   });
 
   /**
@@ -70,9 +76,9 @@ describe('entering the mode', () => {
   it('with no project id sets the store but writes NOTHING — least of all under the bare prefix', () => {
     const storage = memoryStorage();
 
-    enterNewProjectMode({ projectId: '', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: '', userPrompt: PROMPT }, storage);
 
-    expect(newProjectModeStore.get()).toEqual({ projectId: '', brief: BRIEF });
+    expect(newProjectModeStore.get()).toEqual({ projectId: '', userPrompt: PROMPT });
     expect([...storage.map.keys()]).toEqual([]);
     expect(storage.map.has(NEW_PROJECT_MODE_PREFIX)).toBe(false);
   });
@@ -88,20 +94,20 @@ describe('entering the mode', () => {
       },
     };
 
-    expect(() => enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, throwing)).not.toThrow();
-    expect(newProjectModeStore.get()).toEqual({ projectId: 'proj_a', brief: BRIEF });
+    expect(() => enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, throwing)).not.toThrow();
+    expect(newProjectModeStore.get()).toEqual({ projectId: 'proj_a', userPrompt: PROMPT });
   });
 
   it('tolerates having no storage at all (SSR)', () => {
-    expect(() => enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, null)).not.toThrow();
-    expect(newProjectModeStore.get()?.brief).toBe(BRIEF);
+    expect(() => enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, null)).not.toThrow();
+    expect(newProjectModeStore.get()?.userPrompt).toBe(PROMPT);
   });
 });
 
 describe('reading a stored mode', () => {
-  it('returns the brief for its own project', () => {
+  it('returns the prompt for its own project', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     /*
      * The full shape, not a subset: the record is rebuilt field by field on read (never spread), and
@@ -110,9 +116,30 @@ describe('reading a stored mode', () => {
      */
     expect(readNewProjectMode('proj_a', storage)).toEqual({
       projectId: 'proj_a',
-      brief: BRIEF,
-      userPrompt: undefined,
+      userPrompt: PROMPT,
     });
+  });
+
+  /**
+   * A record with no prompt is still a valid mode — the card path (a genre picked, nothing typed) has
+   * no words, and the mode's job is marking "created, never built", not carrying text.
+   */
+  it('accepts a record with no userPrompt at all', () => {
+    const storage = memoryStorage({ [newProjectModeKey('proj_a')]: JSON.stringify({ projectId: 'proj_a' }) });
+
+    expect(readNewProjectMode('proj_a', storage)).toEqual({ projectId: 'proj_a', userPrompt: undefined });
+  });
+
+  /** A legacy record still carrying the retired `brief` field reads cleanly — the field is ignored. */
+  it('ignores the retired brief field on an old record', () => {
+    const storage = memoryStorage({
+      [newProjectModeKey('proj_a')]: JSON.stringify({ projectId: 'proj_a', brief: '<old brief>', userPrompt: PROMPT }),
+    });
+
+    const mode = readNewProjectMode('proj_a', storage);
+
+    expect(mode).toEqual({ projectId: 'proj_a', userPrompt: PROMPT });
+    expect(mode && 'brief' in mode ? (mode as Record<string, unknown>).brief : undefined).toBeUndefined();
   });
 
   it('returns null for a project with no record', () => {
@@ -120,12 +147,12 @@ describe('reading a stored mode', () => {
   });
 
   /**
-   * 🔴 The inner id is checked against the key. A record that disagrees is a mis-keyed write, and a
-   * stored brief is INSTRUCTIONS that reach the model — believing it would send another project's brief.
+   * 🔴 The inner id is checked against the key. A record that disagrees is a mis-keyed write, and the
+   * stored prompt reaches the chat box — believing it would offer another project's prompt.
    */
   it('REJECTS a record whose inner projectId disagrees with the key it was found under', () => {
     const storage = memoryStorage({
-      [newProjectModeKey('proj_b')]: JSON.stringify({ projectId: 'proj_a', brief: BRIEF }),
+      [newProjectModeKey('proj_b')]: JSON.stringify({ projectId: 'proj_a', userPrompt: PROMPT }),
     });
 
     expect(readNewProjectMode('proj_b', storage)).toBeNull();
@@ -134,15 +161,21 @@ describe('reading a stored mode', () => {
   it.each([
     ['corrupt JSON', '{not json'],
     ['a truncated write', '{"projectId":"proj_a"'],
-    ['a missing brief', JSON.stringify({ projectId: 'proj_a' })],
-    ['an empty brief', JSON.stringify({ projectId: 'proj_a', brief: '' })],
-    ['a non-string brief', JSON.stringify({ projectId: 'proj_a', brief: 42 })],
     ['a bare null', JSON.stringify(null)],
-    ['an array', JSON.stringify([{ projectId: 'proj_a', brief: BRIEF }])],
+    ['an array', JSON.stringify([{ projectId: 'proj_a', userPrompt: PROMPT }])],
   ])('returns null for %s', (_label, raw) => {
     const storage = memoryStorage({ [newProjectModeKey('proj_a')]: raw });
 
     expect(readNewProjectMode('proj_a', storage)).toBeNull();
+  });
+
+  /** A corrupt optional degrades to "no words" — never `[object Object]` in the chat box. */
+  it('drops a non-string userPrompt rather than rejecting the record', () => {
+    const storage = memoryStorage({
+      [newProjectModeKey('proj_a')]: JSON.stringify({ projectId: 'proj_a', userPrompt: 42 }),
+    });
+
+    expect(readNewProjectMode('proj_a', storage)).toEqual({ projectId: 'proj_a', userPrompt: undefined });
   });
 
   it('returns null for an empty project id without touching storage', () => {
@@ -175,13 +208,13 @@ describe('surviving a reload', () => {
    * The reload is simulated the only way that means anything here: the live store is emptied (module
    * state does not survive a page load) and the mode is re-hydrated from the SAME storage.
    */
-  it('a project created, then reloaded, is still in the mode with its brief intact', () => {
+  it('a project created, then reloaded, is still in the mode with its prompt intact', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     newProjectModeStore.set(null); // the reload
 
-    const rehydrated = { projectId: 'proj_a', brief: BRIEF, userPrompt: undefined };
+    const rehydrated = { projectId: 'proj_a', userPrompt: PROMPT };
 
     expect(hydrateNewProjectMode('proj_a', storage)).toEqual(rehydrated);
     expect(newProjectModeStore.get()).toEqual(rehydrated);
@@ -189,7 +222,7 @@ describe('surviving a reload', () => {
 
   it('a project whose mode was cleared before the reload comes back with nothing', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
     exitNewProjectMode('proj_a', storage);
 
     newProjectModeStore.set(null);
@@ -201,7 +234,7 @@ describe('surviving a reload', () => {
 describe('scoping — one project can never answer for another', () => {
   it('entering for A then hydrating for B yields null', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     expect(hydrateNewProjectMode('proj_b', storage)).toBeNull();
     expect(newProjectModeStore.get()).toBeNull();
@@ -210,11 +243,11 @@ describe('scoping — one project can never answer for another', () => {
   /**
    * 🔴 THE `null` WRITE IS THE LOAD-BEARING HALF. "New project" and a dashboard Open are SPA navigates:
    * module state survives them, so a hydrate that only writes when it FINDS something leaves the previous
-   * project's brief in the store and the user carries it into a game they had already built.
+   * project's mode in the store and the user carries it into a game they had already built.
    */
   it('hydrating a project with no mode CLEARS the store — it does not leave the previous project’s mode', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
     expect(newProjectModeStore.get()?.projectId).toBe('proj_a');
 
     hydrateNewProjectMode('proj_b', storage);
@@ -224,35 +257,35 @@ describe('scoping — one project can never answer for another', () => {
 
   it('hydrating with no project at all clears the store', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     expect(hydrateNewProjectMode(undefined, storage)).toBeNull();
     expect(newProjectModeStore.get()).toBeNull();
   });
 
-  it('two projects hold independent records, and going back to A restores A’s brief', () => {
+  it('two projects hold independent records, and going back to A restores A’s prompt', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: 'brief A' }, storage);
-    enterNewProjectMode({ projectId: 'proj_b', brief: 'brief B' }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: 'prompt A' }, storage);
+    enterNewProjectMode({ projectId: 'proj_b', userPrompt: 'prompt B' }, storage);
 
-    expect(hydrateNewProjectMode('proj_a', storage)?.brief).toBe('brief A');
-    expect(hydrateNewProjectMode('proj_b', storage)?.brief).toBe('brief B');
+    expect(hydrateNewProjectMode('proj_a', storage)?.userPrompt).toBe('prompt A');
+    expect(hydrateNewProjectMode('proj_b', storage)?.userPrompt).toBe('prompt B');
   });
 
-  it('creating a second project does not overwrite the first one’s stored brief', () => {
+  it('creating a second project does not overwrite the first one’s stored prompt', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: 'brief A' }, storage);
-    enterNewProjectMode({ projectId: 'proj_b', brief: 'brief B' }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: 'prompt A' }, storage);
+    enterNewProjectMode({ projectId: 'proj_b', userPrompt: 'prompt B' }, storage);
 
     expect(storage.map.size).toBe(2);
-    expect(readNewProjectMode('proj_a', storage)?.brief).toBe('brief A');
+    expect(readNewProjectMode('proj_a', storage)?.userPrompt).toBe('prompt A');
   });
 });
 
 describe('leaving the mode', () => {
   it('clears the live store and removes the record', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     exitNewProjectMode('proj_a', storage);
 
@@ -267,16 +300,16 @@ describe('leaving the mode', () => {
    */
   it('exiting a project that is NOT the open one leaves the open one’s store alone', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     exitNewProjectMode('proj_b', storage);
 
-    expect(newProjectModeStore.get()).toEqual({ projectId: 'proj_a', brief: BRIEF });
+    expect(newProjectModeStore.get()).toEqual({ projectId: 'proj_a', userPrompt: PROMPT });
   });
 
   it('is idempotent — a second exit is a no-op, not a throw', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     exitNewProjectMode('proj_a', storage);
 
@@ -293,20 +326,19 @@ describe('leaving the mode', () => {
       },
     };
 
-    newProjectModeStore.set({ projectId: 'proj_a', brief: BRIEF });
+    newProjectModeStore.set({ projectId: 'proj_a', userPrompt: PROMPT });
 
     expect(() => exitNewProjectMode('proj_a', throwing)).not.toThrow();
     expect(newProjectModeStore.get()).toBeNull();
   });
 
   /**
-   * 🔴 CLEARED ON SEND, NOT ON FINISH — so a failed build is retried WITH the brief. The mode is gone
-   * from the moment the first turn is posted, which is what makes the retry ordinary rather than a
-   * second hidden append.
+   * 🔴 CLEARED ON SEND, NOT ON FINISH — the mode is gone from the moment the first turn is posted,
+   * which is what makes a retry after a failed build an ordinary turn.
    */
-  it('a retry after a failed build carries no second brief — the mode ended at the send', () => {
+  it('a retry after a failed build finds no mode — it ended at the send', () => {
     const storage = memoryStorage();
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, storage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: PROMPT }, storage);
 
     exitNewProjectMode('proj_a', storage); // the send
 

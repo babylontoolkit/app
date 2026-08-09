@@ -23,7 +23,7 @@
  *   • the synced Agent Reference docs (`babylontoolkit/agent`) — authored externally, owner's fix.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 /** The path the chrome lives at today, and the ones it must never be described by again. */
@@ -40,7 +40,8 @@ function shippedFiles(): string[] {
     .filter((f) => /\.(ts|tsx|js|jsx|css|scss|json|md)$/.test(f))
     .filter((f) => !f.endsWith('.spec.ts') && !f.endsWith('.spec.tsx'))
     .filter((f) => !/^(SPEC|CLAUDE|GETTING_STARTED|NEW_PROJECT|FORK_BASE|README|DEPLOY|CREDITS)\.md$/.test(f))
-    .filter((f) => !f.startsWith('_specs/') && !f.startsWith('spec/') && !f.startsWith('docs/'));
+    .filter((f) => !f.startsWith('_specs/') && !f.startsWith('spec/') && !f.startsWith('docs/'))
+    .filter((f) => existsSync(f)); // `git ls-files` still lists a file deleted-but-unstaged
 }
 
 describe('the chrome zone path', () => {
@@ -78,19 +79,17 @@ describe('the chrome zone path', () => {
     ).toEqual([]);
   });
 
-  it('is stated to the model in the baked prompt and the creation brief', () => {
+  it('is stated to the model in the baked prompt', () => {
     /*
      * The inverse of the scan above: removing the path entirely would also pass a "no retired path"
-     * check, and leave the model with no idea where the chrome is.
+     * check, and leave the model with no idea where the chrome is. The baked prompt is its one home —
+     * the creation brief that also used to name it is retired (owner, 2026-08-08).
      */
     const prompt = readFileSync('app/lib/.server/prompt/sections/20-hard-constraints.md', 'utf8');
     expect(prompt).toContain(`${CURRENT_ZONE}/**`);
     expect(prompt).toContain(`${CURRENT_ZONE}/splash.tsx`);
     expect(prompt).toContain(`${CURRENT_ZONE}/loading.tsx`);
     expect(prompt).toContain(`${CURRENT_ZONE}/overlay.tsx`);
-
-    const brief = readFileSync('app/lib/registry/create-project.ts', 'utf8');
-    expect(brief).toContain(`${CURRENT_ZONE}/**`);
   });
 
   it('keeps the chrome OUTSIDE the read-only framework folder', () => {

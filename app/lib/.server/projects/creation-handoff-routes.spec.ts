@@ -1,23 +1,21 @@
 /**
  * The creation handoff on the project route (SPEC §4.4a, §4.5.3, §4.2.8, migration 0016).
  *
- * The handoff is what an unbuilt project still owes its owner: the machine-written creation brief —
- * which carries `CREATION_BRIEF_MARKER` and therefore switches ten server-side protections ON for the
- * first build turn — plus the user's own words. It lived in `localStorage`, which made it a fact about
- * a DEVICE: open an unbuilt project on a second machine and there was no handoff card, and the first
- * build turn went out with no brief at all. The build still ran and was simply worse, with nothing
- * throwing and the token count going DOWN. That is §4.2.8's stated failure mode, and it is why every
- * assertion here is about the ROW rather than about a status code.
+ * The handoff is what an unbuilt project still owes its owner: the user's own words, carried until
+ * their first build turn, plus the phase plan. (The machine-written creation BRIEF is retired — owner,
+ * 2026-08-08 — an old client still sending one has it silently dropped.) It lived in `localStorage`,
+ * which made it a fact about a DEVICE: open an unbuilt project on a second machine and there was no
+ * handoff card and no carried prompt. That is why every assertion here is about the ROW rather than
+ * about a status code.
  *
  * Three properties, each of which fails silently:
  *
  * - **`null` must clear it.** That is how the first build turn ends New Project mode. A route that
  *   cannot express "cleared" is a project that offers to build itself forever.
- * - **Malformed input clears rather than throws.** A corrupt handoff is exactly a project that should
+ * - **A non-object clears rather than throws.** A corrupt handoff is exactly a project that should
  *   stop offering to build itself — and a 500 here would leave the mode stuck instead.
- * - **The brief is CAPPED.** It arrives in a browser body and it is sent to the model on the most
- *   expensive turn in the product, so an unbounded one is an unbounded per-turn bill, forever
- *   (`MAX_INSTRUCTIONS_CHARS`'s reasoning, one field to the left).
+ * - **The prompt is CAPPED.** It arrives in a browser body and it reaches the model, so an unbounded
+ *   one is an unbounded per-turn bill (`MAX_INSTRUCTIONS_CHARS`'s reasoning).
  *
  * Plus the two walls, as everywhere a project is touched: a session AND ownership, with someone else's
  * project answering **404, not 403** — a 403 confirms the id exists and turns the route into an
@@ -87,7 +85,7 @@ async function capFromSource(name: string): Promise<number> {
   return Number(match![1].replace(/_/g, ''));
 }
 
-const BRIEF = `Build the game described above.\n<!-- creation-brief -->\nPlay contract: navigate('/play', { gameMode: 'KartRacerMode' }).`;
+const PROMPT = 'a kart racer with boost pads and drifting';
 
 let tmp: string;
 let projects: FsProjectStore;
@@ -152,29 +150,38 @@ const storedHandoff = async (projectId: string) => (await projects.get(projectId
 
 describe('storing and reading back the handoff', () => {
   it('a PATCH stores it and a later GET returns it — a second device sees the same handoff', async () => {
-    expect((await patch(mine.id, { creationHandoff: { brief: BRIEF, userPrompt: 'a kart racer' } })).status).toBe(200);
+    expect((await patch(mine.id, { creationHandoff: { userPrompt: PROMPT } })).status).toBe(200);
 
     /*
      * Read through the ROUTE, not the store: the whole point of moving this off `localStorage` is that
      * a browser which never created the project can fetch it. A field persisted but stripped by
-     * `toWireProject` would pass a store test and still leave the second device with no brief.
+     * `toWireProject` would pass a store test and still leave the second device with no prompt.
      */
-    expect(await wireHandoff(mine.id)).toEqual({ brief: BRIEF, userPrompt: 'a kart racer' });
+    expect(await wireHandoff(mine.id)).toEqual({ userPrompt: PROMPT });
   });
 
-  it('keeps the brief when there were no user words — the card path had none, and inventing some is worse', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF } });
+  it('keeps the handoff when there were no user words — the card path had none, and inventing some is worse', async () => {
+    await patch(mine.id, { creationHandoff: {} });
 
     const handoff = await wireHandoff(mine.id);
-    expect(handoff?.brief).toBe(BRIEF);
+    expect(handoff).toBeTruthy();
     expect(handoff?.userPrompt).toBeUndefined();
   });
 
+  /** A legacy client still sending the retired brief has it silently dropped — never stored, never wired. */
+  it('drops the retired brief field from an old client, keeping the rest', async () => {
+    await patch(mine.id, { creationHandoff: { brief: '<old machine brief>', userPrompt: PROMPT } });
+
+    const handoff = await wireHandoff(mine.id);
+    expect(handoff).toEqual({ userPrompt: PROMPT });
+    expect(JSON.stringify(handoff)).not.toContain('old machine brief');
+  });
+
   it('a rename does not disturb the handoff — an unrelated PATCH must not end New Project mode', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF } });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT } });
     await patch(mine.id, { name: 'Renamed' });
 
-    expect((await storedHandoff(mine.id))?.brief).toBe(BRIEF);
+    expect((await storedHandoff(mine.id))?.userPrompt).toBe(PROMPT);
   });
 });
 
@@ -182,8 +189,8 @@ describe('storing and reading back the handoff', () => {
  * 🔴 THE PHASE PLAN (§4.4e, migration 0020) — two rules the brief's own rules get WRONG.
  *
  * Creation is now Game → Frontend → Art → Verify, driven by a plan stored in this same column. The
- * plan is what says which phases are still owed, so it outlives the brief (which is still consumed on
- * send) and the whole handoff is NULL only once the last phase completes.
+ * plan is what says which phases are still owed, and the whole handoff is NULL only once the last
+ * phase completes.
  *
  * Both rules below shipped untested on the first pass, and a mutation proved it: removing the split
  * malformed rule left all 18 assertions green.
@@ -191,8 +198,10 @@ describe('storing and reading back the handoff', () => {
 describe('the phase plan', () => {
   const plan = (next: number, done: unknown[] = []) => ({ v: 1, phases: ['game', 'frontend', 'art'], next, done });
 
-  it('stores a plan alongside the brief and hands it back on the wire', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(1, [{ id: 'game', state: 'finished' }]) } });
+  it('stores a plan alongside the prompt and hands it back on the wire', async () => {
+    await patch(mine.id, {
+      creationHandoff: { userPrompt: PROMPT, plan: plan(1, [{ id: 'game', state: 'finished' }]) },
+    });
 
     const handoff = await wireHandoff(mine.id);
     expect(handoff?.plan?.next).toBe(1);
@@ -208,20 +217,20 @@ describe('the phase plan', () => {
    * clearing on a corrupt plan strands a HALF-BUILT project with no way to resume, after the user has
    * already paid for the phases that ran. Two fields, two failure modes, deliberately not one rule.
    */
-  it('drops a malformed plan but KEEPS the brief — a corrupt plan must not strand a half-built project', async () => {
+  it('drops a malformed plan but KEEPS the handoff — a corrupt plan must not strand a half-built project', async () => {
     for (const bad of [{ v: 99 }, { v: 1, phases: [] }, { v: 1, phases: ['nope'] }, 'plan', 42, []]) {
       await patch(mine.id, { creationHandoff: null });
-      await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: bad } });
+      await patch(mine.id, { creationHandoff: { userPrompt: PROMPT, plan: bad } });
 
       const handoff = await storedHandoff(mine.id);
-      expect(handoff?.brief).toBe(BRIEF);
+      expect(handoff?.userPrompt).toBe(PROMPT);
       expect(handoff?.plan).toBeUndefined();
     }
   });
 
-  it('CONTROL: a malformed BRIEF still clears everything, plan included', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(1) } });
-    await patch(mine.id, { creationHandoff: { brief: '', plan: plan(2) } });
+  it('CONTROL: a non-object handoff still clears everything, plan included', async () => {
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT, plan: plan(1) } });
+    await patch(mine.id, { creationHandoff: 'just build it' });
 
     expect(await storedHandoff(mine.id)).toBeUndefined();
   });
@@ -235,8 +244,10 @@ describe('the phase plan', () => {
    * what gets rebuilt: a read-then-write check is a race, so the merge IS the write.
    */
   it('never rewinds the plan — a stale tab cannot re-run a finished phase', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(2, [{ id: 'game', state: 'finished' }]) } });
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(0) } });
+    await patch(mine.id, {
+      creationHandoff: { userPrompt: PROMPT, plan: plan(2, [{ id: 'game', state: 'finished' }]) },
+    });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT, plan: plan(0) } });
 
     const handoff = await storedHandoff(mine.id);
     expect(handoff?.plan?.next).toBe(2);
@@ -244,8 +255,8 @@ describe('the phase plan', () => {
   });
 
   it('CONTROL: a plan that really is ahead still advances — the merge is not a freeze', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(1) } });
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(2) } });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT, plan: plan(1) } });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT, plan: plan(2) } });
 
     expect((await storedHandoff(mine.id))?.plan?.next).toBe(2);
   });
@@ -255,7 +266,7 @@ describe('the phase plan', () => {
    * of the plan is the only thing that stops the project offering to build itself forever.
    */
   it('an explicit null still clears a project mid-plan', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, plan: plan(2) } });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT, plan: plan(2) } });
     await patch(mine.id, { creationHandoff: null });
 
     expect(await storedHandoff(mine.id)).toBeUndefined();
@@ -264,12 +275,11 @@ describe('the phase plan', () => {
 
 describe('clearing it', () => {
   /*
-   * 🔴 The end state. `null` is sent when the first build turn is SENT — not when it succeeds, because
-   * a failed build is retried and the retry must still carry the brief. If the route could not express
+   * 🔴 The end state. `null` is sent when the first build turn is SENT. If the route could not express
    * "cleared", the project would go on offering to build itself after it had been built.
    */
   it('PATCH with null clears it', async () => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, userPrompt: 'a kart racer' } });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT } });
     expect(await storedHandoff(mine.id)).toBeTruthy();
 
     expect((await patch(mine.id, { creationHandoff: null })).status).toBe(200);
@@ -279,20 +289,16 @@ describe('clearing it', () => {
   });
 
   /*
-   * A corrupt handoff is exactly a project that should stop offering to build itself: a brief that is
-   * missing, empty, or not a string cannot carry `CREATION_BRIEF_MARKER`, so building from it is
-   * strictly worse than not offering. Throwing instead would leave the mode stuck with no way out.
+   * A corrupt handoff is exactly a project that should stop offering to build itself. Throwing instead
+   * would leave the mode stuck with no way out. (An object — even an empty one — is a VALID handoff:
+   * the card path carries no words, so `{}` means "created, never built, nothing typed".)
    */
   it.each([
-    ['a missing brief', { userPrompt: 'a kart racer' }],
-    ['an empty brief', { brief: '' }],
-    ['a non-string brief', { brief: { text: BRIEF } }],
-    ['an empty object', {}],
     ['a bare string', 'just build it'],
-    ['an array', [BRIEF]],
+    ['an array', [PROMPT]],
     ['a number', 7],
   ])('%s clears rather than throwing', async (_label, value) => {
-    await patch(mine.id, { creationHandoff: { brief: BRIEF } });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT } });
 
     const response = await patch(mine.id, { creationHandoff: value });
 
@@ -301,31 +307,23 @@ describe('clearing it', () => {
   });
 });
 
-describe('the caps (§4.2.8)', () => {
-  it('truncates an oversized brief to the route’s own limit', async () => {
-    const cap = await capFromSource('MAX_HANDOFF_BRIEF_CHARS');
-
-    await patch(mine.id, { creationHandoff: { brief: 'x'.repeat(cap * 2) } });
-
-    expect((await storedHandoff(mine.id))?.brief).toHaveLength(cap);
-  });
-
+describe('the cap (§4.2.8)', () => {
   it('truncates an oversized userPrompt to the route’s own limit', async () => {
     const cap = await capFromSource('MAX_HANDOFF_PROMPT_CHARS');
 
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, userPrompt: 'y'.repeat(cap * 2) } });
+    await patch(mine.id, { creationHandoff: { userPrompt: 'y'.repeat(cap * 2) } });
 
     expect((await storedHandoff(mine.id))?.userPrompt).toHaveLength(cap);
   });
 
-  it('leaves a real brief byte-identical — the cap must never quietly edit the marker out', async () => {
+  it('leaves a real prompt byte-identical — the cap must never quietly edit it', async () => {
     /*
-     * The control on the two truncation tests. A cap of zero would satisfy them both; what makes the
-     * cap correct is that ordinary text passes through untouched, marker and all.
+     * The control on the truncation test. A cap of zero would satisfy it; what makes the cap correct
+     * is that ordinary text passes through untouched.
      */
-    await patch(mine.id, { creationHandoff: { brief: BRIEF, userPrompt: 'a kart racer' } });
+    await patch(mine.id, { creationHandoff: { userPrompt: PROMPT } });
 
-    expect(await storedHandoff(mine.id)).toEqual({ brief: BRIEF, userPrompt: 'a kart racer' });
+    expect(await storedHandoff(mine.id)).toEqual({ userPrompt: PROMPT });
   });
 });
 
@@ -333,7 +331,7 @@ describe('the two walls (§4.5.3)', () => {
   it('401s when unauthenticated, and writes nothing', async () => {
     currentUser = null;
 
-    expect((await patch(mine.id, { creationHandoff: { brief: BRIEF } })).status).toBe(401);
+    expect((await patch(mine.id, { creationHandoff: { userPrompt: PROMPT } })).status).toBe(401);
     expect((await load(mine.id)).status).toBe(401);
 
     currentUser = USER;
@@ -345,21 +343,21 @@ describe('the two walls (§4.5.3)', () => {
      * 403 would confirm the id exists. The status is the enumeration oracle, so it is asserted
      * exactly, not merely as "not 200".
      */
-    const response = await patch(theirs.id, { creationHandoff: { brief: BRIEF } });
+    const response = await patch(theirs.id, { creationHandoff: { userPrompt: PROMPT } });
 
     expect(response.status).toBe(404);
     expect(await storedHandoff(theirs.id)).toBeUndefined();
   });
 
   it('cannot CLEAR someone else’s handoff either — a null is a write', async () => {
-    await projects.update(theirs.id, { creationHandoff: { brief: BRIEF } });
+    await projects.update(theirs.id, { creationHandoff: { userPrompt: PROMPT } });
 
     expect((await patch(theirs.id, { creationHandoff: null })).status).toBe(404);
-    expect((await storedHandoff(theirs.id))?.brief).toBe(BRIEF);
+    expect((await storedHandoff(theirs.id))?.userPrompt).toBe(PROMPT);
   });
 
   it('404s identically for a project that does not exist', async () => {
-    expect((await patch('prj_nope', { creationHandoff: { brief: BRIEF } })).status).toBe(404);
+    expect((await patch('prj_nope', { creationHandoff: { userPrompt: PROMPT } })).status).toBe(404);
     expect((await load('prj_nope')).status).toBe(404);
   });
 });

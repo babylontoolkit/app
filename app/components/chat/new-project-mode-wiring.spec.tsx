@@ -3,9 +3,11 @@
  * NEW PROJECT MODE — THE WIRING (T7).
  *
  * `new-project-mode.spec.ts` proves the store. This file proves the three things only the component can
- * be wrong about, each of which fails silently and costs the user their creation brief:
+ * be wrong about, each of which fails silently and costs the user their carried prompt (the
+ * machine-written creation BRIEF is retired — owner, 2026-08-08 — so the first build turn is an
+ * ordinary turn, and these tests pin exactly that):
  *
- *   1. creation ENTERS the mode, carrying the brief it built at the moment its facts were true;
+ *   1. creation ENTERS the mode, carrying the user's own prompt;
  *   2. a CLIENT COMMAND does not clear it — `/context`, `/effort` and `/clear` are intercepted before
  *      anything is posted, and typing one on a freshly created project is an ordinary thing to do. A
  *      clear placed at the top of `sendMessage` would spend the mode on a command that was never a build;
@@ -215,10 +217,8 @@ import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { compileWizardPrompt, summarizeSelection } from '~/lib/registry/wizard';
 import { ChatImpl } from './Chat.client';
 
-const BRIEF = [
-  CREATION_BRIEF_MARKER,
-  '<creation-brief>the play contract, the scaffolded class, the images on disk</creation-brief>',
-].join('\n\n');
+/** What a picked card carries as the user's words (`briefFromRegistryEntry`). */
+const CARD_PROMPT = 'Arcade Racing — Drive fast around a track.';
 
 let wire: string[] = [];
 
@@ -309,7 +309,6 @@ beforeEach(() => {
 
   seams.createProjectFromRegistry.mockResolvedValue({
     assistantMessage: '<boltArtifact id="project-setup" title="Arcade Racing"></boltArtifact>',
-    userMessage: BRIEF,
     className: 'ArcadeRacingMode',
   });
   seams.waitForMountVisible.mockResolvedValue(undefined);
@@ -369,7 +368,7 @@ async function createProjectInMode() {
   mountChat();
   await click('new project');
 
-  expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1', brief: BRIEF });
+  expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1', userPrompt: CARD_PROMPT });
 }
 
 /**
@@ -377,7 +376,7 @@ async function createProjectInMode() {
  *
  * `new-project-mode.spec.ts` proves the hydrate is correct; this proves it is REACHED. The whole app-level
  * guarantee rides on one `useEffect` keyed on the open project, and deleting it breaks nothing loudly: a
- * reloaded project silently loses its brief, and a mode entered for project A follows the user into
+ * reloaded project silently loses its carried prompt, and a mode entered for project A follows the user into
  * project B — module state survives an SPA navigate, which is what makes the `null` write load-bearing.
  *
  * Driven through the `projectId` nanostore (the component's own source for `activeProjectId`), so the
@@ -390,7 +389,7 @@ async function createProjectInMode() {
 describe('the open project is hydrated by the component', () => {
   it('mounting on a project whose mode is in storage puts that mode in the live store', async () => {
     /* Persist A's mode, then wipe the live store: exactly the state a page reload leaves behind. */
-    enterNewProjectMode({ projectId: 'proj_a', brief: BRIEF }, localStorage);
+    enterNewProjectMode({ projectId: 'proj_a', userPrompt: CARD_PROMPT }, localStorage);
     newProjectModeStore.set(null);
 
     projectId.set('proj_a');
@@ -400,13 +399,13 @@ describe('the open project is hydrated by the component', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_a', brief: BRIEF });
+    expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_a', userPrompt: CARD_PROMPT });
   });
 
   /**
    * 🔴 THE LEAK. Project B has no stored mode, and the store is holding A's in memory. The component has
    * to WRITE the null — a hydrate that only writes when it finds something leaves A's banner and A's
-   * hidden creation brief attached to a game the user had already built.
+   * carried prompt attached to a game the user had already built.
    */
   it('switching to a project with no mode CLEARS the store — B never inherits A’s mode', async () => {
     projectId.set('proj_a');
@@ -418,7 +417,7 @@ describe('the open project is hydrated by the component', () => {
 
     /* A is in the mode, in memory only (no stored record — the mode was entered this session). */
     await act(async () => {
-      newProjectModeStore.set({ projectId: 'proj_a', brief: BRIEF });
+      newProjectModeStore.set({ projectId: 'proj_a', userPrompt: CARD_PROMPT });
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(newProjectModeStore.get()?.projectId).toBe('proj_a');
@@ -434,16 +433,16 @@ describe('the open project is hydrated by the component', () => {
 });
 
 describe('creation enters New Project mode', () => {
-  it('sets the live store with the brief creation built', async () => {
+  it('sets the live store with the carried prompt', async () => {
     await createProjectInMode();
   });
 
-  /** Persisted under this project's own key, so a user who refreshes and then types still gets the brief. */
+  /** Persisted under this project's own key, so a user who refreshes still gets the card + prompt. */
   it('persists it per project, so it survives a reload', async () => {
     await createProjectInMode();
 
     expect(localStorage.getItem(newProjectModeKey('proj_1'))).toBeTruthy();
-    expect(readNewProjectMode('proj_1', localStorage)).toMatchObject({ projectId: 'proj_1', brief: BRIEF });
+    expect(readNewProjectMode('proj_1', localStorage)).toMatchObject({ projectId: 'proj_1', userPrompt: CARD_PROMPT });
   });
 
   it('CONTROL — and contacted no model on the way in', async () => {
@@ -454,7 +453,7 @@ describe('creation enters New Project mode', () => {
 
 /**
  * 🔴 THE RULE THIS FILE EXISTS FOR. A client command is intercepted before anything is posted, so it
- * cannot be the build turn — and the mode must still be there afterwards, brief intact.
+ * cannot be the build turn — and the mode must still be there afterwards, prompt intact.
  */
 describe('a slash command never consumes the mode', () => {
   it.each(['/context', '/effort', '/clear'])('%s leaves the mode intact and posts nothing', async (command) => {
@@ -463,19 +462,19 @@ describe('a slash command never consumes the mode', () => {
     outbound = command;
     await click('send');
 
-    expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1', brief: BRIEF });
-    expect(readNewProjectMode('proj_1', localStorage)?.brief).toBe(BRIEF);
+    expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1', userPrompt: CARD_PROMPT });
+    expect(readNewProjectMode('proj_1', localStorage)?.userPrompt).toBe(CARD_PROMPT);
 
     /* CONTROL: nothing was posted — which is what makes "the mode survived" the right answer. */
     expect(agentRequests()).toEqual([]);
   });
 
-  it('a command then a real build still carries the brief’s mode to the send', async () => {
+  it('a command then a real build still carries the mode to the send', async () => {
     await createProjectInMode();
 
     outbound = '/context';
     await click('send');
-    expect(newProjectModeStore.get()?.brief).toBe(BRIEF);
+    expect(newProjectModeStore.get()?.userPrompt).toBe(CARD_PROMPT);
 
     outbound = 'build my kart racer';
     await click('send');
@@ -522,15 +521,16 @@ describe('the first build send leaves the mode', () => {
 });
 
 /**
- * 🔴 THE HIDDEN BRIEF, ON THE WIRE (T10).
+ * 🔴 THE FIRST BUILD TURN IS AN ORDINARY TURN (owner, 2026-08-08).
  *
- * The store tests above prove the mode is consumed at the right moment; these prove what that consumption
- * actually PUTS ON THE WIRE — which is the only thing the server, and the bill, can see. `new-project-send.spec.ts`
- * proves the composition in isolation; only this file can prove the composed messages reach `/api/agent`,
- * in ONE request, with the marker intact and the user's own message clean.
+ * The hidden creation brief is RETIRED. These tests pin the negative space it left: the first build
+ * send posts ONE request holding ONE plain user message — no second hidden message, no
+ * `CREATION_BRIEF_MARKER` anywhere on the wire — and attachments ride on that one message. A
+ * regression that quietly reintroduces a hidden machine message is exactly the complexity the owner
+ * removed, and nothing about it would throw.
  */
-describe('the first build turn carries the hidden brief', () => {
-  it('posts ONE request whose body holds both the user’s words and the marker', async () => {
+describe('the first build turn is an ordinary turn — no hidden brief', () => {
+  it('posts ONE request holding ONE plain user message, with no marker anywhere', async () => {
     await createProjectInMode();
 
     outbound = 'build my kart racer';
@@ -538,56 +538,14 @@ describe('the first build turn carries the hidden brief', () => {
 
     expect(agentRequests()).toHaveLength(1);
 
-    const body = JSON.stringify(posted[0]);
-    expect(body).toContain(CREATION_BRIEF_MARKER);
-    expect(body).toContain('build my kart racer');
-  });
-
-  /**
-   * Two user messages, in order: what the user typed, then the brief. The brief carries `annotations:
-   * ['hidden']`, which is what `Messages.client.tsx` reads to keep it out of the transcript — so the
-   * VISIBLE message is the un-annotated one, and it must contain no trace of the machine's text.
-   */
-  it('the visible message is the user’s words alone; the marker rides on the hidden one', async () => {
-    await createProjectInMode();
-
-    outbound = 'build my kart racer';
-    await click('send');
-
     const users = userMessagesOf(0);
-    expect(users).toHaveLength(2);
-
-    const [visible, hidden] = users;
-
-    expect(visible.annotations).toBeUndefined();
-    expect(visible.content).toContain('build my kart racer');
-    expect(visible.content).not.toContain(CREATION_BRIEF_MARKER);
-    expect(visible.content).not.toContain('<creation-brief>');
-
-    expect(hidden.annotations).toEqual(['hidden']);
-    expect(hidden.content).toContain(CREATION_BRIEF_MARKER);
-    expect(hidden.content).toContain('<creation-brief>');
+    expect(users).toHaveLength(1);
+    expect(users[0].annotations).toBeUndefined();
+    expect(users[0].content).toContain('build my kart racer');
+    expect(JSON.stringify(posted[0])).not.toContain(CREATION_BRIEF_MARKER);
   });
 
-  /** Both messages carry the same `[Model: …]/[Provider: …]` envelope, so the marker sniff reads clean text. */
-  it('the brief carries the model/provider envelope, like every other user message', async () => {
-    await createProjectInMode();
-
-    outbound = 'build my kart racer';
-    await click('send');
-
-    const [visible, hidden] = userMessagesOf(0);
-
-    expect(visible.content).toMatch(/^\[Model: .+\]\n\n\[Provider: .+\]\n\n/);
-    expect(hidden.content).toMatch(/^\[Model: .+\]\n\n\[Provider: .+\]\n\n/);
-  });
-
-  /**
-   * 🔴 THE DOUBLE-APPEND. The conversation is UNCACHED and re-sent at full rate on EVERY later turn, so a
-   * brief that rides twice is paid for twice, forever. The mode is cleared at the send precisely so the
-   * second send cannot read it.
-   */
-  it('a SECOND send does not carry the brief again', async () => {
+  it('a SECOND send is equally plain — nothing hidden ever enters the history', async () => {
     await createProjectInMode();
 
     outbound = 'build my kart racer';
@@ -599,18 +557,12 @@ describe('the first build turn carries the hidden brief', () => {
     expect(agentRequests().length).toBeGreaterThan(1);
 
     const second = posted[posted.length - 1];
-    const briefs = second.messages.filter((message) => message.content.includes(CREATION_BRIEF_MARKER));
-
-    /* Exactly the one from the first turn, still in the history — never a second copy. */
-    expect(briefs).toHaveLength(1);
-    expect(userMessagesOf(posted.length - 1).filter((message) => message.annotations != null)).toHaveLength(1);
+    expect(JSON.stringify(second)).not.toContain(CREATION_BRIEF_MARKER);
+    expect(second.messages.filter((message) => message.annotations != null)).toHaveLength(0);
   });
 
-  /**
-   * CONTROL — a project that was never in the mode. Without this, "the marker was posted" is unfalsifiable:
-   * a `sendMessage` that appended the brief unconditionally would pass every assertion above.
-   */
-  it('CONTROL — an ordinary project posts one plain user message and no marker', async () => {
+  /** CONTROL — an ordinary project posts the same shape, so "one plain message" is not vacuous. */
+  it('CONTROL — an ordinary project posts one plain user message too', async () => {
     projectId.set('proj_b');
 
     await act(async () => {
@@ -629,22 +581,15 @@ describe('the first build turn carries the hidden brief', () => {
     expect(users).toHaveLength(1);
     expect(users[0].content).toContain('now add a boost pad');
     expect(users[0].annotations).toBeUndefined();
-    expect(JSON.stringify(posted[0])).not.toContain(CREATION_BRIEF_MARKER);
   });
 
   /**
-   * 🔴 THE ATTACHMENT MUST RIDE ON THE VISIBLE MESSAGE (the T10 defect an independent verifier found).
-   *
-   * "build my game like this" + a reference image is the ARCHETYPAL first build message, and it reached
-   * nothing at all — three mechanisms combining, none of which throws: `useChat`'s `reload()` destructures
-   * only `{data, headers, body}` so it drops `experimental_attachments`; the composed messages carried
-   * none of their own; and `convertToCoreMessages` keeps only TEXT parts of a user message, so the copy in
-   * `parts` was discarded too. The image simply evaporated on the most expensive turn in the product.
-   *
-   * Asserted on the WIRE, because that is the only place all three mechanisms are visible at once — a
-   * component-level check of what `setMessages` received would have passed throughout the whole defect.
+   * 🔴 THE ATTACHMENT RIDES ON THE ONE MESSAGE. "build my game like this" + a reference image is the
+   * archetypal first build message; asserted on the WIRE because `useChat`'s `reload()` drops
+   * `experimental_attachments` and `convertToCoreMessages` keeps only text parts — both invisible at
+   * the component level.
    */
-  it('an attached image rides on the VISIBLE message, and never on the hidden brief', async () => {
+  it('an attached image rides on the first build message', async () => {
     await createProjectInMode();
 
     await click('attach');
@@ -652,29 +597,17 @@ describe('the first build turn carries the hidden brief', () => {
     outbound = 'build my game like this';
     await click('send');
 
-    const [visible, hidden] = userMessagesOf(0);
-
-    expect(visible.experimental_attachments).toHaveLength(1);
-    expect(visible.experimental_attachments?.[0]).toMatchObject({
+    const users = userMessagesOf(0);
+    expect(users).toHaveLength(1);
+    expect(users[0].experimental_attachments).toHaveLength(1);
+    expect(users[0].experimental_attachments?.[0]).toMatchObject({
       name: 'reference.png',
       contentType: 'image/png',
     });
-    expect(visible.experimental_attachments?.[0].url).toContain('base64');
-
-    /* The brief is machine text with nothing to illustrate — an attachment here would be billed twice. */
-    expect(hidden.annotations).toEqual(['hidden']);
-    expect(hidden.experimental_attachments).toBeUndefined();
-
-    /* And the turn is still the first build turn: one request, marker intact. */
-    expect(agentRequests()).toHaveLength(1);
-    expect(hidden.content).toContain(CREATION_BRIEF_MARKER);
+    expect(users[0].experimental_attachments?.[0].url).toContain('base64');
   });
 
-  /**
-   * CONTROL — the ORDINARY `append` path. Without it, "attachments arrive" could be an accident of the
-   * harness rather than a property of the composed turn, and a regression that broke both paths at once
-   * would still leave one green test claiming attachments work.
-   */
+  /** CONTROL — the ordinary path still carries its attachment, so the assertion above has a baseline. */
   it('CONTROL — an ordinary (non-New-Project) send still carries its attachment', async () => {
     projectId.set('proj_b');
 
@@ -696,7 +629,7 @@ describe('the first build turn carries the hidden brief', () => {
     expect(users[0].experimental_attachments?.[0]).toMatchObject({ name: 'reference.png' });
   });
 
-  /** A slash command posts nothing, so there is no body to carry a brief — and the mode is still armed. */
+  /** A slash command posts nothing, so there is no body at all — and the mode is still armed. */
   it('a slash command in the mode puts NOTHING on the wire', async () => {
     await createProjectInMode();
 
@@ -704,7 +637,7 @@ describe('the first build turn carries the hidden brief', () => {
     await click('send');
 
     expect(posted).toEqual([]);
-    expect(newProjectModeStore.get()?.brief).toBe(BRIEF);
+    expect(newProjectModeStore.get()?.userPrompt).toBe(CARD_PROMPT);
   });
 });
 
@@ -717,23 +650,10 @@ describe('the first build turn carries the hidden brief', () => {
  * whatever is open, and writing it under the bare prefix instead would give every such project one
  * shared record.
  *
- * `sendMessage` then read and cleared it `if (activeProjectId)` — a rule that is false on exactly this
- * path, and the failure compounded in both directions with nothing red anywhere:
- *
- *   - the brief was NEVER appended, so all ten server protections were off on the first build turn:
- *     no `bt-landing`/`bt-design` inlined (the six-round, ~29k-output-token redraft pathology), no
- *     bounded media-only loop, no `requiresAction` rescue, `load_skill` offered on a turn that had
- *     already been given its skills, and the liveness panel narrating a creation as an ordinary edit;
- *   - the mode was NEVER cleared, so `isCreationTurn`'s New Project key stayed true and the premium
- *     pill stayed LOCKED for the rest of the session on a project that had since been built.
- *
- * The degraded path is the one that had already lost something, and it lost the most. It is tested here
- * rather than trusted as a degenerate case of the happy path precisely because it is the branch nobody
- * drives by hand.
- *
- * The clear is also what makes T13's "unlocks after" assertion real: `first-build-turn.spec.ts` can pin
- * `isCreationTurn(mode) === false` given a cleared mode, but only this file can prove a send is what
- * clears it. So the final assertion below re-derives the pill's own answer from the state the send left.
+ * `sendMessage` once read and cleared it `if (activeProjectId)` — a rule that is false on exactly this
+ * path, so the mode was never cleared and the premium pill stayed LOCKED for the rest of the session on
+ * a project that had since been built. The degraded path is the branch nobody drives by hand, so it is
+ * tested rather than trusted.
  */
 describe('the unregistered-project fallback (no project id)', () => {
   /** Create with registration failing — the project is local-only and the mode is keyed on ''. */
@@ -742,7 +662,7 @@ describe('the unregistered-project fallback (no project id)', () => {
     mountChat();
     await click('new project');
 
-    expect(newProjectModeStore.get()).toMatchObject({ projectId: '', brief: BRIEF });
+    expect(newProjectModeStore.get()).toMatchObject({ projectId: '', userPrompt: CARD_PROMPT });
 
     /* CONTROL — this really is the degraded path: nothing registered, so there is no project id. */
     expect(projectId.get()).toBeUndefined();
@@ -752,7 +672,7 @@ describe('the unregistered-project fallback (no project id)', () => {
     await createUnregisteredProjectInMode();
   });
 
-  it('the first build send CARRIES the marker — the ten protections stay on', async () => {
+  it('the first build send is an ordinary turn here too — one plain message, no marker', async () => {
     await createUnregisteredProjectInMode();
 
     outbound = 'build my kart racer';
@@ -761,16 +681,10 @@ describe('the unregistered-project fallback (no project id)', () => {
     expect(agentRequests()).toHaveLength(1);
 
     const users = userMessagesOf(0);
-    expect(users).toHaveLength(2);
-
-    const [visible, hidden] = users;
-
-    expect(visible.annotations).toBeUndefined();
-    expect(visible.content).toContain('build my kart racer');
-    expect(visible.content).not.toContain(CREATION_BRIEF_MARKER);
-
-    expect(hidden.annotations).toEqual(['hidden']);
-    expect(hidden.content).toContain(CREATION_BRIEF_MARKER);
+    expect(users).toHaveLength(1);
+    expect(users[0].annotations).toBeUndefined();
+    expect(users[0].content).toContain('build my kart racer');
+    expect(JSON.stringify(posted[0])).not.toContain(CREATION_BRIEF_MARKER);
   });
 
   it('the first build send CLEARS the mode — it does not outlive the project it belongs to', async () => {
@@ -791,7 +705,7 @@ describe('the unregistered-project fallback (no project id)', () => {
   it('leaves isCreationTurn FALSE once the build has been sent', async () => {
     await createUnregisteredProjectInMode();
 
-    /* Locked while the mode is armed and nothing yet carries the brief — the window T13 closed. */
+    /* Locked while the mode is armed. */
     expect(isCreationTurn({ messages: [], newProjectMode: newProjectModeStore.get() })).toBe(true);
 
     outbound = 'build my kart racer';
@@ -804,43 +718,17 @@ describe('the unregistered-project fallback (no project id)', () => {
       }),
     ).toBe(false);
   });
-
-  /** And it does not re-append: a second send on a degraded project is an ordinary turn. */
-  it('a SECOND send does not carry the brief again', async () => {
-    await createUnregisteredProjectInMode();
-
-    outbound = 'build my kart racer';
-    await click('send');
-
-    outbound = 'now add a boost pad';
-    await click('send');
-
-    const second = posted[posted.length - 1];
-
-    expect(second.messages.filter((message) => message.content.includes(CREATION_BRIEF_MARKER))).toHaveLength(1);
-  });
 });
 
 /**
- * 🔴 THE WIZARD'S COMPILED SELECTIONS (§4.7).
+ * 🔴 THE WIZARD'S COMPILED SELECTIONS (§4.7) — they ride as the CARRIED PROMPT now.
  *
- * On the wizard path the seed carries TWO texts: `prompt` is the compiled brief (preamble + genre +
- * vibe fragment + every mechanic fragment + the twist) and `visiblePrompt` is the short friendly
- * summary. The textbox correctly takes the SUMMARY — a box holds words a user can read and edit, not a
- * machine-composed task list — and that left the compiled text with nowhere to go: four steps of
- * explicit choices, dropped in silence, on the one path built for users who do not know what to type.
- *
- * Nothing throws when it regresses. The creation still works, the project still builds, and the model
- * is simply never told about the drift mechanic the user ticked — which reads as the model ignoring
- * them. So the assertion has to be on the WIRE, and it has to be paired with a control proving the
- * selections are not appended unconditionally (a duplicate of the user's own words in the brief is the
- * mirror-image defect, paid for on every later turn since the history is uncached).
- *
- * Driven through the REAL route: the mock `BaseChat` calls `onCompleteTour` with a `WizardSelection`,
- * exactly as the real `GuidedTour` does, so `compileWizardPrompt`/`summarizeSelection` and the whole of
- * `runStartProject` are the real ones. The expectations are computed from the same two functions rather
- * than hand-written strings — a hand-written copy of the compiled text would go stale the moment
- * `wizard.json` changes and would then be asserting nothing about the wiring.
+ * On the wizard path the seed carries TWO texts: `prompt` is the compiled selections (preamble + genre
+ * + vibe fragment + every mechanic fragment + the twist) and `visiblePrompt` the short friendly
+ * summary. The hidden brief that used to smuggle the compiled text to the model is retired (owner,
+ * 2026-08-08), so the compiled text IS the carried prompt: the handoff card shows it, and Build sends
+ * it. That is a quotation of choices the user explicitly made — four wizard steps — not machine words
+ * in their mouth, and dropping it instead would silently discard everything the wizard asked.
  */
 describe('the wizard path carries its compiled selections', () => {
   const compiled = () => compileWizardPrompt(WIZARD_SELECTION);
@@ -851,86 +739,46 @@ describe('the wizard path carries its compiled selections', () => {
     await click('guided tour');
   }
 
-  it('stores a brief holding BOTH the creation marker and the compiled selections', async () => {
-    await createViaWizard();
-
-    const brief = newProjectModeStore.get()?.brief ?? '';
-
-    /* The creation brief itself is untouched — the selections are an APPENDIX, never a replacement. */
-    expect(brief).toContain(CREATION_BRIEF_MARKER);
-    expect(brief).toContain('<creation-brief>');
-    expect(brief.startsWith(BRIEF)).toBe(true);
-
-    /* And the user's four steps ride with it, under a heading that says whose choices they are. */
-    expect(brief).toContain("**The user's guided-tour selections**");
-    expect(brief).toContain(compiled());
-
-    /* Not a token of it — the mechanic fragments are the part a regression silently drops. */
-    expect(compiled()).toContain('Features to build:');
-    expect(brief).toContain('the track melts behind you');
-  });
-
-  /*
-   * The handoff card shows the user's own words and its Build sends them. On the wizard path those
-   * words are the SHORT SUMMARY — never the compiled brief, which is a machine-written task list the
-   * user never saw and would not recognise as theirs. (The compiled text still travels; it rides
-   * hidden inside the brief, asserted above.)
-   */
-  it('the card carries the SUMMARY alone — the compiled brief is never shown back at the user', async () => {
+  it('carries the COMPILED selections as the prompt the handoff will offer to build', async () => {
     await createViaWizard();
 
     const carried = newProjectModeStore.get()?.userPrompt ?? '';
 
-    expect(carried).toBe(summary());
+    expect(carried).toBe(compiled());
 
-    /* CONTROL — the summary really is the short one, so "this is not the compiled text" has meaning. */
+    /* Not a token of it — the mechanic fragments are the part a regression silently drops. */
+    expect(carried).toContain('Features to build:');
+    expect(carried).toContain('the track melts behind you');
+
+    /* CONTROL — the summary really is the short one, so "the compiled text travels" has meaning. */
     expect(summary()).not.toBe(compiled());
-    expect(carried).not.toContain('Features to build:');
-    expect(carried).not.toContain(CREATION_BRIEF_MARKER);
 
     /* And creation writes nothing into the box: the card holds it until the user presses Edit or X. */
     expect(screen.getByTestId('chat-input').textContent).toBe('');
   });
 
-  /**
-   * The send. The user presses it on the box creation prefilled, so `outbound` is the summary — which
-   * is also what makes the second half of this assertion sharp: the visible message legitimately
-   * contains the summary and must contain none of the compiled text.
-   */
-  it('puts the compiled selections on the wire, in the HIDDEN message only', async () => {
+  it('the send puts the selections on the wire as the user message — nothing hidden', async () => {
     await createViaWizard();
 
-    outbound = summary();
+    outbound = compiled();
     await click('send');
 
     expect(agentRequests()).toHaveLength(1);
 
     const users = userMessagesOf(0);
-    expect(users).toHaveLength(2);
-
-    const [visible, hidden] = users;
-
-    expect(hidden.annotations).toEqual(['hidden']);
-    expect(hidden.content).toContain(CREATION_BRIEF_MARKER);
-    expect(hidden.content).toContain("**The user's guided-tour selections**");
-    expect(hidden.content).toContain(compiled());
-
-    expect(visible.annotations).toBeUndefined();
-    expect(visible.content).toContain(summary());
-    expect(visible.content).not.toContain('Features to build:');
-    expect(visible.content).not.toContain("**The user's guided-tour selections**");
-    expect(visible.content).not.toContain(CREATION_BRIEF_MARKER);
+    expect(users).toHaveLength(1);
+    expect(users[0].annotations).toBeUndefined();
+    expect(users[0].content).toContain('Features to build:');
+    expect(users[0].content).toContain('the track melts behind you');
+    expect(JSON.stringify(posted[0])).not.toContain(CREATION_BRIEF_MARKER);
   });
 
   /**
-   * CONTROL — PATH A (§4.4a), the typed prompt. `prompt` is the user's own words and there is no
-   * `visiblePrompt` at all, so there is nothing hidden to carry: appending here would put a second copy
-   * of the user's sentence inside the brief, re-sent on every later turn of the conversation forever.
-   *
-   * The real Path A route: an empty chat with no project, a typed message, `decideSeed` against the
-   * registry, `startProject` — no wizard anywhere in it.
+   * CONTROL — PATH A (§4.4a), the typed prompt: the user's own words are the carried prompt, and no
+   * wizard heading appears anywhere. The real Path A route: an empty chat with no project, a typed
+   * message, `decideSeed` against the registry, `startProject` — no wizard anywhere in it.
    */
-  it('CONTROL — a typed-prompt (Path A) creation appends NO selections section', async () => {
+  it('CONTROL — a typed-prompt (Path A) creation carries the typed words alone', async () => {
     await act(async () => {
       mountChat();
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -939,21 +787,12 @@ describe('the wizard path carries its compiled selections', () => {
     outbound = 'build a kart racing game with drifting and boost pads';
     await click('send');
 
-    /* CONTROL — this really was a creation, not an ordinary send: the mode was entered. */
+    /* CONTROL — this really was a creation, not an ordinary send: the mode was entered, no model contacted. */
     const mode = newProjectModeStore.get();
-    expect(mode?.brief).toBeTruthy();
     expect(agentRequests()).toEqual([]);
 
-    expect(mode?.brief).toBe(BRIEF);
-    expect(mode?.brief).not.toContain("**The user's guided-tour selections**");
-  });
-
-  /** CONTROL — the CARD path (Path B) types nothing at all, so it has nothing to append either. */
-  it('CONTROL — a card creation appends NO selections section', async () => {
-    await createProjectInMode();
-
-    expect(newProjectModeStore.get()?.brief).toBe(BRIEF);
-    expect(newProjectModeStore.get()?.brief).not.toContain("**The user's guided-tour selections**");
+    expect(mode?.userPrompt).toBe('build a kart racing game with drifting and boost pads');
+    expect(mode?.userPrompt).not.toContain('Features to build:');
   });
 });
 
@@ -964,19 +803,18 @@ describe('the wizard path carries its compiled selections', () => {
  * carry NOTHING, so the handoff offered *Describe your game*: the one screen in the product that asks you
  * to type out the thing you just chose from a menu.
  *
- * `creation-handoff.spec.ts` proves the text is derived correctly. These prove it REACHES the mode, and —
- * the part no pure test can see — that it rides on the channel that does not disturb the two other things
- * `runStartProject` derives one line apart: the project TITLE and the wizard-selections block.
+ * `creation-handoff.spec.ts` proves the text is derived correctly. These prove it REACHES the mode, and
+ * that it does not disturb the project TITLE derived one line apart.
  */
 describe('a picked game type carries its own brief', () => {
   it('carries the card title and copy as the words the handoff will offer to build', async () => {
     await createProjectInMode();
 
-    expect(newProjectModeStore.get()?.userPrompt).toBe('Arcade Racing — Drive fast around a track.');
+    expect(newProjectModeStore.get()?.userPrompt).toBe(CARD_PROMPT);
   });
 
   /*
-   * 🔴 The regression this fix could easily have introduced. The carried brief rides on `visiblePrompt`
+   * 🔴 The regression this fix could easily have introduced. The carried prompt rides on `visiblePrompt`
    * precisely because `prompt` is what `deriveProjectTitle` reads — send it there and the project stops
    * being called "Arcade Racing" and starts being called something squeezed out of the card's copy.
    */
@@ -987,18 +825,6 @@ describe('a picked game type carries its own brief', () => {
   });
 
   /*
-   * 🔴 The other one-line-apart trap: `prompt && visiblePrompt && prompt !== visiblePrompt` is what
-   * appends the WIZARD's compiled selections. Passing both would staple the card copy into the hidden
-   * brief as though the user had walked the guided tour.
-   */
-  it('does NOT staple the card copy into the hidden brief as wizard selections', async () => {
-    await createProjectInMode();
-
-    expect(newProjectModeStore.get()?.brief).toBe(BRIEF);
-    expect(newProjectModeStore.get()?.brief).not.toContain('Drive fast around a track.');
-  });
-
-  /*
    * The fallback stays a fallback. "Blank Canvas — an empty scene" is the choice that MEANS "I do not
    * have a brief yet"; turning it into one would build a random game out of a request for a blank page.
    */
@@ -1006,7 +832,7 @@ describe('a picked game type carries its own brief', () => {
     mountChat();
     await click('blank canvas');
 
-    expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1', brief: BRIEF });
+    expect(newProjectModeStore.get()).toMatchObject({ projectId: 'proj_1' });
     expect(newProjectModeStore.get()?.userPrompt).toBeUndefined();
   });
 });

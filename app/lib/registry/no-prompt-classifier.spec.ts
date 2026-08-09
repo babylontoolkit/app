@@ -2,8 +2,9 @@
  * WHO DECIDES WHETHER A CREATION DOES THE LANDING/CHROME PASS (§4.4c, T11) — the structural guard.
  *
  * The answer must be: **the model, from the user's own request**, resolved against an instruction with a
- * stated default that lives in the creation brief. Never a keyword table, a substring check or a regex in
- * THIS repo.
+ * stated default that lives in the baked system prompt (`20-hard-constraints.md` — the creation brief
+ * that used to carry it is retired, owner 2026-08-08). Never a keyword table, a substring check or a
+ * regex in THIS repo.
  *
  * That is not a style preference. This family of bug has already cost real money twice, and both times it
  * failed silently — nothing threw, the platform kept working, the model was just fed the wrong
@@ -27,13 +28,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * Every file on the creation path that touches the user's words: where the brief is written, where the
- * prompt is carried back to the textbox, where the first build turn is composed, and where the brief is
- * stored in between.
+ * Every file on the creation path that touches the user's words: where the project is created, where the
+ * prompt is carried back to the textbox, and where the mode stores it in between. (`new-project-send.ts`
+ * was on this list until the hidden brief it composed was retired and the file deleted with it.)
  */
 const CREATION_PATH = [
   'app/lib/registry/create-project.ts',
-  'app/lib/chat/new-project-send.ts',
   'app/lib/chat/new-project-draft.ts',
   'app/lib/stores/new-project-mode.ts',
 ];
@@ -308,33 +308,30 @@ describe('CONTROLS — the scanner works, and is looking at the right thing', ()
       expect(code, file).toMatch(/export (async )?(function|const|interface)/);
     }
 
-    // The brief lives here; if this import ever moves, the scan is pointed at the wrong file.
-    expect(codeOnly(read('app/lib/registry/create-project.ts'))).toContain('buildCreationBrief');
+    // Creation lives here; if this export ever moves, the scan is pointed at the wrong file.
+    expect(codeOnly(read('app/lib/registry/create-project.ts'))).toContain('createProjectFromRegistry');
   });
 
-  it('strips comments — a post-mortem naming the dead keywords does not count as one', () => {
+  it('strips comments — prose about the rule does not count as a violation of it', () => {
     const raw = read('app/lib/registry/create-project.ts');
     const code = codeOnly(raw);
 
-    // The module header quotes the substring that matched b-ui-ld, and the rule it broke.
-    expect(raw).toContain("`'ui'`");
-    expect(raw).toContain('keyword table');
-    expect(code).not.toContain("'ui'`");
-    expect(code).not.toContain('keyword table');
+    // The module header states the retirement in prose the scan must not read as code.
+    expect(raw).toContain('THERE IS NO CREATION BRIEF');
+    expect(code).not.toContain('THERE IS NO CREATION BRIEF');
   });
 
-  it('strips the brief prose — the INSTRUCTION telling the model to decide is not a classifier', () => {
-    const code = codeOnly(read('app/lib/registry/create-project.ts'));
+  it('strips string literals — the artifact template is prose, not a classifier', () => {
+    const raw = read('app/lib/registry/create-project.ts');
+    const code = codeOnly(raw);
 
-    // These words are in the brief, and only in the brief.
-    expect(read('app/lib/registry/create-project.ts')).toContain('A single narrow change');
-    expect(code).not.toContain('A single narrow change');
-    expect(code).not.toContain('bt-landing skill');
+    // This sentence lives in the creation artifact's template literal, and only there.
+    expect(raw).toContain('Setting up your project');
+    expect(code).not.toContain('Setting up your project');
 
     // ...but the code around the prose survived, so the strip did not swallow the file.
-    expect(code).toContain('function buildCreationBrief');
+    expect(code).toContain('function createProjectFromRegistry');
     expect(code).toContain('scaffolded');
-    expect(code).toContain('listAvailableImages');
   });
 
   it('DETECTS a planted violation — each shape of the bug that has actually shipped here', () => {
@@ -435,15 +432,16 @@ describe('the creation path classifies nothing — the model decides, from the r
   });
 
   /*
-   * The brief must still SAY it, or there is nothing for the model to resolve — a scan that only proves
-   * the absence of a keyword table would pass just as happily on a brief that had lost the instruction.
+   * The instruction must still be STATED somewhere, or there is nothing for the model to resolve — a
+   * scan that only proves the absence of a keyword table would pass just as happily on a system that
+   * had lost the instruction. Its home is the baked prompt now (the brief that carried it is retired).
    */
-  it('states the decision as an instruction the model resolves', () => {
-    const brief = read('app/lib/registry/create-project.ts');
+  it('states the decision as an instruction the model resolves — in the baked prompt', () => {
+    const prompt = read('app/lib/.server/prompt/sections/20-hard-constraints.md');
 
-    expect(brief).toMatch(/user's own message above is the request/i);
-    expect(brief).toMatch(/it is the DEFAULT whenever the request is not plainly narrow/i);
-    expect(brief).toMatch(/A single narrow change/);
+    expect(prompt).toMatch(/FIRST BUILT OUT/);
+    expect(prompt).toMatch(/leave the landing page alone/i);
+    expect(prompt).toMatch(/narrow request/i);
   });
 });
 
