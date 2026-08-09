@@ -27,17 +27,33 @@ import {
 const record = (id: any, state: any = 'finished') => ({ id, generationId: 'gen_1', at: '2026-08-08T00:00:00Z', state });
 
 describe('the phase table', () => {
-  it('is Game -> Frontend -> Art -> Verify, in that order', () => {
-    expect(DEFAULT_CREATION_PHASES).toEqual(['game', 'frontend', 'art', 'verify']);
+  it('is Frontend -> Art -> Game -> Verify, in that order', () => {
+    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game', 'verify']);
   });
 
   /*
-   * The order is what survives a failure, not what looks best first. Fail after `game` and you have a
-   * playable project with a stock page; the reverse buys a pretty page in front of no game.
+   * Owner decision 2026-08-08, reversing `game → frontend`. The order is decided by which body of
+   * work is BOUNDED, not by what survives a failure: the front end is one page plus three chrome
+   * files whatever the game is, while the game scales with the request unpredictably. Whatever runs
+   * LAST is what a length-truncated response mangles, so the fixed cost goes first.
    */
-  it('puts the game before the front end', () => {
+  it('puts the front end before the game', () => {
     const ids = DEFAULT_CREATION_PHASES;
-    expect(ids.indexOf('game')).toBeLessThan(ids.indexOf('frontend'));
+    expect(ids.indexOf('frontend')).toBeLessThan(ids.indexOf('game'));
+  });
+
+  /*
+   * `art` renders the list `frontend` wrote into DESIGN.md and wires the returned paths into the
+   * files `frontend` just created. Putting the game between them would break that hand-off.
+   */
+  it('keeps art immediately after the front end', () => {
+    const ids = DEFAULT_CREATION_PHASES;
+    expect(ids.indexOf('art')).toBe(ids.indexOf('frontend') + 1);
+  });
+
+  /* The repair pass can only run once there is something to repair. */
+  it('leaves verify last', () => {
+    expect(DEFAULT_CREATION_PHASES[DEFAULT_CREATION_PHASES.length - 1]).toBe('verify');
   });
 
   it('gives media to EXACTLY ONE phase, and it is the art phase', () => {
@@ -72,6 +88,28 @@ describe('the phase table', () => {
   it('the game phase is told NOT to touch the landing page or chrome', () => {
     const game = CREATION_PHASES.find((p) => p.id === 'game')!;
     expect(game.task).toMatch(/do NOT touch the landing page/i);
+  });
+
+  /*
+   * The mirror of the rule above, and the one that had to change when the order flipped. While the
+   * game ran first, `frontend` was told "the game code is already written: do not rewrite it"; now
+   * the game has NOT been written when this phase runs, so the fence has to point the other way or
+   * the front-end step quietly becomes the monolithic turn the phases exist to prevent.
+   */
+  it('the front-end phase is told NOT to write gameplay code', () => {
+    const frontend = CREATION_PHASES.find((p) => p.id === 'frontend')!;
+    expect(frontend.task).toMatch(/do NOT write gameplay code/i);
+  });
+
+  /*
+   * The front end runs before any gameplay exists, so the play contract is wired against the class
+   * §4.4b scaffolded at creation. Without this the step has no correct class name to navigate to and
+   * the single sanctioned response is to invent one.
+   */
+  it('the front-end phase points at the scaffolded GameMode rather than an invented name', () => {
+    const frontend = CREATION_PHASES.find((p) => p.id === 'frontend')!;
+    expect(frontend.task).toMatch(/scaffolded into `src\/scripts\/`/i);
+    expect(frontend.task).toMatch(/never invent one/i);
   });
 
   it('the art phase forbids inventing an asset path', () => {
@@ -251,7 +289,7 @@ describe('advance / complete', () => {
   });
 
   it('currentCreationPhase points at the next phase, and is null when complete', () => {
-    expect(currentCreationPhase(newCreationPlan())?.id).toBe('game');
+    expect(currentCreationPhase(newCreationPlan())?.id).toBe('frontend');
     expect(currentCreationPhase({ ...newCreationPlan(['game']), next: 1 })).toBeNull();
     expect(currentCreationPhase(undefined)).toBeNull();
   });
@@ -279,8 +317,8 @@ describe('creationPhaseMessage', () => {
 
   it('carries that phase task and no other', () => {
     const message = creationPhaseMessage(plan, 0);
-    expect(message).toContain('Write the GAME');
-    expect(message).not.toContain('bt-landing skill');
+    expect(message).toContain('bt-landing skill');
+    expect(message).not.toContain('Write the GAME');
   });
 
   /*
@@ -304,14 +342,14 @@ describe('creationPhaseMessage', () => {
 
 describe('describeCreationPlan', () => {
   it('marks done / current / pending in order', () => {
-    const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('game')] });
+    const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('frontend')] });
     expect(view.rows.map((r) => r.state)).toEqual(['done', 'current', 'pending', 'pending']);
     expect(view.step).toBe('Step 2 of 4');
     expect(view.complete).toBe(false);
   });
 
   it("carries each completed phase's own outcome", () => {
-    const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('game', 'rescued')] });
+    const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('frontend', 'rescued')] });
     expect(view.rows[0].outcome).toBe('rescued');
     expect(view.rows[1].outcome).toBeUndefined();
   });
@@ -330,10 +368,10 @@ describe('describeCreationPlanOutcome — the plan-level verdict', () => {
    * a metric defined against a failure it no longer detects, reporting health.
    */
   it('is INCOMPLETE while phases remain, naming how many and which is next', () => {
-    const outcome = describeCreationPlanOutcome({ ...newCreationPlan(), next: 1, done: [record('game')] });
+    const outcome = describeCreationPlanOutcome({ ...newCreationPlan(), next: 1, done: [record('frontend')] });
     expect(outcome.state).toBe('incomplete');
     expect(outcome.detail).toContain('3 of 4 steps');
-    expect(outcome.detail).toContain('front end');
+    expect(outcome.detail).toContain('art');
   });
 
   it('is FINISHED when every phase completed cleanly', () => {

@@ -116,6 +116,41 @@ navigate('/play', { gameMode: 'YourModeClassName', sceneUrl: 'optional/scene.glt
   landing page with no play button at all. **The `navigate('/play', …)` call itself is the one thing
   that must always survive.**
 
+## BUILD ORDER — the front end comes FIRST, the game LAST
+
+**On a first build-out, write the frontend shell before you write the game**, in this order:
+
+1. **Decide the design, then render its art** — make every `generate_image` call in ONE round, before
+   you write any files, and wire the returned paths in as you go.
+2. **The landing page** — `src/pages/Home.tsx` + `Home.css` (see "Landing-page rewrites" and the
+   Layout law below).
+3. **The chrome** — `src/chrome/**`: preloader, splash, overlay (see "Chrome rewrites" below).
+4. **The game** — the GameMode and Script Components in `src/scripts/**`.
+
+This is a reliability rule, not a matter of taste. **Your reply has a hard length limit, and whatever
+you write LAST is what gets cut off** — mid-file, mid-tag, closing `</boltAction>` missing, several
+files welded into one broken file. The front end is a KNOWN, bounded amount of work: one page and
+three chrome files, much the same size whatever the game is. The game is not — it grows without limit
+with the request, and you cannot know before you start how much room it will need. So spend the fixed
+cost first, where it is certain to fit and certain to land intact, and let the open-ended work take
+whatever room is left.
+
+It also fails better. Finish the front end and run short on the game, and the user is one prompt from
+done, with everything already written intact on disk. Spend it all on the game and get cut off part
+way through the landing page, and you leave a file that does not compile sitting on top of a game
+nobody can reach.
+
+**This order works because the GameMode class already exists.** The platform scaffolded a registered
+GameMode into `src/scripts/` when the project was created — read its real class name off that file
+(never invent one), and wire `navigate('/play', { gameMode: 'ThatClass' })` from the landing page
+before you have written a line of gameplay. That same file is then the one you fill in at step 4.
+
+Treat the front end you just wrote as the **specification for the game**: whatever the landing page
+promises — the modes, the tracks, the pickups, the scoring — is what the game then has to deliver.
+
+**On a NARROW request** ("add an FPS counter", "fix the boost pads") none of this applies: there is no
+front end to write and no order to keep. Do only what was asked.
+
 ## Landing-page rewrites
 
 **When a project is FIRST BUILT OUT** — the first build turn on a freshly created project, or any

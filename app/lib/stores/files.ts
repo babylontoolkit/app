@@ -1122,6 +1122,33 @@ export class FilesStore {
     }
 
     /*
+     * 🔴 A FILE THAT FAILED TO WRITE IS NOT ON DISK, SO IT MUST NOT ENTER THE MAP — and getting this
+     * wrong does not lose one file, it PERMANENTLY DISABLES CHECKPOINTING for the project.
+     *
+     * `onError` above fires only when the write THREW, i.e. the bytes never landed. Recording the
+     * entry anyway (this used to pass `restorable` wholesale) creates a phantom: a map key with no
+     * file behind it. Every later `serializeFiles({ strict: true })` then reads that key off disk,
+     * gets ENOENT, and throws `IncompleteSerializationError` — and strict serialize is what
+     * `checkpointProject` runs, so it returns before `createLocalSnapshot` AND before
+     * `saveWorkingCopy`. The result is a project that silently keeps NO local checkpoint and NO
+     * recovery copy, on every turn, for as long as the phantom survives — and because the phantom is
+     * re-recorded from the same incoming map on every mount, it survives forever.
+     *
+     * That is not hypothetical. MEASURED on a repo-mounted project (2026-08-09): four consecutive
+     * file-writing turns, two of them fully settled and billed, produced exactly ONE local
+     * snapshot — the "Loaded from repository" mount itself (`nextSeq: 1`, so `createLocalSnapshot`
+     * ran once). On reload the mount read that seq-0 snapshot as the whole truth and every AI edit
+     * since was gone. Binaries are the only entries serialize reads from disk (text comes from the
+     * map), which is why the symptom presents as "every binary in the project failed at once".
+     *
+     * The map's job is to describe the disk. Only what landed goes in.
+     */
+    const landed =
+      failures.length === 0
+        ? restorable
+        : Object.fromEntries(Object.entries(restorable).filter(([filePath]) => !failures.includes(filePath)));
+
+    /*
      * 🔴 Report the restore into the map SYNCHRONOUSLY — the same write-through `recordAgentWrite`
      * gives artifact writes, for the same reason and against the same measured defect.
      *
@@ -1147,7 +1174,7 @@ export class FilesStore {
      * restored file is in the map twice — doubled context, doubled exports, and phantom keys that the
      * next restore plans for deletion.
      */
-    this.#recordRestoredFiles(restorable, sandbox.workdir);
+    this.#recordRestoredFiles(landed, sandbox.workdir);
 
     // Only a caller that PASSED `protect` has opted into deletions (see the doc comment above).
     const protect = options?.protect;
@@ -1160,6 +1187,13 @@ export class FilesStore {
      * Deletions come AFTER the writes. If anything fails partway, the project is left with too many
      * files rather than too few — the recoverable direction. (`node_modules` and `.git` are excluded
      * from the watcher, so they are not in this map and can never be planned for deletion.)
+     */
+    /*
+     * ⚠️ `restorable`, NOT `landed` — the two differ deliberately and in opposite directions. `landed`
+     * answers "what is on disk?" (so it must exclude failed writes). This answers "what does the
+     * incoming version CLAIM to contain?", and a file we failed to write is still claimed: passing
+     * `landed` here would take a write failure and turn it into a DELETION of the copy already on
+     * disk, which is the recoverable direction inverted.
      */
     const { toDelete } = planRestore({
       current: Object.entries(this.files.get())

@@ -670,3 +670,113 @@ describe('restoreFiles: inherited behaviours (pre-existing, not fixed in T9b)', 
     expect(decoder.decode(disk.get('src/main.ts'))).toBe('v2');
   });
 });
+
+/**
+ * 🔴 A FAILED WRITE MUST NOT ENTER THE MAP — the phantom that permanently disables checkpointing.
+ *
+ * `writeSerializedFileMap`'s `onError` fires only when the write THREW, so those bytes never landed.
+ * `restoreFiles` used to record the whole incoming map regardless, which leaves a map key with no file
+ * behind it. Nothing notices immediately — and then EVERY later `serializeFiles({ strict: true })`
+ * reads that key off disk, gets ENOENT, and throws. Strict serialize is exactly what
+ * `checkpointProject` runs, and it returns before `createLocalSnapshot` AND before `saveWorkingCopy`,
+ * so the project silently keeps no local checkpoint and no recovery copy on every turn thereafter.
+ * Because the phantom is re-recorded from the same incoming map on each mount, it never clears.
+ *
+ * MEASURED on a repo-mounted project (2026-08-09): four consecutive file-writing turns, two of them
+ * fully settled and billed, produced ONE local snapshot — the "Loaded from repository" mount itself
+ * (`nextSeq: 1`). On reload the mount read that seq-0 snapshot as the whole truth and every AI edit
+ * since was gone. Binaries are the only entries serialize reads from disk (text comes straight from
+ * the map), which is why the symptom presents as "every binary failed at once".
+ */
+describe('restoreFiles — a write that FAILED is not recorded as present', () => {
+  const workdir = WORK_DIR;
+  const p = (rel: string) => `${workdir}/${rel}`;
+  const png = makePng();
+
+  /** Build a store whose provider refuses to write any path matching `failOn`. */
+  function storeRefusingWrites(failOn: RegExp) {
+    const made = newStore(workdir);
+    const fs = made.provider.fs as unknown as { writeFile(rel: string, data: string | Uint8Array): Promise<void> };
+    const realWrite = fs.writeFile.bind(fs);
+
+    fs.writeFile = async (rel: string, data: string | Uint8Array) => {
+      if (failOn.test(rel)) {
+        throw Object.assign(new Error(`EIO: write failed for ${rel}`), { code: 'EIO' });
+      }
+
+      return realWrite(rel, data);
+    };
+
+    return made;
+  }
+
+  function payload(): SerializedFileMap {
+    return {
+      [p('src/pages/Home.tsx')]: { type: 'file', content: 'export const Home = () => null;\n', isBinary: false },
+      [p('public/babylon.png')]: { type: 'file', content: bytesToBase64(png), isBinary: true, size: png.byteLength },
+    };
+  }
+
+  it('leaves the un-written binary OUT of the map', async () => {
+    const { store, disk } = storeRefusingWrites(/babylon\.png$/);
+
+    await store.restoreFiles(payload(), { protect: () => false });
+
+    // It is genuinely not on disk…
+    expect(disk.has('public/babylon.png')).toBe(false);
+
+    // …so it must not be in the map claiming otherwise.
+    expect(store.files.get()[p('public/babylon.png')]).toBeUndefined();
+  });
+
+  /*
+   * THE MONEY ASSERTION. This is the state `checkpointProject` is in on the very next turn: with the
+   * phantom recorded, strict serialize throws and no checkpoint and no working copy are ever written.
+   */
+  it('leaves a STRICT serialize working, so the next checkpoint can still be taken', async () => {
+    const { store } = storeRefusingWrites(/babylon\.png$/);
+
+    await store.restoreFiles(payload(), { protect: () => false });
+
+    const serialized = await store.serializeFiles({ strict: true });
+
+    // The file that did land is present and correct.
+    expect(serialized[p('src/pages/Home.tsx')]).toMatchObject({ isBinary: false });
+    expect(serialized[p('public/babylon.png')]).toBeUndefined();
+  });
+
+  /*
+   * CONTROL — without this the two assertions above pass for a `restoreFiles` that records NOTHING at
+   * all, which would be a far worse bug wearing the same green tick.
+   */
+  it('CONTROL: with every write succeeding, the binary IS recorded and strict serialize reads it', async () => {
+    const { store, disk } = storeRefusingWrites(/__never_matches__/);
+
+    await store.restoreFiles(payload(), { protect: () => false });
+
+    expect(disk.has('public/babylon.png')).toBe(true);
+    expect(store.files.get()[p('public/babylon.png')]).toMatchObject({ isBinary: true });
+
+    const serialized = await store.serializeFiles({ strict: true });
+    expect(serialized[p('public/babylon.png')]).toMatchObject({ isBinary: true, content: bytesToBase64(png) });
+  });
+
+  /*
+   * ⚠️ The delete plan keeps using the CLAIMED map, not the landed one. A write failure must not be
+   * escalated into deleting the copy already on disk — the two sets differ deliberately and in
+   * opposite directions.
+   */
+  it('does not DELETE a file merely because its write failed', async () => {
+    const { store, disk } = storeRefusingWrites(/babylon\.png$/);
+
+    // A pre-existing copy on disk, present in the map before the restore runs.
+    disk.set('public/babylon.png', png);
+    await store.refreshFiles();
+    expect(store.files.get()[p('public/babylon.png')]).toBeDefined();
+
+    await store.restoreFiles(payload(), { protect: () => false });
+
+    // The restore could not overwrite it, and must not have removed it either.
+    expect(disk.has('public/babylon.png')).toBe(true);
+  });
+});

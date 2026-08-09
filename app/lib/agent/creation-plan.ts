@@ -75,48 +75,53 @@ export interface CreationPhase {
 }
 
 /**
- * ⚠️ Ordered by what survives a failure, not by what is most impressive first.
+ * 🔴 ORDERED FRONT END FIRST, GAME LAST — reversed by owner decision, 2026-08-08.
  *
- * The game is what the user asked for; the landing page is decoration. Fail after `game` and you
- * have a playable project with a stock page — which is exactly what "creation" meant before the
- * landing redesign was bundled into the same turn. Fail after `frontend` and the art is missing,
- * which the design degrades to on its own. The reverse order would buy a fast visible signal and
- * pay for it with the possibility of a beautiful page in front of no game.
+ * The original order was `game → frontend → art`, argued as "what survives a failure": fail after
+ * the game and you have a playable project with a stock page, where the reverse buys a pretty page
+ * in front of no game. That reasoning treated a cut-off run as a terminal state. It is not one — a
+ * plan RESUMES, and a single-turn build is one prompt from finished whichever way round it went.
+ *
+ * What actually decides the order is which body of work is BOUNDED. The front end is a known
+ * quantity: one page and three chrome files, much the same size whatever the game is (33% of the
+ * monolithic run's characters). The game is open-ended — 45% on that same run, and it scales with
+ * the request in a way nothing can predict before the turn starts. Whatever runs LAST is what a
+ * length-truncated response mangles, so the fixed cost goes first, where it is certain to fit, and
+ * the unbounded work takes the room that is left.
+ *
+ * `verify` stays last because it is the repair pass. `art` stays adjacent to `frontend` because it
+ * renders the list `frontend` wrote into `DESIGN.md` and wires the returned paths into the files
+ * `frontend` just created — separating that pair would be a real regression.
+ *
+ * ⚠️ The same rule is stated to the model in the baked prompt's "BUILD ORDER" section
+ * (`prompt/sections/20-hard-constraints.md`), which is the LIVE path while this plan is inert (§4.4a:
+ * nothing sends `CREATION_BRIEF_MARKER`, so no phase message is ever composed). The two must never
+ * disagree about which way round a build goes.
  */
 export const CREATION_PHASES: readonly CreationPhase[] = [
-  {
-    id: 'game',
-    label: 'Game code',
-    activeLabel: 'Writing your game code',
-    allowsMedia: false,
-    task:
-      'Write the GAME. This step owes the playable project and nothing else — do NOT touch the ' +
-      'landing page or the game chrome, which are a later step and will be redesigned then.\n\n' +
-      'Build what the request asks for in `src/scripts/**`: the GameMode named above plus whatever ' +
-      'Script Components, systems and helpers it needs. Keep the play contract exactly as described. ' +
-      'Then write `SPEC.md` — a short statement of what this game is and how it plays.\n\n' +
-      'If the request was a single narrow change that does not call for game code, do only what was ' +
-      'asked and say so in one line.',
-  },
   {
     id: 'frontend',
     label: 'Front end',
     activeLabel: 'Designing your front end',
     allowsMedia: false,
     task:
-      'Design the complete frontend shell, following the **bt-landing skill** (pre-loaded in your ' +
-      'Skills) EXACTLY, using the project facts in the brief above as its Step-0 inputs.\n\n' +
+      'Design the complete frontend shell FIRST, following the **bt-landing skill** (pre-loaded in ' +
+      'your Skills) EXACTLY, using the project facts in the brief above as its Step-0 inputs.\n\n' +
       'That is the landing page (`src/pages/Home.tsx` + `Home.css`, rewritten completely, ' +
       'full-page-width per the Layout law) AND the game chrome in `src/chrome/**` (preloader, ' +
       'splash, overlay — redesigned to the same theme, never derived from the default splash, ' +
       'lightweight, wiring preserved). If the bt-landing skill is absent from your Skills, follow ' +
       'the same rules from the system prompt\'s "Layout law" and "Chrome rewrites" sections.\n\n' +
+      'Wire the play contract now: a registered GameMode was scaffolded into `src/scripts/` when the ' +
+      'project was created, so read its real class name off that file and navigate to it — never ' +
+      'invent one. Do NOT write gameplay code in this step; the game is a later step, and what this ' +
+      'design promises is what it will have to deliver.\n\n' +
       'Then write `DESIGN.md`, and in it name the two or three pieces of art this design would ' +
       'benefit from — the next step renders exactly that list, so be specific about subject, ' +
       'aspect ratio and whether each needs a transparent background.\n\n' +
-      'The game code is already written: do not rewrite it. If the request was a single narrow ' +
-      'change that did not call for a redesign, leave the landing page and the chrome alone and say ' +
-      'so in one line — a redesign nobody asked for is destructive, not generous.',
+      'If the request was a single narrow change that did not call for a redesign, leave the landing ' +
+      'page and the chrome alone and say so in one line — a redesign nobody asked for is ' +
+      'destructive, not generous.',
   },
   {
     id: 'art',
@@ -130,6 +135,23 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
       'Those paths are the one exception to never inventing an asset path — use exactly what the ' +
       'tool returned, never a path you expect it to return.\n\n' +
       'If the design needs no bespoke art, generate nothing and say so in one line.',
+  },
+  {
+    id: 'game',
+    label: 'Game code',
+    activeLabel: 'Writing your game code',
+    allowsMedia: false,
+    task:
+      'Write the GAME. This step owes the playable project and nothing else — do NOT touch the ' +
+      'landing page or the game chrome, which were designed in the earlier steps and are already ' +
+      'correct.\n\n' +
+      'Build what the request asks for in `src/scripts/**`: the GameMode named above plus whatever ' +
+      'Script Components, systems and helpers it needs. Keep the play contract exactly as described, ' +
+      'and deliver what the front end promises — its modes, tracks, pickups and scoring are the ' +
+      'specification for this step. Then write `SPEC.md` — a short statement of what this game is ' +
+      'and how it plays.\n\n' +
+      'If the request was a single narrow change that does not call for game code, do only what was ' +
+      'asked and say so in one line.',
   },
   {
     id: 'verify',

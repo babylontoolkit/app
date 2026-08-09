@@ -24,14 +24,46 @@ import { TooltipProvider } from '@radix-ui/react-tooltip';
 import WithTooltip from '~/components/ui/Tooltip';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { getProject, renameProject } from '~/lib/persistence/projects';
+import { createScopedLogger } from '~/utils/logger';
+
+const logger = createScopedLogger('ProjectTitle');
 
 /** Mirrors the server's cap (`api.projects.$projectId.ts` slices to 120). */
 const MAX_NAME_LENGTH = 120;
 
+/**
+ * 🔴 "Not loaded YET" and "could not be loaded" are DIFFERENT, and collapsing them is what emptied the
+ * header (found 2026-08-09).
+ *
+ * `getProject` used to be `.catch(() => undefined)` with the note *"an offline miss leaves the bar
+ * empty, exactly as it was before a name arrived"* — which treats a permanent failure as a slow
+ * success. It is not offline-only and it is not transient: `requireOwnedProject` answers **404, not
+ * 403**, for a project that is missing OR belongs to someone else (the enumeration-oracle rule,
+ * §4.5.3), so a project whose server row is gone returns the same shape forever. The component then
+ * rendered `null`, the title silently vanished, and the one always-visible label naming what you are
+ * looking at was simply absent — with nothing anywhere saying why.
+ *
+ * MEASURED live: `GET /api/projects/prj_…` → `404 {"message":"That project does not exist."}` for a
+ * project the browser still held with six local checkpoints, while a project created after the
+ * server's store was reset showed its title normally. Same code, same header — which is exactly why it
+ * reads as "sometimes it disappears".
+ *
+ * The distinction matters beyond the label: a project the server cannot resolve also cannot be
+ * renamed, shared, deployed, or given a working copy, so an empty bar hides a half-dead project behind
+ * what looks like a cosmetic gap. Loading still renders nothing (a flash of fallback text on every
+ * open would be worse); FAILING says so.
+ */
+type NameState = { status: 'loading' } | { status: 'ready'; name: string } | { status: 'unavailable' };
+
 export function ProjectTitle() {
   const activeProjectId = useStore(projectIdStore);
 
-  const [name, setName] = useState<string | undefined>();
+  const [state, setState] = useState<NameState>({ status: 'loading' });
+  const name = state.status === 'ready' ? state.name : undefined;
+  const setName = useCallback(
+    (next: string | undefined) => setState(next ? { status: 'ready', name: next } : { status: 'unavailable' }),
+    [],
+  );
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 
@@ -43,7 +75,7 @@ export function ProjectTitle() {
 
   useEffect(() => {
     if (!activeProjectId) {
-      setName(undefined);
+      setState({ status: 'loading' });
       confirmed.current = undefined;
 
       return undefined;
@@ -51,15 +83,28 @@ export function ProjectTitle() {
 
     let cancelled = false;
 
+    setState({ status: 'loading' });
+
     getProject(activeProjectId)
       .then((project) => {
         if (!cancelled) {
-          setName(project.name);
+          setState(project.name ? { status: 'ready', name: project.name } : { status: 'unavailable' });
           confirmed.current = project.name;
         }
       })
-      // Best-effort: an offline miss leaves the bar empty, exactly as it was before a name arrived.
-      .catch(() => undefined);
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        /*
+         * Never silent. This is the whole defect: the bar going blank was the ONLY symptom of a
+         * project the server cannot resolve, and it was indistinguishable from one still loading.
+         */
+        logger.warn(`Could not load project ${activeProjectId} for the header title`, error);
+        setState({ status: 'unavailable' });
+        confirmed.current = undefined;
+      });
 
     return () => {
       cancelled = true;
@@ -103,6 +148,28 @@ export function ProjectTitle() {
     },
     [activeProjectId, draft],
   );
+
+  /*
+   * Still asking. Renders nothing on purpose — a fallback label flashed on every open would be a worse
+   * lie than a brief gap, and this state always resolves.
+   */
+  if (state.status === 'loading') {
+    return null;
+  }
+
+  /*
+   * Asked and failed. Say so, and do NOT offer the pencil: renaming posts to the same project the
+   * server just refused to resolve, so the control could only ever produce an error toast.
+   */
+  if (state.status === 'unavailable') {
+    return (
+      <TooltipProvider>
+        <WithTooltip tooltip="This project's record could not be loaded, so it cannot be renamed, shared or deployed. Reload the page; if it persists, the project no longer exists on the server.">
+          <span className="truncate text-bolt-elements-textTertiary italic">Project unavailable</span>
+        </WithTooltip>
+      </TooltipProvider>
+    );
+  }
 
   if (!name) {
     return null;
