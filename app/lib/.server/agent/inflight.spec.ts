@@ -6,7 +6,7 @@
  * and the user reports "it broke my game".
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { _resetClaims, claimProject, GenerationInFlightError } from './inflight';
+import { _resetClaims, claimProject, GenerationInFlightError, shouldClaimProject } from './inflight';
 
 const USER = 'user_1';
 
@@ -111,5 +111,86 @@ describe('claimProject', () => {
 
     // The takeover's claim must still be standing.
     expect(() => claimProject('prj_1', USER, new AbortController().signal)).toThrow(GenerationInFlightError);
+  });
+});
+
+/**
+ * 🔴 THE LOCK IS SCOPED TO BUILD TURNS (owner, 2026-08-09).
+ *
+ * *"I am not in build mode and don't ever hold me because it thinks I am."* Plan mode exists to think
+ * about a project without touching it, and it was both taking this lock and being refused by it — with
+ * an error announcing that the project "is already building" to someone who had switched building off.
+ *
+ * The two directions are one rule, which is why the predicate is pure and shared rather than a boolean
+ * written at the call site: a Plan turn takes no claim (so it cannot block the build that follows it)
+ * and makes no claim request (so a build in flight cannot refuse it).
+ */
+describe('shouldClaimProject — the lock covers builds, not plans', () => {
+  it('claims for an ordinary build turn', () => {
+    expect(shouldClaimProject({ projectId: 'prj_1', chatMode: 'build' })).toBe(true);
+  });
+
+  /* 🔴 The reported bug. Read-only by guarantee (§4.2.9), so there is nothing to serialise. */
+  it('does NOT claim for a Plan-mode turn', () => {
+    expect(shouldClaimProject({ projectId: 'prj_1', chatMode: 'discuss' })).toBe(false);
+  });
+
+  /*
+   * The safe default, and the direction that matters: an older client, a dropped field or a value
+   * nobody recognised is a turn that MIGHT write files, so it must stay behind the lock. Getting this
+   * backwards re-opens the interleaved-writes corruption silently.
+   */
+  it.each([
+    ['absent', undefined],
+    ['an unrecognised value from a stale client', 'planning' as unknown as 'build'],
+  ])('claims when chatMode is %s', (_label, chatMode) => {
+    expect(shouldClaimProject({ projectId: 'prj_1', chatMode })).toBe(true);
+  });
+
+  /* A generation with no project locks nothing — there is no tree for it to corrupt. */
+  it.each([
+    ['build', 'build' as const],
+    ['discuss', 'discuss' as const],
+  ])('does not claim without a project (%s)', (_label, chatMode) => {
+    expect(shouldClaimProject({ chatMode })).toBe(false);
+  });
+});
+
+/**
+ * The behaviour the predicate buys, asserted through the lock itself rather than only as a boolean —
+ * a predicate that returns the right answer while the caller ignores it is the failure this pins.
+ */
+describe('a Plan turn and a build turn do not block each other', () => {
+  beforeEach(() => {
+    _resetClaims();
+  });
+
+  /** Route-shaped: claim only when the rule says to. */
+  const send = (projectId: string, chatMode: 'discuss' | 'build') =>
+    shouldClaimProject({ projectId, chatMode }) ? claimProject(projectId, USER) : undefined;
+
+  it('lets a Plan turn through while a build is running', () => {
+    send('prj_1', 'build');
+    expect(() => send('prj_1', 'discuss')).not.toThrow();
+  });
+
+  it('lets a build start after a Plan turn that never released', () => {
+    send('prj_1', 'discuss');
+    expect(() => send('prj_1', 'build')).not.toThrow();
+  });
+
+  it('runs any number of Plan turns at once', () => {
+    send('prj_1', 'discuss');
+    send('prj_1', 'discuss');
+    expect(() => send('prj_1', 'discuss')).not.toThrow();
+  });
+
+  /*
+   * CONTROL — without this the whole block passes for a lock that was simply deleted, which is the
+   * cheerful way to make a "stop blocking me" bug go green while restoring the tree corruption.
+   */
+  it('still refuses a second BUILD turn', () => {
+    send('prj_1', 'build');
+    expect(() => send('prj_1', 'build')).toThrow(GenerationInFlightError);
   });
 });

@@ -1799,10 +1799,11 @@ export const ChatImpl = memo(
        * ⚠️ It rides on `visiblePrompt`, NOT `prompt`, and the distinction is load-bearing in two places
        * one line apart in `runStartProject`: `prompt` derives the project TITLE (so passing it here
        * would rename "Arcade Racing" to something squeezed out of the card's marketing copy), and
-       * `prompt && visiblePrompt && prompt !== visiblePrompt` is what appends the WIZARD's compiled
-       * selections to the brief (so passing both would staple this text into the hidden brief as if the
-       * user had walked the guided tour). With `prompt` undefined the title stays the card's, no wizard
-       * block is emitted, and `draftTextForSeed` still resolves the carried words to this text.
+       * `prompt && visiblePrompt && prompt !== visiblePrompt` is the WIZARD branch, which carries the
+       * compiled selections in preference to the summary — so passing both would take that branch and
+       * silently drop this text from the carried prompt. With `prompt` undefined the title stays the
+       * card's, the wizard branch cannot fire, and `draftTextForSeed` resolves the carried words to this
+       * text.
        *
        * The fallback row returns `undefined` on purpose — see `briefFromRegistryEntry`.
        */
@@ -1938,13 +1939,33 @@ export const ChatImpl = memo(
     /**
      * **Build my game** — the first build turn, sent from the card.
      *
-     * 🔴 Goes through the ORDINARY `sendMessage`, never a second send path. Ten behavioural protections
-     * hang off that function recognising a first build turn (the hidden brief, the mode clear, the
-     * premium lock, the celebration arming, the attachment handling); a private "just post it" shortcut
-     * here would have every one of them silently absent, on the most expensive turn in the product.
+     * 🔴 Goes through the ORDINARY `sendMessage`, never a second send path. Every behavioural protection
+     * on a first build turn hangs off that function (the mode clear, the row's handoff clear, the premium
+     * lock, the celebration arming, the attachment handling); a private "just post it" shortcut here
+     * would have all of them silently absent, on the most expensive turn in the product.
      */
     const handleCreationBuild = (prompt: string) => {
       void sendMessage({} as React.UIEvent, prompt);
+    };
+
+    /**
+     * **Plan my brief** — fill the box with `/bt-plan <brief>` AND switch to Plan mode (§4.2.9, §4.4a).
+     *
+     * 🔴 **Both halves, or neither is worth having** (owner, 2026-08-09). The prefix asks the `bt-plan`
+     * skill to produce an ordered task list; Plan mode is what makes the turn READ-ONLY — the server's
+     * discuss note, the `skills-only` toolset (no media debits, no MCP writes) and the `NO_REPLAY` mark
+     * that routes the reply through the render-only parser, with `_specs/**` as the one write door so
+     * the plan file itself can land. Prefix alone leaves a turn that is free to rewrite the project
+     * while the user believes they asked for a plan.
+     *
+     * Setting the mode here is safe where it would NOT be on Build: this sends nothing, so React has
+     * committed the state (and `useChat` has refreshed its request body) long before the user presses
+     * enter. `Messages.client.tsx`'s "Build & Apply" needs a per-request `body` override for exactly the
+     * opposite reason — it sends immediately, and `setChatMode` does not apply until the next render.
+     */
+    const handleCreationPlan = (prompt: string) => {
+      setChatMode('discuss');
+      fillChatBox(prompt, { focus: true });
     };
 
     /**
@@ -2161,13 +2182,14 @@ export const ChatImpl = memo(
        *
        *   - **After the client-command interceptions above**, because `/context` or `/effort` on a
        *     freshly created project is an ordinary thing to type and posts nothing. Clearing at the top
-       *     of the handler would silently spend the mode — and with it the creation brief — on a command
-       *     that was never a build.
+       *     of the handler would silently spend the mode — and with it the carried prompt, the premium
+       *     lock and the game-ready celebration — on a command that was never a build.
        *   - **Before the post below**, because a mode that outlives its own send is a mode a second,
        *     fast send reads again.
        *
-       * And on SEND rather than on finish: a build that fails is one the user retries, and the retry must
-       * carry the brief. The brief is a fact about the first message, not about the first one that worked.
+       * And on SEND rather than on finish: a build that fails is one the user retries, and that retry is
+       * still the first build. Being the first build is a fact about the first message the user sends,
+       * not about the first one that worked.
        */
       /*
        * ⚠️ Whether the mode is OURS is the mode's question, not `activeProjectId`'s — and gating on a
@@ -2330,6 +2352,7 @@ export const ChatImpl = memo(
         canReseed={!isLoading && !fakeLoading && messages.length <= 3}
         onCreationBuild={handleCreationBuild}
         onCreationEdit={(prompt) => fillChatBox(prompt, { focus: true })}
+        onCreationPlan={handleCreationPlan}
         onCreationDismiss={(prompt) => fillChatBox(prompt, { focus: false })}
         model={model}
         setModel={handleModelChange}

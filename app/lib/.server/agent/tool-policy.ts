@@ -20,8 +20,11 @@
  *    a render — and each extra round re-reads the cached prefix at a tenth, so the slack is cheap.
  */
 import { phaseAllowsMedia, type CreationPhaseId } from '~/lib/agent/creation-plan';
-import { MAX_TOOL_ROUNDS } from './tools';
-import { MAX_REFERENCE_LOADS } from './reference-tools';
+import {
+  type AgentBudgets,
+  CREATION_FILE_READ_ROUNDS as SHARED_CREATION_FILE_READ_ROUNDS,
+  DEFAULT_AGENT_BUDGETS,
+} from './budgets';
 
 /** 1 round of parallel generate_* calls + the ANSWER step + 1 round of slack (the +1 rule, §4.2.8). */
 export const CREATION_MEDIA_STEPS = 3;
@@ -72,14 +75,23 @@ export const CREATION_MEDIA_STEPS = 3;
  * purpose — an extra in-generation step re-reads the WARM prefix at 0.1x, where the forced
  * continuation it prevents rewrites the whole thing at 2x AND risks a truncated project.
  *
- * ⚠️ Held at 3 so `CREATION_TOOL_ROUNDS + 1` stays equal to `MAX_TOOL_ROUNDS + 1` — a creation must
+ * ⚠️ Held at 3 so `CREATION_TOOL_ROUNDS + 1` stays at or below `MAX_TOOL_ROUNDS + 1` — a creation must
  * never get MORE rounds than an ordinary turn, which `tool-policy.spec.ts` asserts as a relationship.
- * The live run used exactly 3 read rounds (steps 1, 2 and 4), so this covers the observed shape; if it
- * needs to grow, `MAX_TOOL_ROUNDS` grows with it or the invariant breaks.
+ * The live run used exactly 3 read rounds (steps 1, 2 and 4), so this covers the observed shape.
+ *
+ * 🔴 **The "if it needs to grow, `MAX_TOOL_ROUNDS` grows with it or the invariant breaks" clause is no
+ * longer a note for a future reader — it is CODE** (`budgets.ts`, 2026-08-09). The reference budget is
+ * configurable now, and an operator raising it is exactly the case that sentence was worrying about; a
+ * warning in a comment cannot be executed by a deploy that sets an env var. `maxToolRounds` is derived
+ * upward from whatever the budgets resolve to, so the relationship holds by construction rather than by
+ * someone reading this paragraph first.
+ *
+ * Both constants below re-export the SHIPPED defaults. The values a turn runs with arrive on
+ * `ToolPolicyInput.budgets`; reading these here would ignore the operator silently.
  */
-export const CREATION_FILE_READ_ROUNDS = 3;
+export const CREATION_FILE_READ_ROUNDS = SHARED_CREATION_FILE_READ_ROUNDS;
 
-export const CREATION_TOOL_ROUNDS = MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROUNDS;
+export const CREATION_TOOL_ROUNDS = DEFAULT_AGENT_BUDGETS.creationToolRounds;
 
 /**
  * 🔴 MEDIA IS OFF THE CREATION TURN (2026-08-08, owner-driven, live evidence below).
@@ -195,6 +207,17 @@ export interface ToolPolicyInput {
    * what keeps a project created before phases (and one whose build never started) working unchanged.
    */
   creationPhase?: CreationPhaseId | null;
+
+  /**
+   * This turn's resolved round ceilings (`budgets.ts`).
+   *
+   * 🔴 Optional and defaulting to the shipped values, so every existing caller is byte-identical — but
+   * production MUST pass them, because they are DERIVED from the reference budget. An operator raising
+   * `AGENT_MAX_REFERENCE_LOADS` without the ceilings moving with it would give a creation more rounds
+   * than an ordinary turn, inverting the relationship this file's own spec pins. That derivation lives
+   * in `budgets.ts`; this input is how it reaches the decision.
+   */
+  budgets?: Pick<AgentBudgets, 'maxToolRounds' | 'creationToolRounds'>;
 }
 
 export interface ToolPolicy {
@@ -227,6 +250,13 @@ export interface ToolPolicy {
 }
 
 export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
+  /*
+   * The ceilings this turn runs with. `DEFAULT_AGENT_BUDGETS` reproduces the shipped constants
+   * exactly, so an absent `budgets` is byte-identical to the behaviour before config existed.
+   */
+  const maxToolRounds = input.budgets?.maxToolRounds ?? DEFAULT_AGENT_BUDGETS.maxToolRounds;
+  const creationToolRounds = input.budgets?.creationToolRounds ?? DEFAULT_AGENT_BUDGETS.creationToolRounds;
+
   if (input.isFirstBuildTurn) {
     /*
      * 🔴 `+ 1` — THE ANSWER STEP IS SEPARATE FROM THE MEDIA BUDGET (2026-08-07, gen_msixapaq_i871b6).
@@ -285,7 +315,7 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
        * So the art phase's headroom appears here BECAUSE it is the phase that can spend it, not
        * because someone remembered to add it — and the `+ 1` answer step stays outside every budget.
        */
-      maxSteps: CREATION_TOOL_ROUNDS + (allowsMedia ? MEDIA_IMAGE_ROUNDS : 0) + 1,
+      maxSteps: creationToolRounds + (allowsMedia ? MEDIA_IMAGE_ROUNDS : 0) + 1,
     };
   }
 
@@ -297,7 +327,7 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
    */
   if (input.isDiscussTurn) {
     return input.preloadedCount === 0 && !input.isSlash
-      ? { allowTools: true, toolset: 'skills-only', allowsMedia: false, maxSteps: MAX_TOOL_ROUNDS + 1 }
+      ? { allowTools: true, toolset: 'skills-only', allowsMedia: false, maxSteps: maxToolRounds + 1 }
       : { allowTools: false, toolset: 'skills-only', allowsMedia: false, maxSteps: 1 };
   }
 
@@ -337,6 +367,6 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
     allowTools: true,
     toolset: 'all',
     allowsMedia: input.hasMediaTools,
-    maxSteps: MAX_TOOL_ROUNDS + (input.hasMediaTools ? MEDIA_IMAGE_ROUNDS : 0) + 1,
+    maxSteps: maxToolRounds + (input.hasMediaTools ? MEDIA_IMAGE_ROUNDS : 0) + 1,
   };
 }

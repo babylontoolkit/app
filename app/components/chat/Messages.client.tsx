@@ -16,7 +16,7 @@ import {
 import { selectRestoreTarget } from '~/lib/persistence/restore-target';
 import { protectNothing } from '~/lib/persistence/restore-plan';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { BUILD_AND_APPLY_MESSAGE } from '~/lib/chat/plan-proposal';
+import { BUILD_AND_APPLY_MESSAGE, executePlanMessage } from '~/lib/chat/plan-proposal';
 import { useStore } from '@nanostores/react';
 import { atom } from 'nanostores';
 import { countArtifactProgress } from '~/lib/stores/agent-status';
@@ -286,6 +286,30 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
       );
     };
 
+    /**
+     * "Build this plan" (§4.2.9, owner 2026-08-09): the plan turn WROTE `_specs/<feature>_plan.md`, and
+     * this is the step that executes it — flip to Build and hand the plan file to `/bt-execute`.
+     *
+     * The other end of the handoff card's **Plan my brief**: that button plans the build, this one
+     * builds the plan. Without it the flow ended with a plan on disk, the toggle still reading Plan,
+     * and the user having to know both to flip it and to type a slash command.
+     *
+     * Same `body: { chatMode: 'build' }` override, and for the same load-bearing reason as
+     * `handleBuildAndApply` above: `setChatMode` does not apply until the next committed render, so
+     * without it this would post ANOTHER read-only turn — one that reads the plan and cannot act on it.
+     */
+    const handleExecutePlan = (planPath: string) => {
+      if (!props.append) {
+        return;
+      }
+
+      props.setChatMode?.('build');
+      props.append(
+        { id: `execute-${Date.now()}`, role: 'user', content: executePlanMessage(planPath) },
+        { body: { chatMode: 'build' } },
+      );
+    };
+
     return (
       <div id={id} className={props.className} ref={ref}>
         {messages.length > 0
@@ -319,6 +343,7 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
                         onRestore={canRestore ? handleRestore : undefined}
                         onRetry={props.append ? handleRetry : undefined}
                         onBuildAndApply={props.append ? handleBuildAndApply : undefined}
+                        onExecutePlan={props.append ? handleExecutePlan : undefined}
                         append={props.append}
                         chatMode={props.chatMode}
                         setChatMode={props.setChatMode}

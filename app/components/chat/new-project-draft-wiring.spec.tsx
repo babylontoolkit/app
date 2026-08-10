@@ -150,13 +150,22 @@ vi.mock('./BaseChat', () => ({
       </button>
 
       {/*
-       * The handoff card's three actions. The CARD itself is covered by `CreationHandoffCard.spec.tsx`
+       * The handoff card's actions. The CARD itself is covered by `CreationHandoffCard.spec.tsx`
        * (which handler each button calls, and the dismissal); what only this file can see is what
-       * `Chat.client` DOES with them — the box, the cookie, the caret, and the wire.
+       * `Chat.client` DOES with them — the box, the cookie, the caret, the chat MODE, and the wire.
        */}
       <button type="button" onClick={() => props.onCreationEdit(newProjectModeStore.get()?.userPrompt ?? '')}>
         edit brief
       </button>
+      <button
+        type="button"
+        onClick={() => props.onCreationPlan(`/bt-plan ${(newProjectModeStore.get()?.userPrompt ?? '').trim()}`)}
+      >
+        plan my brief
+      </button>
+
+      {/* The Build/Plan toggle's state, as the real `ChatBox` receives it — the only way to see the switch. */}
+      <div data-testid="chat-mode">{props.chatMode}</div>
       <button type="button" onClick={() => props.onCreationDismiss(newProjectModeStore.get()?.userPrompt ?? '')}>
         close card
       </button>
@@ -356,6 +365,35 @@ describe('the handoff card puts the prompt in the box only when asked', () => {
   });
 
   /*
+   * 🔴 PLAN SWITCHES THE CHAT INTO PLAN MODE, AND THAT IS THE HALF ONLY THIS FILE CAN SEE (owner,
+   * 2026-08-09 — *"WE NEED To ALSO SWITCH TO PLAN MODE. That is the whole point as well"*).
+   *
+   * The `/bt-plan` prefix asks the skill to plan; `chatMode: 'discuss'` is what makes the turn READ-ONLY
+   * (§4.2.9: the server's Plan note, the `skills-only` toolset, the `NO_REPLAY` mark, with `_specs/**`
+   * as the one write door so the plan file itself lands). A card wired to `onCreationEdit` would compose
+   * exactly the same command and leave the chat in Build — nothing throws, nothing on screen disagrees,
+   * and the "plan" turn is free to rewrite the project.
+   */
+  it('Plan my brief fills the box AND switches the chat to Plan mode', async () => {
+    await createThen('plan my brief');
+
+    expect(box().value).toBe(`/bt-plan ${TYPED_PROMPT}`);
+    expect(document.activeElement).toBe(box());
+    expect(screen.getByTestId('chat-mode').textContent).toBe('discuss');
+  });
+
+  /*
+   * CONTROL — the mode is not simply always 'discuss' under this harness, and Edit does not drag the
+   * chat into a read-only mode behind the user's back. Without this, the assertion above passes for a
+   * component that hard-codes the mode.
+   */
+  it('CONTROL — Edit brief leaves the chat in Build mode', async () => {
+    await createThen('edit brief');
+
+    expect(screen.getByTestId('chat-mode').textContent).toBe('build');
+  });
+
+  /*
    * 🔴 ONCE THE USER HAS TAKEN THE TEXT, IT IS AN ORDINARY DRAFT — AND ORDINARY DRAFTS SURVIVE A RELOAD
    * (found live, 2026-07-29).
    *
@@ -382,8 +420,8 @@ describe('the handoff card puts the prompt in the box only when asked', () => {
     expect(document.activeElement).not.toBe(box());
   });
 
-  /** CONTROL — neither action posts anything. Only Build sends. */
-  it.each([['edit brief'], ['close card']])('CONTROL — %s contacts no model', async (action) => {
+  /** CONTROL — none of these post anything. Only Build sends. */
+  it.each([['edit brief'], ['plan my brief'], ['close card']])('CONTROL — %s contacts no model', async (action) => {
     await createThen(action);
 
     expect(agentRequests()).toEqual([]);

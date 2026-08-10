@@ -20,18 +20,21 @@
  *
  * ## The rules it is holding
  *
- * 🔴 **The brief is SHOWN.** Build sends the user's words plus a hidden machine-written brief; the words
- * are theirs and they are entitled to read them before pressing a button that spends credits.
+ * 🔴 **The brief is SHOWN.** Build sends these words and only these words (the hidden machine-written
+ * brief that used to ride with them was retired 2026-08-08, §4.4a) — they are the user's, and they are
+ * entitled to read them before pressing a button that spends credits.
  *
  * 🔴 **No Build without words.** On the card path (a picked genre, an empty box) there is nothing to
  * continue. A Build button there would either post an empty turn or quietly invent a brief on the user's
  * behalf — so the primary becomes *Describe your game*, which just puts the caret in the box.
  * `decideCreationHandoff` owns that branch so it is testable without React.
  *
- * 🔴 **X hides the CARD, never the MODE.** `dismissCreationHandoff` is not `exitNewProjectMode`: the
- * hidden creation brief must still ride on whatever the user sends next, or the play contract, the
- * scaffolded class name and the on-disk image list vanish from the most expensive turn in the product,
- * silently. Only a SEND clears the mode.
+ * 🔴 **X hides the CARD, never the MODE.** `dismissCreationHandoff` is not `exitNewProjectMode`. The
+ * mode is what says "created, never built", and three things read it after the card is gone: the carried
+ * prompt (this card holds the only copy of it), the premium lock (every paid rung is edit-only, and a
+ * first build on a buffered model dies at the gateway timeout), and the game-ready celebration, armed on
+ * the send. Collapsing the two would put all of that behind the most casual gesture on the screen. Only
+ * a SEND clears the mode.
  *
  * §4.1a house style, applied to a card rather than the toolbar: ONE accent-filled primary, everything
  * else the same shared secondary (a style only looks wrong next to its neighbours, which is why both
@@ -43,9 +46,8 @@
  * `DEFAULT`, so the utility silently matches nothing. Use `text-accent-500`.
  */
 import { useStore } from '@nanostores/react';
-import { decideCreationHandoff } from '~/lib/chat/creation-handoff';
+import { decideCreationHandoff, planCommandFor } from '~/lib/chat/creation-handoff';
 import { projectId } from '~/lib/persistence/useChatHistory';
-import { useSaveProject } from '~/lib/persistence/useSaveProject';
 import { dismissCreationHandoff, newProjectModeStore } from '~/lib/stores/new-project-mode';
 
 /**
@@ -88,20 +90,21 @@ interface CreationHandoffCardProps {
   /** Move the text into the chat box, focused, caret at the end. */
   onEdit?: (prompt: string) => void;
 
+  /**
+   * **Plan my brief** — the same fill-the-box-and-focus as `onEdit`, PLUS switching the chat into Plan
+   * mode. Separate from `onEdit` because that second half is the point (§4.2.9): the `/bt-plan` command
+   * asks the skill to plan, and Plan mode is what makes the turn actually read-only. The card does not
+   * know what "Plan mode" is — it reports the choice, and `Chat.client` owns the mechanics.
+   */
+  onPlan?: (prompt: string) => void;
+
   /** The `X`: put the text in the box, but leave focus where it is. */
   onDismiss?: (prompt: string) => void;
 }
 
-export function CreationHandoffCard({ onBuild, onEdit, onDismiss }: CreationHandoffCardProps) {
+export function CreationHandoffCard({ onBuild, onEdit, onPlan, onDismiss }: CreationHandoffCardProps) {
   const mode = useStore(newProjectModeStore);
   const pid = useStore(projectId);
-
-  /*
-   * Called BEFORE the early return — it is a hook, and a conditional one crashes on the render where the
-   * card disappears. It is also the header chip's own hook, so this row and that chip can never disagree
-   * about the provider, the wording, or what pressing it does.
-   */
-  const save = useSaveProject();
 
   /*
    * The mode is keyed per project and hydrated on every mount, so the store already answers for the OPEN
@@ -118,32 +121,6 @@ export function CreationHandoffCard({ onBuild, onEdit, onDismiss }: CreationHand
   const dismiss = () => {
     dismissCreationHandoff(pid);
   };
-
-  /*
-   * 🔴 SAVE THE UNTOUCHED STARTER — A BASELINE WORTH HAVING, AND THIS IS THE MOMENT (owner, 2026-07-29).
-   *
-   * *"We should put some sort of Save project button that at least saves the core project to GitHub, so
-   * we can easily reset from"* it. This is the only point in a project's life where the tree is exactly
-   * the pinned starter plus one scaffolded class, so a commit here is a clean baseline to diff against
-   * or reset to — and it is also when the project is least safe (§4.5.4b: unlinked work is one cleared
-   * cache or device switch from gone, and the sandbox is a workspace that can be reclaimed).
-   *
-   * It is the header chip's action, not a second one: same hook, same tested `actionLabel`, same single
-   * writer. A private "save" here would be a second thing called saving, which is precisely how the
-   * header ended up with two adjacent buttons both labelled "Sync". It sits in the SAME row as Build and
-   * Edit (owner's layout call) but wears the secondary style — it is a safeguard, not the next step.
-   *
-   * Rendered only when there is something to press: `action: 'none'` means a save is already in flight or
-   * there is nothing outstanding, and a permanently dead button on the welcome card is a dead end rather
-   * than a roadmap (§4.1a).
-   */
-  const saveAction =
-    save.view.action === 'none' ? null : (
-      <button type="button" onClick={save.run} className={CARD_SECONDARY_BUTTON}>
-        <div className="i-ph:cloud-arrow-up-duotone text-base" />
-        {save.view.actionLabel}
-      </button>
-    );
 
   /*
    * No top padding on the outer wrapper: the column already supplies `--panel-top-gap`, and a second one
@@ -202,7 +179,31 @@ export function CreationHandoffCard({ onBuild, onEdit, onDismiss }: CreationHand
                 Edit my brief
               </button>
 
-              {saveAction}
+              {/*
+               * 🔴 PLAN, NOT SAVE (owner, 2026-08-09). *"I think I have enough save to GitHub buttons."*
+               * The third slot used to hold the header chip's save action; what this moment was actually
+               * missing is a way to NOT one-shot the whole game.
+               *
+               * 🔴 **It switches the chat into Plan mode, and that is half the point** (owner, same day —
+               * *"WE NEED To ALSO SWITCH TO PLAN MODE. That is the whole point as well"*). The `/bt-plan`
+               * prefix asks the skill to plan; §4.2.9's Plan mode is what makes the turn READ-ONLY, so
+               * without it a first build turn holding a planning command is still a turn that may rewrite
+               * the project. Prefix without mode is a request the pipeline is free to ignore.
+               *
+               * Still sends NOTHING — the box is filled and focused exactly as Edit does, so the user
+               * reads the composed command, edits it if they want, and presses enter themselves.
+               */}
+              <button
+                type="button"
+                onClick={() => {
+                  dismiss();
+                  onPlan?.(planCommandFor(handoff.prompt));
+                }}
+                className={CARD_SECONDARY_BUTTON}
+              >
+                <div className="i-ph:list-checks-duotone text-base" />
+                Plan my brief
+              </button>
             </div>
           </>
         ) : (
@@ -222,8 +223,6 @@ export function CreationHandoffCard({ onBuild, onEdit, onDismiss }: CreationHand
               <div className="i-ph:pencil-simple-duotone text-base" />
               Describe your game
             </button>
-
-            {saveAction}
           </div>
         )}
 
@@ -232,14 +231,18 @@ export function CreationHandoffCard({ onBuild, onEdit, onDismiss }: CreationHand
          * rule between (owner's call, on both counts).
          *
          * Side-by-side, a sentence long enough to be useful wraps and pushes the buttons out of
-         * alignment, so the row's shape depended on how long the provider's name happened to be. The
-         * separator is what stops the captions reading as a third, unaligned column of the button row.
+         * alignment, so the row's shape depended on how long the label happened to be. The separator is
+         * what stops the captions reading as a third, unaligned column of the button row.
+         *
+         * The Plan caption is not decoration: a button that puts a slash command in the box and then
+         * waits is the one action here whose effect is not obvious from its label, and the sentence has
+         * to say both what it produces and that it does not build.
          */}
         <div className="mt-3 flex flex-col gap-0.5 border-t border-bolt-elements-borderColor pt-2 text-xs text-bolt-elements-textTertiary">
           {handoff.kind === 'describe' && <span>Tell it what to build — that message is the brief.</span>}
-          {save.view.action !== 'none' && (
+          {handoff.kind === 'build' && (
             <span>
-              Keep a clean copy of the starter in your own {save.providerName} account before you build on it.
+              Plan turns your brief into an ordered list of tasks first, instead of building it all in one go.
             </span>
           )}
         </div>

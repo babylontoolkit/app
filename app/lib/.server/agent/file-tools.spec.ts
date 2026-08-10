@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import { createFileTools, MAX_FILE_READS, MAX_READ_CHARS, resolveFile, suggestPaths } from './file-tools';
 import type { FileMap } from '~/lib/.server/llm/constants';
+import { type AgentBudgets, DEFAULT_AGENT_BUDGETS } from './budgets';
 
 const text = (content: string) => ({ type: 'file' as const, content, isBinary: false });
 const binary = (size: number) => ({ type: 'file' as const, content: '', isBinary: true, size });
@@ -191,5 +192,117 @@ describe('the pure helpers', () => {
   it('suggestPaths returns nothing for a wholly unrelated path', () => {
     const files = { 'src/main.ts': text('x') } as unknown as FileMap;
     expect(suggestPaths(files, 'zzzz.py')).toEqual([]);
+  });
+});
+
+/**
+ * 🔴 A PLANNING ARTIFACT SPENDS ITS OWN POOL (owner, 2026-08-09).
+ *
+ * Reported live: a `/bt-execute` turn spent its budget on eleven system-API files, was then refused
+ * the 28KB plan it was executing against, and correctly declined to tick an Acceptance box it could no
+ * longer verify. Charging a plan to the same pool as the source it describes means the harder a turn
+ * looks at the project, the less able it is to check its own work — exactly backwards.
+ *
+ * RESERVED, never exempt. The two halves are tested separately because "unbounded" and "reserved" pass
+ * every test that only asks whether the plan read succeeded.
+ */
+describe('read_file — the _specs/ pool', () => {
+  const PLAN = 'x'.repeat(5_000);
+
+  const planCtx = (files: Record<string, unknown>, budgets?: Partial<AgentBudgets>) => ({
+    ...ctx(files),
+    planCharsThisTurn: { total: 0 },
+    budgets: { ...DEFAULT_AGENT_BUDGETS, ...budgets },
+  });
+
+  /* 🔴 The reported bug: a spent general budget must not refuse the plan. */
+  it('reads the plan when the project budget is exhausted', async () => {
+    const c = planCtx({ '_specs/kart_plan.md': text(PLAN) });
+    c.charsThisTurn.total = DEFAULT_AGENT_BUDGETS.maxReadChars; // eleven system files already read
+    c.readThisTurn = new Set(Array.from({ length: DEFAULT_AGENT_BUDGETS.maxFileReads }, (_, i) => `src/f${i}.ts`));
+
+    expect(await run(c as never, '_specs/kart_plan.md')).toBe(PLAN);
+  });
+
+  it('does not charge the project pool for a plan read', async () => {
+    const c = planCtx({ '_specs/kart_plan.md': text(PLAN) });
+    await run(c as never, '_specs/kart_plan.md');
+
+    expect(c.charsThisTurn.total).toBe(0);
+    expect(c.planCharsThisTurn.total).toBe(5_000);
+  });
+
+  /*
+   * 🔴 The other half: a reserved pool that is never checked is an unbounded read path wearing the
+   * shape of a budget. Without this, "exempt `_specs/`" passes every test above.
+   */
+  it('refuses once the plan pool itself is spent', async () => {
+    const c = planCtx({ '_specs/kart_plan.md': text(PLAN) }, { maxPlanReadChars: 4_000 });
+    c.planCharsThisTurn.total = 4_000;
+
+    expect(await run(c as never, '_specs/kart_plan.md')).toMatch(/REFUSED/);
+  });
+
+  /*
+   * 🔴 The pool must accumulate ACROSS calls. A counter created inside `execute` starts at zero every
+   * invocation, so the ceiling could never be reached — the bug this exact test caught while it was
+   * being written.
+   */
+  it('accumulates across reads rather than resetting per call', async () => {
+    const c = planCtx(
+      { '_specs/a_plan.md': text(PLAN), '_specs/b_plan.md': text(PLAN), '_specs/c_plan.md': text(PLAN) },
+      { maxPlanReadChars: 12_000 },
+    );
+
+    await run(c as never, '_specs/a_plan.md');
+    await run(c as never, '_specs/b_plan.md');
+    expect(c.planCharsThisTurn.total).toBe(10_000);
+
+    expect(await run(c as never, '_specs/c_plan.md')).toBe(PLAN); // 10,000 < 12,000 — still allowed
+    expect(await run(c as never, '_specs/a_plan.md')).toBe(PLAN); // a re-read is always free
+  });
+
+  /*
+   * 🔴 The pool rides on the SHARED path rule, so the quarantine has no back door. `isPlanArtifactPath`
+   * rejects traversal; a bespoke `startsWith('_specs/')` here would let `_specs/../src/x.ts` read the
+   * whole project for free.
+   */
+  it('does not let a traversal path ride the plan pool', async () => {
+    const c = planCtx({ 'src/secret.ts': text('shh') });
+    c.charsThisTurn.total = DEFAULT_AGENT_BUDGETS.maxReadChars;
+
+    expect(await run(c as never, '_specs/../src/secret.ts')).toMatch(/REFUSED/);
+  });
+
+  /* CONTROL — ordinary source still spends the ordinary pool, or the split has just disabled the budget. */
+  it('still charges the project pool for ordinary source', async () => {
+    const c = planCtx({ 'src/main.ts': text('export const x = 1;') });
+    await run(c as never, 'src/main.ts');
+
+    expect(c.charsThisTurn.total).toBe(19);
+    expect(c.planCharsThisTurn.total).toBe(0);
+  });
+});
+
+/** The budgets are CONFIGURABLE — a context that carries them must be honored over the defaults. */
+describe('read_file — configured budgets', () => {
+  it('honors a raised char budget', async () => {
+    const c = {
+      ...ctx({ 'src/main.ts': text('abc') }),
+      budgets: { ...DEFAULT_AGENT_BUDGETS, maxReadChars: 200_000 },
+    };
+    c.charsThisTurn.total = 150_000; // over the shipped 120k, under the configured 200k
+
+    expect(await run(c as never, 'src/main.ts')).toBe('abc');
+  });
+
+  it('honors a lowered count budget', async () => {
+    const c = {
+      ...ctx({ 'src/main.ts': text('abc') }),
+      budgets: { ...DEFAULT_AGENT_BUDGETS, maxFileReads: 1 },
+    };
+    c.readThisTurn = new Set(['src/other.ts']);
+
+    expect(await run(c as never, 'src/main.ts')).toMatch(/REFUSED/);
   });
 });

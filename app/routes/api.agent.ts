@@ -15,7 +15,7 @@ import { NotConfiguredError } from '~/lib/.server/agent/config';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { validateAttachments } from '~/lib/.server/agent/attachments';
-import { claimProject } from '~/lib/.server/agent/inflight';
+import { claimProject, shouldClaimProject } from '~/lib/.server/agent/inflight';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
 import { ProtocolTagStreamFilter } from '~/lib/.server/agent/protocol-strip';
@@ -181,13 +181,21 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     validateAttachments(body.messages, context);
 
     /*
-     * One in-flight generation per project (§4.12). Two generations against one project interleave
-     * their file actions and leave a working tree that is a mix of two different ideas — a corruption
-     * the user cannot see and cannot undo. Claimed here, released in `finally` so a Stop, a crash, or
-     * a closed tab all free it — and the claim carries THIS request's signal, so a holder that was
-     * STOPPED yields to the next send immediately rather than only when its settlement tail finishes.
+     * One in-flight BUILD generation per project (§4.12). Two build generations against one project
+     * interleave their file actions and leave a working tree that is a mix of two different ideas — a
+     * corruption the user cannot see and cannot undo. Claimed here, released in `finally` so a Stop, a
+     * crash, or a closed tab all free it — and the claim carries THIS request's signal, so a holder
+     * that was STOPPED yields to the next send immediately rather than only when its settlement tail
+     * finishes.
+     *
+     * A Plan-mode turn (§4.2.9) takes NO claim and therefore cannot be refused by one: it is read-only
+     * by guarantee, so it can neither corrupt the tree nor be corrupted by a build. `shouldClaimProject`
+     * owns that rule — see the header of `inflight.ts` for why the scope is the fix.
      */
-    releaseProject = body.projectId ? claimProject(body.projectId, user.id, request.signal) : undefined;
+    releaseProject =
+      body.projectId && shouldClaimProject({ projectId: body.projectId, chatMode: body.chatMode })
+        ? claimProject(body.projectId, user.id, request.signal)
+        : undefined;
 
     const generation = await runAgentGeneration({
       messages: body.messages,

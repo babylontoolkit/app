@@ -21,9 +21,11 @@ creation process."* Text arriving in a box nobody typed into reads as leftover s
 next step, and a panel that only describes gives the flow no forward edge. The card encodes the
 asymmetry that matters: **creation is the heavy step that must not fail; the brief is cheap and
 re-runnable** — so the two are separated by a deliberate press, and the cheap half is the one behind the
-button. The words reach the box only via **Edit my brief** (focused, caret at the end) or the **X**
-(filled, unfocused) — and once they are in the box they are persisted like any typed draft, because both
-of those also close the card and "press Edit, get distracted, reload" must not lose them. Creation
+button. The words reach the box only via **Edit my brief** (focused, caret at the end), **Plan my brief**
+(the same, prefixed with `/bt-plan` and switched to Plan mode) or the **X** (filled, unfocused) — and
+once they are in the box they
+are persisted like any typed draft, because all three also close the card and "press Edit, get
+distracted, reload" must not lose them. Creation
 itself writes nothing to the `cachedPrompt` cookie, which used to leak one project's prompt onto the
 next visit to the landing page.
 
@@ -32,10 +34,19 @@ the card and the hidden brief follow the project to any device, and both end whe
 SENT. The card's **X** is session-only: it comes back on reload until the project has actually been
 built, because until then it is the one outstanding action and nothing else on screen says so.
 
-The card also carries a **baseline save** — the header git chip's own action, through the same
-`useSaveProject` hook and the same single writer, never a second thing called saving. Creation is the
-one moment when the tree is exactly the pinned starter plus the scaffolded class, so a commit there is
-something to reset back to.
+The card's third action is **Plan my brief** (owner, 2026-08-09). It is *Edit my brief* with the brief
+addressed to the planning skill — `/bt-plan <your words>` in the box, unsent — **and the chat switched
+into Plan mode**, so the user can read it, edit it further and press enter themselves, and get an
+ordered task list instead of one turn that tries to write the game, the landing page, the chrome and
+the docs at once (the run that hit the provider's output ceiling, §4.4e). Both halves matter: the
+prefix asks the skill to plan, and Plan mode (§4.2.9) is what makes the turn read-only — `_specs/**` is
+the one path it may write, which is exactly where the plan file goes.
+
+When that plan lands, its reply carries a **Build this plan** button: it flips back to Build and posts
+`/bt-execute` against the plan file. So the round trip is one press out and one press back, with no
+slash command anyone has to remember. It replaced a **baseline save** that duplicated the header git chip's action:
+*"I think I have enough save to GitHub buttons."* Saving is still one press away in the header, on the
+same single writer it always was.
 
 | | creation | first build turn |
 |---|---|---|

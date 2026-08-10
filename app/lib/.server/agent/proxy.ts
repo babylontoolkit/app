@@ -41,6 +41,7 @@ import {
 import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './creation-completion';
 import type { TurnOutcomeFacts } from '~/lib/agent/turn-outcome';
 import { createFileTools } from './file-tools';
+import { resolveAgentBudgets } from './budgets';
 import { buildFileManifest, renderFileManifest } from '~/lib/context/file-manifest';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
@@ -1224,9 +1225,24 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   /*
    * Discussion mode (§4.2.9), decided ONCE — the note, the tool policy, and the route's NO_REPLAY
-   * annotation must all agree, and `discussModeNote` owns the rule (including the creation-turn guard).
+   * annotation must all agree, and `discussModeNote` owns the rule.
+   *
+   * It no longer takes `isFirstBuildTurn`: a first build turn CAN be a plan turn, deliberately (the
+   * handoff card's "Plan my brief"). `owesFiles` below is what keeps that honest — a discuss turn is
+   * excused from producing files rather than failed for it.
    */
-  const discussNote = discussModeNote({ chatMode: request.chatMode, isFirstBuildTurn });
+  const discussNote = discussModeNote({ chatMode: request.chatMode });
+
+  /*
+   * 🔴 THE TURN'S READ BUDGETS, RESOLVED ONCE FOR THE WHOLE GENERATION (`budgets.ts`, owner 2026-08-09).
+   *
+   * One resolve, deliberately: these numbers are NOT independent. `maxToolRounds` is DERIVED from
+   * `maxReferenceLoads`, so resolving them separately at the three seams that need them (the policy
+   * here, the reference tool, the file tool) is how a raised reference budget ends up giving a creation
+   * more rounds than an ordinary turn — the one relationship `tool-policy.spec.ts` pins — with nothing
+   * throwing. Resolved HERE rather than beside the tool contexts because the policy is decided first.
+   */
+  const budgets = resolveAgentBudgets(request.context);
 
   const toolPolicy = toolPolicyForTurn({
     isFirstBuildTurn,
@@ -1236,6 +1252,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     preloadedCount: preloaded.length,
     isSlash: Boolean(slash),
     isDiscussTurn: discussNote !== null,
+    budgets,
   });
   const allowTools = toolPolicy.allowTools;
 
@@ -1367,17 +1384,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     versionId: promptVersion.id,
     loaded: new Set(carriedReferences.map((r) => r.id)),
     loadedThisTurn: new Set<string>(),
+    maxLoads: budgets.maxReferenceLoads,
   };
 
   /*
    * `read_file` reads the SAME map the manifest was rendered from, so what the model is offered and
    * what it can fetch can never disagree. The budgets are per-turn and live here, not in the tool,
    * because the tool is recreated per call site and a budget on a fresh object is no budget at all.
+   *
+   * `planCharsThisTurn` is the RESERVED `_specs/**` pool: a `/bt-execute` turn reads its own plan to
+   * know what to build and to verify its Acceptance clause, and charging that to the same pool as the
+   * project source means the harder the turn looks at the code, the less able it is to check its own
+   * work. Separate ceiling, never an exemption — see `budgets.ts`.
    */
   const fileToolContext = {
     files: projectFiles,
     readThisTurn: new Set<string>(),
     charsThisTurn: { total: 0 },
+    planCharsThisTurn: { total: 0 },
+    budgets,
   };
 
   const toolContext: SkillToolContext = {

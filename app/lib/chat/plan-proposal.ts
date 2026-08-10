@@ -73,3 +73,86 @@ export function messageProposesWrite(content: string): boolean {
 export function shouldOfferBuildAndApply(annotations: unknown, content: string): boolean {
   return isPlanModeMessage(annotations) && messageProposesWrite(content);
 }
+
+/**
+ * The plan file a plan turn WROTE — `_specs/<feature>_plan.md` (owner, 2026-08-09).
+ *
+ * The complement of `messageProposesWrite`, and the reason this file needed a second question. A
+ * `bt-plan` turn's write is the ONE that plan mode applies, so nothing was left unapplied and
+ * "Build & Apply" is correctly silent — which left the flow with no next step at all: the plan is on
+ * disk, the toggle still says Plan, and the user has to know to flip it and type `/bt-execute`.
+ *
+ * 🔴 **`_plan.md` only, never any `_specs/` file.** `bt-spec` writes `<feature>_spec.md` and the next
+ * step there is `bt-plan`, not `bt-execute` — offering to BUILD a spec would skip the planning step the
+ * spec exists to feed, and spend a build's worth of credits doing it. The suffix is the skills' stated
+ * output convention (`plan-artifacts.ts`, and the plan-mode note states both names to the model).
+ *
+ * The LAST match wins: a turn that writes a spec and then a plan ends on the plan, and that is the
+ * artifact the user just watched appear.
+ */
+export function planArtifactToExecute(content: string): string | undefined {
+  let found: string | undefined;
+
+  for (const match of content.matchAll(BOLT_ACTION_TAG)) {
+    const tag = match[0];
+    const filePath = tagAttribute(tag, 'filePath');
+
+    if (
+      tagAttribute(tag, 'type')?.toLowerCase() === 'file' &&
+      isPlanArtifactPath(filePath) &&
+      filePath!.trim().toLowerCase().endsWith('_plan.md')
+    ) {
+      found = filePath!.trim();
+    }
+  }
+
+  return found;
+}
+
+/**
+ * The message "Build this plan" sends. Runs in Build mode (the caller overrides `chatMode`).
+ *
+ * 🔴 **The skill's OWN argument grammar, not a sentence** (owner, 2026-08-09). `bt-execute` is
+ * `/bt-execute <plan> <task-id>`, where `ALL` is the literal token for "every remaining task, in
+ * order". The first draft wrote an instruction naming the file instead, on the reasoning that guessing
+ * at a grammar this repo does not own (skills are authored in `babylontoolkit/skills`) was the risky
+ * side. It is the opposite: the skill PARSES those two positions, and its own SKILL.md says that with
+ * no task id it must *"list the available task ids and ask the user what to run — DO NOT guess"*. So
+ * prose does not degrade to "run everything", it degrades to a round trip that asks the question this
+ * button exists to have already answered.
+ *
+ * ⚠️ Two positional tokens, so `planPath` must be a path with no spaces — `_specs/<feature>_plan.md`
+ * by convention, and `planArtifactToExecute` only ever returns one of those.
+ */
+export function executePlanMessage(planPath: string): string {
+  return `/bt-execute ${planPath} ALL`;
+}
+
+/**
+ * What to offer under a plan-mode reply: apply an unapplied proposal, build the plan that landed, or
+ * nothing at all.
+ *
+ * ONE button per message, decided here rather than by two independent `&&`s in the JSX — two accent
+ * buttons under one reply is the §4.1a row problem in miniature, and the user cannot be expected to
+ * pick between "apply" and "build" when the difference is which of them the read-only wall touched.
+ *
+ * **`apply` wins when both are true.** A proposed write is a concrete change the model just showed and
+ * the wall blocked, so it is the narrower, cheaper and more predictable of the two; executing a whole
+ * plan is many turns of work the user can ask for immediately afterwards. This also keeps every
+ * existing plan turn behaving exactly as it did.
+ */
+export type PlanFollowUp = { kind: 'apply' } | { kind: 'execute'; planPath: string };
+
+export function decidePlanFollowUp(annotations: unknown, content: string): PlanFollowUp | null {
+  if (!isPlanModeMessage(annotations)) {
+    return null;
+  }
+
+  if (messageProposesWrite(content)) {
+    return { kind: 'apply' };
+  }
+
+  const planPath = planArtifactToExecute(content);
+
+  return planPath ? { kind: 'execute', planPath } : null;
+}

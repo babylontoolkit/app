@@ -45,6 +45,18 @@ export interface SandboxDirent {
  * The overload pairs are load-bearing and must be preserved by any provider: `readFile` without an
  * encoding returns BYTES (that is how `spec/binary-files.md`'s byte-identity contract is honoured),
  * and `readdir` with `withFileTypes` returns dirents rather than names.
+ *
+ * 🔴 **`readFile`'s bytes belong to the PROVIDER, and a caller must copy before taking ownership**
+ * (2026-08-09). A provider is free to return a live view into its own storage — Nodepod's VFS does
+ * exactly that — so transferring the returned buffer to a worker, or writing through it, corrupts the
+ * sandbox rather than the caller's copy. It cost a whole project's binaries once (see
+ * `FilesStore.readBinaryFile` and `working-copy-detach.spec.ts`); the failure is invisible on the two
+ * providers that decode off a transport, which is why it must be a rule here rather than a habit.
+ *
+ * ⚠️ The same aliasing runs the other way on `writeFile`: Nodepod stores the exact `Uint8Array` it is
+ * handed (`toBytes` returns it unchanged), so a caller that kept a reference and reused it would be
+ * editing the file. Nothing does today — every writer decodes or fetches its bytes fresh — and this
+ * note is here so that a scratch buffer is never introduced as an optimisation.
  */
 export interface SandboxFileSystem {
   readFile(path: string, encoding?: null): Promise<Uint8Array>;

@@ -35,6 +35,7 @@ import { z } from 'zod';
 import { createScopedLogger } from '~/utils/logger';
 import { getPromptStore } from '~/lib/.server/prompt/store';
 import { excludedReferenceReason, resolveReferenceId } from '~/lib/.server/prompt/sources';
+import { DEFAULT_MAX_REFERENCE_LOADS } from './budgets';
 
 const logger = createScopedLogger('reference-tools');
 
@@ -60,7 +61,13 @@ const logger = createScopedLogger('reference-tools');
  * pairing that `gen_msixapaq_i871b6` cost 1,489 credits to learn. If either number moves, re-derive
  * both.
  */
-export const MAX_REFERENCE_LOADS = 3;
+/**
+ * ⚠️ This re-exports the shipped DEFAULT. The value a turn runs with is resolved from config
+ * (`budgets.ts`, `AGENT_MAX_REFERENCE_LOADS`) and arrives on the context — and it is resolved TOGETHER
+ * with the round ceilings, because raising it alone would let a creation's `maxSteps` exceed an
+ * ordinary turn's, silently inverting the one relationship `tool-policy.spec.ts` pins.
+ */
+export const MAX_REFERENCE_LOADS = DEFAULT_MAX_REFERENCE_LOADS;
 
 export interface ReferenceToolContext {
   /** The prompt version whose blobs this generation reads. Pinned for the whole turn. */
@@ -80,10 +87,17 @@ export interface ReferenceToolContext {
    * "withdraw the tool" returning through the budget instead of the tool set.
    */
   loadedThisTurn: Set<string>;
+
+  /**
+   * How many bodies this turn may pull in. Optional, defaulting to the shipped value, so a caller that
+   * predates config behaves identically — production resolves it at the proxy doorway.
+   */
+  maxLoads?: number;
 }
 
 export function createReferenceTools(context: ReferenceToolContext) {
   const store = getPromptStore();
+  const maxLoads = context.maxLoads ?? DEFAULT_MAX_REFERENCE_LOADS;
 
   /** The ids this prompt version actually holds — the authority, never the source map. */
   const availableIds = async (): Promise<string[]> => {
@@ -171,10 +185,8 @@ export function createReferenceTools(context: ReferenceToolContext) {
          * lookup. A refusal the model can act on, not an error: it names what it has and tells it to
          * get on with the task.
          */
-        if (context.loadedThisTurn.size >= MAX_REFERENCE_LOADS) {
-          logger.warn(
-            `load_reference: budget spent (${context.loadedThisTurn.size}/${MAX_REFERENCE_LOADS}), refused "${id}"`,
-          );
+        if (context.loadedThisTurn.size >= maxLoads) {
+          logger.warn(`load_reference: budget spent (${context.loadedThisTurn.size}/${maxLoads}), refused "${id}"`);
 
           return (
             `You have already loaded ${context.loadedThisTurn.size} references in this response ` +

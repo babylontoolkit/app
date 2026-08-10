@@ -517,7 +517,14 @@ describe('the documentation path classifies nothing either — the model chooses
      * lookup. Asserting the ORDER is what makes this about the rule rather than about the message.
      */
     const code = codeOnly(tools);
-    const budget = code.indexOf('>= MAX_REFERENCE_LOADS');
+
+    /*
+     * `maxLoads`, not `MAX_REFERENCE_LOADS`, since 2026-08-09: the budget is CONFIGURABLE now
+     * (`budgets.ts`, `AGENT_MAX_REFERENCE_LOADS`) and arrives on the tool context, so the constant is
+     * only the shipped default. The property this asserts — enforced in `execute`, checked BEFORE the
+     * store read — is unchanged; only the identifier the check reads moved.
+     */
+    const budget = code.indexOf('>= maxLoads');
     const storeRead = code.indexOf('readOnDemand');
 
     expect(budget, 'the budget check is gone').toBeGreaterThan(-1);

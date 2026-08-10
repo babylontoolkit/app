@@ -57,6 +57,45 @@ export function decideCreationHandoff({ userPrompt }: HandoffInput): HandoffDeci
   return prompt.trim().length > 0 ? { kind: 'build', prompt } : { kind: 'describe', prompt: '' };
 }
 
+/**
+ * The slash command the card's **Plan my brief** action writes in front of the user's words (§4.4a).
+ *
+ * 🔴 **PLAN IS THE THIRD DOOR OUT OF THE CARD, AND IT REPLACED THE BASELINE SAVE (owner, 2026-08-09).**
+ * *"I think I have enough save to GitHub buttons."* The card's third button was a duplicate of the
+ * header chip's action — correct as REUSE, redundant as a place to put it — and the thing genuinely
+ * missing from this moment was a way to NOT one-shot the whole game. A first build turn asked to write
+ * the game, the landing page, the chrome and the docs is the run that hit the provider's output ceiling
+ * (§4.4e); `bt-plan` turns the same brief into an ordered task list the user can then execute a step at
+ * a time. So the choice on the card is now *build it* / *edit it* / *plan it*, which are three answers to
+ * the one question the card asks, rather than two answers and a safeguard.
+ *
+ * ⚠️ **It fills the box; it does not send.** The user is expected to read the composed command, edit it
+ * further if they want, and press enter themselves — same contract as *Edit my brief*, which is the
+ * whole reason this is a prefix rather than a second send path.
+ */
+export const PLAN_SKILL_COMMAND = '/bt-plan';
+
+/**
+ * The user's brief, addressed to the planning skill.
+ *
+ * The brief is TRIMMED here and nowhere else. `decideCreationHandoff` deliberately preserves the exact
+ * bytes — that text is what Build sends and what the card quotes — but this is a COMMAND LINE, and
+ * `parseSlashInvocation` anchors on a leading `/` after trimming and then trims the args itself. So a
+ * carried prompt that starts with a newline (the landing-page box hands those back routinely) would put
+ * `/bt-plan` alone on the first line: identical on the wire, and it reads in the chat box as if the
+ * command had lost its argument.
+ *
+ * An empty brief still yields the command plus its space, so the caret lands where the user types. It is
+ * unreachable from the card today — the Plan button only exists on the `build` branch, which is defined
+ * by having words — and it is here so this function can never be the thing that turns an empty box into
+ * a bare `/bt-plan` invocation.
+ */
+export function planCommandFor(prompt: string): string {
+  const brief = prompt.trim();
+
+  return brief ? `${PLAN_SKILL_COMMAND} ${brief}` : `${PLAN_SKILL_COMMAND} `;
+}
+
 /** The fields of a registry row this reads. Structural so the tests need no fixture. */
 export interface BriefSourceEntry {
   title?: string;

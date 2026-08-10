@@ -84,10 +84,19 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
 
   /*
    * Plan mode is only meaningful once a PROJECT exists (§4.2.9). On the landing page there is no
-   * project yet, and the first message ALWAYS creates one — a creation turn, which the server forces
-   * to Build regardless of this toggle (`decidePremium`/discuss-note both ignore the creation turn).
-   * So with no project the toggle is locked to Build and disabled, mirroring how the premium pill and
-   * the model selector need a project before they mean anything. A click explains rather than toggles.
+   * project yet and nothing to plan against: sending from there CREATES the project (§4.4a — a clone,
+   * no model). So with no project the toggle is locked to Build and disabled, mirroring how the premium
+   * pill and the model selector need a project before they mean anything. A click explains rather than
+   * toggles.
+   *
+   * ⚠️ This is a DISPLAY clamp only — the wire value is `Chat.client`'s `chatMode` state, unclamped. It
+   * cannot disagree with what is sent today, because the two things that set Plan both require a
+   * project: this toggle, and the handoff card's **Plan my brief** (the card renders only for a project
+   * id). Do not add a third setter that can run without one.
+   *
+   * ⚠️ And Plan DOES apply to the first build turn. It used to be true that "the creation turn is
+   * forced to Build"; `discussModeNote` dropped the note for one. That exemption was REMOVED
+   * (2026-08-09) so the handoff card's "Plan my brief" means what it says — a planned first build.
    */
   const activeProjectId = useStore(projectIdStore);
   const planAvailable = Boolean(activeProjectId);

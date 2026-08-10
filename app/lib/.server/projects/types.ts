@@ -157,13 +157,14 @@ export interface Project {
    * The creation → build handoff for a project that has never been built (§4.4a, migration 0016).
    *
    * 🔴 **A FACT ABOUT THE PROJECT, NOT ABOUT ONE BROWSER.** It shipped in `localStorage`, which made the
-   * handoff card and — far worse — the hidden creation brief a property of the device that happened to
-   * create the project. Open an unbuilt project on a second machine and the first build turn went out
-   * with NO brief: no play contract, no scaffolded class name, no list of the images actually on disk.
-   * The build still ran and was simply worse, with nothing reporting why (§4.2.8's silent failure mode).
+   * handoff a property of the device that happened to create the project: open an unbuilt project on a
+   * second machine and the card was absent, so the user's own brief — the one prompt in the product they
+   * did not just type and cannot retype from memory — was simply gone. (It was worse still while the
+   * machine-written brief existed, since that rode the same record and its absence made the build quietly
+   * worse with nothing reporting why; that brief was retired 2026-08-08, this rule was not.)
    *
    * 🔴 **NULL IS THE END STATE, and it is set when the first build turn is SENT** — never when it
-   * succeeds, because a failed build is one the user retries and the retry must still carry the brief.
+   * succeeds, because a failed build is one the user retries, and the retry is still their first build.
    */
   creationHandoff?: CreationHandoff;
 

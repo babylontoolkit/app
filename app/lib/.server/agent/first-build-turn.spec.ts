@@ -366,12 +366,12 @@ describe('consumer 5 — the liveness panel calls a first build a creation', () 
   });
 });
 
-/* ---------------------------------- 7. the four consumers whose RULES were already tested elsewhere */
+/* --------------------------------- 7. the three consumers whose RULES were already tested elsewhere */
 
 /**
- * `decideModelTier`, `discussModeNote`, `toolPolicyForTurn` and `mediaProtocolNote` each have paired
- * true/false tests in their own specs — their RULES are proven. What was not proven is that the proxy
- * still HANDS them the flag, and the two are independent failures.
+ * `decideModelTier`, `toolPolicyForTurn` and `mediaProtocolNote` each have paired true/false tests in
+ * their own specs — their RULES are proven. What was not proven is that the proxy still HANDS them the
+ * flag, and the two are independent failures.
  *
  * Found by a verifier disconnecting all four in `proxy.ts` at once: `pnpm test` stayed fully green
  * (3397/3397). The rule tests cannot see it, because they call the pure functions directly. The most
@@ -385,13 +385,29 @@ describe('consumer 5 — the liveness panel calls a first build a creation', () 
  *
  * Shorthand binding, never a substring — see the `statusKindFor` note above for why.
  */
-describe('the four rule-tested consumers are still WIRED to the flag', () => {
-  it.each(['decideModelTier', 'discussModeNote', 'toolPolicyForTurn', 'mediaProtocolNote'])(
+describe('the three rule-tested consumers are still WIRED to the flag', () => {
+  it.each(['decideModelTier', 'toolPolicyForTurn', 'mediaProtocolNote'])(
     '%s receives isFirstBuildTurn from the proxy',
     (callee) => {
       expect(callArgs(proxy, callee)).toMatch(/[{,]\s*isFirstBuildTurn\s*[,}]/);
     },
   );
+
+  /*
+   * 🔴 `discussModeNote` WAS the fourth, and its removal is the assertion (owner, 2026-08-09).
+   *
+   * It used to drop Plan mode on a creation turn — "the user asked for a game, not an essay". The
+   * handoff card's **Plan my brief** button makes that wrong: planning the build before writing it is
+   * something the user can now explicitly choose on turn one (§4.4a), and dropping the note there would
+   * compose a `/bt-plan` command and then run it with full write access.
+   *
+   * Pinned as an ABSENCE rather than deleted quietly, because re-adding the flag here is a one-word
+   * change that reads like a fix and silently un-does a shipped feature: the button would still compose
+   * its command, and the turn would simply stop being read-only.
+   */
+  it('discussModeNote is deliberately NOT wired to it — plan mode is honoured on a first build', () => {
+    expect(callArgs(proxy, 'discussModeNote')).not.toMatch(/isFirstBuildTurn/);
+  });
 });
 
 /* ------------------------------------------------- 7b. the phase, which is ORTHOGONAL to the flag */

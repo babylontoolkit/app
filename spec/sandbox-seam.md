@@ -91,6 +91,23 @@ Measured against real call sites, not copied from WebContainer's `.d.ts`:
 
 - `fs` — `readFile` / `writeFile` / `readdir` / `mkdir` / `rm`. The overload pairs are load-bearing:
   `readFile` with no encoding returns **bytes** (that is `spec/binary-files.md`'s contract).
+  🔴 **Those bytes are ON LOAN — never transfer them, never write through them** (2026-08-09). A
+  provider may hand back a live view into its own storage, and Nodepod does: `memory-volume.ts`'s
+  `readFileSync` ends `return inode.content`, the array the file is actually stored in, and
+  `writeFile` aliases the same way (`toBytes` returns a `Uint8Array` argument unchanged). WebContainer
+  and CodeSandbox decode a fresh buffer off a transport, so a caller that takes ownership is correct
+  on two providers and destructive on the third, with nothing at the call site to say which. **What it
+  cost:** `writeWorkingCopyFromStore` pushed `bytes.buffer` onto its worker `postMessage` transfer
+  list, which detached **the VFS's own storage for every binary in the project** — so the next
+  `serializeFiles` died on all of them at once (`TypeError: Cannot perform Construct on a detached or
+  out-of-bounds ArrayBuffer`, thrown by `buffer@5.7.1`'s `fromArrayView` under `bytesToBase64`). It
+  presented as *"the first Save or Link to GitHub always fails, then works after a refresh"* — the
+  refresh reboots the pod and rehydrates the VFS — and as `IncompleteSerializationError` on the
+  **local checkpoint**, i.e. §4.12 undo and §4.5.4c crash recovery going dark for the turn, correctly
+  refusing to write a poisoned map. Fixed by copying (`new Uint8Array(bytes)`) before transferring;
+  pinned by `working-copy-detach.spec.ts`, whose worker double calls `structuredClone(msg, {transfer})`
+  so it detaches for real — **a stubbed `postMessage` does nothing to a buffer, which is why every
+  existing working-copy spec passed against the broken code.**
 - `mount(tree)` — atomic. Not a nicety: the starter used to arrive as ~64 sequential writes that
   raced a cold boot, so `npm install` ran against an empty directory.
 - `spawn(command, args, options)` — returns a process with `output` / `input` / `exit` / `kill` / `resize`.

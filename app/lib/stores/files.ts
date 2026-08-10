@@ -966,6 +966,20 @@ export class FilesStore {
    * Read a binary file's real bytes from the sandbox — the source of truth for
    * binary content. Every egress path (snapshot, ZIP, GitHub push, deploy, share build)
    * goes through here rather than reading `File.content`, which is empty for binaries.
+   *
+   * 🔴 **THE BYTES ARE ON LOAN. Never transfer them, never mutate them in place** (2026-08-09).
+   *
+   * Whether this returns a fresh buffer or a live view into the provider's own storage is the
+   * PROVIDER's business, and it differs: WebContainer and CodeSandbox decode a fresh buffer off a
+   * transport, while Nodepod's VFS returns the array the file is actually stored in
+   * (`memory-volume.ts` `readFileSync` → `return inode.content`). A caller cannot tell which it has.
+   *
+   * So a caller that takes ownership must COPY first (`new Uint8Array(bytes)`). The one that did not
+   * was the working-copy writer, which transferred `bytes.buffer` to its encode worker: that detached
+   * the VFS's own storage for every binary in the project, and the next serialize — Save, Link to
+   * GitHub, ZIP, deploy — failed on all of them at once with a detached-ArrayBuffer TypeError, until a
+   * page refresh rebooted the pod. Invisible on two providers, destructive on the third, and nothing
+   * about the call site said which one it was talking to.
    */
   async readBinaryFile(filePath: string): Promise<Uint8Array> {
     const sandbox = await this.#sandbox;

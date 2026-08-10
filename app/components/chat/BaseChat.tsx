@@ -107,9 +107,10 @@ interface BaseChatProps {
   onReseed?: (entry: GameRegistryEntry) => void;
   canReseed?: boolean;
 
-  // The creation → build handoff card (§4.4a). Its three actions all live in `Chat.client`.
+  // The creation → build handoff card (§4.4a). Its actions all live in `Chat.client`.
   onCreationBuild?: (prompt: string) => void;
   onCreationEdit?: (prompt: string) => void;
+  onCreationPlan?: (prompt: string) => void;
   onCreationDismiss?: (prompt: string) => void;
 }
 
@@ -172,6 +173,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
       canReseed = false,
       onCreationBuild,
       onCreationEdit,
+      onCreationPlan,
       onCreationDismiss,
     },
     ref,
@@ -432,6 +434,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                       <CreationHandoffCard
                         onBuild={onCreationBuild}
                         onEdit={onCreationEdit}
+                        onPlan={onCreationPlan}
                         onDismiss={onCreationDismiss}
                       />
                     )}

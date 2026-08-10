@@ -16,22 +16,37 @@
  * instead of a rewritten artifact. Output bills at 5x input and decodes serially at ~60-110 tok/s, so
  * suppressing an unwanted artifact is both the cheapest and the fastest thing a mode can do.
  *
- * A PURE function, tested, because both failure modes are silent: emitting the note on a creation
- * turn would produce a game-less "creation" (the user asked for a game and gets an essay — while the
- * full creation context was assembled and billed), and never emitting it leaves the toggle inert,
- * quietly billing artifact-sized output for planning questions.
+ * A PURE function, tested, because its failure mode is silent: never emitting the note leaves the
+ * toggle inert, quietly billing artifact-sized output for planning questions while the user believes
+ * nothing can be written.
+ *
+ * ## 🔴 The first-build exemption is GONE (owner, 2026-08-09)
+ *
+ * This used to take an `isFirstBuildTurn` flag and drop the note on a creation turn — "the user asked
+ * for a game, and an essay instead would be a game-less creation they had already been billed for."
+ * Sound when creation was one hidden-brief turn the model was told to build. It is wrong now, twice:
+ *
+ *   - **The user can ask for a plan first, deliberately.** The handoff card's **Plan my brief** button
+ *     (§4.4a) exists to turn the first turn into an ordered task list instead of one 64k-token
+ *     everything-at-once build. Dropping the note there composes a `/bt-plan` command and then runs it
+ *     with full write access — the read-only half missing, nothing on screen disagreeing.
+ *   - **The flag was already inert**, since nothing has sent `CREATION_BRIEF_MARKER` since the brief
+ *     was retired. So the exemption was dormant code that would have woken up and broken that button
+ *     the moment the brief or the §4.4e phase messages returned. Removing it is a no-op today and the
+ *     difference between a working feature and a silent one later.
+ *
+ * The concern it was written for did not disappear — it moved to where it can be answered: Plan is a
+ * mode the user SETS and can see, on a toggle labelled with its current state, and `owesFiles`
+ * (`proxy.ts`) already excuses a discuss turn from producing files rather than failing it.
  */
 import { PLAN_ARTIFACTS_DIR } from '~/lib/chat/plan-artifacts';
 
 export interface DiscussNoteInput {
   chatMode?: 'discuss' | 'build';
-
-  /** The creation turn MUST build (§4.4) — Discuss is ignored on it, like the premium toggle. */
-  isFirstBuildTurn: boolean;
 }
 
 export function discussModeNote(input: DiscussNoteInput): string | null {
-  if (input.chatMode !== 'discuss' || input.isFirstBuildTurn) {
+  if (input.chatMode !== 'discuss') {
     return null;
   }
 

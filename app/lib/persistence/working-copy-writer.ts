@@ -149,8 +149,33 @@ export async function writeWorkingCopyFromStore(
     if (dirent.isBinary) {
       try {
         const bytes = await workbenchStore.readBinaryFile(path);
-        entries.push({ path, isBinary: true, size: bytes.byteLength, bytes });
-        transfer.push(bytes.buffer);
+
+        /*
+         * 🔴 COPY BEFORE TRANSFERRING — YOU MAY ONLY GIVE AWAY MEMORY YOU ALLOCATED (fixed 2026-08-09).
+         *
+         * This used to push `bytes.buffer` straight onto the transfer list. Transferring detaches the
+         * buffer in THIS thread, and `readBinaryFile` hands back whatever the provider gave it — which
+         * on Nodepod is the VFS's own storage (`memory-volume.ts` `readFileSync` returns `inode.content`
+         * itself, no copy). So a working-copy save detached the sandbox's own bytes for every binary in
+         * the project, and the next thing to read them — Save, Link to GitHub, ZIP, deploy, a share
+         * build — died on ALL of them at once with `TypeError: Cannot perform Construct on a detached
+         * or out-of-bounds ArrayBuffer` (that `Construct` is `buffer@5.7.1`'s `fromArrayView` doing
+         * `new Uint8Array(view)` underneath `bytesToBase64`). A refresh reboots the pod and rehydrates
+         * the VFS, which is exactly why "refresh and try again" worked and why this read as flaky.
+         *
+         * The copy costs one memcpy, against a base64 pass and a `JSON.stringify` of the same bytes in
+         * the worker — and it is what makes the zero-copy transfer honest rather than a loan we never
+         * repay. It is bounded by `withinWorkingCopyBudget` above.
+         *
+         * ⚠️ The rule is not "Nodepod is special". Every other provider decodes a fresh buffer off a
+         * transport, so the defect was invisible for two providers and destructive on the third; a
+         * caller cannot see which kind it has. Anything that transfers, detaches, or writes in place
+         * must own its bytes first — see `readBinaryFile`'s contract.
+         */
+        const owned = new Uint8Array(bytes);
+
+        entries.push({ path, isBinary: true, size: owned.byteLength, bytes: owned });
+        transfer.push(owned.buffer);
       } catch (error) {
         // A binary we cannot read is dropped, not fatal — the rest of the project is still worth saving.
         logger.warn(`Skipping unreadable binary during working-copy save: ${path} (${(error as Error)?.message})`);

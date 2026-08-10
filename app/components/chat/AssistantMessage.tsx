@@ -19,7 +19,7 @@ import type {
 import { ToolInvocations } from './ToolInvocations';
 import { ThinkingPanel } from './ThinkingPanel';
 import type { ToolCallAnnotation } from '~/types/context';
-import { shouldOfferBuildAndApply } from '~/lib/chat/plan-proposal';
+import { decidePlanFollowUp } from '~/lib/chat/plan-proposal';
 
 interface AssistantMessageProps {
   content: string;
@@ -38,9 +38,17 @@ interface AssistantMessageProps {
 
   /**
    * Plan mode (§4.2.9): flip the toggle to Build and re-run to APPLY the change this plan turn
-   * proposed. Offered only on a plan turn that proposed a write — see `shouldOfferBuildAndApply`.
+   * proposed. Offered only on a plan turn that proposed a write — see `decidePlanFollowUp`.
    */
   onBuildAndApply?: (messageId: string) => void;
+
+  /**
+   * Plan mode (§4.2.9): flip the toggle to Build and run `/bt-execute` against the plan file this turn
+   * WROTE. The other half of the same moment — a `bt-plan` turn leaves nothing unapplied (its
+   * `_specs/` write is the one plan mode performs), so "Build & Apply" is silent and the flow used to
+   * end with the plan on disk, the toggle still saying Plan, and no next step on screen.
+   */
+  onExecutePlan?: (planPath: string) => void;
   chatMode?: 'discuss' | 'build';
   setChatMode?: (mode: 'discuss' | 'build') => void;
   model?: string;
@@ -86,6 +94,7 @@ export const AssistantMessage = memo(
     onRetry,
     append,
     onBuildAndApply,
+    onExecutePlan,
     chatMode,
     setChatMode,
     model,
@@ -93,7 +102,14 @@ export const AssistantMessage = memo(
     parts,
     addToolResult,
   }: AssistantMessageProps) => {
-    const offerBuildAndApply = Boolean(onBuildAndApply && messageId && shouldOfferBuildAndApply(annotations, content));
+    /*
+     * ONE follow-up per reply, chosen by the pure decision rather than by two independent conditions
+     * here — see `decidePlanFollowUp`. `null` for every ordinary build message, so this costs a normal
+     * turn nothing.
+     */
+    const followUp = decidePlanFollowUp(annotations, content);
+    const offerBuildAndApply = Boolean(onBuildAndApply && messageId && followUp?.kind === 'apply');
+    const offerExecutePlan = Boolean(onExecutePlan && followUp?.kind === 'execute');
     const filteredAnnotations = (annotations?.filter(
       (annotation: JSONValue) =>
         annotation && typeof annotation === 'object' && Object.keys(annotation).includes('type'),
@@ -284,6 +300,20 @@ export const AssistantMessage = memo(
             </button>
             <p className="mt-1.5 text-xs text-bolt-elements-textTertiary">
               This was a plan — no files were changed. Switch to Build and apply it.
+            </p>
+          </div>
+        )}
+        {offerExecutePlan && followUp?.kind === 'execute' && (
+          <div className="mt-3">
+            <button
+              onClick={() => onExecutePlan!(followUp.planPath)}
+              className="inline-flex items-center gap-2 px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover transition-colors"
+            >
+              <div className="i-ph:hammer" />
+              Build this plan
+            </button>
+            <p className="mt-1.5 text-xs text-bolt-elements-textTertiary">
+              The plan is saved to <code>{followUp.planPath}</code>. Switch to Build and work through it.
             </p>
           </div>
         )}

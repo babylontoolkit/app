@@ -55,10 +55,13 @@ export function isCreationTurn({ activeProjectId, messages, newProjectMode }: Cr
   }
 
   /*
-   * Otherwise it is the LAST user turn that decides — the hidden brief covers creation streaming, a
-   * failed creation awaiting retry, and a fresh project before the user's first edit. A new chat on an
-   * EXISTING project has a project id and no brief, so premium stays available: its first message is
-   * an edit.
+   * Otherwise the LAST user turn decides, by the marker the machine-written brief used to carry.
+   *
+   * ⚠️ **INERT FOR NEW PROJECTS, and kept for the old ones.** That brief was retired 2026-08-08, so
+   * nothing sends the marker any more and the two branches above are what answer for a project created
+   * since — but the marker is still sitting in the saved transcripts of every project built before it,
+   * and this is the branch that reads them. Deleting it would unlock the premium pill on the resumed
+   * first build turn of an older project, which is the one turn every paid rung is barred from.
    */
   const lastUser = [...messages].reverse().find((message) => message.role === 'user');
 

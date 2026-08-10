@@ -4,24 +4,26 @@
  *
  * The card is the seam between "your project exists and runs" and "build my game". Everything worth
  * testing about it is a rule that fails SILENTLY — nothing here throws when it breaks, the card simply
- * offers the wrong thing to the wrong project, or strips the hidden creation brief out of the most
- * expensive turn in the product.
+ * offers the wrong thing to the wrong project, or ends the "created, never built" state early on the
+ * most expensive turn in the product.
  *
- * The four rules pinned here:
+ * The five rules pinned here:
  *
  *   1. **It belongs to ONE project.** `newProjectModeStore` is module-level, and module-level state
  *      survives an SPA navigate — that is the inherited-identity class of bug §4.5.6 records twice. A
  *      card that followed the user into a finished project would offer to rebuild it from a brief
  *      describing a different game.
- *   2. **The brief is SHOWN.** Build sends the user's words plus a hidden machine-written brief; the
- *      words are theirs and they are entitled to read them before pressing a button that spends credits.
+ *   2. **The brief is SHOWN, byte-exact.** Build sends these words and only these words (the hidden
+ *      machine-written brief was retired 2026-08-08), and the user is entitled to read them before
+ *      pressing a button that spends credits.
  *   3. **Dismissing the CARD is not leaving the MODE.** `dismissCreationHandoff` hides one panel;
- *      `newProjectModeStore` keeps the mode so the hidden brief still rides on the next message. Collapse
- *      the two and clicking `X` — the most casual gesture on screen — silently strips the play contract,
- *      the scaffolded class name and the on-disk image list out of the build turn, with nothing anywhere
- *      reporting why the output got worse.
+ *      `newProjectModeStore` keeps the mode, which is what still carries the user's only copy of their
+ *      prompt, holds the premium pill locked (paid rungs are edit-only) and arms the game-ready toast.
+ *      Collapse the two and the most casual gesture on screen quietly takes all three.
  *   4. **No Build without words.** On the describe path a Build button would post an empty turn or invite
  *      the model to invent a brief.
+ *   5. **Plan is Edit with a prefix, and it sends nothing.** It hands the box `/bt-plan <brief>` for the
+ *      user to read, edit and post themselves.
  *
  * ⚠️ `useChatHistory` is the builder's whole persistence module; importing it for real would drag the
  * WebContainer boot and IndexedDB into a unit test. Only the `projectId` atom is needed — same mock the
@@ -41,44 +43,13 @@ vi.mock('~/lib/persistence/useChatHistory', async () => {
 });
 
 /*
- * The card offers the header chip's save action (`useSaveProject`), which reaches the whole persistence
- * layer. Doubled at the seam rather than mocked away: `requestSave` is the ONE writer that pushes to
- * somebody's own repository, so a test that renders this card must be able to prove it was not called.
+ * 🔴 THE CARD NO LONGER TOUCHES THE PERSISTENCE LAYER (owner, 2026-08-09). The third button used to be
+ * the header chip's save action, so this file doubled `~/lib/persistence` in order to prove that merely
+ * rendering the card pushed nothing to anybody's repository. That button is now **Plan my brief**, which
+ * writes text into the chat box and nothing else. The mocks are deleted rather than left standing: a
+ * double for a seam the component no longer has is a test that passes for a reason that stopped being
+ * true, which is how this file's sibling specs have gone quietly vacuous before.
  */
-const persistence = vi.hoisted(() => ({
-  requestSave: vi.fn(),
-  startGitConnect: vi.fn(),
-  repoStatus: null as any,
-  unsavedWork: null as any,
-  saveState: null as any,
-}));
-
-vi.mock('~/lib/persistence', async () => {
-  const { atom: makeAtom } = await import('nanostores');
-  persistence.repoStatus = makeAtom<any>({ linked: false, configuredProviders: ['github'] });
-  persistence.unsavedWork = makeAtom<any>(false);
-
-  return {
-    /*
-     * The SAME atom the `useChatHistory` mock exposes — production's index re-exports it, and two
-     * separate atoms here would make the hook read `undefined` while the card reads a project, which is
-     * a disagreement the real code cannot have.
-     */
-    projectId: history.projectId,
-    repoStatus: persistence.repoStatus,
-    unsavedWork: persistence.unsavedWork,
-    requestSave: persistence.requestSave,
-    startGitConnect: persistence.startGitConnect,
-  };
-});
-
-vi.mock('~/lib/persistence/save-queue', async () => {
-  const { atom: makeAtom } = await import('nanostores');
-  persistence.saveState = makeAtom<any>({ status: 'idle' });
-
-  return { saveState: persistence.saveState };
-});
-
 import { projectId } from '~/lib/persistence/useChatHistory';
 import {
   enterNewProjectMode,
@@ -99,6 +70,7 @@ function mode(overrides: Partial<NewProjectMode> = {}): NewProjectMode {
 
 const buildButton = () => screen.queryByRole('button', { name: /build my game/i });
 const editButton = () => screen.queryByRole('button', { name: /edit my brief/i });
+const planButton = () => screen.queryByRole('button', { name: /plan my brief/i });
 const describeButton = () => screen.queryByRole('button', { name: /describe your game/i });
 const closeButton = () => screen.queryByRole('button', { name: /close/i });
 
@@ -107,10 +79,11 @@ const card = () => screen.queryByRole('heading', { name: /your project is ready/
 
 let onBuild: ReturnType<typeof vi.fn>;
 let onEdit: ReturnType<typeof vi.fn>;
+let onPlan: ReturnType<typeof vi.fn>;
 let onDismiss: ReturnType<typeof vi.fn>;
 
 function renderCard() {
-  return render(<CreationHandoffCard onBuild={onBuild} onEdit={onEdit} onDismiss={onDismiss} />);
+  return render(<CreationHandoffCard onBuild={onBuild} onEdit={onEdit} onPlan={onPlan} onDismiss={onDismiss} />);
 }
 
 beforeEach(() => {
@@ -119,6 +92,7 @@ beforeEach(() => {
   projectId.set(PID);
   onBuild = vi.fn();
   onEdit = vi.fn();
+  onPlan = vi.fn();
   onDismiss = vi.fn();
 });
 
@@ -207,6 +181,51 @@ describe('CreationHandoffCard — the build path', () => {
     expect(card()).not.toBeInTheDocument();
   });
 
+  /*
+   * 🔴 PLAN IS EDIT WITH A PREFIX (owner, 2026-08-09).
+   *
+   * It hands the box a `/bt-plan` command instead of sending anything, so the user can read it, edit it
+   * further, and press enter themselves. The two things that fail silently here: sending it (a card
+   * button that spends credits without the user pressing send is the thing Build exists to be), and
+   * losing the brief off the end of the command — the whole point is that the plan is planned FROM the
+   * user's own words.
+   */
+  it('hands the chat box a /bt-plan command carrying the brief, and sends nothing', () => {
+    renderCard();
+    fireEvent.click(planButton()!);
+
+    expect(onPlan).toHaveBeenCalledTimes(1);
+    expect(onPlan).toHaveBeenCalledWith(`/bt-plan ${TYPED.trim()}`);
+    expect(onBuild).not.toHaveBeenCalled();
+    expect(card()).not.toBeInTheDocument();
+  });
+
+  /*
+   * 🔴 PLAN IS ITS OWN ACTION, NOT `onEdit` WITH DIFFERENT TEXT (owner, 2026-08-09): *"WE NEED To ALSO
+   * SWITCH TO PLAN MODE. That is the whole point as well."* The prefix asks the skill to plan; §4.2.9's
+   * Plan mode is what makes the turn read-only. Routing this through `onEdit` would compose the right
+   * command and leave the chat in Build — a turn free to rewrite the project while the user believes
+   * they asked for a plan, and nothing on screen or in the reply would say otherwise.
+   */
+  it('does NOT route Plan through the Edit handler — the mode switch rides on its own callback', () => {
+    renderCard();
+    fireEvent.click(planButton()!);
+
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The command line is TRIMMED where the quoted brief is not. `TYPED` starts with a newline — the
+   * landing-page box hands those back routinely — and an untrimmed prefix leaves `/bt-plan` alone on the
+   * first line, reading in the chat box as if the command had lost its argument.
+   */
+  it('does not leave the command dangling on its own line', () => {
+    renderCard();
+    fireEvent.click(planButton()!);
+
+    expect(onPlan.mock.calls[0][0]).toMatch(/^\/bt-plan a kart racer/);
+  });
+
   it('closes the card and reports the prompt when X is pressed', () => {
     renderCard();
     fireEvent.click(closeButton()!);
@@ -222,6 +241,7 @@ describe('CreationHandoffCard — the build path', () => {
    */
   it.each([
     ['Edit brief', () => fireEvent.click(editButton()!)],
+    ['Plan brief', () => fireEvent.click(planButton()!)],
     ['X', () => fireEvent.click(closeButton()!)],
   ])('keeps the mode (and its carried prompt) alive after %s', (_label, press) => {
     renderCard();
@@ -267,12 +287,13 @@ describe('CreationHandoffCard — the describe path (a card was picked, nothing 
    * post an empty turn or quietly invent a brief on the user's behalf, on the most expensive generation
    * in the product. Neither throws.
    */
-  it('offers no Build button anywhere', () => {
+  it('offers no Build button anywhere — and nothing to plan either', () => {
     renderCard();
 
     expect(card()).toBeInTheDocument();
     expect(buildButton()).not.toBeInTheDocument();
     expect(editButton()).not.toBeInTheDocument();
+    expect(planButton()).not.toBeInTheDocument();
     expect(onBuild).not.toHaveBeenCalled();
   });
 
@@ -301,60 +322,27 @@ describe('CreationHandoffCard — the describe path (a card was picked, nothing 
 });
 
 /**
- * THE BASELINE SAVE (owner, 2026-07-29).
+ * THE SHAPE OF THE ROW (owner, 2026-08-09 — replacing the baseline-save block this file used to hold).
  *
- * *"We should put some sort of Save project button that at least saves the core project to GitHub, so we
- * can easily reset from"* it. This is the only moment where the tree is exactly the pinned starter plus
- * one scaffolded class, so a commit here is a clean baseline — and it is also the moment the project is
- * least safe (unlinked, in a sandbox that can be reclaimed).
- *
- * What must not drift: it is the HEADER CHIP'S action, not a second one. Same hook, same tested
- * `actionLabel`, same single writer. A private save here would be a second thing called saving, which is
- * exactly how the header ended up with two adjacent buttons both labelled "Sync".
+ * The third slot was the header chip's save action; it is **Plan my brief** now — *"I think I have enough
+ * save to GitHub buttons"*. The property worth pinning is not the absence of that one button, which is a
+ * negative that stays true by itself: it is the row's SIZE. §4.1a's whole record of the toolbar is that a
+ * row grows one individually-reasonable control at a time, and a style — or a count — only looks wrong
+ * next to its neighbours, which nothing in a code review shows you. So the count is asserted, and the
+ * next addition has to be a deliberate edit to this number rather than an unremarked fourth button.
  */
-describe('the baseline save row', () => {
-  const saveButton = () => screen.queryByRole('button', { name: /commit changes|link|reconnect|try again/i });
-
+describe('the action row', () => {
   beforeEach(() => {
-    projectId.set(PID);
     enterNewProjectMode(mode());
-
-    /* Module-level atoms outlive a `cleanup()`, so a state one test sets is the next test's premise. */
-    persistence.saveState.set({ status: 'idle' });
-    persistence.repoStatus.set({ linked: false, configuredProviders: ['github'] });
   });
 
-  it('offers the save action and routes it through the one writer', () => {
+  it('offers exactly three actions and the close button', () => {
     renderCard();
 
-    expect(saveButton()).toBeInTheDocument();
-    fireEvent.click(saveButton()!);
+    const labels = screen
+      .getAllByRole('button')
+      .map((button) => button.getAttribute('aria-label') ?? button.textContent);
 
-    expect(persistence.requestSave).toHaveBeenCalledTimes(1);
-    expect(persistence.requestSave).toHaveBeenCalledWith(PID, 'github');
-  });
-
-  /*
-   * 🔴 Nothing pushes to somebody's repository without a press (owner, 2026-07-23). Rendering a card that
-   * merely OFFERS to save must never be the thing that saves.
-   */
-  it('CONTROL — rendering the card pushes nothing', () => {
-    renderCard();
-
-    expect(persistence.requestSave).not.toHaveBeenCalled();
-    expect(persistence.startGitConnect).not.toHaveBeenCalled();
-  });
-
-  /*
-   * A permanently-dead row is a dead end, not a roadmap (§4.1a). `action: 'none'` is the "already saved,
-   * nothing outstanding" state, and a greyed button there says less than no button at all.
-   */
-  it('disappears when there is nothing to press', () => {
-    /* A save already in flight: `action: 'none'`, and a greyed button there says less than no button. */
-    persistence.saveState.set({ status: 'saving' });
-    renderCard();
-
-    expect(card()).toBeInTheDocument();
-    expect(saveButton()).not.toBeInTheDocument();
+    expect(labels).toEqual(['Close', 'Build my game', 'Edit my brief', 'Plan my brief']);
   });
 });

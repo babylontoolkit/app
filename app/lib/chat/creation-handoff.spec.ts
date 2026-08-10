@@ -16,7 +16,8 @@
  *     and there is no other place to pin it.
  */
 import { describe, expect, it } from 'vitest';
-import { briefFromRegistryEntry, decideCreationHandoff } from './creation-handoff';
+import { briefFromRegistryEntry, decideCreationHandoff, planCommandFor } from './creation-handoff';
+import { parseSlashInvocation } from '~/lib/skills/slash';
 
 describe('decideCreationHandoff — there are words to send', () => {
   it('offers build for typed words', () => {
@@ -162,5 +163,49 @@ describe('briefFromRegistryEntry never throws on an incomplete registry row', ()
 
   it('still returns the title when only the copy is missing', () => {
     expect(briefFromRegistryEntry({ title: 'Arcade Racing' })).toBe('Arcade Racing');
+  });
+});
+
+/**
+ * THE PLAN COMMAND (owner, 2026-08-09) — the card's third action.
+ *
+ * The button that used to save the untouched starter to GitHub now writes `/bt-plan <brief>` into the
+ * chat box, so the user can plan the build instead of one-shotting it. It is asserted against the REAL
+ * `parseSlashInvocation` rather than against a string shape, because the only thing that matters about
+ * the composed text is what the server makes of it: a command the parser does not recognise falls
+ * through as ordinary prose, which builds the game exactly as if the button had not been pressed —
+ * silently, and on the most expensive turn in the product.
+ */
+describe('planCommandFor', () => {
+  it('addresses the brief to the planning skill', () => {
+    expect(planCommandFor('a kart racer with boost pads')).toBe('/bt-plan a kart racer with boost pads');
+  });
+
+  /*
+   * The carried prompt comes out of a textarea and routinely has leading whitespace. `parseSlashInvocation`
+   * trims the args itself, so this changes nothing on the wire — it stops the chat box showing `/bt-plan`
+   * alone on the first line, which reads as a command that lost its argument.
+   */
+  it('does not leave the command dangling above its brief', () => {
+    expect(planCommandFor('\n  a kart racer\n')).toBe('/bt-plan a kart racer');
+  });
+
+  it.each([
+    ['plain', 'a kart racer'],
+    ['padded', '\n  a kart racer\n\n  with boost pads  \n'],
+    ['multi-line', 'a kart racer\n\nwith boost pads on the second lap'],
+  ])('parses as a bt-plan invocation carrying the whole brief (%s)', (_label, brief) => {
+    const invocation = parseSlashInvocation(planCommandFor(brief));
+
+    expect(invocation?.name).toBe('bt-plan');
+    expect(invocation?.args).toBe(brief.trim());
+  });
+
+  /*
+   * Unreachable from the card — Plan only exists on the `build` branch, which is defined by having words
+   * — and pinned so it can never become the thing that turns an empty box into a bare invocation.
+   */
+  it('still leaves the caret after the command when there is no brief', () => {
+    expect(planCommandFor('   ')).toBe('/bt-plan ');
   });
 });

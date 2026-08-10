@@ -67,9 +67,10 @@ export interface NewProjectMode {
   /**
    * Has the user closed the handoff card (the `X`, or one of its actions) IN THIS SESSION?
    *
-   * 🔴 **Dismissing the CARD is not leaving the MODE.** The hidden brief must still ride on whatever
-   * they send next — drop it and the play contract, the scaffolded class name and the on-disk image
-   * list vanish from the most expensive turn in the product, silently. So this hides one panel and
+   * 🔴 **Dismissing the CARD is not leaving the MODE.** The mode is the "created, never built" fact, and
+   * it is still needed after the panel is gone: it holds the user's only copy of their prompt, keeps the
+   * premium pill locked (paid rungs are edit-only — a first build on a buffered model dies at the
+   * gateway timeout), and is what arms the game-ready toast on the send. So this hides one panel and
    * nothing else; only a SEND clears the mode.
    *
    * 🔴 **AND IT IS NOT PERSISTED (owner, 2026-07-29).** It was, and that was wrong: until the first

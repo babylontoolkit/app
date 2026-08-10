@@ -124,10 +124,20 @@ export interface BuildOptions {
 
   /** Build and store, but do not activate. Activation is always a separate, explicit step. */
   activate?: boolean;
+
+  /**
+   * The reference budget to ADVERTISE in the Reference Library index.
+   *
+   * Passed in rather than read from env here, so this module stays a builder with no config of its
+   * own — and so the caller is the one place that has to think about the fact that this number is
+   * baked into a cached prompt. See `buildReferenceIndex` for what happens if it later disagrees with
+   * what the tool enforces (benign either way; never a killed generation).
+   */
+  maxReferenceLoads?: number;
 }
 
 export async function buildSystemPrompt(options: BuildOptions): Promise<BuildResult> {
-  const { skillsIndex, githubToken, activate = true } = options;
+  const { skillsIndex, githubToken, activate = true, maxReferenceLoads } = options;
   const store = getPromptStore();
 
   logger.info(`Building system prompt from ${AGENT_REPO}@main`);
@@ -158,7 +168,7 @@ export async function buildSystemPrompt(options: BuildOptions): Promise<BuildRes
    * (the fetch above iterates `ON_DEMAND_BLOCKS`), and one missing doc fails the whole build before
    * this line, so there is no state in which the index can advertise a document the version lacks.
    */
-  const content = assemblePrompt(docs, skillsIndex, buildReferenceIndex(ON_DEMAND_BLOCKS));
+  const content = assemblePrompt(docs, skillsIndex, buildReferenceIndex(ON_DEMAND_BLOCKS, maxReferenceLoads));
   const fetched = docs.length + Object.keys(onDemand).length + Object.keys(declarations).length;
 
   const candidate: NewPromptVersion = {

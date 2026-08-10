@@ -13,6 +13,7 @@
 import { type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
 import { requireAdmin } from '~/lib/.server/supabase/auth';
+import { resolveAgentBudgets } from '~/lib/.server/agent/budgets';
 import { buildSystemPrompt } from '~/lib/.server/prompt/build';
 import { invalidateActivePrompt } from '~/lib/.server/prompt/active';
 import { warmAfterPromptChange } from '~/lib/.server/prompt/cache-warmer';
@@ -163,6 +164,13 @@ export async function action({ request, context }: ActionFunctionArgs) {
         skillsIndex: skills.skillsIndex,
         githubToken: config.githubToken,
         activate: true,
+
+        /*
+         * The number the index ADVERTISES must be the one `load_reference` enforces, or the prompt
+         * promises a budget the tool does not keep. Both come from `resolveAgentBudgets`, so a
+         * re-sync is what brings a changed `AGENT_MAX_REFERENCE_LOADS` into the baked prompt.
+         */
+        maxReferenceLoads: resolveAgentBudgets(context).maxReferenceLoads,
       });
 
       invalidateActivePrompt();

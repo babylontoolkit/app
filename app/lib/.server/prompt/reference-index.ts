@@ -35,9 +35,19 @@ import type { OnDemandBlock } from './sources';
  * the number the model is told and the number `execute` enforces must be one constant, or the prompt
  * promises a budget the tool does not keep.
  */
-import { MAX_REFERENCE_LOADS } from '~/lib/.server/agent/reference-tools';
+import { DEFAULT_MAX_REFERENCE_LOADS } from '~/lib/.server/agent/budgets';
 
-export function buildReferenceIndex(blocks: OnDemandBlock[]): string {
+/**
+ * @param maxLoads the budget the tool will actually enforce. Defaults to the shipped value.
+ *
+ * ⚠️ **This index is baked into the CACHED prompt at sync time**, so the number it states is frozen
+ * until the next prompt build. Changing `AGENT_MAX_REFERENCE_LOADS` therefore wants a re-sync to keep
+ * the advertised number and the enforced one in step. The staleness is benign in the RAISE direction
+ * (the prompt under-promises; the tool is simply more permissive than advertised) and in the lower
+ * direction it degrades to a refusal the model can act on, naming what it already has — never a killed
+ * generation, because the budget is enforced inside `execute` and never as a zod constraint.
+ */
+export function buildReferenceIndex(blocks: OnDemandBlock[], maxLoads = DEFAULT_MAX_REFERENCE_LOADS): string {
   if (blocks.length === 0) {
     /*
      * Never advertise a tool with nothing behind it. An empty index that still said "call
@@ -69,7 +79,7 @@ export function buildReferenceIndex(blocks: OnDemandBlock[]): string {
      */
     'Decide which references you need and load them BEFORE you begin writing code, files or an artifact.',
     'Loading is cheap; abandoning a half-written answer to load one is not. Do not interleave the two.',
-    `You may load at most ${MAX_REFERENCE_LOADS} references in one response, so choose by the`,
+    `You may load at most ${maxLoads} references in one response, so choose by the`,
     'descriptions below. If a task needs one you have not loaded, load it rather than guessing at an API.',
     '',
     ...rows,

@@ -3,7 +3,7 @@ import { discussModeNote } from './discuss-note';
 
 describe('discussModeNote', () => {
   it('emits the instruction on an ordinary plan-mode turn', () => {
-    const note = discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: false });
+    const note = discussModeNote({ chatMode: 'discuss' });
     expect(note).toContain('PLAN mode');
     expect(note).toContain('Do NOT emit `<boltArtifact>`');
   });
@@ -15,7 +15,7 @@ describe('discussModeNote', () => {
    * agree on the folder, which is why both read `PLAN_ARTIFACTS_DIR`.
    */
   it('states the _specs planning-artifact exception so the skills still write their files', () => {
-    const note = discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: false });
+    const note = discussModeNote({ chatMode: 'discuss' });
     expect(note).toContain('`_specs/`');
     expect(note).toContain('_spec.md');
     expect(note).toContain('_plan.md');
@@ -23,15 +23,24 @@ describe('discussModeNote', () => {
   });
 
   it('is silent in build mode and when the mode is absent (every existing caller)', () => {
-    expect(discussModeNote({ chatMode: 'build', isFirstBuildTurn: false })).toBeNull();
-    expect(discussModeNote({ isFirstBuildTurn: false })).toBeNull();
+    expect(discussModeNote({ chatMode: 'build' })).toBeNull();
+    expect(discussModeNote({})).toBeNull();
   });
 
   /*
-   * The creation turn MUST build (§4.4): the user asked for a game, and the whole creation context has
-   * been assembled and billed. A discuss note here would buy an essay instead of a game, silently.
+   * 🔴 THE FIRST-BUILD EXEMPTION IS GONE, ON PURPOSE (owner, 2026-08-09).
+   *
+   * It used to return `null` for a creation turn — "the user asked for a game, not an essay". The
+   * handoff card's **Plan my brief** button (§4.4a) makes that wrong: planning the build BEFORE
+   * writing it is a thing the user can now explicitly choose on turn one, and dropping the note there
+   * would compose a `/bt-plan` command and then run it with full write access. Nothing would throw;
+   * the turn would simply not be read-only.
+   *
+   * Pinned as a PROPERTY, not as the absence of a parameter: an extra field on the input must not
+   * change the answer, so a re-added creation guard fails here rather than passing unnoticed.
    */
-  it('is ignored on the first build turn, like the premium toggle', () => {
-    expect(discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: true })).toBeNull();
+  it('honours plan mode on a first build turn — extra input fields cannot suppress it', () => {
+    expect(discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: true } as any)).toContain('PLAN mode');
+    expect(discussModeNote({ chatMode: 'discuss', creationPhase: 'game' } as any)).toContain('PLAN mode');
   });
 });
