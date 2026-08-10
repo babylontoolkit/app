@@ -5,6 +5,7 @@ import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
+import { runPreviewToolCall } from '~/lib/preview/bridge';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
 import {
   ApiError,
@@ -846,6 +847,57 @@ export const ChatImpl = memo(
             destPath: media.destPath,
             kind: media.kind === 'video' ? 'video' : 'image',
           });
+          continue;
+        }
+
+        /*
+         * Preview dev-tools (`lib/preview/protocol.ts`) — the agent asking the RUNNING game a question.
+         *
+         * Same relay as MCP and the same dedupe set: this effect replays every data part on every stream
+         * chunk, so without the `handledToolCalls` latch one `evaluate_in_game` would run per chunk.
+         */
+        const previewCall = part as {
+          type?: string;
+          generationId?: string;
+          toolCallId?: string;
+          method?: string;
+          params?: Record<string, unknown>;
+        };
+
+        if (
+          previewCall.type === 'preview-tool-call' &&
+          previewCall.toolCallId &&
+          previewCall.generationId &&
+          previewCall.method
+        ) {
+          if (handledToolCalls.current.has(previewCall.toolCallId)) {
+            continue;
+          }
+
+          handledToolCalls.current.add(previewCall.toolCallId);
+
+          void (async () => {
+            let result: unknown;
+            let error: string | undefined;
+
+            try {
+              result = await runPreviewToolCall(previewCall.method as never, previewCall.params);
+            } catch (e) {
+              error = (e as Error).message;
+            }
+
+            await fetch('/api/agent/tool-result', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                generationId: previewCall.generationId,
+                toolCallId: previewCall.toolCallId,
+                result,
+                error,
+              }),
+            }).catch(() => undefined);
+          })();
+
           continue;
         }
 

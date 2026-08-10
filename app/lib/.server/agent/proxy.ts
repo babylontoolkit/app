@@ -41,6 +41,7 @@ import {
 import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './creation-completion';
 import type { TurnOutcomeFacts } from '~/lib/agent/turn-outcome';
 import { createFileTools } from './file-tools';
+import { createPreviewTools, type PreviewToolCallEvent } from './preview-tools';
 import { resolveAgentBudgets } from './budgets';
 import { buildFileManifest, renderFileManifest } from '~/lib/context/file-manifest';
 import type { FileMap } from '~/lib/.server/llm/constants';
@@ -445,6 +446,9 @@ export interface AgentGeneration {
    * No-op when the project has no MCP servers. Subscribe BEFORE draining `textStream`.
    */
   onMcpToolCall(listener: (event: McpToolCallEvent) => void): void;
+
+  /** Preview dev-tools calls (`lib/preview/protocol.ts`) — same relay shape as MCP. */
+  onPreviewToolCall(listener: (event: PreviewToolCallEvent) => void): void;
 
   /**
    * Subscribe to media renders the model STARTED during this generation (§4.16). Fire-and-forget,
@@ -1174,6 +1178,34 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const hasMcpTools = Object.keys(mcpRelayTools).length > 0;
 
   /*
+   * 🔴 PREVIEW DEV-TOOLS (`lib/preview/protocol.ts`) — the agent asking the RUNNING game questions.
+   *
+   * Same relay as MCP, for the same reason: the game runs in the user's browser and the server can
+   * never touch it (§5). Offered on EVERY turn that has a project, including a discuss/plan turn — they
+   * are pure READS (`evaluate` runs in the user's own preview and writes nothing to the sandbox), and a
+   * turn that can discuss a bug but not look at it is the dangling-instruction failure `read_file` was
+   * added to fix, one layer out.
+   *
+   * They cost nothing when unused: a tool definition the model does not call is a few hundred cached
+   * tokens, and without them `bt-execute`'s self-verification can only narrate about code it read.
+   */
+  const previewListeners: Array<(event: PreviewToolCallEvent) => void> = [];
+  const emitPreviewCall = (event: PreviewToolCallEvent) => {
+    for (const listener of previewListeners) {
+      listener(event);
+    }
+  };
+
+  const previewTools = request.projectId
+    ? createPreviewTools({
+        generationId,
+        userId: user.id,
+        abortSignal: request.abortSignal,
+        emit: emitPreviewCall,
+      })
+    : {};
+
+  /*
    * Built-in media generation tools (§4.16) — offered whenever the platform holds a KIE key and the
    * turn belongs to a project (the debit needs a project for the bytes to land in). Async-enqueue:
    * the tool debits, starts the render, EMITS a `media-task` data part and returns immediately — the
@@ -1478,11 +1510,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          * that drifts from what the policy decided — and this one decides whether the turn can spend
          * credits on renders.
          */
-        { ...fileTools, ...referenceTools, ...createRepairTool(), ...(toolPolicy.allowsMedia ? mediaTools : {}) }
+        {
+          ...fileTools,
+          ...previewTools,
+          ...referenceTools,
+          ...createRepairTool(),
+          ...(toolPolicy.allowsMedia ? mediaTools : {}),
+        }
       : toolPolicy.toolset === 'skills-only'
-        ? { ...fileTools, ...createSkillTools(toolContext), ...referenceTools, ...researchTools, ...createRepairTool() }
+        ? {
+            ...fileTools,
+            ...previewTools,
+            ...createSkillTools(toolContext),
+            ...referenceTools,
+            ...researchTools,
+            ...createRepairTool(),
+          }
         : {
             ...fileTools,
+            ...previewTools,
             ...createSkillTools(toolContext),
             ...referenceTools,
             ...mcpRelayTools,
@@ -2651,6 +2697,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     settlement: settlementPromise,
     notice: byok.notice ?? tierNotice,
     onMcpToolCall: (listener) => mcpListeners.push(listener),
+    onPreviewToolCall: (listener) => previewListeners.push(listener),
     onMediaTask: (listener) => mediaListeners.push(listener),
   };
 }

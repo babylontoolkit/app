@@ -62,15 +62,118 @@ game's **own** content — its track, its vehicle, its characters, its environme
 procedural geometry and materials you author, themed to the request. A recognisable stand-in you made
 is always better than the wrong model loaded from a demo.
 
-## Code architecture
+## CODE ARCHITECTURE — build it like a Unity project
 
-Work within the React Framework's conventions:
+The Toolkit is a Unity-style component framework. Architect the project the way you would a Unity one:
+**`ScriptComponent` is this framework's `MonoBehaviour`, and plain TypeScript classes are everything
+else.** You need both, and using the wrong one for a job is the mistake to avoid in either direction.
 
-- **Game flow lives in GameMode classes**, wired through unified navigation.
-- **Per-object behavior lives in Script Components**, using the Toolkit's full lifecycle
-  (`awake` / `start` / `update` / `late` / `after` / `step` / `fixed` / `ready` / `destroy`), each
-  registered via `TOOLKIT.SceneManager.RegisterClass`.
-- **Never do ad-hoc scene bootstrapping** or put game logic outside these constructs unless asked.
+### The lifecycle
+
+A `ScriptComponent` is constructed with the transform it is attached to
+(`constructor(transform, scene, properties?, alias?)`) and is registered with
+`SceneManager.RegisterClass("Name", Name)`. It then overrides **only the hooks it needs** — they are
+opt-in `protected` methods, exactly like Unity's magic methods:
+
+| Hook       | When                                                                       |
+| ---------- | -------------------------------------------------------------------------- |
+| `awake`    | Once, on attach. Wire references. The scene may not be fully built yet.     |
+| `start`    | Once, before the first `update`. Everything else exists by now.             |
+| `ready`    | Once, after the scene is fully ready.                                       |
+| `update`   | Every frame. The main behaviour hook.                                       |
+| `late`     | Every frame, after all `update`s. Cameras that follow a target belong here. |
+| `step`     | Physics step.                                                              |
+| `fixed`    | Fixed timestep. Force/velocity work belongs here.                           |
+| `after`    | After the physics step.                                                     |
+| `destroy`  | On dispose. Unhook anything you hooked.                                     |
+
+**`update()` takes no arguments** — ask the component for time (`this.getDeltaSeconds()`,
+`this.getDeltaTime()`, `this.getAnimationRatio()`). Components find each other through the framework
+(`this.getComponent<T>("ClassName")`, `this.getComponents<T>`, `this.getChildWithScript`), and reach
+their own node through `this.transform` and `this.scene`.
+
+**Declare only the hooks you actually use.** An empty override still gets registered and called every
+frame; delete the ones you do not need rather than leaving them stubbed.
+
+**`src/babylon/classes/` is the worked reference for all of this — read it before you write.**
+`DefaultGameMode.ts` is the lifecycle showcase (every hook, in order, with what each is for);
+`FreeCameraMode.ts` is a minimal controller; `PlayerControllerDemo.ts` and `VehicleControllerDemo.ts`
+show `createScene()`, loading a prefab through `SceneManager.LoadRuntimeAssets`, and resolving nodes out
+of the loaded result. Copy the PATTERNS from these; the folder itself is read-only, so copy a class into
+`src/scripts/` before changing it (and rebase its imports — see the file-zone table).
+
+### Which one to write
+
+**Use a `ScriptComponent` when the thing IS a game object, or needs the lifecycle** — it is attached to
+a transform in the scene, or it needs per-frame/physics ticks, collision and trigger events, or click
+actions. The player kart, the AI driver, the camera rig, the item box, the race manager.
+
+**Use a regular class for ordinary OOP** — encapsulation, inheritance, and logic that does not live on a
+node and does not need a tick. Track geometry and racing-line math, tuning tables and data models,
+factories and builders, state machines, scoring rules, pathfinding, save data. These are normal
+TypeScript classes with constructors, private fields and methods, and a component owns and drives them.
+
+The test is simply: **does it hang off a node in the scene, or does it need the engine to tick it?** If
+yes, `ScriptComponent`. If no, a plain class — and making it a component anyway is just as wrong, since
+it forces an empty transform into the scene for something that is only logic.
+
+What is NOT acceptable is a plain class with a hand-rolled `tick(dt)` that some other class calls every
+frame to simulate a game object. That reimplements the framework badly: use `update()` and
+`getDeltaSeconds()`.
+
+### Imported scenes already have their components — FIND them, do not re-create them
+
+A glTF exported from Unity carries its component setup in metadata, and the Toolkit's glTF parser
+**instantiates those `ScriptComponent`s automatically** as the scene loads. So a node from an imported
+scene arrives with its scripts already attached and already registered, exactly as a prefab does in
+Unity. Your job is to get a reference to what is there.
+
+- **On a transform you already have:** `SceneManager.GetComponent<T>(transform, "ClassName")`, or
+  `SceneManager.GetComponents<T>(transform)` for all of them. From inside a component, the instance
+  forms are shorter: `this.getComponent<T>("ClassName")` and `this.getComponents<T>("ClassName")`.
+- **Searching the scene:** `SceneManager.FindTransformWithScript(scene, "ClassName")` and
+  `FindAllTransformsWithScript(scene, "ClassName")` — the `FindObjectOfType` equivalents. By name or
+  tag: `FindGameObject(scene, path)`, `FindGameObjectWithTag(scene, tag)`, `FindGameObjectsWithTag`.
+- **Searching under a node:** `this.getChildWithScript("ClassName")` / `getChildrenWithScript`, or
+  `getChildWithTags` / `getChildrenWithTags`; the static forms are
+  `SceneManager.FindChildTransformWithScript(parent, klass, …)` and `FindAllChildTransformsWithScript`.
+- **Exported inspector values ride along.** A component authored in Unity keeps its serialized property
+  values; read them with `this.getProperty<T>("speed", 10)`, and `SceneManager.FindSceneMetadata(transform)`
+  for the raw node metadata.
+
+**Never `new` a `ScriptComponent` yourself to "attach" behaviour to an imported node, and never rebuild
+in code what the export already describes.** Doing so gives you a second, unregistered instance that the
+lifecycle never drives — its `update()` simply never runs, with no error to explain why. Resolve
+references in `start()` rather than `awake()` when they point at other objects: `awake` runs while the
+scene is still being assembled, so the thing you are looking for may not exist yet.
+
+### Decomposition
+
+**One responsibility per class, one class per file.** A single 40,000-character GameMode that builds the
+track, drives the player, runs the AI, manages the camera and owns the HUD is a defect — split it
+(`TrackBuilder`, `KartController`, `KartAIController`, `KartCameraManager`, `RaceManager`, …).
+
+**Game flow lives in the GameMode / `SceneController`**, wired through unified navigation; a
+`SceneController` is a `ScriptComponent` that builds the scene in `createScene()`. **Never do ad-hoc
+scene bootstrapping** or put game logic outside these constructs unless asked.
+
+### The UI holds NO game code — and "no game code" includes DATA
+
+`src/pages/**` and `src/components/**` are the landing page and menus. The rule that React must not
+import `GameManager` or Babylon is about the BUNDLE. This rule is about OWNERSHIP, and it is separate:
+
+- **No gameplay data or tuning in the UI.** Rosters, stats, physics numbers, track definitions, item
+  tables, difficulty curves — these belong to the game, in `src/scripts/**`. A `const KARTS = [{ name,
+  stats: { speed, accel, drift } }]` sitting in `Home.tsx` means the landing page and the game each own
+  half the truth, and they drift the moment either is edited.
+- **No gameplay state in the UI.** No simulation, no per-frame work, no game rules.
+- **Selections travel in the navigation state ONLY.** `navigate('/play', { gameMode, ...selections })`
+  is the entire channel. Never write choices to `sessionStorage`/`localStorage`/globals for the game to
+  read behind the contract — a side channel the play contract does not cover is a bug that survives
+  every test of the contract itself.
+
+If the landing page needs to show the roster, the roster is exported from `src/scripts/**` and
+imported by the page as **data** — one definition, owned by the game, displayed by the UI.
 
 ## FILE ZONES — read-only means read-only
 

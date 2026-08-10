@@ -603,6 +603,9 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
       aborted: false,
     }),
     onMcpToolCall: vi.fn(),
+
+    /* Preview dev-tools relay — the route subscribes before draining, so the double must offer it. */
+    onPreviewToolCall: vi.fn(),
     onMediaTask: vi.fn(),
     ...overrides,
 

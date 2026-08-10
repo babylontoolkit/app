@@ -312,7 +312,14 @@ describe('the interface is implementable without WebContainer', () => {
     }
 
     return {
-      capabilities: { terminal: false, textSearch: false, watch: true, clearPort: false, nativeAddons: false },
+      capabilities: {
+        terminal: false,
+        textSearch: false,
+        watch: true,
+        clearPort: false,
+        nativeAddons: false,
+        previewScript: false,
+      },
 
       // An in-memory provider has no previous session to restore from.
       bootRestoredFilesystem: false,
@@ -449,6 +456,9 @@ describe('the WebContainer adapter translates the right calls', () => {
       watch: true,
       clearPort: false,
       nativeAddons: false,
+
+      /* `setPreviewScript` is a first-class WebContainer API — the dev-tools channel works here. */
+      previewScript: true,
     });
   });
 });

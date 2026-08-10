@@ -75,6 +75,14 @@ export const CODESANDBOX_CAPABILITIES: SandboxCapabilities = {
 
   /** A real Linux microVM: `.node` addons load normally, so rolldown finds its native binding. */
   nativeAddons: true,
+
+  /*
+   * Not implemented here. The vendor serves previews from its own host and exposes no hook to inject
+   * a script into the served document, so the dev-tools channel (`lib/preview/protocol.ts`) has no way
+   * in — the game-side half has to be IN the page before the game's own code runs. Declared false so
+   * the panel says "not supported on this provider" rather than silently reporting a healthy game.
+   */
+  previewScript: false,
 };
 
 /**

@@ -222,6 +222,16 @@ export interface SandboxCapabilities {
    * a ~10MB download nobody uses.
    */
   readonly nativeAddons: boolean;
+
+  /**
+   * {@link SandboxProvider.setPreviewScript} is implemented — the builder can observe and drive the
+   * running game (`lib/preview/protocol.ts`).
+   *
+   * A FLAG rather than a `typeof provider.setPreviewScript === 'function'` probe, for the reason
+   * `spec/sandbox-seam.md` gives for `nativeAddons`: a probe reports "not found" where the truth is
+   * "not supported", and the dev-tools panel needs to tell the user which of those it is.
+   */
+  readonly previewScript: boolean;
 }
 
 /**
@@ -358,6 +368,26 @@ export interface SandboxProvider {
    * Returns `undefined` for a port this provider has never seen open — there is nothing to re-mint.
    */
   refreshPreviewUrl?(port: number): Promise<SandboxPreviewUrl | undefined>;
+
+  /**
+   * Inject a script into every preview document, before any page content loads.
+   *
+   * 🔴 **This is how the builder can see inside a running game at all** (`lib/preview/protocol.ts`).
+   * The injected script reports uncaught errors and console output, and answers questions about the
+   * game's own JavaScript — which is the difference between "the preview looks wrong" and "`update()`
+   * threw `GetKeyDown is not a function` on frame one".
+   *
+   * ⚠️ **It existed and was wired to exactly one provider for months.** `webcontainer/index.ts` called
+   * WebContainer's own `setPreviewScript` directly, outside the seam, so on Nodepod — the shipped
+   * default — a game that crashed at runtime told the builder NOTHING: no alert, no `errors` in the
+   * agent request body, and therefore no auto-repair. Nothing threw; the product simply stopped
+   * noticing. That is why this belongs on the interface rather than in a provider's boot file.
+   *
+   * Present only when {@link SandboxCapabilities.previewScript} is true. A provider without it is not
+   * broken — the dev-tools surface degrades to "not supported here" and says so, per the
+   * capability-flag rule in `spec/sandbox-seam.md` (never a `typeof x.foo === 'function'` probe).
+   */
+  setPreviewScript?(script: string): Promise<void>;
 
   /** Present only when {@link SandboxCapabilities.textSearch} is true. */
   textSearch?(query: string, options: SandboxTextSearchOptions, onProgress: SandboxTextSearchProgress): Promise<void>;

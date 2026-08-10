@@ -1564,6 +1564,9 @@ describe('the adapter translates the right calls', () => {
       watch: true,
       clearPort: true,
       nativeAddons: true,
+
+      /* No hook to inject into the served preview document — the dev-tools channel cannot reach it. */
+      previewScript: false,
     });
     expect(provider.textSearch).toBeUndefined();
     expect(typeof provider.clearPort).toBe('function');

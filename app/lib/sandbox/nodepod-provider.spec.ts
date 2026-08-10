@@ -294,6 +294,9 @@ describe('capabilities are pinned exactly', () => {
       watch: true,
       clearPort: false,
       nativeAddons: false,
+
+      /* The dev-tools channel (`lib/preview/protocol.ts`) — Nodepod injects into every preview document. */
+      previewScript: true,
     });
   });
 

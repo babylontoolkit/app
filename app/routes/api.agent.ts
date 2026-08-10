@@ -323,6 +323,21 @@ async function streamGeneration(
   });
 
   /*
+   * Preview dev-tools relay (`lib/preview/protocol.ts`). Same shape and same reasoning as the MCP
+   * subscription above: subscribed BEFORE the drain so an early call cannot be missed, executed in the
+   * user's own browser against their running game, never on platform infrastructure (§5).
+   */
+  generation.onPreviewToolCall((event) => {
+    stream.writeData({
+      type: 'preview-tool-call',
+      generationId: generation.generationId,
+      toolCallId: event.toolCallId,
+      method: event.method,
+      params: (event.params ?? null) as any,
+    });
+  });
+
+  /*
    * WHICH SKILLS THIS TURN IS RUNNING — emitted BEFORE the model writes a token (§4.11).
    *
    * The server already knows: `/slash` invocations are resolved and skills pre-loaded while building

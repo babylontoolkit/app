@@ -46,11 +46,23 @@ export const WEBCONTAINER_CAPABILITIES: SandboxCapabilities = {
    * costs nothing and means an import stops depending on a vendor's private escape hatch.
    */
   nativeAddons: false,
+
+  /** `setPreviewScript` is a first-class WebContainer API — this is the provider it was built against. */
+  previewScript: true,
 };
 
 export function createWebContainerProvider(container: WebContainer): SandboxProvider {
   return {
     capabilities: WEBCONTAINER_CAPABILITIES,
+
+    /*
+     * The dev-tools channel (`lib/preview/protocol.ts`). This call is not new — it has existed since
+     * upstream — but it used to be made in `webcontainer/index.ts`, OUTSIDE the seam, which is why the
+     * capability silently did not exist on any other provider.
+     */
+    async setPreviewScript(script: string) {
+      await container.setPreviewScript(script);
+    },
 
     /*
      * A WebContainer dies with the tab; every page load boots an empty filesystem. `false` is what

@@ -83,6 +83,15 @@ export interface NodepodClient {
   teardown(): void;
 
   /**
+   * Inject a script into every preview document before page content loads — the dev-tools channel
+   * (`lib/preview/protocol.ts`).
+   *
+   * Optional for the `processManager` reason: an SDK version that stops exposing it must degrade to
+   * "no dev tools" rather than to a provider that fails to construct.
+   */
+  setPreviewScript?(script: string): Promise<void>;
+
+  /**
    * Nodepod's own process table — how the interactive terminal gets a PERSISTENT shell.
    *
    * 🔴 Optional on purpose, and the provider degrades to one-shot `spawn` without it. `spawn()`
@@ -149,6 +158,9 @@ export const NODEPOD_CAPABILITIES: SandboxCapabilities = {
    * the WASM binding itself. See `~/utils/rolldown-wasm`.
    */
   nativeAddons: false,
+
+  /** Nodepod injects into every preview document before page content loads (`setPreviewScript`). */
+  previewScript: true,
 };
 
 /**
@@ -823,6 +835,18 @@ export function createNodepodProvider(client: NodepodClient, options: NodepodPro
     shell: NODEPOD_SHELL,
     workdir,
     fs,
+
+    /*
+     * The dev-tools channel (`lib/preview/protocol.ts`). Nodepod injects this into every preview
+     * document before any page content loads, which is what lets it observe a crash on frame one.
+     */
+    async setPreviewScript(script: string) {
+      if (!client.setPreviewScript) {
+        throw new Error('This Nodepod build does not support preview script injection.');
+      }
+
+      await client.setPreviewScript(script);
+    },
 
     async mount(tree: SandboxFileTree, mountOptions?: { mountPoint?: string }) {
       const prefix = mountOptions?.mountPoint ? toRelPath(workdir, mountOptions.mountPoint) : '';

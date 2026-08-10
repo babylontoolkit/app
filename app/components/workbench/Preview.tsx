@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { IconButton } from '~/components/ui/IconButton';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { attachPreviewBridge, detachPreviewBridge, notifyPreviewReloading } from '~/lib/preview/bridge';
 import { PortDropdown } from './PortDropdown';
 import { ScreenshotSelector } from './ScreenshotSelector';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
@@ -202,6 +203,26 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   useEffect(() => {
     setLoadStartedAt(iframeUrl ? Date.now() : undefined);
     setDocumentLoadedAt(undefined);
+  }, [iframeUrl]);
+
+  /*
+   * The dev-tools channel (`lib/preview/protocol.ts`) — this is the element it talks to.
+   *
+   * 🔴 Re-attached whenever the URL changes and torn down on unmount, because the bridge holds
+   * PENDING requests: a tool call in flight when the preview navigates would otherwise wait out its
+   * whole relay window in silence, and the agent would be billed for it. `notifyPreviewReloading`
+   * marks the old document gone as soon as a new URL is set, so a request issued mid-reload waits for
+   * the new document's `ready` instead of being answered by the one that is going away.
+   */
+  useEffect(() => {
+    if (!iframeUrl || !iframeRef.current) {
+      return undefined;
+    }
+
+    notifyPreviewReloading();
+    attachPreviewBridge(iframeRef.current);
+
+    return () => detachPreviewBridge();
   }, [iframeUrl]);
 
   /*

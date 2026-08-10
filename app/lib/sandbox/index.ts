@@ -380,6 +380,21 @@ export function bootForProject(projectId?: string): Promise<SandboxProvider> {
       state.inFlight = undefined;
       state.resolve(provider);
 
+      /*
+       * 🔴 The dev-tools channel (`lib/preview/protocol.ts`), installed for EVERY provider that can
+       * take it — this used to happen inside `webcontainer/index.ts`, so on the shipped default a
+       * game that crashed at runtime reported nothing at all.
+       *
+       * Fire-and-forget, and deliberately AFTER `state.resolve`: this is instrumentation, and a
+       * sandbox must never fail to open because its debugger could not be installed. `installPreviewAgent`
+       * already reports rather than throws; the `.catch` covers the dynamic import itself.
+       */
+      void import('~/lib/preview/install')
+        .then((module) => module.installPreviewDevTools(provider))
+        .catch(() => {
+          /* Reported inside the module; a missing debugger is never worth failing a boot for. */
+        });
+
       return provider;
     },
     (error) => {
