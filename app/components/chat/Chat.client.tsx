@@ -18,6 +18,7 @@ import {
 } from '~/lib/persistence/projects';
 import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { isCreationTurn } from '~/lib/chat/creation-turn';
+import { liveTurnIdentity } from '~/lib/chat/live-turn-identity';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { describeTurnOutcome, type TurnOutcome } from '~/lib/agent/turn-outcome';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
@@ -278,6 +279,23 @@ export const ChatImpl = memo(
      * treats that as "not recoverable" rather than minting one, which would duplicate the chat.
      */
     const activeServerChatId = useStore(chatMetadata)?.serverChatId;
+
+    /*
+     * 🔴 THE LIVE IDENTITY OVERRIDE — see `~/lib/chat/turn-identity.ts` for the measurement.
+     *
+     * Everything above is a render CAPTURE, which is correct for the base request body and wrong for
+     * the window between a page load and the commit that carries the mounted project. Measured live:
+     * a turn posted `projectId: undefined` while the project sat open on screen, and the proxy
+     * silently dropped the preview, media and MCP tool families — three capabilities gone, generation
+     * billed as normal, nothing thrown.
+     *
+     * Every send therefore passes this as a per-request body override, which `useChat` merges OVER
+     * the base body. It is read from the stores at the moment of sending, so it cannot be stale.
+     */
+    const liveTurnBody = useCallback(
+      () => liveTurnIdentity({ projectId: activeProjectId, chatId: activeServerChatId }),
+      [activeProjectId, activeServerChatId],
+    );
 
     /*
      * The MODEL TIER (§4.6.1a): the user's stored choice, NARROWED by live eligibility.
@@ -980,6 +998,7 @@ export const ChatImpl = memo(
         { role: 'user', content: repairMessage(decision.repairAttempt) },
         {
           body: {
+            ...liveTurnBody(),
             errors: decision.errors,
             repairOf: decision.repairOf,
             repairAttempt: decision.repairAttempt,
@@ -996,12 +1015,15 @@ export const ChatImpl = memo(
       if (prompt) {
         setSearchParams({});
         runAnimation();
-        append({
-          role: 'user',
-          content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${prompt}`,
-        });
+        append(
+          {
+            role: 'user',
+            content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${prompt}`,
+          },
+          { body: liveTurnBody() },
+        );
       }
-    }, [model, provider, searchParams]);
+    }, [model, provider, searchParams, liveTurnBody]);
 
     const { enhancingPrompt, promptEnhanced, enhancePrompt, resetEnhancer } = usePromptEnhancer();
     const { parsedMessages, parseMessages, resetParsedMessages } = useMessageParser();
@@ -2213,7 +2235,7 @@ export const ChatImpl = memo(
             experimental_attachments: attachments,
           },
         ]);
-        reload(attachments ? { experimental_attachments: attachments } : undefined);
+        reload({ ...(attachments ? { experimental_attachments: attachments } : {}), body: liveTurnBody() });
         setFakeLoading(false);
         clearDraftPrompt();
 
@@ -2317,7 +2339,9 @@ export const ChatImpl = memo(
             content: messageText,
             parts: createMessageParts(messageText, imageDataList),
           },
-          attachmentOptions,
+
+          /* The live identity rides on EVERY send — see `liveTurnBody`. */
+          { ...attachmentOptions, body: liveTurnBody() },
         );
       };
 

@@ -56,6 +56,18 @@ function stubTierEnv(vars: Partial<Record<string, string>> = {}) {
   for (const key of [
     'PREMIUM_MODEL',
     'PREMIUM_MINIMUM_CREDITS',
+
+    /*
+     * ⚠️ `ENABLE_EXTENDED_MODELS` was MISSING from this list until 2026-08-10, and the PLATINUM trio is
+     * added with it. Every assertion here about ladder LENGTH reads that flag through
+     * `getModelTiers`, so a developer running `ENABLE_EXTENDED_MODELS=false` would have seen this file
+     * fail with CI green — the `oauth.spec.ts` trap, in a scrub list that already named its siblings.
+     */
+    'ENABLE_EXTENDED_MODELS',
+    'PLATINUM_MODEL',
+    'PLATINUM_MINIMUM_CREDITS',
+    'ENABLE_PLATINUM_MODEL',
+
     'SUPERMAX_MODEL',
     'ENABLE_EXTENDED_MODELS',
     'SUPERMAX_MINIMUM_CREDITS',
@@ -102,9 +114,9 @@ afterEach(() => {
  * definition — the branch that would have handled `undefined` is the one nobody tests.
  */
 describe('the ladder table (model-tiers.ts)', () => {
-  it('is Standard · Premium, and the paid table is that list minus the free rung, in order', () => {
-    expect([...MODEL_TIER_IDS]).toEqual(['standard', 'premium']);
-    expect(PAID_MODEL_TIERS.map((tier) => tier.id)).toEqual(['premium']);
+  it('is Standard · Premium · Platinum, and the paid table is that list minus the free rung, in order', () => {
+    expect([...MODEL_TIER_IDS]).toEqual(['standard', 'premium', 'platinum']);
+    expect(PAID_MODEL_TIERS.map((tier) => tier.id)).toEqual(['premium', 'platinum']);
     expect(STANDARD_TIER_LABEL).toBe('Standard');
   });
 
@@ -321,11 +333,18 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
     expect(getModelTier('premium', {}).minimumCredits).toBe(1200);
   });
 
-  /* The admin-promoted list is the authority — this is the path an operator actually reprices through. */
+  /*
+   * The admin-promoted list is the authority — this is the path an operator actually reprices through.
+   *
+   * ⚠️ Onto **KIE's** list explicitly, because that is the list `getModelTier` prices the §4.6.1a paid
+   * rungs from on every provider (`rates.ts`, unchanged by the 2026-08-10 per-provider split). Promote
+   * onto Comet's list instead and the assertions below would read the untouched baked KIE row — a
+   * green-looking test grading a promotion nothing consulted.
+   */
   it('prices a rung from a PROMOTED list when one is live', async () => {
     stubTierEnv();
 
-    const result = await promoteMarketPrices(memoryStore(), {
+    const result = await promoteMarketPrices(memoryStore(), 'KIE', {
       ...BAKED_MARKET_PRICES,
       llm: { ...BAKED_MARKET_PRICES.llm, 'claude-opus-5': { inputPerMTok: 7, outputPerMTok: 35 } },
     });
@@ -408,7 +427,7 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
 
     expect(tiers).toHaveLength(1 + PAID_MODEL_TIERS.length);
     expect(tiers.map((tier) => tier.id)).toEqual([...MODEL_TIER_IDS]);
-    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium']);
+    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium', 'platinum']);
 
     const [standard] = tiers;
     expect(standard.model, 'the platform model is passed IN — this file must not resolve it').toBe('claude-sonnet-5');
@@ -432,6 +451,62 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
     expect(premium.model).toBe('claude-opus-4-8');
     expect(premium.minimumCredits).toBe(4000);
     expect(premium.serveable).toBe(true);
+  });
+
+  /*
+   * 🔴 RESTORED 2026-08-10 — one of the two properties `premium.spec.ts` recorded as LOST when the
+   * ladder was cut to a single paid rung, and unwritable until PLATINUM brought a sibling back.
+   *
+   * A rung is misconfigured PER RUNG: its selector names a model the active price list cannot price.
+   * The failure must stay contained, because the alternative is the worst kind of outage — an operator
+   * mistypes one model id and the whole paid ladder disappears from the picker, with the healthy rung
+   * they never touched vanishing alongside the one they broke. `getModelTiers` catches per rung for
+   * exactly this reason; without a second paid rung, "contained" and "the only rung" are the same
+   * observation and nothing was actually being asserted.
+   */
+  it('a broken selector locks ONLY its own rung — the sibling stays serveable', () => {
+    stubTierEnv({ PLATINUM_MODEL: 'claude-not-a-real-model-9' });
+
+    const tiers = getModelTiers('claude-sonnet-5', {});
+    const premium = tiers.find((tier) => tier.id === 'premium')!;
+    const platinum = tiers.find((tier) => tier.id === 'platinum')!;
+
+    expect(platinum.serveable, 'the rung whose selector is unpriceable must lock').toBe(false);
+    expect(platinum.reason, 'and it must say why, for the operator').toBeTruthy();
+
+    expect(premium.serveable, 'the untouched sibling must NOT be taken down with it').toBe(true);
+    expect(premium.reason).toBeUndefined();
+
+    expect(
+      tiers.map((tier) => tier.id),
+      'and the ladder keeps its shape — a locked rung is still a rung',
+    ).toEqual([...MODEL_TIER_IDS]);
+  });
+
+  /*
+   * The per-rung flag WITHDRAWS a rung (absent), where a broken selector LOCKS it (present, serveable
+   * false). The distinction is the one `getModelTiers` documents: locked means "an operator must fix
+   * something", withdrawn means "this deploy has decided". Rendering a withdrawal as a lock would keep
+   * advertising a class that is never coming back on this deploy.
+   */
+  it('ENABLE_PLATINUM_MODEL=false removes the rung entirely, leaving Premium untouched', () => {
+    stubTierEnv({ ENABLE_PLATINUM_MODEL: 'false' });
+
+    const tiers = getModelTiers('claude-sonnet-5', {});
+
+    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium']);
+    expect(tiers.find((tier) => tier.id === 'premium')!.serveable).toBe(true);
+  });
+
+  /*
+   * ⚠️ The one-directional rule: the MASTER switch still wins. A deploy that had already turned paid
+   * models off must not start serving Platinum because a new per-rung flag defaults ON — that would be
+   * an upgrade silently widening what is billed, which is the `ENABLE_EXTENDED_MODELS` bug's shape.
+   */
+  it('ENABLE_EXTENDED_MODELS=false withdraws EVERY paid rung, whatever the per-rung flags say', () => {
+    stubTierEnv({ ENABLE_EXTENDED_MODELS: 'false', ENABLE_PLATINUM_MODEL: 'true' });
+
+    expect(getModelTiers('claude-sonnet-5', {}).map((tier) => tier.id)).toEqual(['standard']);
   });
 
   /*
@@ -565,7 +640,7 @@ describe('.env.example ships a working model tier ladder', () => {
   const LADDER_KEYS = [
     'LLM_PROVIDER',
     'LLM_MODEL',
-    'ENABLE_PREMIUM_MODEL',
+    'ENABLE_EXTENDED_MODELS',
     'PREMIUM_MODEL',
     'PREMIUM_MINIMUM_CREDITS',
   ] as const;
@@ -613,7 +688,7 @@ describe('.env.example ships a working model tier ladder', () => {
    */
   it('assigns the shipping ladder', () => {
     expect(envExampleValue(example, 'LLM_MODEL')).toBe('claude-sonnet-5');
-    expect(envExampleValue(example, 'ENABLE_PREMIUM_MODEL')).toBe('true');
+    expect(envExampleValue(example, 'ENABLE_EXTENDED_MODELS')).toBe('true');
     expect(envExampleValue(example, 'PREMIUM_MODEL')).toBe('claude-opus-5');
     expect(envExampleValue(example, 'PREMIUM_MINIMUM_CREDITS')).toBe('1500');
   });
@@ -675,7 +750,14 @@ describe('.env.example ships a working model tier ladder', () => {
   it('declares every ladder variable in worker-configuration.d.ts', () => {
     const declarations = readFileSync(path.join(process.cwd(), 'worker-configuration.d.ts'), 'utf8');
 
-    for (const key of ['ENABLE_PREMIUM_MODEL', 'PREMIUM_MODEL', 'PREMIUM_MINIMUM_CREDITS']) {
+    for (const key of [
+      'ENABLE_EXTENDED_MODELS',
+      'ENABLE_PLATINUM_MODEL',
+      'PREMIUM_MODEL',
+      'PREMIUM_MINIMUM_CREDITS',
+      'PLATINUM_MODEL',
+      'PLATINUM_MINIMUM_CREDITS',
+    ]) {
       expect(declarations, `${key} is not declared`).toMatch(new RegExp(`^\\s*${key}\\s*:`, 'm'));
     }
   });
@@ -695,7 +777,7 @@ describe('.env.example ships a working model tier ladder', () => {
    * a fourth retired key arrived, and inventing it is how the two halves drift — keep them separate and
    * keep both.
    */
-  it.each(['ENABLE_EXTENDED_MODELS', 'SUPERMAX_MODEL', 'SUPERMAX_MINIMUM_CREDITS'])(
+  it.each(['ENABLE_PREMIUM_MODEL', 'SUPERMAX_MODEL', 'SUPERMAX_MINIMUM_CREDITS'])(
     'never assigns the retired %s — mentioning it in the upgrade note is fine, assigning it is not',
     (key) => {
       expect(envExampleAssignments(example, key)).toEqual([]);

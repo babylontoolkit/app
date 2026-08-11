@@ -42,9 +42,15 @@
 import { createScopedLogger } from '~/utils/logger';
 import { env, envFlag, envNumber } from '~/lib/.server/env';
 import { getMonitor } from '~/lib/.server/monitoring';
-import { getPlatformModel, getPlatformProvider, type PlatformProviderName } from '~/lib/.server/agent/config';
+import {
+  getPlatformModel,
+  platformKeyEnvFor,
+  resolvePlatformProvider,
+  type PlatformProviderName,
+} from '~/lib/.server/agent/config';
 import { familyOf } from '~/lib/modules/llm/model-families';
 import { KIE_DEFAULT_BASE_URL } from '~/lib/modules/llm/providers/kie-wire';
+import { COMET_DEFAULT_BASE_URL } from '~/lib/modules/llm/providers/comet-wire';
 import { getActivePrompt } from './active';
 
 const logger = createScopedLogger('cache-warmer');
@@ -79,6 +85,56 @@ export const DEFAULT_CACHE_WARMER_FANOUT = 6;
  * because a fanout touch on a cold prefix is a 2x WRITE, not a read.
  */
 export const DEFAULT_ANTHROPIC_FANOUT = 1;
+
+/**
+ * Comet — **5, MEASURED 2026-08-11 over three cold probes plus a warm re-probe** (spec AC6 / T11).
+ *
+ * Comet warms PER BACKEND like KIE, not first-request like Anthropic direct, and the evidence is a
+ * clustered warmup rather than a rate — which is the only reading that is safe to act on:
+ *
+ * ```
+ * 30 req  claude-sonnet-5   writes at 1, 2, 4        then 26 consecutive HITs   (27/30)
+ * 20 req  claude-opus-4-8   writes at 1, 2, 3, 4     then 16 consecutive HITs   (16/20)
+ * 12 req  claude-sonnet-5   writes at 1, 3, 5        then hits                  (T3, 2026-08-10)
+ * 12 req  claude-sonnet-5   warm re-probe            12/12 HIT, zero writes
+ * ```
+ *
+ * Three DISTINCT writes in two samples and four in the third, all landing inside the first five
+ * requests, with a HIT appearing mid-warmup (request 3 of the first sample) — i.e. requests are spread
+ * across a small pool of backends, each needing its own write, and a request can land on one already
+ * warmed. **5 is the deepest index at which any sample still wrote**, so it covers all three; every
+ * sample was fully warm by then and stayed warm.
+ *
+ * ⚠️ **Do not read the "27/30" or "16/20" ratios as a hit RATE.** Both are 100% after the warmup and
+ * 0% inside it. This is the mistake that cost a day on KIE: a miss rate measured over a warmup is not
+ * a miss rate, and reading it as one came within an env var of buying a 2.5x more expensive provider
+ * to fix a defect that did not exist. Read the distribution.
+ *
+ * ⚠️ **The honest residual: if the pool is really 4 backends with random assignment, 5 touches is not
+ * a guarantee** — coupon-collector says covering 4 uniformly needs ~8 on average, and we observed full
+ * warmth by 4-5 three times out of three. So either the pool is ~3, or assignment is not uniform. The
+ * response to that gap is to MEASURE again, never to inflate the number: a fanout touch on a cold
+ * prefix is a **2x WRITE**, so guessing high bills real money on every cycle forever, while guessing
+ * low costs one avoidable cold read that the NEXT cycle (every 45 min, against a 1h TTL) fixes by
+ * itself. The asymmetry points at the measured value.
+ *
+ * ⚠️ Pinned in the spec as a **LITERAL**, not as a reference to this constant — an assertion that
+ * reads the value it is checking passes for any value (the `PROGRESS_CAP` vacuity trap).
+ */
+export const DEFAULT_COMET_FANOUT = 5;
+
+/**
+ * The fanout DEFAULT per provider — a record, so a new provider is a **compile** error, not a guess.
+ *
+ * ⚠️ The `?? DEFAULT_ANTHROPIC_FANOUT` at the read site is a runtime belt that this exhaustiveness
+ * makes unreachable, kept only because the lookup key can arrive from a resolver. Do not read it as
+ * the real default for an unknown provider — there is no such thing here, by type.
+ */
+const FANOUT_BY_PROVIDER: Record<PlatformProviderName, number> = {
+  Anthropic: DEFAULT_ANTHROPIC_FANOUT,
+  KIE: DEFAULT_CACHE_WARMER_FANOUT,
+  Comet: DEFAULT_COMET_FANOUT,
+};
 
 /** Spacing between fanout requests — concurrent probes measured as landing on the SAME backend. */
 const WARMUP_SPACING_MS = 2000;
@@ -123,12 +179,48 @@ export function cacheWarmerIntervalMinutes(context?: unknown): number {
  * How many touches per cycle — **defaulted PER PROVIDER**, because the number exists to cover KIE's
  * load balancer and Anthropic direct has none (see {@link DEFAULT_ANTHROPIC_FANOUT}).
  *
- * ⚠️ An explicit `CACHE_WARMER_FANOUT` still wins on either provider. The provider only chooses the
- * DEFAULT: a single constant meant one of the two providers was always wrong, and the wrong direction
+ * ⚠️ An explicit `CACHE_WARMER_FANOUT` still wins on any provider. The provider only chooses the
+ * DEFAULT: a single constant meant one of the providers was always wrong, and the wrong direction
  * (6 on Anthropic) is the expensive one.
+ *
+ * 🔴 It reads a RECORD, not `=== 'KIE' ? 6 : 1`. That ternary put every provider it had not heard of
+ * on the Anthropic branch — which is the cheap direction here and therefore harmless by luck, not by
+ * design. The same shape one file over (`platformKeyFor`) resolved the WRONG KEY. A record makes the
+ * question "what is this provider's default" impossible to answer by accident.
+ *
+ * ---
+ *
+ * 🔴 **THE WARMER WARMS THE GATEWAY THAT WOULD ACTUALLY SERVE, NOT `LLM_PROVIDER` (2026-08-10).**
+ *
+ * This function and `runWarmCycle` both used `getPlatformProvider`, which was exactly right while the
+ * provider was fixed — fixed WAS serving, by construction. `AUTO_MODEL_SELECT` broke that identity:
+ * a turn can be served by any rung in `LLM_PROVIDER_CHAIN`, and the cached prefix is **per gateway**.
+ * So during precisely the outage the ladder exists to survive, the warmer would have been warming a
+ * prefix nobody was sending, at a fanout tuned for a gateway nobody was using — this file's own
+ * documented failure mode ("a warmer warming a prefix nobody sends is false comfort, silently"),
+ * arriving through a door that did not exist when it was written. It is the `getPlatformProvider`
+ * defect one layer up from the one this file already records: a guard that names a fixed vendor stops
+ * being true the next time the config changes.
+ *
+ * `resolvePlatformProvider` is the SAME function `getPlatformConfig` calls, so the warmer and the
+ * proxy cannot disagree about who is serving — which is the only property that makes a warmer worth
+ * running at all. With `AUTO_MODEL_SELECT` off it IS `getPlatformProvider`, so this is byte-identical
+ * to the old behaviour on every deploy that has not opted in.
+ *
+ * ⚠️ **It warms ONE gateway — the current head of the ladder — never the whole chain.** Warming the
+ * chain would multiply a spend already documented as unmeasured (~$0.30/day per prefix against ~$0.18
+ * per cold start avoided) by the ladder's length, for gateways most turns never touch. Following the
+ * ladder costs the same as before and is simply pointed at the right place.
+ *
+ * ⚠️ **Consequence worth knowing before enabling it:** a failover REPOINTS the warmer, so the rung the
+ * ladder just left goes cold while it is cooling. That is correct — a prefix nobody sends is what this
+ * is designed not to pay for — but it means the first turn after a failback pays a cold start. The
+ * measurement pass this file owes (`generations.cacheCreationTokens > 0` counts cold starts) should
+ * count those separately once the ladder is live, or a laddered deploy will read as warmer-ineffective
+ * when it is doing exactly what it should.
  */
-export function cacheWarmerFanout(context?: unknown): number {
-  const fallback = getPlatformProvider(context) === 'KIE' ? DEFAULT_CACHE_WARMER_FANOUT : DEFAULT_ANTHROPIC_FANOUT;
+export function cacheWarmerFanout(context?: unknown, providerOverride?: PlatformProviderName): number {
+  const fallback = FANOUT_BY_PROVIDER[providerOverride ?? resolvePlatformProvider(context)] ?? DEFAULT_ANTHROPIC_FANOUT;
   const fanout = envNumber(context, 'CACHE_WARMER_FANOUT', fallback);
 
   return Number.isFinite(fanout) && fanout >= 1 && fanout <= 16 ? Math.floor(fanout) : fallback;
@@ -206,16 +298,42 @@ export function buildWarmupRequest(input: {
   headers: Record<string, string>;
   body: Record<string, unknown>;
 } {
-  const anthropicDirect = input.provider === 'Anthropic';
+  /*
+   * 🔴 A RECORD, not `provider === 'Anthropic' ? … : …`.
+   *
+   * That binary meant "Anthropic, or ELSE KIE" — so the moment a third provider existed, a Comet
+   * deploy would have POSTed a Comet API key to `api.kie.ai`. Not a no-op: a real credential sent to
+   * the wrong vendor, on a timer, warming a prefix nobody sends. Exactly the false comfort this
+   * module's header warns about, and the same shape as the `platformKeyFor` ternary one file over.
+   *
+   * Every entry speaks the SAME Anthropic Messages wire and differs only in origin and auth header —
+   * which is the entire reason `LLM_PROVIDER` can be a config swap.
+   */
+  const wire: Record<PlatformProviderName, { url: string; auth: Record<string, string> }> = {
+    Anthropic: {
+      url: `${ANTHROPIC_DEFAULT_BASE_URL}/messages`,
+      auth: { 'x-api-key': input.apiKey },
+    },
+
+    /* KIE and Comet both proxy the same wire behind a bearer token; Comet accepts either header. */
+    KIE: {
+      url: `${KIE_DEFAULT_BASE_URL}/messages`,
+      auth: { authorization: `Bearer ${input.apiKey}` },
+    },
+    Comet: {
+      url: `${COMET_DEFAULT_BASE_URL}/messages`,
+      auth: { authorization: `Bearer ${input.apiKey}` },
+    },
+  };
+
+  const { url, auth } = wire[input.provider];
 
   return {
-    url: anthropicDirect ? `${ANTHROPIC_DEFAULT_BASE_URL}/messages` : `${KIE_DEFAULT_BASE_URL}/messages`,
+    url,
     headers: {
       'content-type': 'application/json',
       'anthropic-version': '2023-06-01',
-
-      // Anthropic authenticates with `x-api-key`; KIE proxies the same wire behind a bearer token.
-      ...(anthropicDirect ? { 'x-api-key': input.apiKey } : { authorization: `Bearer ${input.apiKey}` }),
+      ...auth,
     },
     body: {
       model: input.model,
@@ -339,11 +457,24 @@ export async function runWarmCycle(context?: unknown, deps?: WarmCycleDeps): Pro
       return none('organic traffic read the cache within the interval');
     }
 
-    const provider = getPlatformProvider(context);
-    const apiKey = env(context, provider === 'KIE' ? 'KIE_API_KEY' : 'ANTHROPIC_API_KEY');
+    /*
+     * The key env var comes from the SAME table the rest of the platform uses (`platformKeyEnvFor`),
+     * not from a local ternary. It was `provider === 'KIE' ? 'KIE_API_KEY' : 'ANTHROPIC_API_KEY'` —
+     * a second copy of a rule that already had a home, and one that would have read the ANTHROPIC key
+     * on a Comet deploy. Two writers of one fact is how they start disagreeing.
+     */
+    /*
+     * The LADDER's answer, not `LLM_PROVIDER` — see `cacheWarmerFanout` above. Resolved ONCE here and
+     * threaded to the key, the model and the fanout below, so a cycle cannot warm one gateway's prefix
+     * with another gateway's key or model. (The ladder is cheap and deterministic, but it reads a
+     * cooldown map that organic traffic mutates, so two calls in one cycle really could differ.)
+     */
+    const provider = resolvePlatformProvider(context);
+    const keyEnvVar = platformKeyEnvFor(provider);
+    const apiKey = env(context, keyEnvVar);
 
     if (!apiKey) {
-      return none(`${provider === 'KIE' ? 'KIE_API_KEY' : 'ANTHROPIC_API_KEY'} is not configured`);
+      return none(`${keyEnvVar} is not configured`);
     }
 
     const active = await getActivePrompt();
@@ -356,7 +487,7 @@ export async function runWarmCycle(context?: unknown, deps?: WarmCycleDeps): Pro
      * Throws only for an unpriced model — a config state the generations themselves already refuse on,
      * so the warmer staying quiet about it adds no new failure mode.
      */
-    const model = getPlatformModel(context);
+    const model = getPlatformModel(context, provider);
 
     /*
      * 🔴 CLAUDE ONLY — and the guard sits HERE, not in `ensureCacheWarmer`, on purpose.
@@ -384,7 +515,7 @@ export async function runWarmCycle(context?: unknown, deps?: WarmCycleDeps): Pro
     const request = buildWarmupRequest({ model, promptText: active.content, apiKey, provider });
     const fetchFn = deps?.fetchFn ?? fetch;
     const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    const fanout = cacheWarmerFanout(context);
+    const fanout = cacheWarmerFanout(context, provider);
 
     const result: WarmCycleResult = { sent: 0, reads: 0, writes: 0, failures: 0 };
 

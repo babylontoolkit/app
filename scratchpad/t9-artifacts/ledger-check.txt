@@ -1,0 +1,5 @@
+ledger rows for the retention drive:
+  media      -20 med_mso97knz_nzm0ls bal=26102
+  media     -128 med_mso97lb9_jkpgqv bal=25974
+media rows: 54 | unique: 54 | duplicates: 0
+balance chain intact across all 200 rows: true

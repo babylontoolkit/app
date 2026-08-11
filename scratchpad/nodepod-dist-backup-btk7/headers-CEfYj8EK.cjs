@@ -1,0 +1,4 @@
+"use strict";const a=require("node:fs/promises"),u=require("node:url"),c=require("node:path"),d=["../__sw__.js","../../static/__sw__.js","../../dist/__sw__.js"];let t=null;async function l(e){const r=c.dirname(u.fileURLToPath(e)),n=[];for(const i of d){const s=c.resolve(r,i);try{return await a.readFile(s),s}catch(o){const _=o instanceof Error?o.message:String(o);n.push(`  ${s}: ${_}`)}}throw new Error(`[nodepod] could not locate __sw__.js. Tried:
+${n.join(`
+`)}`)}async function w(e){return t||(t=(async()=>{const r=await l(e);return a.readFile(r,"utf8")})()),t}const p="/__sw__.js";function S(){return{"Content-Type":"application/javascript; charset=utf-8","Service-Worker-Allowed":"/","Cache-Control":"no-cache"}}exports.DEFAULT_SW_PATH=p;exports.readServiceWorkerSource=w;exports.swResponseHeaders=S;
+//# sourceMappingURL=headers-CEfYj8EK.cjs.map

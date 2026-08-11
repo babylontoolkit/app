@@ -91,6 +91,36 @@ const DELIVERY: Record<PlatformProviderName, DeliveryMode | Record<ModelFamily, 
      * `scripts/stream-probe.mjs gemini-3-5-flash` and flip the one word if KIE's adapter changes.**
      */
     gemini: 'streamed',
+
+    /*
+     * UNREACHABLE on KIE and present only so this exhaustive Record compiles: `kie.ts` refuses the
+     * `chat` family at model resolution (KIE fronts no Grok/Kimi/Qwen/GLM/DeepSeek/MiniMax ids), so
+     * nothing can ever read this value. It is `streamed` because that is the standing default for an
+     * unmeasured surface — NOT because anything was measured here.
+     */
+    chat: 'streamed',
+  },
+
+  Comet: {
+    /*
+     * ✅ MEASURED 2026-08-10, and it is the headline difference from KIE's row above: the same Claude
+     * models over the same Anthropic-native Messages API, streaming properly. `stream-probe.mjs`:
+     * 5,825 chars over **388 deltas** with **4% of characters in the final second** — that last number
+     * is the one that separates "streamed for N seconds" from "buffered for N seconds and flushed",
+     * which no server-side total can tell apart. KIE's Claude adapter measures 100% on that number.
+     */
+    claude: 'streamed',
+
+    /*
+     * ⚠️ ASSUMED, NOT MEASURED — the standing default for an unprobed surface. `batched` renders a
+     * sentence telling the user to expect nothing for minutes; claiming that about something nobody
+     * has watched manufactures the despair the panel exists to prevent, and it is unfalsifiable from
+     * their side of the screen. Do not read these three as evidence: if a rung ever names a model in
+     * one of these families, MEASURE it with `scripts/stream-probe.mjs` and flip the word.
+     */
+    codex: 'streamed',
+    chat: 'streamed',
+    gemini: 'streamed',
   },
 };
 

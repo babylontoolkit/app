@@ -1,5 +1,5 @@
 /**
- * `ENABLE_PREMIUM_MODEL=false` — the deploy that serves ONE model (SPEC §4.6.1a) — and the retirement
+ * `ENABLE_EXTENDED_MODELS=false` — the deploy that serves ONE model (SPEC §4.6.1a) — and the retirement
  * of the names it used to go by.
  *
  * The switch exists because the provider is not always dependable on more than one model at a time.
@@ -17,7 +17,7 @@
  * every case here for a reason unrelated to the flag.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ENABLE_PREMIUM_MODEL_ENV_KEY, premiumModelEnabled, refuseRetiredModelTierEnv } from './premium-model-flag';
+import { ENABLE_EXTENDED_MODELS_ENV_KEY, extendedModelsEnabled, refuseRetiredModelTierEnv } from './premium-model-flag';
 import { getModelTiers } from './rates';
 import { decideModelTier, modelTiersSessionHint } from './premium';
 import { getTierModel } from '~/lib/.server/agent/config';
@@ -27,15 +27,33 @@ import { readFileSync } from 'node:fs';
 
 /** The variables that decide the ladder. Any one of them left real makes these assertions lie. */
 const LADDER_ENV = [
-  ENABLE_PREMIUM_MODEL_ENV_KEY,
+  ENABLE_EXTENDED_MODELS_ENV_KEY,
   'PREMIUM_MODEL',
   'PREMIUM_MINIMUM_CREDITS',
+
+  /*
+   * ⚠️ The PLATINUM trio (2026-08-10). Added WITH the rung, not after it: `.env.local` on the
+   * developer's own machine now sets `PLATINUM_MODEL`, and `env()` falls back to `process.env`, so an
+   * unscrubbed key here resolves a real value and these assertions quietly describe that machine
+   * instead of the state they name. That is the `oauth.spec.ts` trap — this is its FOURTH recorded
+   * occurrence, and every previous one was found only after it fired on one developer's box with CI
+   * green.
+   */
+  'ENABLE_PLATINUM_MODEL',
+  'PLATINUM_MODEL',
+  'PLATINUM_MINIMUM_CREDITS',
+
   'LLM_MODEL',
   'LLM_PROVIDER',
   'KIE_DEFAULT_MODEL',
 
-  // The retired trio — scrubbed here, and asserted to be refused in their own describe below.
-  'ENABLE_EXTENDED_MODELS',
+  /*
+   * The retired trio — scrubbed here, and asserted to be refused in their own describe below.
+   * ⚠️ `ENABLE_PREMIUM_MODEL` JOINED this list on 2026-08-10 and `ENABLE_EXTENDED_MODELS` LEFT it:
+   * the rename reversed, so the key that is refused is the one that was live two days ago. A machine
+   * upgrading across either rename is exactly where the stale key lingers.
+   */
+  'ENABLE_PREMIUM_MODEL',
   'SUPERMAX_MODEL',
   'SUPERMAX_MINIMUM_CREDITS',
 ];
@@ -54,29 +72,29 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-describe('premiumModelEnabled — a switch that decides whether the expensive model can run', () => {
-  it('is named ENABLE_PREMIUM_MODEL', () => {
-    expect(ENABLE_PREMIUM_MODEL_ENV_KEY).toBe('ENABLE_PREMIUM_MODEL');
+describe('extendedModelsEnabled — a switch that decides whether the expensive model can run', () => {
+  it('is named ENABLE_EXTENDED_MODELS', () => {
+    expect(ENABLE_EXTENDED_MODELS_ENV_KEY).toBe('ENABLE_EXTENDED_MODELS');
   });
 
   it('defaults ON, so an operator who has never heard of it sees no change', () => {
     scrub();
-    expect(premiumModelEnabled({})).toBe(true);
+    expect(extendedModelsEnabled({})).toBe(true);
   });
 
   it('is on for exactly "true" and nothing else — the safe direction for a spend switch', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'true' });
-    expect(premiumModelEnabled({})).toBe(true);
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'true' });
+    expect(extendedModelsEnabled({})).toBe(true);
 
     for (const value of ['false', '1', 'yes', 'TRUE', 'True', 'off', 'no']) {
       vi.unstubAllEnvs();
-      scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: value });
-      expect(premiumModelEnabled({})).toBe(false);
+      scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: value });
+      expect(extendedModelsEnabled({})).toBe(false);
     }
   });
 
   /**
-   * ⚠️ MEASURED, and it surprised me: `ENABLE_PREMIUM_MODEL=` (assigned but EMPTY) is the DEFAULT,
+   * ⚠️ MEASURED, and it surprised me: `ENABLE_EXTENDED_MODELS=` (assigned but EMPTY) is the DEFAULT,
    * not "off". `env()` returns `process.env[key] || undefined`, so an empty string is indistinguishable
    * from unset for every variable in the platform — this switch does not get to have its own rule.
    *
@@ -85,8 +103,8 @@ describe('premiumModelEnabled — a switch that decides whether the expensive mo
    * person gets it wrong. Asserting it makes the behaviour a decision instead of an accident.
    */
   it('treats an EMPTY assignment as unset — i.e. as the default, not as off', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: '' });
-    expect(premiumModelEnabled({})).toBe(true);
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: '' });
+    expect(extendedModelsEnabled({})).toBe(true);
   });
 
   /*
@@ -98,8 +116,8 @@ describe('premiumModelEnabled — a switch that decides whether the expensive mo
    * thrown, nothing logged, and the only visible sign is a bigger bill.
    */
   it('🔴 does not read the retired name — an old "false" must not read as the default ON', () => {
-    scrub({ ENABLE_EXTENDED_MODELS: 'false' });
-    expect(premiumModelEnabled({})).toBe(true);
+    scrub({ ENABLE_PREMIUM_MODEL: 'false' });
+    expect(extendedModelsEnabled({})).toBe(true);
   });
 });
 
@@ -119,9 +137,9 @@ describe('the retired ladder variables are refused, and the refusal is useful', 
   });
 
   it.each([
-    ['ENABLE_EXTENDED_MODELS', ENABLE_PREMIUM_MODEL_ENV_KEY],
-    ['SUPERMAX_MODEL', 'PREMIUM_MODEL'],
-    ['SUPERMAX_MINIMUM_CREDITS', 'PREMIUM_MINIMUM_CREDITS'],
+    ['ENABLE_PREMIUM_MODEL', ENABLE_EXTENDED_MODELS_ENV_KEY],
+    ['SUPERMAX_MODEL', 'PLATINUM_MODEL'],
+    ['SUPERMAX_MINIMUM_CREDITS', 'PLATINUM_MINIMUM_CREDITS'],
   ])('refuses %s and names %s as the way forward', (retired, replacement) => {
     scrub({ [retired]: 'anything' });
 
@@ -140,7 +158,7 @@ describe('the retired ladder variables are refused, and the refusal is useful', 
 
   /* An operator cleaning up an old deploy usually has more than one left over; name them all at once. */
   it('names every retired key that is set, not just the first', () => {
-    scrub({ ENABLE_EXTENDED_MODELS: 'false', SUPERMAX_MODEL: 'claude-fable-5' });
+    scrub({ ENABLE_PREMIUM_MODEL: 'false', SUPERMAX_MODEL: 'claude-fable-5' });
 
     let message = '';
 
@@ -150,7 +168,7 @@ describe('the retired ladder variables are refused, and the refusal is useful', 
       message = (error as Error).message;
     }
 
-    expect(message).toContain('ENABLE_EXTENDED_MODELS');
+    expect(message).toContain('ENABLE_PREMIUM_MODEL');
     expect(message).toContain('SUPERMAX_MODEL');
   });
 
@@ -171,21 +189,28 @@ describe('the retired ladder variables are refused, and the refusal is useful', 
    * operator still learns what is wrong — it rides in `reason`, which `proxy.ts` warn-logs.
    */
   it('🔴 degrades the ladder rather than taking /api/me down', () => {
-    scrub({ ENABLE_EXTENDED_MODELS: 'false' });
+    /*
+     * A RETIRED key, not the live flag — the distinction is the whole test. A retired key makes
+     * `getModelTier` THROW, which `getModelTiers` catches per rung and reports as a LOCKED rung; the
+     * live flag set to false WITHDRAWS the rungs instead, so the ladder would be one row long and
+     * there would be no locked rung to inspect. Both are correct behaviours of different inputs.
+     */
+    scrub({ ENABLE_PREMIUM_MODEL: 'false' });
 
     const tiers = getModelTiers('claude-sonnet-5', {});
 
     expect(tiers[0].serveable, 'the free rung is unaffected').toBe(true);
 
     const premium = tiers.find((tier) => tier.id === 'premium')!;
+    expect(premium, 'a retired key LOCKS the rung — it must still be present to carry the reason').toBeDefined();
     expect(premium.serveable).toBe(false);
-    expect(premium.reason).toContain('ENABLE_EXTENDED_MODELS');
+    expect(premium.reason).toContain('ENABLE_PREMIUM_MODEL');
   });
 });
 
 describe('WALL 1 — the ladder itself', () => {
   it('offers Standard alone when the switch is off', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'false' });
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'false' });
 
     const tiers = getModelTiers('claude-opus-5', {});
 
@@ -195,13 +220,13 @@ describe('WALL 1 — the ladder itself', () => {
   });
 
   it('CONTROL: the paid rungs are there when it is on', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'true' });
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'true' });
 
-    expect(getModelTiers('claude-sonnet-5', {}).map((tier) => tier.id)).toEqual(['standard', 'premium']);
+    expect(getModelTiers('claude-sonnet-5', {}).map((tier) => tier.id)).toEqual(['standard', 'premium', 'platinum']);
   });
 
   it('🔴 resolves a request for a paid rung DOWN to standard, never up', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'false' });
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'false' });
 
     const tiers = getModelTiers('claude-opus-5', {}).map((tier) => ({
       id: tier.id,
@@ -235,7 +260,7 @@ describe('WALL 1 — the ladder itself', () => {
    *    (`isModelTierId` no longer accepts the stored value either).
    */
   it('🔴 resolves the RETIRED supermax id down to standard, as a plain unknown id', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'true' });
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'true' });
 
     const tiers = getModelTiers('claude-sonnet-5', {});
 
@@ -254,19 +279,19 @@ describe('WALL 1 — the ladder itself', () => {
 
 describe('WALL 2 — model resolution refuses independently', () => {
   it('refuses to resolve a paid rung, and names the flag rather than the selector', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'false', PREMIUM_MODEL: 'claude-opus-5' });
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'false', PREMIUM_MODEL: 'claude-opus-5' });
 
     /*
      * Unreachable through the ladder today — which is why it is a WALL. A caller that assembled its own
      * tier list, or resolved a model before the decision, would otherwise bill the expensive model.
      */
-    expect(() => getTierModel('premium', {})).toThrow(ENABLE_PREMIUM_MODEL_ENV_KEY);
+    expect(() => getTierModel('premium', {})).toThrow(ENABLE_EXTENDED_MODELS_ENV_KEY);
   });
 });
 
 describe('what the client is told, and what it does with it', () => {
   it('/api/me reports one rung, and it is the model actually running', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'false' });
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'false' });
 
     const hint = modelTiersSessionHint({
       tiers: getModelTiers('claude-opus-5', {}),
@@ -281,7 +306,7 @@ describe('what the client is told, and what it does with it', () => {
   });
 
   it('🔴 the free rung survives — the switch withdraws the PAID rungs, never the platform', () => {
-    scrub({ [ENABLE_PREMIUM_MODEL_ENV_KEY]: 'false' });
+    scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'false' });
 
     const tiers = getModelTiers('claude-opus-5', {});
 
@@ -304,7 +329,7 @@ describe('.env.example documents it exactly once', () => {
   it('assigns the key once — a later duplicate silently wins in a copied .env', () => {
     const source = readFileSync(ENV_EXAMPLE_FILENAME, 'utf8');
 
-    expect(envExampleAssignments(source, ENABLE_PREMIUM_MODEL_ENV_KEY)).toHaveLength(1);
+    expect(envExampleAssignments(source, ENABLE_EXTENDED_MODELS_ENV_KEY)).toHaveLength(1);
 
     // CONTROL: the counter still matches something, so "no duplicates" is a finding and not a silence.
     expect(envExampleAssignments(source, 'PREMIUM_MODEL').length).toBeGreaterThan(0);

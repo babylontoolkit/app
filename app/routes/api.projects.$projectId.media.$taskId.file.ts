@@ -19,7 +19,9 @@ import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { errorResponse } from '~/lib/.server/http';
 import { getObjectStore } from '~/lib/.server/storage';
 import { getMediaTask } from '~/lib/.server/media/store';
-import { downloadResult } from '~/lib/.server/media/kie-client';
+import { mediaBaseUrlFor, requireMediaKey } from '~/lib/.server/agent/config';
+import { mediaProviderFor } from '~/lib/.server/media/provider';
+import { downloadMediaResult } from '~/lib/.server/media/service';
 import { contentTypeForBytes, extensionMismatch } from '~/lib/media/sniff';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { createScopedLogger } from '~/utils/logger';
@@ -41,7 +43,13 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
       return json({ error: true, message: `The render is ${task.status}; there are no bytes yet.` }, { status: 409 });
     }
 
-    const upstream = await downloadResult(task.resultUrl);
+    /*
+     * Fetched by THE TASK'S provider, resolved from the record — the same rule as polling. A download
+     * that read current config would use the wrong gateway's handling for a URL it did not issue.
+     */
+    const upstream = await downloadMediaResult(task, (name) =>
+      mediaProviderFor(name, requireMediaKey(name, context), mediaBaseUrlFor(name, context)),
+    );
 
     /*
      * 🔴 THE PROVIDER'S WORD IS NOT EVIDENCE (§4.16).

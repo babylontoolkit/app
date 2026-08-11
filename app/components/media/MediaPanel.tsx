@@ -10,7 +10,10 @@
  * Options → payload mapping mirrors `agent/media-tools.ts` exactly: one convention, two callers.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
+import { sessionStore } from '~/lib/stores/session';
+import { hasCutoutPass, imageModelCapability, supportsTransparency } from '~/lib/media/image-capabilities';
 import { trackMediaTask } from '~/lib/media/tasks';
 
 interface MediaPanelProps {
@@ -24,7 +27,8 @@ interface FieldChoice {
 }
 
 interface FieldSpec {
-  key: 'resolution' | 'mode' | 'sound' | 'duration' | 'aspectRatio' | 'outputFormat' | 'transparent';
+  /** ⚠️ `quality` is Comet-only — it is the field its token-priced image models are priced on. */
+  key: 'resolution' | 'mode' | 'sound' | 'duration' | 'aspectRatio' | 'outputFormat' | 'transparent' | 'quality';
   label: string;
   choices: FieldChoice[];
   default: string;
@@ -67,7 +71,7 @@ const resolution = (values: string[], def: string): FieldSpec => ({
 });
 
 /** The curated model set — matches the Marketplace price list's media rows; the quote is the referee. */
-const IMAGE_MODELS: ModelSpec[] = [
+export const IMAGE_MODELS: ModelSpec[] = [
   {
     id: 'nano-banana-2',
     label: 'Nano Banana 2 (default)',
@@ -85,15 +89,6 @@ const IMAGE_MODELS: ModelSpec[] = [
        * actually asked is the one that decides the pipeline: does this art sit over other content?
        * The quote below prices both stages, so the extra credits are on the button before Generate.
        */
-      {
-        key: 'transparent',
-        label: 'Background',
-        choices: [
-          { value: 'false', label: 'Opaque — JPG' },
-          { value: 'true', label: 'Transparent — PNG' },
-        ],
-        default: 'false',
-      },
     ],
   },
   { id: 'nano-banana-2-lite', label: 'Nano Banana 2 Lite', fields: [resolution(['1K'], '1K'), aspect()] },
@@ -103,7 +98,123 @@ const IMAGE_MODELS: ModelSpec[] = [
   { id: 'flux-2/flex', label: 'Flux 2 Flex', fields: [resolution(['1K', '2K'], '2K'), aspect()] },
 ];
 
-const VIDEO_MODELS: ModelSpec[] = [
+/**
+ * 🔴 THE MODEL LISTS ARE PER GATEWAY, because the gateways do not serve the same models.
+ *
+ * Comet's flat-priced image models (`doubao-seedream-5`, `seedream-5-0-pro`) are in its feed and
+ * return HTTP 503 `no available channel` — so what it actually serves is `gpt-image-1.5` (token-priced,
+ * and the ONLY transparency capability on this gateway) and `gemini-3-pro-image` (cheap, opaque, jpeg).
+ * Showing KIE's list on a Comet deploy would offer six models that every quote refuses.
+ *
+ * ⚠️ `quality` is a Comet-only field and it is the PRICE dial: `low`/`medium`/`high` at 1024x1024
+ * measured $0.010 / $0.031 / $0.111 of true cost. It is labelled by what it buys rather than by the
+ * API's word, because "high" reads as a quality preference and is really a 4x bill.
+ */
+export const COMET_IMAGE_MODELS: ModelSpec[] = [
+  {
+    id: 'gpt-image-1.5',
+    label: 'GPT Image 1.5 (default)',
+    fields: [
+      {
+        key: 'quality',
+        label: 'Quality',
+        choices: [
+          { value: 'low', label: 'Draft — cheapest' },
+          { value: 'medium', label: 'Standard' },
+          { value: 'high', label: 'Best — ~4x the credits' },
+        ],
+        default: 'medium',
+      },
+
+      /*
+       * Only the two PROBED sizes: 16:9 -> 1536x1024 and 1:1 -> 1024x1024. Any other aspect has no
+       * measured token count, therefore no price row, therefore a refusal — so it is not offered.
+       */
+      aspect([ASPECTS[0], ASPECTS[2]]),
+    ],
+  },
+  {
+    id: 'gemini-3-pro-image',
+    label: 'Nano Banana Pro — cheapest, opaque only',
+    fields: [],
+  },
+];
+
+/**
+ * 🔴 THE BACKGROUND CONTROL IS DRIVEN BY THE CAPABILITY TABLE, NEVER HAND-ATTACHED.
+ *
+ * It was written literally onto `gpt-image-1.5` in the array above, which merely AGREED with
+ * `image-capabilities.ts` — so adding a model here, or flipping `nativeAlpha` there, would silently
+ * desynchronise them and offer transparency a quote then refuses. Deriving it means the table is the
+ * only place that answers "can this model do alpha", which is what FR7 asked for ("a per-model
+ * capability table, never a flag").
+ *
+ * KIE is the other half: nothing there emits alpha, but a priced cut-out pass can add it, so the
+ * control is offered on the model the KIE list prices for it. `supportsTransparency` answers
+ * "can this GATEWAY deliver alpha by any route at all", and the per-model check answers "on this one".
+ */
+export function withBackgroundField(model: ModelSpec, provider: 'KIE' | 'Comet' | null): ModelSpec {
+  if (!provider || !supportsTransparency(provider)) {
+    return { ...model, fields: model.fields.filter((f) => f.key !== 'transparent') };
+  }
+
+  const native = imageModelCapability(provider, model.id)?.nativeAlpha ?? false;
+  const capable = native || hasCutoutPass(provider);
+
+  if (!capable) {
+    return { ...model, fields: model.fields.filter((f) => f.key !== 'transparent') };
+  }
+
+  if (model.fields.some((f) => f.key === 'transparent')) {
+    return model;
+  }
+
+  return {
+    ...model,
+    fields: [
+      ...model.fields,
+      {
+        key: 'transparent',
+        label: 'Background',
+        choices: [
+          { value: 'false', label: native ? 'Opaque' : 'Opaque — JPG' },
+
+          /*
+           * The COST is in the label because it differs by gateway and the user cannot see why: on KIE
+           * transparency is a second priced stage, on Comet the alpha comes out of the same call. A
+           * user who learned one would otherwise be surprised by the other.
+           */
+          { value: 'true', label: native ? 'Transparent — PNG, no extra cost' : 'Transparent — PNG' },
+        ],
+        default: 'false',
+      },
+    ],
+  };
+}
+
+/**
+ * ⚠️ EVERY VIDEO MODEL THIS GATEWAY PRICES IS GOOGLE VEO, and none of them is a "default".
+ *
+ * The owner's rule is that Veo — the most expensive video on either catalogue — is never fallen back
+ * to, only chosen (`provider-defaults.ts`). The agent's `generate_video` refuses here for that reason.
+ * A human in this panel IS choosing, and the exact credit price sits on the Generate button before
+ * anything is spent, so the panel may offer them — but the first entry must not wear "(default)",
+ * because a pre-selected most-expensive-option is the fallback wearing a dropdown.
+ */
+export const COMET_VIDEO_MODELS: ModelSpec[] = [
+  { id: 'veo3-fast', label: 'Veo 3 Fast — Google', fields: [duration([4, 6, 8], 4)] },
+  { id: 'veo3', label: 'Veo 3 — Google, 4x the credits', fields: [duration([4, 6, 8], 4)] },
+];
+
+/**
+ * Exported for `media-panel-fields.spec.tsx` only — `modelsForProvider` is the sole runtime reader.
+ *
+ * The alternative was writing the nine ids into the spec by hand, which asserts that someone typed the
+ * same list twice rather than that the function returns THIS catalogue: a model added here and not
+ * there would fail the test as a mismatch, teaching the reader to sync the copy instead of to check
+ * the mapping. One writer of the list, and the spec points at it.
+ */
+export const VIDEO_MODELS: ModelSpec[] = [
   {
     id: 'kling-3.0/video',
     label: 'Kling 3.0 (default)',
@@ -161,6 +272,30 @@ const VIDEO_MODELS: ModelSpec[] = [
   },
 ];
 
+/**
+ * The catalogue for a gateway — the ONE place that maps a provider onto a model list.
+ *
+ * 🔴 `null` RETURNS AN EMPTY LIST, IT DOES NOT MEAN KIE. There are three states, not two: Comet, KIE,
+ * and *no media gateway on this deployment at all* (`LLM_PROVIDER=Anthropic` with no `MEDIA_PROVIDER`
+ * — `getMediaProvider` returns null, and `/api/me` reports it as null). The `? COMET : KIE` ternary
+ * this replaced sent the third state down the KIE branch, so a box that could serve nothing offered
+ * nano-banana-2 and kling-3.0 and only refused at quote time.
+ *
+ * ⚠️ An empty list is a state the caller must RENDER, not index into. Every `models[0]` on this path
+ * is optional-chained for that reason; the panel shows an unavailable card instead of a form.
+ */
+export function modelsForProvider(kind: 'image' | 'video', provider: 'KIE' | 'Comet' | null): ModelSpec[] {
+  if (!provider) {
+    return [];
+  }
+
+  if (kind === 'video') {
+    return provider === 'Comet' ? COMET_VIDEO_MODELS : VIDEO_MODELS;
+  }
+
+  return (provider === 'Comet' ? COMET_IMAGE_MODELS : IMAGE_MODELS).map((m) => withBackgroundField(m, provider));
+}
+
 interface TaskRow {
   id: string;
   kind: 'image' | 'video';
@@ -199,8 +334,25 @@ function buildRequest(kind: 'image' | 'video', model: ModelSpec, values: Record<
 }
 
 export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
+  /*
+   * WHICH gateway is serving renders — a rendering hint from `/api/me`, never an authority (the quote
+   * is still the referee). It decides which model list is drawn; drawing the wrong one offers models
+   * every quote would refuse.
+   *
+   * 🔴 THREE STATES, NOT TWO (2026-08-11). This was `provider === 'Comet' ? COMET : KIE`, so `null` —
+   * which means *this deployment serves no media at all* — took the `else` and drew KIE's catalogue.
+   * On an `LLM_PROVIDER=Anthropic` box with no `MEDIA_PROVIDER` the panel therefore offered
+   * nano-banana-2 and kling-3.0, models no gateway could serve, and the user learned that only when
+   * the quote came back refused. Same shape as the T9 tool-defaults defect one layer up: a ternary
+   * treating "not Comet" as "therefore KIE" when the real third state is "no gateway".
+   */
+  const { media, loading: sessionLoading } = useStore(sessionStore);
+  const mediaProvider = media.provider;
+  const imageModels = useMemo(() => modelsForProvider('image', mediaProvider), [mediaProvider]);
+  const videoModels = useMemo(() => modelsForProvider('video', mediaProvider), [mediaProvider]);
+
   const [kind, setKind] = useState<'image' | 'video'>('image');
-  const [modelId, setModelId] = useState(IMAGE_MODELS[0].id);
+  const [modelId, setModelId] = useState(imageModels[0]?.id ?? '');
   const [values, setValues] = useState<Record<string, string>>({});
   const [prompt, setPrompt] = useState('');
   const [credits, setCredits] = useState<number | null>(null);
@@ -208,14 +360,29 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
   const [busy, setBusy] = useState(false);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
 
-  const models = kind === 'image' ? IMAGE_MODELS : VIDEO_MODELS;
-  const model = useMemo(() => models.find((m) => m.id === modelId) ?? models[0], [models, modelId]);
+  const models = kind === 'image' ? imageModels : videoModels;
+  const model = useMemo(
+    (): ModelSpec | undefined => models.find((m) => m.id === modelId) ?? models[0],
+    [models, modelId],
+  );
 
   const switchKind = (next: 'image' | 'video') => {
     setKind(next);
-    setModelId((next === 'image' ? IMAGE_MODELS : VIDEO_MODELS)[0].id);
+    setModelId((next === 'image' ? imageModels : videoModels)[0]?.id ?? '');
     setValues({});
   };
+
+  /*
+   * The gateway can change under a mounted panel (an operator flips `MEDIA_PROVIDER`, or the session
+   * simply arrives after first paint — `media.provider` is null until `/api/me` answers). Left alone,
+   * `modelId` would keep naming a model the new list does not contain and every quote would refuse.
+   */
+  useEffect(() => {
+    if (models.length > 0 && !models.some((m) => m.id === modelId)) {
+      setModelId(models[0].id);
+      setValues({});
+    }
+  }, [models, modelId]);
 
   const loadTasks = useCallback(() => {
     fetch(`/api/projects/${projectId}/media`)
@@ -232,6 +399,14 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
 
     setCredits(null);
     setQuoteError(null);
+
+    /*
+     * No gateway means no model, and quoting one would ask the server to price `undefined`. The panel
+     * renders its unavailable card in that state; this effect simply has nothing to do.
+     */
+    if (!model) {
+      return undefined;
+    }
 
     fetch(`/api/projects/${projectId}/media`, {
       method: 'POST',
@@ -264,6 +439,14 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
       return;
     }
 
+    /*
+     * Unreachable from the rendered form (no model means the unavailable card is shown instead), but
+     * a start request is a DEBIT — it does not get to be reached by a path nobody checked.
+     */
+    if (!model) {
+      return;
+    }
+
     setBusy(true);
 
     try {
@@ -293,6 +476,42 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
       setBusy(false);
     }
   };
+
+  /*
+   * No gateway, so there is no form to draw — and drawing one would invite the user to compose a
+   * request every quote refuses. AFTER every hook, or this early return changes the hook order
+   * between renders (the session arrives async, so both branches really do happen in one mount).
+   *
+   * ⚠️ Two different sentences, because they are two different facts. `loading` means /api/me has not
+   * answered yet and media may well be available a moment from now; a settled `null` means this
+   * deployment serves none, which is the operator's to fix and not worth waiting for. Collapsing them
+   * would either tell a healthy user their platform has no media, or leave someone staring at a
+   * spinner that is never going to resolve — the `mount-source.ts` "said none is not said nothing"
+   * rule, one screen up.
+   */
+  if (!model) {
+    return (
+      <div
+        className="overlay-centered fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+        onClick={onClose}
+      >
+        <div
+          className="w-[420px] max-w-[92vw] rounded-lg bg-bolt-elements-background-depth-1 border border-bolt-elements-borderColor p-4 flex flex-col gap-3"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-bolt-elements-textPrimary">Generate media</h2>
+            <button className="i-ph:x text-bolt-elements-textSecondary" onClick={onClose} title="Close" />
+          </div>
+          <p className="text-xs text-bolt-elements-textSecondary">
+            {sessionLoading
+              ? 'Checking which image and video models are available…'
+              : 'Image and video generation is not available on this deployment — the configured provider serves no renders.'}
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="overlay-centered fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>

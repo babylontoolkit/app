@@ -12,6 +12,7 @@ import {
   MIN_BILLED_OUTPUT_TOKENS,
   MIN_PRODUCTIVE_TEXT_CHARS,
   NO_FILES_WRITTEN_ERROR,
+  UNPRODUCTIVE_DENSITY,
   shouldRescueUnproductiveTurn,
   UNPRODUCTIVE_RESCUE_PROMPT,
   type UnproductiveTurnInput,
@@ -23,6 +24,7 @@ const DEMO_FAILURE: UnproductiveTurnInput = {
   aborted: false,
   alreadyContinued: false,
   emittedAction: false,
+  truncatedAction: false,
   toolCalls: 0,
   textChars: 83,
   outTokens: 524,
@@ -118,6 +120,7 @@ describe('shouldRescueUnproductiveTurn — a turn that had to WRITE', () => {
     aborted: false,
     alreadyContinued: false,
     emittedAction: false,
+    truncatedAction: false,
     toolCalls: 0,
     textChars: 31_852,
     outTokens: 12_215,
@@ -176,6 +179,7 @@ describe('isFailedBuildTurn', () => {
     aborted: false,
     alreadyContinued: false,
     emittedAction: false,
+    truncatedAction: false,
     toolCalls: 0,
     textChars: 31_852,
     outTokens: 12_215,
@@ -282,5 +286,74 @@ describe('NO_FILES_WRITTEN_ERROR', () => {
         attempts: 0,
       }),
     ).toBe(false);
+  });
+});
+
+/**
+ * 🔴 THE PAC-MAN FAILURE — measured live 2026-08-10, `gen_msn0zl5h_44wpni`.
+ *
+ * The owner asked for the Pac-Man player to be rebuilt. The model answered, opened an artifact titled
+ * "Authentic Pac-Man: upper/lower jaw wedge, black eyes", opened one `<boltAction type="edit">`, and
+ * the stream ENDED mid-diff on the literal text `>>>>>>> REPLACE`. Closes of both tags: zero.
+ *
+ * The action runner only executes a CLOSED action, so no file was touched. On screen: an artifact card
+ * with a title and nothing under it. Billed 240 credits / $0.696, `status: completed`, no rescue and
+ * no refund — reported by the owner as the third or fourth occurrence, and as the thing that would
+ * stop them shipping.
+ *
+ * It escaped because `emittedAction` is `includes('<boltAction')` — the OPENING tag — so the guard
+ * against "announced work and did nothing" was disarmed by the announcement. The same truncation is
+ * where the stray `=======` / `>>>>>>>` conflict markers in shipped source came from.
+ */
+describe('a turn cut off mid-action is rescued, not billed as a success', () => {
+  const PACMAN_TRUNCATION: UnproductiveTurnInput = {
+    aborted: false,
+    alreadyContinued: false,
+
+    /* Both true at once: it DID emit an opening tag, and that action never closed. */
+    emittedAction: true,
+    truncatedAction: true,
+
+    toolCalls: 1,
+    textChars: 7_695,
+    outTokens: 13_436,
+    requiresAction: false,
+  };
+
+  it('rescues the measured Pac-Man turn', () => {
+    expect(shouldRescueUnproductiveTurn(PACMAN_TRUNCATION)).toBe(true);
+  });
+
+  /*
+   * 🔴 Order matters: `truncatedAction` is checked BEFORE the `emittedAction` bail. Moving it after
+   * restores the bug exactly, and every other test in this file still passes.
+   */
+  it('rescues even though the turn was long, dense and confident', () => {
+    expect(PACMAN_TRUNCATION.textChars).toBeGreaterThan(MIN_PRODUCTIVE_TEXT_CHARS);
+    expect(PACMAN_TRUNCATION.textChars / PACMAN_TRUNCATION.outTokens).toBeLessThan(UNPRODUCTIVE_DENSITY);
+    expect(shouldRescueUnproductiveTurn(PACMAN_TRUNCATION)).toBe(true);
+  });
+
+  /* A tool call does not buy a truncated action a pass — the file still is not there. */
+  it('rescues regardless of how many tools were called', () => {
+    expect(shouldRescueUnproductiveTurn({ ...PACMAN_TRUNCATION, toolCalls: 6 })).toBe(true);
+  });
+
+  /* Still bounded to ONE pass, and still never fights a Stop. */
+  it('does not stack with a continuation that already ran', () => {
+    expect(shouldRescueUnproductiveTurn({ ...PACMAN_TRUNCATION, alreadyContinued: true })).toBe(false);
+  });
+
+  it('does not fire when the user pressed Stop', () => {
+    expect(shouldRescueUnproductiveTurn({ ...PACMAN_TRUNCATION, aborted: true })).toBe(false);
+  });
+
+  /*
+   * CONTROL — a healthy turn that opened AND closed its actions must still be left alone. Without
+   * this, "always rescue when an action was emitted" passes every test above and doubles the cost of
+   * every successful build in the product.
+   */
+  it('CONTROL: a complete action is not rescued', () => {
+    expect(shouldRescueUnproductiveTurn({ ...PACMAN_TRUNCATION, truncatedAction: false })).toBe(false);
   });
 });

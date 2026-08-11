@@ -16,7 +16,7 @@
  * | output         | 5x (model-specific)    | what the model writes                                  |
  */
 import { env, envFlag, envNumber, NotConfiguredError } from '~/lib/.server/env';
-import { premiumModelEnabled, refuseRetiredModelTierEnv } from './premium-model-flag';
+import { modelTierEnabled, extendedModelsEnabled, refuseRetiredModelTierEnv } from './premium-model-flag';
 import type { MarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { activeMarketPrices } from './market-price-store';
@@ -153,11 +153,12 @@ export const KIE_MODEL_RATES: Record<string, ModelRates> = llmRatesFromList(BAKE
  *    each row's own input rate, measured on this vendor.
  *  - `explicit-pair` (gpt-*) — KIE publishes both prices and neither is a multiple of input, so the
  *    row's quotes are used verbatim. Validation guarantees both halves are present.
- *  - `none` (gemini-*) — KIE quotes no cached rate and reports no cached-token counter, so cached
- *    tokens bill at the FULL INPUT rate (read = write = input). Deliberately NOT a discount: we do
- *    not grant one we cannot verify, and we do not add a surcharge we cannot observe. This is why the
- *    admin margin report may show a Gemini warm edit costing what a cold one costs — by design, not a
- *    caching regression (spec edge case).
+ *  - `none` (gemini-*, and the `chat` family: grok-/kimi-/qwen/glm-/deepseek/minimax-) — no vendor
+ *    quotes a cached rate for these and their wires report no cached-token counter, so cached tokens
+ *    bill at the FULL INPUT rate (read = write = input). Deliberately NOT a discount: we do not grant
+ *    one we cannot verify, and we do not add a surcharge we cannot observe. This is why the admin
+ *    margin report may show a warm edit on these families costing what a cold one costs — by design,
+ *    not a caching regression (spec edge case).
  *
  * ⚠️ An UNKNOWN family falls back to `derived`. Validation refuses such a row on the way in, so this
  * is only reachable for a baked/stored row that predates the family rules — deriving is the same
@@ -258,7 +259,7 @@ export function kieDefaultModel(context?: unknown): string | undefined {
     return undefined;
   }
 
-  const priced = activeMarketPrices().llm;
+  const priced = activeMarketPrices('KIE').llm;
 
   if (!priced[model]) {
     throw new NotConfiguredError(
@@ -284,7 +285,23 @@ export function kieDefaultModel(context?: unknown): string | undefined {
 export function kieRates(context?: unknown): Record<string, ModelRates> {
   refuseRetiredPriceEnv(context);
 
-  return llmRatesFromList(activeMarketPrices());
+  return llmRatesFromList(activeMarketPrices('KIE'));
+}
+
+/**
+ * Comet's rate table — the ACTIVE Comet marketplace price list, as `ModelRates`.
+ *
+ * The exact twin of `kieRates`, reading its OWN promoted list. The two must never share one: both
+ * price `claude-sonnet-5`, at different rates ($0.85/$4.275 vs $1.60/$8), so a lookup against the
+ * wrong list returns a plausible number rather than an error — the failure shape this whole file
+ * exists to prevent.
+ *
+ * Cache rates DERIVE for every claude row (Comet quotes none), which is the family rule, unchanged.
+ */
+export function cometRates(context?: unknown): Record<string, ModelRates> {
+  refuseRetiredPriceEnv(context);
+
+  return llmRatesFromList(activeMarketPrices('Comet'));
 }
 
 /**
@@ -363,10 +380,50 @@ export function getModelTier(id: PaidModelTierId, context?: unknown): ModelTier 
   const definition = paidModelTierDefinition(id);
   const model = env(context, definition.modelEnvKey)?.trim() || definition.defaultModel;
   const minimumCredits = envNumber(context, definition.minimumEnvKey, definition.defaultMinimumCredits);
-  const row = activeMarketPrices().llm[model];
+
+  /*
+   * ⚠️ **The rungs are priced from the KIE list on EVERY provider** — unchanged behaviour, and the
+   * reason `marketPriceProvidersFor` always includes KIE. `providerRates`' gap-fill (fill, never
+   * overwrite) stops those rates reaching a provider that prices the model itself.
+   *
+   * 🔴 **It DOES fire, and a real deploy hits it today.** An earlier draft of this comment claimed
+   * "every rung the ladder can name is priced in both marketplace lists, so the gap-fill does not
+   * fire for any real configuration". That is false: the owner's `.env.local` sets
+   * `PREMIUM_MODEL=gpt-5-6-sol`, a KIE-specific id that `BAKED_COMET_PRICES` does not price (and that
+   * Comet is not known to serve at all). On a Comet deploy that rung would be priced from KIE's
+   * table — the latent half of the 231-vs-576 defect recorded on `providerRates`, wearing a third
+   * provider's coat.
+   *
+   * Flagged rather than fixed here, because making the ladder per-provider is a money-path change
+   * that deserves its own task and its own mutation tests, not a line smuggled into a storage
+   * refactor. **The cutover task must re-point `PREMIUM_MODEL` at a model the target provider prices
+   * in its own right.**
+   *
+   * ⚠️ **CORRECTED 2026-08-10 — THERE IS NO REFUSAL, AND THIS COMMENT USED TO CLAIM THERE WAS.** It
+   * read "which `getTierModel` refuses loudly at request time, so the failure is a describable 503
+   * rather than a silent mis-bill. That refusal is the reason this is survivable." It cannot refuse:
+   * `getTierModel` checks `providerRates(context)[provider]`, which is the table AFTER `withTiers` has
+   * gap-filled that very rung into every provider — so for an ENABLED rung the lookup always succeeds,
+   * by construction, on every gateway. Proven live: with `PREMIUM_MODEL` naming a KIE-only id,
+   * `getTierModel('premium', ctx, 'Comet')` returns it with no error and Comet's table reports the KIE
+   * row verbatim. The safety net named two paragraphs above did not exist, which is exactly the
+   * failure mode the closing line warns about — this comment demonstrating its own rule twice over.
+   *
+   * So the honest statement of the residual risk: a rung model a gateway does not price NATIVELY
+   * settles at the marketplace (KIE-shaped) rate on that gateway, silently, in an unknown direction.
+   * That is TRUE TODAY with a fixed `LLM_PROVIDER` and is not introduced by `AUTO_MODEL_SELECT`; the
+   * ladder only adds a second door to it. Gating the ladder on native rung pricing was considered and
+   * REJECTED: `MODEL_RATES` has no `claude-fable-5` row (Anthropic does not sell it), so that rule
+   * would drop ANTHROPIC — the deliberate last-resort rung — out of the ladder for a perfectly normal
+   * rung selector, trading a bounded mis-bill for having nowhere to fail over to.
+   *
+   * The rule this violates is worth restating because it caught this comment: a claim in a comment
+   * cannot be executed, and a false one is how a defect survives review.
+   */
+  const row = activeMarketPrices('KIE').llm[model];
 
   if (!row) {
-    const priced = Object.keys(activeMarketPrices().llm).join(', ') || '(none)';
+    const priced = Object.keys(activeMarketPrices('KIE').llm).join(', ') || '(none)';
 
     throw new NotConfiguredError(
       `${definition.modelEnvKey}="${model}"`,
@@ -432,7 +489,7 @@ export function getModelTiers(standardModel: string, context?: unknown): ModelTi
   };
 
   /*
-   * 🔴 `ENABLE_PREMIUM_MODEL=false` → the ladder IS the standard rung, and every downstream rule
+   * 🔴 `ENABLE_EXTENDED_MODELS=false` → the ladder IS the standard rung, and every downstream rule
    * follows from that single fact rather than from a second code path (see `premium-model-flag.ts`).
    * `decideModelTier` already resolves a rung it cannot find DOWN to standard, `/api/me` reports one
    * option so the picker has nothing to open, and `getTierModel` refuses independently.
@@ -441,40 +498,48 @@ export function getModelTiers(standardModel: string, context?: unknown): ModelTi
    * "misconfigured — an operator must fix something", and it renders a LOCKED row, i.e. the UI keeps
    * advertising a class this deploy has deliberately withdrawn.
    */
-  if (!premiumModelEnabled(context)) {
+  if (!extendedModelsEnabled(context)) {
     return [standard];
   }
 
-  const paid = PAID_MODEL_TIERS.map((definition): ModelTierStatus => {
-    try {
-      const tier = getModelTier(definition.id, context);
+  /*
+   * A rung withdrawn by its OWN flag is ABSENT, exactly like the master switch's rungs above — never
+   * `serveable: false`. That state means "an operator must fix something" and renders a LOCKED row,
+   * i.e. the UI would keep advertising a class this deploy deliberately withdrew. `decideModelTier`
+   * resolves an absent rung DOWN to standard, so one rule covers both switches.
+   */
+  const paid = PAID_MODEL_TIERS.filter((definition) => modelTierEnabled(definition, context)).map(
+    (definition): ModelTierStatus => {
+      try {
+        const tier = getModelTier(definition.id, context);
 
-      return {
-        id: tier.id,
-        label: tier.label,
-        model: tier.model,
-        minimumCredits: tier.minimumCredits,
-        firstBuildLocked: tier.firstBuildLocked,
-        serveable: true,
-      };
-    } catch (error) {
-      /*
-       * The threshold is still readable — `envNumber` cannot throw — so the locked rung can still
-       * state what it WOULD cost to unlock. Only the model half is in doubt, and that reports as the
-       * in-code default rather than the unpriceable selector: naming a model we refuse to bill would
-       * put a model the platform will not run in front of the user.
-       */
-      return {
-        id: definition.id,
-        label: definition.label,
-        model: definition.defaultModel,
-        minimumCredits: envNumber(context, definition.minimumEnvKey, definition.defaultMinimumCredits),
-        firstBuildLocked: definition.firstBuildLocked,
-        serveable: false,
-        reason: error instanceof Error ? error.message : String(error),
-      };
-    }
-  });
+        return {
+          id: tier.id,
+          label: tier.label,
+          model: tier.model,
+          minimumCredits: tier.minimumCredits,
+          firstBuildLocked: tier.firstBuildLocked,
+          serveable: true,
+        };
+      } catch (error) {
+        /*
+         * The threshold is still readable — `envNumber` cannot throw — so the locked rung can still
+         * state what it WOULD cost to unlock. Only the model half is in doubt, and that reports as the
+         * in-code default rather than the unpriceable selector: naming a model we refuse to bill would
+         * put a model the platform will not run in front of the user.
+         */
+        return {
+          id: definition.id,
+          label: definition.label,
+          model: definition.defaultModel,
+          minimumCredits: envNumber(context, definition.minimumEnvKey, definition.defaultMinimumCredits),
+          firstBuildLocked: definition.firstBuildLocked,
+          serveable: false,
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
 
   return [standard, ...paid];
 }
@@ -544,6 +609,7 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
   return {
     Anthropic: withTiers(MODEL_RATES),
     KIE: withTiers(kieRates(context)),
+    Comet: withTiers(cometRates(context)),
   };
 }
 
@@ -798,17 +864,32 @@ export function getBillingConfigSafe(context?: unknown): BillingConfig | null {
 }
 
 export interface TokenUsage {
-  /** UNCACHED input only — Anthropic reports cached input separately (§4.2.8). */
+  /**
+   * UNCACHED input only — and `costForRates` below DEPENDS on that, because it ADDS this to the
+   * cache classes. Any overlap is billed twice.
+   *
+   * ⚠️ This read "Anthropic reports cached input separately", which was a fact about one vendor
+   * doing duty as a contract. Anthropic's wire happens to satisfy it; OpenAI's and Google's report
+   * the cached count as a BREAKDOWN of the prompt total and do not. Nobody re-read this line when
+   * the gpt/gemini families shipped, and a real `gpt-5-6-terra` turn billed 1.86x (T12, 2026-08-11).
+   * `step-usage.ts` is what makes the guarantee true now, per family; see
+   * `FamilyPolicy.promptTokensIncludeCacheRead`.
+   */
   promptTokens: number;
   completionTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
 }
 
-/** Raw model cost of a generation, in USD. The honest number, before any margin. */
-export function rawCostUsd(usage: TokenUsage, model: string, provider: string, context?: unknown): number {
-  const rates = ratesFor(model, provider, context);
-
+/**
+ * The token-vector arithmetic, against rates the caller has already chosen.
+ *
+ * Split out from `rawCostUsd` so a second caller (`savings.ts`, which prices a turn against the BAKED
+ * Anthropic table without going near `providerRates`) shares this formula instead of copying it. Two
+ * copies of the cost equation is how the four multipliers drift — and the 2x cache-write rule in
+ * particular has been re-derived wrongly before (§4.2.8).
+ */
+export function costForRates(usage: TokenUsage, rates: ModelRates): number {
   return (
     (usage.promptTokens * rates.inputPerMTok +
       usage.completionTokens * rates.outputPerMTok +
@@ -816,6 +897,11 @@ export function rawCostUsd(usage: TokenUsage, model: string, provider: string, c
       usage.cacheCreationTokens * rates.cacheWritePerMTok) /
     1_000_000
   );
+}
+
+/** Raw model cost of a generation, in USD. The honest number, before any margin. */
+export function rawCostUsd(usage: TokenUsage, model: string, provider: string, context?: unknown): number {
+  return costForRates(usage, ratesFor(model, provider, context));
 }
 
 /**

@@ -15,8 +15,9 @@
  * `base-provider -> manager -> registry -> providers -> base-provider` is an import cycle the bundler
  * tolerates and vitest does not. That was re-verified for THIS file (2026-08-04): a bare
  * `import('./kie')` fails at collection with `Class extends value undefined is not a constructor or
- * null` in `anthropic.ts`, reached through `registry.ts`. So `buildInstance` below reproduces the three
- * branches exactly as `kie.ts` wires them, in the established `capture()` style.
+ * null` in `anthropic.ts`, reached through `registry.ts`. So `buildInstance` below reproduces the
+ * branches exactly as `kie.ts` wires them — including the explicit `family !== 'claude'` refusal that
+ * replaced the old `else` fallthrough (2026-08-10) — in the established `capture()` style.
  *
  * A reproduction proves the WIRES are right and proves nothing about whether `kie.ts` still calls them
  * that way, so it is paired with a SOURCE SCAN (the last describe) that reads `kie.ts` and asserts the
@@ -166,6 +167,20 @@ function buildInstance(
     return gemini(model);
   }
 
+  /*
+   * 🔴 EXPLICIT, never a fallthrough — mirrors `kie.ts`. This branch was an `else`, which was correct
+   * for exactly as long as every family KIE did not name was Claude. `chat` (2026-08-10) ended that:
+   * `requireFamily('grok-4.5')` now SUCCEEDS, so an `else` would hand a Grok id to `createAnthropic`
+   * and put an Anthropic `thinking` block in a chat-completions body.
+   */
+  if (family !== 'claude') {
+    throw new Error(
+      `The KIE provider does not serve the "${family}" family (model "${model}"). KIE fronts ` +
+        'claude-*, gpt-* and gemini-* only. Point LLM_MODEL at a model KIE serves, or set ' +
+        'LLM_PROVIDER to a provider that serves this family.',
+    );
+  }
+
   const kie = createAnthropic({
     apiKey: API_KEY,
     baseURL: KIE_DEFAULT_BASE_URL,
@@ -295,6 +310,71 @@ describe('an unknown model id refuses before anything is built', () => {
     expect(() => buildInstance('llama-3', {}, spy)).toThrow(/llama-3/);
     expect(() => buildInstance('llama-3', {}, spy)).toThrow(/claude-\*.*gpt-\*.*gemini-\*/s);
     expect(calls, 'the refusal must precede every request').toBe(0);
+  });
+});
+
+/**
+ * 🔴 A KNOWN FAMILY KIE DOES NOT SERVE — the failure the `chat` family created (2026-08-10).
+ *
+ * This is a different shape from the unknown-id refusal above and it is the more dangerous one.
+ * `requireFamily('grok-4.5')` SUCCEEDS: the id is well-formed, the family is declared, and the price
+ * list can price it — so every guard upstream waves it through. The only thing standing between it and
+ * `createAnthropic` was the shape of the last branch, and while that branch was an `else` it caught
+ * "everything I have not thought of", which is a guess wearing a default's clothes.
+ *
+ * What lands on the wire if the guard goes: an Anthropic `thinking` block, `output_config` and KIE's
+ * `thinkingFlag` inside a chat-completions body, POSTed to `claude/v1/messages` for a model KIE does
+ * not front. That is a hard 400 — or worse, a 200 from a Claude model the operator did not choose and
+ * is not being billed for. Either way the operator's `LLM_MODEL` is not what ran.
+ *
+ * So the assertion is ZERO FETCH CALLS, not "it throws": a throw somewhere later, after the wire was
+ * built and the request was in flight, is not the same guarantee.
+ */
+describe('a family KIE does not serve refuses before the wire is built', () => {
+  /** One id per chat vendor — the refusal must not depend on which vendor happened to be tested. */
+  const CHAT_IDS = ['grok-4.5', 'kimi-k2-thinking', 'qwen3-max', 'glm-4.6', 'deepseek-v3.2', 'minimax-m2'];
+
+  it.each(CHAT_IDS)('refuses %s and never touches fetch', (model) => {
+    let calls = 0;
+    const spy: typeof fetch = async () => {
+      calls += 1;
+      return anthropicSse();
+    };
+
+    expect(() => buildInstance(model, {}, spy)).toThrow();
+    expect(calls, 'a family KIE does not serve must never reach the wire').toBe(0);
+  });
+
+  /*
+   * The message must name the FAMILY, the MODEL and the way out. "Unsupported model" sends an operator
+   * to the model list; naming the family and `LLM_PROVIDER` tells them the id is fine and the PROVIDER
+   * is wrong, which is the actual mistake being made (a Comet model id left in place across a
+   * provider switch — the exact move `LLM_PROVIDER` exists to make cheap).
+   */
+  it('names the family, the model and the provider swap', () => {
+    let message = '';
+
+    try {
+      buildInstance('grok-4.5', {}, (async () => anthropicSse()) as typeof fetch);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('chat');
+    expect(message).toContain('grok-4.5');
+    expect(message).toContain('LLM_PROVIDER');
+  });
+
+  /*
+   * CONTROL. Every assertion above is satisfied by a `buildInstance` that throws for EVERYTHING, which
+   * would be a total outage reported as a passing suite. A Claude id must still build and still reach
+   * the wire in the same file, with the same helper.
+   */
+  it('still builds and reaches the wire for a family KIE DOES serve (control)', async () => {
+    const seen = await capture('claude-opus-5');
+
+    expect(seen.calls).toBe(1);
+    expect(seen.url).toBe(`${KIE_DEFAULT_BASE_URL}/messages`);
   });
 });
 
@@ -473,5 +553,28 @@ describe('kie.ts really wires the branches this spec reproduces', () => {
     expect(nonClaudeBranches.length).toBeGreaterThan(200);
     expect(nonClaudeBranches).toContain('codexFetch');
     expect(nonClaudeBranches).toContain('geminiFetch');
+  });
+
+  /*
+   * 🔴 THE CLAUDE BRANCH IS GUARDED, NOT DEFAULTED — and only a source scan can say so, because the
+   * import cycle keeps `KieProvider` out of vitest and the reproduction above can be faithful to a
+   * `kie.ts` that has since changed.
+   *
+   * The guard must sit BEFORE `createAnthropic(`, not merely somewhere in the file: a refusal after
+   * the client is built is a different guarantee, and a decoy `family !== 'claude'` in a later comment
+   * or a dead branch would satisfy a bare `toContain`. Scanned over the COMMENT-STRIPPED source for
+   * the same reason the ordering scan is — `kie.ts`'s own prose describes this rule, so an unstripped
+   * scan would match the documentation of the guard rather than the guard.
+   */
+  it('refuses a non-Claude family EXPLICITLY, before createAnthropic is reached', () => {
+    const guardAt = code.indexOf("family !== 'claude'");
+    const clientAt = code.indexOf('createAnthropic(');
+
+    expect(guardAt, 'control: the guard must exist as CODE, not only in a comment').toBeGreaterThan(-1);
+    expect(clientAt).toBeGreaterThan(-1);
+    expect(guardAt, 'a fallthrough else would hand a chat-family id to the Anthropic wire').toBeLessThan(clientAt);
+
+    // It THROWS — a warn-and-continue here is the fallthrough with a log line attached.
+    expect(code.slice(guardAt, clientAt)).toContain('throw new Error(');
   });
 });

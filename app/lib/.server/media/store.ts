@@ -10,6 +10,7 @@
  * not a copy).
  */
 import type { ObjectStore } from '~/lib/.server/storage';
+import type { MediaEndpoint, MediaProviderName } from './provider';
 
 export type MediaTaskStatus = 'pending' | 'succeeded' | 'failed';
 
@@ -21,7 +22,21 @@ export interface MediaTaskRecord {
   userId: string;
 
   kind: 'image' | 'video';
-  endpoint: 'jobs' | 'veo';
+
+  /**
+   * 🔴 WHICH GATEWAY IS RENDERING THIS — stamped at creation, read by every later poll and download.
+   *
+   * `MEDIA_PROVIDER` is an operator switch and a render takes minutes, so "who is serving media" is
+   * not a stable fact for the life of a task. Resolving it from CURRENT config at poll time would
+   * ask the wrong gateway about a task id it has never issued: the render never completes, the
+   * failure path eventually refunds art that may have rendered perfectly, and nothing throws.
+   *
+   * ⚠️ OPTIONAL because records written before this field existed have none. They resolve to `'KIE'`
+   * (`mediaProviderOf`) — the only gateway that could have written them.
+   */
+  provider?: MediaProviderName;
+
+  endpoint: MediaEndpoint;
 
   /** The canonical priced model id (aliases resolved) — what the debit was computed from. */
   model: string;

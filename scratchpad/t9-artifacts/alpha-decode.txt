@@ -1,0 +1,10 @@
+file                 shield-lightning-badge.png
+bytes                934,137
+dimensions           1024x1024   (1,048,576 pixels)
+colortype            6  <- REPORTED, NOT USED to decide anything
+fully transparent       561,615   53.56%
+semi transparent        103,258    9.85%
+fully opaque            383,703   36.59%
+corner alphas        [0, 0, 0, 0]
+
+VERDICT: REAL ALPHA

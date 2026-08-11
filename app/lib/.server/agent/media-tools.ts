@@ -19,8 +19,9 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { createScopedLogger } from '~/utils/logger';
 import type { ObjectStore } from '~/lib/.server/storage';
-import type { MediaProvider } from '~/lib/.server/media/kie-client';
+import type { MediaProvider } from '~/lib/.server/media/provider';
 import { MediaRefusedError, startMediaTask, type StartedMediaTask } from '~/lib/.server/media/service';
+import { isGoogleVideoModel, mediaModelDefaults } from '~/lib/media/provider-defaults';
 
 const logger = createScopedLogger('media-tools');
 
@@ -109,6 +110,15 @@ interface CommonArgs {
 }
 
 export function createMediaTools(ctx: MediaToolContext) {
+  /*
+   * 🔴 PER GATEWAY, NEVER A LITERAL (T9, 2026-08-11 — see `media/provider-defaults.ts` for the
+   * measurement). These ids used to be inlined KIE models, so on Comet every call that did not name a
+   * model was refused and the turn spent a whole extra round rediscovering the catalogue. The
+   * DESCRIPTIONS below are built from the same source: they ride in the cached prompt, so advertising
+   * `nano-banana-2` on a Comet deploy misleads the agent on every turn of every conversation.
+   */
+  const defaults = mediaModelDefaults(ctx.provider.name);
+
   const start = async (input: {
     model: string;
     prompt: string;
@@ -158,12 +168,12 @@ export function createMediaTools(ctx: MediaToolContext) {
   return {
     generate_image: tool({
       description:
-        'Generate an image with the built-in AI image generator (default model nano-banana-2) and save it ' +
+        `Generate an image with the built-in AI image generator (default model ${defaults.image}) and save it ` +
         'into the project under public/assets/generated/. Costs the user credits (shown in the result). ' +
         'Use for textures, sprites, backgrounds, logos, UI art.',
       parameters: z.object({
         prompt: z.string().optional().describe('What to generate. Detailed and style-specific works best.'),
-        model: z.string().optional().describe('Image model. Default nano-banana-2.'),
+        model: z.string().optional().describe(`Image model. Default ${defaults.image}.`),
         resolution: z.string().optional().describe('1K, 2K or 4K. Default 2K. 1K is cheaper; 4K costs more.'),
         aspect_ratio: z.string().optional().describe('e.g. 16:9, 1:1, 9:16, 4:3. Default 16:9.'),
         transparent: z
@@ -194,7 +204,7 @@ export function createMediaTools(ctx: MediaToolContext) {
         }
 
         return start({
-          model: args.model?.trim() || 'nano-banana-2',
+          model: args.model?.trim() || defaults.image,
           prompt: args.prompt,
           options: {
             resolution: args.resolution || '2K',
@@ -215,20 +225,41 @@ export function createMediaTools(ctx: MediaToolContext) {
     }),
 
     generate_video: tool({
+      /*
+       * The description tells the truth about a gateway with no non-Google video: an advertised
+       * default that does not exist buys a refused call and a wasted round, which is the very thing
+       * the defaults table was built to stop.
+       */
       description:
-        'Generate a video clip with the built-in AI video generator (default model kling-3.0/video) and ' +
-        'save it into the project under public/assets/generated/. Costs the user credits (video is ' +
-        'expensive — hundreds of credits). Renders take minutes and complete in the background.',
+        'Generate a video clip with the built-in AI video generator and save it into the project ' +
+        `under public/assets/generated/. ${
+          defaults.video
+            ? `Default model ${defaults.video}.`
+            : 'This gateway serves only Google Veo video, which must be requested through ' +
+              'generate_google_video — so this tool needs an explicit non-Google model here.'
+        } Costs the user credits (video is expensive — hundreds of credits). Renders take minutes ` +
+        'and complete in the background. Never produces Google Veo video; use generate_google_video for that.',
       parameters: z.object({
         prompt: z.string().optional().describe('What happens in the video.'),
         model: z
           .string()
           .optional()
-          .describe('Video model. Default kling-3.0/video. Also: kling-2.6, bytedance/seedance-2, …'),
-        mode: z.string().optional().describe('kling-3.0 tier: std (720p), pro (1080p) or 4K. Default std.'),
+          .describe(
+            defaults.video
+              ? `Video model. Default ${defaults.video}.${defaults.videoAlternatives}`
+              : 'Required on this gateway — it has no non-Google default. Google Veo ids are refused ' +
+                  'here; call generate_google_video for those.',
+          ),
+
+        /*
+         * Gateway-scoped like the model ids above, and for the same reason: on a gateway with no such
+         * knob these described a control that cannot act, in the cached prefix, forever. An empty hint
+         * leaves the parameter present (the shape is shared) but says nothing about it.
+         */
+        mode: z.string().optional().describe(defaults.videoModeHint),
         sound: z.boolean().optional().describe('Generate audio with the video. Default false.'),
         duration_seconds: z.number().optional().describe('Clip length in seconds. Default 5.'),
-        resolution: z.string().optional().describe('For seedance/grok models: 480p, 720p, 1080p, 4K.'),
+        resolution: z.string().optional().describe(defaults.videoResolutionHint),
         aspect_ratio: z.string().optional().describe('16:9, 9:16 or 1:1. Default 16:9.'),
         file_name: z.string().optional().describe('Preferred file name (without extension).'),
       }),
@@ -239,7 +270,32 @@ export function createMediaTools(ctx: MediaToolContext) {
           return 'generate_video needs a "prompt" describing the video.';
         }
 
-        const model = args.model?.trim() || 'kling-3.0/video';
+        /*
+         * 🔴 THIS TOOL NEVER PRODUCES GOOGLE VIDEO (owner rule, 2026-08-11). Veo is the most expensive
+         * video on either catalogue and `generate_google_video` exists so it is chosen deliberately.
+         * Both doors are shut here, BEFORE any debit: no Google default to drift onto, and a Veo id
+         * named on this tool is refused rather than served.
+         *
+         * Refusals, never fatals — a `MediaRefusedError`-shaped string the model can act on. It names
+         * the other tool, so the recovery is one round and obvious.
+         */
+        const model = args.model?.trim() || defaults.video;
+
+        if (!model) {
+          return (
+            'generate_video has no default model on this gateway, because every video model it serves ' +
+            'is Google Veo — and Veo must be requested deliberately, not fallen back to. Either name a ' +
+            'non-Google video model, or call generate_google_video if you actually want Veo.'
+          );
+        }
+
+        if (isGoogleVideoModel(model)) {
+          return (
+            `"${model}" is a Google Veo model, and Veo is generated through generate_google_video so ` +
+            'that its cost is chosen on purpose. Call that tool instead, or name a non-Google model here.'
+          );
+        }
+
         const options: Record<string, string | number | boolean> = {
           sound: args.sound ?? false,
           aspectRatio: args.aspect_ratio || '16:9',
@@ -262,12 +318,12 @@ export function createMediaTools(ctx: MediaToolContext) {
 
     generate_google_video: tool({
       description:
-        'Generate a video with Google Veo 3.1 (models veo3_fast / veo3 / veo3_lite) and save it into the ' +
-        'project under public/assets/generated/. Costs the user credits (a Veo clip is a flat per-video ' +
-        'price). Renders take minutes and complete in the background.',
+        `Generate a video with Google Veo (default model ${defaults.googleVideo} on this gateway) and save ` +
+        'it into the project under public/assets/generated/. Costs the user credits (video is expensive). ' +
+        'Renders take minutes and complete in the background.',
       parameters: z.object({
         prompt: z.string().optional().describe('What happens in the video.'),
-        model: z.string().optional().describe('veo3 (quality), veo3_fast (default) or veo3_lite.'),
+        model: z.string().optional().describe(`Veo model id on this gateway. Default ${defaults.googleVideo}.`),
         resolution: z.string().optional().describe('720p, 1080p or 4k. Default 720p.'),
         aspect_ratio: z.string().optional().describe('16:9 or 9:16. Default 16:9.'),
         duration_seconds: z.number().optional().describe('4, 6 or 8 seconds. Default 8.'),
@@ -279,7 +335,7 @@ export function createMediaTools(ctx: MediaToolContext) {
         }
 
         return start({
-          model: args.model?.trim() || 'veo3_fast',
+          model: args.model?.trim() || defaults.googleVideo,
           prompt: args.prompt,
           options: {
             resolution: args.resolution || '720p',

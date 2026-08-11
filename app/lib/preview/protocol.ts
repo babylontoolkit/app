@@ -205,7 +205,20 @@ export function capValue(value: unknown, limits?: PreviewValueLimits): unknown {
 
     const object = input as object;
 
-    /* A cycle is ordinary in a scene graph (mesh.parent.children), not exotic — never throw on one. */
+    /*
+     * 🔴 `seen` TRACKS THE CURRENT PATH, NOT EVERY OBJECT EVER VISITED — hence the `delete` below.
+     *
+     * A cycle is ordinary in a scene graph (`mesh.parent.children[0] === mesh`), so it must never
+     * throw. But a global "visited" set cannot tell a CYCLE from a value that simply appears TWICE,
+     * and shared references are just as ordinary: one material on many meshes, the same kart object
+     * listed under both `nearest` and `all`. Observed live (2026-08-09) — a kart present in two fields
+     * of one reply came back as `[Circular]`, which tells the model the data is self-referential when
+     * it is not, and hides a value it asked for.
+     *
+     * Removing the object once its subtree is walked makes this an ANCESTOR check: an object is
+     * circular only if it contains itself. A repeated sibling is serialized again, and the `total`
+     * budget is what bounds the cost of that.
+     */
     if (seen.has(object)) {
       return '[Circular]';
     }
@@ -216,43 +229,48 @@ export function capValue(value: unknown, limits?: PreviewValueLimits): unknown {
 
     seen.add(object);
 
-    if (Array.isArray(object)) {
-      const items = object.slice(0, caps.breadth).map((item) => walk(item, depth + 1));
+    try {
+      if (Array.isArray(object)) {
+        const items = object.slice(0, caps.breadth).map((item) => walk(item, depth + 1));
 
-      if (object.length > caps.breadth) {
-        items.push(`[+${object.length - caps.breadth} more]`);
+        if (object.length > caps.breadth) {
+          items.push(`[+${object.length - caps.breadth} more]`);
+        }
+
+        return items;
       }
 
-      return items;
-    }
-
-    /*
-     * An Error must keep its message and stack — they are the reason anyone is inspecting — and its
-     * own enumerable keys would otherwise miss both (they are non-enumerable on Error instances).
-     */
-    if (object instanceof Error) {
-      return { name: object.name, message: walk(object.message, depth + 1), stack: walk(object.stack, depth + 1) };
-    }
-
-    const out: Record<string, unknown> = {};
-    const keys = Object.keys(object).slice(0, caps.breadth);
-
-    for (const key of keys) {
-      try {
-        out[key] = walk((object as Record<string, unknown>)[key], depth + 1);
-      } catch (error) {
-        /* A getter that throws is common on engine objects (a disposed mesh). Report, never abort. */
-        out[key] = `[Getter threw: ${(error as Error)?.message ?? 'unknown'}]`;
+      /*
+       * An Error must keep its message and stack — they are the reason anyone is inspecting — and its
+       * own enumerable keys would otherwise miss both (they are non-enumerable on Error instances).
+       */
+      if (object instanceof Error) {
+        return { name: object.name, message: walk(object.message, depth + 1), stack: walk(object.stack, depth + 1) };
       }
+
+      const out: Record<string, unknown> = {};
+      const keys = Object.keys(object).slice(0, caps.breadth);
+
+      for (const key of keys) {
+        try {
+          out[key] = walk((object as Record<string, unknown>)[key], depth + 1);
+        } catch (error) {
+          /* A getter that throws is common on engine objects (a disposed mesh). Report, never abort. */
+          out[key] = `[Getter threw: ${(error as Error)?.message ?? 'unknown'}]`;
+        }
+      }
+
+      const total = Object.keys(object).length;
+
+      if (total > caps.breadth) {
+        out['…'] = `[+${total - caps.breadth} more keys]`;
+      }
+
+      return out;
+    } finally {
+      /* Leaving the subtree: this object is no longer an ancestor of anything still being walked. */
+      seen.delete(object);
     }
-
-    const total = Object.keys(object).length;
-
-    if (total > caps.breadth) {
-      out['…'] = `[+${total - caps.breadth} more keys]`;
-    }
-
-    return out;
   };
 
   return walk(value, 0);

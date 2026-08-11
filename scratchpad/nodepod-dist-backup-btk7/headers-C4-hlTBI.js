@@ -1,0 +1,3 @@
+import{readFile as e}from"node:fs/promises";import{fileURLToPath as _}from"node:url";import{dirname as f,resolve as l}from"node:path";const u=["../__sw__.js","../../static/__sw__.js","../../dist/__sw__.js"];let n=null;async function p(t){const o=f(_(t)),a=[];for(const c of u){const s=l(o,c);try{return await e(s),s}catch(r){const i=r instanceof Error?r.message:String(r);a.push(`  ${s}: ${i}`)}}throw new Error(`[nodepod] could not locate __sw__.js. Tried:
+${a.join(`
+`)}`)}async function w(t){return n||(n=(async()=>{const o=await p(t);return e(o,"utf8")})()),n}const d="/__sw__.js";function m(){return{"Content-Type":"application/javascript; charset=utf-8","Service-Worker-Allowed":"/","Cache-Control":"no-cache"}}export{d as D,w as r,m as s};

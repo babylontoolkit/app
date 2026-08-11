@@ -24,7 +24,7 @@ exists for *skill* versions; that is unrelated.
 | Claude Haiku 4.5 | `claude-haiku-4-5` | 200_000 | **64_000** |
 | Claude Opus 4.8 | `claude-opus-4-8` | 1_000_000 | 128_000 |
 | Claude Opus 5 (§4.6.1a **Premium** rung; platform default 2026-07-27 → 2026-07-31) | `claude-opus-5` | 1_000_000 | 128_000 |
-| Claude Fable 5 (the §4.6.1a **SuperMax** rung until that rung was retired 2026-08-08; now reachable only as `PREMIUM_MODEL`, which the owner's deploy sets — opt-in, threshold-gated, never a default) | `claude-fable-5` | 1_000_000 | 128_000 |
+| Claude Fable 5 (the §4.6.1a **SuperMax** rung until 2026-08-08, and the **Platinum** rung's default model since 2026-08-10 (`PLATINUM_MODEL`). ⚠️ This said "now reachable only as `PREMIUM_MODEL`, which the owner's deploy sets" until 2026-08-11 — false on both halves: the deploy points `PREMIUM_MODEL` at `claude-opus-5` — opt-in, threshold-gated, never a default) | `claude-fable-5` | 1_000_000 | 128_000 |
 
 ⚠️ **Haiku is the exception**: 200k context and a **64k** output cap, not 128k. Copying another
 row's numbers over Haiku asks for more output than the model allows, which is a hard 400.

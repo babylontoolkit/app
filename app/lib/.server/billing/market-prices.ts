@@ -14,7 +14,7 @@
  * variant that matches nothing refuses work the operator believes is priced.
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
-import { FAMILY_POLICY, familyOf, type CacheProfile } from '~/lib/modules/llm/model-families';
+import { FAMILY_POLICY, FAMILY_PREFIXES, familyOf, type CacheProfile } from '~/lib/modules/llm/model-families';
 
 /**
  * USD per million tokens.
@@ -283,8 +283,9 @@ function validateLlmCachePolicy(model: string, rate: Record<string, unknown>, er
      * (kie-wire.ts) approached from the other side.
      */
     errors.push(
-      `llm["${model}"] does not name a known model family — ids must start with claude-, gpt- or gemini-. ` +
-        "KIE's pricing FEED uses display names (gpt-5.6-sol); the price list is keyed by the API id (gpt-5-6-sol).",
+      `llm["${model}"] does not name a known model family — ids must start with ` +
+        `${FAMILY_PREFIXES.map(([prefix]) => prefix).join(', ')}. ` +
+        'A pricing FEED uses display names (gpt-5.6-sol); the price list is keyed by the API id (gpt-5-6-sol).',
     );
 
     return;
@@ -302,8 +303,8 @@ function validateLlmCachePolicy(model: string, rate: Record<string, unknown>, er
       profile === 'derived'
         ? 'cache rates derive (0.1x read, 2.0x write) and cannot be quoted here'
         : profile === 'none'
-          ? 'this family has no cached rate on KIE, so cache rates cannot be quoted here — cached tokens ' +
-            'bill at the full input rate'
+          ? 'no vendor quotes a cached rate for this family, so cache rates cannot be quoted here — ' +
+            'cached tokens bill at the full input rate'
           : `only ${[...LLM_BASE_RATE_KEYS, ...LLM_CACHE_RATE_KEYS].join('/')} are supported`;
 
     errors.push(`llm["${model}"] has unsupported keys [${extras.join(', ')}] — ${why}.`);

@@ -1,0 +1,14 @@
+export declare const PINNED_ESBUILD_WASM = "0.20.0";
+export declare const PINNED_ROLLUP_BROWSER = "4.44.0";
+export declare const PINNED_BROTLI_WASM = "3.0.1";
+export declare const PINNED_LIGHTNINGCSS_WASM = "1.31.1";
+export declare const PINNED_WA_SQLITE = "1.0.0";
+export declare const CDN_ESBUILD_ESM = "https://esm.sh/esbuild-wasm@0.20.0";
+export declare const CDN_ESBUILD_BINARY = "https://esm.sh/esbuild-wasm@0.20.0/esbuild.wasm";
+export declare const CDN_ROLLUP_BROWSER = "https://esm.sh/@rollup/browser@4.44.0";
+export declare const CDN_BROTLI_WASM = "https://cdn.jsdelivr.net/npm/brotli-wasm@3.0.1/pkg.web/brotli_wasm.js";
+export declare const CDN_LIGHTNINGCSS_WASM = "https://esm.sh/lightningcss-wasm@1.31.1";
+export declare const CDN_WA_SQLITE = "https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/dist/wa-sqlite.mjs";
+export declare const CDN_WA_SQLITE_WASM = "https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/dist/wa-sqlite.wasm";
+declare const _dynamicImport: (url: string) => Promise<any>;
+export { _dynamicImport as cdnImport };

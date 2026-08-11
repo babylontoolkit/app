@@ -343,6 +343,38 @@ if (env.KIE_API_KEY) {
   }
 }
 
+/**
+ * Comet — the candidate KIE replacement (added 2026-08-10).
+ *
+ * Runs the platform's PRODUCTION request shape, not a simplified one: `thinking:{adaptive,summarized}`
+ * + `output_config.effort`, exactly what `thinkingFetch` puts on the wire. A probe that sends a
+ * simpler body measures a request we never make, and delivery mode is precisely the property that
+ * changes with the body (KIE streams its GPT wire and batches its Claude one).
+ *
+ * `thinkingFlag` is deliberately ABSENT — that field is KIE's own adapter flag (`kie-wire.ts`), and
+ * sending a foreign vendor's private field to a different gateway is how a probe measures a 400
+ * instead of a delivery mode.
+ */
+if (env.COMET_API_KEY) {
+  const COMET_BASE = env.COMET_BASE_URL || 'https://api.cometapi.com/v1';
+  const cometUrl =
+    FAMILY === 'codex'
+      ? `${COMET_BASE}/chat/completions`
+      : FAMILY === 'gemini'
+        ? `${COMET_BASE}beta/models/${MODEL}:streamGenerateContent?alt=sse`
+        : `${COMET_BASE}/messages`;
+
+  await probe(
+    `COMET  ${MODEL}  [${FAMILY}]  — production shape`,
+    FAMILY,
+    cometUrl,
+    { authorization: `Bearer ${env.COMET_API_KEY}`, ...headers },
+    FAMILY === 'claude'
+      ? { ...baseBody, thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort: 'medium' } }
+      : baseBody,
+  );
+}
+
 /*
  * The control is Claude-only by construction: api.anthropic.com serves no GPT or Gemini model, so
  * there is nothing to compare a non-Claude run against. Say so out loud — a silently absent control

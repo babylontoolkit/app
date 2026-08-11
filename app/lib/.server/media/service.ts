@@ -17,6 +17,7 @@
  * against fakes.
  */
 import { createScopedLogger } from '~/utils/logger';
+import { isGoogleVideoModel } from '~/lib/media/provider-defaults';
 import { dispatchMediaCreate } from './dispatch';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
@@ -27,14 +28,18 @@ import { getBillingConfig, creditsForRawCost } from '~/lib/.server/billing/rates
 import { activeMarketPrices, ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { lookupMediaPrice, findMediaModel, type MarketPriceList } from '~/lib/.server/billing/market-prices';
 import type { ObjectStore } from '~/lib/.server/storage';
-import type { MediaProvider, MediaEndpoint } from './kie-client';
+import {
+  mediaProviderOf,
+  type MediaEndpoint,
+  type MediaProvider,
+  type MediaProviderName,
+  type MediaProviderResolver,
+} from './provider';
 import { putMediaTask, getMediaTask, type MediaTaskRecord } from './store';
-import { cutoutRenderPrompt, resolveImageDelivery, type ImageDelivery } from '~/lib/media/output-format';
+import { cutoutRenderPrompt, resolveImageIntent } from '~/lib/media/output-format';
+import { isRefusal, realizeImageDelivery, type ImageDelivery } from '~/lib/media/image-capabilities';
 
 const logger = createScopedLogger('media-service');
-
-/** Veo model ids use the dedicated endpoint; everything else is a jobs model. */
-const VEO_MODELS = new Set(['veo3', 'veo3_fast', 'veo3_lite']);
 
 /**
  * The cut-out model — stage 2 of a transparent image (§4.16). Not a model anyone selects: it takes an
@@ -72,7 +77,14 @@ export interface MediaRequest {
 }
 
 export interface MediaQuote {
-  /** Canonical priced model id (aliases resolved). */
+  /**
+   * Canonical priced model id (aliases resolved) — and, for a transparent request, the model that
+   * will ACTUALLY be called.
+   *
+   * 🔴 On a gateway whose alpha lives in a different model than the one asked for, this reports the
+   * substitute (`gpt-image-1.5` on Comet). It drives the generations anchor and the ledger note, so
+   * the swap is billed against the model that ran and is visible on the button — never silent.
+   */
   model: string;
   kind: 'image' | 'video';
 
@@ -80,8 +92,22 @@ export interface MediaQuote {
   usd: number;
   credits: number;
 
-  /** How this image is delivered (cut-out pass, rendered format, final format). Images only. */
+  /** How this image is delivered (which model, alpha strategy, formats). Images only. */
   delivery?: ImageDelivery;
+
+  /**
+   * The options the price was looked up with and the payload must be built from.
+   *
+   * The two must be the SAME record or a render is billed for one configuration and asked for
+   * another — the invariant that already binds the delivery decision, extended to the options,
+   * because a gateway with its own vocabulary (Comet prices on `quality`, KIE on `resolution`) needs
+   * them normalised once rather than at each call site.
+   *
+   * ⚠️ IMAGES ONLY, strictly. A video quote returns the caller's record unchanged: `durationSeconds`
+   * is merged in for variant MATCHING (`lookupOptions`) but is its own field on the request and the
+   * record, so duplicating it here would be a second copy of one fact rather than a normalisation.
+   */
+  options: Record<string, string | number | boolean>;
 
   /** The cut-out pass's own raw cost, for the admin/step log. Present only when `delivery.cutout`. */
   cutoutUsd?: number;
@@ -96,8 +122,21 @@ export interface MediaQuote {
  * transparent image (an opaque render, cut-out skipped) is the silent failure this whole pipeline
  * exists to remove.
  */
-export function quoteMediaRequest(request: MediaRequest, context?: unknown): MediaQuote {
-  const list = activeMarketPrices();
+export function quoteMediaRequest(
+  request: MediaRequest,
+  mediaProvider: MediaProviderName,
+  context?: unknown,
+): MediaQuote {
+  /*
+   * 🔴 THE MEDIA PROVIDER'S OWN LIST, AND THE PARAMETER IS REQUIRED AND SECOND ON PURPOSE.
+   *
+   * Prices are per gateway. A default here — 'KIE', or worse "whichever list was loaded last" —
+   * would price a Comet render off KIE's rows the day a caller forgot to pass it: the wrong number
+   * on the Generate button, the wrong debit in the ledger, and nothing to throw. Putting it before
+   * the optional `context` makes every call site state it, so the compiler enumerates the work
+   * instead of a reviewer having to.
+   */
+  const list = activeMarketPrices(mediaProvider);
 
   if (request.model === CUTOUT_MODEL) {
     throw new MediaRefusedError(
@@ -106,27 +145,88 @@ export function quoteMediaRequest(request: MediaRequest, context?: unknown): Med
     );
   }
 
-  const price = lookupMediaPrice(list, {
-    model: request.model,
-    options: lookupOptions(request),
-    durationSeconds: request.durationSeconds,
-  });
+  const config = getBillingConfig(context);
 
-  if (!price) {
+  /*
+   * 🔴 KIND FIRST, and from the REQUESTED model.
+   *
+   * Everything below this point is image machinery — the alpha intent, the model substitution, the
+   * cut-out chain — and running any of it against a video request would let a prompt that happens to
+   * say "logo" resolve a video to an image model. `findMediaModel` is a pure lookup and takes no
+   * position on options, so it can answer "what kind of thing is this" before anything is priced.
+   */
+  const requested = findMediaModel(list, request.model);
+
+  if (!requested) {
     throw new MediaRefusedError(unpricedMessage(list, request));
   }
 
-  const config = getBillingConfig(context);
-  const kind = findMediaModel(list, price.model)!.pricing.kind;
+  if (requested.pricing.kind !== 'image') {
+    const videoPrice = lookupMediaPrice(list, {
+      model: request.model,
+      options: lookupOptions(request),
+      durationSeconds: request.durationSeconds,
+    });
 
-  if (kind !== 'image') {
-    return { model: price.model, kind, usd: price.usd, credits: creditsForRawCost(price.usd, config) };
+    if (!videoPrice) {
+      throw new MediaRefusedError(unpricedMessage(list, request));
+    }
+
+    return {
+      model: videoPrice.model,
+      kind: 'video',
+      usd: videoPrice.usd,
+      credits: creditsForRawCost(videoPrice.usd, config),
+      options: request.options,
+    };
   }
 
-  const delivery = deliveryFor(request);
+  /*
+   * 🔴 THE REALIZATION IS DECIDED BEFORE THE PRICE, because on some gateways it CHANGES the model.
+   *
+   * The intent ("must this sit over other content?") is provider-independent; how it is served is not.
+   * On KIE nothing emits alpha, so transparency is a second priced stage on the requested model. On
+   * Comet the alpha lives in `gpt-image-1.5`, so a transparent request RESOLVES to that model — and
+   * therefore has to be priced as that model. Pricing the requested model and then calling a
+   * different one is the priced-but-not-listed mis-bill wearing media clothes.
+   */
+  const intent = resolveImageIntent(imageHints(request));
+  const realized = realizeImageDelivery({
+    provider: mediaProvider,
+    model: request.model,
+    wantsAlpha: intent.wantsAlpha,
+    explicitFormat: intent.format,
+    cutoutAvailable: Boolean(lookupMediaPrice(list, { model: CUTOUT_MODEL, options: {} })),
+  });
+
+  /*
+   * Refuse BEFORE the debit and never downgrade. A transparent request served opaque delivers exactly
+   * what the user paid extra not to get, and reports success while doing it — the §4.16 failure that
+   * shipped a logo with a grey box behind it.
+   */
+  if (isRefusal(realized)) {
+    throw new MediaRefusedError(realized.refused);
+  }
+
+  const options = providerImageOptions(request, mediaProvider);
+  const price = lookupMediaPrice(list, { model: realized.model, options });
+
+  if (!price) {
+    throw new MediaRefusedError(unpricedMessage(list, { ...request, model: realized.model, options }));
+  }
+
+  const kind = 'image' as const;
+  const delivery: ImageDelivery = { ...realized, model: price.model };
 
   if (!delivery.cutout) {
-    return { model: price.model, kind, usd: price.usd, credits: creditsForRawCost(price.usd, config), delivery };
+    return {
+      model: price.model,
+      kind,
+      usd: price.usd,
+      credits: creditsForRawCost(price.usd, config),
+      delivery,
+      options,
+    };
   }
 
   if (String(request.options.resolution ?? '').toUpperCase() === '4K') {
@@ -157,24 +257,64 @@ export function quoteMediaRequest(request: MediaRequest, context?: unknown): Med
     credits: creditsForRawCost(usd, config),
     delivery,
     cutoutUsd: cutoutPrice.usd,
+    options,
   };
 }
 
-/** The delivery decision for an image request — one place, so quote/payload/path cannot disagree. */
-function deliveryFor(request: MediaRequest): ImageDelivery {
-  return resolveImageDelivery({
-    explicitFormat: request.options.outputFormat as string | undefined,
-    transparent: request.options.transparent as boolean | string | undefined,
-    fileName: (request as { fileName?: string }).fileName,
-    prompt: request.prompt,
-  });
-}
-
-/** Duration participates in variant matching too (kling-2.6 prices per 5s/10s video). */
+/**
+ * 🔴 DURATION PARTICIPATES IN VARIANT MATCHING — it is an OPTION, not just a multiplier.
+ *
+ * `kling-2.6` prices per (durationSeconds, sound): all four of its variants are keyed on the duration,
+ * so a lookup that passes `options` raw matches none of them and the quote REFUSES a model the panel
+ * and the `generate_video` tool both offer. That is exactly what happened when T8's rewrite dropped
+ * this helper — every `kling-2.6` render became unquotable on KIE with the whole suite green, because
+ * `market-prices.spec.ts` tests `lookupMediaPrice` directly with the duration already merged in and
+ * `media.spec.ts` only ever drove `kling-3.0`, which is keyed on `mode`.
+ *
+ * The separate `durationSeconds` argument is what MULTIPLIES a `per_second` price. Both are needed and
+ * they are not the same thing.
+ */
 function lookupOptions(request: MediaRequest): Record<string, string | number | boolean> {
   return request.durationSeconds !== undefined
     ? { ...request.options, durationSeconds: request.durationSeconds }
     : request.options;
+}
+
+/** What the intent decision is read from — one place, so no call site invents a different question. */
+function imageHints(request: MediaRequest) {
+  return {
+    explicitFormat: request.options.outputFormat as string | undefined,
+    transparent: request.options.transparent as boolean | string | undefined,
+    fileName: (request as { fileName?: string }).fileName,
+    prompt: request.prompt,
+  };
+}
+
+/**
+ * The gateways price images on DIFFERENT option vocabularies, and this is the one translation.
+ *
+ * KIE prices on `resolution` (1K/2K/4K); Comet prices `gpt-image-1.5` on `quality` x `aspectRatio`,
+ * because those are the two fields that decide its token count and therefore its cost. Normalising
+ * here — once, into the record the quote carries — is what stops the price lookup and the provider
+ * payload asking for different things.
+ *
+ * ⚠️ The `quality` default is `medium` (owner decision, 2026-08-10): ~$0.031 true cost against KIE's
+ * $0.06 for its default image, so the cheaper side of the incumbent. `high` is available and roughly
+ * 4x that; a caller has to ask for it.
+ */
+function providerImageOptions(
+  request: MediaRequest,
+  mediaProvider: MediaProviderName,
+): Record<string, string | number | boolean> {
+  if (mediaProvider !== 'Comet') {
+    return request.options;
+  }
+
+  return {
+    ...request.options,
+    aspectRatio: String(request.options.aspectRatio ?? '16:9'),
+    quality: String(request.options.quality ?? 'medium'),
+  };
 }
 
 function unpricedMessage(list: MarketPriceList, request: MediaRequest): string {
@@ -217,13 +357,20 @@ export interface StartedMediaTask {
 }
 
 export async function startMediaTask(input: StartMediaInput): Promise<StartedMediaTask> {
-  await ensureMarketPrices(input.context);
+  /*
+   * The provider comes off the INSTANCE, not off config: `startMediaTask` is handed the client the
+   * caller resolved, and stamping the record from anything else would let the two disagree — a task
+   * created on one gateway and labelled as another is a task nothing can poll.
+   */
+  const mediaProvider = input.provider.name;
+
+  await ensureMarketPrices(mediaProvider, input.context);
 
   if (!input.prompt?.trim()) {
     throw new MediaRefusedError('A prompt is required to generate media.');
   }
 
-  const quote = quoteMediaRequest(input, input.context);
+  const quote = quoteMediaRequest(input, mediaProvider, input.context);
   const config = getBillingConfig(input.context);
   const ledger = getLedger(input.context);
   const id = `med_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -239,7 +386,9 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
     userId: input.userId,
     projectId: input.projectId,
     model: quote.model,
-    provider: 'KIE',
+
+    // The gateway that will actually be billed — what the §4.10 margin report attributes spend by.
+    provider: mediaProvider,
     creditsCharged: quote.credits,
     rawCostUsd: quote.usd,
     status: 'running',
@@ -284,9 +433,9 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
      */
     kieTaskId = await dispatchMediaCreate(id, () =>
       input.provider.create({
-        endpoint: endpointFor(quote.model),
+        endpoint: endpointFor(mediaProvider, quote.model),
         model: quote.model,
-        payload: buildProviderPayload(quote.model, input, quote.delivery),
+        payload: buildProviderPayload(quote.model, { ...input, options: quote.options }, quote.delivery, mediaProvider),
       }),
     );
   } catch (error) {
@@ -295,7 +444,9 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
       input.userId,
       id,
       debited,
-      `KIE refused the task: ${(error as Error).message}`,
+
+      // Named by GATEWAY, never hardcoded: this string is the ledger note on a real refund.
+      `${mediaProvider} refused the task: ${(error as Error).message}`,
       input.context,
     );
     await getGenerationStore(input.context)
@@ -313,10 +464,17 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
     projectId: input.projectId,
     userId: input.userId,
     kind: quote.kind,
-    endpoint: endpointFor(quote.model),
+    provider: mediaProvider,
+    endpoint: endpointFor(mediaProvider, quote.model),
     model: quote.model,
     prompt: input.prompt,
-    options: input.options,
+
+    /*
+     * The NORMALISED options — the exact record the price was looked up with and the payload was
+     * built from, not the caller's raw one. A record that stores what was asked for while having been
+     * billed for something else is how a task becomes unauditable.
+     */
+    options: quote.options,
     durationSeconds: input.durationSeconds,
     destPath,
     usd: quote.usd,
@@ -395,14 +553,22 @@ async function serialised<T>(taskId: string, work: () => Promise<T>): Promise<T>
 export interface PollMediaInput {
   projectId: string;
   taskId: string;
-  provider: MediaProvider;
+
+  /**
+   * 🔴 A RESOLVER, NOT A PROVIDER. The gateway is read off the RECORD — see `store.ts`'s `provider`
+   * field. A caller that handed in an instance would be handing in "whoever is configured right
+   * now", which is a different fact from "whoever is rendering this", and the two diverge for
+   * exactly as long as a render takes.
+   */
+  resolveProvider: MediaProviderResolver;
+
   objectStore: ObjectStore;
   context?: unknown;
 }
 
 /**
- * Advance a task by asking KIE once. Terminal states are sticky; the failure path refunds EXACTLY
- * once (the `refunded` latch on the record, inside the per-task serialisation).
+ * Advance a task by asking its provider once. Terminal states are sticky; the failure path refunds
+ * EXACTLY once (the `refunded` latch on the record, inside the per-task serialisation).
  */
 export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRecord | null> {
   return serialised(input.taskId, async () => {
@@ -412,10 +578,12 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
       return record;
     }
 
+    const provider = input.resolveProvider(mediaProviderOf(record));
+
     let state;
 
     try {
-      state = await input.provider.query(record.endpoint, record.kieTaskId);
+      state = await provider.query(record.endpoint, record.kieTaskId);
     } catch (error) {
       // A flaky poll is NOT a failed render — stay pending; the next poll asks again.
       logger.warn(`Poll for ${record.id} failed transiently: ${(error as Error).message}`);
@@ -437,7 +605,7 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
        */
       if (record.cutout && record.stage === 'render') {
         try {
-          const cutoutTaskId = await input.provider.create({
+          const cutoutTaskId = await provider.create({
             endpoint: 'jobs',
             model: CUTOUT_MODEL,
             payload: { image: state.resultUrl },
@@ -550,8 +718,51 @@ async function refundMediaTask(
   }
 }
 
-function endpointFor(model: string): MediaEndpoint {
-  return VEO_MODELS.has(model) ? 'veo' : 'jobs';
+/**
+ * Which upstream route this render is created on and polled at — a PROVIDER decision, not a model one.
+ *
+ * Explicit per provider rather than "veo or jobs", because the value is persisted and shared: the
+ * moment a second gateway exists, a default of `'jobs'` would stamp a Comet task with KIE's route and
+ * make it unpollable forever.
+ */
+function endpointFor(provider: MediaProviderName, model: string): MediaEndpoint {
+  switch (provider) {
+    case 'KIE':
+      /*
+       * ONE writer of "is this a Google Veo model" (`media/provider-defaults.ts`). This was a private
+       * `VEO_MODELS` set of three exact KIE ids, and `cometEndpointFor` below asked the same question a
+       * third way (`startsWith('veo')`) — three spellings of one fact, in one file. The set was also
+       * spelling-brittle: it lists `veo3_fast` and would route a hyphenated `veo3-fast` to the wrong
+       * endpoint, which is unpollable-forever rather than an error. Same rule as `isSecretPath`.
+       */
+      return isGoogleVideoModel(model) ? 'veo' : 'jobs';
+
+    case 'Comet':
+      return cometEndpointFor(model);
+
+    default: {
+      const unreachable: never = provider;
+      throw new MediaRefusedError(`Unknown media provider: ${String(unreachable)}`, 503);
+    }
+  }
+}
+
+/**
+ * A finished render's bytes, fetched by THE TASK'S provider (never the configured one).
+ *
+ * The file route used to import KIE's `downloadResult` directly, which was invisible as a coupling
+ * until a second gateway existed — polling would have become provider-aware while downloading
+ * silently stayed on KIE, so a Comet task's presigned URL would be fetched with KIE's handling.
+ */
+export async function downloadMediaResult(
+  record: Pick<MediaTaskRecord, 'id' | 'provider' | 'resultUrl'>,
+  resolveProvider: MediaProviderResolver,
+): Promise<Response> {
+  if (!record.resultUrl) {
+    throw new MediaRefusedError('That render has no result URL yet.', 409);
+  }
+
+  return resolveProvider(mediaProviderOf(record)).download(record.resultUrl);
 }
 
 /*
@@ -565,6 +776,26 @@ function str(value: unknown, fallback: string): string {
 }
 
 /**
+ * 🔴 THE REALIZATION IS PASSED IN, NEVER RE-DERIVED.
+ *
+ * The payload builder and the destination path used to fall back to computing the delivery decision
+ * themselves when none was handed to them. That was survivable while the decision depended only on
+ * the request — three call sites, one pure function, same answer. It stopped being survivable when
+ * the decision started depending on the GATEWAY: a re-derivation here has no provider to consult, so
+ * it would silently answer the KIE question on a Comet task, and the file would be billed as one
+ * thing, written as another and referenced as a third.
+ *
+ * So there is no fallback. An image with no delivery decision is a programming error and says so.
+ */
+function requireDelivery(delivery: ImageDelivery | undefined, model: string): ImageDelivery {
+  if (!delivery) {
+    throw new Error(`internal: image request for "${model}" reached the wire with no delivery decision`);
+  }
+
+  return delivery;
+}
+
+/**
  * Shape the createTask body for a priced request. The SAME `options` record that priced the task
  * feeds this, so the price lookup and the payload can never disagree about what was asked for.
  *
@@ -574,10 +805,16 @@ export function buildProviderPayload(
   model: string,
   request: MediaRequest,
   delivery?: ImageDelivery,
+  mediaProvider: MediaProviderName = 'KIE',
 ): Record<string, unknown> {
   const o = request.options;
 
-  if (VEO_MODELS.has(model)) {
+  if (mediaProvider === 'Comet') {
+    return buildCometPayload(model, request, delivery);
+  }
+
+  if (isGoogleVideoModel(model)) {
+    // Same one writer as `endpointFor` — the Veo payload shape and the Veo route must never disagree.
     return {
       prompt: request.prompt,
       model,
@@ -628,7 +865,7 @@ export function buildProviderPayload(
   }
 
   // Image models (nano-banana-2 et al) — the jobs image shape.
-  const image = delivery ?? deliveryFor(request);
+  const image = requireDelivery(delivery, model);
 
   return {
     /*
@@ -650,6 +887,69 @@ export function buildProviderPayload(
 }
 
 /**
+ * Comet's three request shapes (SPEC §4.16) — all live-probed 2026-08-10, see `comet-client.ts`.
+ *
+ * ⚠️ **`aspectRatio` maps to a SIZE, and only the two probed sizes exist.** `gpt-image-1.5` is
+ * token-priced and its token count is a function of `(size, quality)`, so an unprobed aspect has no
+ * price row — `lookupMediaPrice` returns null and the quote refuses BEFORE any debit, rather than
+ * pricing it off a neighbouring cell. That refusal is the feature; do not add a size here without
+ * adding its measured row.
+ */
+const COMET_IMAGE_SIZES: Record<string, string> = {
+  '1:1': '1024x1024',
+  '16:9': '1536x1024',
+};
+
+function buildCometPayload(model: string, request: MediaRequest, delivery?: ImageDelivery): Record<string, unknown> {
+  const o = request.options;
+
+  if (cometEndpointFor(model) === 'comet-video') {
+    /* `seconds` is a STRING on this wire — measured. `model` is added by the client. */
+    return { prompt: request.prompt, seconds: String(request.durationSeconds ?? 5) };
+  }
+
+  if (cometEndpointFor(model) === 'comet-gemini-image') {
+    /* Native Gemini: no size, no quality, no format — one shape, and it answers with jpeg bytes. */
+    return { contents: [{ parts: [{ text: request.prompt }] }] };
+  }
+
+  const image = requireDelivery(delivery, model);
+
+  return {
+    /*
+     * NO `cutoutRenderPrompt` here, and that is the point of `cutoutPrompt` being a field rather than
+     * being inferred from "is this transparent". That directive commands a flat OPAQUE backdrop for a
+     * background remover's benefit; sent to a model that produces genuine alpha it destroys the very
+     * thing it was asked for.
+     */
+    prompt: image.cutoutPrompt ? cutoutRenderPrompt(request.prompt) : request.prompt,
+    size: COMET_IMAGE_SIZES[str(o.aspectRatio, '16:9')] ?? COMET_IMAGE_SIZES['16:9'],
+    quality: str(o.quality, 'medium'),
+
+    /*
+     * 🔴 STATED, never left to the backend's default. `deriveDestPath` names the file from
+     * `finalFormat`, so an unstated format meant every OPAQUE Comet image was written as `.jpg` while
+     * `gpt-image-1.5` returned OpenAI's default PNG — the file proxy's byte sniffer would have flagged
+     * a `media-format-mismatch` on the default path, which is the "billed as one thing, written as
+     * another, referenced as a third" failure this whole delivery decision exists to prevent.
+     *
+     * `jpeg`, not `jpg`: that is the API's spelling, and it is echoed back in the response.
+     */
+    output_format: image.renderFormat === 'jpg' ? 'jpeg' : 'png',
+    ...(image.background ? { background: image.background } : {}),
+  };
+}
+
+/** Which Comet route a model is created on and polled at. Video is async; both image routes are not. */
+function cometEndpointFor(model: string): MediaEndpoint {
+  if (isGoogleVideoModel(model) || model.includes('video')) {
+    return 'comet-video';
+  }
+
+  return model.startsWith('gemini-') ? 'comet-gemini-image' : 'comet-image';
+}
+
+/**
  * Where the bytes land in the project. Always under `public/assets/generated/` — user-visible,
  * referenced by path from game code, pushed to their repo like any other asset (§4.5.4b).
  */
@@ -659,8 +959,8 @@ export function deriveDestPath(
   taskId: string,
   delivery?: ImageDelivery,
 ): string {
-  // `finalFormat` — what actually lands on disk after any cut-out pass, never what KIE rendered.
-  const ext = kind === 'video' ? 'mp4' : (delivery ?? deliveryFor(request)).finalFormat;
+  // `finalFormat` — what actually lands on disk after any cut-out pass, never what was rendered.
+  const ext = kind === 'video' ? 'mp4' : requireDelivery(delivery, request.model).finalFormat;
   const preferred = request.fileName?.replace(/\.[a-zA-Z0-9]+$/, '');
   const slug = (preferred || request.prompt)
     .toLowerCase()

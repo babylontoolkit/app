@@ -9,43 +9,27 @@
  *
  * This module does WIRE ONLY: build the request, create the task, query it once, download a result.
  * No polling loops (the client polls our route per request), no billing (service.ts debits BEFORE
- * calling this), no filesystem. It is behind the `MediaProvider` interface so the money-path tests
- * drive `service.ts` against a fake.
+ * calling this), no filesystem.
  *
- * Result URLs expire (~3 days image / ~14 days video) — which is exactly why `downloadResult` exists:
- * the bytes must land in the user's PROJECT, not be hotlinked.
+ * ⚠️ **The SEAM lives in `provider.ts`, not here.** It used to be declared in this file, which was
+ * fine while KIE was the only media gateway and wrong the moment a second one existed — the interface
+ * every provider implements cannot live inside one of them. This module now holds only KIE, and
+ * imports its types.
+ *
+ * Result URLs expire (~3 days image / ~14 days video) — which is exactly why `download` exists: the
+ * bytes must land in the user's PROJECT, not be hotlinked.
  */
 import { createScopedLogger } from '~/utils/logger';
+import type { CreateMediaTaskInput, MediaEndpoint, MediaProvider, MediaProviderName, MediaTaskState } from './provider';
 
 const logger = createScopedLogger('kie-media');
 
 const API = 'https://api.kie.ai';
 const UA = 'babylon-toolkit-app-builder/1.0';
 
-export type MediaEndpoint = 'jobs' | 'veo';
-
-export interface CreateMediaTaskInput {
-  endpoint: MediaEndpoint;
-
-  /** The KIE model slug (jobs) — ignored shape-wise for veo, where it rides in the flat payload. */
-  model: string;
-
-  /** The request body's input/payload, already shaped by `service.ts` (`buildJobsInput`/`buildVeoPayload`). */
-  payload: Record<string, unknown>;
-}
-
-export type MediaTaskState =
-  | { state: 'pending' }
-  | { state: 'succeeded'; resultUrl: string }
-  | { state: 'failed'; error: string };
-
-/** The seam the service depends on — a fake implements this in `media.spec.ts`. */
-export interface MediaProvider {
-  create(input: CreateMediaTaskInput): Promise<string>;
-  query(endpoint: MediaEndpoint, kieTaskId: string): Promise<MediaTaskState>;
-}
-
 export class KieMediaProvider implements MediaProvider {
+  readonly name: MediaProviderName = 'KIE';
+
   private readonly _apiKey: string;
 
   constructor(apiKey: string) {
@@ -74,7 +58,21 @@ export class KieMediaProvider implements MediaProvider {
     }
   }
 
+  /**
+   * 🔴 EXPLICIT, never a fallthrough. `MediaEndpoint` is a shared PERSISTED vocabulary that now names
+   * another gateway's routes too, so "anything that is not veo is jobs" would quietly POST a Comet
+   * task to KIE's jobs endpoint — a debit taken, a task id that means nothing, and a poll that can
+   * only ever time out. Refusing names the mismatch instead.
+   */
+  private _assertKieEndpoint(endpoint: MediaEndpoint): asserts endpoint is 'jobs' | 'veo' {
+    if (endpoint !== 'jobs' && endpoint !== 'veo') {
+      throw new Error(`KIE does not serve the "${endpoint}" endpoint — that task belongs to another provider.`);
+    }
+  }
+
   async create(input: CreateMediaTaskInput): Promise<string> {
+    this._assertKieEndpoint(input.endpoint);
+
     const result =
       input.endpoint === 'veo'
         ? await this._request(`${API}/api/v1/veo/generate`, 'POST', input.payload)
@@ -93,6 +91,8 @@ export class KieMediaProvider implements MediaProvider {
   }
 
   async query(endpoint: MediaEndpoint, kieTaskId: string): Promise<MediaTaskState> {
+    this._assertKieEndpoint(endpoint);
+
     const url =
       endpoint === 'veo'
         ? `${API}/api/v1/veo/record-info?taskId=${encodeURIComponent(kieTaskId)}`
@@ -102,6 +102,10 @@ export class KieMediaProvider implements MediaProvider {
     const data = info?.data ?? {};
 
     return parseTaskState(data);
+  }
+
+  download(url: string): Promise<Response> {
+    return downloadResult(url);
   }
 }
 
@@ -173,6 +177,10 @@ function extractResultUrl(data: Record<string, any>): string | undefined {
 /**
  * Stream a finished render's bytes. Returns the raw Response so the file route can pipe it through
  * without buffering a multi-hundred-MB video in memory.
+ *
+ * ⚠️ Exported for its own tests and used by `KieMediaProvider.download`. Routes must NOT import it
+ * directly — the file route did, which is how the download half stayed provider-blind while polling
+ * became provider-aware. Go through the task's provider.
  */
 export async function downloadResult(url: string): Promise<Response> {
   const response = await fetch(url, { headers: { 'User-Agent': UA } });

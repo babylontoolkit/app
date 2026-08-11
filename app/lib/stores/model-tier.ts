@@ -30,12 +30,13 @@ export const modelTierPanelOpen = atom<boolean>(false);
 export const MODEL_TIER_DESCRIPTIONS: Record<ModelTierId, string> = {
   standard: 'Default. Best value — full-quality builds and edits at the lowest credit burn.',
   premium: 'A stronger model for harder problems. Burns credits several times faster per turn.',
+  platinum: 'The most capable model available. The fastest credit burn — keep it for the hard builds.',
 };
 
 /**
  * Is there a CHOICE to present at all?
  *
- * On a deploy running `ENABLE_PREMIUM_MODEL=false` the server sends one rung, and a picker offering a
+ * On a deploy running `ENABLE_EXTENDED_MODELS=false` the server sends one rung, and a picker offering a
  * single option is a control that cannot do anything — it opens a panel whose only row is the one
  * already in use. Worse, the pill's tooltip would go on saying "Click to choose a different model",
  * which is a promise the deploy has deliberately withdrawn.

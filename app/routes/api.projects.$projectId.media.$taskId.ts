@@ -13,8 +13,8 @@ import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { errorResponse } from '~/lib/.server/http';
 import { getObjectStore } from '~/lib/.server/storage';
-import { getPlatformConfig } from '~/lib/.server/agent/config';
-import { KieMediaProvider } from '~/lib/.server/media/kie-client';
+import { mediaBaseUrlFor, requireMediaKey } from '~/lib/.server/agent/config';
+import { mediaProviderFor } from '~/lib/.server/media/provider';
 import { pollMediaTask } from '~/lib/.server/media/service';
 
 export async function loader({ request, params, context }: LoaderFunctionArgs) {
@@ -22,16 +22,16 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
     const user = await requireVerifiedUser(request, context);
     await requireOwnedProject(user, params.projectId!, context);
 
-    const platform = getPlatformConfig(context);
-
-    if (!platform.kieApiKey) {
-      return json({ error: true, message: 'Media generation is not configured on this server.' }, { status: 503 });
-    }
-
     const task = await pollMediaTask({
       projectId: params.projectId!,
       taskId: params.taskId!,
-      provider: new KieMediaProvider(platform.kieApiKey),
+
+      /*
+       * 🔴 Resolved from the RECORD, not from `MEDIA_PROVIDER`. A poll must reach the gateway that
+       * issued the task id — an operator flipping the switch mid-render would otherwise strand every
+       * render in flight and eventually refund art that succeeded.
+       */
+      resolveProvider: (name) => mediaProviderFor(name, requireMediaKey(name, context), mediaBaseUrlFor(name, context)),
       objectStore: getObjectStore(context),
       context,
     });

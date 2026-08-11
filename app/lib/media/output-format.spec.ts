@@ -1,5 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { cutoutRenderPrompt, resolveImageDelivery, resolveImageOutputFormat } from './output-format';
+import {
+  cutoutRenderPrompt,
+  resolveImageDelivery,
+  resolveImageIntent,
+  resolveImageOutputFormat,
+  type ImageDeliveryHints,
+} from './output-format';
 
 describe('resolveImageOutputFormat', () => {
   it('honours an explicit format', () => {
@@ -88,6 +96,140 @@ describe('resolveImageDelivery', () => {
 
   it('does not fire on an incidental mention of a background', () => {
     expect(resolveImageDelivery({ prompt: 'a garage interior with tools in the background' }).cutout).toBe(false);
+  });
+});
+
+/**
+ * The INTENT half, extracted in T8 (SPEC §4.16).
+ *
+ * `ImageDelivery.cutout` used to mean two things at once — *the user wants alpha* and *run a second
+ * priced stage* — which was correct only while KIE was the only gateway, because there those ARE the
+ * same fact. On Comet `gpt-image-1.5` produces real alpha in one call, so they come apart.
+ *
+ * 🔴 **This block is the AC7 control.** The precedence rules below are what the tools, the creation
+ * brief and months of user habit have been trained against; the extraction was allowed to move where
+ * the decision is REALIZED, and forbidden from moving what the caller ASKED FOR. So every case is
+ * asserted against `resolveImageDelivery`'s own answer rather than against a fresh literal — a
+ * hand-copied expectation can drift with the code it is supposed to pin.
+ */
+describe('resolveImageIntent — the provider-independent half (AC7)', () => {
+  /* Every hint shape the delivery tests above cover, plus the empty case. */
+  const CASES: Array<[string, ImageDeliveryHints]> = [
+    ['nothing at all', {}],
+    ['a photographic prompt', { prompt: 'a race car on an asphalt track' }],
+    ['a stated transparent', { transparent: true, prompt: 'a wordmark' }],
+    ['the string form a <select> produces', { transparent: 'true' }],
+    ['the string form of false', { transparent: 'false' }],
+    ['a stated false against a logo prompt', { transparent: false, fileName: 'team-logo', prompt: 'a logo' }],
+    ['an explicit png', { explicitFormat: 'png' }],
+    ['an explicit jpg against a logo name', { explicitFormat: 'jpg', fileName: 'hero-logo' }],
+    ['a wordmark file name', { fileName: 'street-logo-wordmark' }],
+    ['an emblem file name', { fileName: 'team-emblem' }],
+    ['a sprite prompt', { prompt: 'a cut-out character sprite' }],
+    ['an icon prompt', { prompt: 'a game icon' }],
+    ['a transparent-background prompt', { prompt: 'a crest on a transparent background' }],
+    ['the silhouette regression', { prompt: 'a muscle car at sunset, distant mesa silhouettes on the horizon' }],
+    ['an incidental background mention', { prompt: 'a garage interior with tools in the background' }],
+    ['an unsupported format', { explicitFormat: 'webp', prompt: 'a hero' }],
+  ];
+
+  it.each(CASES)('decides %s exactly as the shipped delivery decision does', (_label, hints) => {
+    /*
+     * On KIE — the gateway these rules were written against — "wants alpha" and "runs a cut-out" are
+     * the same fact, so this equality IS the no-behaviour-change proof. If the extraction changed any
+     * answer, one of these sixteen rows fails and names which input moved.
+     */
+    expect(resolveImageIntent(hints).wantsAlpha).toBe(resolveImageDelivery(hints).cutout);
+  });
+
+  it('is not vacuous — the table contains both answers (control)', () => {
+    /*
+     * ⚠️ Without this, the block above passes for a `resolveImageIntent` that always returns false and
+     * a `resolveImageDelivery` that always returns `cutout: false` — two broken functions agreeing.
+     */
+    const answers = CASES.map(([, hints]) => resolveImageIntent(hints).wantsAlpha);
+
+    expect(answers).toContain(true);
+    expect(answers).toContain(false);
+  });
+
+  it('states the precedence: an explicit false beats every hint', () => {
+    expect(resolveImageIntent({ transparent: false, fileName: 'team-logo', prompt: 'a logo' }).wantsAlpha).toBe(false);
+  });
+
+  it('reads an explicit png as intent, and an explicit jpg as its opposite', () => {
+    expect(resolveImageIntent({ explicitFormat: 'png' }).wantsAlpha).toBe(true);
+    expect(resolveImageIntent({ explicitFormat: 'jpg', prompt: 'a logo' }).wantsAlpha).toBe(false);
+  });
+
+  it('falls back to hints only when nothing is stated', () => {
+    expect(resolveImageIntent({ prompt: 'a team emblem' }).wantsAlpha).toBe(true);
+    expect(resolveImageIntent({ prompt: 'a garage interior' }).wantsAlpha).toBe(false);
+  });
+
+  it('carries the caller format UNCHANGED by the alpha answer', () => {
+    /*
+     * The intent does not get to pick png for a transparent request — that is a REALIZATION decision
+     * and it differs per gateway (KIE renders jpg and cuts out; Comet renders png with real alpha).
+     * Folding it in here is how the two halves would silently re-fuse.
+     */
+    expect(resolveImageIntent({ transparent: true })).toEqual({ wantsAlpha: true, format: 'jpg' });
+    expect(resolveImageIntent({ transparent: true, explicitFormat: 'png' })).toEqual({
+      wantsAlpha: true,
+      format: 'png',
+    });
+    expect(resolveImageIntent({ explicitFormat: 'webp' }).format).toBe('jpg');
+  });
+
+  it('is a pure function of its hints — same input, same answer, no hidden state', () => {
+    const hints: ImageDeliveryHints = { prompt: 'a team badge' };
+    const first = resolveImageIntent(hints);
+
+    resolveImageIntent({ transparent: false });
+    resolveImageIntent({ explicitFormat: 'png' });
+
+    expect(resolveImageIntent(hints)).toEqual(first);
+  });
+
+  /**
+   * 🔴 Provider-independence, asserted structurally rather than by hoping.
+   *
+   * The intent module answers "must this art sit over other content?" — a question about the REQUEST.
+   * The moment a gateway name appears in it, the same user request starts meaning different things on
+   * different providers and the split that T8 exists to make has been quietly undone. A behavioural
+   * test cannot see that (the function takes no provider to vary), so this reads the source.
+   */
+  describe('names no gateway (the split is structural)', () => {
+    const SOURCE = readFileSync(join(process.cwd(), 'app/lib/media/output-format.ts'), 'utf-8');
+    const GATEWAY_WORDS = /\b(comet|kie|gpt-image|nativeAlpha\w*|imageModelCapability|realizeImageDelivery)\b/i;
+
+    it('the scanner read a real, non-empty file (control)', () => {
+      /*
+       * ⚠️ A scan that silently matches nothing reports a clean bill of health forever — this repo has
+       * hit that trap twice. Prove the file was read AND that the needle can fire.
+       */
+      expect(SOURCE.length).toBeGreaterThan(2000);
+      expect(GATEWAY_WORDS.test('const m = nativeAlphaModelFor(provider)')).toBe(true);
+      expect(GATEWAY_WORDS.test('resolveImageIntent(hints)')).toBe(false);
+    });
+
+    it('contains no gateway-specific machinery', () => {
+      const offending = SOURCE.split('\n')
+        .map((line, index) => [index + 1, line] as const)
+
+        // Prose is allowed to explain the other half; only CODE may not reach for it.
+        .filter(([, line]) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+        .filter(([, line]) => GATEWAY_WORDS.test(line));
+
+      expect(offending.map(([n, line]) => `${n}: ${line.trim()}`)).toEqual([]);
+    });
+
+    it('and the realization module IS where those live (control)', () => {
+      // Proves the needle matches the real shipped code one file over, so the rule above is meaningful.
+      const realization = readFileSync(join(process.cwd(), 'app/lib/media/image-capabilities.ts'), 'utf-8');
+
+      expect(GATEWAY_WORDS.test(realization)).toBe(true);
+    });
   });
 });
 

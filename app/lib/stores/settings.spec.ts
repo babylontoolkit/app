@@ -44,7 +44,7 @@ import type { ModelTierId } from './settings';
 
 /** The wire keys, as a browser holds them. Never imported — see the header note. */
 const MODEL_TIER_KEY = 'modelTier';
-const LEGACY_PREMIUM_KEY = 'premiumModelEnabled';
+const LEGACY_PREMIUM_KEY = 'extendedModelsEnabled';
 
 /**
  * A `Storage` that is a plain Map, so a test can seed it, hand it to a fresh module instance, and then
@@ -115,11 +115,11 @@ afterEach(() => {
  * ============================================================================================
  */
 describe('the pre-ladder boolean migrates once, on first read', () => {
-  it("premiumModelEnabled: 'true' with no modelTier key reads 'premium'", async () => {
+  it("extendedModelsEnabled: 'true' with no modelTier key reads 'premium'", async () => {
     expect(await tierFor({ [LEGACY_PREMIUM_KEY]: 'true' })).toBe('premium');
   });
 
-  it("premiumModelEnabled: 'false' reads 'standard'", async () => {
+  it("extendedModelsEnabled: 'false' reads 'standard'", async () => {
     expect(await tierFor({ [LEGACY_PREMIUM_KEY]: 'false' })).toBe('standard');
   });
 
@@ -150,18 +150,18 @@ describe('the pre-ladder boolean migrates once, on first read', () => {
  * ============================================================================================
  * 2. THE NEW KEY WINS
  *
- * 🔴 The expensive direction. A user who moved back DOWN to Standard has a stale `premiumModelEnabled`
+ * 🔴 The expensive direction. A user who moved back DOWN to Standard has a stale `extendedModelsEnabled`
  * still sitting in storage — the migration reads that key but never clears it. If the legacy key were
  * consulted whenever it is present (rather than only when the new key is ABSENT), every downgrade would
  * silently undo itself on the next reload and the user would be billed at the premium rate.
  * ============================================================================================
  */
 describe('the new key is authoritative whenever it exists', () => {
-  it("modelTier: 'standard' beats a stale premiumModelEnabled: 'true'", async () => {
+  it("modelTier: 'standard' beats a stale extendedModelsEnabled: 'true'", async () => {
     expect(await tierFor({ [MODEL_TIER_KEY]: 'standard', [LEGACY_PREMIUM_KEY]: 'true' })).toBe('standard');
   });
 
-  it("modelTier: 'premium' beats a stale premiumModelEnabled: '' (the new key wins either way)", async () => {
+  it("modelTier: 'premium' beats a stale extendedModelsEnabled: '' (the new key wins either way)", async () => {
     expect(await tierFor({ [MODEL_TIER_KEY]: 'premium', [LEGACY_PREMIUM_KEY]: '' })).toBe('premium');
   });
 
@@ -360,7 +360,7 @@ describe('the chosen rung survives a reload', () => {
   });
 
   it('every rung survives its own reload', async () => {
-    for (const tier of ['standard', 'premium'] as const) {
+    for (const tier of ['standard', 'premium', 'platinum'] as const) {
       const storage = fakeStorage();
 
       const first = await loadSettings(storage);

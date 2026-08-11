@@ -192,6 +192,22 @@ export default class KieProvider extends BaseProvider {
     }
 
     /*
+     * 🔴 EXPLICIT, never a fallthrough. This branch used to be the `else`, which was correct for
+     * exactly as long as every family this provider did not name was Claude. The moment a fourth
+     * family was declared (`chat`, 2026-08-10) `requireFamily('grok-4.5')` started SUCCEEDING, and an
+     * `else` would have handed a Grok id to `createAnthropic` — an Anthropic `thinking` block in a
+     * chat-completions body, a hard 400 before a token, on precisely the failure `requireFamily`
+     * exists to prevent. A branch that catches "everything I have not thought of" is a guess.
+     */
+    if (family !== 'claude') {
+      throw new Error(
+        `The KIE provider does not serve the "${family}" family (model "${model}"). KIE fronts ` +
+          'claude-*, gpt-* and gemini-* only. Point LLM_MODEL at a model KIE serves, or set ' +
+          'LLM_PROVIDER to a provider that serves this family.',
+      );
+    }
+
+    /*
      * The CLAUDE family — byte-identical to what this provider has always done (§4.2a's regression
      * bar). `baseUrl`/`KIE_BASE_URL` stays CLAUDE-SCOPED, deliberately: it has always meant "the Claude
      * endpoint", an operator who set it meant that, and the other two families carry their own base

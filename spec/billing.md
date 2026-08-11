@@ -144,9 +144,41 @@ Balance chip, per-message cost badge (shows 'BYOK' for Pro-key generations), bil
 
 `BILLING_ENFORCED` (gate on/off; recording always on), `SIGNUP_GRANT_CREDITS`, `DAILY_TOKEN_BUDGET` (platform breaker), per-user rate limits. Anthropic Console spend caps are the backstop of last resort.
 
-## The Marketplace price list (2026-07-18) — where every KIE price lives
+## The Marketplace price list (2026-07-18; PER PROVIDER since 2026-08-10) — where every gateway price lives
 
-**One versioned document holds everything the platform believes KIE charges us**: the LLM token rates
+> 🔴 **THE LIST IS SCOPED TO A GATEWAY.** Immutable versions + an active pointer **per provider**
+> (`activeMarketPrices(provider)` sync on the billing path, `ensureMarketPrices(provider)` at the async
+> doorways). KIE's storage keys are unchanged, so nothing migrated. Two gateways reselling the same
+> models at different prices cannot share one document, and the failure of pretending otherwise is
+> silent: whichever list was promoted last would price the other gateway's turns.
+>
+> ⚠️ **The doorway must ensure every provider the ladder could SELECT**, not just `LLM_PROVIDER`
+> (`providersToPrice`). Ensuring one and laddering to another gates and settles the selected gateway
+> from its BAKED table while the operator's promoted list sits unread — the same mis-bill, one door over.
+>
+> **Comet's feed quotes OFFICIAL vendor rates; the charged rate is `pricing × ratio`, READ PER ROW.**
+> Not a constant: three rows carry `1.0`, so a hardcoded `0.8` would under-charge exactly the newest and
+> most expensive models. ⚠️ `MODEL_RATES['claude-sonnet-5']` was verified and deliberately **left at
+> $3/$15** — Comet reporting the official $2/$10 *confirms* the introductory-pricing note in `rates.ts`
+> rather than contradicting it. Under-charging ourselves for a few weeks is the right direction.
+>
+> **What the user SEES of all this (2026-08-10, `billing/savings.ts`, `billing/ledger-view.ts`).**
+> Credits are cost-proportional, so a cheaper gateway is the user's purchasing power, not our margin —
+> and it was invisible. The `/context` panel names the serving provider and the turn's saving; the
+> credits panel carries a headline total **with its scope** and a per-row `saved N`, and rows are
+> labelled by `generations.status_kind` so a creation build, an edit, an auto-repair and a plan stop
+> reading as four identical "Generation" rows. Three rules, each of which printed a flattering number
+> when broken: the reference is **`MODEL_RATES` directly, never `providerRates().Anthropic`** (which
+> gap-fills paid-rung models at marketplace rates); the comparison is a **USD ratio against the recorded
+> `raw_cost_usd`**, so a `CREDIT_MARGIN` change cannot retroactively invent a discount; and the function
+> **cannot throw**, because it runs on `/api/credits`. Anything unanswerable returns `null` and the UI
+> says nothing at all.
+
+**One versioned document PER PROVIDER holds everything the platform believes that gateway charges
+us.** ⚠️ This opened *"everything the platform believes **KIE** charges us"* until 2026-08-11 — true
+when there was one gateway, and false from the moment a second shipped (T4). The KIE keys were left
+untouched so nothing migrated, which is exactly why the singular kept reading as correct: the storage
+layout for the incumbent did not change, only the number of layouts. The document holds the LLM token rates
 (`llm`: model → input/output USD per MTok) and the per-task media prices for §4.16 image/video
 generation (`media`: model → variants of options → USD, per_image / per_second / per_video). It is
 doc-sync rules applied to money, mirroring the §4.4 template pin:
@@ -167,7 +199,9 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   is **~4.7×** the default rather than the 2× this line said while Opus 5 was the default. A paid rung can never become the default's effective price
   through any path (`market-prices.spec.ts` + `market-price-store.spec.ts` pin both doors).
 - **Admin-promoted active list** (`billing/market-price-store.ts`): immutable versions in the
-  ObjectStore (`pricing/kie-market/versions/mp_*.json`) + an `active.json` pointer. Promote validates
+  ObjectStore, keyed PER PROVIDER (`pricing/kie-market/versions/mp_*.json` for KIE, and its sibling
+  prefix for each other gateway — the KIE prefix is unchanged so no stored bytes moved) + an
+  `active.json` pointer per provider. Promote validates
   BEFORE writing (a refused list changes nothing, all errors reported at once); rollback only
   re-points at stored bytes that still validate. The Admin tab's **Marketplace prices** section is
   the only writer; ordinary price maintenance is fetch-feed → edit → promote, no deploy.
@@ -180,9 +214,19 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   Setting any of them throws at config time with directions to the panel — a price var that nothing
   reads is a mis-bill waiting to be believed. `KIE_DEFAULT_MODEL` and `PREMIUM_MODEL` survive as
   SELECTORS, accepted only if the active list prices them in their own right (`kieDefaultModel`,
-  `getModelTier`/`getModelTiers` — SPEC §4.6.1a). ⚠️ **`SUPERMAX_MODEL`, `SUPERMAX_MINIMUM_CREDITS` and
-  `ENABLE_EXTENDED_MODELS` joined the retired-and-refused list on 2026-08-08** when the third rung was
-  removed and the master flag became `ENABLE_PREMIUM_MODEL` — same rule, different family of variable:
+  `getModelTier`/`getModelTiers` — SPEC §4.6.1a). ⚠️ **`SUPERMAX_MODEL`, `SUPERMAX_MINIMUM_CREDITS` and — TODAY — `ENABLE_PREMIUM_MODEL`
+  are the retired-and-refused model-tier names; the LIVE master switch is `ENABLE_EXTENDED_MODELS`**
+  (`premium-model-flag.ts`, default ON, with `ENABLE_PLATINUM_MODEL` gating the top rung). 🔴 **This
+  paragraph said the exact INVERSE until 2026-08-11** — that `ENABLE_EXTENDED_MODELS` was refused and
+  `ENABLE_PREMIUM_MODEL` was the flag. That was true between 2026-08-08 and 2026-08-10, and the
+  polarity flipped back when the second paid rung returned as `platinum` (`claude-fable-5`,
+  `PLATINUM_MINIMUM_CREDITS` 2000). ⚠️ **The refused name is always whichever one is NOT currently
+  read — take it from `premium-model-flag.ts`, never from a document.** And note HOW this survived:
+  the same correction was applied to `SPEC.md` §4.6.1a and to `CLAUDE.md` on 2026-08-11 and **this
+  third document was missed in both passes**. The lesson the second pass wrote down — *a polarity fix
+  applied to one document is half a fix* — turned out to have a third half. When a fact lives in three
+  documents, grep for the VARIABLE NAME across all of them; fixing the two you remembered is how the
+  third goes on teaching the inverse. Same rule, different family of variable:
   a var nothing reads is a configuration the operator believes they have. Their refusal lives in
   `billing/premium-model-flag.ts` and is called from `getModelTier` (so `/api/me` degrades and only the
   money path throws), never from `kieRates`, which runs on every settlement. A selector is never a

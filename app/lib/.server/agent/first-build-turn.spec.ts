@@ -270,6 +270,7 @@ describe('consumer 4 — a first build that writes nothing gets one corrective p
     aborted: false,
     alreadyContinued: false,
     emittedAction: false,
+    truncatedAction: false,
     toolCalls: 0,
     textChars: 31_852,
     outTokens: 12_000,

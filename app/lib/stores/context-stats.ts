@@ -51,6 +51,35 @@ export interface ContextStats {
   creditsCharged: number;
 
   model: string;
+
+  /**
+   * The gateway that served the last turn — `KIE`, `Comet` or `Anthropic`.
+   *
+   * Empty until a turn has run. Worth showing beside the credits because with `AUTO_MODEL_SELECT` the
+   * platform picks a gateway per turn, and the same model bills differently on each: a user watching
+   * their credit spend move needs to be able to see WHY it moved.
+   */
+  provider: string;
+
+  /**
+   * What the last turn's gateway saved against Anthropic list, in CREDITS (`billing/savings.ts`).
+   *
+   * Null is the normal value and means SAY NOTHING — a turn Anthropic cannot price, a refunded
+   * failure, an unmetered server. It is deliberately not zeroed on absence: rendering "saved 0" for
+   * "we cannot compare" states a fact we do not have, on the one panel a user opens to understand a
+   * price. It also does NOT fall back to the previous turn's value like `model`/`provider` do — those
+   * describe a stable configuration, this describes ONE charge, and carrying it forward would attach
+   * a real discount to a turn that did not earn it.
+   */
+  savings: TurnSavings | null;
+}
+
+/** The wire shape of `Savings` (`~/lib/.server/billing/savings.ts`), restated client-side. */
+export interface TurnSavings {
+  basis: 'saved' | 'full_price';
+  referenceCredits: number;
+  savedCredits: number;
+  percent: number;
 }
 
 export type ContextHealth = 'green' | 'amber' | 'red';
@@ -147,7 +176,41 @@ export function updateContextStats(annotations: unknown[] | undefined): void {
     completionTokens: (usage?.completionTokens as number) ?? 0,
     creditsCharged: (credits?.creditsCharged as number) ?? 0,
     model: (meta?.model as string) ?? prev?.model ?? '',
+    provider: (meta?.provider as string) ?? prev?.provider ?? '',
+    savings: readSavings(credits?.savings),
   });
+}
+
+/**
+ * Validate the savings annotation before it is displayed beside a money number.
+ *
+ * Structural, not defensive theatre: this value crosses the wire and is persisted with the message,
+ * so a saved conversation from an older build carries no `savings` at all, and a partially-written
+ * one could carry a `savedCredits` with no `percent`. Rendering `NaN%` next to a credit charge is
+ * worse than rendering nothing, and "nothing" is already the designed-for state.
+ */
+function readSavings(raw: unknown): TurnSavings | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const value = raw as Partial<TurnSavings>;
+  const numeric = [value.referenceCredits, value.savedCredits, value.percent];
+
+  if (!numeric.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+    return null;
+  }
+
+  if (value.basis !== 'saved' && value.basis !== 'full_price') {
+    return null;
+  }
+
+  return {
+    basis: value.basis,
+    referenceCredits: value.referenceCredits as number,
+    savedCredits: value.savedCredits as number,
+    percent: value.percent as number,
+  };
 }
 
 /** A new conversation starts with no context — reset on chat switch or `/clear`. */

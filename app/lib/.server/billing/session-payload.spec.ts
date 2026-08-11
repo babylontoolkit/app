@@ -111,13 +111,36 @@ const SESSION_ENV = [
   'LLM_PROVIDER',
   'KIE_DEFAULT_MODEL',
 
+  /*
+   * ⚠️ THE PROVIDER CHAIN OUTRANKS `LLM_PROVIDER`, so it belongs in this list (added 2026-08-10 with
+   * `AUTO_MODEL_SELECT`). Without it the flag in a developer's `.env.local` silently laddered every
+   * case here onto whichever gateway had a key — Comet locally, KIE on CI — so all 36 tests passed
+   * while exercising a different provider on each machine. That is the exact `oauth.spec.ts` trap this
+   * file's own header warns about, and it fired the same day the variable was introduced.
+   *
+   * `COMET_API_KEY` joins for the same reason: under the ladder a provider's KEY decides whether its
+   * rung is eligible, which makes it part of the precedence chain and not merely a secret.
+   */
+  'AUTO_MODEL_SELECT',
+  'LLM_PROVIDER_CHAIN',
+  'COMET_API_KEY',
+
   // the paid rungs
   'PREMIUM_MODEL',
   'PREMIUM_MINIMUM_CREDITS',
-  'ENABLE_PREMIUM_MODEL',
-
-  // Retired 2026-08-08 and REFUSED if set — a leftover would degrade the ladder in every case here.
+  'PLATINUM_MODEL',
+  'PLATINUM_MINIMUM_CREDITS',
   'ENABLE_EXTENDED_MODELS',
+  'ENABLE_PLATINUM_MODEL',
+
+  /*
+   * REFUSED if set — a leftover would degrade the ladder in every case here.
+   * ⚠️ `ENABLE_PREMIUM_MODEL` is the retired one as of 2026-08-10: the master switch was renamed TO
+   * that on 08-08 and BACK to `ENABLE_EXTENDED_MODELS` on 08-10 when Platinum restored the second
+   * paid rung. Which name is live and which is refused depends on the date — an upgrading machine can
+   * be carrying either, so both appear in this list, on opposite sides of it.
+   */
+  'ENABLE_PREMIUM_MODEL',
   'SUPERMAX_MODEL',
   'SUPERMAX_MINIMUM_CREDITS',
 
@@ -266,7 +289,7 @@ describe('CONTROLS — the drive reaches the loader and the payload is the real 
     expect(body.accountsEnabled).toBeTypeOf('boolean');
 
     // The ladder, in rung order — three rungs, standard first.
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
   });
 
   it('reports the balance the ledger actually returned, not a constant wearing its name', async () => {
@@ -384,7 +407,7 @@ describe('a misconfigured PREMIUM_MODEL degrades that rung to off and takes noth
     const { body } = await withBrokenPaidRung();
     const tiers = tiersOf(body);
 
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'platinum']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.standard.model).toBe(DEFAULT_MODEL);
     expect(tiers.premium.available, 'the broken rung is the only one withdrawn').toBe(false);
@@ -480,7 +503,7 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.enforced).toBe(true);
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
     expect(tiersOf(body).premium.model).toBe(DEFAULT_PREMIUM_MODEL);
   });
 
@@ -511,7 +534,7 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.modelTiers.standardModel).toBe(DEFAULT_MODEL);
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'platinum']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.premium.available).toBe(false);
     expect(tiers.premium.available).toBe(false);

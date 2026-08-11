@@ -89,9 +89,29 @@ const TIER_ENV = [
   'LLM_MODEL',
   'LLM_PROVIDER',
   'KIE_DEFAULT_MODEL',
+
+  /*
+   * `AUTO_MODEL_SELECT` joined the "which gateway" precedence chain on 2026-08-10, and the owner's
+   * `.env.local` really does set it (with a chain, and all three keys). `getTierModel` reads the plain
+   * `getPlatformProvider` today, so none of these can reach it — but that is a fact about the current
+   * implementation, not about this scrub list, and the same omission has already silently rewritten
+   * three cases in `platform-key.spec.ts`. Scrubbing the whole chain costs nothing and means a future
+   * routing change fails here loudly instead of on one developer's machine.
+   */
+  'AUTO_MODEL_SELECT',
+  'LLM_PROVIDER_CHAIN',
+  'ANTHROPIC_API_KEY',
+  'KIE_API_KEY',
+  'COMET_API_KEY',
   'PREMIUM_MODEL',
   'PREMIUM_MINIMUM_CREDITS',
+  'ENABLE_EXTENDED_MODELS',
+
+  /* The per-rung switches: a leftover `false` withdraws the rung and fails every case below it. */
   'ENABLE_PREMIUM_MODEL',
+  'ENABLE_PLATINUM_MODEL',
+  'PLATINUM_MODEL',
+  'PLATINUM_MINIMUM_CREDITS',
 
   // Retired, and now REFUSED if set — a leftover on an upgrading machine fails every case here.
   'ENABLE_EXTENDED_MODELS',
@@ -238,6 +258,120 @@ describe('getTierModel — an unpriceable selector is refused, naming the rung�
   it('directs the operator to the Marketplace price list', () => {
     stubTierEnv({ PREMIUM_MODEL: 'not-a-real-model' });
     expect(() => getTierModel('premium', {})).toThrow(/Marketplace price list/);
+  });
+});
+
+/**
+ * 🔴 `getTierModel(id, context, providerOverride)` — AND AN HONEST ACCOUNT OF WHAT IT BUYS.
+ *
+ * The third argument arrived with `AUTO_MODEL_SELECT`: the gateway is chosen PER REQUEST, so a caller
+ * holding `config.provider` must be able to say so rather than let this re-derive from `LLM_PROVIDER`
+ * — two readers of one decision, on the most expensive rung in the product (`kieEnvModel`, exactly).
+ *
+ * ⚠️ **It is NOT observable through this function's return value or its error, for any real
+ * configuration, and the implementation's own comment says so.** `providerRates` gap-fills every
+ * resolvable rung's model into EVERY provider's table (`rates.ts` `withTiers`, fill-never-overwrite),
+ * so for an enabled rung the price lookup below succeeds on every gateway by construction; and a rung
+ * that is disabled, or whose selector the Marketplace list cannot price, throws BEFORE the provider is
+ * ever consulted. There is no input that makes the argument change the answer.
+ *
+ * So this block does the only two honest things available:
+ *
+ *   1. It PINS THE UNOBSERVABILITY as a property. If someone makes the check bite — a per-provider
+ *      ladder, a gate on native pricing — these cases fail and demand a real behavioural pin instead
+ *      of leaving one to be written from memory.
+ *   2. It reads the resolution from the source, because that is the only instrument that can see the
+ *      argument being used at all. The behavioural half of the parameter — the price table it selects
+ *      — is driven with a stubbed rates seam in `tier-model-provider.spec.ts`, and the proxy call site
+ *      is pinned in `provider-select-wiring.spec.ts`.
+ */
+describe('getTierModel — the provider override, and what it can and cannot be observed to do', () => {
+  it.each(['Anthropic', 'KIE', 'Comet'] as const)('accepts an explicit %s and resolves the rung', (provider) => {
+    stubTierEnv();
+
+    expect(getTierModel('premium', {}, provider)).toBe('claude-opus-5');
+  });
+
+  /*
+   * THE PROPERTY, stated directly: an enabled rung resolves identically on every gateway, INCLUDING a
+   * gateway that does not price the model natively. That is `withTiers`' gap-fill, and it is why the
+   * argument cannot be caught by a behavioural test here. `claude-fable-5` is the live example — the
+   * owner's deploy runs it, and Anthropic bakes no row for it.
+   */
+  it('resolves the same model on every gateway, even one with no native row for it', () => {
+    stubTierEnv({ PREMIUM_MODEL: 'claude-fable-5' });
+
+    const answers = (['Anthropic', 'KIE', 'Comet'] as const).map((provider) => getTierModel('premium', {}, provider));
+
+    expect(answers).toEqual(['claude-fable-5', 'claude-fable-5', 'claude-fable-5']);
+  });
+
+  /*
+   * ⚠️ If this ever fails, the override has become observable and the comment above is out of date.
+   * Write the real behavioural pin then — do not relax this into `toBeDefined()`.
+   */
+  it('the override cannot change the answer while the rung is gap-filled into every table', () => {
+    stubTierEnv({ LLM_PROVIDER: 'Anthropic', PREMIUM_MODEL: 'claude-fable-5' });
+
+    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'Comet'));
+    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'KIE'));
+  });
+
+  /* Omitting the argument must behave exactly as it did before the parameter existed. */
+  it('falls back to LLM_PROVIDER when no override is given', () => {
+    stubTierEnv({ LLM_PROVIDER: 'KIE' });
+
+    expect(getTierModel('premium', {})).toBe(getTierModel('premium', {}, 'KIE'));
+  });
+
+  /*
+   * The walls run BEFORE the provider is consulted, which is the other half of why no override can be
+   * observed: a withdrawn rung refuses whoever asks, and the refusal names the FLAG rather than a
+   * price list, because that is the one thing the operator has to change.
+   */
+  it('a withdrawn rung refuses on every gateway, naming the flag and not the provider', () => {
+    stubTierEnv({ ENABLE_PREMIUM_MODEL: 'false' });
+
+    for (const provider of ['Anthropic', 'KIE', 'Comet'] as const) {
+      expect(() => getTierModel('premium', {}, provider)).toThrow(NotConfiguredError);
+      expect(() => getTierModel('premium', {}, provider)).toThrow(/ENABLE_PREMIUM_MODEL/);
+    }
+  });
+
+  /*
+   * SOURCE. `providerOverride ?? getPlatformProvider(context)` is a five-character deletion that no
+   * assertion above can see, and it silently returns the money path to validating the rung against
+   * `LLM_PROVIDER` while a different gateway serves and bills it.
+   */
+  it('resolves the provider from the override, falling back to getPlatformProvider', () => {
+    const body = configSource.slice(
+      configSource.indexOf('export function getTierModel('),
+      configSource.indexOf('export function getPremiumModel'),
+    );
+
+    expect(body).toMatch(/const provider = providerOverride \?\? getPlatformProvider\(context\)/);
+    expect(body, 'the price table must be indexed by that resolution, not re-derived').toMatch(
+      /providerRates\(context\)\[provider\]/,
+    );
+  });
+
+  it('declares the override as an optional third parameter, typed as a platform provider', () => {
+    expect(configSource).toMatch(
+      /export function getTierModel\(\s*id: PaidModelTierId,\s*context\?: unknown,\s*providerOverride\?: PlatformProviderName,?\s*\)/,
+    );
+  });
+
+  /* CONTROL — the slice above is a real function body and really ends where this thinks it does. */
+  it('CONTROL — the scanned body is getTierModel and contains its price check', () => {
+    const body = configSource.slice(
+      configSource.indexOf('export function getTierModel('),
+      configSource.indexOf('export function getPremiumModel'),
+    );
+
+    expect(body.length).toBeGreaterThan(500);
+    expect(body).toContain('paidModelTierDefinition(id)');
+    expect(body).toContain('if (!priced[model])');
+    expect(body).not.toContain('export function getPremiumModel');
   });
 });
 
@@ -482,7 +616,16 @@ describe('the requested rung: tier wins, the legacy boolean still works, BYOK sh
     const model = declaration(proxy, 'model');
 
     expect(model).toMatch(/const model =\s*byokModel \?\?/);
-    expect(model).toContain("tierDecision.tier === 'standard' ? standardModel : getTierModel(tierDecision.tier");
+
+    /*
+     * Whitespace-tolerant: the arguments grew (`getTierModel` gained the selected provider under
+     * `AUTO_MODEL_SELECT`) and prettier wrapped the line, which broke a literal `toContain` while the
+     * PRECEDENCE this test is named for was untouched. A source scan that fails on reformatting
+     * teaches people to loosen it rather than read it.
+     */
+    expect(model).toMatch(
+      /tierDecision\.tier === 'standard'\s*\?\s*standardModel\s*:\s*getTierModel\(tierDecision\.tier/,
+    );
   });
 
   /* The standard rung is the platform model — and BYOK skips resolving it at all (§4.6.1). */
@@ -829,7 +972,10 @@ describe('the route hands the ladder its inputs and reports the rung that RAN', 
   /* The settled numbers still ride the same annotation — the notice must not have displaced them. */
   it('keeps the settled credit numbers alongside the notice', async () => {
     routeMocks.runAgentGeneration.mockResolvedValue(
-      fakeGeneration({ notice: 'declined', settlement: Promise.resolve({ creditsCharged: 42, balanceAfter: 958 }) }),
+      fakeGeneration({
+        notice: 'declined',
+        settlement: Promise.resolve({ creditsCharged: 42, balanceAfter: 958, savings: null }),
+      }),
     );
 
     const credits = annotationFromStream(await postToAgentRoute({ tier: 'supermax' }), 'credits');

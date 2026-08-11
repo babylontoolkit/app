@@ -13,7 +13,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import { classNames } from '~/utils/classNames';
 import { sessionStore } from '~/lib/stores/session';
-import { compactAge, describeLedgerEntry, type LedgerTone } from '~/lib/billing/ledger-display';
+import { compactAge, describeLedgerEntry, formatSavings, type LedgerTone } from '~/lib/billing/ledger-display';
 
 interface MySubscription {
   planId: string;
@@ -30,6 +30,20 @@ interface LedgerHistoryRow {
   balanceAfter: number;
   note?: string;
   createdAt: string;
+
+  /** `creation` | `edit` | `repair` | `plan` — what the turn WAS (`generations.status_kind`). */
+  kind?: string;
+
+  /** Credits this turn's gateway saved against Anthropic list. Absent when there is nothing to claim. */
+  savedCredits?: number;
+}
+
+/** The headline savings figure and — inseparably — the scope it covers (`billing/ledger-view.ts`). */
+interface LedgerSavings {
+  savedCredits: number;
+  referenceCredits: number;
+  percent: number;
+  comparedRows: number;
 }
 
 /** Refunds stand out (fail-loud rule 5: a refund the user cannot find might as well not exist). */
@@ -46,6 +60,7 @@ export function CreditsIndicator() {
   const [open, setOpen] = useState(false);
   const [subscription, setSubscription] = useState<MySubscription | null>(null);
   const [history, setHistory] = useState<LedgerHistoryRow[] | null>(null);
+  const [savings, setSavings] = useState<LedgerSavings | null>(null);
 
   /*
    * Resolved only when the panel is actually opened. "Am I subscribed?" costs a Stripe API call, so it
@@ -64,8 +79,19 @@ export function CreditsIndicator() {
           return;
         }
 
-        const payload = data as { subscription: MySubscription | null; history?: LedgerHistoryRow[] };
+        const payload = data as {
+          subscription: MySubscription | null;
+          history?: LedgerHistoryRow[];
+          savings?: LedgerSavings;
+        };
         setSubscription(payload.subscription);
+
+        /*
+         * Server-computed, never derived here from the rows — the same rule as the balance. The client
+         * holds a page of the ledger, not the price tables, so any figure it worked out itself would be
+         * a second opinion about money sitting next to the first one.
+         */
+        setSavings(payload.savings ?? null);
 
         /*
          * The ledger history (SPEC §4.6, `spec/fail-loud.md` rule 5). This response always carried it;
@@ -145,13 +171,34 @@ export function CreditsIndicator() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-72 z-50 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg p-3">
+        <div className="absolute right-0 top-full mt-1 w-80 z-50 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg p-3">
           <div className="flex items-baseline justify-between mb-2">
             <span className="text-sm font-medium text-bolt-elements-textPrimary">
               {balance.toLocaleString()} credits
             </span>
             {!enforced && <span className="text-[10px] text-bolt-elements-textTertiary">not enforced</span>}
           </div>
+
+          {/*
+           * WHAT THE GATEWAY LADDER HAS BEEN WORTH (§4.2a, `billing/savings.ts`).
+           *
+           * Sits with the BALANCE rather than down in the history, because it is the same kind of fact:
+           * how much building this user has left. Credits are cost-proportional, so a cheaper gateway
+           * does not widen our margin — it is purchasing power the user got for free and could not see.
+           *
+           * ⚠️ The scope is printed WITH the number. These totals cover the page of ledger rows below,
+           * not the account's lifetime, and a bare "saved 1,240 credits" would be read as the latter —
+           * a claim the data does not support, on a panel whose whole value is that it can be trusted.
+           */}
+          {savings && savings.savedCredits > 0 && (
+            <p className="text-[11px] text-bolt-elements-icon-success mb-2">
+              Saved {formatSavings(savings)} vs full price
+              <span className="text-bolt-elements-textTertiary">
+                {' '}
+                · last {savings.comparedRows} {savings.comparedRows === 1 ? 'charge' : 'charges'}
+              </span>
+            </p>
+          )}
 
           {empty && enforced && (
             <p className="text-xs text-bolt-elements-icon-error mb-2">
@@ -269,8 +316,18 @@ export function CreditsIndicator() {
                             · {compactAge(entry.createdAt, new Date())}
                           </span>
                         </span>
-                        <span className={classNames('shrink-0 tabular-nums', TONE_CLASS[view.tone])}>
-                          {view.amount}
+                        <span className="shrink-0 flex items-baseline gap-1.5">
+                          {/*
+                           * The per-turn discount, beside the charge it discounts. Its own element rather
+                           * than text appended to the label, so the label keeps the `truncate` — a long
+                           * label must eat itself, never the money figure next to it.
+                           */}
+                          {entry.savedCredits ? (
+                            <span className="text-bolt-elements-icon-success tabular-nums">
+                              saved {entry.savedCredits.toLocaleString()}
+                            </span>
+                          ) : null}
+                          <span className={classNames('tabular-nums', TONE_CLASS[view.tone])}>{view.amount}</span>
                         </span>
                       </div>
                     );

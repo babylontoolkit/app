@@ -34,9 +34,19 @@ export interface SearchBillingContext {
 /** Debit the flat search toll for a billable search. Best-effort, non-throwing. Returns credits charged. */
 async function debitSearch(query: string, billing: SearchBillingContext): Promise<number> {
   try {
-    await ensureMarketPrices(billing.context);
+    await ensureMarketPrices('KIE', billing.context);
 
-    const credits = searchCreditsFor(activeMarketPrices(), BAKED_MARKET_PRICES.search!);
+    /*
+     * ⚠️ Explicitly the KIE list, which is byte-identical to the behaviour before the price store
+     * became per-provider — not an oversight.
+     *
+     * The search toll is a PLATFORM number (a flat credit charge for a web search) that happens to
+     * live inside a marketplace price list, so it does not belong to a gateway at all. Anchoring it
+     * to the list it has always been read from keeps one answer; letting it follow `LLM_PROVIDER`
+     * would make the price of a search change when the operator switched LLM vendors, which is a
+     * surprise with no reason behind it. The baked fallback below covers a list that omits it.
+     */
+    const credits = searchCreditsFor(activeMarketPrices('KIE'), BAKED_MARKET_PRICES.search!);
 
     if (credits <= 0) {
       return 0;

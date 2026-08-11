@@ -113,7 +113,14 @@ describe('Build this plan', () => {
      * 🔴 The load-bearing half. Without the override this posts `chatMode: 'discuss'` — a second
      * read-only turn that reads the plan and cannot act on it, billed in full.
      */
-    expect(options).toEqual({ body: { chatMode: 'build' } });
+    /*
+     * `chatMode` asserted by NAME rather than by whole-object equality: since 2026-08-10 every send
+     * also carries the live project/chat identity (`~/lib/chat/turn-identity.ts`), so an exact match
+     * would fail for a reason that has nothing to do with what this test is about. The mode is the
+     * load-bearing field and it is still pinned exactly.
+     */
+    expect(options.body.chatMode).toBe('build');
+    expect(options.body).toHaveProperty('projectId');
   });
 
   it('shows the plan file on the caption, so the user can see what will be built', () => {
@@ -151,7 +158,15 @@ describe('Build & Apply — the same override, pinned at last', () => {
     const [message, options] = append.mock.calls[0];
 
     expect(message.content).toContain('Apply the changes you just proposed');
-    expect(options).toEqual({ body: { chatMode: 'build' } });
+
+    /*
+     * `chatMode` asserted by NAME rather than by whole-object equality: since 2026-08-10 every send
+     * also carries the live project/chat identity (`~/lib/chat/turn-identity.ts`), so an exact match
+     * would fail for a reason that has nothing to do with what this test is about. The mode is the
+     * load-bearing field and it is still pinned exactly.
+     */
+    expect(options.body.chatMode).toBe('build');
+    expect(options.body).toHaveProperty('projectId');
   });
 
   /*

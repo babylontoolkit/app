@@ -14,6 +14,7 @@ import { classNames } from '~/utils/classNames';
 import { contextHealth, contextPanelOpen, contextStatsStore } from '~/lib/stores/context-stats';
 import { IconButton } from '~/components/ui/IconButton';
 import { EFFORT_LABELS, baseEffortStore, effortPanelOpen } from '~/lib/stores/effort';
+import { formatSavings } from '~/lib/billing/ledger-display';
 
 const DOT_COLORS = {
   green: 'bg-green-500',
@@ -103,6 +104,42 @@ export function ContextIndicator() {
               <div className="flex justify-between">
                 <span className="text-bolt-elements-textSecondary">Model</span>
                 <span>{stats.model}</span>
+              </div>
+            )}
+            {/*
+             * WHICH GATEWAY SERVED IT. Directly under the model, because with `AUTO_MODEL_SELECT` the two
+             * are independent: the platform picks a gateway per turn from a preference ladder, and the
+             * SAME model bills materially differently on each (measured: Premium settled 1,017 credits on
+             * Anthropic against ~407 at KIE-shaped rates). Without this the cost line above can move
+             * between two identical-looking turns with nothing on screen explaining why.
+             */}
+            {stats.provider && (
+              <div className="flex justify-between">
+                <span className="text-bolt-elements-textSecondary">Provider</span>
+                <span>{stats.provider}</span>
+              </div>
+            )}
+            {/*
+             * WHAT THE GATEWAY SAVED, IN CREDITS (`billing/savings.ts`).
+             *
+             * Credits are cost-proportional, so a cheaper gateway is not our margin — it is the user's
+             * pack going further, and it was previously invisible: the cost line above moved between two
+             * identical-looking turns with nothing explaining it. Directly under that line, because it
+             * only means anything as a comparison against the number it discounts.
+             *
+             * `full_price` is rendered, not hidden. A row that appears only when there IS a discount
+             * teaches the user that its absence means "unknown", when the honest reading of an Anthropic
+             * turn is "there was no cheaper option today" — and silence there would let a discount be
+             * implied by omission on every turn that did not get one.
+             */}
+            {stats.savings && (
+              <div className="flex justify-between">
+                <span className="text-bolt-elements-textSecondary">Saved vs full price</span>
+                {stats.savings.basis === 'saved' ? (
+                  <span className="text-bolt-elements-icon-success">{formatSavings(stats.savings)}</span>
+                ) : (
+                  <span className="text-bolt-elements-textTertiary">full price</span>
+                )}
               </div>
             )}
             {/*

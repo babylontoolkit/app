@@ -38,6 +38,7 @@ import {
   shouldRescueUnproductiveTurn,
   UNPRODUCTIVE_RESCUE_PROMPT,
 } from './unproductive';
+import { ACTION_CLOSE_TAG, ACTION_OPEN_TAG, createTagCounter, isTruncatedAction } from './action-tags';
 import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './creation-completion';
 import type { TurnOutcomeFacts } from '~/lib/agent/turn-outcome';
 import { createFileTools } from './file-tools';
@@ -51,7 +52,7 @@ import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getModelTiers } from '~/lib/.server/billing/rates';
-import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
+import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
 import { parseCreationPhaseId } from '~/lib/agent/creation-plan';
@@ -62,7 +63,17 @@ import {
   type ModelTierDecisionReason,
   type ModelTierId,
 } from '~/lib/.server/billing/premium';
-import { getPlatformConfig, getPlatformModel, getTierModel, NotConfiguredError, requirePlatformKey } from './config';
+import {
+  getPlatformConfig,
+  getPlatformModel,
+  providersToPrice,
+  getTierModel,
+  NotConfiguredError,
+  requirePlatformKey,
+  type PlatformProviderName,
+} from './config';
+import { recordProviderFailure, recordProviderSuccess } from './provider-select';
+import { describeSavings, type Savings } from '~/lib/.server/billing/savings';
 import { createSkillTools, type SkillToolContext } from './tools';
 import { toolPolicyForTurn } from './tool-policy';
 import { mediaProtocolNote } from './media-note';
@@ -80,7 +91,7 @@ import { createWebFetchTool } from './web-fetch-tool';
 import { createWebSearchTool } from './web-search-tool';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { createMediaTools, type MediaTaskEvent } from './media-tools';
-import { KieMediaProvider } from '~/lib/.server/media/kie-client';
+import { resolveMediaProvider } from '~/lib/.server/media/provider';
 import { getObjectStore } from '~/lib/.server/storage';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
 import { cancelGenerationToolCalls } from './mcp-relay';
@@ -337,6 +348,21 @@ type SkillTools = ReturnType<typeof createSkillTools>;
  */
 export type AgentChunk = { type: 'text'; value: string } | { type: 'reasoning'; value: string };
 
+/**
+ * What a settled turn cost, and what it would have cost at full price.
+ *
+ * `savings` rides here rather than being recomputed by the route because it must be derived from the
+ * SAME usage and provider settlement billed from — a second derivation is a second chance to disagree
+ * with the ledger, and the number is displayed next to the charge it is describing.
+ */
+export interface AgentSettlement {
+  creditsCharged: number;
+  balanceAfter: number;
+
+  /** Null when there is nothing honest to say — see `describeSavings`. */
+  savings: Savings | null;
+}
+
 export interface AgentGeneration {
   /**
    * The visible output. The server-side tool loop — including a forced continuation when the
@@ -354,6 +380,21 @@ export interface AgentGeneration {
 
   promptVersionId: string;
   model: string;
+
+  /**
+   * The GATEWAY that served this turn — `KIE`, `Comet` or `Anthropic` (§4.2a).
+   *
+   * Recorded for the same reason as `modelTier` beside it: once `AUTO_MODEL_SELECT` can pick a rung
+   * per turn, "which model ran" no longer implies "who ran it", and the two gateways price the same
+   * model very differently (measured: Premium settled 1,017 credits on Anthropic against ~407 at
+   * KIE-shaped rates). It is the field that makes a surprising bill traceable to a choice, and it is
+   * what `/context` shows the user — a turn whose price moved because the gateway moved must be able
+   * to say so.
+   *
+   * ⚠️ ALWAYS the provider that actually served, never `LLM_PROVIDER`: it is read from the same
+   * `config.provider` that `settleGeneration` bills from, so the number and the label cannot disagree.
+   */
+  provider: PlatformProviderName;
 
   /**
    * The rung of the model tier ladder that actually RAN, and why (§4.6.1a).
@@ -435,7 +476,7 @@ export interface AgentGeneration {
   outcome: Promise<TurnOutcomeFacts>;
 
   /** Resolves with what we charged, once settled. Drives the client's credit badge (§4.6). */
-  settlement: Promise<{ creditsCharged: number; balanceAfter: number } | null>;
+  settlement: Promise<AgentSettlement | null>;
 
   /** e.g. "your Pro subscription lapsed, so this build used credits" (§4.6.1). Never an error. */
   notice?: string;
@@ -622,7 +663,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * doorway they share. A failed refresh falls back to the last-loaded/baked list inside — it can
    * never throw and never block a generation.
    */
-  await ensureMarketPrices(request.context);
+  await Promise.all(
+    [...new Set(providersToPrice(request.context).flatMap((platform) => marketPriceProvidersFor(platform)))].map((p) =>
+      ensureMarketPrices(p, request.context),
+    ),
+  );
 
   /*
    * Same doorway: refresh the pinned Synty asset library so the prompt assembly below can read it
@@ -811,7 +856,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * model is a real config fault, and having it surface for some users and not others is how it stays
    * unfixed.
    */
-  const standardModel = byokModel ?? getPlatformModel(request.context);
+  const standardModel = byokModel ?? getPlatformModel(request.context, config.provider);
   const tiers = getModelTiers(standardModel, request.context);
 
   /*
@@ -844,7 +889,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   });
 
   const model =
-    byokModel ?? (tierDecision.tier === 'standard' ? standardModel : getTierModel(tierDecision.tier, request.context));
+    byokModel ??
+    (tierDecision.tier === 'standard'
+      ? standardModel
+      : getTierModel(tierDecision.tier, request.context, config.provider));
 
   /**
    * Which wire this generation is on, derived from the model id (`model-families.ts`).
@@ -1196,6 +1244,24 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     }
   };
 
+  /*
+   * 🔴 NO PROJECT ID MEANS THREE TOOL FAMILIES VANISH, SO SAY SO.
+   *
+   * `previewTools`, `mediaTools` and the MCP relay tools are all gated on this one field. A turn that
+   * arrives without it runs with none of them, bills normally, and throws nothing — measured live
+   * 2026-08-10, where a reload beat the render commit and the model reported "I do not have
+   * evaluate_in_game this turn" on a project that was open on screen (`~/lib/chat/turn-identity.ts`).
+   *
+   * The client now sends the LIVE store value on every path, so this should not happen. Which is
+   * exactly why it is logged rather than tolerated: if it ever appears again, the fix is upstream and
+   * this line is the only thing that would show it.
+   */
+  if (!request.projectId) {
+    logger.warn(
+      `Generation ${generationId} has no projectId — preview, media and MCP tools are all unavailable for this turn`,
+    );
+  }
+
   const previewTools = request.projectId
     ? createPreviewTools({
         generationId,
@@ -1225,12 +1291,26 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const startedMedia: MediaTaskEvent[] = [];
   mediaListeners.push((event) => startedMedia.push(event));
 
+  /*
+   * Whether media tools exist at all is the MEDIA provider's key, not the LLM provider's (§4.16).
+   * This gated on `config.kieApiKey`, which is the same question only for as long as KIE is the only
+   * gateway that renders: a Comet media deploy would have advertised no media tools at all while
+   * holding a working key, and the model would have drawn the art in CSS — the §4.16 pathology where
+   * a capability that exists is unreachable, announced only by the model saying so.
+   *
+   * 🔴 `resolveMediaProvider`, never `mediaProviderFor`, because this is STRAIGHT-LINE code on the
+   * hot path: a media provider with no client, or a typo'd `MEDIA_PROVIDER`, must cost the turn its
+   * media tools and nothing else. Resolving it eagerly here returned HTTP 500 for the whole
+   * generation on a Comet box — no chat, because image generation was unavailable.
+   */
+  const mediaProvider = resolveMediaProvider(request.context);
+
   const mediaTools =
-    request.projectId && config.kieApiKey
+    request.projectId && mediaProvider
       ? createMediaTools({
           userId: user.id,
           projectId: request.projectId,
-          provider: new KieMediaProvider(config.kieApiKey),
+          provider: mediaProvider,
           objectStore: getObjectStore(request.context),
           context: request.context,
           emit: (event) => {
@@ -1848,9 +1928,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
         if (!emittedAction) {
           const window = actionScanTail + part.textDelta;
-          emittedAction = window.includes(ACTION_TAG);
-          actionScanTail = window.slice(-(ACTION_TAG.length - 1));
+          emittedAction = window.includes(ACTION_OPEN_TAG);
+          actionScanTail = window.slice(-(ACTION_OPEN_TAG.length - 1));
         }
+
+        /* Opens vs closes — an excess of opens means the stream stopped mid-action (see above). */
+        openedActions.push(part.textDelta);
+        closedActions.push(part.textDelta);
 
         if (!emittedArtifact) {
           const window = artifactScanTail + part.textDelta;
@@ -1914,8 +1998,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     resolveUsage = resolve;
   });
 
-  let resolveSettlement: (settlement: { creditsCharged: number; balanceAfter: number } | null) => void;
-  const settlementPromise = new Promise<{ creditsCharged: number; balanceAfter: number } | null>((resolve) => {
+  let resolveSettlement: (settlement: AgentSettlement | null) => void;
+  const settlementPromise = new Promise<AgentSettlement | null>((resolve) => {
     resolveSettlement = resolve;
   });
 
@@ -1970,12 +2054,29 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * reader was the rescue (worst case: one extra pass); NOT harmless now that `isFailedBuildTurn`
    * refunds on it, where the same miss gives a completed build away for free.
    *
-   * The tail carries `ACTION_TAG.length - 1` chars between deltas because the provider is free to split
+   * The tail carries `ACTION_OPEN_TAG.length - 1` chars between deltas because the provider is free to split
    * `<boltAction` across two of them, and a containment test on each delta alone would never see it.
    */
-  const ACTION_TAG = '<boltAction';
   let emittedAction = false;
   let actionScanTail = '';
+
+  /*
+   * 🔴 AND DID EVERY ACTION IT OPENED ACTUALLY CLOSE?
+   *
+   * The action runner executes a CLOSED action; an unclosed one writes no file. Measured live
+   * 2026-08-10 (`gen_msn0zl5h_44wpni`): one `<boltArtifact`, one `<boltAction`, ZERO closes of either,
+   * ending mid-diff on `>>>>>>> REPLACE`. 240 credits, no file, an artifact card with no rows under it
+   * — and no rescue, because `emittedAction` was true on the strength of the opening tag alone.
+   *
+   * Counted separately from `emittedAction` rather than replacing it: `creation-completion.ts` reads
+   * that flag with the meaning "it emitted ONE action", and quietly changing what it means would move
+   * a second decision nobody re-checked.
+   *
+   * Both tags need their own scan tail — a provider may split either across deltas, and sharing one
+   * tail between two different-length needles silently truncates the shorter one's lookback.
+   */
+  const openedActions = createTagCounter(ACTION_OPEN_TAG);
+  const closedActions = createTagCounter(ACTION_CLOSE_TAG);
 
   /*
    * Did the model COMMIT to producing files? An opened artifact is the strongest evidence a turn was a
@@ -2076,6 +2177,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           }
 
           retried = true;
+
+          /*
+           * THE GATEWAY IS THE SUSPECT HERE, AND ONLY HERE (`provider-select.ts`).
+           *
+           * `shouldRetryGeneration` has already established the narrow thing the `AUTO_MODEL_SELECT`
+           * cooldown is about: the provider broke BEFORE producing a single billed token. That is a
+           * fact about the gateway, unlike the `failed` flag below it — a generation can fail for a
+           * zod violation, an unproductive turn or a refusal while the gateway behaved perfectly, and
+           * cooling a healthy rung on that evidence moves every following turn onto a COLD prefix
+           * (~8x one prefix in cache writes). Wrong here is expensive and throws nothing, so the
+           * signal stays exactly as narrow as the evidence.
+           *
+           * No-op when the ladder is off: nothing reads the map, and it is bounded by the provider
+           * count either way.
+           */
+          recordProviderFailure(config.provider, Date.now());
 
           /*
            * Tell the liveness panel this is a RETRY, not a think (`heartbeat.ts` `AgentStatusActivity`).
@@ -2240,6 +2357,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           aborted: Boolean(request.abortSignal?.aborted),
           alreadyContinued: forcedContinuation,
           emittedAction,
+
+          /*
+           * Cut off mid-action: it opened more actions than it closed, so the runner executed the
+           * unclosed one never, and the file was not written. See `truncatedAction` in
+           * `unproductive.ts` for the live measurement this closes.
+           */
+          truncatedAction: isTruncatedAction(openedActions.count, closedActions.count),
           toolCalls: toolCallCount,
           textChars: visibleTextChars,
           outTokens: totals.completionTokens,
@@ -2411,6 +2535,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       resolveUsage(totals);
 
       /*
+       * A gateway that STREAMED is a healthy gateway, whatever became of the turn afterwards
+       * (`provider-select.ts`). Deliberately keyed on billed output rather than on `failed`, for the
+       * mirror-image reason the failure above is keyed on the retry: our own downstream failures are
+       * not evidence against the provider, and leaving a stale cooldown standing would keep traffic
+       * off the cheapest rung — and off its warm prefix — long after it recovered.
+       */
+      if (totals.completionTokens > 0) {
+        recordProviderSuccess(config.provider);
+      }
+
+      /*
        * Resolved in the same `finally` as the usage, so it can never be missed on an error path — a
        * turn that failed is exactly one whose outcome the user most needs told.
        */
@@ -2470,11 +2605,30 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         );
       }
 
+      const chargedAfterRefund = settlement && !failed ? settlement.creditsCharged : 0;
+
       resolveSettlement(
         settlement
           ? {
-              creditsCharged: failed ? 0 : settlement.creditsCharged,
+              creditsCharged: chargedAfterRefund,
               balanceAfter: failed ? settlement.balanceAfter + settlement.creditsCharged : settlement.balanceAfter,
+
+              /*
+               * What the gateway saved the user on THIS turn (`billing/savings.ts`).
+               *
+               * Derived from `chargedAfterRefund`, not from `settlement.creditsCharged`: a failed turn
+               * is refunded to zero, and a "you saved 300 credits" line beside a charge that was handed
+               * straight back describes a transaction that did not happen. `describeSavings` returns
+               * null for a zero charge, so the refunded case reports nothing by construction.
+               */
+              savings: describeSavings({
+                usage: totals,
+                model,
+
+                /* The raw USD settlement just computed — the same number recorded on the row. */
+                actualCostUsd: settlement.rawCostUsd,
+                creditsCharged: chargedAfterRefund,
+              }),
             }
           : null,
       );
@@ -2651,6 +2805,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     generationId,
     promptVersionId: promptVersion.id,
     model,
+
+    // The gateway that served the turn — the same value `settleGeneration` bills from.
+    provider: config.provider,
 
     /*
      * The rung that actually RAN, plus why. Recorded because a tier used to be inferable only from the

@@ -132,6 +132,63 @@ regression hides *inside* the machinery built to catch the last one.
 | Default-deny over every ledger-debiting call site | `billing/money-paths.spec.ts` | A debit path shipping with no refund, no alert and no written excuse — the moment it lands |
 | `RESCUE_MARKER_RATE` / `REFUND_RATE` rolling windows | `monitoring/paid-path-rates.ts` | A rescue quietly absorbing an upstream regression; a subsystem refunding most of its work |
 | Rescue-marker counts on the usage panel | `admin/usage-report.ts` → Admin tab | Rescued turns, which look completely ordinary in every other number on the page |
+| Truncated-action rescue (opens > closes) | `agent/action-tags.ts` + `unproductive.ts` | A turn cut off mid-`<boltAction>`: artifact card with no rows, no file written, billed in full |
+
+## 🔴 THE GUARD THAT WAS DISARMED BY THE THING IT GUARDS AGAINST (2026-08-10)
+
+Reported by the owner, for the third or fourth time, as the thing that would stop them shipping:
+*"I was supposed to be fixing the pac man player, but just sitting there. THAT IS SO BAD FOR PAID
+CREDITS — the user paid for that work and nothing."*
+
+**Measured, `gen_msn0zl5h_44wpni`:** 44,582 prompt + 13,436 completion tokens, **240 credits
+($0.696)**, `status: completed`, no refund, no rescue. The saved transcript's last assistant message:
+
+```
+<boltArtifact  ×1     </boltArtifact>  ×0
+<boltAction    ×1     </boltAction>    ×0
+```
+
+…ending mid-diff on the literal text `>>>>>>> REPLACE`. **The action runner only executes a CLOSED
+action**, so no file was written. On screen: an artifact card with a title and nothing under it —
+visually identical to "still working", except the turn was over.
+
+**Why nothing caught it.** `shouldRescueUnproductiveTurn` opened with
+`if (aborted || alreadyContinued || emittedAction) return false`, and `emittedAction` is
+`text.includes('<boltAction')` — the **opening** tag. So the guard against *"announced work and did
+nothing"* was switched off **by the announcement itself**. Every other signal agreed with it: 7,695
+chars is long, the turn called a tool, and the prose was confident. The one mechanical fact that
+disagreed — that the action never closed — was the one nothing measured.
+
+**Fixed** with an explicit `truncatedAction` (opens > closes), checked **before** the `emittedAction`
+bail. A truncated action is the strongest possible rescue signal, because no interpretation is
+involved: the model did not choose to stop.
+
+### Never regress, each silent
+
+- **Order is load-bearing.** `truncatedAction` must be tested BEFORE `emittedAction`. Moving it after
+  restores the bug exactly, and every other test in `unproductive.spec.ts` still passes
+  (mutation-verified: the ordering swap fails 3, and rescuing on any emitted action fails 4).
+- **Count closes, never opens.** `emittedAction` is deliberately left alone and NOT redefined —
+  `creation-completion.ts` reads it meaning "it emitted ONE action", and silently changing that would
+  move a second decision nobody re-checked.
+- **`>` and not `!==`.** A stray close with no open is a harmless parser oddity; treating it as
+  truncation rescues turns whose files all landed, doubling the cost of healthy builds.
+- **The counter lives in `action-tags.ts`, not inline in `proxy.ts`.** It shipped inline, where no test
+  could reach it — the `execution-queue.ts` lesson ("a behaviour no test can reach is how a one-line
+  bug survives"). It carries `needle.length - 1` chars of lookback because a provider may split a tag
+  across deltas; get that wrong and the count is silently low, which reads as truncation on **every**
+  healthy build and buys a second billed pass on all of them.
+
+### The second-order finding
+
+This is also where the stray `=======` / `>>>>>>> REPLACE` conflict markers in shipped source come
+from (`RaceHud.tsx`, 2026-08-09, which broke `/play` entirely and took two turns to repair). A
+truncated `type="edit"` leaves SEARCH/REPLACE syntax where code should be. **The same defect that
+silently bills for nothing also silently corrupts files** — so this guard is not only a money fix.
+
+⚠️ **NOT yet driven live.** The predicate and the counter are unit-tested and mutation-verified against
+the real transcript's chunking, but the end-to-end path — truncation → rescue → files landed — has not
+been observed on a live generation.
 
 ## The money-path inventory (Stage A output, 2026-07-25)
 

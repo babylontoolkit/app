@@ -1,0 +1,17 @@
+provider=Comet  model=claude-sonnet-5  family=claude  requests=12  delay=3000ms  prefix≈3375 tokens
+
+  #   ms      write     read    fresh   verdict
+   1   7948          0     5420        6   HIT
+   2  12523          0     5420        6   HIT
+   3  12473          0     5420        6   HIT
+   4   2133          0     5420        6   HIT
+   5   2325          0     5420        6   HIT
+   6   2525          0     5420        6   HIT
+   7   2502          0     5420        6   HIT
+   8   2430          0     5420        6   HIT
+   9  11969          0     5420        6   HIT
+  10   2314          0     5420        6   HIT
+  11   4465          0     5420        6   HIT
+  12   6128          0     5420        6   HIT
+
+12/12 measured requests hit the cache (of 12 attempted). Requests 2..N SHOULD all hit — request 1 is the write.

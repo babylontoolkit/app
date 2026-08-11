@@ -26,11 +26,75 @@ import { getObjectStore } from '~/lib/.server/storage';
 import type { MarketPriceList } from './market-prices';
 import { validateMarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
+import { BAKED_COMET_PRICES } from './baked-comet-prices';
 
 const logger = createScopedLogger('market-price-store');
 
-const VERSION_PREFIX = 'pricing/kie-market/versions';
-const POINTER_KEY = 'pricing/kie-market/active.json';
+/**
+ * Which gateway a price list belongs to.
+ *
+ * ⚠️ **Declared here rather than imported from `agent/config.ts`, deliberately.** That module's
+ * `PlatformProviderName` is the same set minus `Anthropic`, but importing it would close the cycle
+ * `config -> rates -> market-price-store -> config`. `billing.spec.ts` asserts the two lists agree
+ * instead, which is the same guarantee without the edge — the identical trade `model-families.ts`
+ * makes to stay client-safe.
+ *
+ * `Anthropic` is absent because it is not a marketplace: Anthropic's rates are first-party and live
+ * in `MODEL_RATES`, hand-maintained in code. There is nothing for an operator to promote.
+ */
+export const MARKET_PRICE_PROVIDERS = ['KIE', 'Comet'] as const;
+export type MarketPriceProvider = (typeof MARKET_PRICE_PROVIDERS)[number];
+
+/**
+ * The storage slug per provider.
+ *
+ * 🔴 **`KIE` keeps `kie` byte-identically, and that is load-bearing.** Every promoted version and
+ * every pointer already in a deployed store lives under `pricing/kie-market/...`; renaming the slug
+ * would strand them — the pointer read would miss, the baked list would quietly take over, and an
+ * operator's carefully promoted prices would stop being the ones charged with nothing throwing. A
+ * migration was avoidable here, so it was avoided.
+ */
+const STORE_SLUG: Record<MarketPriceProvider, string> = {
+  KIE: 'kie',
+  Comet: 'comet',
+};
+
+/** The baked fallback per provider — real, current-at-build pricing, never a zero rate. */
+const BAKED_BY_PROVIDER: Record<MarketPriceProvider, MarketPriceList> = {
+  KIE: BAKED_MARKET_PRICES,
+  Comet: BAKED_COMET_PRICES,
+};
+
+/**
+ * Every marketplace list a generation on `platformProvider` prices from — and there are usually TWO.
+ *
+ * 🔴 KIE's list is ALWAYS in the answer, on every provider, because `getModelTier` prices the §4.6.1a
+ * paid rungs from it regardless of who is serving. So an Anthropic or Comet deploy that refreshed
+ * only "its own" list would price every premium rung from KIE's BAKED table forever — the operator's
+ * promoted rung prices silently ignored, with nothing throwing and the credit total moving in
+ * whichever direction the stale numbers happen to point.
+ *
+ * `Anthropic` contributes nothing of its own (its rates are first-party, in `MODEL_RATES`), so it
+ * yields just KIE. A marketplace provider yields itself plus KIE, de-duplicated.
+ *
+ * Takes a plain string rather than `PlatformProviderName` to keep this module free of the
+ * `config -> rates -> market-price-store` import cycle.
+ */
+export function marketPriceProvidersFor(platformProvider: string): MarketPriceProvider[] {
+  const own = MARKET_PRICE_PROVIDERS.find((name) => name === platformProvider);
+
+  return own && own !== 'KIE' ? [own, 'KIE'] : ['KIE'];
+}
+
+/** The immutable-versions prefix for a provider. */
+function versionPrefix(provider: MarketPriceProvider): string {
+  return `pricing/${STORE_SLUG[provider]}-market/versions`;
+}
+
+/** The "which version is live" pointer for a provider. */
+function pointerKey(provider: MarketPriceProvider): string {
+  return `pricing/${STORE_SLUG[provider]}-market/active.json`;
+}
 
 /** How long a loaded list is trusted before the next ensure re-reads the pointer. */
 const CACHE_TTL_MS = 60_000;
@@ -50,8 +114,8 @@ export interface MarketPriceVersionListing {
   storedAt?: string;
 }
 
-export function versionKey(versionId: string): string {
-  return `${VERSION_PREFIX}/${versionId.replace(/[^a-zA-Z0-9._-]/g, '__')}.json`;
+export function versionKey(provider: MarketPriceProvider, versionId: string): string {
+  return `${versionPrefix(provider)}/${versionId.replace(/[^a-zA-Z0-9._-]/g, '__')}.json`;
 }
 
 /*
@@ -68,60 +132,92 @@ interface CacheState {
   loadedAt: number;
 }
 
-let cache: CacheState | undefined;
+/**
+ * One cache slot PER PROVIDER.
+ *
+ * 🔴 It was a single module-level `cache`, which is the same object whichever provider asked. With
+ * two marketplaces that is a silent cross-pricing bug: a media lookup on one provider would settle
+ * against whichever list the last `ensureMarketPrices` happened to load — and both lists price
+ * `claude-sonnet-5`, at DIFFERENT rates, so the wrong answer looks exactly like the right one.
+ */
+const caches = new Map<MarketPriceProvider, CacheState>();
 
 /**
- * The active price list, synchronously. Baked until `ensureMarketPrices` has loaded a promotion.
+ * The active price list for a provider, synchronously. Baked until `ensureMarketPrices` has loaded a
+ * promotion for that provider.
  *
  * This is THE read every synchronous money-path consumer uses (`billing/rates.ts`). It can never
- * throw and never return a partial list — the cache only ever holds a list that passed validation.
+ * throw and never return a partial list — a cache slot only ever holds a list that passed validation.
+ *
+ * ⚠️ **`provider` is REQUIRED and deliberately has no default.** An implicit "the configured
+ * provider's list" would make the answer depend on `LLM_PROVIDER` at the moment of the call, so a
+ * MEDIA lookup would silently price against the LLM provider's list the day the two are configured
+ * apart (which T7's `MEDIA_PROVIDER` makes an ordinary state). Same rule, same reason, as
+ * `ratesFor`'s required `provider` argument.
  */
-export function activeMarketPrices(): MarketPriceList {
-  return cache?.list ?? BAKED_MARKET_PRICES;
+export function activeMarketPrices(provider: MarketPriceProvider): MarketPriceList {
+  return caches.get(provider)?.list ?? BAKED_BY_PROVIDER[provider];
 }
 
 /** Which version is live — null means the baked fallback. Surfaced in the admin panel, never guessed. */
-export function activeMarketPriceVersionId(): string | null {
-  return cache?.versionId ?? null;
+export function activeMarketPriceVersionId(provider: MarketPriceProvider): string | null {
+  return caches.get(provider)?.versionId ?? null;
 }
 
-/** Tests + promotion use this; nothing else should. */
-export function invalidateMarketPricesCache(): void {
-  cache = undefined;
+/** Tests + promotion use this; nothing else should. Omit the provider to clear every slot. */
+export function invalidateMarketPricesCache(provider?: MarketPriceProvider): void {
+  if (provider) {
+    caches.delete(provider);
+  } else {
+    caches.clear();
+  }
 }
 
 /**
- * Refresh the cache from storage if it is stale. Called at async entry points (agent proxy, admin
- * routes, /api/me); everything downstream reads synchronously.
+ * Refresh a provider's cache from storage if it is stale. Called at async entry points (agent proxy,
+ * admin routes, /api/me); everything downstream reads synchronously.
+ *
+ * ⚠️ The provider is REQUIRED, exactly as `activeMarketPrices`' is. It briefly carried a `= 'KIE'`
+ * default, which is the implicit-provider shape this layer exists to forbid: a caller that forgets
+ * warms one gateway's list and then reads another's, so the first synchronous price lookup after it
+ * answers from a stale or baked table with nothing thrown. `context` stays optional and therefore
+ * second, so every call site has to state the provider by position.
  */
-export async function ensureMarketPrices(context?: unknown): Promise<MarketPriceList> {
-  if (cache && Date.now() - cache.loadedAt < CACHE_TTL_MS) {
-    return cache.list;
+export async function ensureMarketPrices(provider: MarketPriceProvider, context?: unknown): Promise<MarketPriceList> {
+  const cached = caches.get(provider);
+
+  if (cached && Date.now() - cached.loadedAt < CACHE_TTL_MS) {
+    return cached.list;
   }
 
   try {
     const store = getObjectStore(context);
-    const loaded = await readActiveList(store);
+    const loaded = await readActiveList(store, provider);
 
-    cache = { ...loaded, loadedAt: Date.now() };
+    caches.set(provider, { ...loaded, loadedAt: Date.now() });
   } catch (error) {
-    logger.warn(`Could not load the promoted price list; the baked list stands: ${(error as Error).message}`);
+    logger.warn(
+      `Could not load the promoted ${provider} price list; the baked list stands: ${(error as Error).message}`,
+    );
 
     // Cache the fallback too — a broken store must not be re-probed on every generation.
-    cache = { list: BAKED_MARKET_PRICES, versionId: null, loadedAt: Date.now() };
+    caches.set(provider, { list: BAKED_BY_PROVIDER[provider], versionId: null, loadedAt: Date.now() });
   }
 
-  return cache.list;
+  return caches.get(provider)!.list;
 }
 
-async function readActiveList(store: ObjectStore): Promise<{ list: MarketPriceList; versionId: string | null }> {
-  const pointer = await readPointer(store);
+async function readActiveList(
+  store: ObjectStore,
+  provider: MarketPriceProvider,
+): Promise<{ list: MarketPriceList; versionId: string | null }> {
+  const pointer = await readPointer(store, provider);
 
   if (!pointer) {
-    return { list: BAKED_MARKET_PRICES, versionId: null };
+    return { list: BAKED_BY_PROVIDER[provider], versionId: null };
   }
 
-  const list = await loadVersion(store, pointer.versionId);
+  const list = await loadVersion(store, provider, pointer.versionId);
 
   if (!list) {
     /*
@@ -129,8 +225,11 @@ async function readActiveList(store: ObjectStore): Promise<{ list: MarketPriceLi
      * the fallback for now, but do NOT delete or repoint anything — that is the admin's call to make
      * with the version history in front of them.
      */
-    logger.error(`Active price pointer names ${pointer.versionId}, which is missing or invalid; baked list stands.`);
-    return { list: BAKED_MARKET_PRICES, versionId: null };
+    logger.error(
+      `Active ${provider} price pointer names ${pointer.versionId}, which is missing or invalid; baked list stands.`,
+    );
+
+    return { list: BAKED_BY_PROVIDER[provider], versionId: null };
   }
 
   return { list, versionId: pointer.versionId };
@@ -142,8 +241,11 @@ async function readActiveList(store: ObjectStore): Promise<{ list: MarketPriceLi
  * ------------------------------------------------------------------------------------------------
  */
 
-export async function readPointer(store: ObjectStore): Promise<MarketPricePointer | null> {
-  const bytes = await store.get(POINTER_KEY);
+export async function readPointer(
+  store: ObjectStore,
+  provider: MarketPriceProvider,
+): Promise<MarketPricePointer | null> {
+  const bytes = await store.get(pointerKey(provider));
 
   if (!bytes) {
     return null;
@@ -159,8 +261,12 @@ export async function readPointer(store: ObjectStore): Promise<MarketPricePointe
 }
 
 /** A stored version's list, revalidated on read — bytes at rest are not trusted to still be a price list. */
-export async function loadVersion(store: ObjectStore, versionId: string): Promise<MarketPriceList | null> {
-  const bytes = await store.get(versionKey(versionId));
+export async function loadVersion(
+  store: ObjectStore,
+  provider: MarketPriceProvider,
+  versionId: string,
+): Promise<MarketPriceList | null> {
+  const bytes = await store.get(versionKey(provider, versionId));
 
   if (!bytes) {
     return null;
@@ -175,8 +281,11 @@ export async function loadVersion(store: ObjectStore, versionId: string): Promis
 }
 
 /** Every version still in the store — the rollback menu. Newest first. */
-export async function listVersions(store: ObjectStore): Promise<MarketPriceVersionListing[]> {
-  const objects = await store.list(`${VERSION_PREFIX}/`);
+export async function listVersions(
+  store: ObjectStore,
+  provider: MarketPriceProvider,
+): Promise<MarketPriceVersionListing[]> {
+  const objects = await store.list(`${versionPrefix(provider)}/`);
 
   return objects
     .map((o) => ({
@@ -214,6 +323,7 @@ export type PromoteResult = { ok: true; pointer: MarketPricePointer } | { ok: fa
  */
 export async function promoteMarketPrices(
   store: ObjectStore,
+  provider: MarketPriceProvider,
   candidate: unknown,
   options?: { note?: string },
 ): Promise<PromoteResult> {
@@ -225,7 +335,7 @@ export async function promoteMarketPrices(
 
   const versionId = mintVersionId(new Date());
   await store.put(
-    versionKey(versionId),
+    versionKey(provider, versionId),
     new TextEncoder().encode(JSON.stringify(checked.list, null, 2)),
     'application/json',
   );
@@ -236,11 +346,11 @@ export async function promoteMarketPrices(
     activatedBy: 'promote',
     note: options?.note?.trim() || undefined,
   };
-  await writePointer(store, pointer);
+  await writePointer(store, provider, pointer);
 
-  cache = { list: checked.list, versionId, loadedAt: Date.now() };
+  caches.set(provider, { list: checked.list, versionId, loadedAt: Date.now() });
   logger.info(
-    `Promoted marketplace price list ${versionId} (${Object.keys(checked.list.llm).length} llm rows, ${Object.keys(checked.list.media).length} media models)`,
+    `Promoted ${provider} marketplace price list ${versionId} (${Object.keys(checked.list.llm).length} llm rows, ${Object.keys(checked.list.media).length} media models)`,
   );
 
   return { ok: true, pointer };
@@ -252,11 +362,15 @@ export type RollbackResult = { ok: true; pointer: MarketPricePointer } | { ok: f
  * Re-point at a version still in the store. Rolling back to bytes we no longer have (or that no
  * longer validate) is refused — the pointer must never name a list that cannot serve.
  */
-export async function rollbackMarketPrices(store: ObjectStore, versionId: string): Promise<RollbackResult> {
-  const list = await loadVersion(store, versionId);
+export async function rollbackMarketPrices(
+  store: ObjectStore,
+  provider: MarketPriceProvider,
+  versionId: string,
+): Promise<RollbackResult> {
+  const list = await loadVersion(store, provider, versionId);
 
   if (!list) {
-    return { ok: false, message: `No valid stored price list named ${versionId}.` };
+    return { ok: false, message: `No valid stored ${provider} price list named ${versionId}.` };
   }
 
   const pointer: MarketPricePointer = {
@@ -264,14 +378,18 @@ export async function rollbackMarketPrices(store: ObjectStore, versionId: string
     activatedAt: new Date().toISOString(),
     activatedBy: 'rollback',
   };
-  await writePointer(store, pointer);
+  await writePointer(store, provider, pointer);
 
-  cache = { list, versionId, loadedAt: Date.now() };
-  logger.warn(`Rolled marketplace prices back to ${versionId}`);
+  caches.set(provider, { list, versionId, loadedAt: Date.now() });
+  logger.warn(`Rolled ${provider} marketplace prices back to ${versionId}`);
 
   return { ok: true, pointer };
 }
 
-async function writePointer(store: ObjectStore, pointer: MarketPricePointer): Promise<void> {
-  await store.put(POINTER_KEY, new TextEncoder().encode(JSON.stringify(pointer, null, 2)), 'application/json');
+async function writePointer(
+  store: ObjectStore,
+  provider: MarketPriceProvider,
+  pointer: MarketPricePointer,
+): Promise<void> {
+  await store.put(pointerKey(provider), new TextEncoder().encode(JSON.stringify(pointer, null, 2)), 'application/json');
 }

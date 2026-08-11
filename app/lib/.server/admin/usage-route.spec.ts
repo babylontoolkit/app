@@ -78,6 +78,10 @@ beforeEach(() => {
     async upsert() {
       /* The route only lists. */
     },
+    async listByIds() {
+      /* The route never decorates a ledger view — that is `/api/credits`. */
+      return [];
+    },
     async hasBilledGeneration() {
       /* The route never asks — that is the project-delete refund path (§4.4a). */
       return false;

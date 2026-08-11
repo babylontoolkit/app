@@ -1,15 +1,21 @@
 /**
  * The MODEL TIER LADDER (SPEC §4.6.1a) — the vocabulary of model classes a credits user may choose.
  *
- * Two rungs, ordered by cost: **Standard** (the operator's platform model) and **Premium**. The paid
- * rung names an operator-configured model through an env SELECTOR and unlocks at a credit THRESHOLD the
- * user must hold.
+ * THREE rungs, ordered by CAPABILITY: **Standard** (the operator's platform model), **Premium** and
+ * **Platinum**. Each paid rung names an operator-configured model through an env SELECTOR and unlocks
+ * at a credit THRESHOLD the user must hold.
+ *
+ * ⚠️ This comment said "Two rungs, ordered by cost" until 2026-08-11 — stale on BOTH counts, sitting
+ * directly above a three-entry table. Ordered by CAPABILITY, not cost: on Anthropic the Platinum
+ * (fable-5) row settles CHEAPER than Premium (opus-5), so anyone reading "by cost" and reordering the
+ * rungs would be acting on a rule this file does not follow.
  *
  * ## Why this is a table and not two code paths
  *
- * This replaced a boolean (`PREMIUM_MODEL` or nothing), briefly carried a third rung (`SuperMax`,
- * 2026-07-31 → 2026-08-08), and is back to one paid rung by owner decision — the ladder is a LIST
- * precisely so that number can change without the rules changing. The alternative, copying the premium
+ * This replaced a boolean (`PREMIUM_MODEL` or nothing), carried a third rung (`SuperMax`, 2026-07-31 →
+ * 2026-08-08), dropped to one paid rung, and gained a second again as `platinum` on 2026-08-10 — three
+ * shape changes, none of which changed a rule. The ladder is a LIST precisely so that number can move
+ * without the rules moving. The alternative, copying the premium
  * machinery into a per-rung twin, means every rule gets written twice and the two copies drift. The
  * rules here are money rules: the threshold that protects the free signup grant, the first-build lock,
  * the refuse-an-unpriced-selector check. A drifted copy of any of them fails silently.
@@ -42,8 +48,8 @@
  * deliberate: a fallback for a credit threshold is correct, a fallback for a PRICE is catastrophic.
  */
 
-/** The rungs, cheapest first. Order is meaningful — it is the ladder. */
-export const MODEL_TIER_IDS = ['standard', 'premium'] as const;
+/** The rungs, in LADDER order (ascending capability). Order is meaningful — it is the ladder. ⚠️ NOT price order: on Anthropic the Platinum row settles cheaper than Premium. */
+export const MODEL_TIER_IDS = ['standard', 'premium', 'platinum'] as const;
 
 export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
 
@@ -63,6 +69,50 @@ export type PaidModelTierId = Exclude<ModelTierId, 'standard'>;
  */
 export const DEFAULT_PREMIUM_MODEL = 'claude-opus-5';
 export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
+
+/**
+ * PLATINUM — the second paid rung (added 2026-08-10, owner).
+ *
+ * 🔴 **This is the rung `SuperMax` used to be, under a better name — NOT a revival of its env vars.**
+ * `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` stay REFUSED (`refuseRetiredModelTierEnv`), and that
+ * is the whole point rather than an oversight: a deploy still carrying `SUPERMAX_MODEL=x` must fail
+ * loudly and be told where the model goes now, never be silently adopted into a rung whose threshold
+ * and price it was never checked against. Same reasoning as `ENABLE_EXTENDED_MODELS` — a rename that
+ * silently starts reading an old value is the costly direction.
+ *
+ * ⚠️ **Restoring a second paid rung makes four PROPERTIES WRITABLE again** — each a money rule with no
+ * meaning under one paid rung: a declined rung steps down to STANDARD and never to the adjacent rung;
+ * one broken selector leaves its sibling serveable; `getTierModel` names its OWN env var in its
+ * refusal; and the panel can render an unserveable rung beside a serveable one.
+ *
+ * 🔴 **WRITABLE IS NOT WRITTEN. Two of the four are restored; two are NOT (2026-08-11).**
+ *   ✅ never-step-down-one-rung — `premium.spec.ts` (`BETWEEN_PREMIUM_AND_PLATINUM`)
+ *   ✅ one broken selector leaves its sibling serveable — `model-tiers.spec.ts`
+ *   ❌ `getTierModel` naming its own env var — `model-tier-config.spec.ts` still has only the
+ *      structural scan, and its own comment still says a hardcoded `'PREMIUM_MODEL'` is "wrong the
+ *      moment a second rung returns". It returned.
+ *   ❌ the panel's unserveable-beside-serveable copy — `ModelTierPanel.spec.tsx`'s `ladder()` fixture
+ *      is still standard+premium, and its own comment still says the property "comes back the moment a
+ *      second paid rung does".
+ *
+ * An earlier version of this comment claimed all four were "asserted again as of this change" — an
+ * over-claim caught by review, and the worst kind: **a comment asserting coverage that does not exist
+ * is how the gap stops being looked for.** Both un-restored properties are flagged in their own spec
+ * files, in the present tense, waiting for someone to notice the condition they name has been met.
+ */
+export const DEFAULT_PLATINUM_MODEL = 'claude-fable-5';
+
+/**
+ * Above Premium's 1200 and well above `SIGNUP_GRANT_CREDITS` (1000).
+ *
+ * The ladder must stay monotonic in threshold or a bare deploy offers a dearer rung for less. It is
+ * also cost-monotonic on the current provider — Comet prices fable-5 at $8/$40 against opus-5's
+ * $4/$20 — but ⚠️ **rungs order CAPABILITY, not price, and that is not the same thing on every
+ * provider**: on Anthropic-direct the fable-5 rung settled 814 credits against Opus 5's 1,017,
+ * because Anthropic prices Opus 5 above the fable row. Do not "fix" a non-monotonic price by
+ * reordering the ladder.
+ */
+export const DEFAULT_PLATINUM_MINIMUM_CREDITS = 2000;
 
 /** The static definition of a paid rung: where its config comes from and what it falls back to. */
 export interface ModelTierDefinition {
@@ -108,9 +158,20 @@ export interface ModelTierDefinition {
    * test — not surgery on the decision function — the next time a provider misbehaves.
    */
   firstBuildLocked: boolean;
+
+  /**
+   * The env flag that withdraws THIS rung alone, default ON.
+   *
+   * 🔴 It only ever NARROWS what `ENABLE_EXTENDED_MODELS` already allows — that variable remains the
+   * MASTER switch for every paid rung and is deliberately not renamed. An existing deploy carrying
+   * `ENABLE_EXTENDED_MODELS=false` expects no paid rung at all, and making it per-rung on upgrade would
+   * silently start serving Platinum to a deploy that had switched the paid models off: the costly
+   * direction, nothing thrown, which is precisely the `ENABLE_EXTENDED_MODELS` bug wearing a new hat.
+   */
+  enabledEnvKey: string;
 }
 
-/** Every paid rung, cheapest first. `standard` is absent by design — see `PaidModelTierId`. */
+/** Every paid rung, in LADDER order (ascending capability, not price). `standard` is absent by design — see `PaidModelTierId`. */
 export const PAID_MODEL_TIERS: readonly ModelTierDefinition[] = [
   {
     id: 'premium',
@@ -120,6 +181,17 @@ export const PAID_MODEL_TIERS: readonly ModelTierDefinition[] = [
     defaultModel: DEFAULT_PREMIUM_MODEL,
     defaultMinimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS,
     firstBuildLocked: false,
+    enabledEnvKey: 'ENABLE_EXTENDED_MODELS',
+  },
+  {
+    id: 'platinum',
+    label: 'Platinum',
+    modelEnvKey: 'PLATINUM_MODEL',
+    minimumEnvKey: 'PLATINUM_MINIMUM_CREDITS',
+    defaultModel: DEFAULT_PLATINUM_MODEL,
+    defaultMinimumCredits: DEFAULT_PLATINUM_MINIMUM_CREDITS,
+    firstBuildLocked: false,
+    enabledEnvKey: 'ENABLE_PLATINUM_MODEL',
   },
 ];
 

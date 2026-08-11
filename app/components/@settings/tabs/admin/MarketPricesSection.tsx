@@ -40,17 +40,33 @@ interface PriceList {
   search?: { creditsPerSearch: number };
 }
 interface MarketPricesState {
+  /** Which marketplace the SERVER loaded. Optional so an older bundle against a newer route still renders. */
+  provider?: string;
+
+  /** Every marketplace the route offers — the selector must not hold its own copy of this list. */
+  providers?: string[];
+
   active: { versionId: string | null; list: PriceList };
   versions: Array<{ versionId: string; size: number; storedAt?: string; active: boolean }>;
   baked: PriceList;
   storage: string;
 }
+
+/**
+ * One row of a vendor's pricing feed, NORMALISED — the two vendors publish different shapes.
+ *
+ * KIE returns display STRINGS (`modelDescription`, `usdPrice`); Comet returns numbers plus a
+ * per-row `ratio`, where the charged rate is `official x ratio`. Rather than render one shape and
+ * silently blank the other, the panel maps both onto {label, detail, price} at the fetch seam.
+ *
+ * 🔴 For Comet the price shown is the CHARGED one, with the official rate and the ratio beside it.
+ * Showing `pricing.input` alone would show a number that is not what we pay — the exact misreading
+ * that produced "no discount on Opus 5" during this feature's investigation.
+ */
 interface FeedRow {
-  modelDescription: string;
-  interfaceType: string;
-  provider: string;
-  usdPrice: string;
-  creditUnit: string;
+  label: string;
+  detail: string;
+  price: string;
 }
 
 const UNIT_LABEL: Record<MediaRow['unit'], string> = {
@@ -59,7 +75,49 @@ const UNIT_LABEL: Record<MediaRow['unit'], string> = {
   per_video: 'per video',
 };
 
+/**
+ * Which marketplace the panel is editing.
+ *
+ * 🔴 It rides in EVERY request, and a promotion targets whichever provider is selected — so the
+ * selected value and the displayed list must never come apart. `load()` re-fetches on every change
+ * and the response echoes its own `provider` back, which is what the header renders: the panel shows
+ * what the SERVER says it loaded, never what the local state hoped for. Promoting Comet's rates
+ * over KIE's pointer is a silent repricing of every generation, so this is not a cosmetic filter.
+ */
+type PriceProvider = 'KIE' | 'Comet';
+
+/**
+ * Map a vendor feed row onto the panel's three columns.
+ *
+ * ⚠️ The Comet branch shows `charged` as the headline and the official rate + ratio as the detail,
+ * because the charged number is the one that has to match the promoted list. A `ratio` that is not
+ * 0.8 is the interesting case (three rows carry 1.0), so it is always printed rather than elided when
+ * it happens to be the common value.
+ */
+function normaliseFeedRow(row: Record<string, unknown>, provider: PriceProvider): FeedRow {
+  if (provider === 'Comet') {
+    const inCharged = row.chargedInputPerMTok as number | null;
+    const outCharged = row.chargedOutputPerMTok as number | null;
+    const ratio = row.ratio as number | null;
+
+    return {
+      label: String(row.id ?? ''),
+      detail:
+        `${row.modelType ?? ''}` +
+        (ratio == null ? '' : ` · official $${row.officialInputPerMTok}/$${row.officialOutputPerMTok} × ${ratio}`),
+      price: inCharged == null ? '—' : `$${inCharged} / $${outCharged} per MTok`,
+    };
+  }
+
+  return {
+    label: String(row.modelDescription ?? ''),
+    detail: String(row.interfaceType ?? ''),
+    price: `$${row.usdPrice ?? '?'} ${row.creditUnit ?? ''}`,
+  };
+}
+
 export function MarketPricesSection() {
+  const [provider, setProvider] = useState<PriceProvider>('KIE');
   const [state, setState] = useState<MarketPricesState | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -69,14 +127,24 @@ export function MarketPricesSection() {
   const [feed, setFeed] = useState<FeedRow[] | null>(null);
   const [feedFilter, setFeedFilter] = useState('');
 
-  const load = () => {
-    fetch('/api/admin/market-prices')
+  const load = (which: PriceProvider = provider) => {
+    fetch(`/api/admin/market-prices?provider=${encodeURIComponent(which)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => data && setState(data as MarketPricesState))
       .catch(() => undefined);
   };
 
-  useEffect(load, []);
+  useEffect(() => {
+    /*
+     * Clear the loaded list BEFORE fetching the new provider's, so the panel cannot show one
+     * provider's prices under the other's name for the duration of a round trip. A stale table under
+     * a switched heading is exactly the misreading that gets the wrong list promoted.
+     */
+    setState(null);
+    setFeed(null);
+    setEditing(false);
+    load(provider);
+  }, [provider]);
 
   const post = async (body: Record<string, unknown>) => {
     const r = await fetch('/api/admin/market-prices', {
@@ -102,7 +170,7 @@ export function MarketPricesSection() {
     setErrors([]);
 
     try {
-      const { ok, data } = await post({ action: 'promote', list: parsed, note });
+      const { ok, data } = await post({ action: 'promote', provider, list: parsed, note });
 
       if (!ok) {
         // The route returns EVERY validation error at once — show them all, not just the first.
@@ -111,7 +179,7 @@ export function MarketPricesSection() {
       }
 
       const pointer = data.pointer as { versionId: string };
-      toast.success(`Prices promoted — ${pointer.versionId} is live for all billing.`);
+      toast.success(`${provider} prices promoted — ${pointer.versionId} is live for all billing.`);
       setEditing(false);
       setNote('');
       load();
@@ -124,14 +192,14 @@ export function MarketPricesSection() {
     setBusy(true);
 
     try {
-      const { ok, data } = await post({ action: 'rollback', versionId });
+      const { ok, data } = await post({ action: 'rollback', provider, versionId });
 
       if (!ok) {
         toast.error(String(data.message ?? 'Rollback failed.'));
         return;
       }
 
-      toast.success(`Rolled prices back to ${versionId}.`);
+      toast.success(`Rolled ${provider} prices back to ${versionId}.`);
       load();
     } finally {
       setBusy(false);
@@ -142,16 +210,16 @@ export function MarketPricesSection() {
     setBusy(true);
 
     try {
-      const { ok, data } = await post({ action: 'fetch-feed' });
+      const { ok, data } = await post({ action: 'fetch-feed', provider });
 
       if (!ok) {
-        toast.error(String(data.message ?? 'Could not reach the kie.ai pricing feed.'));
+        toast.error(String(data.message ?? `Could not reach the ${provider} pricing feed.`));
         return;
       }
 
-      const result = data.feed as { rows: FeedRow[]; reportedTotal: number };
-      setFeed(result.rows);
-      toast.success(`Fetched ${result.rows.length} of ${result.reportedTotal} kie.ai price rows.`);
+      const result = data.feed as { rows: Array<Record<string, unknown>>; reportedTotal: number };
+      setFeed(result.rows.map((row) => normaliseFeedRow(row, provider)));
+      toast.success(`Fetched ${result.rows.length} of ${result.reportedTotal} ${provider} price rows.`);
     } finally {
       setBusy(false);
     }
@@ -169,7 +237,7 @@ export function MarketPricesSection() {
   const { active } = state;
   const mediaEntries = Object.entries(active.list.media);
   const shownFeed = feed?.filter(
-    (row) => !feedFilter || row.modelDescription.toLowerCase().includes(feedFilter.toLowerCase()),
+    (row) => !feedFilter || `${row.label} ${row.detail}`.toLowerCase().includes(feedFilter.toLowerCase()),
   );
 
   return (
@@ -177,12 +245,30 @@ export function MarketPricesSection() {
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-bolt-elements-textPrimary">Marketplace prices</h3>
         <div className="flex gap-2">
+          {/*
+           * Which marketplace is being edited. FIRST in the row and always visible, because every
+           * other control on this panel acts on it — a promote button whose target is inferable only
+           * from a heading further down is how the wrong list gets repriced.
+           */}
+          <select
+            className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
+            disabled={busy}
+            value={provider}
+            onChange={(e) => setProvider(e.target.value as PriceProvider)}
+            aria-label="Price list provider"
+          >
+            {(state.providers ?? ['KIE', 'Comet']).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
           <button
             className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
             disabled={busy}
             onClick={() => void fetchFeed()}
           >
-            Fetch kie.ai feed
+            Fetch {provider} feed
           </button>
           <button
             className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
@@ -199,6 +285,8 @@ export function MarketPricesSection() {
       </div>
 
       <div className="mt-2 text-xs text-bolt-elements-textTertiary">
+        {/* The SERVER's echo of what it loaded — never the local selector, which can be mid-switch. */}
+        {state.provider ?? provider} ·{' '}
         {active.versionId
           ? `Active version ${active.versionId} · stored in ${state.storage}`
           : 'Using the BAKED defaults (nothing promoted yet)'}
@@ -382,13 +470,13 @@ export function MarketPricesSection() {
         </div>
       )}
 
-      {/* KIE's own feed, for the operator's eyes — comparison only, never machine-applied. */}
+      {/* The vendor's own feed, for the operator's eyes — comparison only, never machine-applied. */}
       {shownFeed && (
         <div className="mt-2 rounded-md border border-bolt-elements-borderColor">
           <div className="flex items-center gap-2 px-3 py-1.5 border-b border-bolt-elements-borderColor">
             <input
               className="flex-1 text-xs px-2 py-1 rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary"
-              placeholder="Filter kie.ai rows (e.g. kling, banana, claude)…"
+              placeholder={`Filter ${provider} rows (e.g. kling, banana, claude)…`}
               value={feedFilter}
               onChange={(e) => setFeedFilter(e.target.value)}
             />
@@ -404,10 +492,10 @@ export function MarketPricesSection() {
               <tbody>
                 {shownFeed.map((row, i) => (
                   <tr key={i} className="border-t border-bolt-elements-borderColor first:border-t-0">
-                    <td className="px-3 py-1 text-bolt-elements-textSecondary">{row.modelDescription}</td>
-                    <td className="px-3 py-1 text-bolt-elements-textTertiary">{row.interfaceType}</td>
+                    <td className="px-3 py-1 text-bolt-elements-textSecondary">{row.label}</td>
+                    <td className="px-3 py-1 text-bolt-elements-textTertiary">{row.detail}</td>
                     <td className="px-3 py-1 text-right text-bolt-elements-textPrimary whitespace-nowrap">
-                      ${row.usdPrice} <span className="text-bolt-elements-textTertiary">{row.creditUnit}</span>
+                      {row.price}
                     </td>
                   </tr>
                 ))}

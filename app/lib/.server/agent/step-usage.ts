@@ -19,11 +19,21 @@
  */
 
 import { extractStepCacheTokens } from './usage-metadata';
-import type { ModelFamily } from '~/lib/modules/llm/model-families';
+import { FAMILY_POLICY, type ModelFamily } from '~/lib/modules/llm/model-families';
 
 /** What one generation cost, in the four token classes Anthropic bills separately (§4.6). */
 export interface GenerationUsage {
-  /** UNCACHED input. `@ai-sdk/anthropic` maps only `input_tokens` here — cache classes are separate. */
+  /**
+   * UNCACHED input — a guarantee this module MAKES, not one the SDK hands it.
+   *
+   * ⚠️ This said "`@ai-sdk/anthropic` maps only `input_tokens` here — cache classes are separate",
+   * which was a claim about ONE vendor standing in for a contract on a vendor-neutral field. It went
+   * silently false when the gpt/gemini families shipped (2026-08-04) — every OpenAI- and
+   * Google-shaped wire reports the cached count as a BREAKDOWN of the prompt total — and settlement,
+   * which adds the two, then billed the cached portion twice. `accumulateStepUsage` now subtracts,
+   * per `FamilyPolicy.promptTokensIncludeCacheRead`, so the field is uncached by construction on
+   * every family rather than by luck on one.
+   */
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
@@ -82,10 +92,18 @@ export function accumulateStepUsage(
   steps: readonly UsageStep[] | undefined,
   family?: ModelFamily,
 ): GenerationUsage {
+  /*
+   * Does this family's wire count cached tokens INSIDE `promptTokens`? See `FamilyPolicy`
+   * .promptTokensIncludeCacheRead — a fact about the vendor's API, not about our pricing.
+   *
+   * ⚠️ An omitted family resolves to `false`, matching the `anthropic`-namespace fallback below:
+   * both halves of the no-family case must describe the SAME vendor, or a caller that cannot name
+   * the family gets Anthropic's cache counters and somebody else's arithmetic.
+   */
+  const cacheInsidePrompt = family ? FAMILY_POLICY[family].promptTokensIncludeCacheRead : false;
+
   for (const step of steps ?? []) {
-    totals.promptTokens += n(step.usage?.promptTokens);
     totals.completionTokens += n(step.usage?.completionTokens);
-    totals.totalTokens += n(step.usage?.totalTokens);
 
     /*
      * ⚠️ `family` is OPTIONAL and an omitted one reads the `anthropic` namespace — byte-identical to
@@ -97,6 +115,43 @@ export function accumulateStepUsage(
     const cache = extractStepCacheTokens(step.providerMetadata, family);
     totals.cacheReadTokens += cache.cacheReadTokens;
     totals.cacheCreationTokens += cache.cacheCreationTokens;
+
+    /*
+     * 🔴 THE SUBTRACTION THAT MAKES `promptTokens` MEAN WHAT SETTLEMENT ASSUMES IT MEANS.
+     *
+     * `costForRates` ADDS `promptTokens * input` and `cacheReadTokens * cacheRead`, which is only
+     * correct when the two do not overlap. On every OpenAI- and Google-shaped wire they overlap
+     * completely, so without this the cached portion was billed twice — measured live at **1.86x**
+     * on a real `gpt-5-6-terra` turn (T12, 2026-08-11).
+     *
+     * PER STEP, never on the totals: the floor has to apply to each step's own pair. Summing first
+     * lets one step's surplus prompt tokens silently absorb another step's over-report, which is the
+     * kind of cancellation that makes a bill look right for the wrong reason.
+     *
+     * ⚠️ FLOORED AT ZERO. A provider that reports more cached tokens than prompt tokens is
+     * malformed, and this is settlement — it can never refuse (§4.6) — so the only safe reading is
+     * "all of it was cached". A negative would flow straight into `costForRates` and CREDIT the user
+     * at the input rate, turning a provider's bad number into a way to bill less than nothing.
+     */
+    const stepPrompt = n(step.usage?.promptTokens);
+    const uncachedPrompt = cacheInsidePrompt ? Math.max(0, stepPrompt - cache.cacheReadTokens) : stepPrompt;
+    totals.promptTokens += uncachedPrompt;
+
+    /*
+     * ⚠️ `totalTokens` MOVES WITH `promptTokens`, or one generation ends up with two totals.
+     *
+     * The provider's own `totalTokens` is `promptTokens + completionTokens` in ITS units, so on an
+     * inclusive family it counts the cached tokens that the line above just removed. Left alone, the
+     * FS record persisted the wire's number (`proxy.ts`) while `gate.ts` and the Supabase read both
+     * DERIVE it as `promptTokens + completionTokens` — the same field, two values, differing by
+     * exactly the cache read. Caught by T12's verifier on the real record: `gen_msopyq5f` was
+     * 17,464 + 78 yet stored 35,431.
+     *
+     * Diagnostic-only today (nothing bills from it), which is precisely why it would have sat there:
+     * this repo's own history is full of metrics that quietly stopped meaning what their name says.
+     * Subtracting the SAME amount keeps all three derivations in agreement by construction.
+     */
+    totals.totalTokens += Math.max(0, n(step.usage?.totalTokens) - (stepPrompt - uncachedPrompt));
   }
 
   return totals;

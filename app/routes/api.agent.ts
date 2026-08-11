@@ -522,6 +522,13 @@ async function streamGeneration(
       model: generation.model,
 
       /*
+       * WHICH GATEWAY SERVED IT (§4.2a). With `AUTO_MODEL_SELECT` the provider can differ per turn, so
+       * the model string no longer implies who ran it — and the same model costs materially different
+       * amounts on different gateways. Shown in `/context` so a price change is explicable.
+       */
+      provider: generation.provider,
+
+      /*
        * The rung that actually RAN, and why — never the one that was requested (§4.6.1a). A declined
        * Premium turn and a plain Standard turn can run the same model and are very different facts, so a
        * client reading only `model` cannot tell them apart; and once two rungs may name one model, the
@@ -568,6 +575,24 @@ async function streamGeneration(
       creditsCharged: settlement?.creditsCharged ?? 0,
       balanceAfter: settlement?.balanceAfter ?? null,
       notice: generation.notice ?? null,
+
+      /*
+       * What the gateway saved on this turn, in credits (`billing/savings.ts`). Rides on the CREDITS
+       * annotation rather than `agentMeta` because it is a fact about the charge — the two must move
+       * together, and a saving arriving on a different annotation than the number it discounts is a
+       * pair the client can render half of.
+       *
+       * `null` is the normal, expected value (a turn Anthropic cannot price, a refunded failure, an
+       * unmetered server) and means SAY NOTHING — never "you saved 0".
+       */
+      savings: settlement?.savings
+        ? {
+            basis: settlement.savings.basis,
+            referenceCredits: settlement.savings.referenceCredits,
+            savedCredits: settlement.savings.savedCredits,
+            percent: settlement.savings.percent,
+          }
+        : null,
     },
   });
 }

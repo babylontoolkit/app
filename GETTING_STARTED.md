@@ -83,10 +83,10 @@ loop; self-healing repair turns; usage recording) with the ANTHROPIC key read fr
 ("not configured" state when absent) → §4.11 skills sync + /slash invocation with
 autocomplete.
 Also: §4.2a Anthropic provider hardening — current model IDs (claude-sonnet-5 default =
-§4.6.1a Standard, opus-5 = Premium, fable-5 = SuperMax, haiku-4-5 at 64k output), @ai-sdk/anthropic ^1.2.12, stripSamplingParams
+§4.6.1a Standard, opus-5 = Premium, fable-5 = Platinum since 2026-08-10 — it was SuperMax until 2026-08-08 — haiku-4-5 at 64k output), @ai-sdk/anthropic ^1.2.12, stripSamplingParams
 + dropOrphanReasoningSignatures, capabilities.ts OUTSIDE .server, anthropic.spec.ts tests.
 Model comes from the DEFAULT_MODEL constant (app/utils/constants.ts) / LLM_MODEL — never a free-form UI
-  choice. A credits user may pick a CLASS (Standard/Premium/SuperMax, SPEC §4.6.1a): the client sends
+  choice. A credits user may pick a CLASS (Standard/Premium/Platinum, SPEC §4.6.1a): the client sends
   an enum tier id the server maps through operator-configured selectors, never a model string.
 Dev path: PRO_FEATURES_ENABLED=true + my own key in .env.local. Verify: /bt-spec <task> loads
 the skill and produces its workflow output.

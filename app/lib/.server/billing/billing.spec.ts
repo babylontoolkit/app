@@ -11,6 +11,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   COLD_CREATION_USAGE,
+  cometRates,
   creditsForUsage,
   DEFAULT_PREMIUM_MODEL,
   getBillingConfig,
@@ -30,10 +31,11 @@ import {
 } from './rates';
 import { PAID_MODEL_TIERS } from './model-tiers';
 import { FAMILY_POLICY, familyOf, type CacheProfile } from '~/lib/modules/llm/model-families';
-import { invalidateMarketPricesCache, promoteMarketPrices } from './market-price-store';
+import { invalidateMarketPricesCache, MARKET_PRICE_PROVIDERS, promoteMarketPrices } from './market-price-store';
 import type { LlmMarketRate } from './market-prices';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
+import { BAKED_COMET_PRICES } from './baked-comet-prices';
 import {
   DEFAULT_PLATFORM_PROVIDER,
   getPlatformModel,
@@ -125,7 +127,7 @@ const KIE_ENV = [
 const MODEL_TIER_ENV = [
   'PREMIUM_MODEL',
   'PREMIUM_MINIMUM_CREDITS',
-  'ENABLE_PREMIUM_MODEL',
+  'ENABLE_EXTENDED_MODELS',
   'PREMIUM_INPUT_DOLLARS',
   'PREMIUM_OUTPUT_DOLLARS',
 
@@ -252,9 +254,17 @@ function cacheProfileOf(model: string): CacheProfile {
   return family ? FAMILY_POLICY[family].cacheProfile : 'derived';
 }
 
-/** Promote the baked list plus extra/overridden LLM rows — the admin-panel path, in one line. */
+/**
+ * Promote the baked list plus extra/overridden LLM rows — the admin-panel path, in one line.
+ *
+ * ⚠️ Explicitly onto **KIE's** list (2026-08-10, the per-provider price store). Every caller below
+ * then asserts through `kieRates`/`providerRates().KIE`, so the promotion and the assertion must name
+ * the same marketplace or the test grades a promotion nobody read. The provider is a REQUIRED argument
+ * on `promoteMarketPrices` for exactly this reason — a default would have made this line compile
+ * unchanged while silently deciding which vendor's prices a test was about.
+ */
 async function promoteLlmRows(rows: Record<string, LlmMarketRate>) {
-  const result = await promoteMarketPrices(memoryStore(), {
+  const result = await promoteMarketPrices(memoryStore(), 'KIE', {
     ...BAKED_MARKET_PRICES,
     llm: { ...BAKED_MARKET_PRICES.llm, ...rows },
   });
@@ -402,6 +412,63 @@ describe('rate table', () => {
       const model = PLATFORM_MODEL_BY_PROVIDER[provider];
       expect(providerRates()[provider][model], `${provider} cannot price its own default ${model}`).toBeDefined();
     }
+  });
+
+  /*
+   * 🔴 THE TWO PROVIDER LISTS ARE DECLARED TWICE, ON PURPOSE — SO SOMETHING HAS TO RELATE THEM.
+   *
+   * `MARKET_PRICE_PROVIDERS` (`market-price-store.ts`) is deliberately NOT imported from
+   * `agent/config.ts`: doing so would close the cycle `config -> rates -> market-price-store -> config`.
+   * The cost of dodging that edge is a second hand-maintained list, and this file is where the two are
+   * made to agree — the same trade `model-families.ts` takes to stay client-safe, and the same
+   * `packMargin()` shape as everything else in this repo that is only correct RELATIVE to something
+   * else: a number nothing relates to its partner drifts silently.
+   *
+   * The drift that matters is one direction in particular. Add a fourth marketplace provider to
+   * `PLATFORM_PROVIDERS` and forget the store's list, and `marketPriceProvidersFor` will not throw —
+   * it will simply return `['KIE']`, so the new provider's promoted prices are never refreshed and
+   * every generation on it settles from KIE's baked table. Nothing fails; the invoices are just wrong.
+   *
+   * `Anthropic` is the one permitted difference and it is a real distinction, not an exemption:
+   * Anthropic is not a marketplace. Its rates are first-party and hand-maintained in `MODEL_RATES`, so
+   * there is no list for an operator to promote and nothing for the store to key.
+   */
+  it('has a marketplace price list for every platform provider except Anthropic', () => {
+    expect([...MARKET_PRICE_PROVIDERS].sort()).toEqual(
+      PLATFORM_PROVIDERS.filter((provider) => provider !== 'Anthropic').sort(),
+    );
+
+    // Control: the filter really removed something, so the equality above is not comparing two full lists.
+    expect(PLATFORM_PROVIDERS).toContain('Anthropic');
+    expect(MARKET_PRICE_PROVIDERS).not.toContain('Anthropic' as never);
+  });
+
+  /*
+   * The rate tables must not share a cache slot. Both marketplaces price `claude-sonnet-5` — the
+   * platform default — at different rates, so a leak between them returns a plausible number rather
+   * than an error: `providerRates().KIE` would quietly start reporting Comet's prices (2x), or the
+   * reverse (half), on every settlement, with nothing throwing.
+   */
+  it('keeps each provider’s rate table on its OWN promoted list', async () => {
+    /* Control: identical rows before anything is promoted would make the divergence below meaningless. */
+    expect(providerRates({}).KIE['claude-sonnet-5'].inputPerMTok).toBe(0.85);
+    expect(providerRates({}).Comet['claude-sonnet-5'].inputPerMTok).toBe(1.6);
+
+    const promoted = await promoteMarketPrices(memoryStore(), 'Comet', {
+      ...BAKED_COMET_PRICES,
+      llm: { ...BAKED_COMET_PRICES.llm, 'claude-sonnet-5': { inputPerMTok: 9, outputPerMTok: 45 } },
+    });
+    expect(promoted.ok, promoted.ok ? '' : promoted.errors.join('; ')).toBe(true);
+
+    expect(cometRates({})['claude-sonnet-5'].inputPerMTok, 'the promotion landed').toBe(9);
+
+    /*
+     * AC7's control, restated where it can catch a cross-provider leak: KIE's runtime table is still
+     * byte-identical to the baked one it has always been. `kieRates()` and `KIE_MODEL_RATES` derive
+     * from the same document, so any difference at all means a Comet write reached KIE's slot.
+     */
+    expect(kieRates({})).toEqual(KIE_MODEL_RATES);
+    expect(providerRates({}).KIE['claude-sonnet-5'].inputPerMTok).toBe(0.85);
   });
 
   /*
@@ -1725,6 +1792,9 @@ describe('the generation row a debit points at', () => {
         rows.set(row.id, { ...rows.get(row.id), ...row });
       },
       async list() {
+        return [];
+      },
+      async listByIds() {
         return [];
       },
       async hasBilledGeneration() {

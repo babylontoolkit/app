@@ -101,6 +101,25 @@ export interface UnproductiveTurnInput {
    * plan mode it is guaranteed — the §4.2.9 wall makes writing impossible).
    */
   requiresAction: boolean;
+
+  /**
+   * 🔴 THE MODEL WAS CUT OFF MID-ACTION — it opened `<boltAction` and never closed it.
+   *
+   * Measured live 2026-08-10 (`gen_msn0zl5h_44wpni`, 240 credits, $0.696): a Pac-Man rebuild wrote
+   * 7,695 chars, opened exactly one artifact and one action, closed NEITHER, and ended mid-diff on the
+   * literal text `>>>>>>> REPLACE`. The action runner only executes a CLOSED action, so no file was
+   * touched. On screen: an artifact card with a title and no rows under it — indistinguishable from
+   * "still thinking", except it was over.
+   *
+   * It was billed and not rescued, because `emittedAction` is `text.includes('<boltAction')` — the
+   * OPENING tag. So the guard that exists to catch "announced work and did nothing" was switched off
+   * by the announcement itself. This is the third or fourth time the owner has seen it, and it is
+   * exactly the failure `spec/fail-loud.md` forbids: money spent, nothing delivered, nothing said.
+   *
+   * A truncated action is the STRONGEST possible signal for a second pass — stronger than the density
+   * heuristics below, because there is no interpretation involved. The model did not decide to stop.
+   */
+  truncatedAction: boolean;
 }
 
 /**
@@ -110,7 +129,25 @@ export interface UnproductiveTurnInput {
  * a `true` here spends the user's credits without them asking for it.
  */
 export function shouldRescueUnproductiveTurn(input: UnproductiveTurnInput): boolean {
-  if (input.aborted || input.alreadyContinued || input.emittedAction) {
+  if (input.aborted || input.alreadyContinued) {
+    return false;
+  }
+
+  /*
+   * 🔴 AN OPENED-BUT-UNCLOSED ACTION IS THE OPPOSITE OF PRODUCTIVE — check it BEFORE `emittedAction`.
+   *
+   * `emittedAction` is `includes('<boltAction')`, so a truncated action sets it and used to return
+   * false right here: the turn that most needs rescuing was the one the guard trusted most. Order
+   * matters, and this must stay above the `emittedAction` bail — see `truncatedAction`.
+   *
+   * No density or length test: they ask "did it announce and stop?", and a cut-off action IS the
+   * answer to that, mechanically and without interpretation.
+   */
+  if (input.truncatedAction) {
+    return true;
+  }
+
+  if (input.emittedAction) {
     return false;
   }
 

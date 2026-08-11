@@ -17,6 +17,7 @@ import { selectRestoreTarget } from '~/lib/persistence/restore-target';
 import { protectNothing } from '~/lib/persistence/restore-plan';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { BUILD_AND_APPLY_MESSAGE, executePlanMessage } from '~/lib/chat/plan-proposal';
+import { liveTurnIdentity } from '~/lib/chat/live-turn-identity';
 import { useStore } from '@nanostores/react';
 import { atom } from 'nanostores';
 import { countArtifactProgress } from '~/lib/stores/agent-status';
@@ -258,11 +259,14 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
         return;
       }
 
-      props.append({
-        id: `retry-${Date.now()}`,
-        role: 'user',
-        content: typeof prompt.content === 'string' ? prompt.content : '',
-      });
+      props.append(
+        {
+          id: `retry-${Date.now()}`,
+          role: 'user',
+          content: typeof prompt.content === 'string' ? prompt.content : '',
+        },
+        { body: liveTurnIdentity() },
+      );
     };
 
     /**
@@ -282,7 +286,7 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
       props.setChatMode?.('build');
       props.append(
         { id: `apply-${Date.now()}`, role: 'user', content: BUILD_AND_APPLY_MESSAGE },
-        { body: { chatMode: 'build' } },
+        { body: { ...liveTurnIdentity(), chatMode: 'build' } },
       );
     };
 
@@ -306,7 +310,7 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
       props.setChatMode?.('build');
       props.append(
         { id: `execute-${Date.now()}`, role: 'user', content: executePlanMessage(planPath) },
-        { body: { chatMode: 'build' } },
+        { body: { ...liveTurnIdentity(), chatMode: 'build' } },
       );
     };
 

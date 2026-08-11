@@ -112,6 +112,39 @@ describe('capValue — the ceilings, each announced', () => {
     expect(JSON.stringify(capValue(parent))).toContain('[Circular]');
   });
 
+  /*
+   * 🔴 SHARED ≠ CIRCULAR — found live 2026-08-09.
+   *
+   * A reply named one kart as both `nearest` and an entry in `all`. With a global visited-set the
+   * second occurrence came back `[Circular]`, which tells the model the data references itself when it
+   * does not, and withholds a value it explicitly asked for. Sharing is ordinary: one material on many
+   * meshes, one node in two lists. Only a SELF-containing object is circular.
+   */
+  it('serializes a value referenced twice, rather than calling it circular', () => {
+    const kart = { name: 'kart_0', x: 100.5 };
+    const result = capValue({ nearest: kart, all: [kart] }) as { nearest: unknown; all: unknown[] };
+
+    expect(result.nearest).toEqual(kart);
+    expect(result.all[0]).toEqual(kart);
+    expect(JSON.stringify(result)).not.toContain('[Circular]');
+  });
+
+  /* The same object appearing many times across siblings must never be mistaken for a cycle. */
+  it('handles a shared reference repeated across many siblings', () => {
+    const material = { name: 'kartPaint', color: 'red' };
+    const meshes = Array.from({ length: 6 }, (_, i) => ({ name: `mesh_${i}`, material }));
+
+    expect(JSON.stringify(capValue({ meshes }))).not.toContain('[Circular]');
+  });
+
+  /* CONTROL — the fix must not disable cycle detection, which is what `seen.delete` could do. */
+  it('CONTROL: a self-referencing object is still reported as circular', () => {
+    const node: Record<string, unknown> = { name: 'self' };
+    node.me = node;
+
+    expect(JSON.stringify(capValue(node))).toContain('[Circular]');
+  });
+
   /* A disposed Babylon node throws from its own getters. Report the throw; do not abort the answer. */
   it('survives a getter that throws, and keeps the rest of the object', () => {
     const object = {

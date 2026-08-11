@@ -7,6 +7,8 @@
 import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { getLedger } from '~/lib/.server/billing/ledger';
+import { getGenerationStore } from '~/lib/.server/billing/generations';
+import { buildLedgerView } from '~/lib/.server/billing/ledger-view';
 import { getBillingConfigSafe } from '~/lib/.server/billing/rates';
 import {
   CREDIT_PACKS,
@@ -42,6 +44,17 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       isStripeConfigured(context) ? findActiveSubscription(user.id, context).catch(() => null) : Promise.resolve(null),
     ]);
 
+    /*
+     * Decorate the history — what each turn WAS, and what its gateway saved (§4.6).
+     *
+     * Best-effort by construction: `listByIds` returns [] on any failure and `buildLedgerView` renders
+     * every row it cannot decorate exactly as before. The balance and the history are what this route
+     * exists for and neither depends on this lookup succeeding.
+     */
+    const generationIds = entries.map((e) => e.generationId).filter((id): id is string => Boolean(id));
+    const generations = generationIds.length > 0 ? await getGenerationStore(context).listByIds(generationIds) : [];
+    const view = buildLedgerView(entries, generations);
+
     return json({
       balance,
       enforced: config?.enforced ?? true,
@@ -59,14 +72,17 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           }
         : null,
 
-      history: entries.map((e) => ({
-        id: e.id,
-        delta: e.delta,
-        reason: e.reason,
-        balanceAfter: e.balanceAfter,
-        note: e.note,
-        createdAt: e.createdAt,
-      })),
+      history: view.rows,
+
+      /*
+       * WHAT THE GATEWAY LADDER IS WORTH, over the rows above (`billing/ledger-view.ts`).
+       *
+       * Credits are cost-proportional, so a cheaper gateway is not our margin — it is the user's pack
+       * going further, and that had been completely invisible. `comparedRows` travels with the totals
+       * because they cover THIS PAGE of the ledger, not the account's lifetime, and a headline number
+       * without its scope is a claim the data does not support.
+       */
+      savings: view.savings,
     });
   } catch (error) {
     return errorResponse(error);

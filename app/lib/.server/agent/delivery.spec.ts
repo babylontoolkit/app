@@ -19,6 +19,7 @@ const MODEL_BY_FAMILY: Record<ModelFamily, string> = {
   claude: 'claude-opus-5',
   codex: 'gpt-5-6-sol',
   gemini: 'gemini-3-5-flash',
+  chat: 'grok-4.5',
 };
 
 describe('deliveryModeFor', () => {
@@ -49,6 +50,18 @@ describe('deliveryModeFor', () => {
 
   it('reports KIE + gemini as streaming (provisional — big-answer probe owed, T11)', () => {
     expect(deliveryModeFor('KIE', 'gemini-3-5-flash')).toBe('streamed');
+  });
+
+  /*
+   * ⚠️ NOT A SUPPORTED PATH. `kie.ts` refuses the `chat` family at model resolution — KIE fronts no
+   * Grok/Kimi/Qwen/GLM/DeepSeek/MiniMax id — so nothing in production can read this entry; it exists
+   * only so the exhaustive `Record<ModelFamily, DeliveryMode>` compiles. This is pinned as `streamed`
+   * because that is the standing default for an unmeasured surface (the note below), NOT because
+   * anyone measured KIE serving a chat model. If KIE ever does front one, MEASURE it with
+   * `scripts/stream-probe.mjs` before believing this value.
+   */
+  it('reports KIE + chat as streaming — the unmeasured default on an UNREACHABLE pair', () => {
+    expect(deliveryModeFor('KIE', 'grok-4.5')).toBe('streamed');
   });
 
   /*

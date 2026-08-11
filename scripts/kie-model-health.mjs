@@ -50,15 +50,39 @@ const env = Object.fromEntries(
     }),
 );
 
-const KEY = env.KIE_API_KEY;
+/**
+ * WHICH PROVIDER — `PROBE_PROVIDER=KIE|Comet` (default KIE), matching `cache-probe.mjs`.
+ *
+ * 🔴 This script is the CATALOGUE prober — the thing that answers FR4's "will this vendor serve this
+ * id RIGHT NOW", which no pricing feed can. It was hardcoded to KIE, so when Comet arrived the one
+ * instrument that could have caught a dead id could not be pointed at it. It immediately paid for
+ * itself: `claude-haiku-4-5` is listed in the spec as live-probed on Comet and actually returns a
+ * hard 400 there ("has not been priced by the administrator yet"), while Comet serves the DATED
+ * `claude-haiku-4-5-20251001` instead.
+ *
+ * ⚠️ A feed row is NOT a probe, in either direction: `grok-4.5` appears in Comet's feed under the
+ * display code `grok-4-5`, and `claude-haiku-4-5` appears in neither the feed nor the API. Only a
+ * request that returns 200 is evidence.
+ */
+const PROVIDER = (process.env.PROBE_PROVIDER || env.LLM_PROVIDER || 'KIE').toLowerCase();
+const IS_COMET = PROVIDER === 'cometapi' || PROVIDER === 'comet';
+
+const KEY = IS_COMET ? env.COMET_API_KEY : env.KIE_API_KEY;
 
 if (!KEY) {
-  throw new Error('no KIE_API_KEY in .env.local');
+  throw new Error(`no ${IS_COMET ? 'COMET_API_KEY' : 'KIE_API_KEY'} in .env.local`);
 }
 
-const CLAUDE_BASE = env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
-const CODEX_BASE = env.KIE_CODEX_BASE_URL || 'https://api.kie.ai/codex/v1';
-const GEMINI_BASE = env.KIE_GEMINI_BASE_URL || 'https://api.kie.ai/gemini/v1';
+/*
+ * Comet serves every family from ONE origin (unlike KIE's three separately-hosted adapters), and
+ * its OpenAI surface is chat-completions rather than Responses — Comet marks `gpt-5*` as `openai` and
+ * only `o3-pro` carries `openai-response`. Mirrors `comet-wire.ts`'s `COMET_WIRES`.
+ */
+const COMET_BASE = env.COMET_BASE_URL || 'https://api.cometapi.com/v1';
+
+const CLAUDE_BASE = IS_COMET ? COMET_BASE : env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
+const CODEX_BASE = IS_COMET ? COMET_BASE : env.KIE_CODEX_BASE_URL || 'https://api.kie.ai/codex/v1';
+const GEMINI_BASE = IS_COMET ? `${COMET_BASE}beta` : env.KIE_GEMINI_BASE_URL || 'https://api.kie.ai/gemini/v1';
 
 /**
  * The family a model id belongs to — the same prefix rule as `app/lib/modules/llm/model-families.ts`.
@@ -76,6 +100,11 @@ function familyOf(model) {
 
   if (model.startsWith('gemini-')) {
     return 'gemini';
+  }
+
+  /* The `chat` family (FR3) — OpenAI-dialect vendors that are not OpenAI. Rides chat-completions. */
+  if (/^(grok-|kimi-|qwen|glm-|deepseek|minimax-)/.test(model)) {
+    return 'chat';
   }
 
   throw new Error(`unknown family for "${model}" — add its prefix here and in model-families.ts`);
@@ -121,6 +150,34 @@ const MODELS = [
 ];
 
 /**
+ * Comet's candidate catalogue — a DIFFERENT list, because the two vendors do not serve the same ids.
+ *
+ * 🔴 `claude-haiku-4-5` is deliberately here so the probe keeps reporting its 400. It is listed in
+ * `_specs/cometapi-provider_spec.md` as verified and it is not: Comet answers
+ * `"model claude-haiku-4-5 has not been priced by the administrator yet"` and serves the DATED
+ * `claude-haiku-4-5-20251001` instead, at an output cap its feed reports as 8K rather than 64K.
+ * Keeping the dead id in the probe list is how that stays visible instead of becoming folklore.
+ */
+const COMET_MODELS_TO_PROBE = [
+  'claude-sonnet-5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-fable-5',
+
+  'claude-haiku-4-5', // EXPECTED 400 — see above. Its dated twin is the id Comet actually serves.
+  'claude-haiku-4-5-20251001',
+
+  /* The `chat` family (FR3) — all four probed 200 on 2026-08-10. */
+  'grok-4.5',
+  'kimi-k3',
+  'qwen3-coder',
+  'glm-5.2',
+];
+
+/** Which catalogue this run probes. */
+const PROBE_LIST = IS_COMET ? COMET_MODELS_TO_PROBE : MODELS;
+
+/**
  * The endpoint and body for one probe, derived from the model's FAMILY.
  *
  * Each family speaks a different protocol, so "is this model serveable?" cannot be asked with one
@@ -130,6 +187,19 @@ const MODELS = [
  */
 function probeRequest(model, thinkingFlag) {
   const family = familyOf(model);
+
+  /*
+   * 🔴 The family names a DIALECT; the PROVIDER chooses the WIRE (FR2). `gpt-*` is OpenAI-dialect on
+   * both gateways but rides **Responses** on KIE and **chat-completions** on Comet, so a probe that
+   * assumed one endpoint would report every gpt id dead on the other provider. The `chat` family has
+   * no Responses form anywhere.
+   */
+  if (family === 'chat' || (family === 'codex' && IS_COMET)) {
+    return {
+      url: `${CODEX_BASE}/chat/completions`,
+      body: { model, max_tokens: 1, messages: [{ role: 'user', content: 'ok' }], stream: true },
+    };
+  }
 
   if (family === 'codex') {
     return {
@@ -159,7 +229,8 @@ function probeRequest(model, thinkingFlag) {
 
   const body = { model, max_tokens: 1, messages: [{ role: 'user', content: 'ok' }], stream: true };
 
-  if (thinkingFlag) {
+  /* `thinkingFlag` is KIE's private Claude-adapter field. Sending it to Comet would probe a shape the platform never sends. */
+  if (thinkingFlag && !IS_COMET) {
     body.thinkingFlag = true;
   }
 
@@ -168,7 +239,7 @@ function probeRequest(model, thinkingFlag) {
 
 async function attempt(model, thinkingFlag) {
   /* `thinkingFlag` is Claude-only, so the two passes are identical elsewhere — probe once. */
-  if (thinkingFlag && familyOf(model) !== 'claude') {
+  if (thinkingFlag && (IS_COMET || familyOf(model) !== 'claude')) {
     return { skip: true };
   }
 
@@ -212,13 +283,16 @@ async function attempt(model, thinkingFlag) {
   }
 }
 
-console.log(`KIE catalogue health — ${ROUNDS} rounds x ${MODELS.length} models x thinkingFlag on/off\n`);
+console.log(
+  `${IS_COMET ? 'Comet' : 'KIE'} catalogue health — ${ROUNDS} rounds x ${PROBE_LIST.length} models` +
+    `${IS_COMET ? '' : ' x thinkingFlag on/off'}\n`,
+);
 
-const tally = Object.fromEntries(MODELS.map((m) => [m, { ok: 0, fail: 0, notes: new Set() }]));
+const tally = Object.fromEntries(PROBE_LIST.map((m) => [m, { ok: 0, fail: 0, notes: new Set() }]));
 
 for (let round = 0; round < ROUNDS; round++) {
-  const shift = round % MODELS.length;
-  const order = MODELS.slice(shift).concat(MODELS.slice(0, shift));
+  const shift = round % PROBE_LIST.length;
+  const order = PROBE_LIST.slice(shift).concat(PROBE_LIST.slice(0, shift));
   const marks = [];
 
   for (const model of order) {
@@ -251,7 +325,7 @@ for (let round = 0; round < ROUNDS; round++) {
 
 console.log('\n  model                 ok   fail   fail-rate   error');
 
-for (const model of MODELS) {
+for (const model of PROBE_LIST) {
   const { ok, fail, notes } = tally[model];
   const rate = `${((fail / Math.max(1, ok + fail)) * 100).toFixed(0)}%`;
   console.log(
@@ -259,8 +333,8 @@ for (const model of MODELS) {
   );
 }
 
-const dead = MODELS.filter((m) => tally[m].ok === 0);
-const healthy = MODELS.filter((m) => tally[m].fail === 0);
+const dead = PROBE_LIST.filter((m) => tally[m].ok === 0);
+const healthy = PROBE_LIST.filter((m) => tally[m].fail === 0);
 
 console.log(`\n  healthy (0 failures): ${healthy.join(', ') || 'NONE'}`);
 console.log(`  unserveable (0 successes): ${dead.join(', ') || 'none'}`);

@@ -104,7 +104,7 @@ export function ModelTierPanel() {
   /*
    * Belt to the pill's braces: with one serveable rung there is nothing to choose, so the popup never
    * shows even if the atom is somehow true — a stale `true` surviving a session change (a deploy that
-   * turns `ENABLE_PREMIUM_MODEL` off while a tab is open, a future keyboard shortcut) would otherwise
+   * turns `ENABLE_EXTENDED_MODELS` off while a tab is open, a future keyboard shortcut) would otherwise
    * render a one-row picker whose only row is the model already running.
    *
    * The ANCHOR is still rendered unconditionally — see below; that is a layout rule, not a state one.
@@ -172,10 +172,7 @@ export function ModelTierPanel() {
                 >
                   <div className="flex items-center gap-2">
                     <div className={active ? 'i-ph:check-circle-fill text-base' : 'i-ph:circle text-base opacity-50'} />
-                    <span className="text-xs font-medium">
-                      {tier.label}
-                      {tier.id === 'standard' ? ' — default' : ''}
-                    </span>
+                    <span className="text-xs font-medium">{tier.label}</span>
                     <span className="ml-auto text-[11px] text-bolt-elements-textSecondary">{model.full}</span>
                     {reason ? <div className="i-ph:lock-simple text-sm" /> : null}
                   </div>

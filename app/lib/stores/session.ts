@@ -158,6 +158,25 @@ export function normalizeModelTiers(value: unknown): ModelTiersState {
 
 export interface SessionState {
   loading: boolean;
+
+  /**
+   * 🔴 "WE COULD NOT ASK" — DISTINCT FROM "WE ASKED AND THE ANSWER IS NONE" (2026-08-11).
+   *
+   * `refreshSession` reports a failed `/api/me` as a fully EMPTY session with `loading: false`, which
+   * is right for auth and credits (signed-out is the safe reading) and WRONG for any control that
+   * hides itself when a capability is absent: an absent capability and an unanswered question become
+   * the same value, so a transient blip looks exactly like a deployment that has never had the
+   * feature. `mount-source.ts` already draws this line — `undefined` (could not ask) is not `null`
+   * (asked, empty) — and collapsing them there lets a flaky connection push over a repo it never read.
+   *
+   * The concrete symptom this exists to stop: `usePromptEnhancer` calls `refreshSession()` MID-SESSION,
+   * so one failed request made the Media button vanish from the header on a deployment where media is
+   * configured — resizing the toolbar, which §4.1a forbids outright.
+   *
+   * ⚠️ It is NOT a licence to render a capability as available. A control may use this to keep HOLDING
+   * ITS PLACE, never to claim a gateway exists; the server re-derives everything on use regardless.
+   */
+  loadFailed: boolean;
   authenticated: boolean;
 
   /** False when Supabase is unconfigured — the app runs as a single local user (§4.5). */
@@ -187,6 +206,15 @@ export interface SessionState {
     modelTiers: ModelTiersState;
   };
 
+  /**
+   * WHICH GATEWAY SERVES RENDERS (§4.16) — a rendering hint for the Media panel, never an authority.
+   * The routes re-derive it and refuse on their own, so this only decides which model list and which
+   * controls are drawn. `provider: null` means the platform serves no media here at all.
+   */
+  media: {
+    provider: 'KIE' | 'Comet' | null;
+  };
+
   pro: {
     /** The master switch. Off (the default) means Pro/BYOK UI does not exist for ANYONE. */
     proFeaturesEnabled: boolean;
@@ -202,6 +230,7 @@ export interface SessionState {
 
 export const EMPTY_SESSION: SessionState = {
   loading: true,
+  loadFailed: false,
   authenticated: false,
   accountsEnabled: false,
   credits: {
@@ -212,6 +241,13 @@ export const EMPTY_SESSION: SessionState = {
     plans: [],
     modelTiers: LOCKED_MODEL_TIERS,
   },
+
+  /*
+   * Defaults to NO media, deliberately. Until `/api/me` answers, drawing a model list would offer
+   * controls whose gateway is unknown — and offering transparency we cannot deliver is the one
+   * failure §4.16 exists to prevent. Absent means off; the server turns it on.
+   */
+  media: { provider: null },
   pro: { proFeaturesEnabled: false, byokUnlocked: false, tier: null, status: null, subscriberEmail: null },
 };
 
@@ -223,7 +259,7 @@ export async function refreshSession(): Promise<SessionState> {
     const response = await fetch('/api/me');
 
     if (!response.ok) {
-      const next = { ...EMPTY_SESSION, loading: false };
+      const next = { ...EMPTY_SESSION, loading: false, loadFailed: true };
       sessionStore.set(next);
 
       return next;
@@ -233,6 +269,7 @@ export async function refreshSession(): Promise<SessionState> {
 
     const next: SessionState = {
       loading: false,
+      loadFailed: false,
       authenticated: Boolean(data.authenticated),
       accountsEnabled: Boolean(data.accountsEnabled),
       user: data.user,
@@ -247,6 +284,7 @@ export async function refreshSession(): Promise<SessionState> {
       credits: data.credits
         ? { ...EMPTY_SESSION.credits, ...data.credits, modelTiers: normalizeModelTiers(data.credits.modelTiers) }
         : EMPTY_SESSION.credits,
+      media: data.media ?? EMPTY_SESSION.media,
       pro: data.pro ?? EMPTY_SESSION.pro,
     };
 
@@ -255,7 +293,7 @@ export async function refreshSession(): Promise<SessionState> {
     return next;
   } catch {
     // Offline or mid-deploy. Report signed-out rather than hanging the UI on a spinner forever.
-    const next = { ...EMPTY_SESSION, loading: false };
+    const next = { ...EMPTY_SESSION, loading: false, loadFailed: true };
     sessionStore.set(next);
 
     return next;

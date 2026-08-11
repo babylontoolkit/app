@@ -1,5 +1,5 @@
 /**
- * `ENABLE_PREMIUM_MODEL` — the master switch for the PAID rung of the model ladder (SPEC §4.6.1a).
+ * `ENABLE_EXTENDED_MODELS` — the master switch for the PAID rung of the model ladder (SPEC §4.6.1a).
  *
  * ## Why a flag and not "just unset the selector"
  *
@@ -38,28 +38,64 @@
  * `"TRUE"` are all OFF — the safe direction for a switch that decides whether the expensive model can
  * run at all.
  *
- * ## 🔴 The retired names are REFUSED, and the flag is why (2026-08-08)
+ * ## 🔴 The retired names are REFUSED, and this flag has now been renamed TWICE
  *
- * This variable shipped as `ENABLE_EXTENDED_MODELS` while the ladder had two paid rungs. Renaming a
- * flag whose default is ON is a **silent money bug**: a deploy carrying `ENABLE_EXTENDED_MODELS=false`
- * in SSM would, on upgrade, stop being read, fall through to the default, and start serving the
- * expensive rung to everyone — the costly direction, with nothing thrown and nothing logged. So the old
- * name is refused by NAME, pointing at its replacement, exactly as `CREATION_FLAT_CREDITS` and the
- * retired `*_DOLLARS` price vars are.
+ * Renaming a flag whose default is ON is a **silent money bug**: the old key stops being read, falls
+ * through to the default, and the deploy starts serving the expensive rungs to everyone — the costly
+ * direction, with nothing thrown and nothing logged. So every rename here ships as a PAIR: read the
+ * new name, and refuse the old one by NAME, exactly as `CREATION_FLAT_CREDITS` and the retired
+ * `*_DOLLARS` price vars are.
  *
- * `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` join it for the sibling reason: the SuperMax rung was
- * retired in the same change, so those are selectors nothing reads — an operator believing they are
- * serving a class that no longer exists. The failure is quieter than the flag's (a missing rung is the
- * *cheap* direction) but it is the same shape, and treating one case by hand and the other by
- * judgement is how the two halves of a pair drift.
+ * The history, because the direction has reversed and a reader who assumes one rename will get it
+ * backwards:
+ *
+ *  - shipped as `ENABLE_EXTENDED_MODELS` (two paid rungs: Premium · SuperMax)
+ *  - **2026-08-08** → `ENABLE_PREMIUM_MODEL`, when SuperMax was retired and the plural stopped being
+ *    true; `ENABLE_EXTENDED_MODELS` became refused
+ *  - **2026-08-10** → back to `ENABLE_EXTENDED_MODELS`, when PLATINUM restored the second paid rung
+ *    and the plural became true again; `ENABLE_PREMIUM_MODEL` is now the refused one
+ *
+ * ⚠️ So the name is once again accurate rather than merely historical — it governs EVERY paid rung,
+ * not one of them. Per-rung control is `enabledEnvKey` (`ENABLE_PLATINUM_MODEL`), which can only ever
+ * NARROW what this allows.
+ *
+ * `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` stay refused throughout, and PLATINUM taking that
+ * rung's position did NOT change that: those values were chosen against SuperMax's threshold and
+ * SuperMax's price list, so adopting them silently would serve a paid class nobody reviewed. The
+ * failure is quieter than the flag's (a missing rung is the *cheap* direction) but it is the same
+ * shape, and treating one case by hand and the other by judgement is how the two halves of a pair
+ * drift.
  */
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
+import type { ModelTierDefinition } from './model-tiers';
 
-export const ENABLE_PREMIUM_MODEL_ENV_KEY = 'ENABLE_PREMIUM_MODEL';
+export const ENABLE_EXTENDED_MODELS_ENV_KEY = 'ENABLE_EXTENDED_MODELS';
 
-/** Is the paid rung (Premium) offered at all on this deploy? */
-export function premiumModelEnabled(context?: unknown): boolean {
-  return envFlag(context, ENABLE_PREMIUM_MODEL_ENV_KEY, true);
+/**
+ * Are PAID rungs offered at all on this deploy? The MASTER switch, covering every rung in
+ * `PAID_MODEL_TIERS` — not just the one it is named after.
+ *
+ * The plural in `EXTENDED_MODELS` is load-bearing: this governs Premium AND Platinum together. A
+ * deploy that sets it false serves the Standard model to everyone, whatever the per-rung flags say.
+ * Per-rung control is `enabledEnvKey`, which only ever NARROWS this.
+ *
+ * ⚠️ It is read through `envFlag`, so it is on ONLY for the exact string `"true"` — `"1"`, `"yes"` and
+ * `"TRUE"` are all OFF, the safe direction for a switch deciding whether the expensive models run.
+ */
+export function extendedModelsEnabled(context?: unknown): boolean {
+  return envFlag(context, ENABLE_EXTENDED_MODELS_ENV_KEY, true);
+}
+
+/**
+ * Is this SPECIFIC paid rung offered? Master switch AND the rung's own flag, both default ON.
+ *
+ * The conjunction is the safety property and it is one-directional: a rung can be withdrawn without
+ * touching its sibling, but no per-rung flag can serve a rung the master switch has turned off. That
+ * asymmetry is what makes adding Platinum a no-op for every deploy that had already disabled paid
+ * models — the upgrade cannot widen what is served, only keep or narrow it.
+ */
+export function modelTierEnabled(definition: ModelTierDefinition, context?: unknown): boolean {
+  return extendedModelsEnabled(context) && envFlag(context, definition.enabledEnvKey, true);
 }
 
 /**
@@ -69,17 +105,44 @@ export function premiumModelEnabled(context?: unknown): boolean {
  * "remove this" leaves them guessing whether the capability moved or vanished.
  */
 const RETIRED_MODEL_TIER_ENV: ReadonlyArray<{ key: string; fix: string }> = [
+  /*
+   * 🔴 THE REFUSAL SWAPPED DIRECTION ON 2026-08-10, and swapping it was not optional.
+   *
+   * `ENABLE_EXTENDED_MODELS` was retired in favour of `ENABLE_PREMIUM_MODEL` on 2026-08-08, when the
+   * ladder was cut to ONE paid rung and the "extended models" plural stopped being true. PLATINUM
+   * restored the second paid rung, so the plural is accurate again and the name went back.
+   *
+   * The entry that used to sit here refused `ENABLE_EXTENDED_MODELS` — the key the platform now READS.
+   * Leaving it would refuse the live flag on every deploy that sets it, i.e. the rename would have
+   * broken the thing it renamed. And deleting it without adding its mirror would reproduce the exact
+   * bug the 08-08 rename was documented against, pointing the other way: a deploy carrying
+   * `ENABLE_PREMIUM_MODEL=false` would stop being read, fall through to the default ON, and start
+   * serving the expensive rungs to everyone — costly, silent, unlogged.
+   *
+   * **A rename of a default-ON flag is always a PAIR of edits: start reading the new name, and start
+   * REFUSING the old one.** Doing only the first is the silent money bug; doing only the second is an
+   * outage. That is true in whichever direction the rename runs, including back the way it came.
+   */
   {
-    key: 'ENABLE_EXTENDED_MODELS',
-    fix: `renamed to ${ENABLE_PREMIUM_MODEL_ENV_KEY} — copy its value across and remove the old key`,
+    key: 'ENABLE_PREMIUM_MODEL',
+    fix: `renamed back to ${ENABLE_EXTENDED_MODELS_ENV_KEY} now that the ladder has two paid rungs again — copy its value across and remove the old key`,
   },
+
+  /*
+   * 🔴 The SuperMax keys stay REFUSED even though PLATINUM now occupies that rung's position
+   * (2026-08-10). Adopting a stale `SUPERMAX_MODEL` value into Platinum is the tempting move and the
+   * wrong one: that value was chosen against SuperMax's threshold and SuperMax's price list, and
+   * silently promoting it means an operator serves a rung they never reviewed, at a threshold they
+   * never set. Refusing costs them one deliberate edit; adopting costs them a mis-served paid tier
+   * with nothing thrown. Same rule as `ENABLE_EXTENDED_MODELS` directly above.
+   */
   {
     key: 'SUPERMAX_MODEL',
-    fix: 'the SuperMax rung is retired; there is one paid rung now, so name that model in PREMIUM_MODEL or remove this key',
+    fix: 'the SuperMax rung is retired and replaced by PLATINUM — move the model to PLATINUM_MODEL (reviewing it against the active price list first) or remove this key',
   },
   {
     key: 'SUPERMAX_MINIMUM_CREDITS',
-    fix: 'the SuperMax rung is retired; set the threshold in PREMIUM_MINIMUM_CREDITS or remove this key',
+    fix: 'the SuperMax rung is retired and replaced by PLATINUM — set the threshold in PLATINUM_MINIMUM_CREDITS or remove this key',
   },
 ];
 

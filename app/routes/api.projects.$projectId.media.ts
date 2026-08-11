@@ -17,9 +17,9 @@ import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { errorResponse } from '~/lib/.server/http';
 import { getObjectStore } from '~/lib/.server/storage';
-import { getPlatformConfig, NotConfiguredError } from '~/lib/.server/agent/config';
+import { getMediaConfig, getMediaProvider, NotConfiguredError, mediaKeyEnvFor } from '~/lib/.server/agent/config';
 import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
-import { KieMediaProvider } from '~/lib/.server/media/kie-client';
+import { mediaProviderFor } from '~/lib/.server/media/provider';
 import { listMediaTasks } from '~/lib/.server/media/store';
 import { MediaRefusedError, quoteMediaRequest, startMediaTask } from '~/lib/.server/media/service';
 
@@ -60,7 +60,22 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       return json({ error: true, message: 'model is required.' }, { status: 400 });
     }
 
-    await ensureMarketPrices(context);
+    /*
+     * Who serves media HERE — its own switch (§4.16), defaulting to the LLM provider. A quote priced
+     * off a different gateway's list than the one that will render is a wrong number on the Generate
+     * button and then a wrong debit, so both actions resolve it from the same call.
+     */
+    const mediaProvider = getMediaProvider(context);
+
+    if (!mediaProvider) {
+      throw new NotConfiguredError(
+        'Media generation',
+        'No media provider is configured. Set MEDIA_PROVIDER (or run on a provider that serves ' +
+          'renders) — the current LLM provider sells no image or video generation.',
+      );
+    }
+
+    await ensureMarketPrices(mediaProvider, context);
 
     const mediaRequest = {
       model: body.model,
@@ -71,7 +86,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
 
     if (body.action === 'quote') {
       // Never debits — this is the number on the Generate button.
-      return json(quoteMediaRequest(mediaRequest, context));
+      return json(quoteMediaRequest(mediaRequest, mediaProvider, context));
     }
 
     if (body.action === 'start') {
@@ -79,12 +94,13 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
        * The platform key is required HERE, not lazily inside the provider — a missing key must be a
        * describable 503 before any debit is taken, never a refund cycle.
        */
-      const platform = getPlatformConfig(context);
+      const media = getMediaConfig(context);
 
-      if (!platform.kieApiKey) {
+      if (!media) {
         throw new NotConfiguredError(
-          'Media generation (KIE_API_KEY)',
-          'Set KIE_API_KEY in the server environment — image/video generation uses the platform KIE key.',
+          `Media generation (${mediaKeyEnvFor(mediaProvider)})`,
+          `Set ${mediaKeyEnvFor(mediaProvider)} in the server environment — image/video generation ` +
+            `uses the platform ${mediaProvider} key.`,
         );
       }
 
@@ -93,7 +109,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
         userId: user.id,
         projectId: params.projectId!,
         fileName: body.fileName,
-        provider: new KieMediaProvider(platform.kieApiKey),
+        provider: mediaProviderFor(media.provider, media.apiKey, media.baseUrl),
         objectStore: getObjectStore(context),
         context,
       });

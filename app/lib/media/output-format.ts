@@ -91,6 +91,23 @@ export interface ImageDeliveryHints {
   prompt?: string;
 }
 
+/**
+ * The INTENT half — what the caller asked for, with no gateway in it.
+ *
+ * 🔴 Split out from the realization on 2026-08-10 (T8). `ImageDelivery.cutout` used to mean two
+ * things at once — *the user wants alpha* and *run a second priced stage* — which was correct only
+ * for as long as KIE was the only gateway, because there those ARE the same fact. On Comet
+ * `gpt-image-1.5` produces real alpha in one call, so the two come apart, and a boolean that fuses
+ * them cannot express it. This one answers only the question a caller can actually answer.
+ */
+export interface ImageIntent {
+  /** Must this art sit over other content? */
+  wantsAlpha: boolean;
+
+  /** The caller's format, normalised. Honoured only when there is no alpha to carry. */
+  format: ImageOutputFormat;
+}
+
 export interface ImageDelivery {
   /** Run `recraft/remove-background` on the render — the only way to get real alpha. Costs extra. */
   cutout: boolean;
@@ -153,18 +170,41 @@ export function resolveImageOutputFormat(explicit: string | undefined): ImageOut
  * carry alpha, so reading it as a transparency request would be reading it backwards.
  */
 export function resolveImageDelivery(hints: ImageDeliveryHints = {}): ImageDelivery {
-  const explicit = hints.explicitFormat?.trim().toLowerCase();
-  const stated = isTrue(hints.transparent);
+  const { wantsAlpha, format } = resolveImageIntent(hints);
 
-  const cutout = stated ?? (explicit === 'png' ? true : explicit === 'jpg' ? false : hintsSayTransparent(hints));
-
-  if (cutout) {
+  if (wantsAlpha) {
     return { cutout: true, renderFormat: 'jpg', finalFormat: 'png' };
   }
 
-  const format = resolveImageOutputFormat(hints.explicitFormat);
-
   return { cutout: false, renderFormat: format, finalFormat: format };
+}
+
+/**
+ * The INTENT, with no gateway in it — "must this art sit over other content?", plus the caller's
+ * format for when the answer is no.
+ *
+ * 🔴 This is `resolveImageDelivery`'s decision half, extracted so the same question can be answered
+ * once and REALIZED differently per gateway (`media/image-capabilities.ts`). The precedence is
+ * unchanged and is asserted against the old behaviour, because it is the part users have been
+ * training against for months:
+ *
+ *  1. An explicit `transparent` — true or FALSE. A stated `false` wins over every hint, so a photo
+ *     whose prompt happens to mention a logo cannot be charged for alpha it does not need.
+ *  2. An explicit `output_format: "png"`. The tools and the brief have told the model for months that
+ *     png means transparency; honouring that as INTENT is what finally makes the instruction true
+ *     instead of quietly buying an opaque RGBA container.
+ *  3. A transparency hint in the file name or prompt — the safety net for a model that says nothing.
+ *
+ * An explicit `jpg` with no `transparent` flag is opaque, hints or not: jpg is the format that CANNOT
+ * carry alpha, so reading it as a transparency request would be reading it backwards.
+ */
+export function resolveImageIntent(hints: ImageDeliveryHints = {}): ImageIntent {
+  const explicit = hints.explicitFormat?.trim().toLowerCase();
+  const stated = isTrue(hints.transparent);
+
+  const wantsAlpha = stated ?? (explicit === 'png' ? true : explicit === 'jpg' ? false : hintsSayTransparent(hints));
+
+  return { wantsAlpha, format: resolveImageOutputFormat(hints.explicitFormat) };
 }
 
 function hintsSayTransparent(hints: ImageDeliveryHints): boolean {

@@ -70,16 +70,31 @@ interface Env {
   LLM_MODEL: string;
 
   /**
-   * The paid rung of the MODEL TIER LADDER (§4.6.1a). `PREMIUM_MODEL` is a SELECTOR priced by the
-   * active Marketplace price list — never a price — and `PREMIUM_MINIMUM_CREDITS` is the balance a user
-   * must HOLD to unlock it. `ENABLE_PREMIUM_MODEL` is the master switch (default ON).
-   *
-   * ⚠️ `ENABLE_EXTENDED_MODELS`, `SUPERMAX_MODEL` and `SUPERMAX_MINIMUM_CREDITS` are RETIRED and
-   * REFUSED if set (`billing/premium-model-flag.ts`), so they are deliberately absent from this type.
+   * Who serves image/video renders (SPEC §4.16) — KIE or Comet, its OWN switch. Unset, media follows
+   * `LLM_PROVIDER`; `Anthropic` yields no media provider at all (they sell no renders). It selects a
+   * gateway, never a key: the provider's existing `*_API_KEY` above is what pays.
    */
-  ENABLE_PREMIUM_MODEL: string;
+  MEDIA_PROVIDER: string;
+
+  /**
+   * The paid rungs of the MODEL TIER LADDER (§4.6.1a): Premium and Platinum. Each `*_MODEL` is a
+   * SELECTOR priced by the active Marketplace price list — never a price — and each
+   * `*_MINIMUM_CREDITS` is the balance a user must HOLD to unlock that rung.
+   * `ENABLE_EXTENDED_MODELS` is the master switch over BOTH (default ON); `ENABLE_PLATINUM_MODEL`
+   * withdraws Platinum alone and can only ever narrow the master switch, never widen it.
+   *
+   * ⚠️ `ENABLE_PREMIUM_MODEL`, `SUPERMAX_MODEL` and `SUPERMAX_MINIMUM_CREDITS` are RETIRED and
+   * REFUSED if set (`billing/premium-model-flag.ts`), so they are deliberately absent from this type.
+   * Note `ENABLE_PREMIUM_MODEL` was itself the LIVE name from 2026-08-08 to 2026-08-10 — the rename
+   * reversed when Platinum restored the second paid rung, so which of the two is refused depends on
+   * the date, and this file states the CURRENT answer.
+   */
+  ENABLE_EXTENDED_MODELS: string;
+  ENABLE_PLATINUM_MODEL: string;
   PREMIUM_MODEL: string;
   PREMIUM_MINIMUM_CREDITS: string;
+  PLATINUM_MODEL: string;
+  PLATINUM_MINIMUM_CREDITS: string;
 
   /** Credit economics (`spec/billing.md`). Never fudge these to fix a margin — see the file's own warning. */
   CREDIT_MARGIN: string;

@@ -1,0 +1,25 @@
+provider=Comet  model=claude-opus-4-8  family=claude  requests=20  delay=3000ms  prefix≈3375 tokens
+
+  #   ms      write     read    fresh   verdict
+   1  11865       5420        0        6   miss (wrote)
+   2   1448       5420        0        6   miss (wrote)
+   3  34014       5420        0        6   miss (wrote)
+   4  23007       5420        0        6   miss (wrote)
+   5   2643          0     5420        6   HIT
+   6  19596          0     5420        6   HIT
+   7  23283          0     5420        6   HIT
+   8   1641          0     5420        6   HIT
+   9   1503          0     5420        6   HIT
+  10  23380          0     5420        6   HIT
+  11   1618          0     5420        6   HIT
+  12  39208          0     5420        6   HIT
+  13  22037          0     5420        6   HIT
+  14   1474          0     5420        6   HIT
+  15  26193          0     5420        6   HIT
+  16   1596          0     5420        6   HIT
+  17  20923          0     5420        6   HIT
+  18   1669          0     5420        6   HIT
+  19  18562          0     5420        6   HIT
+  20   1551          0     5420        6   HIT
+
+16/20 measured requests hit the cache (of 20 attempted). Requests 2..N SHOULD all hit — request 1 is the write.

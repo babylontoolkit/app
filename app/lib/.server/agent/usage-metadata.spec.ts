@@ -14,6 +14,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { extractStepCacheTokens, shouldWarnMissingUsageNamespace, usageNamespaceFor } from './usage-metadata';
+import { FAMILY_POLICY, MODEL_FAMILIES } from '~/lib/modules/llm/model-families';
 
 describe('extractStepCacheTokens — claude identity', () => {
   /**
@@ -157,6 +158,28 @@ describe('extractStepCacheTokens — per family', () => {
       sawNamespace: true,
     });
   });
+
+  /**
+   * The `chat` family (Comet, 2026-08-10) speaks the OpenAI chat-completions dialect, so its
+   * counters arrive under the SAME `openai` namespace as codex — but its cache is not priced
+   * (`cacheProfile: 'none'`), which is a different fact and is asserted separately below. Reading the
+   * key is still worth pinning: an adapter that starts reporting `cachedPromptTokens` must be picked
+   * up automatically, expected zeros rather than assumed zeros.
+   */
+  it('reads the openai namespace for chat', () => {
+    expect(extractStepCacheTokens({ openai: { cachedPromptTokens: 8_192 } }, 'chat')).toEqual({
+      cacheReadTokens: 8_192,
+      cacheCreationTokens: 0,
+      sawNamespace: true,
+    });
+  });
+
+  /** Same namespace as codex, and it must stay that way — they are one dialect. */
+  it('routes chat and codex to the same namespace', () => {
+    const meta = { openai: { cachedPromptTokens: 5 }, anthropic: { cacheReadInputTokens: 999 } };
+
+    expect(extractStepCacheTokens(meta, 'chat')).toEqual(extractStepCacheTokens(meta, 'codex'));
+  });
 });
 
 describe('extractStepCacheTokens — absent vs empty', () => {
@@ -245,6 +268,26 @@ describe('shouldWarnMissingUsageNamespace', () => {
     expect(shouldWarnMissingUsageNamespace('gemini')).toBe(false);
   });
 
+  /**
+   * `chat` takes gemini's exemption for gemini's reason — `cacheProfile: 'none'`, so the namespace is
+   * EXPECTED to be absent and its absence costs nothing. ⚠️ It would be easy to derive the exemption
+   * from the namespace instead (`openai` warns, so chat warns) — that reading is wrong and would emit
+   * a warning on every step of every chat generation, which is how an operator learns to ignore the
+   * one warning that means real money is being mis-measured.
+   */
+  it('does NOT warn for chat — same exemption as gemini, same reason', () => {
+    expect(shouldWarnMissingUsageNamespace('chat')).toBe(false);
+  });
+
+  /**
+   * Asserted over the DECLARED UNION, not a hand-written list: a family added to `MODEL_FAMILIES`
+   * must be a deliberate answer to "is this cache priced?", never an omission. The rule is exactly
+   * `cacheProfile !== 'none'`, so it is stated once and checked against every family that exists.
+   */
+  it.each(MODEL_FAMILIES)('warns for %s exactly when its cache is priced', (family) => {
+    expect(shouldWarnMissingUsageNamespace(family)).toBe(FAMILY_POLICY[family].cacheProfile !== 'none');
+  });
+
   it('does not warn when the family is unknown', () => {
     expect(shouldWarnMissingUsageNamespace(undefined)).toBe(false);
   });
@@ -255,6 +298,12 @@ describe('usageNamespaceFor', () => {
     expect(usageNamespaceFor('claude')).toBe('anthropic');
     expect(usageNamespaceFor('codex')).toBe('openai');
     expect(usageNamespaceFor('gemini')).toBe('google');
+    expect(usageNamespaceFor('chat')).toBe('openai');
     expect(usageNamespaceFor(undefined)).toBe('anthropic');
+  });
+
+  /* Every declared family names a namespace — the warning text quotes it, so a gap reads as a bug. */
+  it.each(MODEL_FAMILIES)('names a namespace for %s', (family) => {
+    expect(usageNamespaceFor(family)).toBe(FAMILY_POLICY[family].usageNamespace);
   });
 });

@@ -89,7 +89,7 @@ export function ModelTierPill() {
   const selectedLabel = selectedRow?.label ?? 'Standard';
 
   /*
-   * A deploy with `ENABLE_PREMIUM_MODEL=false` sends ONE rung, so there is nothing to pick. The pill
+   * A deploy with `ENABLE_EXTENDED_MODELS=false` sends ONE rung, so there is nothing to pick. The pill
    * still renders — naming the model in use is its job, and that is if anything more useful when the
    * user has no say in it — but it stops behaving like a control: no picker, and a tooltip that does
    * not invite a click it will not honour.

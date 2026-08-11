@@ -704,7 +704,18 @@ describe('the source scan — the fallback rung, the render capture, and the unt
 
     // It must not re-declare the tier, nor spread anything that could shadow it.
     expect(scoped).not.toMatch(/\btier\s*:/);
-    expect(scoped).not.toMatch(/\.\.\./);
+
+    /*
+     * The blanket "no spread at all" rule was RELAXED to a named exception on 2026-08-10, when every
+     * send path gained the live project/chat identity (`~/lib/chat/turn-identity.ts` — a turn that
+     * posts `projectId: undefined` silently loses the preview, media and MCP tool families).
+     *
+     * The protection is unchanged in substance: `liveTurnBody()` is pinned by `turn-identity.spec.ts`
+     * to return EXACTLY `projectId` and `chatId`, so it cannot shadow the tier. Any OTHER spread here
+     * still fails, because an unpinned one could carry anything.
+     */
+    const spreads = scoped.match(/\.\.\.[A-Za-z_$][\w$]*\(?\)?/g) ?? [];
+    expect(spreads.filter((s) => s !== '...liveTurnBody()')).toEqual([]);
   });
 
   /*

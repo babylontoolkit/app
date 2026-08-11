@@ -91,3 +91,132 @@ export async function fetchKieMarketFeed(options?: { filter?: string }): Promise
 
   return { rows, reportedTotal, fetchedAt: new Date().toISOString() };
 }
+
+/*
+ * ------------------------------------------------------------------------------------------------ *
+ * Comet's model feed
+ * ------------------------------------------------------------------------------------------------
+ */
+
+/** Comet publishes its whole catalogue in one authenticated GET — no paging, unlike KIE's POST pager. */
+const COMET_FEED_URL = 'https://api.cometapi.com/api/models';
+
+/**
+ * One row of Comet's feed, reduced to the fields an operator compares against the promoted list.
+ *
+ * 🔴 **`input`/`output` are the OFFICIAL VENDOR rates; the CHARGED rate is `input x ratio`.** This
+ * shape keeps all three so the panel can show the arithmetic rather than a number whose meaning has
+ * to be remembered — reading `input` as the charged rate is the mistake that produced "no discount on
+ * Opus 5" on the first pass of this investigation.
+ *
+ * ⚠️ `ratio` is PER ROW. 273 of 276 rows carry 0.8 and three carry 1.0, so a UI (or a capture) that
+ * folds in a constant under-charges exactly the newest and most expensive models.
+ */
+export interface CometFeedRow {
+  id: string;
+
+  /** Comet's own display code, which DISAGREES with `id` on some rows (`grok-4.5` → `grok-4-5`). */
+  code: string;
+  name: string;
+  modelType: string;
+  officialInputPerMTok: number | null;
+  officialOutputPerMTok: number | null;
+  ratio: number | null;
+
+  /** `official x ratio`, computed here so every reader sees the same number. Null when unpriceable. */
+  chargedInputPerMTok: number | null;
+  chargedOutputPerMTok: number | null;
+  contextLength: string | null;
+  maxCompletionTokens: string | null;
+}
+
+export interface CometFeedResult {
+  rows: CometFeedRow[];
+  reportedTotal: number;
+  fetchedAt: string;
+}
+
+function charged(official: number | null | undefined, ratio: number | null | undefined): number | null {
+  /*
+   * BOTH operands are finite-checked, and the symmetry is the point: checking only `official` let a
+   * row with `ratio: NaN` through as `NaN`, which renders as a BLANK CELL — indistinguishable from a
+   * free model, on the screen an operator uses to decide what to charge.
+   */
+  if (typeof official !== 'number' || !Number.isFinite(official)) {
+    return null;
+  }
+
+  if (typeof ratio !== 'number' || !Number.isFinite(ratio)) {
+    return null;
+  }
+
+  // Two decimals — 0.3 x 0.8 is 0.24000000000000002 in binary floating point.
+  return Math.round(official * ratio * 100) / 100;
+}
+
+/**
+ * Comet's catalogue, for the ADMIN'S EYES ONLY.
+ *
+ * 🔴 Never machine-applied, exactly like the KIE variant above: auto-applying a third party's feed to
+ * our billing table hands their webmaster write access to our margin. It exists so an operator can
+ * SEE that a promoted row has drifted, and then decide.
+ *
+ * ⚠️ It is also **not a probe**. A row here is evidence of a price, never evidence that the id can be
+ * called — `claude-haiku-4-5` is absent from this feed AND 400s on the wire, while `grok-4.5` appears
+ * under the display code `grok-4-5`. An id ships only after a request to it returns 200 (FR4).
+ */
+export async function fetchCometMarketFeed(apiKey: string, options?: { filter?: string }): Promise<CometFeedResult> {
+  const response = await fetch(COMET_FEED_URL, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Comet model feed returned HTTP ${response.status}`);
+  }
+
+  /*
+   * A body of literal `null` parses fine and then throws a bare TypeError on property access — so the
+   * shape is checked before it is read, and the failure says what was wrong with it.
+   */
+  const json = (await response.json()) as { data?: unknown } | null;
+
+  if (!json || typeof json !== 'object' || !Array.isArray(json.data)) {
+    throw new Error('Comet model feed returned no data array');
+  }
+
+  const records = json.data as Array<Record<string, any>>;
+
+  const filter = options?.filter?.trim().toLowerCase();
+
+  /*
+   * ⚠️ The filter matches `id` OR `code`, because this module's own header records that the two
+   * DISAGREE on some rows (`grok-4.5` carries `code: "grok-4-5"`). Matching `id` alone meant an
+   * operator who typed the code Comet shows in its own UI got zero rows out of 276 — which reads as
+   * "Comet does not sell it" rather than "you spelled it their other way", on the panel whose entire
+   * job is telling those two states apart.
+   */
+  const rows: CometFeedRow[] = records
+    .filter((r) => !filter || `${r.id ?? ''} ${r.code ?? ''}`.toLowerCase().includes(filter))
+    .map((r) => {
+      const ratio = typeof r.pricing?.ratio === 'number' ? r.pricing.ratio : null;
+      const officialIn = typeof r.pricing?.input === 'number' ? r.pricing.input : null;
+      const officialOut = typeof r.pricing?.output === 'number' ? r.pricing.output : null;
+
+      return {
+        id: String(r.id ?? ''),
+        code: String(r.code ?? ''),
+        name: String(r.name ?? ''),
+        modelType: String(r.model_type ?? ''),
+        officialInputPerMTok: officialIn,
+        officialOutputPerMTok: officialOut,
+        ratio,
+        chargedInputPerMTok: charged(officialIn, ratio),
+        chargedOutputPerMTok: charged(officialOut, ratio),
+        contextLength: r.context_length == null ? null : String(r.context_length),
+        maxCompletionTokens: r.max_completion_tokens == null ? null : String(r.max_completion_tokens),
+      };
+    });
+
+  return { rows, reportedTotal: records.length, fetchedAt: new Date().toISOString() };
+}

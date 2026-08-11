@@ -22,8 +22,15 @@ interface CodedError {
   name?: string;
 }
 
-/** Errors we RAISE on purpose and whose messages are safe (and useful) to show the user. */
-const SAFE_ERRORS = new Set([
+/**
+ * Errors we RAISE on purpose and whose messages are safe (and useful) to show the user.
+ *
+ * Exported as a `ReadonlySet` so a spec can pin membership — "this refusal is describable" is a real
+ * property of a thrown class, and a message assertion cannot see it (a plain `Error` with perfect
+ * wording becomes a generic 500). Readonly because an importer that could `.add()` here would be
+ * widening what the server discloses, from a module that never intended to offer that.
+ */
+export const SAFE_ERRORS: ReadonlySet<string> = new Set([
   'UnauthorizedError',
   'ForbiddenError',
   'NotFoundError',

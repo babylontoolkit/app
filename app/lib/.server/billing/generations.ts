@@ -172,6 +172,21 @@ export interface GenerationStore {
   list(limit?: number): Promise<GenerationRecord[]>;
 
   /**
+   * The rows a page of ledger entries points at, by id (SPEC §4.6).
+   *
+   * Exists so the credits panel can say what a debit was FOR — every generation debit carries the
+   * reason `'generation'` (the SQL `CHECK` constraint owns that vocabulary), so the ledger alone
+   * renders a creation build, a one-line edit, an auto-repair and a plan as four identical rows
+   * labelled "Generation". `status_kind` has recorded the difference on every turn since migration
+   * 0019 and nothing has ever read it.
+   *
+   * Batched deliberately: the alternative is a lookup per row, i.e. up to 100 round trips to decorate
+   * one dropdown. Ids not found are simply absent from the result — a ledger row whose generation row
+   * has been swept must still render, as itself.
+   */
+  listByIds(ids: string[]): Promise<GenerationRecord[]>;
+
+  /**
    * Has this project ever had a generation the user was actually CHARGED for? (§4.4a, migration 0015.)
    *
    * The observable definition of "the flat creation charge bought something": the project-create refund
@@ -256,6 +271,20 @@ export class FsGenerationStore implements GenerationStore {
     }
 
     return false;
+  }
+
+  async listByIds(ids: string[]): Promise<GenerationRecord[]> {
+    const records: GenerationRecord[] = [];
+
+    for (const id of new Set(ids)) {
+      try {
+        records.push(JSON.parse(await fs.readFile(this._file(id), 'utf8')) as GenerationRecord);
+      } catch {
+        /* Missing or corrupt: the caller renders the ledger row undecorated rather than not at all. */
+      }
+    }
+
+    return records;
   }
 
   async list(limit = 100): Promise<GenerationRecord[]> {
@@ -365,39 +394,76 @@ export class SupabaseGenerationStore implements GenerationStore {
     return (data ?? []).length > 0;
   }
 
+  async listByIds(ids: string[]): Promise<GenerationRecord[]> {
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const db = await createAdminClient(this._context);
+    const { data, error } = await db
+      .from('generations')
+      .select()
+      .in('id', [...new Set(ids)]);
+
+    if (error) {
+      /*
+       * A DECORATION, never the row itself. This lookup only adds a label and a savings figure to a
+       * ledger entry the caller already has, so an outage here must degrade to plain rows — the
+       * balance and the history are what that panel exists for, and neither depends on this.
+       */
+      logger.warn(`Could not load generations for the ledger view: ${error.message}`);
+      return [];
+    }
+
+    return (data ?? []).map(toGenerationRecord);
+  }
+
   async list(limit = 100): Promise<GenerationRecord[]> {
     const db = await createAdminClient(this._context);
     const { data } = await db.from('generations').select().order('created_at', { ascending: false }).limit(limit);
 
-    return (data ?? []).map(
-      (r: any): GenerationRecord => ({
-        id: r.id,
-        createdAt: r.created_at,
-        userId: r.user_id,
-        projectId: r.project_id ?? undefined,
-        model: r.model,
-        provider: 'Anthropic',
-        creditsCharged: r.credits_charged,
-        rawCostUsd: Number(r.raw_cost_usd),
-        promptVersionId: r.prompt_version_id,
-        skillsLoaded: r.skills_loaded ?? [],
-        blocksLoaded: [],
-        promptTokens: r.input_tokens,
-        completionTokens: r.output_tokens,
-        totalTokens: r.input_tokens + r.output_tokens,
-        cacheReadTokens: r.cached_input_tokens,
-        cacheCreationTokens: r.cache_write_tokens,
-        toolRounds: r.tool_rounds ?? 0,
-        statusKind: r.status_kind ?? undefined,
-        durationMs: r.duration_ms ?? undefined,
-        finishReason: r.finish_reason ?? undefined,
-        repairOf: r.repair_of ?? undefined,
-        steps: r.steps ?? undefined,
-        status: r.status,
-        error: r.error ?? undefined,
-      }),
-    );
+    return (data ?? []).map(toGenerationRecord);
   }
+}
+
+/*
+ * The one row -> record mapping. It was inline in `list()`; a second reader (`listByIds`) made a
+ * second copy the obvious move, and two mappings of one table drift silently — a column read by one
+ * caller and not the other looks like a feature that works on some screens.
+ *
+ * ⚠️ `provider` is HARDCODED and has been since this store was written: there is no `provider` column
+ * on `generations`, so a Postgres deploy cannot say which gateway served a historical turn. Nothing
+ * on the ledger path depends on it (savings are computed from usage + model against Anthropic list,
+ * which needs no provider), but the Admin per-provider view cannot be trusted until it is a real
+ * column. Left as found rather than quietly widened here.
+ */
+function toGenerationRecord(r: any): GenerationRecord {
+  return {
+    id: r.id,
+    createdAt: r.created_at,
+    userId: r.user_id,
+    projectId: r.project_id ?? undefined,
+    model: r.model,
+    provider: 'Anthropic',
+    creditsCharged: r.credits_charged,
+    rawCostUsd: Number(r.raw_cost_usd),
+    promptVersionId: r.prompt_version_id,
+    skillsLoaded: r.skills_loaded ?? [],
+    blocksLoaded: [],
+    promptTokens: r.input_tokens,
+    completionTokens: r.output_tokens,
+    totalTokens: r.input_tokens + r.output_tokens,
+    cacheReadTokens: r.cached_input_tokens,
+    cacheCreationTokens: r.cache_write_tokens,
+    toolRounds: r.tool_rounds ?? 0,
+    statusKind: r.status_kind ?? undefined,
+    durationMs: r.duration_ms ?? undefined,
+    finishReason: r.finish_reason ?? undefined,
+    repairOf: r.repair_of ?? undefined,
+    steps: r.steps ?? undefined,
+    status: r.status,
+    error: r.error ?? undefined,
+  };
 }
 
 let _store: GenerationStore | undefined;

@@ -14,7 +14,7 @@
  *      EXPENSIVE row for a model it does not know, so a typo in a variable whose entire purpose is to
  *      spend less would silently spend more — the precise inversion, and it throws nothing. Same rule
  *      and same reason as `getPlatformModel`.
- *   3. 🔴 **`ENABLE_PREMIUM_MODEL` does not gate it** (owner, 2026-08-08). That flag stops users
+ *   3. 🔴 **`ENABLE_EXTENDED_MODELS` does not gate it** (owner, 2026-08-08). That flag stops users
  *      opting into the EXPENSIVE §4.6.1a rungs on the platform's credits. This is the opposite motion:
  *      an operator setting, not a user choice, whose purpose is to spend less. Routing it through the
  *      tier machinery would mean the deploy that switched the paid classes off — the cost-conscious
@@ -22,7 +22,7 @@
  *      absent AND explicitly false, because a source scan cannot see a gate added one call deeper.
  *
  * ⚠️ `env()` falls back to `process.env` and Vitest loads `.env.local`, where a real developer has
- * `LLM_PROVIDER`, `LLM_MODEL`, `ENABLE_PREMIUM_MODEL` and (now) `ENHANCE_PROMPT_MODEL` all set. Every
+ * `LLM_PROVIDER`, `LLM_MODEL`, `ENABLE_EXTENDED_MODELS` and (now) `ENHANCE_PROMPT_MODEL` all set. Every
  * case scrubs the WHOLE precedence chain rather than the one variable it is talking about — the
  * `oauth.spec.ts` trap, which has already fired twice in this repo for want of one sibling in a list.
  */
@@ -36,7 +36,7 @@ const MODEL_ENV = [
   'LLM_MODEL',
   'LLM_PROVIDER',
   'KIE_DEFAULT_MODEL',
-  'ENABLE_PREMIUM_MODEL',
+  'ENABLE_EXTENDED_MODELS',
 
   // Retired 2026-08-08 and REFUSED if set — a leftover would break the unrelated cases here.
   'ENABLE_EXTENDED_MODELS',
@@ -132,7 +132,7 @@ describe('getEnhancerModel — an unpriced model is refused, never quietly used'
   });
 });
 
-describe('🔴 ENABLE_PREMIUM_MODEL does not gate the enhancer model', () => {
+describe('🔴 ENABLE_EXTENDED_MODELS does not gate the enhancer model', () => {
   const CASES: Array<[string, string | undefined]> = [
     ['absent', undefined],
     ['explicitly false', 'false'],
@@ -144,7 +144,7 @@ describe('🔴 ENABLE_PREMIUM_MODEL does not gate the enhancer model', () => {
       LLM_PROVIDER: 'Anthropic',
       LLM_MODEL: 'claude-sonnet-5',
       ENHANCE_PROMPT_MODEL: 'claude-haiku-4-5',
-      ...(flag === undefined ? {} : { ENABLE_PREMIUM_MODEL: flag }),
+      ...(flag === undefined ? {} : { ENABLE_EXTENDED_MODELS: flag }),
     });
 
     expect(getEnhancerModel({})).toBe('claude-haiku-4-5');
@@ -160,7 +160,7 @@ describe('🔴 ENABLE_PREMIUM_MODEL does not gate the enhancer model', () => {
       LLM_PROVIDER: 'Anthropic',
       LLM_MODEL: 'claude-sonnet-5',
       ENHANCE_PROMPT_MODEL: 'claude-haiku-4-5',
-      ENABLE_PREMIUM_MODEL: 'false',
+      ENABLE_EXTENDED_MODELS: 'false',
     });
 
     const { getTierModel } = await import('./config');

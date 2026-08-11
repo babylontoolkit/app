@@ -16,6 +16,8 @@ import {
   type MarketPriceList,
 } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
+import { BAKED_COMET_PRICES } from './baked-comet-prices';
+import { FAMILY_PREFIXES } from '~/lib/modules/llm/model-families';
 
 /** A minimal valid list to mutate per test. */
 function validList(): MarketPriceList {
@@ -55,6 +57,110 @@ describe('validation — the promotion wall', () => {
   it('accepts the baked list — the fallback must never be refused by its own validator', () => {
     const result = validateMarketPriceList(BAKED_MARKET_PRICES);
     expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
+  });
+
+  /*
+   * The SAME wall for the second marketplace's fallback (2026-08-10, `baked-comet-prices.ts`).
+   *
+   * A baked list its own validator refuses is a uniquely bad state: `loadVersion` re-validates on read
+   * and `promoteMarketPrices` validates before writing, but the baked table is served WITHOUT passing
+   * either — it is the thing served when validation has nothing to say. So an invalid one does not
+   * fail loudly, it silently becomes the prices charged on that provider forever.
+   */
+  it('accepts the baked Comet list — its fallback is served without ever passing validation', () => {
+    const result = validateMarketPriceList(BAKED_COMET_PRICES);
+    expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
+  });
+
+  /*
+   * 🔴 The platform default has to be priced on EVERY marketplace, not just on the one that happened
+   * to be shipping when the rule was written. `ratesFor` bills an unpriced model at the most expensive
+   * row, so a Comet list missing this row would bill every ordinary generation at the priciest
+   * Claude rung — silently, and only on that provider.
+   */
+  it('prices the platform default on the Comet list too', () => {
+    expect(BAKED_COMET_PRICES.llm[DEFAULT_MODEL], `${DEFAULT_MODEL} is unpriced on Comet`).toBeDefined();
+    expect(BAKED_COMET_PRICES.llm[DEFAULT_MODEL].inputPerMTok).toBeGreaterThan(0);
+    expect(BAKED_COMET_PRICES.llm[DEFAULT_MODEL].outputPerMTok).toBeGreaterThan(0);
+  });
+
+  /*
+   * The family rule is a property of the LIST, not of a vendor: Comet quotes no cached rate for
+   * anything, so every `claude-*` row derives (0.1x read / 2.0x the 1h write) and the pair is REFUSED
+   * on the way in. Asserted against a Comet row rather than assumed from the KIE tests above, because
+   * "the rule follows the model family, not the marketplace" is exactly the thing a per-provider store
+   * makes it easy to get wrong.
+   */
+  it('refuses quoted cache rates on a Comet claude row, exactly as on KIE', () => {
+    const list: MarketPriceList = {
+      ...BAKED_COMET_PRICES,
+      llm: {
+        ...BAKED_COMET_PRICES.llm,
+        [DEFAULT_MODEL]: { ...BAKED_COMET_PRICES.llm[DEFAULT_MODEL], cachedInputPerMTok: 0.16 },
+      },
+    };
+
+    expect(errorsOf(list).join()).toMatch(/cache rates derive/i);
+
+    /* Control: the same list without the quote is accepted, so the refusal is about the cache key. */
+    expect(validateMarketPriceList(BAKED_COMET_PRICES).ok).toBe(true);
+  });
+
+  /*
+   * An EMPTY media table is valid and is the correct state for Comet today (media lands in T8).
+   * `lookupMediaPrice` has no most-expensive fallback — media debits run BEFORE spend — so an unpriced
+   * media model is REFUSED rather than guessed, and a speculative row is the one shape that would turn
+   * that refusal into a wrong charge.
+   */
+  it('accepts an empty media table — no media rows is a refusal, never a guess', () => {
+    /*
+     * T8 filled this table, so the property under test moved: what still matters is that an EMPTY
+     * media table validates — an operator promoting a list with no media rows must get a refusal at
+     * generation time (`lookupMediaPrice` has no fallback), never a rejected promotion.
+     */
+    expect(validateMarketPriceList({ ...BAKED_COMET_PRICES, media: {} }).ok).toBe(true);
+
+    // ...and the shipped list DOES carry rows now, so the assertion above is not passing by vacuity.
+    expect(Object.keys(BAKED_COMET_PRICES.media).length).toBeGreaterThan(0);
+  });
+
+  /*
+   * WHICH models the Comet list can bill — the rates themselves are pinned in `comet-prices.spec.ts`.
+   *
+   * ⚠️ This used to carry the rate literals too, and T5 moved them: that file pins each row TWICE (once
+   * against `official x ratio` from `COMET_PRICE_PROVENANCE`, once as a literal), and a third copy here
+   * is a number that can drift out of agreement with the other two while every test stays green. What
+   * belongs in THIS file is the question validation asks — which ids does this marketplace claim to
+   * price — so that adding or removing a row stays a deliberate act rather than a silent one.
+   *
+   * ⚠️ `claude-haiku-4-5` is absent because it is a hard 400 on this provider ("has not been priced by
+   * the administrator yet"); Comet serves the dated `claude-haiku-4-5-20251001` instead. The full
+   * evidence, and the reason re-adding it needs a fresh probe rather than a copy from the spec's table,
+   * is in `comet-prices.spec.ts` — do not "restore" the row from this list.
+   *
+   * The three `chat` rows are priced but NOT offered in `COMET_MODELS`, deliberately: pricing a model
+   * an operator has not selected costs nothing, while LISTING an unprobed id ships a 404.
+   */
+  it('pins which models the Comet list prices — rates live in comet-prices.spec.ts', () => {
+    expect(Object.keys(BAKED_COMET_PRICES.llm).sort()).toEqual([
+      'claude-fable-5',
+      'claude-opus-4-8',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'grok-4.5',
+      'kimi-k3',
+      'qwen3-coder',
+    ]);
+
+    expect(BAKED_COMET_PRICES.llm['claude-haiku-4-5'], 'a hard 400 on Comet — never priced').toBeUndefined();
+
+    /* Every row must be a family the validator recognises, or the list cannot be promoted at all. */
+    for (const model of Object.keys(BAKED_COMET_PRICES.llm)) {
+      expect(
+        FAMILY_PREFIXES.some(([prefix]) => model.startsWith(prefix)),
+        `${model} names no family`,
+      ).toBe(true);
+    }
   });
 
   it('accepts a minimal valid list', () => {
@@ -188,6 +294,38 @@ describe('validation — the promotion wall', () => {
   });
 
   /*
+   * The `chat` family (Comet, 2026-08-10) carries the SAME `none` profile as gemini and for the same
+   * reason — no vendor among Grok/Kimi/Qwen/GLM/DeepSeek/MiniMax publishes a cached rate — so a row
+   * quoting only the base pair is the complete, correct row. Accepting it is what makes the family
+   * priceable at all; the ACCEPT case is easy to lose while tightening the refusals around it.
+   */
+  it.each([['grok-4.5'], ['kimi-k2-thinking'], ['qwen3-max'], ['glm-4.6'], ['deepseek-v3.2'], ['minimax-m2']])(
+    'accepts a chat row quoting only the base pair: %s',
+    (id) => {
+      const list = validList();
+      list.llm[id] = { inputPerMTok: 3, outputPerMTok: 15 };
+
+      const result = validateMarketPriceList(list);
+      expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
+    },
+  );
+
+  /*
+   * 🔴 And a chat row quoting a cache rate is REFUSED, explaining that cached tokens bill at the full
+   * input rate. Quoting one here would be inventing an economics no vendor publishes and our own usage
+   * reader cannot observe — a discount granted against a counter that does not arrive. Both cache keys
+   * are covered because a validator that refuses one and ignores the other is half a wall.
+   */
+  it.each([['cachedInputPerMTok'], ['cacheWritePerMTok']])('refuses a chat row quoting %s', (key) => {
+    const list = validList();
+    list.llm['grok-4.5'] = { inputPerMTok: 3, outputPerMTok: 15, [key]: 0.3 };
+
+    const joined = errorsOf(list).join();
+    expect(joined).toMatch(/full input rate/i);
+    expect(joined).toContain(key);
+  });
+
+  /*
    * An id no prefix claims is REFUSED rather than defaulted — the other side of `requireFamily`'s
    * throw: we would be pricing a model whose wire, and therefore whose cache economics, we cannot name.
    *
@@ -200,6 +338,23 @@ describe('validation — the promotion wall', () => {
     list.llm[id] = { inputPerMTok: 2, outputPerMTok: 10 };
 
     expect(errorsOf(list).join()).toMatch(/known model family/i);
+  });
+
+  /*
+   * The refusal must name EVERY accepted prefix, derived from `FAMILY_PREFIXES` rather than typed out.
+   * It used to enumerate three in prose; the day a fourth family landed, an admin pasting a perfectly
+   * valid `grok-4.5` row into an older build would have been told the accepted set was three things it
+   * was not — sending them to fix an id that was already right.
+   */
+  it('names every accepted prefix, so an admin is not told a shorter list than the truth', () => {
+    const list = validList();
+    list.llm['llama-3'] = { inputPerMTok: 2, outputPerMTok: 10 };
+
+    const joined = errorsOf(list).join();
+
+    for (const [prefix] of FAMILY_PREFIXES) {
+      expect(joined, `the refusal must name ${prefix}`).toContain(prefix);
+    }
   });
 
   /*

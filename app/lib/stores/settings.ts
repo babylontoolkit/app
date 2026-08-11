@@ -262,7 +262,7 @@ const updateAutoEnabledTracking = (providerName: string, isEnabled: boolean) => 
  * lists disagreeing is that this browser asks for a rung the server declines to Standard, which is the
  * safe direction and exactly what an out-of-date tab already does.
  */
-export const MODEL_TIER_IDS = ['standard', 'premium'] as const;
+export const MODEL_TIER_IDS = ['standard', 'premium', 'platinum'] as const;
 
 export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
 
@@ -284,7 +284,7 @@ const SETTINGS_KEYS = {
    * opted into premium and paid for it — dropping the key silently downgrades every existing premium
    * user to Standard, with nothing on screen saying their preference changed.
    */
-  PREMIUM_MODEL: 'premiumModelEnabled',
+  PREMIUM_MODEL: 'extendedModelsEnabled',
 
   /** The user's chosen rung of the MODEL TIER LADDER (§4.6.1a). `'standard'` unless they pick up. */
   MODEL_TIER: 'modelTier',
@@ -345,7 +345,7 @@ const getInitialSettings = () => {
  *
  * Three rules, and each one fails silently in a different direction:
  *
- *  - **Migrate `premiumModelEnabled === true` → `'premium'`.** Without it every user who had premium
+ *  - **Migrate `extendedModelsEnabled === true` → `'premium'`.** Without it every user who had premium
  *    switched on is downgraded to Standard the moment they load the new bundle, and the only signal is
  *    a pill quietly naming a cheaper model. The old key is READ, never written — the new key is the
  *    only writer from here on, so the two can never disagree about what the user chose.

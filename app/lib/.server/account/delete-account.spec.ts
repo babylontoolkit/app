@@ -114,7 +114,20 @@ describe('deleteAccount — the property: nothing of theirs is left', () => {
     tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'account-delete-'));
     objects = new FsObjectStore(path.join(tmp, 'objects'));
     projects = new FsProjectStore(path.join(tmp, 'projects'));
-    tokens = new FsGitTokenStore(path.join(tmp, 'tokens'));
+
+    /*
+     * 🔴 TWO arguments, and the first is the CONTEXT, not the root.
+     *
+     * `FsGitTokenStore(context, root?)` falls back to `platformDataDir()/git-tokens` when `root` is
+     * absent — so `new FsGitTokenStore(path.join(tmp, 'tokens'))` passed a filesystem path as the
+     * `context` and left the root undefined, writing this test's fixture rows into the DEVELOPER'S
+     * REAL `.data/git-tokens/` on every run. It typechecked because `context` is `unknown`, and the
+     * comment four lines below already named the hazard it was walking into.
+     *
+     * Same shape as `toSandboxStoreKey`: a parameter whose NAME states a contract, and a call site
+     * that does not satisfy it. Nothing but reading the signature catches this one.
+     */
+    tokens = new FsGitTokenStore({}, path.join(tmp, 'tokens'));
 
     // All four, or this writes into the developer's real `.data/` — see `message-store.spec.ts`.
     setObjectStore(objects);

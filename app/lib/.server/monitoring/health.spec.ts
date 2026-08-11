@@ -79,6 +79,29 @@ describe('buildHealthReport', () => {
      * upstream of every assertion, not just the sandbox ones.
      */
     'CREATION_FLAT_CREDITS',
+
+    /*
+     * 🔴 THE WHOLE LADDER, because `platformKey` now asks a question with two possible askers.
+     *
+     * `buildHealthReport` -> `getPlatformConfig` -> `resolvePlatformProvider`, which with
+     * `AUTO_MODEL_SELECT` on ignores `LLM_PROVIDER` and picks a gateway from `LLM_PROVIDER_CHAIN`
+     * (gated on the key being present and the model priceable, so `COMET_API_KEY` and `LLM_MODEL`
+     * are inputs too). The owner's `.env.local` sets `AUTO_MODEL_SELECT=true` and a real
+     * `COMET_API_KEY` — so "is degraded on KIE when only the Anthropic key is set" laddered PAST
+     * KIE to Anthropic, found the key the test had just set, and reported `ok`. The implementation
+     * was right and the assertion was measuring a different question.
+     *
+     * ⚠️ This is the FIFTH occurrence of the `oauth.spec.ts` trap, and the THIRD in this file — the
+     * two blocks above it are the previous two. The pattern is identical every time: a variable
+     * joins a precedence chain, no scrub list that already names its siblings is re-checked, and the
+     * failure appears ONLY on the machine of the person who configured the feature, with CI green.
+     * The lesson has not been "remember harder" three times running: when you add a variable to a
+     * chain, grep the scrub lists for a variable already IN that chain.
+     */
+    'AUTO_MODEL_SELECT',
+    'LLM_PROVIDER_CHAIN',
+    'COMET_API_KEY',
+    'LLM_MODEL',
   ];
 
   const saved: Record<string, string | undefined> = {};
@@ -238,6 +261,32 @@ describe('buildHealthReport', () => {
     it('is degraded on Anthropic when only the KIE key is set', async () => {
       process.env.LLM_PROVIDER = 'Anthropic';
       process.env.KIE_API_KEY = 'kie-test';
+
+      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('degraded');
+    });
+
+    /*
+     * With `AUTO_MODEL_SELECT` on, "the configured provider" is not the one that will serve the turn
+     * (SPEC §4.2a). The ladder picks a gateway per request from `LLM_PROVIDER_CHAIN`, so the health
+     * report has to ask about the key of the gateway that will actually be SELECTED — reporting on
+     * `LLM_PROVIDER`'s key there is the same mistake the block above fixed, one layer up: a deploy
+     * that laddered to a working gateway would report degraded forever and drag §9a's `ready` with
+     * it, while a deploy whose configured gateway is keyed but unreachable-by-ladder reads healthy.
+     *
+     * These come in a PAIR on purpose. The first alone passes for a report that simply never
+     * consults `LLM_PROVIDER` at all; the second is what proves the ladder is the reason.
+     */
+    it('follows the SELECTED gateway when AUTO_MODEL_SELECT ladders past the configured one', async () => {
+      process.env.AUTO_MODEL_SELECT = 'true';
+      process.env.LLM_PROVIDER = 'KIE';
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+
+      expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('ok');
+    });
+
+    it('CONTROL — the same env with the ladder OFF still reports on the configured gateway', async () => {
+      process.env.LLM_PROVIDER = 'KIE';
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
 
       expect((await buildHealthReport(undefined)).dependencies.platformKey).toBe('degraded');
     });

@@ -74,7 +74,24 @@ const env = Object.fromEntries(
 const PROVIDER = (process.env.PROBE_PROVIDER?.trim() || env.LLM_PROVIDER || 'KIE').toLowerCase();
 const IS_ANTHROPIC = PROVIDER === 'anthropic';
 
-const KEY = IS_ANTHROPIC ? env.ANTHROPIC_API_KEY : env.KIE_API_KEY;
+/**
+ * `PROBE_PROVIDER=Comet` — added 2026-08-10 while evaluating Comet as a KIE replacement.
+ *
+ * Comet fronts the SAME three wires as KIE behind one key, but at ONE base URL (`/v1`) rather than
+ * three family-scoped ones, and it accepts `x-api-key` as well as a bearer token. The important
+ * difference is on the GPT family: Comet's model list marks `gpt-5*` as `openai` (chat completions)
+ * and exposes `openai-response` on **two** ids only (`o3-pro`), so the Responses wire that KIE's
+ * `codex` family is built on does not exist here for the models we would actually run. The codex
+ * branch therefore posts to `/chat/completions` on this provider — see `codexRequest`.
+ */
+const IS_COMET = PROVIDER === 'cometapi' || PROVIDER === 'comet';
+
+const KEY = IS_ANTHROPIC ? env.ANTHROPIC_API_KEY : IS_COMET ? env.COMET_API_KEY : env.KIE_API_KEY;
+const KEY_NAME = IS_ANTHROPIC ? 'ANTHROPIC_API_KEY' : IS_COMET ? 'COMET_API_KEY' : 'KIE_API_KEY';
+const PROVIDER_LABEL = IS_ANTHROPIC ? 'Anthropic' : IS_COMET ? 'Comet' : 'KIE';
+
+/** Comet serves every family from one `/v1` root; KIE scopes a base URL per family. */
+const COMET_BASE = env.COMET_BASE_URL || 'https://api.cometapi.com/v1';
 
 /*
  * `PROBE_MODEL=<id>` overrides the configured model, and it is the whole reason this probe can
@@ -92,12 +109,14 @@ const MODEL = process.env.PROBE_MODEL?.trim() || env.LLM_MODEL || env.KIE_DEFAUL
 
 const CLAUDE_BASE = IS_ANTHROPIC
   ? env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1'
-  : env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
-const CODEX_BASE = env.KIE_CODEX_BASE_URL || 'https://api.kie.ai/codex/v1';
-const GEMINI_BASE = env.KIE_GEMINI_BASE_URL || 'https://api.kie.ai/gemini/v1';
+  : IS_COMET
+    ? COMET_BASE
+    : env.KIE_BASE_URL || 'https://api.kie.ai/claude/v1';
+const CODEX_BASE = IS_COMET ? COMET_BASE : env.KIE_CODEX_BASE_URL || 'https://api.kie.ai/codex/v1';
+const GEMINI_BASE = IS_COMET ? `${COMET_BASE}beta` : env.KIE_GEMINI_BASE_URL || 'https://api.kie.ai/gemini/v1';
 
 if (!KEY) {
-  throw new Error(`no ${IS_ANTHROPIC ? 'ANTHROPIC_API_KEY' : 'KIE_API_KEY'} in .env.local`);
+  throw new Error(`no ${KEY_NAME} in .env.local`);
 }
 
 /**
@@ -141,6 +160,29 @@ const DELAY_MS = Number(process.argv[3] || 3000);
 
 /** Endpoint, headers and body for one probe request, derived from the model's FAMILY. */
 function cacheRequest() {
+  if (FAMILY === 'codex' && IS_COMET) {
+    /*
+     * Comet has no Responses wire for `gpt-5*` (its model list marks them `openai`, and only `o3-pro`
+     * carries `openai-response`), so the GPT family is chat-completions here. Caching is automatic and
+     * prefix-based exactly as on the Responses wire; the counters move to
+     * `usage.prompt_tokens_details.cached_tokens`.
+     */
+    return {
+      url: `${CODEX_BASE}/chat/completions`,
+      headers: {},
+      body: {
+        model: MODEL,
+        messages: [
+          { role: 'system', content: SYSTEM_TEXT },
+          { role: 'user', content: 'ok' },
+        ],
+        max_tokens: 16,
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+    };
+  }
+
   if (FAMILY === 'codex') {
     return {
       url: `${CODEX_BASE}/responses`,
@@ -234,6 +276,11 @@ function countersFrom(family, raw) {
       usage = event.response?.usage ?? null;
     }
 
+    /* Comet's chat-completions wire reports usage on the final chunk (`stream_options.include_usage`). */
+    if (family === 'codex' && IS_COMET && event?.usage) {
+      usage = event.usage;
+    }
+
     if (family === 'gemini' && event?.usageMetadata) {
       usage = event.usageMetadata;
     }
@@ -246,12 +293,13 @@ function countersFrom(family, raw) {
   }
 
   if (family === 'codex') {
-    const details = usage.input_tokens_details ?? {};
+    /* Responses wire: `input_tokens_details`. Chat-completions wire: `prompt_tokens_details`. */
+    const details = usage.input_tokens_details ?? usage.prompt_tokens_details ?? {};
 
     return {
       write: details.cache_write_tokens ?? 0,
       read: details.cached_tokens ?? 0,
-      fresh: usage.input_tokens ?? 0,
+      fresh: usage.input_tokens ?? usage.prompt_tokens ?? 0,
     };
   }
 
@@ -265,7 +313,7 @@ function countersFrom(family, raw) {
 const { url, headers, body } = cacheRequest();
 
 console.log(
-  `provider=${IS_ANTHROPIC ? 'Anthropic' : 'KIE'}  model=${MODEL}  family=${FAMILY}  requests=${N}  ` +
+  `provider=${PROVIDER_LABEL}  model=${MODEL}  family=${FAMILY}  requests=${N}  ` +
     `delay=${DELAY_MS}ms  prefix≈${Math.round(PREFIX.length / 4)} tokens\n`,
 );
 
@@ -294,6 +342,7 @@ for (let i = 1; i <= N; i++) {
     headers: {
       'content-type': 'application/json',
       ...(IS_ANTHROPIC ? { 'x-api-key': KEY } : { authorization: `Bearer ${KEY}` }),
+      /* Comet accepts either; sending the bearer above is enough, and the unused header is ignored. */
       ...headers,
     },
     body: JSON.stringify(body),

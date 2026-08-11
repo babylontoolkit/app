@@ -1,6 +1,7 @@
 import AnthropicProvider from './providers/anthropic';
 import CerebrasProvider from './providers/cerebras';
 import CohereProvider from './providers/cohere';
+import CometApiProvider from './providers/cometapi';
 import DeepseekProvider from './providers/deepseek';
 import FireworksProvider from './providers/fireworks';
 import GoogleProvider from './providers/google';
@@ -26,6 +27,7 @@ export {
   AnthropicProvider,
   CerebrasProvider,
   CohereProvider,
+  CometApiProvider,
   DeepseekProvider,
   FireworksProvider,
   GoogleProvider,

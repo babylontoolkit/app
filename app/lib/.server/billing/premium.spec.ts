@@ -22,16 +22,21 @@
  *    list, that a `PREMIUM_MODEL` the list does not price is REFUSED, and that the retired
  *    `PREMIUM_*_DOLLARS` vars stop the show rather than being silently ignored.
  *
- * ⚠️ **COVERAGE HONESTLY LOST WHEN THE THIRD RUNG WENT (2026-08-08).** Two properties here could only
- * be stated against TWO paid rungs and are now unwritable: "1,499 credits clears Premium and misses
- * SuperMax, so it declines to STANDARD and never steps down one rung", and "one broken selector does
- * not take a healthy sibling rung down". Neither was replaced by a weaker version pretending to be the
- * same test. A hypothetical fixture rung does not work either, and the reason is worth knowing:
- * `decideModelTier` validates the requested id against `MODEL_TIER_IDS` BEFORE it consults the ladder
- * it was handed — the table is the whitelist, deliberately, because that is what stops a browser body
- * naming a rung into existence. So the ladder these functions accept is not free-form, and a fake rung
- * resolves to `standard` no matter what the fixture says. What survives is every property expressible
- * on one paid rung; if a rung ever returns, restore the two above.
+ * ✅ **THE COVERAGE LOST IN 2026-08-08 IS RESTORED (2026-08-10, PLATINUM).** For two days this header
+ * recorded two properties as unwritable, because both could only be stated against TWO paid rungs:
+ * "a balance that clears Premium and misses the rung above declines to STANDARD and never steps down
+ * one rung", and "one broken selector does not take a healthy sibling rung down". Neither was ever
+ * replaced by a weaker version pretending to be the same test, which is why they could simply be
+ * turned back on when a second paid rung returned — they are asserted again below, the first through
+ * the cross-product's `BETWEEN_PREMIUM_AND_PLATINUM` balance and the second by its own case.
+ *
+ * ⚠️ **The reason a FIXTURE rung could never have substituted still stands, and it is the load-bearing
+ * half of this note**: `decideModelTier` validates the requested id against `MODEL_TIER_IDS` BEFORE it
+ * consults the ladder it was handed — the table IS the whitelist, deliberately, because that is what
+ * stops a browser body naming a rung into existence. So the ladder these functions accept is not
+ * free-form, a fake rung resolves to `standard` whatever the fixture says, and restoring this coverage
+ * required a REAL rung. If the ladder is ever cut back to one paid rung, these two go with it — say so
+ * here again rather than writing a weaker test.
  *
  * ⚠️ `decideModelTier` is PURE and reads no environment, so every ladder case below passes its ladder in
  * explicitly. That is not stylistic: this repo's `env()` falls back to `process.env` and vitest loads
@@ -96,7 +101,12 @@ function stubPremium(vars: Partial<Record<string, string>> = {}) {
     'PREMIUM_INPUT_DOLLARS',
     'PREMIUM_OUTPUT_DOLLARS',
     'PREMIUM_MINIMUM_CREDITS',
-    'ENABLE_PREMIUM_MODEL',
+    'ENABLE_EXTENDED_MODELS',
+
+    // The PLATINUM rung (2026-08-10). A developer's own `.env.local` sets these now — see the note above.
+    'PLATINUM_MODEL',
+    'PLATINUM_MINIMUM_CREDITS',
+    'ENABLE_PLATINUM_MODEL',
 
     // Retired 2026-08-08 and REFUSED if set — see the note above.
     'ENABLE_EXTENDED_MODELS',
@@ -141,14 +151,28 @@ const PREMIUM_MINIMUM = 1200;
 const ABOVE_PREMIUM = PREMIUM_MINIMUM + 300;
 const BELOW_PREMIUM = PREMIUM_MINIMUM - 1;
 
+/**
+ * PLATINUM restores the SECOND paid rung (2026-08-10), and with it the cross-product below regains a
+ * case that could not exist while the ladder had one paid rung: a balance that clears PREMIUM but not
+ * PLATINUM. That is the **never-step-down-one-rung** property — a declined rung resolves to STANDARD,
+ * never to the affordable rung beneath it — recorded as LOST when SuperMax was retired and asserted
+ * again here. It is a money rule: stepping down one rung would silently serve (and bill) a model the
+ * user did not ask for, on a turn they expected to be cheaper.
+ */
+const PLATINUM_MINIMUM = 2000;
+const BETWEEN_PREMIUM_AND_PLATINUM = PLATINUM_MINIMUM - 1;
+const ABOVE_PLATINUM = PLATINUM_MINIMUM + 300;
+
 const LADDER: readonly ModelTierOption[] = [
   { id: 'premium', label: 'Premium', minimumCredits: PREMIUM_MINIMUM, firstBuildLocked: true, serveable: true },
+  { id: 'platinum', label: 'Platinum', minimumCredits: PLATINUM_MINIMUM, firstBuildLocked: true, serveable: true },
 ];
 
 /** `standard` is free and has no row — it is short-circuited before the ladder is ever consulted. */
 const THRESHOLDS: Record<ModelTierId, number> = {
   standard: 0,
   premium: PREMIUM_MINIMUM,
+  platinum: PLATINUM_MINIMUM,
 };
 
 describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
@@ -166,7 +190,25 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
    *
    * The expectation is spelled out as an independent branch rather than by calling the function again.
    */
-  const BALANCES = [0, BELOW_PREMIUM, PREMIUM_MINIMUM, PREMIUM_MINIMUM + 1, ABOVE_PREMIUM, 10_000_000];
+  const BALANCES = [
+    0,
+    BELOW_PREMIUM,
+    PREMIUM_MINIMUM,
+    PREMIUM_MINIMUM + 1,
+    ABOVE_PREMIUM,
+
+    /*
+     * ⚠️ These three restore what the comment above has been PROMISING since SuperMax was retired
+     * ("every threshold ... on both rungs") and could not deliver with one paid rung. The middle one
+     * is the load-bearing case: a balance that clears Premium and not Platinum is the only input that
+     * can catch a decline stepping DOWN one rung instead of to standard.
+     */
+    BETWEEN_PREMIUM_AND_PLATINUM,
+    PLATINUM_MINIMUM,
+    ABOVE_PLATINUM,
+
+    10_000_000,
+  ];
 
   function expectedDecision(requested: ModelTierId, balance: number, isFirstBuildTurn: boolean): ModelTierDecision {
     if (requested === 'standard') {
@@ -684,11 +726,17 @@ describe('the premium tier config', () => {
     expect(() => getPremiumTier({})).toThrow(/Marketplace price list/);
   });
 
-  /* A promoted list can reprice or add the premium row — the admin-panel path. */
+  /*
+   * A promoted list can reprice or add the premium row — the admin-panel path.
+   *
+   * ⚠️ **KIE's** list explicitly (2026-08-10, the per-provider price store): the paid rungs price from
+   * KIE's marketplace on every provider, so that is the list this promotion has to land on for
+   * `getPremiumTier` to read it back.
+   */
   it('prices the tier from a PROMOTED list when one is live', async () => {
     stubPremium();
 
-    const result = await promoteMarketPrices(memoryStore(), {
+    const result = await promoteMarketPrices(memoryStore(), 'KIE', {
       ...BAKED_MARKET_PRICES,
       llm: { ...BAKED_MARKET_PRICES.llm, 'claude-opus-5': { inputPerMTok: 6, outputPerMTok: 30 } },
     });
@@ -911,6 +959,13 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     const rows: ModelTierStatusLike[] = [
       { id: 'standard', label: 'Standard', model: STANDARD_MODEL, minimumCredits: 0, serveable: true },
       { id: 'premium', label: 'Premium', model: 'claude-opus-5', minimumCredits: PREMIUM_MINIMUM, serveable: true },
+      {
+        id: 'platinum',
+        label: 'Platinum',
+        model: 'claude-fable-5',
+        minimumCredits: PLATINUM_MINIMUM,
+        serveable: true,
+      },
     ];
 
     return rows.map((row) => ({ ...row, ...(overrides[row.id] ?? {}) }));
@@ -934,7 +989,7 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     });
 
     expect(hint.standardModel).toBe(STANDARD_MODEL);
-    expect(hint.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
+    expect(hint.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
     expect(hint.tiers.every((row) => row.available)).toBe(true);
   });
 

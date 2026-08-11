@@ -1,4 +1,27 @@
-# spec/model-families.md — KIE's three text APIs, one provider (governs SPEC §4.2a; money rules in `spec/billing.md`)
+# spec/model-families.md — model families across gateways: the family names a DIALECT, the provider chooses the WIRE (governs SPEC §4.2a; money rules in `spec/billing.md`)
+
+> 🔴 **RETITLED 2026-08-10. This file was "KIE's three text APIs, one provider", and §1–§8 below are
+> written KIE-first because that is where every number in them was measured.** They remain accurate
+> ABOUT KIE and are deliberately not rewritten — a probe log re-worded to sound general stops being a
+> probe log. What changed is the framing above them, and it changed because a SECOND gateway shipped
+> (Comet, 2026-08-10):
+>
+> - **A family is a DIALECT, not an endpoint.** `gpt-5-*` speaks OpenAI **Responses** on KIE and
+>   **chat-completions** on Comet. So the family alone cannot answer "which wire" — and neither can the
+>   provider, for the original reason: the §4.6.1a ladder's rungs may name models from several families
+>   while the provider is one value per deploy. The **(provider, family) pair** selects the wire builder;
+>   the family still derives from the model id, and still cannot come from `LLM_PROVIDER`.
+> - **There is a fourth family, `chat`** — the OpenAI-compatible one Comet fronts for grok/kimi/qwen/
+>   glm/deepseek/minimax ids. Its cache profile is **`none`**, for gemini's reason rather than by
+>   analogy: no vendor cached rate we can verify and no cached-token counter to observe, so cached
+>   tokens bill at the full input rate. Never a discount we cannot verify, never a surcharge we cannot see.
+> - **Delivery is keyed by (provider, family)** and an unmeasured surface is assumed to STREAM. Comet's
+>   claude branch is **measured `streamed`**; its other families are assumed streaming until probed.
+> - **The probe procedure in §9 applies per GATEWAY.** An id proven on KIE is not an id on Comet: the
+>   two disagree about spellings (`veo3_fast` vs `veo3-fast`) and about which models exist at all. Run
+>   it again, per gateway, before listing anything — the "an id ships only on a live probe" rule is now
+>   an id-plus-gateway rule.
+
 
 > **BUILT 2026-08-04** (`_specs/kie-tri-api-models_spec.md` / `_plan.md`, T1–T11). Every endpoint, id,
 > field name and number in this file was **live-probed on 2026-08-04** against the real KIE account,
@@ -64,6 +87,19 @@ builder here would recreate the `base-provider → manager → registry → prov
 | `claude` | `derived` | `anthropic` | 1,000,000 | 128,000 |
 | `codex` | `explicit-pair` | `openai` | 1,000,000 | 128,000 |
 | `gemini` | `none` | `google` | 1,000,000 | 128,000 |
+| `chat` | `none` | `openai` | **128,000** | **32,000** |
+
+⚠️ **The `chat` row was missing from this table until 2026-08-11**, and its caps are the two that do
+NOT match the others: Comet's feed publishes `context_length` and `max_completion_tokens` per row and
+they vary widely across grok/kimi/qwen/glm/deepseek/minimax, so these are deliberate **FLOORS**, not
+measurements. Undershooting a context window costs a refusal (loud); overshooting a completion cap is
+a hard 400 mid-generation (also loud). Both are the safe direction. A shipped id that carries its own
+probed numbers should get them.
+
+🔴 **A fifth column belongs to BILLING, and it is `promptTokensIncludeCacheRead`** (`claude` false,
+every other family true) — whether that vendor's `usage.promptTokens` counts the cached tokens. It is
+required, so a new family cannot compile without answering; see CLAUDE.md's entry, and note it is NOT
+derivable from `cacheProfile` even though the two agree today.
 
 These are the one place the token limits live. `kieEnvModel` reads them when it synthesizes a
 `ModelInfo` for an operator's unlisted `LLM_MODEL` — it used to inline `1_000_000`/`128_000`, the
@@ -347,11 +383,47 @@ fault can clear or return with nobody telling us.
 
 ## 9. PROBE PROCEDURE (reproducible from this file alone)
 
-Three committed scripts. Each reads `KIE_API_KEY` (and base-URL overrides) from `.env.local` at the
-repo root, and each derives endpoint, request body and response parsing from `familyOf(model)` using
-the **same prefix rule as `model-families.ts`, duplicated deliberately** (they are plain `.mjs` with
-no TS pipeline — keep the two in step; a probe that guessed the wrong wire would report a healthy
-model as dead).
+Three committed scripts. Each derives endpoint, request body and response parsing from
+`familyOf(model)` using the **same prefix rule as `model-families.ts`, duplicated deliberately**
+(they are plain `.mjs` with no TS pipeline — keep the two in step; a probe that guessed the wrong
+wire would report a healthy model as dead).
+
+🔴 **THEY ARE PER-GATEWAY, AND THIS SECTION SAID OTHERWISE UNTIL 2026-08-11.** It read *"each
+reads `KIE_API_KEY`"* — true when there was one gateway, false since Comet shipped. **But the first
+correction was also wrong**, in the way this file keeps warning about: it grouped the scripts from
+memory instead of from the source, sent `kie-model-health.mjs` to the wrong group, and documented a
+`PROBE_PROVIDER=` flag on `stream-probe.mjs` that the script does not read — an inert flag on a
+command line, which is worse than the sentence it replaced because it looks like it works. **Read the
+scripts. They do not all take the same selector:**
+
+| Script | Gateway selector | Keys read | argv |
+|---|---|---|---|
+| `cache-probe.mjs` | **`PROBE_PROVIDER=KIE\|Comet\|Anthropic`** (defaults to `LLM_PROVIDER`, then `KIE`) | one of `KIE_API_KEY` / `COMET_API_KEY` / `ANTHROPIC_API_KEY` | `[requests] [delayMs]` (default 12, 3000) |
+| `kie-model-health.mjs` | **`PROBE_PROVIDER=KIE\|Comet`** (defaults to `LLM_PROVIDER`, then `KIE`) | `KIE_API_KEY` or `COMET_API_KEY` | `[rounds]` (default 6) |
+| `stream-probe.mjs` | **NONE — it probes every gateway whose key is present**, KIE first, then Comet, then an Anthropic control | all three | `[model] [maxTokens]` |
+
+```
+PROBE_PROVIDER=Comet node scripts/cache-probe.mjs 30        # cache warmup shape, per gateway
+PROBE_PROVIDER=Comet node scripts/kie-model-health.mjs      # catalogue health, per gateway
+node scripts/stream-probe.mjs claude-sonnet-5               # delivery; probes EVERY configured gateway
+```
+
+⚠️ `kie-model-health.mjs` keeps its KIE-shaped FILENAME and is gateway-agnostic in everything else —
+it was hardcoded to KIE until Comet arrived, i.e. the one instrument that could catch a dead id could
+not be pointed at the new gateway. ⚠️ `stream-probe.mjs` takes no selector by design (comparing
+gateways side by side is the point), so running it BILLS a request on every configured gateway,
+including ones you were not asking about.
+
+**A probe is an (id, GATEWAY) question, never an id question.** The same model id is a different
+wire, a different cache profile and a different price on each gateway — `gpt-5-*` rides Responses on
+KIE and chat-completions on Comet — so a result is only ever evidence about the pair.
+
+⚠️ **Health is measured on the WIRE, not on a status code.** `kie-model-health.mjs` exists because a
+plain HTTP probe of KIE returns **200 in 0.25s** and the failure arrives afterwards, mid-stream — on
+2026-08-11 that gateway's entire `claude-*` catalogue measured **92-100% failure**
+(`200-then-error: Server exception`) while its `gpt-5-6-*` and `gemini-3-5-flash` rows sat at **0%**.
+A status-code check would have called that healthy, which is how the outage kept reading as
+intermittent. §9.1's heading below still asks the KIE-shaped question; the procedure generalises.
 
 ### ⚠️ Read this before interpreting any output
 
@@ -574,7 +646,7 @@ Verify with `pnpm why @ai-sdk/provider` before and after any future bump — and
 | Gemini full-rate cache billing; gpt explicit-rate settlement math | `billing.spec.ts` |
 | (provider, family) delivery matrix; unknown → streamed | `delivery.spec.ts` |
 | Listed ⇔ priced, both directions, all families | `model-tiers.spec.ts` |
-| `parseModel` across all three families | `ModelTierPanel.spec.tsx` |
+| `parseModel` across all four families | `ModelTierPanel.spec.tsx` |
 
 ⚠️ Do not run the full `pnpm test` suite — it currently destroys local `.data` (standing hazard).
 Run the targeted specs.

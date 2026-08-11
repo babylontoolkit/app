@@ -714,6 +714,21 @@ function onPortMessage(event, mp) {
 //   5. iframe navigation via pathClaims, or recovery after SW update wiped state
 // everything else passes through untouched — no synthetic errors on misses.
 
+// A host passthrough must fail exactly like the network fails — but QUIETLY.
+// These fetches run inside respondWith(), so a rejected fetch escapes as
+// "Uncaught (in promise) TypeError: Failed to fetch" attributed to this
+// worker. The common trigger is the HOST app's own dev server going down or
+// restarting while a tab is open: Vite's HMR client then polls the origin
+// once per second (waitForSuccessfulPing), and every poll dumped an uncaught
+// error + stack on top of the browser's own net::ERR_FAILED line — hundreds
+// of console errors for one ordinary restart. Response.error() surfaces the
+// identical network failure to the page without the unhandled rejection.
+// Never substitute a synthetic HTTP response here: Vite's ping treats ANY
+// response as "server is back" and reloads into a server that is still dead.
+function hostPassthrough(request) {
+  return fetch(request).catch(() => Response.error());
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
@@ -850,7 +865,7 @@ self.addEventListener("fetch", (event) => {
             }
           }
           if (client && client.frameType === "top-level") {
-            return fetch(request);
+            return hostPassthrough(request);
           }
           if (!pod && client && client.url) {
             try {
@@ -860,7 +875,7 @@ self.addEventListener("fetch", (event) => {
               pod = null;
             }
           }
-          if (!pod) return fetch(request);
+          if (!pod) return hostPassthrough(request);
           adoptPreviewClient(clientId, pod);
           const path = stripPreviewPrefix(url.pathname) + url.search;
           return proxyToVirtualServer(request, pod.instanceId, pod.serverPort, path, request);

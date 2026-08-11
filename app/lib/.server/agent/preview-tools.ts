@@ -227,11 +227,15 @@ export function createPreviewTools(ctx: PreviewToolContext): Record<string, Retu
 
     capture_game_screenshot: tool({
       description:
-        'Capture the game canvas as a PNG data URL. Useful as visual evidence that something renders. ' +
-        '⚠️ On the current starter this frame is USUALLY BLANK: the template creates its engine with ' +
-        'no `preserveDrawingBuffer`, so a WebGL canvas reads back empty after the frame is presented. ' +
-        'The result says `blank: true` when that happens. A blank capture is NOT evidence that the ' +
-        'game renders nothing — never report it as a failure. Verify with evaluate_in_game instead.',
+        'Capture the current game frame and SEE it — the image is returned as a real vision part, not ' +
+        'as text, so you can look at what the game actually draws. Downscaled JPEG. The capture is ' +
+        'taken inside the render task, so it works on WebGL and WebGPU alike. ' +
+        'Blankness is measured from the PIXELS: `blank: true` means every sampled pixel is the same ' +
+        'colour, `blank: false` means real content, and `blank: null` means the canvas could not be ' +
+        'checked — treat that as unverified rather than as evidence either way. ' +
+        '⚠️ A blank frame is NOT proof the game renders nothing: the scene may be paused, disposed, ' +
+        'mid-load, or it may have thrown and stopped its render loop. Call get_game_errors and inspect ' +
+        'the scene with evaluate_in_game before concluding anything from a blank capture.',
       parameters: z.object({}),
       execute: async (_args, { toolCallId, abortSignal }) => relay(ctx, toolCallId, abortSignal, 'screenshot'),
 

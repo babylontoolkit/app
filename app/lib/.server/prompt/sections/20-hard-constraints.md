@@ -75,17 +75,17 @@ A `ScriptComponent` is constructed with the transform it is attached to
 `SceneManager.RegisterClass("Name", Name)`. It then overrides **only the hooks it needs** — they are
 opt-in `protected` methods, exactly like Unity's magic methods:
 
-| Hook       | When                                                                       |
-| ---------- | -------------------------------------------------------------------------- |
-| `awake`    | Once, on attach. Wire references. The scene may not be fully built yet.     |
-| `start`    | Once, before the first `update`. Everything else exists by now.             |
-| `ready`    | Once, after the scene is fully ready.                                       |
-| `update`   | Every frame. The main behaviour hook.                                       |
-| `late`     | Every frame, after all `update`s. Cameras that follow a target belong here. |
-| `step`     | Physics step.                                                              |
-| `fixed`    | Fixed timestep. Force/velocity work belongs here.                           |
-| `after`    | After the physics step.                                                     |
-| `destroy`  | On dispose. Unhook anything you hooked.                                     |
+| Hook      | When                                                                        |
+| --------- | --------------------------------------------------------------------------- |
+| `awake`   | Once, on attach. Wire references. The scene may not be fully built yet.     |
+| `start`   | Once, before the first `update`. Everything else exists by now.             |
+| `ready`   | Once, after the scene is fully ready.                                       |
+| `update`  | Every frame. The main behaviour hook.                                       |
+| `late`    | Every frame, after all `update`s. Cameras that follow a target belong here. |
+| `step`    | Physics step.                                                               |
+| `fixed`   | Fixed timestep. Force/velocity work belongs here.                           |
+| `after`   | After the physics step.                                                     |
+| `destroy` | On dispose. Unhook anything you hooked.                                     |
 
 **`update()` takes no arguments** — ask the component for time (`this.getDeltaSeconds()`,
 `this.getDeltaTime()`, `this.getAnimationRatio()`). Components find each other through the framework
@@ -164,7 +164,7 @@ import `GameManager` or Babylon is about the BUNDLE. This rule is about OWNERSHI
 
 - **No gameplay data or tuning in the UI.** Rosters, stats, physics numbers, track definitions, item
   tables, difficulty curves — these belong to the game, in `src/scripts/**`. A `const KARTS = [{ name,
-  stats: { speed, accel, drift } }]` sitting in `Home.tsx` means the landing page and the game each own
+stats: { speed, accel, drift } }]` sitting in `Home.tsx` means the landing page and the game each own
   half the truth, and they drift the moment either is edited.
 - **No gameplay state in the UI.** No simulation, no per-frame work, no game rules.
 - **Selections travel in the navigation state ONLY.** `navigate('/play', { gameMode, ...selections })`

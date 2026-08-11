@@ -14,7 +14,7 @@
 import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { getUser } from '~/lib/.server/supabase/auth';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
-import { getPlatformConfig, getPlatformModel } from '~/lib/.server/agent/config';
+import { getMediaProvider, getPlatformConfig, getPlatformModel, providersToPrice } from '~/lib/.server/agent/config';
 import { getBillingConfigSafe, getModelTiers, type ModelTierStatus } from '~/lib/.server/billing/rates';
 import { modelTiersSessionHint } from '~/lib/.server/billing/premium';
 import { DEFAULT_MODEL } from '~/utils/constants';
@@ -23,12 +23,40 @@ import { getEntitlement } from '~/lib/.server/licensing/entitlements';
 import { isStripeConfigured, CREDIT_PACKS, SUBSCRIPTION_PLANS } from '~/lib/.server/billing/stripe';
 import { errorResponse } from '~/lib/.server/http';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
-import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
+import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
+
+/**
+ * Which price lists to refresh — GUARDED, because `getPlatformProvider` throws on a typo'd
+ * `LLM_PROVIDER` and this is the session endpoint on every page load.
+ *
+ * That is the `premiumSessionHint` defect (2026-07-25) exactly: an unguarded config read five lines
+ * from a comment warning about unguarded config reads took the whole app down for every user over one
+ * line in an env file. A bad provider name degrades to KIE's list here — the ladder needs it on every
+ * provider anyway — and the generation path, which SHOULD refuse, still refuses loudly.
+ */
+function marketPricesToRefresh(context: unknown) {
+  try {
+    /*
+     * The whole CHAIN, not just `LLM_PROVIDER` — this route runs the same ladder (`getPlatformConfig`
+     * → `resolvePlatformProvider`), and its `canPrice` gate reads the marketplace lists synchronously.
+     * Ensuring only the fixed provider would gate the other rungs from their BAKED tables, ignoring
+     * whatever the operator promoted. With `AUTO_MODEL_SELECT` off this is `[LLM_PROVIDER]`, i.e.
+     * byte-identical to what this line did before.
+     */
+    return [...new Set(providersToPrice(context).flatMap((platform) => marketPriceProvidersFor(platform)))];
+  } catch {
+    return marketPriceProvidersFor('KIE');
+  }
+}
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   try {
-    // The premium tier below prices from the marketplace list — refresh it at this async doorway.
-    await ensureMarketPrices(context);
+    /*
+     * The premium tier below prices from the marketplace list — refresh it at this async doorway.
+     * PLURAL: the paid rungs price from KIE's list on every provider, so a Comet deploy needs both
+     * (`marketPriceProvidersFor`). Refreshing only one leaves the other on its baked table silently.
+     */
+    await Promise.all(marketPricesToRefresh(context).map((provider) => ensureMarketPrices(provider, context)));
 
     const user = await getUser(request, context);
     const platform = getPlatformConfig(context);
@@ -151,7 +179,14 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           let standardModel: string | null = null;
 
           try {
-            standardModel = getPlatformModel(context);
+            /*
+             * The gateway already resolved above, not re-derived. Under `AUTO_MODEL_SELECT` the two can
+             * differ, and this is the last place in the route that holds `platform.provider` — a model
+             * validated against `LLM_PROVIDER`'s price table while another rung would serve it reports a
+             * rung as locked (or unlocked) for the wrong reason. It cannot spend either way, which is
+             * why it degraded quietly rather than announcing itself.
+             */
+            standardModel = getPlatformModel(context, platform.provider);
           } catch {
             standardModel = null;
           }
@@ -172,6 +207,30 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           });
         })(),
       },
+
+      /*
+       * WHICH GATEWAY SERVES RENDERS (§4.16) — a rendering hint for the Media panel, which has to know
+       * whether to offer KIE's model list or Comet's.
+       *
+       * ⚠️ It carries the PROVIDER and nothing else. A `transparency` boolean was here too, computed
+       * from `supportsTransparency` and read by nobody, with a doc comment claiming it "gates the
+       * Background control" — a false claim in a comment about a field that did not exist in the UI.
+       * The capability table is client-safe, so the panel answers that question itself from the one
+       * source of truth rather than from a snapshot of it taken on the server.
+       *
+       * ⚠️ GUARDED, like every other lookup in this loader. `getMediaProvider` validates
+       * `MEDIA_PROVIDER` and throws on a typo — correct for the media route, and fatal here, where a
+       * throw would take the session endpoint down on every page load for a misconfigured DROPDOWN.
+       * The 2026-07-25 outage was exactly this shape. `null` degrades to "no media", which is honest:
+       * the routes refuse in that state too.
+       */
+      media: (() => {
+        try {
+          return { provider: getMediaProvider(context) };
+        } catch {
+          return { provider: null };
+        }
+      })(),
 
       pro: {
         proFeaturesEnabled: platform.proFeaturesEnabled,
