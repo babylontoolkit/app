@@ -586,22 +586,42 @@ describe('cometRates — cache rates by FAMILY, off the Comet list', () => {
 
 describe('AC7 control — the existing rate tables are untouched', () => {
   /*
-   * 🔴 OQ1, resolved: `MODEL_RATES['claude-sonnet-5']` stays at the STANDARD $3/$15 even though Comet's
-   * feed reports Anthropic's official rate as $2/$10.
+   * 🔴 OQ1, RE-RESOLVED THE OTHER WAY — AND COMET'S FEED WAS RIGHT ALL ALONG (2026-08-12).
    *
-   * That $2/$10 is INTRODUCTORY pricing expiring 2026-08-31 (`rates.ts`), and seeding it would compress
-   * margin below target the day it lapses with nothing failing — the invoices would just get bigger.
-   * Comet's feed agreeing with the intro rate is evidence that comment is CORRECT, not evidence this
-   * row is stale, and the two tables disagreeing is right because they price two different vendors.
-   * Pinned here so the T5 capture cannot be mistaken for a licence to "align" them.
+   * This test pinned `MODEL_RATES['claude-sonnet-5']` at the STANDARD **$3/$15** and was named for the
+   * decision: Comet's feed reported Anthropic's official rate as $2/$10, that was INTRODUCTORY pricing
+   * expiring 2026-08-31, so "Comet's feed agreeing with the intro rate is evidence that comment is
+   * CORRECT, not evidence this row is stale", pinned "so the T5 capture cannot be mistaken for a licence
+   * to align them". Anthropic has now made $2/$10 the standard price and cancelled the increase, so the
+   * tables SHOULD be aligned and this assertion was defending a 1.5x over-charge on the platform default.
+   *
+   * ⚠️ The lesson is about which source to trust when two disagree. A second, independent capture of the
+   * vendor's own number was reporting the truth, and the reasoning here explained it away in favour of a
+   * hand-maintained table — because the explanation was AVAILABLE and plausible. It was also unfalsifiable
+   * from inside this repo: nothing here could tell "the feed shows the intro rate" from "the feed shows the
+   * current rate" without going and reading the vendor's page. **When a captured source contradicts a
+   * hand-maintained one, the burden of proof belongs on the hand-maintained one, and "we know why they
+   * differ" is a claim with an expiry date.**
    */
-  it('leaves the Anthropic table alone — the intro-vs-standard decision is deliberate', () => {
+  it('agrees with Comet about Anthropic list, and stays out of the marketplace', () => {
     expect(MODEL_RATES['claude-sonnet-5']).toEqual({
-      inputPerMTok: 3.0,
-      outputPerMTok: 15.0,
-      cacheReadPerMTok: 0.3,
-      cacheWritePerMTok: 6.0,
+      inputPerMTok: 2.0,
+      outputPerMTok: 10.0,
+      cacheReadPerMTok: 0.2,
+      cacheWritePerMTok: 4.0,
     });
+
+    /*
+     * The two tables now agree about the OFFICIAL rate, which is the check this file can actually make:
+     * Comet's charged row is that official rate times the row's own ratio, so the official figure is a
+     * shared fact and any drift between them is a real finding rather than an explainable difference.
+     */
+    expect(COMET_PRICE_PROVENANCE['claude-sonnet-5'].officialInputPerMTok).toBe(
+      MODEL_RATES['claude-sonnet-5'].inputPerMTok,
+    );
+    expect(COMET_PRICE_PROVENANCE['claude-fable-5'].officialOutputPerMTok).toBe(
+      MODEL_RATES['claude-fable-5'].outputPerMTok,
+    );
     expect(MODEL_RATES['claude-opus-5'].inputPerMTok).toBe(5.0);
     expect(MODEL_RATES['claude-opus-5'].outputPerMTok).toBe(25.0);
 

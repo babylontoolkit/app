@@ -29,9 +29,26 @@ and they are not billed at the 1.25× headline number either: `proxy.ts` uses th
 under-charges *every* generation, and nothing in the system would notice. `billing.spec.ts` asserts
 the 2× relationship across the whole rate table.
 
-⚠️ **Sonnet 5 carries introductory pricing ($2/$10 per MTok) until 2026-08-31; the rate table
-deliberately uses the standard $3/$15.** Seeding the intro rate would compress the margin below target
-the day it lapses — silently. Under-charging ourselves for a few weeks is the right direction to err.
+🔴 **SONNET 5 IS $2/$10, AND THE INTRO-PRICING CARVE-OUT IS RETIRED (2026-08-12).** This section read:
+*"Sonnet 5 carries introductory pricing ($2/$10 per MTok) until 2026-08-31; the rate table deliberately
+uses the standard $3/$15. Seeding the intro rate would compress the margin below target the day it
+lapses — silently. Under-charging ourselves for a few weeks is the right direction to err."* **Anthropic
+has made $2/$10 the standard price and cancelled the scheduled 1 September increase**, so the premise is
+gone and the deviation inverted from prudent to wrong.
+
+⚠️ **Be precise about who paid for it, because this file's other deviations lean the other way.** Credits
+are cost-proportional, so an OVERSTATED cost in `MODEL_RATES` is not retained margin — it is billed
+straight through: every Anthropic-served Sonnet 5 turn (the platform default, and the last rung of
+`LLM_PROVIDER_CHAIN`) charged **1.5× the credits it should have**. It also fed `savings.ts`, whose
+reference table IS `MODEL_RATES`, so the "you saved N" figure beside a money number claimed a ~47%
+discount against Comet where the honest number is **20%**.
+
+⚠️ **The generalisable rule: a rate held deliberately off the vendor's current price is a DATED decision
+that needs an expiry review, not a comment.** Four documents plus a named spec assertion
+(`'uses standard Sonnet pricing, not the expiring introductory rate'`) all faithfully recorded *why*
+$3/$15 was right, and every one kept reading as correct after the fact underneath it moved — the same
+"cite config as DATED evidence" failure recorded three times already in `CLAUDE.md`. **A test pinned to a
+deliberate deviation goes green every day the deviation is wrong.**
 
 ⚠️ **"User project compute ≈ $0" is RETIRED, and sandbox compute is now an ASSERTED cost input
 (2026-07-28, `billing/vm-cost.ts`).** It was true on WebContainer — the project ran in the user's own
@@ -158,9 +175,20 @@ Balance chip, per-message cost badge (shows 'BYOK' for Pro-key generations), bil
 >
 > **Comet's feed quotes OFFICIAL vendor rates; the charged rate is `pricing × ratio`, READ PER ROW.**
 > Not a constant: three rows carry `1.0`, so a hardcoded `0.8` would under-charge exactly the newest and
-> most expensive models. ⚠️ `MODEL_RATES['claude-sonnet-5']` was verified and deliberately **left at
-> $3/$15** — Comet reporting the official $2/$10 *confirms* the introductory-pricing note in `rates.ts`
-> rather than contradicting it. Under-charging ourselves for a few weeks is the right direction.
+> most expensive models.
+>
+> 🔴 ⚠️ **AND COMET'S FEED WAS RIGHT ABOUT SONNET 5 WHILE OUR OWN TABLE WAS WRONG (2026-08-12).** This
+> paragraph read: *"`MODEL_RATES['claude-sonnet-5']` was verified and deliberately left at $3/$15 — Comet
+> reporting the official $2/$10 confirms the introductory-pricing note in `rates.ts` rather than
+> contradicting it."* The $2/$10 Comet reported was the **standard** rate, not an expiring one, and the
+> "confirmation" reading kept a 1.5× over-charge in place on the platform's default model for weeks.
+>
+> **The lesson is about which source wins a disagreement.** An independent capture of the vendor's own
+> number was reporting the truth and was explained away in favour of a hand-maintained table, because a
+> plausible explanation was available — and one that was *unfalsifiable from inside this repo*: nothing
+> here could tell "the feed shows the intro rate" from "the feed shows the current rate" without reading
+> the vendor's page. **When a captured source contradicts a hand-maintained one, the burden of proof is on
+> the hand-maintained one, and "we know why they differ" is a claim with an expiry date.**
 >
 > **What the user SEES of all this (2026-08-10, `billing/savings.ts`, `billing/ledger-view.ts`).**
 > Credits are cost-proportional, so a cheaper gateway is the user's purchasing power, not our margin —
@@ -349,6 +377,47 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   the unique index rejects gets its redundant debit refunded (`unity-license-service.ts`). The credit
   balance IS the Pro Tools entitlement (the credits-based replacement for the retired PayPal subscription).
   Pinned by `unity-license-service.spec.ts` + `ledger-sql.spec.ts`.
+- **🔴 ANTHROPIC SELLS FABLE 5 AND `MODEL_RATES` DENIED IT — THE PLATINUM RUNG WAS UNDER-BILLED BY 2.5×
+  (found + fixed 2026-08-12).** `PLATINUM_MODEL=claude-fable-5` is live and `Anthropic` is the last rung
+  of `LLM_PROVIDER_CHAIN`, and there was no `claude-fable-5` row in the Anthropic table — three comments
+  in `rates.ts` gave the reason as *"Anthropic does not sell it"*. Anthropic sells it at **$10/$50**. So
+  `providerRates`' gap-fill did not fill a hole, it **substituted KIE's $4/$20 for a price Anthropic
+  publishes**, and the platform ate ~60% of the cost of every Anthropic-served Platinum turn. That is the
+  exact mirror of the 231-vs-576 defect this same function is guarded against — same mechanism, opposite
+  direction, and the direction where the credit count goes DOWN and reads as a cheaper turn.
+  - ⚠️ **It retro-corrected a measurement four documents reasoned from.** *"On Anthropic the fable-5 rung
+    settled 814 credits against Opus 5's 1,017"* was quoted as evidence that the ladder is not
+    cost-monotonic on Anthropic. **814/1017 is exactly 4/5** — it is the gap-filled $4/$20 rate, i.e. the
+    mis-bill itself. At the true $10/$50 the same turn is ~2,035 credits and **the ladder is cost-monotonic
+    on every gateway** (Anthropic $2/$5/$10, Comet $1.60/$4/$8, KIE $0.85/$2/$4). Rungs still order
+    CAPABILITY and must not be reordered by price — the rule survives, its counterexample does not.
+    **A rule justified by a measurement inherits that measurement's bugs.**
+  - ⚠️ **A row in `MODEL_RATES` is a statement that the platform may SERVE that model**, since it is what
+    `getPlatformModel` and the ladder validate a selector against. Anthropic's published rows for Opus
+    4.5/4.6/4.7, Sonnet 4.5/4.6 and **Mythos 5** ($10/$50, limited availability) are deliberately ABSENT:
+    absent means `LLM_MODEL=claude-opus-4-7` on Anthropic is a loud config refusal rather than a live model
+    nobody vetted. **"The vendor publishes a price" is not a reason to add a row; "a selector names it" is.**
+  - ⚠️ **Every "fill case" in the specs had to be re-anchored to a `gpt-*` id.** Four tests used fable-5 as
+    the model "Anthropic bakes no row for", so they asserted the under-charge as correct and one CONTROL
+    stopped controlling anything. **A fill case must name a model the vendor is structurally incapable of
+    pricing, never one it merely has not priced yet.**
+
+- **⚠️ THE 4.7+ TOKENIZER PRODUCES ~30% MORE TOKENS FOR THE SAME TEXT (vendor note, 2026-08-12) — no code
+  change, two things to stop getting wrong.** Claude 4.7 and later (Opus 4.7/4.8/5, Sonnet 5, Fable 5,
+  Mythos 5) use a newer tokenizer; **Sonnet 4.6 and earlier, including Haiku 4.5, use the previous one.**
+  - **Char budgets are not token budgets, and the gap widened.** `MAX_READ_CHARS`, `AGENT_MAX_PLAN_READ_CHARS`,
+    `MAX_INSTRUCTIONS_CHARS`, `ASSET_INDEX_CHAR_BUDGET` and `MAX_SCHEMA_CHARS` are all denominated in CHARS,
+    so the old "≈4 chars/token" folk rule under-states their real cost on every model we run: 80k chars is
+    ~26k tokens, not ~20k. The budgets are still correct as *bounds* — nothing is mis-billed — but anyone
+    sizing one by that rule of thumb will be ~30% optimistic.
+  - **A cross-model rate ratio is not a cross-model cost ratio.** Haiku 4.5 at $1/$5 against Sonnet 5 at
+    $2/$10 looks like 2×; Haiku is on the OLD tokenizer, so it also emits fewer tokens for the same text and
+    the effective gap is wider than the rate card implies. That makes the cheap-model lever
+    (`<PROVIDER>_ENHANCE_PROMPT_MODEL`) *better* than it looks — the safe direction — but it also means
+    `charsPerOutputToken` is **not comparable across the tokenizer boundary**: the ~2.0–2.2 healthy baseline
+    for code was measured on Opus 4.8 (new tokenizer), and the same healthy output on Haiku reads higher.
+    Do not diagnose an old-tokenizer model's density against a new-tokenizer baseline.
+
 - **🔴 `providerRates` injects EVERY paid rung, FILL-A-GAP AND NEVER OVERWRITE, non-throwing.** A
   promoted list that unprices a rung's selector refuses NEW requests for that rung loudly
   (`getTierModel`) but must not take settlement down — an in-flight generation settles via the

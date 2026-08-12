@@ -361,13 +361,56 @@ describe('rate table', () => {
   });
 
   /*
-   * Sonnet 5 is on introductory pricing ($2/$10) until 2026-08-31. We deliberately bill the STANDARD
-   * $3/$15: seeding the intro rate would compress our margin below target the day it lapses, and
-   * nothing would fail — the invoices would just get bigger.
+   * 🔴 SONNET 5 IS $2/$10 — THE STANDARD PRICE, NOT AN INTRODUCTORY ONE (2026-08-12).
+   *
+   * This asserted $3/$15 and was NAMED for the reason: $2/$10 was announced as introductory pricing
+   * expiring 2026-08-31, and billing the higher standard rate meant margin would not compress the day
+   * it lapsed. Anthropic has since made $2/$10 standard and cancelled the increase, so the deliberate
+   * over-statement became a plain 1.5x over-charge on the platform's most common turn — passed through
+   * to the customer, because credits are cost-proportional.
+   *
+   * ⚠️ The test did its job perfectly and was the problem: it pinned a deliberate deviation from the
+   * vendor's price, so it went green every day the deviation was wrong. **A test can only assert the
+   * behaviour someone wrote down; it cannot notice the fact underneath it moved** (the cache-warmer
+   * lesson, `prompt/cache-warmer.ts`). Assert the vendor's CURRENT price here, and keep the deviation —
+   * if one is ever needed again — in a named constant with a review date, not in an assertion whose
+   * greenness is indistinguishable from correctness.
    */
-  it('uses standard Sonnet pricing, not the expiring introductory rate', () => {
-    expect(MODEL_RATES['claude-sonnet-5'].inputPerMTok).toBe(3.0);
-    expect(MODEL_RATES['claude-sonnet-5'].outputPerMTok).toBe(15.0);
+  it('prices Sonnet 5 at the standard $2/$10, matching the vendor table', () => {
+    expect(MODEL_RATES['claude-sonnet-5'].inputPerMTok).toBe(2.0);
+    expect(MODEL_RATES['claude-sonnet-5'].outputPerMTok).toBe(10.0);
+
+    // The cache pair must move WITH the base or the row is half-repriced — the `packMargin()` shape.
+    expect(MODEL_RATES['claude-sonnet-5'].cacheReadPerMTok).toBeCloseTo(0.2, 9);
+    expect(MODEL_RATES['claude-sonnet-5'].cacheWritePerMTok).toBeCloseTo(4.0, 9);
+  });
+
+  /*
+   * 🔴 ANTHROPIC SELLS FABLE 5, AND THE PLATINUM RUNG POINTS AT IT (2026-08-12).
+   *
+   * `PLATINUM_MODEL=claude-fable-5` is live and `Anthropic` is the last rung of `LLM_PROVIDER_CHAIN`, so
+   * a missing row here is not a documentation gap — it is `providerRates` gap-filling KIE's $4/$20 over
+   * a model Anthropic charges $10/$50 for, i.e. eating ~60% of every Anthropic-served Platinum turn.
+   * The mirror of the 231-vs-576 defect, in the direction that loses money rather than the one that
+   * over-charges, which is why nothing complained.
+   */
+  it('prices the Platinum rung natively on Anthropic', () => {
+    expect(MODEL_RATES['claude-fable-5']).toEqual({
+      inputPerMTok: 10.0,
+      outputPerMTok: 50.0,
+      cacheReadPerMTok: 1.0,
+      cacheWritePerMTok: 20.0,
+    });
+
+    /*
+     * The property that actually protects the money: whatever the marketplace lists say, Anthropic's own
+     * row wins. A CONTROL that the marketplace really does disagree keeps this from passing vacuously —
+     * without it, this assertion holds just as well for a `providerRates` that overwrites with a table
+     * that happens to agree.
+     */
+    expect(KIE_MODEL_RATES['claude-fable-5'].inputPerMTok, 'control: the lists disagree').toBe(4.0);
+    expect(ratesFor('claude-fable-5', 'Anthropic', {}).inputPerMTok).toBe(10.0);
+    expect(ratesFor('claude-fable-5', 'Anthropic', {}).outputPerMTok).toBe(50.0);
   });
 
   /* An unknown model must never bill as FREE — that is a revenue leak with a friendly face. */
@@ -929,29 +972,37 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
    * named for simply stopped happening — the assertion failed loudly, which is the good outcome, but
    * the lesson is that a test resting on "some rung happens to default to this model" is a test whose
    * subject can be removed by an unrelated change.
+   *
+   * 🔴 **AND THE SUBJECT WAS REMOVED AGAIN, THE OTHER WAY (2026-08-12): the fill case was
+   * `claude-fable-5`, and Anthropic turned out to SELL it** ($10/$50). So this test asserted, as its
+   * premise, the very belief that was costing the platform ~60% of every Anthropic-served Platinum turn
+   * — `expect(MODEL_RATES['claude-fable-5']).toBeUndefined()` was a green assertion that a money bug was
+   * present. The lesson above generalises one step further: **the fill case must be a model the vendor
+   * can never publish**, not a model it merely has not published yet. A `gpt-*` id is that, permanently;
+   * any `claude-*` id is a vendor announcement away from flipping.
    */
   it('fills the gap for a rung the provider bakes no row for', () => {
-    stubTiers({ PREMIUM_MODEL: 'claude-fable-5' });
+    stubTiers({ PREMIUM_MODEL: 'gpt-5-6-sol' });
 
     expect(
-      MODEL_RATES['claude-fable-5'],
-      'Anthropic bakes no fable-5 row — the injection is its only price',
+      MODEL_RATES['gpt-5-6-sol'],
+      'Anthropic will never sell a GPT model — the injection is its only price',
     ).toBeUndefined();
 
-    expect(providerRates({}).Anthropic['claude-fable-5']).toEqual({
-      inputPerMTok: 4,
-      outputPerMTok: 20,
-      cacheReadPerMTok: 0.4,
-      cacheWritePerMTok: 8.0,
-    });
+    expect(providerRates({}).Anthropic['gpt-5-6-sol'].inputPerMTok).toBe(1.4);
+    expect(providerRates({}).Anthropic['gpt-5-6-sol'].outputPerMTok).toBe(8.4);
   });
 
   /*
    * BOTH halves of the rule at once — fill and don't-overwrite — which needs two MODELS, not two rungs.
    * The shipping default (`claude-opus-5`) is the don't-overwrite half because Anthropic prices it
-   * natively; `claude-fable-5` is the fill half because Anthropic bakes no row for it, and it is the
-   * model the owner's own deploy points `PREMIUM_MODEL` at. Between them they cover the only two shapes
-   * the reduce can meet.
+   * natively; a `gpt-*` id is the fill half because Anthropic bakes no row for it and never will.
+   * Between them they cover the only two shapes the reduce can meet.
+   *
+   * ⚠️ The fill half was `claude-fable-5` until 2026-08-12, on the belief that Anthropic did not sell it.
+   * It does, and BOTH shipped Claude rungs are now natively priced on every gateway — so this test would
+   * have quietly become two copies of the don't-overwrite half, i.e. no longer a test of the fill branch
+   * at all, while staying green. **Pick a fill case the vendor is structurally incapable of pricing.**
    */
   it('fills a gap and refuses to overwrite, on both providers', () => {
     stubTiers();
@@ -961,14 +1012,18 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
     expect(providerRates({}).Anthropic['claude-opus-5'].inputPerMTok).toBe(5);
     expect(providerRates({}).Anthropic['claude-opus-5'].outputPerMTok).toBe(25);
 
-    // Gap-fill MUST fill: Anthropic bakes no fable-5 row, so the injection is its only price.
-    stubTiers({ PREMIUM_MODEL: 'claude-fable-5' });
-    expect(MODEL_RATES, 'the fill case needs a model Anthropic does NOT price').not.toHaveProperty('claude-fable-5');
-    expect(providerRates({}).Anthropic['claude-fable-5'].outputPerMTok).toBe(20);
+    // Nor for Platinum, which Anthropic also prices natively ($10/$50) where the list says $4/$20.
+    expect(providerRates({}).Anthropic['claude-fable-5'].inputPerMTok).toBe(10);
+    expect(providerRates({}).Anthropic['claude-fable-5'].outputPerMTok).toBe(50);
+
+    // Gap-fill MUST fill: Anthropic bakes no GPT row, so the injection is its only price.
+    stubTiers({ PREMIUM_MODEL: 'gpt-5-6-sol' });
+    expect(MODEL_RATES, 'the fill case needs a model Anthropic CANNOT price').not.toHaveProperty('gpt-5-6-sol');
+    expect(providerRates({}).Anthropic['gpt-5-6-sol'].outputPerMTok).toBe(8.4);
 
     // KIE states both itself; the ladder introduces no second opinion.
     expect(providerRates({}).KIE['claude-opus-5'].inputPerMTok).toBe(2);
-    expect(providerRates({}).KIE['claude-fable-5'].outputPerMTok).toBe(20);
+    expect(providerRates({}).KIE['gpt-5-6-sol'].outputPerMTok).toBe(8.4);
   });
 
   /*
@@ -1005,9 +1060,14 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
     expect(anthropic['claude-opus-9-9'], 'an unpriced selector must never be injected').toBeUndefined();
     expect(anthropic['claude-sonnet-5'], 'the rest of the table is untouched').toBeDefined();
 
-    // CONTROL: a healthy selector on the same path IS injected, so the skip is scope and not a no-op.
-    stubTiers({ PREMIUM_MODEL: 'claude-fable-5' });
-    expect(providerRates({}).Anthropic['claude-fable-5']).toBeDefined();
+    /*
+     * CONTROL: a healthy selector on the same path IS injected, so the skip is scope and not a no-op.
+     * ⚠️ It must be a model Anthropic does NOT bake, or `toBeDefined()` passes off the baked row and the
+     * control stops controlling anything — which is what happened here when fable-5 gained a native row
+     * (2026-08-12). `gpt-5-6-sol` can only be present by injection.
+     */
+    stubTiers({ PREMIUM_MODEL: 'gpt-5-6-sol' });
+    expect(providerRates({}).Anthropic['gpt-5-6-sol']).toBeDefined();
   });
 
   /*
@@ -1055,12 +1115,36 @@ describe('the signup grant buys the hook', () => {
     expect(headroom).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
   });
 
-  /* The number the grant is being sized toward. Documents WHY 500 is not yet the default. */
-  it('shows 500 credits is right on KIE and not yet right on Anthropic', () => {
+  /*
+   * 🔴 ANTHROPIC HEADROOM STOPPED BEING THE CONSTRAINT ON GRANT SIZE (2026-08-12).
+   *
+   * This test asserted that a 500-credit grant clears the floor on KIE and FAILS it on Anthropic, and it
+   * was named for that: "documents WHY 500 is not yet the default". It fails now because Sonnet 5's
+   * Anthropic row dropped from an over-stated $3/$15 to the true $2/$10 — a cold build on Anthropic went
+   * 346 -> 231 credits, so 500 clears at ~1.73x.
+   *
+   * ⚠️ Read that correctly: **the grant did not become more generous, the cost estimate stopped being
+   * inflated.** And note what the old assertion had become — a test asserting that a hypothetical grant
+   * is unaffordable, whose failure is GOOD NEWS. That is a shape worth recognising: an assertion pinned
+   * to a limitation goes red when the limitation is removed, and the temptation is to "restore" it.
+   *
+   * So this now records the live arithmetic instead of a verdict. **Whether to lower the grant is the
+   * owner's decision** (`SIGNUP_GRANT_CREDITS` is 1000 and pure operator cost, §4.6) — the only thing
+   * this pins is that the sizing question can no longer be answered by pointing at Anthropic.
+   */
+  it('no longer has an Anthropic headroom problem at 500 credits', () => {
     const target = { ...config, signupGrantCredits: 500 };
 
-    expect(grantHeadroom(target, PLATFORM_MODEL, 'KIE')).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
-    expect(grantHeadroom(target, PLATFORM_MODEL, 'Anthropic')).toBeLessThan(MIN_GRANT_HEADROOM);
+    for (const provider of ['KIE', 'Anthropic'] as const) {
+      expect(grantHeadroom(target, PLATFORM_MODEL, provider), provider).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
+    }
+
+    /*
+     * CONTROL: the floor is still reachable, so the loop above is a measurement and not a tautology.
+     * Opus 5 on Anthropic is the tight combination (~1.56x at the shipped 1000-credit grant), and at 500
+     * it is squarely under the floor — which is why the paid rungs carry credit thresholds.
+     */
+    expect(grantHeadroom(target, 'claude-opus-5', 'Anthropic')).toBeLessThan(MIN_GRANT_HEADROOM);
   });
 });
 
@@ -1150,6 +1234,13 @@ describe('the platform model switch', () => {
    * A model priced on one provider but not the other is refused on the one that cannot bill it.
    * (Was sonnet-5-on-KIE until 2026-07-18 — the marketplace list now prices sonnet-5 on KIE, so the
    * asymmetric model is opus-4-7: a KIE feed row with deliberately NO Anthropic MODEL_RATES entry.)
+   *
+   * ⚠️ **Anthropic publishes a list price for Opus 4.7 ($5/$25) and `MODEL_RATES` still omits it, on
+   * purpose (2026-08-12).** A row in that table is a statement that the platform may be asked to SERVE
+   * the model, so pasting the vendor's whole table in would silently make several unvetted models
+   * selectable. Absent, `LLM_MODEL=claude-opus-4-7` on Anthropic is a loud config refusal — which is
+   * exactly what the assertion below pins. **"The vendor publishes a price" is not a reason to add a
+   * row; "a selector needs it" is** (that is why fable-5 got one: `PLATINUM_MODEL` names it).
    */
   it('validates against the CONFIGURED provider, not against models in general', () => {
     vi.stubEnv('LLM_MODEL', 'claude-opus-4-7');
@@ -1186,11 +1277,18 @@ describe('charge formula', () => {
     cacheCreationTokens: 110_964,
   };
 
-  it('prices a real creation in the range we measured (~$1.12–1.60)', () => {
+  /*
+   * ⚠️ The bracket is a function of the RATES, not of the measurement — re-derived 2026-08-12 when Sonnet
+   * 5's Anthropic row went to its true $2/$10 (this asserted ~$1.12–1.60 against the over-stated $3/$15).
+   * The token vector above is the measured part and is unchanged; only what those tokens cost moved.
+   * A range test over a rate table has to be re-derived on every reprice, which is the price of asserting
+   * a dollar figure at all — the alternative (assert the arithmetic) is the test directly below.
+   */
+  it('prices a real creation in the range we measured (~$0.60–0.90)', () => {
     const cost = rawCostUsd(realCreation, 'claude-sonnet-5', 'Anthropic');
 
-    expect(cost).toBeGreaterThan(1.1);
-    expect(cost).toBeLessThan(1.6);
+    expect(cost).toBeGreaterThan(0.6);
+    expect(cost).toBeLessThan(0.9);
   });
 
   it('charges margin over raw cost', () => {

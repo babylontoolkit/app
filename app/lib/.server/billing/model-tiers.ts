@@ -6,9 +6,17 @@
  * at a credit THRESHOLD the user must hold.
  *
  * ⚠️ This comment said "Two rungs, ordered by cost" until 2026-08-11 — stale on BOTH counts, sitting
- * directly above a three-entry table. Ordered by CAPABILITY, not cost: on Anthropic the Platinum
- * (fable-5) row settles CHEAPER than Premium (opus-5), so anyone reading "by cost" and reordering the
- * rungs would be acting on a rule this file does not follow.
+ * directly above a three-entry table. **Ordered by CAPABILITY, and that is the rule regardless of what
+ * the prices happen to do.**
+ *
+ * ⚠️ Its evidence, though, was a mis-bill: it argued "on Anthropic the Platinum (fable-5) row settles
+ * CHEAPER than Premium (opus-5)". It did, because `MODEL_RATES` had no fable-5 row and `providerRates`
+ * gap-filled KIE's $4/$20 over a model Anthropic sells at $10/$50 (fixed 2026-08-12). **The ladder is
+ * cost-monotonic on every gateway today** — Anthropic $2 / $5 / $10, Comet $1.60 / $4 / $8, KIE
+ * $0.85 / $2 / $4. Do not take that as licence to order the rungs BY cost: capability order is what the
+ * thresholds, the first-build lock and the step-down-to-standard rule are all written against, and a
+ * price coincidence is not a design. The lesson is narrower and sharper — **a rule justified by a
+ * measurement inherits that measurement's bugs**, and this one was quoted in four files for two weeks.
  *
  * ## Why this is a table and not two code paths
  *
@@ -48,7 +56,7 @@
  * deliberate: a fallback for a credit threshold is correct, a fallback for a PRICE is catastrophic.
  */
 
-/** The rungs, in LADDER order (ascending capability). Order is meaningful — it is the ladder. ⚠️ NOT price order: on Anthropic the Platinum row settles cheaper than Premium. */
+/** The rungs, in LADDER order (ascending capability). Order is meaningful — it is the ladder. ⚠️ Capability order, not price order: the two agree on every gateway today, and that is a coincidence to re-check, never a rule to reorder by. */
 export const MODEL_TIER_IDS = ['standard', 'premium', 'platinum'] as const;
 
 export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
@@ -111,11 +119,15 @@ export const DEFAULT_PLATINUM_MODEL = 'claude-fable-5';
  * Above Premium's 1200 and well above `SIGNUP_GRANT_CREDITS` (1000).
  *
  * The ladder must stay monotonic in threshold or a bare deploy offers a dearer rung for less. It is
- * also cost-monotonic on the current provider — Comet prices fable-5 at $8/$40 against opus-5's
- * $4/$20 — but ⚠️ **rungs order CAPABILITY, not price, and that is not the same thing on every
- * provider**: on Anthropic-direct the fable-5 rung settled 814 credits against Opus 5's 1,017,
- * because Anthropic prices Opus 5 above the fable row. Do not "fix" a non-monotonic price by
- * reordering the ladder.
+ * cost-monotonic too, on every gateway: Comet prices fable-5 at $8/$40 against opus-5's $4/$20, and
+ * Anthropic at $10/$50 against $5/$25.
+ *
+ * ⚠️ **This comment claimed the opposite for Anthropic** — "the fable-5 rung settled 814 credits against
+ * Opus 5's 1,017, because Anthropic prices Opus 5 above the fable row" — and that was a symptom, not a
+ * measurement: `MODEL_RATES` carried no fable-5 row, so the Platinum rung was priced from KIE's $4/$20
+ * while Anthropic charged us $10/$50 (fixed 2026-08-12; 814/1017 is exactly 4/5, which is the tell).
+ * **Rungs still order CAPABILITY, not price** — that rule is unchanged and load-bearing — it just no
+ * longer has a counterexample to lean on, so do not go looking for one to justify a reordering.
  */
 export const DEFAULT_PLATINUM_MINIMUM_CREDITS = 2000;
 

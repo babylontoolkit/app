@@ -28,9 +28,16 @@
  * table: `providerRates` INJECTS every paid rung's model into the Anthropic table at MARKETPLACE
  * (KIE-shaped) rates to keep settlement working for a rung Anthropic does not sell. Priced through
  * that, a model Anthropic never listed would still resolve — so "Anthropic list" would be a KIE price
- * wearing an Anthropic label, and for `claude-fable-5` (which KIE prices at ~2x Anthropic's Opus row)
- * it would invent a discount out of a premium. The baked table is the only thing that actually means
- * "what Anthropic charges".
+ * wearing an Anthropic label, and a gateway would be compared against its own price, which is a
+ * guaranteed "you saved 0%" for a turn that may have saved plenty. The baked table is the only thing
+ * that actually means "what Anthropic charges".
+ *
+ * ⚠️ This rule was illustrated with `claude-fable-5` — "which KIE prices at ~2x Anthropic's Opus row,
+ * so it would invent a discount out of a premium". The example was wrong in both halves and the rule is
+ * right anyway, which is why it is worth recording: KIE prices fable-5 at $4/$20, **below** Anthropic's
+ * Opus row, and Anthropic sells fable-5 itself at $10/$50 (`MODEL_RATES`, 2026-08-12) so the injection
+ * does not fire for it at all. The mechanism the rule guards against is real; the model chosen to
+ * demonstrate it was the one the platform was actively mis-pricing.
  *
  * 🔴 **3. It compares a RATIO, never two absolute credit figures.** The turn's credits were computed
  * at whatever `CREDIT_MARGIN` was in force when it ran; a reference recomputed at today's margin is a
@@ -93,11 +100,21 @@ export interface Savings {
 /**
  * What this turn's gateway saved the user against Anthropic list, or `null` to say nothing.
  *
- * ⚠️ **`savedCredits` is floored at zero, and that is not cosmetic.** A gateway CAN be dearer than
- * Anthropic for a given model — measured: the fable-5 rung settled 814 credits on Anthropic against
- * Opus 5's 1,017, because the ladder orders capability, not price. Rendering a negative "saving"
+ * ⚠️ **`savedCredits` is floored at zero, and that is not cosmetic.** Rendering a negative "saving"
  * would tell a user we overcharged them relative to an option they were never offered, on a turn that
  * was billed exactly right. `basis: 'full_price'` is the honest report for that case: no discount.
+ *
+ * ⚠️ **The floor has NO measured case behind it as of 2026-08-12, and it stays anyway.** It used to cite
+ * "the fable-5 rung settled 814 credits on Anthropic against Opus 5's 1,017" as proof a gateway can be
+ * dearer than Anthropic. That comparison was between two different MODELS (which says nothing about a
+ * gateway), and the 814 was itself the gap-fill mis-bill — fable-5 priced at KIE's $4/$20 instead of
+ * Anthropic's $10/$50, i.e. 814/1017 = exactly 4/5. With the real rates in, every Claude row on both
+ * marketplaces is CHEAPER than Anthropic list, so no shipped configuration can produce a negative here.
+ *
+ * Keep the floor. It costs one `Math.max` and it defends a user-facing money claim against a promoted
+ * price list — which an operator can change from the Admin panel, with no deploy, at any time. A
+ * defence removed because today's numbers happen not to need it is a defence removed at exactly the
+ * moment nothing is watching, and the failure mode here is a negative discount rendered to a customer.
  */
 export function describeSavings(input: SavingsInput): Savings | null {
   if (input.creditsCharged <= 0 || !(input.actualCostUsd > 0)) {

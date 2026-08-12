@@ -15,6 +15,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsLedger, setLedger } from './ledger';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from './generations';
+import { MODEL_RATES } from './rates';
 
 const USER = 'user-enh';
 
@@ -402,12 +403,28 @@ describe('the enhancer model is the one that runs AND the one that is billed', (
   });
 
   /*
-   * The point of the whole change, in one number. Anthropic prices Sonnet 5 at exactly 3x Haiku 4.5 on
-   * both input and output ($3/$15 vs $1/$5), so on an identical usage shape the enhancement must cost
-   * exactly a third. Deriving the ratio from the rates rather than pinning two literals means a repriced
-   * row moves the expectation with it instead of failing a test that was never about those two numbers.
+   * The point of the whole change, in one number: a cheap enhancer model costs strictly less than the
+   * platform model on an identical usage shape, in the exact proportion of their rates.
+   *
+   * ⚠️ **This comment used to CLAIM the ratio was derived and the code hardcoded `* 3`** — "Deriving the
+   * ratio from the rates rather than pinning two literals means a repriced row moves the expectation with
+   * it instead of failing a test that was never about those two numbers." It was pinning two literals, so
+   * when Sonnet 5 moved to its true $2/$10 (2026-08-12) the ratio became 2 and this failed exactly as the
+   * comment promised it would not. A comment describing a property the code does not have is how a defect
+   * survives review — the recurring lesson in this repo, here costing a red test rather than money.
+   *
+   * It derives now. The uniformity CONTROL is load-bearing: a single ratio is only meaningful while the
+   * two rows are proportional across every token class, and if a reprice ever breaks that, this test must
+   * fail loudly rather than silently compare one class's ratio against another's cost.
    */
   it('costs strictly less than the platform model on identical usage', async () => {
+    const [cheapRates, dearRates] = [MODEL_RATES['claude-haiku-4-5'], MODEL_RATES['claude-sonnet-5']];
+    const ratio = dearRates.inputPerMTok / cheapRates.inputPerMTok;
+
+    for (const cls of ['inputPerMTok', 'outputPerMTok', 'cacheReadPerMTok', 'cacheWritePerMTok'] as const) {
+      expect(dearRates[cls] / cheapRates[cls], `${cls} must share the one ratio`).toBeCloseTo(ratio, 9);
+    }
+
     const cheap = await enhanceWith('claude-haiku-4-5');
 
     await ledger.append({ userId: USER, delta: cheap.spent, reason: 'adjustment' });
@@ -417,6 +434,6 @@ describe('the enhancer model is the one that runs AND the one that is billed', (
 
     expect(cheap.spent).toBeGreaterThan(0);
     expect(cheap.spent).toBeLessThan(dear.spent);
-    expect(cheap.spent * 3).toBe(dear.spent);
+    expect(cheap.spent * ratio).toBe(dear.spent);
   });
 });

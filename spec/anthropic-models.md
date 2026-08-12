@@ -29,6 +29,30 @@ exists for *skill* versions; that is unrelated.
 ⚠️ **Haiku is the exception**: 200k context and a **64k** output cap, not 128k. Copying another
 row's numbers over Haiku asks for more output than the model allows, which is a hard 400.
 
+### 1a. The tokenizer changed at 4.7, and Haiku is on the old side of the line (2026-08-12)
+
+**Claude 4.7 and later use a newer tokenizer that produces ~30% more tokens for the same text.** That
+covers every model in the table above **except Haiku 4.5** — Sonnet 4.6 and earlier keep the previous
+tokenizer. The exact increase depends on the content, and code is not English, so treat ~30% as the
+vendor's headline and not a constant to compute with.
+
+Nothing in the code needs to change; two habits do.
+
+- **A char budget is not a token budget, and the gap just widened.** `MAX_READ_CHARS`,
+  `AGENT_MAX_PLAN_READ_CHARS`, `MAX_INSTRUCTIONS_CHARS`, `ASSET_INDEX_CHAR_BUDGET` and
+  `MAX_SCHEMA_CHARS` are all in CHARS. They still bound what they bound — nothing is mis-billed — but
+  the "≈4 chars/token" rule under-states their token cost on every model we run: **80k chars is ~26k
+  tokens, not ~20k.** Size a new budget from the measured density, never the rule of thumb.
+- **`charsPerOutputToken` does not compare across the boundary.** The ~2.0–2.2 healthy-for-code
+  baseline (`spec/context-budget.md` §"MEASURED") was measured on Opus 4.8, i.e. the NEW tokenizer, so
+  the same healthy output from Haiku reads higher. Diagnosing an enhancer turn against the Opus
+  baseline will read as "thinking-heavy" when it is nothing of the kind — the same class of mistake as
+  reading the prose 3.5–4 baseline against code output, one boundary over.
+- **A rate ratio is not a cost ratio.** Haiku's $1/$5 against Sonnet 5's $2/$10 looks like 2×; Haiku
+  also emits fewer tokens for the same text, so the real gap is wider. That makes the cheap-model lever
+  (`<PROVIDER>_ENHANCE_PROMPT_MODEL`) better than the rate card suggests — the safe direction, but do
+  not quote "2×" as if it were the delivered saving.
+
 Everything upstream shipped (`claude-3-5-sonnet-20241022`, `claude-3-haiku-20240307`,
 `claude-opus-4-20250514`) is retired and 404s. Delete, don't keep "as fallbacks."
 

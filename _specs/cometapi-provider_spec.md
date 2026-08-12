@@ -513,7 +513,17 @@ by config with no rebuild (§4.2a).
 
 ## Open Questions
 
-1. ✅ **CLOSED (T5, 2026-08-10) — our Anthropic `claude-sonnet-5` rate is CORRECT and deliberate.**
+1. 🔴 **RE-OPENED AND FIXED THE OTHER WAY (2026-08-12) — the closure below was WRONG.** Anthropic made
+   **$2/$10 the standard price** for Sonnet 5 and cancelled the 1 September increase, so Comet's feed was
+   reporting the current rate and `MODEL_RATES` was 1.5× high on the platform's DEFAULT model. Because
+   credits are cost-proportional that over-charge reached users, and it inflated `savings.ts`' advertised
+   discount from a true 20% to ~47%. `MODEL_RATES['claude-sonnet-5']` is now $2/$10 and the two tables
+   agree about the official rate. **The original closure is preserved verbatim below because the reasoning
+   is the lesson: an independent CAPTURE of the vendor's number was overruled by a hand-maintained table on
+   the strength of a plausible story that could not be checked from inside this repo. Put the burden of
+   proof on the hand-maintained value.**
+
+   ~~✅ **CLOSED (T5, 2026-08-10) — our Anthropic `claude-sonnet-5` rate is CORRECT and deliberate.**~~
    The fear was that `rates.ts`'s **$3/$15** was stale against Comet's reported official **$2/$10**.
    It is the opposite: `rates.ts:86-89` already records that $2/$10 is Anthropic's **INTRODUCTORY**
    price, expiring **2026-08-31**, and that the platform bills the STANDARD $3/$15 on purpose —

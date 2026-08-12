@@ -118,12 +118,17 @@ export const BAKED_COMET_PRICES: MarketPriceList = {
      * THE PLATFORM DEFAULT (`DEFAULT_MODEL`, the §4.6.1a Standard rung). Probed 200.
      * official 2.00 / 10.00 x ratio 0.80 -> 1.60 / 8.00
      *
-     * ⚠️ Comet's feed reports Sonnet 5's official rate as $2/$10, which is Anthropic's INTRODUCTORY
-     * price (expires 2026-08-31). Our own Anthropic table deliberately bills the STANDARD $3/$15 for
-     * that reason (`rates.ts` — seeding the intro rate would compress margin below target the day it
-     * lapses, with nothing failing). Here the intro rate is the right input because it is what Comet
-     * actually charges us today; when their feed moves to the standard rate this row moves with it.
-     * The two tables disagreeing is correct, not a defect — they price two different vendors.
+     * ⚠️ **THE TWO TABLES AGREE NOW, AND THE ARGUMENT THAT THEY SHOULDN'T WAS RETIRED (2026-08-12).**
+     * This comment read: Comet's feed reports Sonnet 5's official rate as $2/$10, which is Anthropic's
+     * INTRODUCTORY price expiring 2026-08-31, so our own Anthropic table deliberately bills the STANDARD
+     * $3/$15 and "the two tables disagreeing is correct, not a defect". **Anthropic has made $2/$10 the
+     * standard price and cancelled the scheduled increase**, so `MODEL_RATES` is $2/$10 too and the
+     * official input here needs no caveat at all.
+     *
+     * Worth keeping because of how it read while it was wrong: Comet's feed was reporting the CORRECT
+     * standard rate and was being explained away as reporting an expiring one. A second source
+     * disagreeing with a hand-maintained table is evidence about the table, and this file's own header
+     * rule (capture, never infer) is what kept Comet's row right while the first-party one drifted.
      */
     'claude-sonnet-5': { inputPerMTok: 1.6, outputPerMTok: 8.0 },
 

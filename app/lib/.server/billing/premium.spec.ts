@@ -74,6 +74,7 @@ import {
   DEFAULT_PREMIUM_MODEL,
   MODEL_RATES,
   getPremiumTier,
+  kieRates,
   providerRates,
   ratesFor,
 } from './rates';
@@ -772,8 +773,14 @@ describe('the premium model is priceable on every provider', () => {
    * fill-a-gap rule from a no-op into the thing standing between us and a 60% loss on every premium
    * generation: `premium.rates` come from the KIE-shaped Marketplace list ($2/$10), and overwriting
    * Anthropic's own $5/$25 row with them measured 231 credits where 576 was correct (`rates.ts`).
-   * While the default was Fable 5 — a model Anthropic bakes no row for — filling and overwriting were
-   * indistinguishable, which is exactly why the bug was invisible for as long as it was.
+   * While the default was Fable 5 — a model `MODEL_RATES` carried no row for — filling and overwriting
+   * were indistinguishable, which is exactly why the bug was invisible for as long as it was.
+   *
+   * ⚠️ And the missing row was itself a defect, not a fact about the vendor: Anthropic sells Fable 5 at
+   * $10/$50 (added 2026-08-12), so for that whole period the "harmless" fill was substituting KIE's
+   * $4/$20 for a published price. **Two defects hid inside each other** — the overwrite bug was invisible
+   * because of the missing row, and the missing row was invisible because everyone had agreed it was
+   * intentional.
    */
   it('leaves Anthropic its OWN row for a model Anthropic prices natively', () => {
     stubPremium();
@@ -788,18 +795,34 @@ describe('the premium model is priceable on every provider', () => {
     expect(ratesFor('claude-opus-5', 'KIE', {}).inputPerMTok).toBe(2);
   });
 
+  /*
+   * ⚠️ The fill case is a `gpt-*` id since 2026-08-12, and the reason is the whole finding of that day:
+   * this test used `claude-fable-5` on the belief that Anthropic bakes no row for it, and Anthropic sells
+   * it at $10/$50 — so the assertion below was pinning the KIE-shaped $4/$20 as the correct Anthropic
+   * price for a live rung (`PLATINUM_MODEL`), i.e. asserting a ~60% under-charge. **A fill case must be a
+   * model the vendor CANNOT price, never one it merely has not priced yet.**
+   */
   it('injects a row into a provider that bakes none', () => {
-    stubPremium({ PREMIUM_MODEL: 'claude-fable-5' });
+    stubPremium({ PREMIUM_MODEL: 'gpt-5-6-sol' });
 
-    // MODEL_RATES has no fable-5 row (pinned in billing.spec) — this injection is what prices it.
-    expect(providerRates({}).Anthropic['claude-fable-5']).toEqual({
-      inputPerMTok: 4,
-      outputPerMTok: 20,
-      cacheReadPerMTok: 0.4,
-      cacheWritePerMTok: 8.0,
-    });
+    // Anthropic bakes no GPT row and never will — this injection is what prices it.
+    expect(MODEL_RATES['gpt-5-6-sol'], 'control: the gap is real').toBeUndefined();
+    expect(providerRates({}).Anthropic['gpt-5-6-sol'].inputPerMTok).toBe(1.4);
+    expect(providerRates({}).Anthropic['gpt-5-6-sol'].outputPerMTok).toBe(8.4);
 
-    expect(ratesFor('claude-fable-5', 'Anthropic', {}).inputPerMTok).toBe(4);
+    expect(ratesFor('gpt-5-6-sol', 'Anthropic', {}).inputPerMTok).toBe(1.4);
+  });
+
+  /*
+   * The other side of the same coin, and the defect that made it worth a test: Platinum names a model
+   * Anthropic prices NATIVELY, so the injection must not fire for it either.
+   */
+  it('leaves Anthropic its own row for the Platinum rung', () => {
+    stubPremium({ PLATINUM_MODEL: 'claude-fable-5' });
+
+    expect(kieRates({})['claude-fable-5'].inputPerMTok, 'control: the lists disagree').toBe(4);
+    expect(ratesFor('claude-fable-5', 'Anthropic', {}).inputPerMTok).toBe(10);
+    expect(ratesFor('claude-fable-5', 'Anthropic', {}).outputPerMTok).toBe(50);
   });
 
   it('is idempotent on KIE, which already bakes the identical row', () => {

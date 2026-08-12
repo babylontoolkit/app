@@ -81,19 +81,51 @@ export function ratesFromBase(
 }
 
 /**
- * Published list prices, USD per million tokens.
+ * Published list prices, USD per million tokens. Verified against Anthropic's model pricing table
+ * (2026-08-12).
  *
- * ⚠️ Sonnet 5 currently carries INTRODUCTORY pricing of $2/$10 per MTok, which expires 2026-08-31.
- * We deliberately bill against the STANDARD $3/$15. Seeding the intro rate would silently compress
- * our margin to below target the day it lapses — and nothing would fail; the invoices would just get
- * bigger. Under-charging ourselves for a few weeks is the correct direction to be wrong in.
+ * ## What belongs in here, and why the table is deliberately not the whole price list
+ *
+ * A row here is an assertion that this platform may be asked to SERVE that model on Anthropic — the
+ * `MODEL_RATES` lookup is what `getPlatformModel` and the tier ladder validate a selector against, so
+ * **adding a row widens what a deploy can select.** Anthropic publishes rows for Opus 4.5/4.6/4.7,
+ * Sonnet 4.5/4.6 and Mythos 5 that are deliberately ABSENT: nothing selects them, and an absent row
+ * makes `LLM_MODEL=claude-opus-4-7` on Anthropic a loud config refusal rather than a live model whose
+ * rates nobody checked. Do not paste the vendor's table in wholesale — add the row when a selector
+ * needs it, which is the same "model and price are ONE fact" rule the marketplace list follows.
+ *
+ * ## 🔴 SONNET 5 IS $2/$10 AND THE INTRO-PRICING CARVE-OUT IS DEAD (2026-08-12)
+ *
+ * This row was deliberately held at the STANDARD **$3/$15** for weeks because $2/$10 was announced as
+ * introductory pricing expiring 2026-08-31, and seeding a rate that was about to rise would have
+ * compressed margin the day it lapsed. **Anthropic has now made $2/$10 the standard price and
+ * cancelled the scheduled increase**, so the premise is gone and the carve-out inverted from prudent
+ * to wrong: we were pricing the platform's most common turn at **1.5x what it costs us**.
+ *
+ * That is not a margin windfall, it is a **user over-charge**, and it is worth being precise about the
+ * direction because this file's other fallbacks lean the opposite way. Credits are cost-proportional
+ * (`creditsForUsage`), so an OVERSTATED cost in this table is billed straight through to the customer:
+ * every Anthropic-served Sonnet 5 turn charged 1.5x the credits it should have. It also fed
+ * `savings.ts`, whose reference table IS this one — so the "you saved N" figure shown next to a money
+ * number claimed a ~47% discount on Comet where the honest number is 20%.
+ *
+ * ⚠️ **The generalisable rule: a rate held deliberately off a vendor's current price is a DATED
+ * decision that needs an expiry review, not a comment.** Three documents plus a spec assertion all
+ * faithfully recorded *why* $3/$15 was right, and every one of them kept reading as correct after the
+ * fact underneath it changed — the same "cite config as DATED evidence" failure this repo has now
+ * recorded four times. A price that is intentionally not the vendor's price should be the rarest thing
+ * in this file.
  */
 export const MODEL_RATES: Record<string, ModelRates> = {
+  /*
+   * THE PLATFORM DEFAULT (`DEFAULT_MODEL`, the §4.6.1a Standard rung). $2/$10 is the STANDARD price as
+   * of 2026-08-12 — the introductory-rate carve-out is retired; see the header.
+   */
   'claude-sonnet-5': {
-    inputPerMTok: 3.0,
-    outputPerMTok: 15.0,
-    cacheReadPerMTok: 0.3, // 0.1x
-    cacheWritePerMTok: 6.0, // 2x — the 1h tier
+    inputPerMTok: 2.0,
+    outputPerMTok: 10.0,
+    cacheReadPerMTok: 0.2, // 0.1x
+    cacheWritePerMTok: 4.0, // 2x — the 1h tier
   },
   'claude-haiku-4-5': {
     inputPerMTok: 1.0,
@@ -108,12 +140,43 @@ export const MODEL_RATES: Record<string, ModelRates> = {
     cacheWritePerMTok: 10.0,
   },
 
-  // Anthropic prices Opus 5 as a drop-in at Opus 4.8's exact rates (launch announcement, 2026-07).
+  // The §4.6.1a PREMIUM rung. Anthropic prices Opus 5 as a drop-in at Opus 4.8's exact rates.
   'claude-opus-5': {
     inputPerMTok: 5.0,
     outputPerMTok: 25.0,
     cacheReadPerMTok: 0.5,
     cacheWritePerMTok: 10.0,
+  },
+
+  /*
+   * 🔴 THE §4.6.1a PLATINUM RUNG — AND ANTHROPIC SELLS IT, WHICH THIS FILE USED TO DENY (2026-08-12).
+   *
+   * `PLATINUM_MODEL=claude-fable-5` is live in the owner's deploy and `Anthropic` is the last rung of
+   * `LLM_PROVIDER_CHAIN`, so this row is load-bearing rather than documentation. Until now there was
+   * NO fable-5 row here and three comments in this file asserted the reason was that "Anthropic does
+   * not sell it" — false, and expensive: `providerRates`' gap-fill therefore priced the Platinum rung
+   * on Anthropic from the KIE-shaped marketplace list at **$4/$20 against a true $10/$50**, so we ate
+   * ~60% of the cost of every Anthropic-served Platinum turn, silently, with the credit count going
+   * DOWN so it read as a cheaper turn. That is the exact mirror of the 231-vs-576 defect recorded on
+   * `providerRates` — same mechanism, opposite direction, and the direction that loses money.
+   *
+   * ⚠️ It also retro-corrects a MEASUREMENT this repo reasoned from: "on Anthropic the fable-5 rung
+   * settled 814 credits against Opus 5's 1,017" was quoted in four places as evidence that the ladder
+   * is not cost-monotonic on Anthropic. 814/1017 is exactly 4/5 — it is the gap-filled $4/$20 rate,
+   * i.e. the mis-bill, not a fact about Anthropic's prices. At the real $10/$50 the same turn is ~2,035
+   * credits and Anthropic IS cost-monotonic. The ladder still orders CAPABILITY, not price (do not
+   * reorder it), but that rule no longer has a live counterexample to point at.
+   *
+   * ⚠️ Adding this row also raises `mostExpensive(MODEL_RATES)` from Opus 5's $25 output to $50, so an
+   * UNPRICED model on Anthropic now falls back to twice what it used to. That is the direction this
+   * file's fallbacks are documented to err in (our own favour, recoverable) — noted because it is a
+   * real behaviour change and not a side effect anyone would look for.
+   */
+  'claude-fable-5': {
+    inputPerMTok: 10.0,
+    outputPerMTok: 50.0,
+    cacheReadPerMTok: 1.0,
+    cacheWritePerMTok: 20.0,
   },
 };
 
@@ -128,8 +191,13 @@ export const MODEL_RATES: Record<string, ModelRates> = {
  * against. Runtime billing goes through `kieRates()`, which reads the ACTIVE list.
  *
  * ⚠️ **EVERY ROW IS LOOKED UP, NEVER DERIVED FROM A RATIO.** `claude-opus-4-8` happens to be a uniform
- * 0.4x of Anthropic list; 4.7 is ~0.285x and fable-5 is 2x Anthropic's Opus list — KIE resells many
- * vendors at its own prices. A ratio that holds for one row is a coincidence. The cache multipliers
+ * 0.4x of Anthropic list, and `claude-opus-4-7` is ~0.285x — KIE resells many vendors at its own
+ * prices. A ratio that holds for one row is a coincidence. ⚠️ This sentence also cited "fable-5 is 2x
+ * Anthropic's Opus list" as a second counterexample; now that Anthropic's own fable-5 row is known
+ * ($10/$50, 2026-08-12), KIE's $4/$20 is a uniform **0.4x** of it — the same ratio as 4-8 — so fable-5
+ * has quietly stopped being evidence for this rule and 4-7 (plus the gpt rows, whose cache write is
+ * 1.25x where Claude's is 2.0x) now carries it alone. The rule is unchanged; one of its three examples
+ * turned out to be a coincidence in the other direction, which is rather the point. The cache multipliers
  * ARE shared (0.1x read, 2.0x the 1-hour write, applied to each row's own base) and that one IS
  * measured — see the note below the table.
  *
@@ -328,9 +396,14 @@ export function cometRates(context?: unknown): Record<string, ModelRates> {
  * price is refused — the same "selector without a row" rule as `kieDefaultModel`.
  *
  * ⚠️ **ONE price per rung for whichever provider is active** — the list row states what that model
- * costs on the provider the platform runs. On Anthropic, `claude-fable-5` has no `MODEL_RATES` row at
- * all, so the `providerRates` injection is the ONLY thing that prices it there. ⚠️ That injection
- * FILLS A GAP and never overwrites: a rung may now name a model Anthropic prices natively.
+ * costs on the provider the platform runs, and the `providerRates` injection FILLS A GAP and never
+ * overwrites, because a rung may name a model the provider prices natively. ⚠️ This paragraph used
+ * `claude-fable-5` as the example of a rung Anthropic prices NOWHERE, so the injection was "the ONLY
+ * thing that prices it there". That is false as of 2026-08-12 — Anthropic sells fable-5 at $10/$50 and
+ * `MODEL_RATES` now says so — and while it was believed, the Platinum rung settled on Anthropic at
+ * KIE's $4/$20. **Both shipped rungs are natively priced on every gateway today, so the gap-fill fires
+ * for no current configuration**; it stays because a rung selector may name a non-Claude model
+ * (`PREMIUM_MODEL=gpt-5-6-sol` was a real deploy), which no Anthropic table will ever carry.
  *
  * ⚠️ The thresholds stay env (`envNumber`): a credit THRESHOLD may have a fallback — unlike a price,
  * where a fallback is catastrophic.
@@ -412,13 +485,26 @@ export function getModelTier(id: PaidModelTierId, context?: unknown): ModelTier 
    * So the honest statement of the residual risk: a rung model a gateway does not price NATIVELY
    * settles at the marketplace (KIE-shaped) rate on that gateway, silently, in an unknown direction.
    * That is TRUE TODAY with a fixed `LLM_PROVIDER` and is not introduced by `AUTO_MODEL_SELECT`; the
-   * ladder only adds a second door to it. Gating the ladder on native rung pricing was considered and
-   * REJECTED: `MODEL_RATES` has no `claude-fable-5` row (Anthropic does not sell it), so that rule
-   * would drop ANTHROPIC — the deliberate last-resort rung — out of the ladder for a perfectly normal
-   * rung selector, trading a bounded mis-bill for having nowhere to fail over to.
+   * ladder only adds a second door to it.
    *
-   * The rule this violates is worth restating because it caught this comment: a claim in a comment
-   * cannot be executed, and a false one is how a defect survives review.
+   * 🔴 **AND IT STOPPED BEING HYPOTHETICAL — THE RISK NAMED ABOVE WAS BEING PAID (2026-08-12).**
+   * Gating the ladder on native rung pricing was considered and REJECTED on the grounds that
+   * "`MODEL_RATES` has no `claude-fable-5` row (Anthropic does not sell it), so that rule would drop
+   * ANTHROPIC — the deliberate last-resort rung — out of the ladder". **Anthropic does sell it, at
+   * $10/$50**, and while that sentence stood the Platinum rung settled on Anthropic from KIE's $4/$20
+   * — the unknown direction turned out to be a ~60% loss on every such turn. The row exists now, so:
+   *
+   *  - the premise of the rejection is VOID, and with both shipped rungs natively priced everywhere the
+   *    proposed gate would no longer drop any gateway for any shipped configuration;
+   *  - the residual risk is now confined to a NON-CLAUDE rung selector (`gpt-5-6-sol`), where the gate
+   *    would be a refusal rather than a mis-bill. **Re-opening that decision is a live option, not a
+   *    closed one** — flagged, not taken, because it is a money-path change owed its own mutation tests.
+   *
+   * ⚠️ The rule this comment closes with caught this comment TWICE, one paragraph apart: a claim in a
+   * comment cannot be executed, and a false one is how a defect survives review. The 2026-08-10 pass
+   * corrected the paragraph above ("there is no refusal") and left the paragraph below it — which was
+   * false for the same reason and cost real money — standing. **When you find one false claim in a
+   * comment, audit the whole comment, not the sentence.**
    */
   const row = activeMarketPrices('KIE').llm[model];
 
@@ -559,8 +645,10 @@ export function getPremiumTier(context?: unknown): ModelTier {
  * a module-level constant would freeze whatever the environment held at import time.
  *
  * EVERY paid rung of the model tier ladder is injected into EVERY provider's table so it is priceable
- * no matter who serves it (§4.6.1a). This is what makes `claude-fable-5` billable on Anthropic, which
- * bakes no row for it — and it is idempotent on KIE, whose table derives from the same price list.
+ * no matter who serves it (§4.6.1a) — and it is idempotent on KIE, whose table derives from the same
+ * price list. ⚠️ `claude-fable-5` was this sentence's example of a model "Anthropic bakes no row for";
+ * it has one since 2026-08-12 ($10/$50), so the injection's live purpose is a NON-CLAUDE rung selector,
+ * not the shipped ladder.
  */
 export function providerRates(context?: unknown): Record<string, Record<string, ModelRates>> {
   /*
@@ -591,14 +679,18 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
    * A cold build turn measured **231 credits instead of 576** — we would eat 60% of the cost of every
    * premium generation, silently, with the credit count going DOWN so it reads as a cheaper turn.
    *
-   * ⚠️ It was invisible only while the default `PREMIUM_MODEL` was `claude-fable-5`, which Anthropic
-   * bakes NO row for — the case where filling and overwriting are the same thing. **That safe case is
-   * over**: the premium rung now defaults to `claude-opus-5`, which Anthropic prices natively at
-   * $5/$25, so the guard below is the ONLY thing standing between this table and the 231-vs-576
-   * regression. A rung pointed at `claude-fable-5` (which the owner's deploy runs) is still gap-filled
-   * on Anthropic and idempotent on KIE — the guard has to be correct for BOTH, which is exactly why it
-   * is a condition and not a choice of model. A provider that prices a model itself is the authority
-   * on what it charges.
+   * ⚠️ It was invisible only while the default `PREMIUM_MODEL` was `claude-fable-5`, believed to be a
+   * model Anthropic bakes NO row for — the case where filling and overwriting are the same thing.
+   * **That safe case is over twice over.** First the premium rung moved to `claude-opus-5`, which
+   * Anthropic prices natively at $5/$25, making this guard the only thing between the table and the
+   * 231-vs-576 regression. Then (2026-08-12) it turned out **fable-5 was never the safe case either**:
+   * Anthropic sells it at $10/$50, so for as long as this comment claimed otherwise the gap-fill was
+   * not "filling a hole", it was **substituting KIE's $4/$20 for a price Anthropic publishes** — the
+   * same defect the guard is named for, wearing the coat of the example used to argue it was harmless.
+   *
+   * So the guard's correctness never depended on which model a rung names, which is exactly why it is a
+   * CONDITION and not a choice of model: a provider that prices a model itself is the authority on what
+   * it charges, and whether it does is a question about the table, not about our beliefs.
    */
   const withTiers = (table: Record<string, ModelRates>): Record<string, ModelRates> =>
     tiers.reduce(
@@ -804,17 +896,24 @@ export function getBillingConfig(context?: unknown): BillingConfig {
      *
      * **1000 since 2026-07-30 (owner decision), up from 800**, taken together with the model moving to
      * `claude-sonnet-5` and `PROJECT_CREATE_CREDITS` dropping to 100. Headroom at margin 4.0, computed
-     * through `grantHeadroom` rather than asserted here:
+     * through `grantHeadroom` rather than asserted here (recomputed 2026-08-12 for Sonnet 5's $2/$10
+     * standard price and for Comet, which is the live gateway):
      *
      * | provider  | model    | cold build | headroom (1000 − 100) |
      * |-----------|----------|------------|-----------------------|
      * | KIE       | sonnet-5 | ~98 cr     | **9.18x**             |
      * | KIE       | opus-5   | ~231 cr    | 3.90x                 |
-     * | Anthropic | sonnet-5 | ~346 cr    | 2.60x                 |
+     * | Comet     | sonnet-5 | ~185 cr    | 4.86x                 |
+     * | Comet     | opus-5   | ~461 cr    | 1.95x                 |
+     * | Anthropic | sonnet-5 | ~231 cr    | 3.90x                 |
      * | Anthropic | opus-5   | ~576 cr    | 1.56x                 |
      *
-     * Every combination now clears the 1.5x floor — including Anthropic + Opus 5, which the previous
-     * 800/150 pairing did not survive at the model prices in force. That is the point of raising the
+     * Every combination clears the 1.5x floor — including Anthropic + Opus 5, which the previous 800/150
+     * pairing did not survive at the model prices in force. ⚠️ The Anthropic + Sonnet 5 row **improved
+     * from 2.60x to 3.90x purely because the rate table stopped over-stating that model's price**; the
+     * grant did not get more generous, it stopped being measured against a 1.5x-inflated cost. That is
+     * the honest reading and it is worth stating, because a headroom figure that gets better on its own
+     * is otherwise indistinguishable from good news. That is the point of raising the
      * grant while lowering the creation charge: the failure this guard exists to prevent is a new user
      * whose first free prompt plus one edit exhausts the grant and lands them negative (the gate runs
      * ONCE, before the model; settlement can never refuse, §4.2.1), silently killing the exact moment
@@ -960,11 +1059,16 @@ export const COLD_CREATION_USAGE: TokenUsage = {
  *
  * ⚠️ **The grant size and the provider are ONE number split across two files** — the same shape of bug
  * as `packMargin()` (a pack's price and `CREDIT_MARGIN` disagreeing, silently, at ~19% a generation).
- * A grant is denominated in credits, credits are cost-proportional, and cost depends on the provider —
- * so `SIGNUP_GRANT_CREDITS = 1000` at margin 4.0 is comfortable on KIE (~231 credits a build turn, ~3.7x
- * headroom — ⚠️ that build-turn figure is an OPUS-era measurement and has not been re-derived for the
- * `claude-sonnet-5` default, which is ~2.35x cheaper on KIE, so the real headroom is UNDERSTATED here) and BROKEN on Anthropic (~576, i.e. ~1.4x: below the 1.5x floor — the first prompt plus an
- * edit exhausts the grant and lands the user negative, with nothing left to iterate).
+ * A grant is denominated in credits, credits are cost-proportional, and cost depends on the provider AND
+ * the model — so one grant size is several different amounts of purchasing power. The full table is in
+ * `getBillingConfig`'s `signupGrantCredits` comment and is recomputed there rather than restated here.
+ *
+ * ⚠️ **This paragraph used to say the grant was "BROKEN on Anthropic (~576, i.e. ~1.4x: below the 1.5x
+ * floor)". That was an OPUS-5 figure standing in for the platform default, which has been
+ * `claude-sonnet-5` since 2026-07-30** — the worst shape for a warning to take, because it names a real
+ * floor breach on a combination nobody runs and says nothing about the one they do. On Anthropic +
+ * Sonnet 5 the grant clears at **3.90x** (2026-08-12, once that row stopped over-stating its price by
+ * 1.5x). Opus 5 on Anthropic is the tight combination at 1.56x, and it is a paid RUNG, not the default.
  *
  * That failure would be silent and would land on the ONE moment the funnel depends on — a new user's
  * first prototype. `billing.spec.ts` asserts this floor so the two numbers cannot drift apart.

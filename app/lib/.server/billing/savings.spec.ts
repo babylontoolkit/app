@@ -253,31 +253,36 @@ describe('describeSavings is PURE, so a stale env var cannot 503 the credits pan
  *
  * It INJECTS every paid rung's model at MARKETPLACE (KIE-shaped) rates so a rung Anthropic does not
  * sell still settles. Priced through that, a model Anthropic never listed resolves anyway — so the
- * "Anthropic list" a saving is measured against would be a KIE price wearing an Anthropic label, and
- * for `claude-fable-5` (which KIE prices ABOVE Anthropic's Opus row) it would invent a discount out of
- * a premium. The baked `MODEL_RATES` table is the only thing that means "what Anthropic charges".
+ * "Anthropic list" a saving is measured against would be a KIE price wearing an Anthropic label, and a
+ * gateway would end up compared against its OWN rate: a guaranteed "you saved 0%" on a turn that may
+ * have saved plenty. The baked `MODEL_RATES` table is the only thing that means "what Anthropic charges".
+ *
+ * ⚠️ This block used `claude-fable-5` as the never-priced model and described KIE as pricing it "ABOVE
+ * Anthropic's Opus row". Both halves were wrong (KIE: $4/$20; Anthropic sells fable-5 itself at $10/$50,
+ * `rates.ts` 2026-08-12) and the rule is right anyway — the subject moved to a `gpt-*` id, which no
+ * Anthropic table can ever carry.
  */
 describe('describeSavings measures against the BAKED table, never the injected one', () => {
   it('is null for a rung model Anthropic never priced — even with PREMIUM_MODEL naming it', () => {
     scrubLadderAndPriceEnv();
-    vi.stubEnv('PREMIUM_MODEL', 'claude-fable-5');
+    vi.stubEnv('PREMIUM_MODEL', 'gpt-5-6-sol');
 
     // Anthropic bakes no row for it. That is the whole reason the injection exists.
-    expect(MODEL_RATES['claude-fable-5']).toBeUndefined();
+    expect(MODEL_RATES['gpt-5-6-sol']).toBeUndefined();
 
     /*
      * CONTROL: through the table the first draft used, this model IS priced — and priced at KIE's own
      * rate, not at anything Anthropic ever charged. A lookup there would have resolved and produced a
      * confident number.
      */
-    const injected = providerRates().Anthropic['claude-fable-5'];
+    const injected = providerRates().Anthropic['gpt-5-6-sol'];
     expect(injected).toBeDefined();
-    expect(injected).toEqual(kieRates()['claude-fable-5']);
+    expect(injected.inputPerMTok).toEqual(kieRates()['gpt-5-6-sol'].inputPerMTok);
 
     expect(
       describeSavings({
         usage: USAGE,
-        model: 'claude-fable-5',
+        model: 'gpt-5-6-sol',
         actualCostUsd: GATEWAY_COST_USD,
         creditsCharged: 100,
       }),
