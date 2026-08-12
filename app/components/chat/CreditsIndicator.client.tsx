@@ -34,8 +34,15 @@ interface LedgerHistoryRow {
   /** `creation` | `edit` | `repair` | `plan` — what the turn WAS (`generations.status_kind`). */
   kind?: string;
 
-  /** Credits this turn's gateway saved against Anthropic list. Absent when there is nothing to claim. */
-  savedCredits?: number;
+  /**
+   * What this turn's gateway saved against Anthropic list, as a PERCENTAGE of the full price.
+   * Absent when there is nothing to claim.
+   *
+   * ⚠️ A percentage, not credits, and `0` is a MEANINGFUL value here (a saving that rounds below half
+   * a percent), so this is tested with `=== undefined` and never for truthiness — `entry.savedPercent ?`
+   * would silently drop exactly the rows `formatSavings`' `<1%` branch exists to render.
+   */
+  savedPercent?: number;
 }
 
 /** The headline savings figure and — inseparably — the scope it covers (`billing/ledger-view.ts`). */
@@ -186,9 +193,16 @@ export function CreditsIndicator() {
            * how much building this user has left. Credits are cost-proportional, so a cheaper gateway
            * does not widen our margin — it is purchasing power the user got for free and could not see.
            *
-           * ⚠️ The scope is printed WITH the number. These totals cover the page of ledger rows below,
-           * not the account's lifetime, and a bare "saved 1,240 credits" would be read as the latter —
-           * a claim the data does not support, on a panel whose whole value is that it can be trusted.
+           * ⚠️ The scope is printed WITH the number, and a PERCENTAGE needs it more than the credits
+           * figure did (owner, 2026-08-11). This covers the page of ledger rows below, not the
+           * account's lifetime — and a bare percentage is a rate over an unstated set, so without
+           * "last N charges" beside it a reader supplies their own denominator and it is usually the
+           * wrong one. The whole value of this panel is that its numbers can be trusted.
+           *
+           * It is a WEIGHTED figure, not a mean of the per-row percentages: `ledger-view.ts` sums the
+           * charged and reference credits across the page and divides once, so a single large build
+           * counts for more than a 4-credit edit. Averaging the row percentages would let a handful of
+           * trivial turns dominate the headline.
            */}
           {savings && savings.savedCredits > 0 && (
             <p className="text-[11px] text-bolt-elements-icon-success mb-2">
@@ -322,11 +336,11 @@ export function CreditsIndicator() {
                            * than text appended to the label, so the label keeps the `truncate` — a long
                            * label must eat itself, never the money figure next to it.
                            */}
-                          {entry.savedCredits ? (
+                          {entry.savedPercent === undefined ? null : (
                             <span className="text-bolt-elements-icon-success tabular-nums">
-                              saved {entry.savedCredits.toLocaleString()}
+                              saved {formatSavings({ percent: entry.savedPercent })}
                             </span>
-                          ) : null}
+                          )}
                           <span className={classNames('tabular-nums', TONE_CLASS[view.tone])}>{view.amount}</span>
                         </span>
                       </div>

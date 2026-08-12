@@ -647,9 +647,20 @@ Read read-only before any task was written: the feature spec in full, root `SPEC
     is a **2× WRITE**, so guessing high bills real money every cycle forever, while guessing low costs
     one avoidable cold read that the next cycle (45 min, against a 1h TTL) fixes by itself.
 
-  - ✅ **The warmer still ships DEFAULT OFF**, and the arithmetic that justifies that is untouched by
-    this measurement — a fanout is *how much* a cycle costs, not *whether* the cycle is worth running.
-    A test states that explicitly so the two questions cannot be conflated later.
+  - ✅ **The warmer still ships DEFAULT OFF.** ⚠️ **CORRECTED 2026-08-11 — this bullet originally read
+    "the arithmetic that justifies that is untouched by this measurement — a fanout is *how much* a
+    cycle costs, not *whether* the cycle is worth running." That is FALSE, and the fanout measured here
+    is the single input that decides it.** Work the break-even with rate `R` and fanout `F`: a cold
+    start avoided is worth `0.031 × 1.9R`, a day of 45-minute cycles costs `32 × F × 0.031 × 0.1R`, so
+    break-even `= ~3.4 × F` cold starts a day — **`R` cancels**. So the token price is irrelevant (a
+    cheaper gateway discounts the saving and the cycle equally) and the fanout is the whole answer:
+    moving from Anthropic's 1 to Comet's 5 moved the break-even from ~1.7/day to ~8.4/day, which flips
+    the "3 cold starts a day" case the docs use as their example from **+$7/month to −$15/month**.
+    The separation the original bullet drew is real for a *fixed* gateway and collapses the moment the
+    gateway changes — which is what this task changed. `cacheWarmerEnabled`'s doc comment now carries
+    the formula and a per-gateway table; every bare dollar figure elsewhere was Anthropic-only and has
+    been replaced. The test asserting the two questions are separate still stands: it pins that a fanout
+    change does not flip the ENABLED default, which remains true and is a different claim.
   - ✅ **Claude-only no-op confirmed** (T11's second ⚠️): a `gpt-*` or `gemini-*` platform model makes
     the cycle skip with a describable reason and **zero fetches**, on every gateway, with a control
     proving the same env DOES warm for `claude-sonnet-5`. The guard's placement inside `runWarmCycle`

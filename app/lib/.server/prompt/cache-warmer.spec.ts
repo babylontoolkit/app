@@ -271,11 +271,15 @@ describe('config: interval, fanout, enabled', () => {
   });
 
   /*
-   * 🔴 The default INVERTED 2026-08-08. The warmer can only warm the SHARED prefix (~31k of ~40k), so
-   * one cold start avoided is worth ~$0.18 while a 45-minute cycle costs ~$0.30/day — and which side
-   * wins depends on how many cold starts a day the platform has, which nobody has measured. It ships
-   * off; `generations.cacheCreationTokens > 0` is a cold start, so counting them for a week turns a
-   * guess into a five-minute decision.
+   * 🔴 The default INVERTED 2026-08-08. The warmer can only warm the SHARED prefix (~31k of ~40k), and
+   * which side wins depends on how many cold starts a day the platform has — a number nobody has
+   * measured. It ships off; `generations.cacheCreationTokens > 0` is a cold start, so counting them for
+   * a week turns a guess into a five-minute decision.
+   *
+   * ⚠️ The dollar figures that used to sit here were silently ANTHROPIC-ONLY, and the break-even is
+   * `~3.4 x fanout` cold starts a day — the input rate cancels, so only the FANOUT moves it. On Comet
+   * (fanout 5) that is ~8.4/day against Anthropic's ~1.7. The arithmetic lives in ONE place,
+   * `cacheWarmerEnabled`'s doc comment, rather than being restated here where it would drift.
    */
   it('🔴 enabled defaults to FALSE — the warmer ships off until cold starts are counted', () => {
     expect(cacheWarmerEnabled()).toBe(false);

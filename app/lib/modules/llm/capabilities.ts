@@ -60,7 +60,34 @@ export function supportsSamplingParams(modelId: string): boolean {
  * exists to prevent (§4.2a: the 90s dead spinner, and paying full output rate for reasoning we cannot
  * show). Nothing throws, no test fails, and the token count goes DOWN, which reads like a cheaper turn.
  */
-const MODELS_WITHOUT_ADAPTIVE_THINKING = ['claude-3'];
+/*
+ * 🔴 **THE LEGACY SET IS NOT CLOSED — A 2025 MODEL DROPPED ADAPTIVE THINKING (measured 2026-08-11).**
+ *
+ * SPEC §4.2a and this file's own reasoning held that "the legacy set is CLOSED — no future Claude
+ * model will re-add sampling params or drop adaptive thinking", so the exceptions could only shrink
+ * and a brand-new id would need no code. **`claude-haiku-4-5` falsifies the second half.** Probed
+ * against api.anthropic.com with `output_config.effort` + adaptive thinking:
+ *
+ *     400  adaptive thinking is not supported on this model
+ *
+ * It surfaced through the enhancer, which is exactly where a small cheap model gets pointed
+ * (`ENHANCE_PROMPT_MODEL` ships `claude-haiku-4-5`), and it is the same shape the comment above
+ * describes — a capability assumption that is right for the models someone had in mind and wrong for
+ * the next one. **Do not restore "closed" without re-probing; treat this list as open in BOTH
+ * directions and add a model the moment a wire says no.**
+ *
+ * ⚠️ `startsWith` matching means this ONE entry also covers `claude-haiku-4-5-20251001`, the dated id
+ * Comet serves — which matters, because the capability tables key on the exact model string and the
+ * gateways disagree about how this model is spelled.
+ *
+ * ⚠️ **The gateways also disagree about whether it is an ERROR**, which is why the model's own
+ * capability is what this encodes rather than the provider's tolerance: Comet ACCEPTED
+ * `output_config.effort` on the same model in a direct probe (it fronts Claude via Bedrock, which
+ * validates differently), while the platform's own request through the SDK drew
+ * `ValidationException: output_config.effort: Extra inputs are not permitted`. A field the model does
+ * not support should not be sent to any gateway, whether or not that gateway happens to tolerate it.
+ */
+const MODELS_WITHOUT_ADAPTIVE_THINKING = ['claude-3', 'claude-haiku-4-5'];
 
 /** Fable 5 thinks unconditionally: an explicit `{type: 'disabled'}` is a 400. Never send it one. */
 const MODELS_THAT_CANNOT_DISABLE_THINKING = ['claude-fable-5'];

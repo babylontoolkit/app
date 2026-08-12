@@ -116,6 +116,17 @@ export interface SettleInput {
    */
   provider: string;
 
+  /**
+   * `creation` | `edit` | `repair` | `plan` | `enhance` — how the credits ledger LABELS this row.
+   *
+   * Deliberately a free string rather than `AgentStatusKind`: that union describes what the AGENT is
+   * doing (it drives the heartbeat panel), and `enhance` is not an agent turn — it has no heartbeat,
+   * no tools and no project. The ledger's vocabulary is a superset of the agent's, and forcing them
+   * into one type would either put a non-agent kind in the agent's union or leave the enhancer
+   * unlabelled.
+   */
+  statusKind?: string;
+
   usage: TokenUsage;
 
   /** BYOK generations are RECORDED but charged zero (§4.5.4 point 6). */
@@ -276,6 +287,30 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
       id: input.generationId,
       userId: input.userId,
       model: input.model,
+
+      /*
+       * WHICH GATEWAY SPENT THE MONEY. Written HERE, where settlement already knows it, rather than
+       * left to each caller's enrichment step.
+       *
+       * It was absent from this payload while `input.provider` was used two lines below to PRICE the
+       * turn — so the proxy stamped it in its own later update and the enhancer, which has no such
+       * step, wrote rows with no provider at all (observed live 2026-08-11). With `AUTO_MODEL_SELECT`
+       * the gateway varies per request, so a row that cannot say which one served it cannot be
+       * reconciled against an invoice, and the §4.10 per-provider view silently excludes every
+       * enhancement.
+       */
+      provider: input.provider,
+
+      /*
+       * WHAT KIND of turn this was, when the caller knows at settlement time.
+       *
+       * The proxy sets this in its own enrichment upsert (`statusKindFor`), but the enhancer has no
+       * enrichment step — so every enhancement rendered as the generic "Generation" in the credits
+       * ledger, which is the complaint that produced `status_kind` in the first place ("everything
+       * cant be a Generation"). Optional and `?? null`, so a caller that does not know cannot clobber
+       * a value an earlier upsert already wrote.
+       */
+      statusKind: input.statusKind,
       promptTokens: input.usage.promptTokens,
       completionTokens: input.usage.completionTokens,
       cacheReadTokens: input.usage.cacheReadTokens,

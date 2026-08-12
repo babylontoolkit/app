@@ -134,9 +134,12 @@ describe('validation — the promotion wall', () => {
    * price — so that adding or removing a row stays a deliberate act rather than a silent one.
    *
    * ⚠️ `claude-haiku-4-5` is absent because it is a hard 400 on this provider ("has not been priced by
-   * the administrator yet"); Comet serves the dated `claude-haiku-4-5-20251001` instead. The full
-   * evidence, and the reason re-adding it needs a fresh probe rather than a copy from the spec's table,
-   * is in `comet-prices.spec.ts` — do not "restore" the row from this list.
+   * the administrator yet"); Comet serves the dated `claude-haiku-4-5-20251001` instead — live-probed
+   * and added 2026-08-11 so `COMET_ENHANCE_PROMPT_MODEL` has something to resolve against, since
+   * `getEnhancerModel` REFUSES a model this table cannot price. The two spellings are one model and
+   * exactly one of them may be here; the full evidence, and the reason re-adding the bare id needs a
+   * fresh probe rather than a copy from the spec's table, is in `comet-prices.spec.ts` — do not
+   * "restore" the bare row from this list.
    *
    * The three `chat` rows are priced but NOT offered in `COMET_MODELS`, deliberately: pricing a model
    * an operator has not selected costs nothing, while LISTING an unprobed id ships a 404.
@@ -144,6 +147,7 @@ describe('validation — the promotion wall', () => {
   it('pins which models the Comet list prices — rates live in comet-prices.spec.ts', () => {
     expect(Object.keys(BAKED_COMET_PRICES.llm).sort()).toEqual([
       'claude-fable-5',
+      'claude-haiku-4-5-20251001',
       'claude-opus-4-8',
       'claude-opus-5',
       'claude-sonnet-5',

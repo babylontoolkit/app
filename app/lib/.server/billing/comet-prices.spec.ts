@@ -118,7 +118,7 @@ describe('the charged rate is official x ratio, per row (AC8)', () => {
     const rows = Object.entries(BAKED_COMET_PRICES.llm);
 
     /* A `for` loop over an empty object asserts nothing at all — pin that there is something to check. */
-    expect(rows.length, 'the price list must actually price something').toBe(7);
+    expect(rows.length, 'the price list must actually price something').toBe(8);
 
     for (const [model, rate] of rows) {
       const provenance = COMET_PRICE_PROVENANCE[model];
@@ -219,6 +219,14 @@ describe('the charged rate is official x ratio, per row (AC8)', () => {
       'grok-4.5': { inputPerMTok: 1.6, outputPerMTok: 4.8 },
       'kimi-k3': { inputPerMTok: 2.4, outputPerMTok: 12.0 },
       'qwen3-coder': { inputPerMTok: 0.24, outputPerMTok: 0.96 },
+
+      /*
+       * The DATED haiku, and the only spelling of Haiku 4.5 this gateway can bill (2026-08-11). The bare
+       * `claude-haiku-4-5` is a hard 400 here and stays unpriced; `COMET_ENHANCE_PROMPT_MODEL` exists
+       * precisely because `getEnhancerModel` REFUSES a model this table cannot price, so the row and the
+       * per-gateway env key ship together — one without the other is a 503 on the ✨ button.
+       */
+      'claude-haiku-4-5-20251001': { inputPerMTok: 0.8, outputPerMTok: 4.0 },
     });
   });
 });

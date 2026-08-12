@@ -55,18 +55,43 @@ describe('describeLedgerEntry', () => {
  */
 describe('describeLedgerEntry names the turn when the generation row knows it', () => {
   it.each([
-    ['creation', 'Creation build'],
+    ['creation', 'Creation'],
     ['edit', 'Edit'],
-    ['repair', 'Auto-repair'],
+    ['repair', 'Repair'],
     ['plan', 'Plan'],
+    ['enhance', 'Prompt'],
   ])('a %s generation reads "%s"', (kind, label) => {
     expect(describeLedgerEntry({ delta: -316, reason: 'generation', kind }).label).toBe(label);
   });
 
   /*
+   * ONE WORD EACH — the column is ~11px in a 288px dropdown, so a label that wraps is a layout defect
+   * wearing a copy defect's clothes.
+   *
+   * ⚠️ **This guard was VACUOUS until the labels were collapsed, and that is the point of the comment.**
+   * Drafted on 2026-08-11 against the old table, mutation-run, and it PASSED with the offending
+   * "Enhance prompt" restored — 14 characters and two words, character-for-character the shape of the
+   * then-legitimate "Creation build" — i.e. green on the exact regression it is named for. It was
+   * deleted, and only became a real assertion once "Creation build"/"Auto-repair" became one word too.
+   * Re-verified by mutation in both directions. A test whose input cannot reach the rule it names is
+   * not a weak test, it is no test — so widen this and it dies rather than merely loosens.
+   *
+   * Asserted over `KIND_LABELS`' whole declared set (via the ids above), not a hand-listed sample: a
+   * sample is a list of the cases someone thought of, and the next long label joins the one they did
+   * not.
+   */
+  it('keeps every turn-kind label to a single word', () => {
+    for (const kind of ['creation', 'edit', 'repair', 'plan', 'enhance']) {
+      const { label } = describeLedgerEntry({ delta: -316, reason: 'generation', kind });
+
+      expect(label.trim().split(/\s+/), `"${label}" must be one word — it shares an 11px column`).toHaveLength(1);
+    }
+  });
+
+  /*
    * 🔴 A REFUND OF A CREATION BUILD IS A REFUND. The kind is decorated onto every ledger row that
    * names a generation — including the refund row, which names the same one — so labelling it
-   * "Creation build" would put two identically-titled rows next to each other, one of which gave money
+   * "Creation" would put two identically-titled rows next to each other, one of which gave money
    * back. That is the single distinction this panel most has to make (`spec/fail-loud.md` rule 5), and
    * the failure is silent: the row still renders, it just quietly stops being identifiable as a refund.
    */
@@ -96,7 +121,7 @@ describe('describeLedgerEntry names the turn when the generation row knows it', 
   /* The kind changes only the LABEL — sign and tone are the ledger's facts and are untouched. */
   it('leaves amount and tone alone', () => {
     expect(describeLedgerEntry({ delta: -1_017, reason: 'generation', kind: 'creation' })).toEqual({
-      label: 'Creation build',
+      label: 'Creation',
       amount: '−1,017',
       tone: 'debit',
     });
@@ -104,12 +129,16 @@ describe('describeLedgerEntry names the turn when the generation row knows it', 
 });
 
 /**
- * `formatSavings` — the sentence the `/context` panel and the credits panel BOTH print.
+ * `formatSavings` — the figure the `/context` panel, the credits headline and every history row print.
  *
- * It is shared rather than inlined twice because two copies of a money sentence drift, and it is
- * tested rather than eyeballed because both rules below are invisible in a hand-run: nobody
- * deliberately produces a 1-credit saving or a 0.4% one, so the first time either appears is in front
- * of a user.
+ * It is shared rather than inlined three times because three copies of a money figure drift, and it is
+ * tested rather than eyeballed because its one remaining rule is invisible in a hand-run: nobody
+ * deliberately produces a 0.4% saving, so the first time one appears is in front of a user.
+ *
+ * ⚠️ **It renders a PERCENTAGE, not credits (owner, 2026-08-11).** It printed "214 credits (38%)"
+ * until the owner asked what a row reading `saved 7` beside `-8` meant. The two numbers are on
+ * different axes — what you paid, and what you did not — so side by side they read as two charges. A
+ * percentage cannot be mistaken for an amount and carries its own denominator.
  *
  * ⚠️ `percent` arrives ALREADY ROUNDED — `savings.ts` computes it as
  * `Math.round((savedCredits / referenceCredits) * 100)` — so `0` here does not mean "no saving", it
@@ -117,39 +146,25 @@ describe('describeLedgerEntry names the turn when the generation row knows it', 
  * exists, and it is why this formatter cannot simply print the number it was handed.
  */
 describe('formatSavings', () => {
-  it('renders the ordinary case — credits and a rounded percent', () => {
-    expect(formatSavings({ savedCredits: 214, percent: 38 })).toBe('214 credits (38%)');
+  it('renders a percentage', () => {
+    expect(formatSavings({ percent: 38 })).toBe('38%');
   });
 
-  /* The panels quote four- and five-figure totals; an unseparated "1240" reads as a different number. */
-  it('groups thousands', () => {
-    expect(formatSavings({ savedCredits: 1_240, percent: 12 })).toBe('1,240 credits (12%)');
-    expect(formatSavings({ savedCredits: 1_000_000, percent: 61 })).toBe('1,000,000 credits (61%)');
-  });
-
-  /*
-   * 🔴 A one-credit saving is real and reachable on a cheap turn (the credits panel renders the row
-   * for any `savedCredits > 0`). "Saved 1 credits vs full price" reads as a bug in the NUMBER rather
-   * than in the grammar, on the one panel whose entire value is that its figures can be trusted.
-   */
-  it('says "1 credit", never "1 credits"', () => {
-    expect(formatSavings({ savedCredits: 1, percent: 3 })).toBe('1 credit (3%)');
-  });
-
-  /* CONTROL for the singular: every other count keeps the plural, including the boundary at 2. */
-  it('CONTROL — 0 and 2 stay plural, so the rule is a singular case and not a rewrite', () => {
-    expect(formatSavings({ savedCredits: 2, percent: 3 })).toBe('2 credits (3%)');
-    expect(formatSavings({ savedCredits: 0, percent: 0 })).toBe('0 credits (<1%)');
+  it('leaves ordinary percentages alone', () => {
+    expect(formatSavings({ percent: 1 })).toBe('1%');
+    expect(formatSavings({ percent: 2 })).toBe('2%');
+    expect(formatSavings({ percent: 100 })).toBe('100%');
   });
 
   /*
-   * 🔴 A GENUINE SAVING MUST NEVER PRINT "(0%)". The credits shown immediately beside it assert that
-   * money was saved; a rounded zero in the same sentence denies it. The panel must not state a saving
-   * and its absence in one breath.
+   * 🔴 A GENUINE SAVING MUST NEVER PRINT "0%", and this matters MORE now than it did beside a credits
+   * figure. The percentage is the ONLY signal the badge carries, so a rounded zero makes the panel
+   * render a savings badge whose text denies there were any savings. `savings.ts` only ever reports a
+   * row when `savedCredits > 0`, so a `0` reaching here is always a real saving under half a percent.
    */
   it('renders a sub-half-percent saving as "<1%", never "0%"', () => {
-    expect(formatSavings({ savedCredits: 7, percent: 0 })).toBe('7 credits (<1%)');
-    expect(formatSavings({ savedCredits: 7, percent: 0 })).not.toContain('(0%)');
+    expect(formatSavings({ percent: 0 })).toBe('<1%');
+    expect(formatSavings({ percent: 0 })).not.toContain('0%');
   });
 
   /*
@@ -158,12 +173,16 @@ describe('formatSavings', () => {
    * i.e. under-report a saving on the panel that exists to report it.
    */
   it('CONTROL — 1% prints as "1%", so the floor is exclusive', () => {
-    expect(formatSavings({ savedCredits: 12, percent: 1 })).toBe('12 credits (1%)');
+    expect(formatSavings({ percent: 1 })).toBe('1%');
   });
 
-  it('leaves ordinary percentages alone', () => {
-    expect(formatSavings({ savedCredits: 500, percent: 100 })).toBe('500 credits (100%)');
-    expect(formatSavings({ savedCredits: 3, percent: 2 })).toBe('3 credits (2%)');
+  /*
+   * CONTROL that the credits figure is genuinely GONE rather than merely unused by one caller. A
+   * formatter that still concatenated an amount would pass every assertion above.
+   */
+  it('CONTROL — prints no credit amount and no word "credit"', () => {
+    expect(formatSavings({ percent: 38 })).not.toMatch(/credit/i);
+    expect(formatSavings({ percent: 38 })).toBe('38%');
   });
 });
 

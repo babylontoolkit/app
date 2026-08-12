@@ -323,6 +323,114 @@ describe('thinkingFetch (§3.4 — the silent default that costs 90s and 6,000 o
   });
 
   /*
+   * 🔴 THE LEGACY SET IS NOT CLOSED — A 2025 MODEL DROPPED ADAPTIVE THINKING (probed 2026-08-11).
+   *
+   * SPEC §4.2a and `capabilities.ts`' own reasoning held that this list "can only shrink", so a
+   * brand-new id would need no code at all. `claude-haiku-4-5` falsifies that. Probed against
+   * api.anthropic.com with `output_config.effort` + adaptive thinking:
+   *
+   *     400  adaptive thinking is not supported on this model
+   *
+   * It surfaced through the ENHANCER, which is exactly where a small cheap model gets pointed
+   * (`ENHANCE_PROMPT_MODEL` ships this id) — so the one path whose entire purpose is to spend less was
+   * the one that could not run at all.
+   */
+  describe('🔴 claude-haiku-4-5 has no adaptive thinking (the list is open in BOTH directions)', () => {
+    it('excludes the bare id', () => {
+      expect(supportsAdaptiveThinking('claude-haiku-4-5')).toBe(false);
+    });
+
+    /*
+     * 🔴 THE WHOLE REASON ONE ENTRY SUFFICES, asserted rather than assumed.
+     *
+     * The capability tables key on the exact model STRING and the gateways disagree about how this
+     * model is spelled: Comet serves ONLY `claude-haiku-4-5-20251001`. `startsWith` matching is what
+     * makes the bare entry cover the dated id — if that matching were ever changed to equality the
+     * bare assertion above would still pass and Comet would 400 on every enhancement.
+     */
+    it('excludes the DATED id Comet serves, via startsWith', () => {
+      expect(supportsAdaptiveThinking('claude-haiku-4-5-20251001')).toBe(false);
+    });
+
+    /* Bedrock-style ids strip their `anthropic.` prefix before matching, like every other entry. */
+    it('excludes the Bedrock-prefixed spelling too', () => {
+      expect(supportsAdaptiveThinking('anthropic.claude-haiku-4-5')).toBe(false);
+      expect(supportsAdaptiveThinking('anthropic.claude-haiku-4-5-20251001')).toBe(false);
+    });
+
+    /*
+     * CONTROL — and this is the assertion that keeps the entry an EXCEPTION rather than an inversion
+     * of the list's direction. `capabilities.ts` records that this list once WAS an allow-list of
+     * modern ids, which made every unrecognised model silently lose `display: 'summarized'` and
+     * `output_config.effort`. Adding a model must never re-open that: everything else, including ids
+     * this code has never heard of, still defaults to modern.
+     */
+    it('CONTROL: every other model — including unknown ones — still gets adaptive thinking', () => {
+      for (const model of ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5', 'claude-opus-9', 'claude-haiku-9']) {
+        expect(supportsAdaptiveThinking(model), model).toBe(true);
+      }
+    });
+
+    /*
+     * A NEIGHBOUR CONTROL. `claude-haiku-4-5` is a prefix of nothing else shipped, but a careless
+     * broadening to `claude-haiku` would silently disable thinking for the whole future Haiku line —
+     * a silent overspend on server-default `high` effort with empty reasoning text, which is the
+     * pathology this file exists to prevent.
+     */
+    it('CONTROL: the entry does not swallow the rest of the Haiku line', () => {
+      expect(supportsAdaptiveThinking('claude-haiku-5')).toBe(true);
+      expect(supportsAdaptiveThinking('claude-haiku-4-6')).toBe(true);
+    });
+  });
+
+  /**
+   * 🔴 AT THE WIRE, because that is the only place the failure lives.
+   *
+   * `supportsAdaptiveThinking` is consulted INSIDE `thinkingFetch`, and every Claude branch
+   * (`anthropic.ts` L203, `cometapi.ts` L227, `kie.ts`) wraps its fetch with it unconditionally — so
+   * this IS `getModelInstance`'s real path, not a helper called by hand. The 400 is caused by two
+   * fields being present in the body; the only honest assertion is on the serialized body.
+   */
+  describe('🔴 the haiku 400, at the wire', () => {
+    async function bodyFor(modelId: string) {
+      const { captured, fetchImpl } = capturingFetch(EMPTY_THINKING_THEN_TEXT);
+      const anthropic = createAnthropic({
+        apiKey: 'test-key',
+        fetch: thinkingFetch('adaptive', 'medium', modelId, fetchImpl),
+      });
+
+      /* Mirrors `getModelInstance`'s sampling gate verbatim — never `stripSamplingParams` applied blind. */
+      const base = anthropic(modelId);
+      const model = dropOrphanReasoningSignatures(supportsSamplingParams(modelId) ? base : stripSamplingParams(base));
+      await drain(streamText({ model, prompt: 'hi' }));
+
+      return captured.body;
+    }
+
+    it.each(['claude-haiku-4-5', 'claude-haiku-4-5-20251001'])(
+      'sends neither `thinking` nor `output_config.effort` for %s',
+      async (modelId) => {
+        const body = await bodyFor(modelId);
+
+        expect(body, 'adaptive thinking is not supported on this model — a hard 400').not.toHaveProperty('thinking');
+        expect(body, 'and `output_config.effort` is the field the wire named').not.toHaveProperty('output_config');
+      },
+    );
+
+    /*
+     * CONTROL. Without this the pair above passes for a `thinkingFetch` that stopped writing those
+     * fields for EVERY model — which is the silent server-default-`high`, empty-reasoning pathology
+     * §4.2a exists to prevent, and it would read as a cheaper turn.
+     */
+    it('CONTROL: a model that DOES support it still gets both fields', async () => {
+      const body = await bodyFor('claude-sonnet-5');
+
+      expect(body.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+      expect(body.output_config).toEqual({ effort: 'medium' });
+    });
+  });
+
+  /*
    * §Opus 5 — `disabled` is gated by EFFORT, not merely by model.
    *
    * `{type:'disabled'}` is accepted at `high` and below, and a 400 at `xhigh`/`max`. This is reachable

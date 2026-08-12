@@ -228,8 +228,35 @@ export function getPlatformModel(context?: unknown, providerOverride?: PlatformP
   return model;
 }
 
-/** The env var that picks a cheaper model for prompt enhancement. Named once, read once. */
+/**
+ * The env var that picks a cheaper model for prompt enhancement, applied to EVERY provider.
+ *
+ * The cross-provider default. `enhancerModelEnvKeyFor` below outranks it per gateway.
+ */
 export const ENHANCER_MODEL_ENV_KEY = 'ENHANCE_PROMPT_MODEL';
+
+/**
+ * The PER-GATEWAY enhancer selector — `KIE_ENHANCE_PROMPT_MODEL`, `COMET_ENHANCE_PROMPT_MODEL`,
+ * `ANTHROPIC_ENHANCE_PROMPT_MODEL` (owner, 2026-08-11).
+ *
+ * 🔴 **It exists because ONE MODEL HAS DIFFERENT IDS ON DIFFERENT GATEWAYS, and the wrong one is a
+ * hard failure rather than a fallback.** Haiku 4.5 is `claude-haiku-4-5` on KIE and Anthropic, and
+ * ONLY `claude-haiku-4-5-20251001` on Comet — the bare id there is a 400 ("has not been priced by the
+ * administrator yet"), and the dated id carries `code: "claude-haiku-4-5"`, which is exactly the
+ * id/code drift that makes this look like one model when it is two strings.
+ *
+ * A single `ENHANCE_PROMPT_MODEL` therefore cannot be correct on more than one gateway at a time, and
+ * the moment `AUTO_MODEL_SELECT` can move the gateway per request, "correct today" stops being a
+ * property an operator can rely on. The symptom is immediate and total: `getEnhancerModel` refuses an
+ * unpriced model, so a deploy that switched gateways got a 503 on the FIRST press of the enhance
+ * button — which is how this was found.
+ *
+ * Named by a function rather than three constants so a fourth provider cannot ship with a silently
+ * unreadable variable: `PLATFORM_PROVIDERS` is the only list, and the key is derived from it.
+ */
+export function enhancerModelEnvKeyFor(provider: PlatformProviderName): string {
+  return `${provider.toUpperCase()}_${ENHANCER_MODEL_ENV_KEY}`;
+}
 
 /**
  * The model that ENHANCES a prompt — `ENHANCE_PROMPT_MODEL`, validated, else the platform model.
@@ -240,9 +267,18 @@ export const ENHANCER_MODEL_ENV_KEY = 'ENHANCE_PROMPT_MODEL';
  * into better English, with no project files, no history, no tools and no cache prefix. It was
  * nonetheless running on whatever model builds the games, because the enhancer had exactly one
  * question to answer — "which model?" — and exactly one answer available. The rates make the size of
- * that mistake precise: on Anthropic, `claude-sonnet-5` is **3x** `claude-haiku-4-5` on BOTH input
- * ($3 vs $1) and output ($15 vs $5), so every enhancement was billing triple for a task that does not
- * use what the difference buys.
+ * that available saving precise: on Anthropic, `claude-sonnet-5` is **3x** `claude-haiku-4-5` on BOTH
+ * input ($3 vs $1) and output ($15 vs $5); on Comet it is exactly 2x ($1.60/$8.00 vs $0.80/$4.00).
+ *
+ * ⚠️ **The SHIPPED DEFAULT is `claude-sonnet-5` — the knob exists, and the owner has deliberately not
+ * spent it (2026-08-11).** This paragraph argued the cheap-model case as though it described what we
+ * ship, which stopped being true the moment the default changed. The reasoning for the default:
+ * an enhanced prompt is the INPUT to the most expensive turn in the product, so a worse rewrite is
+ * not saved money — it is a worse game built at full price. Sonnet 5 also supports adaptive thinking
+ * and `claude-haiku-4-5` does not (probed: `400 adaptive thinking is not supported on this model`),
+ * so the cheap rung is also the one that thinks least about the rewrite.
+ *
+ * The saving is still one variable away, and the arithmetic above is still the arithmetic.
  *
  * It is deliberately NOT the same variable as `LLM_MODEL`. Enhancement quality and build quality are
  * different problems with different price sensitivities, and folding them into one setting means an
@@ -266,22 +302,46 @@ export const ENHANCER_MODEL_ENV_KEY = 'ENHANCE_PROMPT_MODEL';
  * Unset is the safe default: the platform model, i.e. exactly the behaviour that shipped before this
  * existed.
  */
-export function getEnhancerModel(context?: unknown): string {
-  const configured = env(context, ENHANCER_MODEL_ENV_KEY)?.trim();
+export function getEnhancerModel(context?: unknown, providerOverride?: PlatformProviderName): string {
+  /*
+   * 🔴 THE SELECTED GATEWAY, NOT `LLM_PROVIDER`.
+   *
+   * This read `getPlatformProvider` — the `kieEnvModel` two-readers class, still live in this one
+   * function after the ladder shipped. With `AUTO_MODEL_SELECT` on it validated the model against
+   * `LLM_PROVIDER`'s price table while the request could run somewhere else, so an operator whose
+   * generations had laddered onto a healthy gateway kept enhancing against the configured one's
+   * catalogue. The caller passes the provider it is actually going to use; absent that we resolve the
+   * ladder ourselves rather than falling back to the configured name.
+   */
+  const provider = providerOverride ?? resolvePlatformProvider(context);
+
+  /*
+   * PER-GATEWAY FIRST, then the cross-provider default, then that gateway's platform model — the same
+   * shape as `platformModelFor`, for the same reason: one question, one precedence chain.
+   *
+   * ⚠️ The bare `ENHANCE_PROMPT_MODEL` deliberately still WORKS and is still REFUSED when the selected
+   * gateway cannot price it. Making it a silent no-op on a gateway that does not serve it would be the
+   * costly direction — the operator asked for a cheap model and would get the platform model at
+   * several times the price, with nothing saying so. A refusal names the variable and the fix.
+   */
+  const specificKey = enhancerModelEnvKeyFor(provider);
+  const specific = env(context, specificKey)?.trim();
+  const configured = specific || env(context, ENHANCER_MODEL_ENV_KEY)?.trim();
 
   if (!configured) {
-    return getPlatformModel(context);
+    return getPlatformModel(context, provider);
   }
 
-  const provider = getPlatformProvider(context);
+  const sourceKey = specific ? specificKey : ENHANCER_MODEL_ENV_KEY;
   const priced = providerRates(context)[provider] ?? {};
 
   if (!priced[configured]) {
     throw new NotConfiguredError(
-      `${ENHANCER_MODEL_ENV_KEY}="${configured}" on provider ${provider}`,
+      `${sourceKey}="${configured}" on provider ${provider}`,
       `We have no rates for it, so we cannot bill it. ${UNPRICED_MODEL_FIX[provider]} ` +
         `Priced models: ${Object.keys(priced).join(', ') || '(none)'}. ` +
-        `Unset ${ENHANCER_MODEL_ENV_KEY} to enhance with the platform model.`,
+        `Set ${specificKey} to this gateway's id for the model you want, or unset ` +
+        `${ENHANCER_MODEL_ENV_KEY} to enhance with the platform model.`,
     );
   }
 

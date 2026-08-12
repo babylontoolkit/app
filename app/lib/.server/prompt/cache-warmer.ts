@@ -145,21 +145,45 @@ const WARMUP_SPACING_MS = 2000;
  * The warmer can only warm blocks that are byte-identical for every user: the base prompt, and (not yet
  * built) the starter file block. The per-project half of the prefix does not exist until the project
  * does. So the saving is not "a cold start avoided", it is "the SHARED FRACTION of a cold start
- * avoided" — measured live at ~31k of a ~40k prefix, worth about **$0.18** each.
+ * avoided" — measured live at **~31k of a ~40k prefix**, i.e. 0.031 MTok in the arithmetic below.
  *
- * Against that, a cycle every 45 minutes costs ~$0.30/day. Which side wins depends entirely on **how
- * many cold starts a day the platform actually has** — a number nobody has measured:
+ * 🔴 **BOTH SIDES ARE PER PROVIDER, so state the FORMULA and cite a gateway as dated evidence.** This
+ * comment carried two bare dollar figures until 2026-08-11 and they were silently Anthropic-only — the
+ * Comet cutover moved the break-even by ~5x with nothing here saying so, which is the "a live config
+ * quoted in the present tense goes stale silently" rule arriving in an economics note. Given the input
+ * rate `R` and the provider's fanout `F` (a cache read is 0.1R, a write 2R, and a 45-minute cycle is
+ * 32 touchpoints a day):
  *
- *   - 3/day  → the warmer nets ~$7/month.   Not worth a background timer.
- *   - 20/day → the warmer nets ~$100/month. Clearly worth it.
+ *   value of one cold start avoided  =  0.031 x 1.9R
+ *   cost of a day of warming         =  32 x F x 0.031 x 0.1R
+ *   break-even cold starts per day   =  ~3.4 x F        <- R cancels; only FANOUT moves it
+ *
+ * That last line is the whole finding, and it is not obvious: a cheaper gateway does NOT make the
+ * warmer more attractive, because it discounts the saving and the cycle by the same factor. **Only the
+ * fanout matters** — so the gateway that most needs warming (many balancer backends) is also the one
+ * where warming is hardest to justify.
+ *
+ * Evaluated on the shipped rates (2026-08-11), `claude-sonnet-5`:
+ *
+ * | gateway   | R      | F | cold start worth | cycle/day | break-even | 3/day    | 20/day   |
+ * |-----------|--------|---|------------------|-----------|------------|----------|----------|
+ * | Anthropic | $3.00  | 1 | $0.18            | $0.30     | ~1.7/day   | +$7/mo   | +$99/mo  |
+ * | Comet     | $1.60  | 5 | $0.094           | $0.79     | ~8.4/day   | **−$15/mo** | +$33/mo |
+ * | KIE       | $0.85  | 6 | $0.050           | $0.51     | ~10/day    | −$11/mo  | +$15/mo  |
+ *
+ * ⚠️ **On the CURRENT gateway (Comet) the "3 cold starts a day" case LOSES ~$15/month** — the same
+ * traffic that netted ~$7/month on Anthropic. Do not carry a conclusion across a provider switch.
+ *
+ * These are upper bounds on cost: `shouldSkipWarmCycle` suppresses a cycle that organic traffic has
+ * already warmed, so real spend scales with how QUIET the platform is.
  *
  * And the value moves the WRONG way with success: once there is organic traffic the shared prefix
  * stays warm by itself, so the warmer matters most when there are no users and least when there are.
  *
  * So it ships off, correct and ready, and the decision waits for data instead of a guess.
  * **`generations.cacheCreationTokens > 0` is a cold start** — count them for a week, then flip
- * `CACHE_WARMER_ENABLED=true` if the number says so. That is a five-minute decision with a real
- * input, which is what this default is buying.
+ * `CACHE_WARMER_ENABLED=true` if the number clears the break-even FOR THE GATEWAY YOU ARE ON. That is
+ * a five-minute decision with a real input, which is what this default is buying.
  */
 export function cacheWarmerEnabled(context?: unknown): boolean {
   return envFlag(context, 'CACHE_WARMER_ENABLED', false);
@@ -208,9 +232,10 @@ export function cacheWarmerIntervalMinutes(context?: unknown): number {
  * to the old behaviour on every deploy that has not opted in.
  *
  * ⚠️ **It warms ONE gateway — the current head of the ladder — never the whole chain.** Warming the
- * chain would multiply a spend already documented as unmeasured (~$0.30/day per prefix against ~$0.18
- * per cold start avoided) by the ladder's length, for gateways most turns never touch. Following the
- * ladder costs the same as before and is simply pointed at the right place.
+ * chain would multiply a spend this file documents as unmeasured (see {@link cacheWarmerEnabled} for
+ * the per-gateway arithmetic) by the ladder's length, for gateways most turns never touch — and each
+ * added gateway brings its OWN fanout, so the cost is the sum of the chain's fanouts, not a doubling.
+ * Following the ladder costs the same as before and is simply pointed at the right place.
  *
  * ⚠️ **Consequence worth knowing before enabling it:** a failover REPOINTS the warmer, so the rung the
  * ladder just left goes cold while it is cooling. That is correct — a prefix nobody sends is what this

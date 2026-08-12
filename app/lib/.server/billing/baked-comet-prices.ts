@@ -74,6 +74,15 @@ export const COMET_PRICE_PROVENANCE: Record<string, CometPriceProvenance> = {
   'qwen3-coder': { officialInputPerMTok: 0.3, officialOutputPerMTok: 1.2, ratio: 0.8 },
 
   /*
+   * The DATED haiku (added 2026-08-11 with the row it justifies — see the LLM table below). Anthropic's
+   * official Haiku 4.5 rate is $1/$5 and the feed's ratio for this row is 0.8, so the charged rate is
+   * $0.80/$4.00. Recorded here rather than only in the table's comment because prose is not checkable:
+   * `comet-prices.spec.ts` iterates the PRICE LIST's keys and fails any row with no provenance, which
+   * is what keeps a probe distinguishable from a number somebody read off a marketing page.
+   */
+  'claude-haiku-4-5-20251001': { officialInputPerMTok: 1.0, officialOutputPerMTok: 5.0, ratio: 0.8 },
+
+  /*
    * 🔴 NOT PRICED BY THIS LIST — recorded as the counter-example that makes the rule testable.
    *
    * All three are newest-generation MEDIA models and all three carry `ratio: 1`, i.e. NO discount.
@@ -152,14 +161,27 @@ export const BAKED_COMET_PRICES: MarketPriceList = {
     'qwen3-coder': { inputPerMTok: 0.24, outputPerMTok: 0.96 },
 
     /*
-     * 🔴 `claude-haiku-4-5` IS ABSENT BECAUSE IT DOES NOT EXIST HERE — see `comet-wire.ts`.
+     * 🔴 THE DATED HAIKU — `claude-haiku-4-5-20251001`, and the BARE id is still absent on purpose.
      *
-     * The spec listed it as live-probed; the re-probe returned a hard 400 ("has not been priced by
-     * the administrator yet"). Comet serves the DATED `claude-haiku-4-5-20251001` instead, at an
-     * output cap the feed reports as 8K rather than the 64K this platform uses for Haiku. Pricing a
-     * model that 400s would have made "unpriced" and "unserveable" two different states with one
-     * spelling between them, which is the priced-but-not-listed trap from the other side.
+     * `claude-haiku-4-5` returns a hard 400 here ("has not been priced by the administrator yet") and
+     * must stay unpriced: pricing a model that 400s makes "unpriced" and "unserveable" two different
+     * states with one spelling between them. Comet serves the DATED id, which carries
+     * `code: "claude-haiku-4-5"` — exactly the id/code drift FR4 warns about.
+     *
+     * **Live-probed 2026-08-11** (`POST /v1/messages`): `stop_reason: end_turn`, real text, and a
+     * populated `cache_creation.ephemeral_1h_input_tokens` — so the `claude` family's DERIVED cache
+     * rates (0.1x read / 2.0x 1h write) apply exactly as they do to every other Comet Claude row.
+     * Feed: `pricing 1/5` (Anthropic's official Haiku rate) x `ratio 0.8` = **$0.80 / $4.00**.
+     *
+     * ⚠️ **THE 8K COMPLETION CAP WAS A FEED READING, AND IT IS WRONG — this row was dropped for it.**
+     * T5 excluded the dated id partly because the feed reports `max_completion_tokens: "8K"` against
+     * the 128,000 the `claude` family declares, and `getCompletionTokenLimit` sends that declared
+     * number verbatim. Probed at 8,192 / 16,384 / **128,000** — all three return `end_turn`. The cap
+     * does not bind requests. So the reason for the exclusion was a number nobody had probed, which is
+     * this plan's own FR4 rule ("a feed row is not a probe, in either direction") turned on the
+     * decision that cited it. **Do not re-derive a limit from this feed; probe it.**
      */
+    'claude-haiku-4-5-20251001': { inputPerMTok: 0.8, outputPerMTok: 4.0 },
   },
 
   /*

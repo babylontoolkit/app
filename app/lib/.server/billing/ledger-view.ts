@@ -42,6 +42,18 @@ export interface LedgerHistoryRow {
 
   /** Credits this row's gateway saved against Anthropic list. Absent when there is nothing to claim. */
   savedCredits?: number;
+
+  /**
+   * The same saving as a PERCENTAGE of what this row would have cost at Anthropic list — what the UI
+   * actually renders (owner, 2026-08-11).
+   *
+   * Carried alongside `savedCredits` rather than derived in the component, because the percentage is a
+   * property of THIS ROW (`saved / reference` for that turn) and cannot be recovered from the row's
+   * own fields: the component has the credits saved but not the reference they were saved against.
+   * Deriving it from the page total would print the page's average on every row, which is a different
+   * and quietly wrong number.
+   */
+  savedPercent?: number;
 }
 
 /**
@@ -153,6 +165,7 @@ export function buildLedgerView(entries: LedgerEntry[], generations: GenerationR
 
     if (savings.savedCredits > 0) {
       row.savedCredits = savings.savedCredits;
+      row.savedPercent = savings.percent;
     }
 
     return row;

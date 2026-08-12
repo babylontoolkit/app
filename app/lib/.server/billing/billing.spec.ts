@@ -1852,6 +1852,71 @@ describe('the generation row a debit points at', () => {
     });
   });
 
+  /*
+   * 🔴 WHICH GATEWAY SPENT THE MONEY (observed live 2026-08-11).
+   *
+   * `input.provider` decides the RATES two lines below the upsert, and was absent from the payload —
+   * so the row could not say which gateway it had been priced against. The proxy papered over it with
+   * its own later enrichment write; the enhancer, which has no enrichment step, wrote rows with no
+   * provider at all. With `AUTO_MODEL_SELECT` the gateway varies per REQUEST, so a row that cannot
+   * name it cannot be reconciled against an invoice, and the §4.10 per-provider view silently excludes
+   * every enhancement.
+   *
+   * ⚠️ Asserted with a NON-default gateway on purpose: `Anthropic` is what `toGenerationRecord` still
+   * hardcodes on the Supabase read path, so a case written against it would pass for a constant.
+   */
+  it('records the PROVIDER that was billed, not merely the model', async () => {
+    await getLedger().append({ userId: 'u1', delta: 10_000, reason: 'grant' });
+    await settleGeneration({
+      userId: 'u1',
+      generationId: 'g-provider',
+      model: 'claude-sonnet-5',
+      provider: 'Comet',
+      usage,
+    });
+
+    expect(rows.get('g-provider')?.provider).toBe('Comet');
+  });
+
+  /*
+   * The CONTROL that makes the case above mean something: the field must FOLLOW the input rather than
+   * being any one constant. Two settlements, two gateways, in one test — a hardcoded value passes
+   * either assertion alone.
+   */
+  it('CONTROL: the provider follows the settlement input, it is not a constant', async () => {
+    await getLedger().append({ userId: 'u1', delta: 10_000, reason: 'grant' });
+
+    for (const provider of ['KIE', 'Comet', 'Anthropic']) {
+      await settleGeneration({
+        userId: 'u1',
+        generationId: `g-${provider}`,
+        model: 'claude-sonnet-5',
+        provider,
+        usage,
+      });
+
+      expect(rows.get(`g-${provider}`)?.provider).toBe(provider);
+    }
+  });
+
+  /*
+   * The enhancer's shape specifically — settlement is its ONLY write, so whatever this anchor omits is
+   * omitted forever. BYOK is used here because it is the other caller with nothing downstream to fix
+   * a gap up: credits are zero and the row must still be complete.
+   */
+  it('records the provider even when the generation is charged zero', async () => {
+    await settleGeneration({
+      userId: 'pro',
+      generationId: 'g-zero-provider',
+      model: 'claude-sonnet-5',
+      provider: 'Comet',
+      usage,
+      byok: true,
+    });
+
+    expect(rows.get('g-zero-provider')).toMatchObject({ provider: 'Comet', creditsCharged: 0 });
+  });
+
   /* BYOK charges nothing — but the row still has to exist, because the generation still happened. */
   it('writes the row even for a BYOK generation that is charged zero', async () => {
     await settleGeneration({

@@ -62,6 +62,7 @@ import {
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import type { LanguageModelV1 } from 'ai';
 import type { IProviderSetting } from '~/types/model';
+import { envConfiguredModels } from './env-models';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
@@ -94,9 +95,12 @@ export default class CometApiProvider extends BaseProvider {
     _settings?: IProviderSetting,
     serverEnv?: Record<string, string>,
   ): Promise<ModelInfo[]> {
-    const model = cometEnvModel(serverEnv);
-
-    return model ? [model] : [];
+    /*
+     * The platform model AND the enhancer's — see `env-models.ts`. Listing only the platform model is
+     * what let a configured `COMET_ENHANCE_PROMPT_MODEL` miss this list and get silently swapped for
+     * `modelsList[0]` by `stream-text.ts`, running Sonnet 5 while settling at Haiku's rates.
+     */
+    return envConfiguredModels('Comet', COMET_MODELS, cometEnvModel(serverEnv), serverEnv);
   }
 
   getModelInstance: (options: {

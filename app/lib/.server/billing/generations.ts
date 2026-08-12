@@ -38,7 +38,18 @@ export interface GenerationRecord {
   projectId?: string;
 
   model: string;
-  provider: string;
+
+  /**
+   * The gateway that served and billed this generation.
+   *
+   * ⚠️ OPTIONAL, because "unknown" is a real state and pretending otherwise is what this replaced.
+   * Rows written before migration 0021 have no provider on record, and `toGenerationRecord` maps a
+   * NULL column to `undefined` rather than substituting a name. It was typed `string` (required)
+   * while the mapper hardcoded `'Anthropic'` — the type was satisfied by a fabricated value, and
+   * because the row arrives as `any` the compiler could not have caught the difference either way.
+   * A reader must handle absence; it must never default.
+   */
+  provider?: string;
 
   /** What we actually charged. Zero for BYOK and for unmetered beta mode — but always recorded. */
   creditsCharged?: number;
@@ -337,6 +348,14 @@ export class SupabaseGenerationStore implements GenerationStore {
         project_id: row.projectId ?? null,
         message_id: row.chatId ?? null,
         model: row.model,
+
+        /*
+         * ⚠️ `?? null` and NOT `?? 'Anthropic'`. Every field in this payload is optional because
+         * `undefined` means "not known yet" and must not clobber an earlier upsert — but a DEFAULT
+         * here would be worse than absent: it would record a gateway that did not serve the turn,
+         * indistinguishable from one that did. Migration 0021 leaves history NULL for the same reason.
+         */
+        provider: row.provider ?? null,
         prompt_version_id: row.promptVersionId ?? null,
         input_tokens: row.promptTokens ?? 0,
         cached_input_tokens: row.cacheReadTokens ?? 0,
@@ -431,11 +450,14 @@ export class SupabaseGenerationStore implements GenerationStore {
  * second copy the obvious move, and two mappings of one table drift silently — a column read by one
  * caller and not the other looks like a feature that works on some screens.
  *
- * ⚠️ `provider` is HARDCODED and has been since this store was written: there is no `provider` column
- * on `generations`, so a Postgres deploy cannot say which gateway served a historical turn. Nothing
- * on the ledger path depends on it (savings are computed from usage + model against Anthropic list,
- * which needs no provider), but the Admin per-provider view cannot be trusted until it is a real
- * column. Left as found rather than quietly widened here.
+ * ✅ `provider` is a REAL COLUMN as of migration 0021 (2026-08-11). It was hardcoded to `'Anthropic'`
+ * since this store was written, so a Postgres deploy reported every row as Anthropic — confidently
+ * wrong rather than absent, on the one view an operator would use to check a gateway cutover.
+ *
+ * ⚠️ **NULL means UNKNOWN, and must never be read as a default.** Rows written before the column
+ * existed have no gateway on record; `settleGeneration` had always been handed one and always PRICED
+ * with it, but never stored it. `undefined` is the honest value for those, and a reader that
+ * substitutes a provider name re-creates exactly the defect this replaced.
  */
 function toGenerationRecord(r: any): GenerationRecord {
   return {
@@ -444,7 +466,7 @@ function toGenerationRecord(r: any): GenerationRecord {
     userId: r.user_id,
     projectId: r.project_id ?? undefined,
     model: r.model,
-    provider: 'Anthropic',
+    provider: r.provider ?? undefined,
     creditsCharged: r.credits_charged,
     rawCostUsd: Number(r.raw_cost_usd),
     promptVersionId: r.prompt_version_id,

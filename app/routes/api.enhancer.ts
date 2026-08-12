@@ -32,7 +32,9 @@ import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
 import { getGenerationStore } from '~/lib/.server/billing/generations';
-import { getEnhancerModel, getPlatformProvider } from '~/lib/.server/agent/config';
+import { getEnhancerModel, resolvePlatformProvider } from '~/lib/.server/agent/config';
+import { accumulateStepUsage, emptyUsage, type UsageStep } from '~/lib/.server/agent/step-usage';
+import { familyOf } from '~/lib/modules/llm/model-families';
 
 export async function action(args: ActionFunctionArgs) {
   return enhancerAction(args);
@@ -68,8 +70,16 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
     const apiKeys = getApiKeysFromCookie(cookieHeader);
     const providerSettings = getProviderSettingsFromCookie(cookieHeader);
 
-    // The platform's provider — an operator config, never the request's choice (see the model note below).
-    const platformProvider = getPlatformProvider(context);
+    /*
+     * The platform's provider — an operator config, never the request's choice (see the model note
+     * below), and since 2026-08-11 the LADDER-RESOLVED one rather than `LLM_PROVIDER`.
+     *
+     * 🔴 Resolved ONCE and threaded to the model lookup, the wire and `settleGeneration` alike, for
+     * the same reason a generation is (SPEC §4.2a): the gateway that spends the tokens must be the one
+     * whose rates bill them. Reading it twice is how the enhancer ends up billing gateway A's rates
+     * for gateway B's tokens.
+     */
+    const platformProvider = resolvePlatformProvider(context);
 
     /*
      * 2. BYOK is decided by the SERVER, never by the request. Without a verified active Pro
@@ -107,7 +117,7 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
      * paid path in the product where a cheaper model costs the user nothing they can perceive. It
      * still settles through the same gate and the same ledger, at that model's own rates.
      */
-    const model = getEnhancerModel(context);
+    const model = getEnhancerModel(context, platformProvider);
     const provider = platformProvider;
 
     const generationId = `gen_enh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -199,10 +209,36 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
         failed = true;
       }
 
-      let usage;
+      /*
+       * 🔴 BILL FROM THE STEPS, exactly as the proxy does — `result.usage` was reporting ZERO INPUT.
+       *
+       * Observed live 2026-08-11: a real enhancement settled `promptTokens: 0` against 335 output
+       * tokens, i.e. the ~600-token system prompt and the user's text were never billed at all. An
+       * under-charge, which is `rates.ts`' safe direction and precisely why it could sit here
+       * indefinitely without anything failing.
+       *
+       * `accumulateStepUsage` is the function settlement already trusts for every generation, and
+       * using it here buys three things a hand-rolled read cannot: the input tokens, the family-aware
+       * cache accounting (`promptTokensIncludeCacheRead`), and one place to fix the next surprise.
+       * The old code hardcoded `cacheReadTokens: 0` — true today because the enhancer sends no
+       * `cache_control`, and a claim rather than a measurement the moment that changes.
+       *
+       * ⚠️ Falls back to `result.usage` when there are no steps: settlement can never refuse (§4.6),
+       * so a shape this does not recognise must still bill SOMETHING rather than throw away the turn.
+       */
+      const usage = emptyUsage();
 
       try {
-        usage = await result.usage;
+        const steps = await result.steps;
+
+        if (steps?.length) {
+          accumulateStepUsage(usage, steps as unknown as UsageStep[], familyOf(model) ?? undefined);
+        } else {
+          const combined = await result.usage;
+          usage.promptTokens = combined.promptTokens ?? 0;
+          usage.completionTokens = combined.completionTokens ?? 0;
+          usage.totalTokens = usage.promptTokens + usage.completionTokens;
+        }
       } catch (error) {
         logger.error(`Failed to read enhancement usage for ${generationId}: ${(error as Error)?.message}`);
         return;
@@ -213,12 +249,13 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
         generationId,
         model,
         provider,
-        usage: {
-          promptTokens: usage.promptTokens ?? 0,
-          completionTokens: usage.completionTokens ?? 0,
-          cacheReadTokens: 0,
-          cacheCreationTokens: 0,
-        },
+        usage,
+
+        /*
+         * So the credits ledger names this turn instead of the generic "Generation" (§4.6). The
+         * display string is `ledger-display.ts`'s to choose — this only says what the turn WAS.
+         */
+        statusKind: 'enhance',
         byok: byok.allowed,
         context,
       });

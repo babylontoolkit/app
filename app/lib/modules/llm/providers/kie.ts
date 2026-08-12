@@ -73,6 +73,7 @@ import type { IProviderSetting } from '~/types/model';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { envConfiguredModels } from './env-models';
 import { kieEnvModel, kieFetch, KIE_DEFAULT_BASE_URL, KIE_MODELS } from './kie-wire';
 import { codexFetch, KIE_CODEX_BASE_URL } from './kie-codex-wire';
 import { geminiFetch, KIE_GEMINI_BASE_URL } from './kie-gemini-wire';
@@ -103,9 +104,14 @@ export default class KieProvider extends BaseProvider {
     _settings?: IProviderSetting,
     serverEnv?: Record<string, string>,
   ): Promise<ModelInfo[]> {
-    const model = kieEnvModel(serverEnv);
-
-    return model ? [model] : [];
+    /*
+     * The platform model AND the enhancer's — see `env-models.ts`. KIE lists `claude-haiku-4-5`
+     * statically, so the enhancer's default happens to be covered here today; that is luck, not a
+     * property. `KIE_ENHANCE_PROMPT_MODEL` can name anything, and an id that misses this list is
+     * silently swapped for `modelsList[0]` by `stream-text.ts` and billed as the one that was asked
+     * for — which is exactly what happened on Comet.
+     */
+    return envConfiguredModels('KIE', KIE_MODELS, kieEnvModel(serverEnv), serverEnv);
   }
 
   getModelInstance: (options: {

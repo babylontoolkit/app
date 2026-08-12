@@ -49,12 +49,28 @@ export interface LedgerRowView {
  * every row written before it genuinely does not know its kind, and an unrecognised future kind must
  * render rather than blank. Both fall back to "Generation", which is exactly as specific as what we
  * actually know.
+ *
+ * ⚠️ **ONE WORD EACH, and that is what makes the width guard able to fail** (owner, 2026-08-11 —
+ * "Creation build" → "Creation", "Auto-repair" → "Repair", "Enhance prompt" → "Prompt"). The column is
+ * ~11px in a 288px dropdown, so a label that wraps is a layout defect wearing a copy defect's clothes.
+ * While the table held two-word entries the obvious guard was VACUOUS: the offending "Enhance prompt"
+ * was character-for-character the same shape as the legitimate "Creation build", so a width check
+ * passed for the exact regression it was named for (drafted, mutation-run and deleted the same day).
+ * Collapsing the set is what gave the property teeth. Keep new kinds to one word, or delete the guard
+ * in `ledger-display.spec.ts` knowingly rather than widening it until it stops biting.
  */
 const KIND_LABELS: Record<string, string> = {
-  creation: 'Creation build',
+  creation: 'Creation',
   edit: 'Edit',
-  repair: 'Auto-repair',
+  repair: 'Repair',
   plan: 'Plan',
+
+  /*
+   * "Prompt", not "Enhance prompt" (owner, 2026-08-11). The tie to the ✨ button it names is carried by
+   * the NOUN, not the whole button title: nothing else in this panel is about a prompt, so the verb
+   * added width and no information.
+   */
+  enhance: 'Prompt',
 };
 
 const LABELS: Record<string, string> = {
@@ -73,7 +89,7 @@ const LABELS: Record<string, string> = {
 export function describeLedgerEntry(entry: { delta: number; reason: string; kind?: string }): LedgerRowView {
   /*
    * The kind wins ONLY for a `generation` row. A refund of a creation build is a REFUND — labelling it
-   * "Creation build" because it names the same generation would put two rows reading the same thing
+   * "Creation" because it names the same generation would put two rows reading the same thing
    * next to each other, one of which gave money back, which is the one distinction this panel most
    * has to make (`spec/fail-loud.md` rule 5).
    */
@@ -95,23 +111,30 @@ export function describeLedgerEntry(entry: { delta: number; reason: string; kind
 }
 
 /**
- * How a savings figure READS — "214 credits (38%)" (`billing/savings.ts`).
+ * How a savings figure READS — a PERCENTAGE, e.g. "38%" (owner, 2026-08-11; `billing/savings.ts`).
  *
- * Here rather than in the two components because both the `/context` panel and the credits panel print
- * it and they must not drift, and because both edge cases below are only visible at values a hand-run
- * of the feature never produces:
+ * ## Why a percentage and not the credits
  *
- * - **Pluralisation.** A 1-credit saving is real and reachable on a cheap turn, and "saved 1 credits"
- *   on a money panel reads as a bug in the number rather than in the grammar.
- * - **`<1%` instead of `0%`.** `percent` is rounded, so a genuine saving under half a percent prints
- *   "(0%)" — a claim that contradicts the credits shown immediately beside it. The panel must never
- *   assert a saving and its absence in the same sentence.
+ * It printed "214 credits (38%)", and the owner asked what a row saying `saved 7` next to `-8` meant.
+ * That question is the finding: the two numbers sit on DIFFERENT AXES — one is what you paid, the
+ * other is what you did not — and side by side they read as two charges. A percentage cannot be
+ * mistaken for an amount, so it needs no mental subtraction and no second glance to interpret.
+ *
+ * It also travels better. The credits figure is only meaningful against a reference the panel does not
+ * show, so "saved 7" is uninterpretable without "of 15"; a percentage carries its own denominator.
+ *
+ * ## The one edge case, which now matters MORE
+ *
+ * **`<1%` instead of `0%`.** `percent` is rounded, so a genuine saving under half a percent prints
+ * "0%". That was already wrong beside a credits figure; with the percentage as the ONLY signal it is
+ * worse — the panel would render a savings badge whose text says there were no savings. This is the
+ * whole reason the formatter is shared rather than inlined at the three call sites.
+ *
+ * ⚠️ Pluralisation logic was removed with the credits figure. If a caller ever prints credits again it
+ * needs to come back: "saved 1 credits" on a money panel reads as a bug in the number, not the grammar.
  */
-export function formatSavings(savings: { savedCredits: number; percent: number }): string {
-  const unit = savings.savedCredits === 1 ? 'credit' : 'credits';
-  const percent = savings.percent < 1 ? '<1' : String(savings.percent);
-
-  return `${savings.savedCredits.toLocaleString()} ${unit} (${percent}%)`;
+export function formatSavings(savings: { percent: number }): string {
+  return savings.percent < 1 ? '<1%' : `${savings.percent}%`;
 }
 
 /**
