@@ -53,8 +53,19 @@ import { EMPTY_SESSION, sessionStore, type ModelTierState, type SessionState } f
  * explicitly — a fixture that derived the number from the assertion would pass against any threshold
  * at all.
  */
-function ladder(options: { balance: number; premiumServeable?: boolean }): SessionState {
-  const { balance, premiumServeable = true } = options;
+/**
+ * A ladder fixture. `withPlatinum` adds the SECOND paid rung (restored 2026-08-10).
+ *
+ * ⚠️ It defaults OFF, and that is deliberate rather than lazy. Nearly every test in this file asserts
+ * on ROW COUNTS ("one serveable rung is not a choice" → 0, a healthy picker → 2), so switching the
+ * shared fixture to three rungs would rewrite the expected number in a dozen assertions at once — the
+ * change most likely to turn a real failure into a number somebody adjusts. The rungs are enumerated
+ * by the SERVER (`getModelTiers`) and this component renders whatever list it is handed, so a two-rung
+ * fixture is a legitimate shape, not a stale one; `model-tiers.spec.ts` is where the real ladder's
+ * membership is pinned. Tests that genuinely need two PAID rungs opt in.
+ */
+function ladder(options: { balance: number; premiumServeable?: boolean; withPlatinum?: boolean }): SessionState {
+  const { balance, premiumServeable = true, withPlatinum = false } = options;
 
   return {
     ...EMPTY_SESSION,
@@ -82,6 +93,18 @@ function ladder(options: { balance: number; premiumServeable?: boolean }): Sessi
             available: true,
             serveable: premiumServeable,
           },
+          ...(withPlatinum
+            ? [
+                {
+                  id: 'platinum' as const,
+                  label: 'Platinum',
+                  model: 'claude-fable-5',
+                  minimumCredits: 2_000,
+                  available: true,
+                  serveable: true,
+                },
+              ]
+            : []),
         ],
       },
     },
@@ -305,8 +328,13 @@ describe('ModelTierPanel — an unserveable rung', () => {
    *
    * ⚠️ The lock VOCABULARY it used to pin (unserveable beats below_minimum; the unserveable sentence
    * never quotes a threshold) is not lost — `lockReasonFor` is pure and is exercised directly below,
-   * which is where it belonged anyway. What is genuinely gone is the rendered-copy assertion, and it
-   * comes back the moment a second paid rung does.
+   * which is where it belonged anyway. What is genuinely gone is the rendered-copy assertion.
+   *
+   * ✅ **RESTORED 2026-08-11**, in the test immediately below this one — `platinum` brought the second
+   * paid rung back on 2026-08-10 and the property became writable again, which is exactly the moment
+   * a note like this stops being a record and starts being a gap. It sat unwritten for a day because
+   * nobody re-read it when the condition it names was met; writing a loss down only helps if somebody
+   * checks back.
    */
   it('offers no picker at all when the only paid rung is unserveable, however rich the user', () => {
     sessionStore.set(ladder({ balance: 10_000_000, premiumServeable: false }));
@@ -323,6 +351,65 @@ describe('ModelTierPanel — an unserveable rung', () => {
 
     expect(rows()).toHaveLength(2);
     expect(isLocked(row('Premium'))).toBe(false);
+  });
+
+  /**
+   * 🔴 AN UNSERVEABLE RUNG BESIDE A SERVEABLE ONE — the property the one-paid-rung ladder could not
+   * express, restored now that `platinum` exists (SPEC §4.6.1a; `model-tiers.ts` "WRITABLE IS NOT
+   * WRITTEN").
+   *
+   * `serveable` answers "has the operator configured and priced this?", `available` answers "can this
+   * user afford it right now?" — two fields on purpose, because folding them buys either a rung locked
+   * on the screen you just paid on, or an enabled control that hard-fails. This is the case that proves
+   * the panel keeps them apart: ONE broken selector must leave its sibling fully pickable, and the
+   * broken row must say why in words no amount of money can act on.
+   *
+   * The COPY is the half `lockReasonFor` cannot cover. That function returns a reason enum; whether the
+   * rendered sentence quotes a threshold is a fact about `lockCopy` and the row, and quoting one here
+   * would tell a user to buy credits that cannot possibly unlock an operator's misconfiguration —
+   * spending real money on a lock that will not open. A pure-function test cannot see that.
+   *
+   * ⚠️ Asserted as an ABSENCE of the threshold, not merely the presence of "Unavailable": a row that
+   * printed both sentences would pass a presence-only check while still sending the user to the shop.
+   */
+  it('locks only the broken rung, and its copy never quotes a threshold credits cannot open', () => {
+    sessionStore.set(ladder({ balance: 10_000_000, premiumServeable: false, withPlatinum: true }));
+    openPanel();
+    render(<ModelTierPanel />);
+
+    expect(rows(), 'three rungs render; only one of them is broken').toHaveLength(3);
+
+    // The broken rung is locked and explains itself without naming a price.
+    expect(isLocked(row('Premium'))).toBe(true);
+    expect(copyOf(row('Premium'))).toMatch(/unavailable/i);
+    expect(copyOf(row('Premium')), 'no threshold on a lock credits cannot open').not.toMatch(/\d[\d,]*\s*credits/i);
+    expect(copyOf(row('Premium')), 'never quotes this rung’s own minimum').not.toContain('1,200');
+
+    // 🔴 The sibling is untouched — one broken selector may not take the ladder down with it.
+    expect(isLocked(row('Platinum')), 'a broken Premium must not lock Platinum').toBe(false);
+    expect(isLocked(row('Standard'))).toBe(false);
+
+    // ...and it is genuinely pickable, not merely unlocked-looking.
+    press(row('Platinum'));
+    expect(modelTierStore.get()).toBe('platinum');
+  });
+
+  /**
+   * CONTROL for the test above: with the SAME balance and the same three rungs, a healthy Premium is
+   * unlocked and quotes nothing.
+   *
+   * Without this, the assertions above pass for a panel that locks nothing and renders no copy at all —
+   * "not matching a threshold" is trivially true of an empty string, which is how a copy assertion goes
+   * green while the row it describes has silently stopped rendering.
+   */
+  it('CONTROL — the same ladder with every rung serveable locks nothing', () => {
+    sessionStore.set(ladder({ balance: 10_000_000, withPlatinum: true }));
+    openPanel();
+    render(<ModelTierPanel />);
+
+    expect(rows()).toHaveLength(3);
+    expect(rows().some(isLocked), 'a rich user on a healthy ladder sees no lock').toBe(false);
+    expect(copyOf(row('Premium'))).toMatch(/Premium/);
   });
 });
 

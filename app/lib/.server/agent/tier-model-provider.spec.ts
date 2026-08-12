@@ -32,7 +32,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NotConfiguredError, getTierModel } from './config';
-import { DEFAULT_PREMIUM_MODEL } from '~/lib/.server/billing/model-tiers';
+import { DEFAULT_PLATINUM_MODEL, DEFAULT_PREMIUM_MODEL } from '~/lib/.server/billing/model-tiers';
 import type { ModelRates } from '~/lib/.server/billing/rates';
 
 const RATE: ModelRates = { inputPerMTok: 2, outputPerMTok: 10, cacheReadPerMTok: 0.2, cacheWritePerMTok: 4 };
@@ -148,6 +148,58 @@ describe('the override selects which price table validates the rung', () => {
       expect(message, 'the rung’s OWN selector, never a hardcoded one').toContain('PREMIUM_MODEL');
       expect(message, 'it must not blame the gateway that was never asked').not.toContain('KIE');
     }
+  });
+
+  /**
+   * 🔴 THE RUNG NAMES ITS OWN ENV VAR — restored 2026-08-11, and the assertion above CANNOT prove it.
+   *
+   * `getTierModel` builds its refusal from `definition.modelEnvKey`, and the case above checks the
+   * message contains `PREMIUM_MODEL`. That passes identically for a hardcoded `'PREMIUM_MODEL'` string,
+   * because the rung under test IS premium — the two hypotheses are observationally identical on a
+   * one-paid-rung ladder, which is precisely why `model-tiers.ts` recorded this property as lost when
+   * SuperMax was retired and why `config.ts`'s own comment says a hardcoded name would be "wrong the
+   * moment a second rung returns". It returned on 2026-08-10 as PLATINUM.
+   *
+   * A PLATINUM refusal is the discriminator: it must say `PLATINUM_MODEL` and must NOT say
+   * `PREMIUM_MODEL`. The absence is the load-bearing half — naming the wrong variable sends an operator
+   * to fix a setting that was never broken, on a money path, while the rung they actually configured
+   * stays dark.
+   */
+  it('a PLATINUM refusal names PLATINUM_MODEL and never the sibling rung’s selector', () => {
+    stubEnv({ LLM_PROVIDER: 'KIE' });
+
+    try {
+      getTierModel('platinum', {}, 'Comet');
+      expect.unreachable('an unpriced rung must not resolve');
+    } catch (error) {
+      const message = (error as Error).message;
+
+      expect(message, 'its OWN selector').toContain('PLATINUM_MODEL');
+      expect(message, '🔴 a hardcoded PREMIUM_MODEL sends the operator to the wrong variable').not.toContain(
+        'PREMIUM_MODEL',
+      );
+      expect(message, 'and its own model, not the sibling’s').toContain(DEFAULT_PLATINUM_MODEL);
+      expect(message).toContain('Platinum');
+    }
+  });
+
+  /**
+   * CONTROL for the case above.
+   *
+   * `not.toContain('PREMIUM_MODEL')` is trivially satisfied by a refusal that throws before it ever
+   * builds a message — a disabled rung, a missing definition, a typo in the tier id. This proves the
+   * platinum rung genuinely RESOLVES when its table prices it, so the refusal above is the price
+   * table's doing and the message really was constructed.
+   */
+  it('CONTROL — platinum resolves when its model is priced, so the refusal is the table’s doing', () => {
+    stub.providerRates.mockReturnValue({
+      Anthropic: { [DEFAULT_PLATINUM_MODEL]: RATE },
+      KIE: { [DEFAULT_PLATINUM_MODEL]: RATE },
+      Comet: { [DEFAULT_PLATINUM_MODEL]: RATE },
+    });
+    stubEnv({ LLM_PROVIDER: 'KIE' });
+
+    expect(getTierModel('platinum', {}, 'Comet')).toBe(DEFAULT_PLATINUM_MODEL);
   });
 
   /* Omitting the argument behaves exactly as it did before the parameter existed. */

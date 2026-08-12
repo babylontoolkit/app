@@ -85,15 +85,20 @@ export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
  * one broken selector leaves its sibling serveable; `getTierModel` names its OWN env var in its
  * refusal; and the panel can render an unserveable rung beside a serveable one.
  *
- * 🔴 **WRITABLE IS NOT WRITTEN. Two of the four are restored; two are NOT (2026-08-11).**
+ * ✅ **ALL FOUR ARE WRITTEN AGAIN (the last two on 2026-08-11).**
  *   ✅ never-step-down-one-rung — `premium.spec.ts` (`BETWEEN_PREMIUM_AND_PLATINUM`)
  *   ✅ one broken selector leaves its sibling serveable — `model-tiers.spec.ts`
- *   ❌ `getTierModel` naming its own env var — `model-tier-config.spec.ts` still has only the
- *      structural scan, and its own comment still says a hardcoded `'PREMIUM_MODEL'` is "wrong the
- *      moment a second rung returns". It returned.
- *   ❌ the panel's unserveable-beside-serveable copy — `ModelTierPanel.spec.tsx`'s `ladder()` fixture
- *      is still standard+premium, and its own comment still says the property "comes back the moment a
- *      second paid rung does".
+ *   ✅ `getTierModel` naming its own env var — `tier-model-provider.spec.ts`, asserted on a PLATINUM
+ *      refusal, which is the only shape that can tell `modelEnvKey` apart from a hardcoded
+ *      `'PREMIUM_MODEL'`: on a one-paid-rung ladder the two hypotheses are observationally identical,
+ *      and the pre-existing `toContain('PREMIUM_MODEL')` passed for both. Mutation-verified.
+ *   ✅ the panel's unserveable-beside-serveable copy — `ModelTierPanel.spec.tsx`, on an opt-in
+ *      three-rung fixture, asserting the broken rung's sentence quotes NO threshold (credits cannot
+ *      open an operator's misconfiguration) while its sibling stays pickable. Mutation-verified.
+ *
+ * ⚠️ They sat unwritten for a day AFTER the condition was met, which is the lesson worth keeping:
+ * writing a loss down only helps if somebody re-reads it when the thing it waits for happens. Nothing
+ * failed, nothing reminded anyone — the note was correct and inert.
  *
  * An earlier version of this comment claimed all four were "asserted again as of this change" — an
  * over-claim caught by review, and the worst kind: **a comment asserting coverage that does not exist
