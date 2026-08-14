@@ -60,7 +60,7 @@ export interface CreationPhase {
   id: CreationPhaseId;
 
   /**
-   * Card row: "Game mode". Sentence case, no verb — it names a thing, not an activity.
+   * Card row: "Game world". Sentence case, no verb — it names a thing, not an activity.
    *
    * Two words, and sharing no word with another scheduled phase (owner, 2026-08-14) — these are read
    * as a LIST, where a one-word row reads as a different kind of thing and two rows sharing a word
@@ -68,7 +68,7 @@ export interface CreationPhase {
    */
   label: string;
 
-  /** Liveness panel: "Writing your game mode". Present tense, addressed to the user. */
+  /** Liveness panel: "Creating your game world". Present tense, addressed to the user. */
   activeLabel: string;
 
   /**
@@ -193,7 +193,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
 
     /*
      * "Art work", not "Art" (owner, 2026-08-14) — *"make uniform looking"*. Every row names a body of
-     * work in two words and NO two of them share a word: **Front end · Art work · Game mode · Core
+     * work in two words and NO two of them share a word: **Front end · Art work · Game world · Core
      * mechanics**. A one-word row read as a different KIND of thing sitting in the same list, and the
      * step line it feeds ("Step 2 — art.") read as a truncation rather than a label.
      */
@@ -210,9 +210,30 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
       'If the design needs no bespoke art, generate nothing and say so in one line.',
   },
   {
+    /*
+     * 🔴 "Game world", not "Game mode" (owner, live 2026-08-14): *"the last two steps don't match what
+     * it is doing… it is on game mode, but it is not a quick thing — there is a lot of heavy thinking
+     * and designing the whole thing."*
+     *
+     * Two things were wrong with the old pair, and the fix is the label, not the scope.
+     *
+     * **"Game mode" named the ARTIFACT, not the work.** It is literally accurate — the step writes the
+     * GameMode class — but to anyone watching it reads like selecting a mode from a menu, so the
+     * longest, heaviest step in the build was wearing the smallest-sounding name on the card. This
+     * step builds the scene, the camera, the lighting, the controllable entity, its input and the
+     * update loop: it is the whole world you move around in, and it is where most of the thinking goes.
+     *
+     * **And the pair read BACKWARDS.** "Core mechanics" sounds foundational, so a list running
+     * `Game mode → Core mechanics` invites the reader to ask why the core is not first. `Game world →
+     * Core mechanics` is a progression: build the place, then the rules that govern play in it.
+     *
+     * ⚠️ A row label is what the user judges the build's honesty by. It has no effect on what the step
+     * DOES — that is the task below — so if the step is doing too much, this comment is not the fix and
+     * the task is.
+     */
     id: 'game',
-    label: 'Game mode',
-    activeLabel: 'Writing your game mode',
+    label: 'Game world',
+    activeLabel: 'Creating your game world',
     allowsMedia: false,
     owesFiles: false,
     task:

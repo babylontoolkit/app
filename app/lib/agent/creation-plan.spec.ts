@@ -39,7 +39,7 @@ describe('the phase table', () => {
    *
    * *"make uniform looking"*, and then, on the split: *"pick something better for step 4 and not say
    * `Game` in step 4… they are all different, front end, art work, game mode… then something else
-   * fitting."* Front end · Art work · Game mode · Core mechanics.
+   * fitting."* Front end · Art work · Game world · Core mechanics.
    *
    * These are read as a LIST, and a list is where an inconsistency shows — which is exactly what
    * nothing in a code review shows you (§4.1a's toolbar lesson, one level down). Two rows sharing a
