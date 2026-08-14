@@ -30,8 +30,46 @@ import {
 const record = (id: any, state: any = 'finished') => ({ id, generationId: 'gen_1', at: '2026-08-08T00:00:00Z', state });
 
 describe('the phase table', () => {
-  it('DECLARES Frontend -> Art -> Game core -> Game systems -> Verify, in that order', () => {
+  it('DECLARES Frontend -> Art -> Game -> Game systems -> Verify, in that order', () => {
     expect(CREATION_PHASES.map((p) => p.id)).toEqual(['frontend', 'art', 'game', 'game-systems', 'verify']);
+  });
+
+  /**
+   * 🔴 THE ROW LABELS ARE UNIFORM AND NO TWO SHARE A WORD (owner, 2026-08-14).
+   *
+   * *"make uniform looking"*, and then, on the split: *"pick something better for step 4 and not say
+   * `Game` in step 4… they are all different, front end, art work, game mode… then something else
+   * fitting."* Front end · Art work · Game mode · Core mechanics.
+   *
+   * These are read as a LIST, and a list is where an inconsistency shows — which is exactly what
+   * nothing in a code review shows you (§4.1a's toolbar lesson, one level down). Two rows sharing a
+   * word read as two halves of one step; a one-word row reads as a different kind of thing.
+   *
+   * ⚠️ Scoped to the SCHEDULED phases. `verify` is not in the default plan and never appears beside
+   * the others, so holding it to a rule about how a list reads would be asserting a constraint nobody
+   * can see.
+   */
+  it('gives every scheduled step a distinct two-word name, sharing no word with another', () => {
+    const labels = DEFAULT_CREATION_PHASES.map((id) => phaseById(id).label);
+    const seen = new Map<string, string>();
+
+    for (const label of labels) {
+      const words = label.toLowerCase().split(' ');
+      expect(words.length).toBe(2);
+
+      for (const word of words) {
+        expect(seen.get(word) ?? label).toBe(label);
+        seen.set(word, label);
+      }
+    }
+  });
+
+  /* The panel line is present tense and addressed to the user — a different string, not the label. */
+  it('every phase names what it is DOING while it runs', () => {
+    for (const phase of CREATION_PHASES) {
+      expect(phase.activeLabel).toMatch(/ing your /);
+      expect(phase.activeLabel).not.toBe(phase.label);
+    }
   });
 
   /*

@@ -59,10 +59,16 @@ export type CreationPhaseId = 'game' | 'game-systems' | 'frontend' | 'art' | 've
 export interface CreationPhase {
   id: CreationPhaseId;
 
-  /** Card row: "Game code". Sentence case, no verb — it names a thing, not an activity. */
+  /**
+   * Card row: "Game mode". Sentence case, no verb — it names a thing, not an activity.
+   *
+   * Two words, and sharing no word with another scheduled phase (owner, 2026-08-14) — these are read
+   * as a LIST, where a one-word row reads as a different kind of thing and two rows sharing a word
+   * read as two halves of one step. Pinned in the spec.
+   */
   label: string;
 
-  /** Liveness panel: "Writing your game code". Present tense, addressed to the user. */
+  /** Liveness panel: "Writing your game mode". Present tense, addressed to the user. */
   activeLabel: string;
 
   /**
@@ -186,10 +192,10 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     id: 'art',
 
     /*
-     * "Art work", not "Art" (owner, 2026-08-14) — *"make uniform looking"*. Every other row names a
-     * body of work in two words ("Front end", "Game core", "Game systems"); a one-word row read as a
-     * different KIND of thing sitting in the same list, and the step line it feeds ("Step 2 — art.")
-     * read as a truncation rather than a label.
+     * "Art work", not "Art" (owner, 2026-08-14) — *"make uniform looking"*. Every row names a body of
+     * work in two words and NO two of them share a word: **Front end · Art work · Game mode · Core
+     * mechanics**. A one-word row read as a different KIND of thing sitting in the same list, and the
+     * step line it feeds ("Step 2 — art.") read as a truncation rather than a label.
      */
     label: 'Art work',
     activeLabel: 'Generating your artwork',
@@ -205,8 +211,8 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
   },
   {
     id: 'game',
-    label: 'Game core',
-    activeLabel: 'Writing your game core',
+    label: 'Game mode',
+    activeLabel: 'Writing your game mode',
     allowsMedia: false,
     owesFiles: false,
     task:
@@ -230,9 +236,16 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
      * scoring field is the whole-file-for-one-line waste this repo prices in output tokens, and it
      * spends the exact room the split just bought.
      */
+    /*
+     * 🔴 THE `id` IS THE STORED KEY; THE `label` IS THE DISPLAY NAME, AND THEY ARE ALLOWED TO DIFFER.
+     * `game-systems` lives in `projects.creation_handoff` and travels in browser bodies, so renaming
+     * it to match the label would make `parseCreationPhaseId` refuse every plan already carrying it —
+     * which drops the step, and drops it SILENTLY for any plan whose `game` phase has already run
+     * (`withSplitGamePhase` only re-adds it before that point). Rename the label freely; leave the id.
+     */
     id: 'game-systems',
-    label: 'Game systems',
-    activeLabel: 'Building your gameplay',
+    label: 'Core mechanics',
+    activeLabel: 'Building your core mechanics',
     allowsMedia: false,
     owesFiles: false,
     task:
