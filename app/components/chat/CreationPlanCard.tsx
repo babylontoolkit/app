@@ -64,8 +64,20 @@ export function CreationPlanCard() {
 
   const current = phaseById(mode.plan.phases[mode.plan.next]);
 
+  /*
+   * 🔴 STICKY, because the chat AUTO-SCROLLS and this card lives at the top of the column.
+   *
+   * Measured live the moment it first rendered: `top: -182px` — the card was correct, complete, and
+   * entirely off screen for the whole build, because the model streams and `StickToBottom` follows it
+   * down. A progress display whose entire purpose is *"so the user knows what is going on"* is worth
+   * nothing at the one moment it is meant to be read.
+   *
+   * It pins to the top of the scrollport (the `overflow-y: auto` two levels up) and needs its own
+   * opaque background, or the messages scroll THROUGH it. `z-[2]` clears the message content without
+   * reaching the workbench's own layer.
+   */
   return (
-    <div className="max-w-chat mx-auto w-full px-1">
+    <div className="max-w-chat mx-auto w-full px-1 sticky top-0 z-[2] pb-2 bg-bolt-elements-background-depth-1">
       <div className="rounded-lg border border-accent-500/40 bg-bolt-elements-background-depth-2 p-4">
         <div className="flex items-center gap-2 mb-1">
           <div className="i-svg-spinners:90-ring-with-bg text-lg text-accent-500" />
