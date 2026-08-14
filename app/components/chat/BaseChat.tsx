@@ -22,6 +22,7 @@ import { GameRegistryCards } from './GameRegistryCards';
 import { StartedFromChip } from './StartedFromChip';
 import { NewChatIntro } from './NewChatIntro';
 import { CreationHandoffCard } from './CreationHandoffCard';
+import { CreationPlanCard } from './CreationPlanCard';
 import { VaguePromptOffer } from './VaguePromptOffer';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import type { WizardSelection } from '~/lib/registry/wizard';
@@ -440,6 +441,13 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                     )}
                   </ClientOnly>
                 )}
+                {/*
+                 * The build's progress (§4.4e) — every step, from the first. It sits where the handoff
+                 * card was, because it is the same slot in the same story: "here is your project" ->
+                 * "here is your project being built". The two never render together (the card gates on
+                 * a mode with NO plan, this one on a mode WITH one), so they cannot stack.
+                 */}
+                {chatStarted && <ClientOnly>{() => <CreationPlanCard />}</ClientOnly>}
                 {chatStarted && (
                   <div className="max-w-chat mx-auto w-full">
                     <StartedFromChip onReseed={onReseed} canChange={canReseed} />

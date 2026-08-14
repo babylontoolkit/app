@@ -112,7 +112,19 @@ export function CreationHandoffCard({ onBuild, onEdit, onPlan, onDismiss }: Crea
    * store survives an SPA navigate, and a card that followed the user into a project they had already
    * built would offer to build it again from a brief describing a different game.
    */
-  if (!mode || !pid || mode.projectId !== pid || mode.handoffDismissed) {
+  /*
+   * 🔴 `mode.plan` is the "the build has STARTED" half (§4.4e, 2026-08-14).
+   *
+   * The mode used to be cleared by the send, so "a mode exists" and "nothing has been built" were the
+   * same fact. Under phases the mode OUTLIVES the send — it carries the plan, which is the only record
+   * of which steps are still owed — so without this the card would sit above `CreationPlanCard` for
+   * the whole build, offering to build a game that is three steps into being built.
+   *
+   * This is what makes BaseChat's "the two never render together" a property rather than a claim: the
+   * handoff card is a mode with NO plan, the plan card is a mode WITH one, and the conditions are
+   * exact complements.
+   */
+  if (!mode || !pid || mode.projectId !== pid || mode.handoffDismissed || mode.plan) {
     return null;
   }
 
