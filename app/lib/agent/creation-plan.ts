@@ -77,6 +77,26 @@ export interface CreationPhase {
   allowsMedia: boolean;
 
   /**
+   * 🔴 MUST this phase write files to count as successful? (live-caught 2026-08-14.)
+   *
+   * `owesFiles` in the proxy turns "a first build turn that wrote nothing" into a FAILED, refunded
+   * generation — the §4.6 guard that stops a build billing in full and delivering an empty project.
+   * Under phases that predicate became too broad, because a phase can be told IN ITS OWN TASK that
+   * writing nothing is the right answer: `art` ends with *"if the design needs no bespoke art,
+   * generate nothing and say so in one line"*, and `game` with the equivalent for a request that asks
+   * only for a front end. Obeying the instruction then failed the turn.
+   *
+   * It is not hypothetical: `verify` ran with no compile errors, correctly wrote nothing, and was
+   * failed for it — the user's build ended in an error message over a project that had just built.
+   *
+   * So the answer is per phase and it is DATA, not a guess: `frontend` is mandatory (owner rule — a
+   * first build always redesigns the landing page and chrome), and the rest may legitimately be a
+   * one-line "nothing to do here". A monolithic creation with NO phase still owes files, which is
+   * what keeps every pre-phase project behaving exactly as it did.
+   */
+  owesFiles: boolean;
+
+  /**
    * What this step owes, appended to the phase message.
    *
    * Each task ends by telling the model to write nothing if the user's request did not call for this
@@ -122,6 +142,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     label: 'Front end',
     activeLabel: 'Designing your front end',
     allowsMedia: false,
+    owesFiles: true,
     task:
       'Design the complete frontend shell FIRST, following the **bt-landing skill** (pre-loaded in ' +
       'your Skills) EXACTLY, using the project facts in the brief above as its Step-0 inputs.\n\n' +
@@ -148,6 +169,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     label: 'Art',
     activeLabel: 'Generating your artwork',
     allowsMedia: true,
+    owesFiles: false,
     task:
       'Render the art this design calls for. Read the list you wrote in `DESIGN.md` and generate ' +
       'those images, ONE per call, at the point in the design where each is needed.\n\n' +
@@ -161,6 +183,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     label: 'Game code',
     activeLabel: 'Writing your game code',
     allowsMedia: false,
+    owesFiles: false,
     task:
       'Write the GAME. This step owes the playable project and nothing else — do NOT touch the ' +
       'landing page or the game chrome, which were designed in the earlier steps and are already ' +
@@ -178,6 +201,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     label: 'Verify',
     activeLabel: 'Checking your project builds',
     allowsMedia: false,
+    owesFiles: false,
     task:
       'The project failed to compile. Fix the errors reported below and change nothing else.\n\n' +
       'Repair the smallest thing that makes it build: do not redesign, do not rewrite working files, ' +
@@ -185,7 +209,29 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
   },
 ];
 
-export const DEFAULT_CREATION_PHASES: readonly CreationPhaseId[] = CREATION_PHASES.map((p) => p.id);
+/**
+ * 🔴 `verify` IS NOT IN THE DEFAULT PLAN (live-caught 2026-08-14, `gen_mst3kiyp_71fdy6`).
+ *
+ * This was `CREATION_PHASES.map(p => p.id)` — every declared phase, including `verify`. But `verify`'s
+ * task is a REPAIR prompt: *"The project failed to compile. Fix the errors reported below and change
+ * nothing else."* Run unconditionally at the end of a healthy build there are no errors to report, so
+ * the model is told to fix a failure that did not happen.
+ *
+ * Measured: it spent ELEVEN steps reading the project hunting for a defect that did not exist, wrote
+ * nothing (correctly — there was nothing to fix), and `owesFiles` then turned "wrote nothing" into a
+ * FAILED generation. The user's build reached its last step and reported an error over a project that
+ * had just been built successfully.
+ *
+ * ⚠️ **Self-healing already covers this, and better.** `decideAutoRepair` fires on a real Vite compile
+ * error inside its window, carries the actual compiler output, and is capped at two attempts — and it
+ * is armed again the instant the plan completes, which is exactly why `creationPlanActive` returns
+ * `disarm: false` rather than disarming the watch between phases. A repair pass that runs whether or
+ * not there is anything to repair is strictly worse than one triggered by the error itself.
+ *
+ * The phase stays in `CREATION_PHASES` so a stored plan naming it still resolves (and so an operator
+ * or a future flow can schedule it deliberately); it is simply not scheduled by default.
+ */
+export const DEFAULT_CREATION_PHASES: readonly CreationPhaseId[] = ['frontend', 'art', 'game'];
 
 /**
  * Bumped only when the stored shape changes incompatibly. An unrecognised version is treated as NO
@@ -254,6 +300,19 @@ export function parseCreationPhaseId(value: unknown): CreationPhaseId | null {
 /** Does this phase get the media tools? Unknown/absent phases never do. */
 export function phaseAllowsMedia(phase: CreationPhaseId | null): boolean {
   return phase ? phaseById(phase).allowsMedia : false;
+}
+
+/**
+ * Must this phase write files to count as a success? See `CreationPhase.owesFiles`.
+ *
+ * 🔴 **`null` — no phase at all — is TRUE**, and that direction is the whole safety of this function.
+ * A monolithic creation (a project made before phases, or the unregistered-project path) still owes
+ * files, so the §4.6 no-files refund is untouched for every flow that is not a phase. Only a phase
+ * that explicitly declares it may do nothing is excused, and it is excused because its own task told
+ * it so.
+ */
+export function phaseOwesFiles(phase: CreationPhaseId | null): boolean {
+  return phase ? phaseById(phase).owesFiles : true;
 }
 
 /**
@@ -487,11 +546,26 @@ export function creationPhaseNote(phase: CreationPhaseId | null): string | null 
 
   const { label, task } = phaseById(phase);
 
+  /*
+   * 🔴 READ IN BATCHES, THEN WRITE (live-measured 2026-08-14, `gen_mst2b7sd_vi0z91`).
+   *
+   * This turn has a bounded number of round trips and every tool call spends one. The failing run
+   * batched ten reads into its first step — the model parallelises perfectly well when it decides to
+   * — and then took FIVE more steps at one read each, discovering files as it went, until there were
+   * no steps left to write with. It never emitted a single file.
+   *
+   * Prose alone does not stop a model (the `protocol-strip` lesson), which is why
+   * `CREATION_FILE_READ_ROUNDS` moved with it. This is the half that costs nothing and addresses the
+   * actual observed behaviour: the model did not need more information, it needed to ask at once.
+   */
   return (
     `# This step of the build: ${label}\n\n` +
     `The project already exists and is installed — do not re-create it.\n\n` +
     `${task}\n\n` +
-    'Do NOT rewrite files that are already correct — emit only what this step owes.'
+    'Do NOT rewrite files that are already correct — emit only what this step owes.\n\n' +
+    'You have a limited number of tool round trips this step. Request every file you need in ONE ' +
+    'parallel batch of `read_file` calls, then write. Do not read one file at a time: each round trip ' +
+    'is a step you can no longer write code with, and a step that runs out mid-plan delivers nothing.'
   );
 }
 

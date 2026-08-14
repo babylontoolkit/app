@@ -336,7 +336,15 @@ describe('consumer 4 — a first build that writes nothing gets one corrective p
      * would pass if someone redefined it as `true`.
      */
     expect(callArgs(proxy, 'shouldRescueUnproductiveTurn')).toContain('requiresAction: owesFiles');
-    expect(proxy).toMatch(/const owesFiles = isFirstBuildTurn && !discussNote;/);
+
+    /*
+     * ⚠️ Extended 2026-08-14 with `phaseOwesFiles(creationPhase)`. A phase whose own task tells it it
+     * may write nothing (`art`, `game`) must not be FAILED for obeying — measured live when `verify`
+     * ran with no compile errors and ended a successful build with an error. `phaseOwesFiles(null)` is
+     * TRUE, so every non-phase flow keeps this guard exactly as it was; both halves are asserted so
+     * neither can be dropped.
+     */
+    expect(proxy).toMatch(/const owesFiles = isFirstBuildTurn && !discussNote && phaseOwesFiles\(creationPhase\);/);
   });
 
   /*

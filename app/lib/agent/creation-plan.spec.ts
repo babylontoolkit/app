@@ -13,6 +13,8 @@ import {
   advanceCreationPlan,
   creationPhaseMessage,
   creationPhaseNote,
+  phaseById,
+  phaseOwesFiles,
   currentCreationPhase,
   describeCreationPlan,
   describeCreationPlanOutcome,
@@ -28,8 +30,8 @@ import {
 const record = (id: any, state: any = 'finished') => ({ id, generationId: 'gen_1', at: '2026-08-08T00:00:00Z', state });
 
 describe('the phase table', () => {
-  it('is Frontend -> Art -> Game -> Verify, in that order', () => {
-    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game', 'verify']);
+  it('DECLARES Frontend -> Art -> Game -> Verify, in that order', () => {
+    expect(CREATION_PHASES.map((p) => p.id)).toEqual(['frontend', 'art', 'game', 'verify']);
   });
 
   /*
@@ -53,8 +55,8 @@ describe('the phase table', () => {
   });
 
   /* The repair pass can only run once there is something to repair. */
-  it('leaves verify last', () => {
-    expect(DEFAULT_CREATION_PHASES[DEFAULT_CREATION_PHASES.length - 1]).toBe('verify');
+  it('leaves verify last in the TABLE (it is not scheduled by default — see "the default plan")', () => {
+    expect(CREATION_PHASES[CREATION_PHASES.length - 1].id).toBe('verify');
   });
 
   it('gives media to EXACTLY ONE phase, and it is the art phase', () => {
@@ -316,12 +318,12 @@ describe('creationPhaseMessage — the VISIBLE line', () => {
   const plan = newCreationPlan();
 
   it('names the step and the total', () => {
-    expect(creationPhaseMessage(plan, 0)).toContain('Step 1 of 4');
-    expect(creationPhaseMessage(plan, 2)).toContain('Step 3 of 4');
+    expect(creationPhaseMessage(plan, 0)).toContain(`Step 1 of ${plan.phases.length}`);
+    expect(creationPhaseMessage(plan, 2)).toContain(`Step 3 of ${plan.phases.length}`);
   });
 
   it("defaults to the plan's own next phase", () => {
-    expect(creationPhaseMessage({ ...plan, next: 1 })).toContain('Step 2 of 4');
+    expect(creationPhaseMessage({ ...plan, next: 1 })).toContain(`Step 2 of ${plan.phases.length}`);
   });
 
   /*
@@ -410,8 +412,8 @@ describe('creationPhaseNote — what the step owes', () => {
 describe('describeCreationPlan', () => {
   it('marks done / current / pending in order', () => {
     const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('frontend')] });
-    expect(view.rows.map((r) => r.state)).toEqual(['done', 'current', 'pending', 'pending']);
-    expect(view.step).toBe('Step 2 of 4');
+    expect(view.rows.map((r) => r.state)).toEqual(['done', 'current', 'pending']);
+    expect(view.step).toBe('Step 2 of 3');
     expect(view.complete).toBe(false);
   });
 
@@ -437,7 +439,7 @@ describe('describeCreationPlanOutcome — the plan-level verdict', () => {
   it('is INCOMPLETE while phases remain, naming how many and which is next', () => {
     const outcome = describeCreationPlanOutcome({ ...newCreationPlan(), next: 1, done: [record('frontend')] });
     expect(outcome.state).toBe('incomplete');
-    expect(outcome.detail).toContain('3 of 4 steps');
+    expect(outcome.detail).toContain('2 of 3 steps');
     expect(outcome.detail).toContain('art');
   });
 
@@ -469,5 +471,70 @@ describe('describeCreationPlanOutcome — the plan-level verdict', () => {
     const outcome = describeCreationPlanOutcome({ ...newCreationPlan(), next: 4, done });
     expect(outcome.headline).toBe('');
     expect(outcome.detail).toBe('');
+  });
+});
+
+/**
+ * 🔴 WHICH PHASES OWE FILES (live-caught 2026-08-14, `gen_mst3kiyp_71fdy6`).
+ *
+ * `owesFiles` turns "a first build turn that wrote nothing" into a FAILED, refunded generation. That
+ * is right for a monolithic creation and too broad for a phase that is told in its own task that
+ * writing nothing is the correct answer. Measured: `verify` ran with no compile errors, spent eleven
+ * steps hunting a defect that did not exist, correctly wrote nothing, and ended a successful build
+ * with an error message.
+ */
+describe('phaseOwesFiles', () => {
+  it('the front end always owes files — it is the mandatory step', () => {
+    expect(phaseOwesFiles('frontend')).toBe(true);
+  });
+
+  it('a phase that may legitimately do nothing does not owe files', () => {
+    expect(phaseOwesFiles('art')).toBe(false);
+    expect(phaseOwesFiles('game')).toBe(false);
+    expect(phaseOwesFiles('verify')).toBe(false);
+  });
+
+  /**
+   * 🔴 THE SAFETY DIRECTION. No phase means a monolithic creation — a project made before phases, or
+   * the unregistered-project path — and those still owe files, so the §4.6 no-files refund is
+   * untouched for every flow that is not a phase. A `false` here would silently disable the guard
+   * that stops a build billing in full and delivering an empty project.
+   */
+  it('NO phase still owes files, so the §4.6 guard is untouched off the phase path', () => {
+    expect(phaseOwesFiles(null)).toBe(true);
+  });
+
+  /**
+   * Every phase in the table answers, so a new one cannot be added without deciding. `owesFiles` is
+   * required on `CreationPhase`, so this is really a check that nobody typed `undefined` past it.
+   */
+  it('every declared phase states an answer', () => {
+    for (const phase of CREATION_PHASES) {
+      expect(typeof phase.owesFiles).toBe('boolean');
+    }
+  });
+});
+
+/**
+ * 🔴 `verify` IS NOT SCHEDULED BY DEFAULT (same run).
+ *
+ * Its task is a repair prompt — "The project failed to compile. Fix the errors reported below" — and
+ * running it unconditionally at the end of a healthy build tells the model to fix a failure that did
+ * not happen. `decideAutoRepair` covers real compile errors, carries the actual compiler output, is
+ * capped at two attempts, and is re-armed the moment the plan completes.
+ */
+describe('the default plan', () => {
+  it('schedules the three building phases, in order', () => {
+    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game']);
+  });
+
+  it('does NOT schedule verify — self-healing owns compile errors', () => {
+    expect(DEFAULT_CREATION_PHASES).not.toContain('verify');
+  });
+
+  /* CONTROL — `verify` is still DECLARED, so a stored plan naming it resolves rather than throwing. */
+  it('CONTROL — verify is still a real phase, just not a default one', () => {
+    expect(CREATION_PHASES.some((p) => p.id === 'verify')).toBe(true);
+    expect(() => phaseById('verify')).not.toThrow();
   });
 });

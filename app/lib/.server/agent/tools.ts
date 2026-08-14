@@ -12,15 +12,30 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { createScopedLogger } from '~/utils/logger';
 import { getSkillStore } from '~/lib/.server/skills/store';
+import { DEFAULT_AGENT_BUDGETS } from './budgets';
 
 const logger = createScopedLogger('agent-tools');
 
 /**
  * Tool rounds per generation. On cap, the model proceeds with whatever it has loaded.
- * 7 (raised from 6, owner, 2026-08-08) to keep `MAX_SKILL_LOADS < MAX_TOOL_ROUNDS` when the skill
- * budget went to 6 — the strict inequality is what guarantees a round is left for the answer.
+ *
+ * 🔴 **DERIVED, NOT DECLARED (2026-08-14) — this was a SECOND WRITER of a number `budgets.ts` already
+ * owns.** It read `= 7`, hand-maintained, with a comment explaining why it had been raised from 6.
+ * Meanwhile `resolveAgentBudgets` computes `maxToolRounds = max(BASELINE_TOOL_ROUNDS,
+ * creationToolRounds)` precisely so the ceiling can never be lower than what a creation needs.
+ *
+ * The two agreed only by coincidence, and the coincidence ended the moment `CREATION_FILE_READ_ROUNDS`
+ * went 3 → 6: the derived ceiling became 9 while this constant still said 7, so a creation was
+ * suddenly entitled to more rounds than the "maximum" — inverting the one relationship
+ * `tool-policy.spec.ts` pins. That spec caught it, which is the whole reason it asserts a
+ * RELATIONSHIP rather than a literal.
+ *
+ * ⚠️ It is the shipped DEFAULT, not a per-request value: the budgets an actual turn runs with arrive
+ * on `ToolPolicyInput.budgets` (an operator can raise them). Reading this constant on a hot path would
+ * ignore the operator silently — same trap as `CREATION_TOOL_ROUNDS` next door. It exists for the
+ * `MAX_SKILL_LOADS < MAX_TOOL_ROUNDS` calibration and for the prompt's advertised number.
  */
-export const MAX_TOOL_ROUNDS = 7;
+export const MAX_TOOL_ROUNDS = DEFAULT_AGENT_BUDGETS.maxToolRounds;
 
 /**
  * How many skill BODIES one generation may pull in (§4.11, `spec/skills.md`).

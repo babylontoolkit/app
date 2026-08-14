@@ -55,7 +55,7 @@ import { getModelTiers } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
-import { creationPhaseNote, parseCreationPhaseId } from '~/lib/agent/creation-plan';
+import { creationPhaseNote, parseCreationPhaseId, phaseOwesFiles } from '~/lib/agent/creation-plan';
 import { toolkitSystemsNoteForRequest } from '~/lib/agent/toolkit-systems';
 import {
   decideModelTier,
@@ -1657,9 +1657,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          * that drifts from what the policy decided — and this one decides whether the turn can spend
          * credits on renders.
          */
+        /*
+         * 🔴 NO PREVIEW TOOLS ON A CREATION (live-caught 2026-08-14, `gen_mst2b7sd_vi0z91`).
+         *
+         * The §4.14 preview tools debug a RUNNING game — `evaluate_in_game`, `get_game_errors`,
+         * `capture_game_screenshot`. During a build there is no game to ask: the frontend phase is
+         * rewriting the page, the art phase is rendering images, and the game phase is writing the
+         * code that would answer. Offering them is the dangling-instruction failure pointing the
+         * other way — the model is handed a tool whose subject does not exist yet.
+         *
+         * It is not theoretical and it is not free. Measured on the first live phased build: with
+         * seven steps available the model spent SIX on `read_file` and the seventh on
+         * `evaluate_in_game` against a stock starter, leaving nothing to write the project with. The
+         * turn failed with no files (correctly refunded, §4.6) having never emitted an artifact.
+         *
+         * ⚠️ A step is the scarcest thing a creation has. Every tool in this set has to earn its place
+         * against "could the model have written a file instead".
+         */
         {
           ...fileTools,
-          ...previewTools,
           ...referenceTools,
           ...createRepairTool(),
           ...(toolPolicy.allowsMedia ? mediaTools : {}),
@@ -2417,7 +2433,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * terminal verdict after it — if those two ever disagreed about which turns owe files, a turn
        * could be rescued for not writing and then billed as a success for the same thing.
        */
-      const owesFiles = isFirstBuildTurn && !discussNote;
+      /*
+       * 🔴 A PHASE THAT IS TOLD IT MAY DO NOTHING IS NOT FAILED FOR DOING NOTHING (2026-08-14).
+       *
+       * This was `isFirstBuildTurn && !discussNote`, which is right for a monolithic creation and too
+       * broad for a phase: `art` ends with "if the design needs no bespoke art, generate nothing and
+       * say so in one line", and `game` with the equivalent for a front-end-only request. Obeying that
+       * instruction produced a turn with no files, which this predicate then turned into a FAILED,
+       * refunded generation — the product contradicting itself inside one turn.
+       *
+       * Measured on the first full live build: the `verify` phase ran with no compile errors, spent
+       * eleven steps looking for a defect that did not exist, correctly wrote nothing, and ended the
+       * user's successful build with an error message.
+       *
+       * `phaseOwesFiles(null)` is TRUE, so every non-phase flow keeps the §4.6 guard exactly as it was.
+       */
+      const owesFiles = isFirstBuildTurn && !discussNote && phaseOwesFiles(creationPhase);
 
       if (
         shouldRescueUnproductiveTurn({

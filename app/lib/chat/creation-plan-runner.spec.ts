@@ -48,7 +48,9 @@ describe('decideNextCreationTurn', () => {
   });
 
   it('reports done when the plan is complete', () => {
-    expect(decideNextCreationTurn(ready({ plan: planAt(4), armedIndex: null }))).toEqual({ kind: 'done' });
+    expect(decideNextCreationTurn(ready({ plan: planAt(newCreationPlan().phases.length), armedIndex: null }))).toEqual({
+      kind: 'done',
+    });
   });
 
   describe('the ways it must NOT run', () => {
@@ -128,8 +130,15 @@ describe('creationPlanActive — the auto-repair disarm (trap 2)', () => {
    * user to fix what the next phase fixes, and colliding with it for the in-flight claim.
    */
   it('is true while phases remain', () => {
+    const last = newCreationPlan().phases.length - 1;
+
     expect(creationPlanActive(planAt(0))).toBe(true);
-    expect(creationPlanActive(planAt(3))).toBe(true);
+
+    /*
+     * Derived from the plan's own length: the default list lost `verify` on 2026-08-14, and a literal
+     * index here silently became "a COMPLETE plan" — which asserts the opposite of what it says.
+     */
+    expect(creationPlanActive(planAt(last))).toBe(true);
   });
 
   /**
@@ -138,7 +147,7 @@ describe('creationPlanActive — the auto-repair disarm (trap 2)', () => {
    * auto-repair exists for, and a guard that stayed on forever would disable it silently.
    */
   it('is false once the plan completes, so self-healing returns', () => {
-    expect(creationPlanActive(planAt(4))).toBe(false);
+    expect(creationPlanActive(planAt(newCreationPlan().phases.length))).toBe(false);
     expect(creationPlanActive(null)).toBe(false);
     expect(creationPlanActive(undefined)).toBe(false);
   });

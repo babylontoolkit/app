@@ -53,7 +53,14 @@ describe('resolveAgentBudgets — an unconfigured platform is unchanged', () => 
       maxReadChars: DEFAULT_MAX_READ_CHARS,
       maxPlanReadChars: DEFAULT_MAX_PLAN_READ_CHARS,
       maxReferenceLoads: DEFAULT_MAX_REFERENCE_LOADS,
-      maxToolRounds: BASELINE_TOOL_ROUNDS,
+
+      /*
+       * ⚠️ Derived, and since CREATION_FILE_READ_ROUNDS went 3 -> 6 (2026-08-14) it sits ABOVE the
+       * baseline even with nothing configured — a creation needs 3 + 6 = 9 rounds, so the ordinary
+       * ceiling rises to meet it rather than a creation quietly exceeding the maximum. Written as the
+       * relationship, not as `9`: a literal here is what let `tools.ts` drift into a second writer.
+       */
+      maxToolRounds: Math.max(BASELINE_TOOL_ROUNDS, DEFAULT_MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROUNDS),
       creationToolRounds: DEFAULT_MAX_REFERENCE_LOADS + CREATION_FILE_READ_ROUNDS,
     });
   });
@@ -97,9 +104,16 @@ describe('the round ceilings are DERIVED, never left to the operator', () => {
   it('raises the ordinary ceiling to fit a raised reference budget', () => {
     const budgets = resolveAgentBudgets(ctx({ AGENT_MAX_REFERENCE_LOADS: '6' }));
 
-    // 6 + 3 = 9 exceeds the baseline 7, so the ceiling moves with it rather than starving the turn.
-    expect(budgets.creationToolRounds).toBe(9);
-    expect(budgets.maxToolRounds).toBe(9);
+    /*
+     * 6 + CREATION_FILE_READ_ROUNDS exceeds the baseline, so the ceiling moves with it rather than
+     * starving the turn. Expressed as the SUM rather than a literal: this assertion was written as
+     * `toBe(9)` when the read budget happened to be 3, so raising that constant failed a test whose
+     * subject is the DERIVATION, not the value — a false alarm that invites someone to re-point the
+     * number instead of reading what broke.
+     */
+    expect(budgets.creationToolRounds).toBe(6 + CREATION_FILE_READ_ROUNDS);
+    expect(budgets.maxToolRounds).toBe(6 + CREATION_FILE_READ_ROUNDS);
+    expect(budgets.maxToolRounds).toBeGreaterThan(BASELINE_TOOL_ROUNDS);
   });
 
   /*

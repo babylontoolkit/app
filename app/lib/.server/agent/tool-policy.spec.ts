@@ -6,6 +6,8 @@
  * media tools makes the model draft around tools it cannot call. Every case here is a turn shape that
  * actually occurs.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CREATION_FILE_READ_ROUNDS,
@@ -364,5 +366,59 @@ describe('an ordinary MEDIA turn has room for its images (2026-08-08)', () => {
 
       expect(creation.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
     }
+  });
+});
+
+/**
+ * 🔴 NO PREVIEW TOOLS ON A CREATION (live-caught 2026-08-14, `gen_mst2b7sd_vi0z91`).
+ *
+ * The §4.14 preview tools debug a RUNNING game. During a build there is nothing to ask: the frontend
+ * phase is rewriting the page, the art phase is rendering images, and the game phase is writing the
+ * code that would answer. Measured on the first live phased build: with seven steps available the
+ * model spent six on `read_file` and the seventh on `evaluate_in_game` against a stock starter, then
+ * had nothing left to write the project with. The turn produced zero files.
+ *
+ * This is a SOURCE scan because the tool object is assembled inline in `proxy.ts` and there is no seam
+ * that returns it — the same reason `first-build-turn.spec.ts` reads its wiring from source.
+ */
+describe('the creation toolset earns every step it spends', () => {
+  const proxy = readFileSync(join(process.cwd(), 'app/lib/.server/agent/proxy.ts'), 'utf-8').replace(
+    /\/\*[\s\S]*?\*\//g,
+    '',
+  );
+
+  /** The `toolset === 'creation'` branch's object literal, brace-matched. */
+  const creationBranch = (() => {
+    const at = proxy.indexOf("toolPolicy.toolset === 'creation'");
+    const open = proxy.indexOf('{', at);
+    let depth = 0;
+
+    for (let i = open; i < proxy.length; i++) {
+      if (proxy[i] === '{') {
+        depth++;
+      } else if (proxy[i] === '}' && --depth === 0) {
+        return proxy.slice(open, i + 1);
+      }
+    }
+
+    return '';
+  })();
+
+  /* CONTROLS — the scan found the real branch, so the assertion below can fail. */
+  it('finds the creation branch and it really is the tool set', () => {
+    expect(creationBranch).toContain('fileTools');
+    expect(creationBranch).toContain('referenceTools');
+  });
+
+  it('offers no preview/debugging tools — there is no running game to ask', () => {
+    expect(creationBranch).not.toContain('previewTools');
+  });
+
+  /*
+   * CONTROL — preview tools must still reach ORDINARY turns, where a running game is exactly what the
+   * user is asking about. Without this, deleting them everywhere passes the assertion above.
+   */
+  it('CONTROL — ordinary turns still get them', () => {
+    expect(proxy).toContain('previewTools');
   });
 });

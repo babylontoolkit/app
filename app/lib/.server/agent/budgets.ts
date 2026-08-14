@@ -94,8 +94,24 @@ export const BASELINE_TOOL_ROUNDS = 7;
  *
  * Reads are cheap in TOKENS and expensive in STEPS: a live creation parallelised eight reads into one
  * step but still took three rounds, because it discovers what it needs incrementally.
+ *
+ * 🔴 **RAISED 3 → 6 (live-measured 2026-08-14, `gen_mst2b7sd_vi0z91`).** The first phased build spent
+ * SEVEN steps on tools and never wrote a file. The shape is the thing to read, not the total: the
+ * model batched **ten reads into step 1** — it parallelises perfectly well — and then dribbled
+ * **exactly one read per step for the next five steps**, discovering what it needed as it went. Three
+ * rounds was measured on a MONOLITHIC turn against a smaller manifest; a phase that must inspect a
+ * page, three chrome files, the scaffolded mode and `globals.ts` before rewriting them needs more.
+ *
+ * ⚠️ **Raising this does not "give the model more rope" in the expensive direction.** An extra step
+ * re-reads the WARM prefix at 0.1×, where the failure it prevents is a whole generation delivering
+ * nothing and being refunded — the platform eats the full cost and the user gets no game. The read
+ * COUNT stays capped by `maxFileReads`, so this buys rounds, never unbounded reading.
+ *
+ * ⚠️ It moves `maxToolRounds` with it BY CONSTRUCTION (see the header): the ceiling is derived, so the
+ * "a creation must never get more rounds than an ordinary turn" invariant cannot be broken by editing
+ * this number alone. That derivation is the only reason this is a one-line change.
  */
-export const CREATION_FILE_READ_ROUNDS = 3;
+export const CREATION_FILE_READ_ROUNDS = 6;
 
 export interface AgentBudgets {
   /** Distinct project files one turn may read. */
