@@ -39,7 +39,7 @@ describe('the phase table', () => {
    *
    * *"make uniform looking"*, and then, on the split: *"pick something better for step 4 and not say
    * `Game` in step 4… they are all different, front end, art work, game mode… then something else
-   * fitting."* Front end · Art work · Game world · Core mechanics.
+   * fitting."* Front end · Art work · Game code.
    *
    * These are read as a LIST, and a list is where an inconsistency shows — which is exactly what
    * nothing in a code review shows you (§4.1a's toolbar lesson, one level down). Two rows sharing a
@@ -178,67 +178,6 @@ describe('the phase table', () => {
   it('the art phase forbids inventing an asset path', () => {
     const art = CREATION_PHASES.find((p) => p.id === 'art')!;
     expect(art.task).toMatch(/never a path you expect it to return/i);
-  });
-});
-
-/**
- * 🔴 THE GAME IS TWO STEPS (owner, 2026-08-14): *"I think we should split the game code phase, so in
- * general it handle your BRIEF better."*
- *
- * Splitting the front end off the monolith left `game` as the only step still carrying an unbounded
- * amount of work, so it inherited the exact failure phases were built to remove — measured on
- * `gen_mstgbuqo_pkhkhi`: 34,192 output tokens, a 5.4-minute silent step, then nothing.
- *
- * The seam only helps if the two halves are DISJOINT. Both ways of collapsing it are silent: a core
- * step that builds the whole game is the old monolith with a new label, and a systems step that
- * re-emits the GameMode spends the room the split just bought re-writing a file that was correct.
- */
-describe('the game/systems split', () => {
-  const core = CREATION_PHASES.find((p) => p.id === 'game')!;
-  const systems = CREATION_PHASES.find((p) => p.id === 'game-systems')!;
-
-  it('runs the core before the systems that build on it', () => {
-    const ids = DEFAULT_CREATION_PHASES;
-    expect(ids.indexOf('game')).toBeGreaterThanOrEqual(0);
-    expect(ids.indexOf('game-systems')).toBe(ids.indexOf('game') + 1);
-  });
-
-  /** The bounded half: what makes it bounded is being told what to leave OUT. */
-  it('the core step is told to stop at something that runs, and names what it must leave out', () => {
-    expect(core.task).toMatch(/PLAYABLE CORE/);
-    expect(core.task).toMatch(/must RUN/i);
-    expect(core.task).toMatch(/scoring/i);
-    expect(core.task).toMatch(/NEXT step/i);
-  });
-
-  /**
-   * CONTROL for the clause above: "leave it out" without "do not stub it" buys placeholder systems in
-   * the core step — the work done twice, which is worse than doing it once in the wrong step.
-   */
-  it('the core step forbids stubbing what it is deferring', () => {
-    expect(core.task).toMatch(/do not stub them/i);
-  });
-
-  /** The unbounded half: it must EXTEND. A rewrite is the whole-file-for-one-line waste. */
-  it('the systems step is told to extend the core, never rewrite it', () => {
-    expect(systems.task).toMatch(/do not rewrite them/i);
-    expect(systems.task).toMatch(/own Script Component/i);
-  });
-
-  it('the systems step owns SPEC.md, and the core step does not', () => {
-    expect(systems.task).toContain('SPEC.md');
-    expect(core.task).not.toContain('SPEC.md');
-  });
-
-  /*
-   * Neither game step may touch the front end. The core carried this rule when it was the whole game
-   * phase; the half that was split off it inherits the same fence, or the last step of the build is
-   * free to redesign the page the first step was made mandatory to produce.
-   */
-  it('neither game step may touch the landing page or the chrome', () => {
-    for (const phase of [core, systems]) {
-      expect(phase.task).toMatch(/landing page/i);
-    }
   });
 });
 
@@ -425,7 +364,7 @@ describe('creationPhaseMessage — the VISIBLE line', () => {
 
   it('names the step and what it is', () => {
     expect(creationPhaseMessage(plan, 0)).toBe('Step 1 — front end.');
-    expect(creationPhaseMessage(plan, 1)).toBe('Step 2 — art work.');
+    expect(creationPhaseMessage(plan, 2)).toBe('Step 3 — game code.');
   });
 
   it("defaults to the plan's own next phase", () => {
@@ -520,15 +459,18 @@ describe('creationPhaseNote — what the step owes', () => {
   });
 
   /*
-   * The two game steps get DIFFERENT notes. They are adjacent, similar, and the failure mode of a
-   * mix-up is invisible: a systems note on the core step builds the whole game in one reply, which is
-   * the monolith this split exists to break up, and it would look like an ordinary long turn.
+   * The game step owns the WHOLE game again — GameMode, scene, controls, rules, scoring, SPEC.md.
+   * Pinned because it was briefly narrowed to a core-only step, and a task that still deferred the
+   * rules to a step that no longer runs would ship a game with no scoring and no win condition,
+   * reported as a completed build.
    */
-  it('the two game steps do not share a note', () => {
-    expect(creationPhaseNote('game')).toMatch(/PLAYABLE CORE/);
-    expect(creationPhaseNote('game')).not.toMatch(/Build the GAMEPLAY/);
-    expect(creationPhaseNote('game-systems')).toMatch(/Build the GAMEPLAY/);
-    expect(creationPhaseNote('game-systems')).not.toMatch(/PLAYABLE CORE/);
+  it('the game step owes the whole game, deferring nothing to a retired step', () => {
+    const note = creationPhaseNote('game') ?? '';
+
+    expect(note).toMatch(/Write the GAME/);
+    expect(note).toContain('SPEC.md');
+    expect(note).not.toMatch(/NEXT step/i);
+    expect(note).not.toMatch(/PLAYABLE CORE/);
   });
 
   it('tells a phase not to rewrite what is already correct', () => {
@@ -700,8 +642,20 @@ describe('phaseOwesFiles', () => {
  * capped at two attempts, and is re-armed the moment the plan completes.
  */
 describe('the default plan', () => {
-  it('schedules the four building phases, in order', () => {
-    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game', 'game-systems']);
+  it('schedules the three building phases, in order', () => {
+    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game']);
+  });
+
+  /**
+   * 🔴 THE COUNT IS A DECISION, NOT AN ACCIDENT (owner, live 2026-08-14): *"can we just keep that
+   * little stage thing 3 modes… JUST MAKE SURE IT FINISHES — that is the whole point."*
+   *
+   * Every phase boundary is a bound AND a failure point, and the split added the second without
+   * needing the first. Asserted as a ceiling so a fourth step has to be a deliberate act with this
+   * sentence read first.
+   */
+  it('is THREE steps — a fourth is a failure point, not a bound', () => {
+    expect(DEFAULT_CREATION_PHASES.length).toBe(3);
   });
 
   it('does NOT schedule verify — self-healing owns compile errors', () => {
@@ -776,83 +730,54 @@ describe('retired phases are dropped on the way in', () => {
    * build agreed to do, not a pointer at whatever the current default happens to be.
    */
   /**
-   * 🔴 SPLITTING A PHASE CHANGES WHAT AN EXISTING PHASE ID MEANS — the half that is easy to miss.
+   * 🔴 THE REVERT SELF-HEALS THE SAME WAY (owner, live 2026-08-14).
    *
-   * Plans on disk name `game`. Until the split that meant "write the whole game"; it now means "write
-   * the playable core and stop". A stranded build resumed against the new task would write a bare
-   * core, mark itself COMPLETE, and hand back a game with no scoring and no win condition — worse than
-   * the failure it was resuming from, and reported as a success.
+   * The game split was live for about an hour and is reverted — it bought no bound (the front end and
+   * art steps had already removed the two fixed-size bodies of work, so what was left FIT) and cost a
+   * turn plus one more place a build can stop. Plans written in that hour carry a four-phase list,
+   * including one mid-build, so `game-systems` is RETIRED rather than deleted and those collapse back
+   * to three steps on the next read.
    */
-  it('a plan that has yet to reach the game gains the systems step it now needs', () => {
-    const stranded = {
+  it('a plan written during the split collapses back to the three steps', () => {
+    const midSplit = {
       v: CREATION_PLAN_VERSION,
-      phases: ['frontend', 'art', 'game'],
+      phases: ['frontend', 'art', 'game', 'game-systems'],
       next: 2,
       done: [record('frontend'), record('art')],
     };
 
-    const parsed = parseCreationPlan(stranded)!;
-
-    expect(parsed.phases).toEqual(['frontend', 'art', 'game', 'game-systems']);
-    expect(currentCreationPhase(parsed)?.id).toBe('game');
-    expect(isCreationPlanComplete(parsed)).toBe(false);
-  });
-
-  /**
-   * 🔴 THE OTHER DIRECTION, and the one that spends money if it is wrong. A plan whose `game` phase
-   * has ALREADY RUN ran it under the task that was live at the time — it wrote the whole game. Adding
-   * a step there bills a generation to build systems onto a game that has them.
-   */
-  it('CONTROL — a plan whose game phase already ran is left exactly as it is', () => {
-    const finished = {
-      v: CREATION_PLAN_VERSION,
-      phases: ['frontend', 'art', 'game'],
-      next: 3,
-      done: [record('frontend'), record('art'), record('game')],
-    };
-
-    const parsed = parseCreationPlan(finished)!;
+    const parsed = parseCreationPlan(midSplit)!;
 
     expect(parsed.phases).toEqual(['frontend', 'art', 'game']);
+    expect(currentCreationPhase(parsed)?.id).toBe('game');
+  });
+
+  /** And one that had already run the extra step reads as COMPLETE, not parked on a dead phase. */
+  it('a plan that finished the retired step is complete, not stranded', () => {
+    const parsed = parseCreationPlan({
+      v: CREATION_PLAN_VERSION,
+      phases: ['frontend', 'art', 'game', 'game-systems'],
+      next: 4,
+      done: [record('frontend'), record('art'), record('game'), record('game-systems')],
+    })!;
+
     expect(isCreationPlanComplete(parsed)).toBe(true);
   });
 
-  /* The step is inserted next to its partner, never appended to the end after something else. */
-  it('inserts the systems step immediately after the core, not at the end', () => {
-    const parsed = parseCreationPlan({
-      v: CREATION_PLAN_VERSION,
-      phases: ['game', 'frontend'],
-      next: 0,
-      done: [],
-    })!;
-
-    expect(parsed.phases).toEqual(['game', 'game-systems', 'frontend']);
-  });
-
-  /* CONTROL — idempotent. A plan already carrying both steps must not grow a third on every read. */
-  it('CONTROL — a plan that already has both game steps is untouched', () => {
-    expect(parseCreationPlan(newCreationPlan())!.phases).toEqual([...DEFAULT_CREATION_PHASES]);
-    expect(parseCreationPlan(parseCreationPlan(newCreationPlan()))!.phases).toEqual([...DEFAULT_CREATION_PHASES]);
-  });
-
   /**
-   * A plan parked PAST its old last step still has the new one to run.
-   *
-   * ⚠️ This deliberately does NOT assert the clamp ORDER. A test for that was written — "clamped after
-   * the migration, or a build reports complete on the turn it gains a step" — and it passed with the
-   * ordering reversed: the two clamps differ only above the declared length, which no real plan
-   * reaches. It was deleted rather than kept, because a green test naming a property it cannot see is
-   * how the next person concludes the property is defended.
+   * CONTROL — retiring an id must not UN-DECLARE it. `plan.done` keeps the record of what actually
+   * ran, and `phaseById` has to resolve one to render it; erasing that erases evidence a later change
+   * is not entitled to erase.
    */
-  it('a plan parked past its old last step still runs the new one', () => {
-    const parsed = parseCreationPlan({
-      v: CREATION_PLAN_VERSION,
-      phases: ['frontend', 'art', 'game'],
-      next: 3,
-      done: [record('frontend'), record('art')],
-    })!;
-
-    expect(isCreationPlanComplete(parsed)).toBe(false);
-    expect(currentCreationPhase(parsed)?.id).toBe('game-systems');
+  it('CONTROL — a retired phase still resolves, so the record of it running survives', () => {
+    expect(() => phaseById('game-systems')).not.toThrow();
+    expect(
+      parseCreationPlan({
+        v: CREATION_PLAN_VERSION,
+        phases: ['frontend', 'art', 'game', 'game-systems'],
+        next: 4,
+        done: [record('game-systems')],
+      })!.done.map((d) => d.id),
+    ).toEqual(['game-systems']);
   });
 });

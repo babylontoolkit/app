@@ -193,8 +193,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
 
     /*
      * "Art work", not "Art" (owner, 2026-08-14) — *"make uniform looking"*. Every row names a body of
-     * work in two words and NO two of them share a word: **Front end · Art work · Game world · Core
-     * mechanics**. A one-word row read as a different KIND of thing sitting in the same list, and the
+     * work in two words and NO two of them share a word: **Front end · Art work · Game code**. A one-word row read as a different KIND of thing sitting in the same list, and the
      * step line it feeds ("Step 2 — art.") read as a truncation rather than a label.
      */
     label: 'Art work',
@@ -211,58 +210,54 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
   },
   {
     /*
-     * 🔴 "Game world", not "Game mode" (owner, live 2026-08-14): *"the last two steps don't match what
-     * it is doing… it is on game mode, but it is not a quick thing — there is a lot of heavy thinking
-     * and designing the whole thing."*
+     * 🔴 THE WHOLE GAME IS ONE STEP AGAIN — the split is REVERTED (owner, live 2026-08-14).
      *
-     * Two things were wrong with the old pair, and the fix is the label, not the scope.
+     * *"I mean it is working, everything just is in the Game mode stage… and that is kool… can we just
+     * keep that little stage thing 3 modes… JUST MAKE SURE IT FINISHES — that is the whole point,
+     * unreliable finishes."*
      *
-     * **"Game mode" named the ARTIFACT, not the work.** It is literally accurate — the step writes the
-     * GameMode class — but to anyone watching it reads like selecting a mode from a menu, so the
-     * longest, heaviest step in the build was wearing the smallest-sounding name on the card. This
-     * step builds the scene, the camera, the lighting, the controllable entity, its input and the
-     * update loop: it is the whole world you move around in, and it is where most of the thinking goes.
+     * The split was built to bound the one remaining unbounded step, on the theory that `game` had
+     * inherited the monolith's failure. Watched live, it had not: the front end and art steps had
+     * already taken the two fixed-size bodies of work out of the reply, and what was left FIT. A
+     * fourth step therefore bought nothing and cost a turn — one more warm-prefix read, one more
+     * history re-send, and one more place a build can stop.
      *
-     * **And the pair read BACKWARDS.** "Core mechanics" sounds foundational, so a list running
-     * `Game mode → Core mechanics` invites the reader to ask why the core is not first. `Game world →
-     * Core mechanics` is a progression: build the place, then the rules that govern play in it.
+     * ⚠️ **A step is a failure point as well as a bound.** That is the half the split's reasoning
+     * missed: every phase boundary is somewhere the plan can pause and need a person, and the owner's
+     * stated priority is FINISHING. Splitting work that already fits trades a bound nobody needed for
+     * a stall nobody wants.
      *
-     * ⚠️ A row label is what the user judges the build's honesty by. It has no effect on what the step
-     * DOES — that is the task below — so if the step is doing too much, this comment is not the fix and
-     * the task is.
+     * The label is "Game code" and not "Game world" or "Game mode", both of which this step wore for
+     * about an hour: it owns the GameMode, the scene, the controls, the rules, the scoring and
+     * `SPEC.md`, so a name describing only the world (or only the mode) undersells its scope — and
+     * this row's name is what the user judges the build by while it runs.
+     *
+     * `game-systems` stays DECLARED and RETIRED (see `RETIRED_PHASES`) so the plans written during
+     * that hour resolve and self-heal rather than stranding on a step that no longer runs.
      */
     id: 'game',
-    label: 'Game world',
-    activeLabel: 'Creating your game world',
+    label: 'Game code',
+    activeLabel: 'Writing your game code',
     allowsMedia: false,
     owesFiles: false,
     task:
-      'Write the PLAYABLE CORE — the smallest version of this game that actually runs. Do NOT touch ' +
-      'the landing page or the game chrome, which were designed in the earlier steps and are already ' +
+      'Write the GAME. This step owes the playable project and nothing else — do NOT touch the ' +
+      'landing page or the game chrome, which were designed in the earlier steps and are already ' +
       'correct.\n\n' +
-      'In `src/scripts/**`: the GameMode named above — scene setup, camera, lighting, the player or ' +
-      'other controllable entity, its input, and the update loop that makes it move. Keep the play ' +
-      'contract exactly as described.\n\n' +
-      'When this step ends the project must RUN and respond to the controls, even if it is bare. ' +
-      'Scoring, pickups, obstacles, enemies, levels, HUD and win/lose conditions are the NEXT step — ' +
-      'leave them out, and do not stub them.\n\n' +
+      'Build what the request asks for in `src/scripts/**`: the GameMode named above plus whatever ' +
+      'Script Components, systems and helpers it needs. Keep the play contract exactly as described, ' +
+      'and deliver what the front end promises — its modes, tracks, pickups and scoring are the ' +
+      'specification for this step. Then write `SPEC.md` — a short statement of what this game is ' +
+      'and how it plays.\n\n' +
+      'Put new behaviour in its own Script Component rather than growing the GameMode: more files of ' +
+      'a readable size is both better code and a reply that is less likely to be cut off.\n\n' +
       'If the request was a single narrow change that does not call for game code, do only what was ' +
       'asked and say so in one line.',
   },
   {
     /*
-     * The unbounded half. Its task is written to EXTEND rather than revisit: the core it is building
-     * on was written one turn ago by the same model with the same brief, so the failure to guard
-     * against is not a misunderstanding, it is a rewrite — re-emitting `<Title>Mode.ts` to add a
-     * scoring field is the whole-file-for-one-line waste this repo prices in output tokens, and it
-     * spends the exact room the split just bought.
-     */
-    /*
-     * 🔴 THE `id` IS THE STORED KEY; THE `label` IS THE DISPLAY NAME, AND THEY ARE ALLOWED TO DIFFER.
-     * `game-systems` lives in `projects.creation_handoff` and travels in browser bodies, so renaming
-     * it to match the label would make `parseCreationPhaseId` refuse every plan already carrying it —
-     * which drops the step, and drops it SILENTLY for any plan whose `game` phase has already run
-     * (`withSplitGamePhase` only re-adds it before that point). Rename the label freely; leave the id.
+     * RETIRED the same day it shipped — see the `game` phase above and `RETIRED_PHASES`. Kept
+     * DECLARED, never scheduled, so a plan stored during the hour it was live still resolves.
      */
     id: 'game-systems',
     label: 'Core mechanics',
@@ -272,17 +267,11 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     task:
       'Build the GAMEPLAY on top of the core that now runs. The GameMode, its scene and its controls ' +
       'already exist and work — read them, extend them, and do not rewrite them. Do NOT touch the ' +
-      'landing page or the game chrome either: they were designed in the earlier steps, and this is ' +
-      'the last step of the build, so anything you change here is what the user is left with.\n\n' +
+      'landing page or the game chrome either.\n\n' +
       'This step owes everything the request asked for that the core does not have yet: the rules and ' +
       'scoring, the pickups, obstacles, enemies, tracks or levels, the HUD, and the win and lose ' +
-      'conditions. Deliver what the front end promises — the modes, tracks, pickups and scoring its ' +
-      'design advertises are the specification for this step.\n\n' +
-      'Put new behaviour in its own Script Component in `src/scripts/**` rather than growing the ' +
-      'GameMode, so this step adds files instead of re-emitting the one the previous step wrote.\n\n' +
-      'Then write `SPEC.md` — a short statement of what this game is and how it plays.\n\n' +
-      'If the core already delivers everything the request asked for, add nothing beyond `SPEC.md` ' +
-      'and say so in one line.',
+      'conditions.\n\n' +
+      'If the core already delivers everything the request asked for, add nothing and say so in one line.',
   },
   {
     id: 'verify',
@@ -319,7 +308,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
  * The phase stays in `CREATION_PHASES` so a stored plan naming it still resolves (and so an operator
  * or a future flow can schedule it deliberately); it is simply not scheduled by default.
  */
-export const DEFAULT_CREATION_PHASES: readonly CreationPhaseId[] = ['frontend', 'art', 'game', 'game-systems'];
+export const DEFAULT_CREATION_PHASES: readonly CreationPhaseId[] = ['frontend', 'art', 'game'];
 
 /**
  * Bumped only when the stored shape changes incompatibly. An unrecognised version is treated as NO
@@ -396,44 +385,22 @@ export function parseCreationPhaseId(value: unknown): CreationPhaseId | null {
  * at a step that new builds no longer have. Reported as *"it says step 3 of 4, what happened to step
  * 4 of 4?"* — the honest answer being that step 4 was the one that failed.
  *
+ * `game-systems` is here for the same reason and a different cause: it was live for about an hour and
+ * is REVERTED, not broken (see the `game` phase — the split bought no bound and cost a turn). Plans
+ * written in that hour, including one mid-build, carry a four-phase list; retiring the id is what
+ * lets those collapse back to `front end → art work → game code` on the next read instead of parking
+ * on a step that is no longer scheduled. **This mechanism is the reason a phase can be added or
+ * removed at all** — without it every change to the default list strands whatever is in flight.
+ *
  * Filtered at the PARSE, so one rule covers both doors: a plan read back from the row and a plan
  * posted by a browser. A stranded plan then self-heals — dropping the trailing phase makes `next`
  * clamp to the new length, i.e. the build reads as COMPLETE, which it is: frontend, art and game all
  * landed.
+ *
+ * ⚠️ Retiring an id NEVER un-declares it. `phaseById` must still resolve one for `plan.done`, which
+ * keeps the record of what actually ran — evidence a later change is not entitled to erase.
  */
-const RETIRED_PHASES: readonly CreationPhaseId[] = ['verify'];
-
-/**
- * 🔴 A PLAN THAT STILL OWES `game` OWES `game-systems` TOO (2026-08-14).
- *
- * The mirror of `RETIRED_PHASES`, and it exists because splitting a phase CHANGES WHAT AN EXISTING
- * PHASE ID MEANS. Plans on disk name `game`; until today that meant "write the whole game", and from
- * today it means "write the playable core and stop". A stranded 3-phase build resumed against the new
- * task would therefore write a bare core, mark itself COMPLETE, and hand back a game with no scoring,
- * no pickups and no win condition — a worse outcome than the failure it was resuming from, produced
- * by a build that reported success.
- *
- * 🔴 **Only when `game` has NOT already run.** A plan whose `game` phase is in `done` ran it under the
- * task that was live at the time, i.e. it wrote the whole game — appending a step there would bill a
- * turn to add systems to a game that already has them. So the two directions are: a plan that has yet
- * to reach the game gains the partner step (correct, and free — it has not been paid for), and a plan
- * that is past it is left exactly as it is (correct, and the safe direction, because the cost of being
- * wrong is a generation nobody asked for).
- *
- * Sited at the PARSE for the same reason as the retirement: it is the one door a stored plan and a
- * browser-posted plan both pass through, so the client and the server cannot end up disagreeing about
- * how many steps a build has.
- */
-function withSplitGamePhase(phases: CreationPhaseId[], done: CreationPhaseRecord[]): CreationPhaseId[] {
-  const gameAt = phases.indexOf('game');
-  const alreadyRan = done.some((d) => d.id === 'game');
-
-  if (gameAt < 0 || alreadyRan || phases.includes('game-systems')) {
-    return phases;
-  }
-
-  return [...phases.slice(0, gameAt + 1), 'game-systems', ...phases.slice(gameAt + 1)];
-}
+const RETIRED_PHASES: readonly CreationPhaseId[] = ['verify', 'game-systems'];
 
 /** Does this phase get the media tools? Unknown/absent phases never do. */
 export function phaseAllowsMedia(phase: CreationPhaseId | null): boolean {
@@ -502,27 +469,19 @@ export function parseCreationPlan(value: unknown): CreationPlan | undefined {
       ];
     });
 
-  /* Needs `parsedDone` — the migration turns on whether `game` has already run. */
-  const parsedPhases = withSplitGamePhase(declaredPhases, parsedDone).slice(0, MAX_CREATION_PHASES);
-
   /*
    * Clamped to the phase list rather than trusted. A `next` past the end silently reports a plan as
    * complete; a negative one re-runs a finished phase and pays for it.
    *
-   * Clamped against `parsedPhases` — the list actually being RETURNED — because that is the list
-   * `isCreationPlanComplete` and `currentCreationPhase` will index into. ⚠️ Clamping against
-   * `declaredPhases` instead happens to produce the same answer for every value a real plan can hold
-   * (they differ only above the declared length, which only a corrupt payload reaches), so this is
-   * correctness by construction rather than a defended invariant — a test asserting the ordering was
-   * written, found to pass with the ordering reversed, and deleted rather than left reporting a
-   * property it could not see.
+   * Clamped against the list actually being RETURNED, because that is what `isCreationPlanComplete`
+   * and `currentCreationPhase` index into.
    */
   const parsedNext =
     typeof next === 'number' && Number.isFinite(next)
-      ? Math.min(Math.max(Math.trunc(next), 0), parsedPhases.length)
+      ? Math.min(Math.max(Math.trunc(next), 0), declaredPhases.length)
       : 0;
 
-  return { v: CREATION_PLAN_VERSION, phases: parsedPhases, next: parsedNext, done: parsedDone };
+  return { v: CREATION_PLAN_VERSION, phases: declaredPhases, next: parsedNext, done: parsedDone };
 }
 
 function isTurnOutcomeState(value: unknown): value is TurnOutcomeState {
