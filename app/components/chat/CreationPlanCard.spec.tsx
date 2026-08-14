@@ -74,7 +74,21 @@ describe('CreationPlanCard', () => {
       expect(screen.getByText(new RegExp(`^${n}\\.`))).toBeTruthy();
     }
 
-    expect(screen.getByText(new RegExp(`Step 1 of ${steps}`))).toBeTruthy();
+    expect(screen.getByText(/Step 1\b/)).toBeTruthy();
+  });
+
+  /**
+   * 🔴 NO "of N" ANYWHERE (owner, 2026-08-14): *"no need `of 3` part"* — the card and the phase message
+   * say it the same way, and the card's LIST is what tells the user how long the build is.
+   *
+   * Asserted over the whole card rather than the counter alone: the total was on screen twice, and
+   * fixing the string a test names while leaving the other is how half a rename ships.
+   */
+  it('shows the ordinal without a total', () => {
+    const { container } = mount(planAt(1));
+
+    expect(screen.getByText(/Step 2\b/)).toBeTruthy();
+    expect(container.textContent).not.toMatch(/Step \d+ of/);
   });
 
   it('names the step actually running, in the present tense', () => {
@@ -96,7 +110,7 @@ describe('CreationPlanCard', () => {
       expect(screen.getByText(new RegExp(`^${n}\\.`))).toBeTruthy();
     }
 
-    expect(screen.getByText(new RegExp(`Step 2 of ${steps}`))).toBeTruthy();
+    expect(screen.getByText(/Step 2\b/)).toBeTruthy();
   });
 
   describe('when it must render nothing', () => {

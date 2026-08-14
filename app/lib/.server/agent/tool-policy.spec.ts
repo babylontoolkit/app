@@ -18,8 +18,16 @@ import {
 } from './tool-policy';
 import { MAX_REFERENCE_LOADS } from './reference-tools';
 import { MAX_TOOL_ROUNDS } from './tools';
+import { CREATION_PHASES } from '~/lib/agent/creation-plan';
 
 const base = { isFirstBuildTurn: false, hasMcpTools: false, hasMediaTools: false, preloadedCount: 0, isSlash: false };
+
+/**
+ * Every phase that must NOT get the media tools — DERIVED, so a phase added to the table is covered
+ * the day it is added rather than the day someone remembers this file. `art` is the single exception
+ * and is asserted positively on its own below, so an empty list here cannot pass silently.
+ */
+const NON_ART_PHASES = CREATION_PHASES.filter((p) => p.id !== 'art').map((p) => p.id);
 
 describe('toolPolicyForTurn — first build turns', () => {
   it('opens the CREATION loop with a derived cap PLUS a reserved answer step (§4.16, Phase 2)', () => {
@@ -99,7 +107,12 @@ describe('toolPolicyForTurn — first build turns', () => {
    * cap to match.
    */
   it('does not let media widen a BUILD phase — the two branches are identical', () => {
-    for (const creationPhase of ['game', 'frontend', 'verify'] as const) {
+    /*
+     * Derived from the phase table rather than listed, so a phase added later cannot slip past this
+     * by simply not being in a hand-written array — the shape of the `bt-gauntlet` exclusion lesson,
+     * and of every default-deny scan in this repo.
+     */
+    for (const creationPhase of NON_ART_PHASES) {
       const withMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase, hasMediaTools: true });
       const withoutMedia = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase });
 
@@ -361,7 +374,7 @@ describe('an ordinary MEDIA turn has room for its images (2026-08-08)', () => {
    * that write the project. Only the `art` phase buys it, and only because that is all it does.
    */
   it('never widens a creation build phase', () => {
-    for (const creationPhase of [undefined, 'game', 'frontend', 'verify'] as const) {
+    for (const creationPhase of [undefined, ...NON_ART_PHASES]) {
       const creation = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase, hasMediaTools: true });
 
       expect(creation.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);

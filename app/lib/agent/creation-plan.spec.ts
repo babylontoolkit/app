@@ -30,8 +30,8 @@ import {
 const record = (id: any, state: any = 'finished') => ({ id, generationId: 'gen_1', at: '2026-08-08T00:00:00Z', state });
 
 describe('the phase table', () => {
-  it('DECLARES Frontend -> Art -> Game -> Verify, in that order', () => {
-    expect(CREATION_PHASES.map((p) => p.id)).toEqual(['frontend', 'art', 'game', 'verify']);
+  it('DECLARES Frontend -> Art -> Game core -> Game systems -> Verify, in that order', () => {
+    expect(CREATION_PHASES.map((p) => p.id)).toEqual(['frontend', 'art', 'game', 'game-systems', 'verify']);
   });
 
   /*
@@ -66,10 +66,16 @@ describe('the phase table', () => {
 
   it('phaseAllowsMedia is false for every non-art phase and for no phase at all', () => {
     expect(phaseAllowsMedia('art')).toBe(true);
-    expect(phaseAllowsMedia('game')).toBe(false);
-    expect(phaseAllowsMedia('frontend')).toBe(false);
-    expect(phaseAllowsMedia('verify')).toBe(false);
     expect(phaseAllowsMedia(null)).toBe(false);
+
+    /*
+     * Derived from the table, not a list of the phases someone happened to think of: a new phase that
+     * quietly arrives with `allowsMedia: true` is a step that can spend credits on renders, and a
+     * hand-written list of the OTHER phases cannot notice one.
+     */
+    for (const phase of CREATION_PHASES) {
+      expect(phaseAllowsMedia(phase.id)).toBe(phase.id === 'art');
+    }
   });
 
   /*
@@ -137,8 +143,70 @@ describe('the phase table', () => {
   });
 });
 
+/**
+ * 🔴 THE GAME IS TWO STEPS (owner, 2026-08-14): *"I think we should split the game code phase, so in
+ * general it handle your BRIEF better."*
+ *
+ * Splitting the front end off the monolith left `game` as the only step still carrying an unbounded
+ * amount of work, so it inherited the exact failure phases were built to remove — measured on
+ * `gen_mstgbuqo_pkhkhi`: 34,192 output tokens, a 5.4-minute silent step, then nothing.
+ *
+ * The seam only helps if the two halves are DISJOINT. Both ways of collapsing it are silent: a core
+ * step that builds the whole game is the old monolith with a new label, and a systems step that
+ * re-emits the GameMode spends the room the split just bought re-writing a file that was correct.
+ */
+describe('the game/systems split', () => {
+  const core = CREATION_PHASES.find((p) => p.id === 'game')!;
+  const systems = CREATION_PHASES.find((p) => p.id === 'game-systems')!;
+
+  it('runs the core before the systems that build on it', () => {
+    const ids = DEFAULT_CREATION_PHASES;
+    expect(ids.indexOf('game')).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf('game-systems')).toBe(ids.indexOf('game') + 1);
+  });
+
+  /** The bounded half: what makes it bounded is being told what to leave OUT. */
+  it('the core step is told to stop at something that runs, and names what it must leave out', () => {
+    expect(core.task).toMatch(/PLAYABLE CORE/);
+    expect(core.task).toMatch(/must RUN/i);
+    expect(core.task).toMatch(/scoring/i);
+    expect(core.task).toMatch(/NEXT step/i);
+  });
+
+  /**
+   * CONTROL for the clause above: "leave it out" without "do not stub it" buys placeholder systems in
+   * the core step — the work done twice, which is worse than doing it once in the wrong step.
+   */
+  it('the core step forbids stubbing what it is deferring', () => {
+    expect(core.task).toMatch(/do not stub them/i);
+  });
+
+  /** The unbounded half: it must EXTEND. A rewrite is the whole-file-for-one-line waste. */
+  it('the systems step is told to extend the core, never rewrite it', () => {
+    expect(systems.task).toMatch(/do not rewrite them/i);
+    expect(systems.task).toMatch(/own Script Component/i);
+  });
+
+  it('the systems step owns SPEC.md, and the core step does not', () => {
+    expect(systems.task).toContain('SPEC.md');
+    expect(core.task).not.toContain('SPEC.md');
+  });
+
+  /*
+   * Neither game step may touch the front end. The core carried this rule when it was the whole game
+   * phase; the half that was split off it inherits the same fence, or the last step of the build is
+   * free to redesign the page the first step was made mandatory to produce.
+   */
+  it('neither game step may touch the landing page or the chrome', () => {
+    for (const phase of [core, systems]) {
+      expect(phase.task).toMatch(/landing page/i);
+    }
+  });
+});
+
 describe('parseCreationPhaseId — resolves DOWN', () => {
-  it.each(['game', 'frontend', 'art', 'verify'])('accepts %s', (id) => {
+  /* Every DECLARED id, derived — a new phase the parser refuses is a plan that silently loses a step. */
+  it.each(CREATION_PHASES.map((p) => p.id))('accepts %s', (id) => {
     expect(parseCreationPhaseId(id)).toBe(id);
   });
 
@@ -317,13 +385,33 @@ describe('advance / complete', () => {
 describe('creationPhaseMessage — the VISIBLE line', () => {
   const plan = newCreationPlan();
 
-  it('names the step and the total', () => {
-    expect(creationPhaseMessage(plan, 0)).toContain(`Step 1 of ${plan.phases.length}`);
-    expect(creationPhaseMessage(plan, 2)).toContain(`Step 3 of ${plan.phases.length}`);
+  it('names the step and what it is', () => {
+    expect(creationPhaseMessage(plan, 0)).toBe('Step 1 — front end.');
+    expect(creationPhaseMessage(plan, 1)).toBe('Step 2 — art work.');
   });
 
   it("defaults to the plan's own next phase", () => {
-    expect(creationPhaseMessage({ ...plan, next: 1 })).toContain(`Step 2 of ${plan.phases.length}`);
+    expect(creationPhaseMessage({ ...plan, next: 1 })).toBe('Step 2 — art work.');
+  });
+
+  /**
+   * 🔴 NO "of N" (owner, 2026-08-14): *"no need `of 3` part"*, and every row reads the same way.
+   *
+   * The total belongs to the card, which draws every row. It is also the half that can be WRONG: the
+   * denominator is the plan's own length, and a resumed 3-phase plan is still valid and still runs, so
+   * two messages in one transcript could honestly disagree about how long the build is.
+   */
+  it('carries the ordinal only — never a total', () => {
+    const short = newCreationPlan(['frontend', 'art', 'game']);
+
+    for (const p of [plan, short]) {
+      for (let n = 0; n < p.phases.length; n++) {
+        expect(creationPhaseMessage(p, n)).not.toMatch(/\bof\b/);
+      }
+    }
+
+    /* CONTROL — the two plans agree about step 2 precisely BECAUSE the total is absent. */
+    expect(creationPhaseMessage(plan, 1)).toBe(creationPhaseMessage(short, 1));
   });
 
   /*
@@ -382,6 +470,7 @@ describe('creationPhaseNote — what the step owes', () => {
    */
   it('CONTROL — game and art may still legitimately do nothing', () => {
     expect(creationPhaseNote('game')).toMatch(/say so in one line/i);
+    expect(creationPhaseNote('game-systems')).toMatch(/say so in one line/i);
     expect(creationPhaseNote('art')).toMatch(/say so in one line/i);
   });
 
@@ -389,7 +478,19 @@ describe('creationPhaseNote — what the step owes', () => {
     const note = creationPhaseNote('frontend') ?? '';
 
     expect(note).toContain('bt-landing skill');
-    expect(note).not.toContain('Write the GAME');
+    expect(note).not.toContain('PLAYABLE CORE');
+  });
+
+  /*
+   * The two game steps get DIFFERENT notes. They are adjacent, similar, and the failure mode of a
+   * mix-up is invisible: a systems note on the core step builds the whole game in one reply, which is
+   * the monolith this split exists to break up, and it would look like an ordinary long turn.
+   */
+  it('the two game steps do not share a note', () => {
+    expect(creationPhaseNote('game')).toMatch(/PLAYABLE CORE/);
+    expect(creationPhaseNote('game')).not.toMatch(/Build the GAMEPLAY/);
+    expect(creationPhaseNote('game-systems')).toMatch(/Build the GAMEPLAY/);
+    expect(creationPhaseNote('game-systems')).not.toMatch(/PLAYABLE CORE/);
   });
 
   it('tells a phase not to rewrite what is already correct', () => {
@@ -411,10 +512,24 @@ describe('creationPhaseNote — what the step owes', () => {
 
 describe('describeCreationPlan', () => {
   it('marks done / current / pending in order', () => {
-    const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('frontend')] });
+    const plan = newCreationPlan(['frontend', 'art', 'game']);
+    const view = describeCreationPlan({ ...plan, next: 1, done: [record('frontend')] });
     expect(view.rows.map((r) => r.state)).toEqual(['done', 'current', 'pending']);
-    expect(view.step).toBe('Step 2 of 3');
     expect(view.complete).toBe(false);
+  });
+
+  /* Same wording as the phase message, for the same reason — see `creationPhaseMessage`. */
+  it('reports the ordinal only, so the card and the message agree', () => {
+    const view = describeCreationPlan({ ...newCreationPlan(), next: 1 });
+    expect(view.step).toBe('Step 2');
+    expect(view.step).not.toMatch(/\bof\b/);
+  });
+
+  /* Every phase gets a row — the card exists because the user could not see step 1 or the last step. */
+  it('draws a row for every phase, including the one running and the ones still to come', () => {
+    const plan = newCreationPlan();
+    const view = describeCreationPlan({ ...plan, next: 1 });
+    expect(view.rows.map((r) => r.id)).toEqual(plan.phases);
   });
 
   it("carries each completed phase's own outcome", () => {
@@ -437,10 +552,17 @@ describe('describeCreationPlanOutcome — the plan-level verdict', () => {
    * a metric defined against a failure it no longer detects, reporting health.
    */
   it('is INCOMPLETE while phases remain, naming how many and which is next', () => {
-    const outcome = describeCreationPlanOutcome({ ...newCreationPlan(), next: 1, done: [record('frontend')] });
+    const plan = newCreationPlan();
+    const outcome = describeCreationPlanOutcome({ ...plan, next: 1, done: [record('frontend')] });
     expect(outcome.state).toBe('incomplete');
-    expect(outcome.detail).toContain('2 of 3 steps');
-    expect(outcome.detail).toContain('art');
+
+    /*
+     * Derived. A literal here is the count that goes stale the next time a phase is added or split —
+     * and it would go stale claiming the build is SHORTER than it is, i.e. under-reporting how much
+     * work is outstanding in the one message whose job is to say what is left.
+     */
+    expect(outcome.detail).toContain(`${plan.phases.length - 1} of ${plan.phases.length} steps`);
+    expect(outcome.detail).toContain('art work');
   });
 
   it('is FINISHED when every phase completed cleanly', () => {
@@ -491,7 +613,23 @@ describe('phaseOwesFiles', () => {
   it('a phase that may legitimately do nothing does not owe files', () => {
     expect(phaseOwesFiles('art')).toBe(false);
     expect(phaseOwesFiles('game')).toBe(false);
+    expect(phaseOwesFiles('game-systems')).toBe(false);
     expect(phaseOwesFiles('verify')).toBe(false);
+  });
+
+  /*
+   * The pairing that keeps this honest: a phase excused from writing files must be a phase whose own
+   * task told it so. Otherwise `owesFiles: false` is just the §4.6 refund switched off for a step —
+   * silently, since the symptom is a build that bills in full and delivers nothing.
+   */
+  it('every phase excused from writing files says so in its own task', () => {
+    for (const phase of CREATION_PHASES) {
+      if (phase.owesFiles || phase.id === 'verify') {
+        continue; // `verify` is only scheduled when there is a real compile error to answer
+      }
+
+      expect(phase.task.toLowerCase()).toMatch(/say so in one line/);
+    }
   });
 
   /**
@@ -524,8 +662,8 @@ describe('phaseOwesFiles', () => {
  * capped at two attempts, and is re-armed the moment the plan completes.
  */
 describe('the default plan', () => {
-  it('schedules the three building phases, in order', () => {
-    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game']);
+  it('schedules the four building phases, in order', () => {
+    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game', 'game-systems']);
   });
 
   it('does NOT schedule verify — self-healing owns compile errors', () => {
@@ -588,6 +726,95 @@ describe('retired phases are dropped on the way in', () => {
 
   /* CONTROL — an ordinary plan is untouched, so this filter cannot be silently eating live phases. */
   it('CONTROL — a current plan passes through whole', () => {
-    expect(parseCreationPlan(newCreationPlan())!.phases).toEqual(['frontend', 'art', 'game']);
+    expect(parseCreationPlan(newCreationPlan())!.phases).toEqual([...DEFAULT_CREATION_PHASES]);
+  });
+
+  /**
+   * 🔴 A PLAN STORED BEFORE THE GAME SPLIT KEEPS ITS OWN SHAPE, AND THAT IS THE POINT.
+   *
+   * The phase LIST lives on the project row, so a build parked mid-plan resumes with the steps it
+   * started with — three, ending at `game` — rather than silently growing a fourth step it never
+   * planned for. That is what makes a stranded project recoverable: the plan is a record of what this
+   * build agreed to do, not a pointer at whatever the current default happens to be.
+   */
+  /**
+   * 🔴 SPLITTING A PHASE CHANGES WHAT AN EXISTING PHASE ID MEANS — the half that is easy to miss.
+   *
+   * Plans on disk name `game`. Until the split that meant "write the whole game"; it now means "write
+   * the playable core and stop". A stranded build resumed against the new task would write a bare
+   * core, mark itself COMPLETE, and hand back a game with no scoring and no win condition — worse than
+   * the failure it was resuming from, and reported as a success.
+   */
+  it('a plan that has yet to reach the game gains the systems step it now needs', () => {
+    const stranded = {
+      v: CREATION_PLAN_VERSION,
+      phases: ['frontend', 'art', 'game'],
+      next: 2,
+      done: [record('frontend'), record('art')],
+    };
+
+    const parsed = parseCreationPlan(stranded)!;
+
+    expect(parsed.phases).toEqual(['frontend', 'art', 'game', 'game-systems']);
+    expect(currentCreationPhase(parsed)?.id).toBe('game');
+    expect(isCreationPlanComplete(parsed)).toBe(false);
+  });
+
+  /**
+   * 🔴 THE OTHER DIRECTION, and the one that spends money if it is wrong. A plan whose `game` phase
+   * has ALREADY RUN ran it under the task that was live at the time — it wrote the whole game. Adding
+   * a step there bills a generation to build systems onto a game that has them.
+   */
+  it('CONTROL — a plan whose game phase already ran is left exactly as it is', () => {
+    const finished = {
+      v: CREATION_PLAN_VERSION,
+      phases: ['frontend', 'art', 'game'],
+      next: 3,
+      done: [record('frontend'), record('art'), record('game')],
+    };
+
+    const parsed = parseCreationPlan(finished)!;
+
+    expect(parsed.phases).toEqual(['frontend', 'art', 'game']);
+    expect(isCreationPlanComplete(parsed)).toBe(true);
+  });
+
+  /* The step is inserted next to its partner, never appended to the end after something else. */
+  it('inserts the systems step immediately after the core, not at the end', () => {
+    const parsed = parseCreationPlan({
+      v: CREATION_PLAN_VERSION,
+      phases: ['game', 'frontend'],
+      next: 0,
+      done: [],
+    })!;
+
+    expect(parsed.phases).toEqual(['game', 'game-systems', 'frontend']);
+  });
+
+  /* CONTROL — idempotent. A plan already carrying both steps must not grow a third on every read. */
+  it('CONTROL — a plan that already has both game steps is untouched', () => {
+    expect(parseCreationPlan(newCreationPlan())!.phases).toEqual([...DEFAULT_CREATION_PHASES]);
+    expect(parseCreationPlan(parseCreationPlan(newCreationPlan()))!.phases).toEqual([...DEFAULT_CREATION_PHASES]);
+  });
+
+  /**
+   * A plan parked PAST its old last step still has the new one to run.
+   *
+   * ⚠️ This deliberately does NOT assert the clamp ORDER. A test for that was written — "clamped after
+   * the migration, or a build reports complete on the turn it gains a step" — and it passed with the
+   * ordering reversed: the two clamps differ only above the declared length, which no real plan
+   * reaches. It was deleted rather than kept, because a green test naming a property it cannot see is
+   * how the next person concludes the property is defended.
+   */
+  it('a plan parked past its old last step still runs the new one', () => {
+    const parsed = parseCreationPlan({
+      v: CREATION_PLAN_VERSION,
+      phases: ['frontend', 'art', 'game'],
+      next: 3,
+      done: [record('frontend'), record('art')],
+    })!;
+
+    expect(isCreationPlanComplete(parsed)).toBe(false);
+    expect(currentCreationPhase(parsed)?.id).toBe('game-systems');
   });
 });
