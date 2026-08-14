@@ -40,7 +40,6 @@
  * single definition is the only thing that stops the two disagreeing about what a phase IS or
  * whether a build is over — the two-writers drift this codebase keeps rediscovering.
  */
-import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import type { TurnOutcomeState } from './turn-outcome';
 
 export type CreationPhaseId = 'game' | 'frontend' | 'art' | 'verify';
@@ -94,9 +93,16 @@ export interface CreationPhase {
  * `frontend` just created — separating that pair would be a real regression.
  *
  * ⚠️ The same rule is stated to the model in the baked prompt's "BUILD ORDER" section
- * (`prompt/sections/20-hard-constraints.md`), which is the LIVE path while this plan is inert (§4.4a:
- * nothing sends `CREATION_BRIEF_MARKER`, so no phase message is ever composed). The two must never
- * disagree about which way round a build goes.
+ * (`prompt/sections/20-hard-constraints.md`), which covers a build that runs as a single turn (an
+ * older project, or the unregistered-project fallback). The two must never disagree about which way
+ * round a build goes.
+ *
+ * ⚠️ **This comment said "the LIVE path while this plan is inert" until 2026-08-14, and it was true.**
+ * The whole phase system shipped on 2026-08-08 with no client caller — `creationPhaseMessage` was
+ * referenced by nothing outside its own spec — so it was built, tested, green and unreachable, while
+ * every creation kept running as the monolithic turn documented at the top of this file. The runner
+ * (`~/lib/chat/creation-plan-runner`) is that caller. A feature whose own source comment says it is
+ * inert is not a note for later; it is a bug report nobody filed.
  */
 export const CREATION_PHASES: readonly CreationPhase[] = [
   {
@@ -355,6 +361,59 @@ export function isCreationPlanComplete(plan: CreationPlan | undefined | null): b
   return !plan || plan.next >= plan.phases.length;
 }
 
+/**
+ * 🔴 DOES THIS PROJECT STILL OWE A BUILD? — the SERVER's definition of a first build turn (2026-08-14).
+ *
+ * ## The failure this exists for
+ *
+ * `carriesCreationBrief` was the only answer to "is this a first build turn?", and it sniffs the last
+ * user message for `CREATION_BRIEF_MARKER`. The hidden brief was retired on 2026-08-08 (`dc58da2`) —
+ * deliberately, the guidance moved into the baked prompt — and the CLIENT derivation was updated to
+ * match. The SERVER's was not, so the flag has been **permanently false ever since**, and with it all
+ * ten protections it drives. Measured on `gen_msswm3qx_u4u2bt`: a creation ran 416s across 9 tool
+ * rounds with the ORDINARY tool policy and no skills preloaded, emitted 82 characters and zero files,
+ * and settled `completed` for 117 credits — because `owesFiles` is `isFirstBuildTurn && !discussNote`,
+ * so the §4.6 no-files refund could not fire. `statusKind: "edit"` on a brand-new project is the
+ * fingerprint.
+ *
+ * Nothing threw, and the whole suite stayed green: every spec asserts *"with the marker present, X
+ * happens"*, with the flag both true and false, mutation-verified. **None asserted the marker is ever
+ * present on a real build.** Same shape as the cache warmer's `not KIE` guard — a test can only assert
+ * the behaviour someone wrote down; it cannot notice that the behaviour stopped being reachable.
+ *
+ * ## Why the ROW and not the message
+ *
+ * This flag now gates a REFUND, so it may never be a value the browser can assert. The project row is
+ * the one authority the client cannot forge: `creation_handoff` is written by an ownership-checked
+ * PATCH whose plan counter is monotonic (`mergeCreationPlan`), and its PRESENCE has meant "created,
+ * never built" since migration 0016. The agent route already loads the project for its ownership
+ * check, so reading this costs nothing.
+ *
+ * ⚠️ **The "no plan" case is the OPPOSITE of `isCreationPlanComplete`'s, and that is not an
+ * inconsistency.** For a PLAN, absent means "there is nothing left to run" — correct, it is asked
+ * about a plan that may never have existed. For a PROJECT, a handoff with no plan is a project that
+ * was created and whose build has not started yet: the most owed a build can possibly be. Reusing the
+ * plan predicate here would return `false` for exactly the turn this function exists to identify, and
+ * it would do it silently.
+ */
+export function projectOwesBuild(handoff: { plan?: CreationPlan; userPrompt?: string } | null | undefined): boolean {
+  /*
+   * Cleared. Under migration 0016 that meant "the first build turn was sent"; since phases it means
+   * "the last phase completed" (`CreationHandoff.plan`). Either way the build is over, and every later
+   * turn is an ordinary edit.
+   */
+  if (!handoff) {
+    return false;
+  }
+
+  // Created, never built — see the ⚠️ above.
+  if (!handoff.plan) {
+    return true;
+  }
+
+  return !isCreationPlanComplete(handoff.plan);
+}
+
 /** The phase that runs next, or `null` when the plan is complete. */
 export function currentCreationPhase(plan: CreationPlan | undefined | null): CreationPhase | null {
   if (!plan || isCreationPlanComplete(plan)) {
@@ -365,28 +424,60 @@ export function currentCreationPhase(plan: CreationPlan | undefined | null): Cre
 }
 
 /**
- * The text of a phase turn.
+ * The VISIBLE text of a phase turn — one short line, and deliberately nothing else.
  *
- * 🔴 **It carries `CREATION_BRIEF_MARKER` verbatim.** `carriesCreationBrief` sniffs the last user
- * message for that exact string, and TEN protections hang off the result — the premium tier lock,
- * `owesFiles` (which is what makes a turn that writes nothing a FAILURE rather than a success), the
- * completeness pass, and `describeTurnOutcome`, which returns `finished` for any turn that is not a
- * first build turn. Drop the marker from a phase message and that phase becomes an ordinary edit:
- * unable to report `incomplete`, unable to be refunded for writing nothing, silently.
+ * 🔴 **The TASK is not in here; it rides in the system tail** (`creationPhaseNote`). Three reasons,
+ * and the first two are rules this repo already enforces elsewhere:
  *
- * ⚠️ It deliberately does NOT repeat the brief. The brief rode on phase 0 and is in the conversation;
- * re-sending it per phase pays for it again on every turn, forever, in an UNCACHED history.
+ *   1. **The history is UNCACHED and permanent.** Every byte of a user message is re-sent at full
+ *      input rate on every later turn, forever. A four-phase build would weld ~5KB of instructions
+ *      into the transcript to say something the model only needs on the turn it applies to.
+ *   2. **The user's own message stays the user's own.** The hidden machine-written brief was retired
+ *      by owner decision on 2026-08-08 and `new-project-mode-wiring.spec.tsx` pins its absence. An
+ *      earlier draft of phases appended the task to the user's words instead — visible, so not
+ *      literally the thing that was removed, but the same idea wearing a better hat. The rule stands.
+ *   3. **Phase 1 needs no message at all.** It rides the words the user actually typed, with only
+ *      `creationPhase` in the request body, so the first build turn is byte-identical to what it was.
+ *
+ * ⚠️ It no longer carries `CREATION_BRIEF_MARKER`, and that is safe ONLY because the server stopped
+ * depending on it: `isFirstBuildTurn` is derived from the project ROW now (`projectOwesBuild`), which
+ * is true for every phase until the last one lands. Restoring a marker check as the sole signal is
+ * how this went dead for six days — see that function's header.
  */
 export function creationPhaseMessage(plan: CreationPlan, index: number = plan.next): string {
   const phase = phaseById(plan.phases[index]);
-  const step = `Step ${index + 1} of ${plan.phases.length} — ${phase.label.toLowerCase()}.`;
+
+  return `Step ${index + 1} of ${plan.phases.length} — ${phase.label.toLowerCase()}.`;
+}
+
+/**
+ * What this step owes, as a SYSTEM note for the turn it applies to (§4.4e).
+ *
+ * ## Placement
+ *
+ * Appended in the VOLATILE TAIL, after the last cache breakpoint — the same rule as `discussNote` and
+ * the media protocol note, and for the same reason: it changes on every phase, so anywhere earlier
+ * would re-write the file-context entry at the 2× cache-WRITE rate four times per build. In the tail
+ * it costs one uncached read of ~300 tokens and invalidates nothing.
+ *
+ * ## Why a note and not a message
+ *
+ * It is instructions for THIS turn, not a thing the user said. Putting it in the conversation would
+ * pay for it on every subsequent turn forever (the history is uncached), and would leave four blocks
+ * of scaffolding sitting in a transcript the user reads.
+ */
+export function creationPhaseNote(phase: CreationPhaseId | null): string | null {
+  if (!phase) {
+    return null;
+  }
+
+  const { label, task } = phaseById(phase);
 
   return (
-    `${CREATION_BRIEF_MARKER} Do not re-create it.\n\n` +
-    `**${step}**\n\n` +
-    `${phase.task}\n\n` +
-    'The project facts are in the brief earlier in this conversation. Do NOT rewrite files that are ' +
-    'already correct — emit only what this step owes.'
+    `# This step of the build: ${label}\n\n` +
+    `The project already exists and is installed — do not re-create it.\n\n` +
+    `${task}\n\n` +
+    'Do NOT rewrite files that are already correct — emit only what this step owes.'
   );
 }
 

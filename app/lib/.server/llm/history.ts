@@ -411,3 +411,70 @@ export function historySavings(before: Message[], after: Message[]): number {
 
   return size(before) - size(after);
 }
+
+/**
+ * 🔴 STRIP THINKING FROM PROVIDER MESSAGES BEFORE REPLAYING THEM (2026-08-14).
+ *
+ * ## The failure
+ *
+ *     ValidationException: ***.***.content.0: Invalid `signature` in `thinking` block
+ *     (Bedrock Runtime: InvokeModelWithResponseStream, 400)
+ *
+ * Three passes in `proxy.ts` start a SECOND stream inside one generation — the forced continuation,
+ * the unproductive rescue, and the creation completeness pass — and each replays
+ * `(await first.response).messages` VERBATIM. Those are the provider's own assistant messages, and on
+ * a thinking model they open with a `reasoning` block carrying the signature that provider issued.
+ *
+ * Replaying it is only safe if the same backend validates it. It is not: the platform is a GATEWAY
+ * chain (Comet → Bedrock), a signature is scoped to the backend that minted it, and the second
+ * request need not land on the same one. Anthropic-direct accepted these, which is why the passes ran
+ * for months without anyone seeing it.
+ *
+ * ⚠️ **This is the sibling of `stripReasoning` above, and the two must not diverge.** That one
+ * protects the CLIENT's history (`Message`, `parts[]`); this one protects the SERVER's replay
+ * (`CoreMessage`, `content[]`). Same rule — *a thinking block from a previous request is never sent
+ * back* — expressed over the other message type, because the AI SDK uses a different shape for each.
+ * A fix applied to only one of them leaves the other failing, in a path that runs on the most
+ * expensive generation in the product.
+ *
+ * ## Why dropping it is correct, not merely convenient
+ *
+ * Anthropic requires thinking to survive WITHIN a turn (across tool results), which `streamText`
+ * handles internally — our tool loop lives inside one call. Every one of these replays appends a new
+ * user message after the assistant turn, which CLOSES it, so the prior thinking is no longer part of
+ * an open exchange. It is also the cheaper answer: reasoning is re-sent uncached at full rate, and a
+ * real creation emits ~15k characters of it.
+ *
+ * ⚠️ Tool calls and tool results are left ALONE. The continuation exists precisely because the model
+ * was mid-tool-loop, and a continuation that cannot see what its tools returned would re-run them.
+ */
+export function stripReplayedReasoning<T extends { role: string; content: unknown }>(messages: T[]): T[] {
+  return messages
+    .map((message) => {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) {
+        return message;
+      }
+
+      const content = (message.content as Array<{ type?: string }>).filter(
+        (part) => part?.type !== 'reasoning' && part?.type !== 'redacted-reasoning',
+      );
+
+      if (content.length === message.content.length) {
+        return message;
+      }
+
+      /*
+       * An assistant message that was ONLY thinking would become empty, and an empty content array is
+       * itself a 400 on several providers. Drop the message instead — it said nothing the continuation
+       * needs, and a turn it cannot see is better than a turn it cannot send.
+       */
+      return { ...message, content } as T;
+    })
+    .filter((message) => {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) {
+        return true;
+      }
+
+      return message.content.length > 0;
+    });
+}

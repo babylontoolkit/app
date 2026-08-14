@@ -68,6 +68,9 @@ const EDIT = 'make the karts faster and add a boost pad';
 const REPO = process.cwd();
 const proxyRaw = readFileSync(join(REPO, 'app/lib/.server/agent/proxy.ts'), 'utf-8');
 
+/** The agent ROUTE — it resolves `owesBuild` from the project row and hands it to the proxy. */
+const route = readFileSync(join(REPO, 'app/routes/api.agent.ts'), 'utf-8').replace(/\/\*[\s\S]*?\*\//g, '');
+
 /**
  * Comments are documentation, not behaviour — and here the distinction is load-bearing in both
  * directions: the retirement post-mortem in `proxy.ts` quotes the OLD name and describes the
@@ -124,7 +127,43 @@ describe('CONTROLS — the source scan can still see the code it judges', () => 
   });
 
   it('finds the derivation itself — every assertion below is about this one boolean', () => {
-    expect(statement(proxy, 'isFirstBuildTurn')).toContain('carriesCreationBrief(messages0)');
+    expect(statement(proxy, 'isFirstBuildTurn')).toContain('isFirstBuildTurnFor(');
+  });
+
+  /**
+   * 🔴 THE ASSERTION THIS WHOLE FILE WAS MISSING (2026-08-14).
+   *
+   * Every test below pins a CONSUMER: "given the flag, does X happen?" Not one of them asked whether
+   * the flag is ever TRUE in production — and for six days it was not. The hidden brief was retired on
+   * 2026-08-08 (`dc58da2`), `carriesCreationBrief` became a search for a string nothing sends, and all
+   * ten protections switched off with the suite green: bounded creation tool rounds, the preloaded
+   * skills, the completeness pass, and the §4.6 refund for a build that writes no files. Measured on
+   * `gen_msswm3qx_u4u2bt`: 416s, 9 tool rounds, 82 characters, zero files, 117 credits, `completed`.
+   *
+   * So the derivation must ALSO read the project row, which is the signal that cannot silently stop
+   * being sent (`projectOwesBuild` — a fact about a row, not a substring of a message). This asserts
+   * the wiring; `project-owes-build.spec.ts` asserts the rule.
+   *
+   * ⚠️ A message-only derivation must never come back. That is not a style preference: it is the
+   * single line whose failure mode is invisible, because a context regression costs $0, throws
+   * nothing, and makes the token count go DOWN.
+   */
+  it('derives the flag from the project ROW, not only from the message', () => {
+    /* Brace-matched: the derivation is a call, so `statement` would stop at the opening line. */
+    const derivation = callArgs(proxy, 'isFirstBuildTurnFor');
+
+    /* CONTROL — the extractor really found the call, so the assertions below can fail. */
+    expect(derivation).toContain('carriesBrief');
+
+    expect(derivation).toContain('owesBuild');
+
+    /*
+     * And the ROUTE resolves it from the row it already loads for the ownership check. Asserted here
+     * because the proxy can only receive what the route sends: a proxy reading `request.owesBuild`
+     * from a route that never sets it is the same outage with an extra step.
+     */
+    expect(route).toContain('owesBuild: projectOwesBuild(');
+    expect(route).toContain('requireOwnedProject');
   });
 
   /*

@@ -55,7 +55,7 @@ import { getModelTiers } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
-import { parseCreationPhaseId } from '~/lib/agent/creation-plan';
+import { creationPhaseNote, parseCreationPhaseId } from '~/lib/agent/creation-plan';
 import { toolkitSystemsNoteForRequest } from '~/lib/agent/toolkit-systems';
 import {
   decideModelTier,
@@ -101,6 +101,7 @@ import type { LanguageModelV1 } from 'ai';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import {
   compactHistory,
+  stripReplayedReasoning,
   historySavings,
   historySize,
   HISTORY_WINDOW_TURNS,
@@ -316,6 +317,19 @@ export interface AgentRequest {
   creationPhase?: string;
 
   /**
+   * 🔴 Does this project still owe a build? — resolved by the ROUTE from the project ROW, and the
+   * reason `isFirstBuildTurn` is a fact again rather than a string match (`projectOwesBuild`).
+   *
+   * NOT part of the request body and it must never become one: it decides `owesFiles`, i.e. whether a
+   * turn that writes nothing is REFUNDED. Everything else on this interface that arrives from a
+   * browser resolves DOWN when it is unrecognised; this one cannot resolve at all, so it is derived
+   * server-side from an ownership-checked row the client can only advance monotonically.
+   *
+   * Absent means "no project named" — a generation with nothing to build into is never a first build.
+   */
+  owesBuild?: boolean;
+
+  /**
    * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
    * RLS-first. Never a credential: only the public project ref and whether RLS is confirmed.
    */
@@ -521,6 +535,35 @@ function lastUserText(messages: Message[]): string {
  */
 export function carriesCreationBrief(messages: Message[]): boolean {
   return lastUserText(messages).includes(CREATION_BRIEF_MARKER);
+}
+
+/**
+ * 🔴 IS THIS A FIRST BUILD TURN? — two signals, and the MESSAGE one is now the legacy half.
+ *
+ * `carriesCreationBrief` was the whole answer until 2026-08-14, and it had been returning `false` on
+ * every creation since the hidden brief was retired on 2026-08-08. Six days, ten protections off,
+ * nothing red — the post-mortem is on `projectOwesBuild`, which is the signal that replaces it.
+ *
+ * Both are kept and OR'd, because they answer for different eras and neither covers the other:
+ *
+ *   - **`owesBuild`** — the project row still carries a `creation_handoff` with work outstanding.
+ *     Server-derived, unforgeable, and true for every phase of a plan until the last one lands. This
+ *     is the live path.
+ *   - **`carriesBrief`** — the last user message contains `CREATION_BRIEF_MARKER`. Live only for
+ *     phase messages (`creationPhaseMessage` emits it verbatim) and for the saved transcripts of
+ *     projects built before the retirement, whose rows were cleared long ago. Dropping it would make
+ *     a resumed old build an ordinary edit.
+ *
+ * ⚠️ OR, never AND. A phase message carries the marker AND its row owes a build, so the two agree on
+ * the common path — but they disagree at both ends of a project's life, and requiring both would
+ * reproduce the outage in the half nobody was looking at.
+ *
+ * Pure and exported for `carriesCreationBrief`'s reason: this one boolean drives ten behaviours, a
+ * verifier once broke five of them at once with the suite green, and the derivation itself had no
+ * seam at all — which is precisely how it went dead without a single test noticing.
+ */
+export function isFirstBuildTurnFor(input: { carriesBrief: boolean; owesBuild: boolean }): boolean {
+  return input.carriesBrief || input.owesBuild;
 }
 
 /**
@@ -780,7 +823,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * PREMIUM decision needs it: a first build on KIE-buffered Fable 5 dies at the gateway timeout before
    * its artifact can flush (see `premium.ts`). The tool policy below reuses the same value.
    */
-  const isFirstBuildTurn = carriesCreationBrief(messages0);
+  /*
+   * 🔴 Read from the ROW as well as the message since 2026-08-14. `carriesCreationBrief` alone was
+   * silently false on every creation for six days (`projectOwesBuild`); `owesBuild` is the
+   * server-derived half and is what makes this a fact rather than a string match.
+   */
+  const isFirstBuildTurn = isFirstBuildTurnFor({
+    carriesBrief: carriesCreationBrief(messages0),
+    owesBuild: Boolean(request.owesBuild),
+  });
 
   /*
    * WHICH PHASE of the creation plan this is (§4.4e), or `null` for the pre-phase single turn.
@@ -1413,6 +1464,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   if (discussNote) {
     system.push({ role: 'system', content: discussNote });
+  }
+
+  /*
+   * 🔴 WHAT THIS PHASE OWES (§4.4e) — same placement rule as `discussNote` above, and for the same
+   * reason: it changes on EVERY phase, so anywhere ahead of a breakpoint would re-write the
+   * file-context entry at the 2x cache-WRITE rate four times per build.
+   *
+   * This is what makes a phase a phase. `creationPhase` alone tells the model which step it is on and
+   * never what the step is FOR — which is the monolithic turn again, wearing a label. `creationPhase`
+   * is already `null` for anything that is not a first build turn, so an ordinary edit can never
+   * receive one.
+   */
+  const phaseNote = creationPhaseNote(creationPhase);
+
+  if (phaseNote) {
+    system.push({ role: 'system', content: phaseNote });
   }
 
   /*
@@ -2311,7 +2378,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         forcedContinuation = true;
         logger.warn(`Tool-round cap (${toolPolicy.maxSteps - 1}) reached — forcing a final answer with tools disabled`);
 
-        const priorMessages = (await first.response).messages;
+        const priorMessages = stripReplayedReasoning((await first.response).messages);
 
         const continuation = startStream(
           [
@@ -2383,7 +2450,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
             'no tool calls) — the model announced work it did not do; forcing one corrective pass',
         );
 
-        const priorMessages = (await first.response).messages;
+        const priorMessages = stripReplayedReasoning((await first.response).messages);
 
         const rescue = startStream(
           [...system, ...coreMessages, ...priorMessages, { role: 'user', content: UNPRODUCTIVE_RESCUE_PROMPT }],
@@ -2428,7 +2495,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         creationCompletionPass = true;
         logger.info('First build turn finished — running the completeness pass before closing the turn');
 
-        const priorMessages = (await first.response).messages;
+        const priorMessages = stripReplayedReasoning((await first.response).messages);
 
         const completion = startStream(
           [...system, ...coreMessages, ...priorMessages, { role: 'user', content: CREATION_COMPLETION_PROMPT }],

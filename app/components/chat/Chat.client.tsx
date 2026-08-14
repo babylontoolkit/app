@@ -62,7 +62,16 @@ import {
   exitNewProjectMode,
   hydrateNewProjectMode,
   newProjectModeStore,
+  updateCreationPlan,
 } from '~/lib/stores/new-project-mode';
+import {
+  advanceCreationPlan,
+  creationPhaseMessage,
+  isCreationPlanComplete,
+  newCreationPlan,
+  parseCreationPlan,
+} from '~/lib/agent/creation-plan';
+import { creationPlanActive, decideNextCreationTurn, type CreationPauseReason } from '~/lib/chat/creation-plan-runner';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
 import { trackMediaTask } from '~/lib/media/tasks';
 import { streamActivitySize } from '~/lib/chat/stream-activity';
@@ -114,6 +123,41 @@ function readTurnOutcome(annotations: unknown[] | undefined): TurnOutcome | null
   const facts = meta?.value?.outcomeFacts;
 
   return facts ? describeTurnOutcome(facts as Parameters<typeof describeTurnOutcome>[0]) : null;
+}
+
+/**
+ * The server's id for the generation that just finished, off the same `agentMeta` annotation.
+ *
+ * Extracted so the repair watch and the creation plan read it through ONE rule. They ask for the same
+ * fact for different reasons — a repair must NAME what it repairs, a phase record is the join to what
+ * that phase COST — and two inline `annotations.find` copies is the shape of drift this file already
+ * carries several notes about.
+ */
+function readGenerationId(annotations: unknown[] | undefined): string | undefined {
+  const meta = annotations?.find(
+    (a): a is { type: string; value?: { generationId?: string } } =>
+      Boolean(a) && typeof a === 'object' && (a as { type?: unknown }).type === 'agentMeta',
+  );
+
+  return meta?.value?.generationId;
+}
+
+/**
+ * Every queued action's terminal-ness, for `waitForActionsSettled`.
+ *
+ * One reader, three callers (the celebration, the phase advance, and the phase pause) — and they must
+ * agree on what "settled" looks at, or a phase can advance over a tree the celebration would still be
+ * waiting on.
+ */
+function readSettleableStatuses() {
+  return settleableStatuses(
+    Object.values(workbenchStore.artifacts.get()).flatMap((artifact) =>
+      Object.values(artifact.runner.actions.get()).map((action) => ({
+        type: action.type,
+        status: action.status,
+      })),
+    ),
+  );
 }
 
 /*
@@ -416,13 +460,28 @@ export const ChatImpl = memo(
 
       getProject(activeProjectId)
         .then((project) => {
-          const handoff = (project as { creationHandoff?: { userPrompt?: string } }).creationHandoff;
+          const handoff = (project as { creationHandoff?: { userPrompt?: string; plan?: unknown } }).creationHandoff;
 
           if (!handoff || projectId.get() !== activeProjectId || newProjectModeStore.get()) {
             return;
           }
 
-          enterNewProjectMode({ projectId: activeProjectId, userPrompt: handoff.userPrompt });
+          /*
+           * 🔴 The PLAN comes back too (§4.4e), or a build interrupted on one device restarts from
+           * phase 1 on the next — redoing work the user has already paid for and overwriting files
+           * that were correct. `parseCreationPlan` validates it on the way in: this is a wire value,
+           * and a malformed plan resolves to "no plan" (the pre-phase single turn), never to a clear.
+           *
+           * ⚠️ It is HYDRATED, not RESUMED. Nothing is armed here, so no generation starts on page
+           * load — the user presses Build, and the send path continues from `plan.next` rather than
+           * starting over. Auto-running on mount would spend credits nobody asked for at that moment,
+           * which is the one thing every decider in this flow exists to prevent.
+           */
+          enterNewProjectMode({
+            projectId: activeProjectId,
+            userPrompt: handoff.userPrompt,
+            plan: parseCreationPlan(handoff.plan),
+          });
         })
         .catch((error) => {
           logger.warn('Could not read the creation handoff for this project', error);
@@ -485,6 +544,39 @@ export const ChatImpl = memo(
      * Cleared on fire so edits and repairs never trigger it.
      */
     const creationCompleteRef = useRef(false);
+
+    /**
+     * The creation phase the runner has armed, or `null` (§4.4e, `decideNextCreationTurn`).
+     *
+     * 🔴 A ref and a one-shot LATCH, exactly like `repairWatch`. The effect that consumes it re-runs on
+     * every render, so without an arm that is cleared BEFORE the `append` it would post the same phase
+     * repeatedly the instant `isLoading` goes false — a self-inflicted loop that bills a full generation
+     * per render. Set only after the finished phase's actions have settled AND the row has accepted the
+     * advance, which is what stops it running a phase the server does not believe is next.
+     */
+    const armedPhaseRef = useRef<number | null>(null);
+
+    /** Mirrors the ref into render so the effect re-evaluates when a phase is armed. */
+    const [armedPhase, setArmedPhase] = useState<number | null>(null);
+
+    /**
+     * 🔴 WAS THE TURN THAT JUST FINISHED A PHASE? — set on a phase send, cleared on every other one.
+     *
+     * Without this, `onFinish` advances the plan for ANY turn that ends while a plan is active — and a
+     * user can type their own message mid-build (a question, a correction, a retry after a failure).
+     * Those turns would silently tick the plan forward, so a phase the user paid for is skipped and
+     * never runs, and the build completes having quietly missed a step.
+     *
+     * Caught by `creation-celebration.spec.tsx`: a failed build, then `/clear`, then an ordinary edit
+     * marched the plan to completion and fired "🎮 Your game is ready" over a project with no game.
+     */
+    const phaseTurnRef = useRef(false);
+
+    /**
+     * Why the creation plan stopped, if it did. Terminal until the user acts — never re-derived, or a
+     * paused plan starts running again on its own (`decideNextCreationTurn`).
+     */
+    const [phasePause, setPhasePause] = useState<CreationPauseReason | null>(null);
 
     const {
       messages,
@@ -618,12 +710,35 @@ export const ChatImpl = memo(
         setData(undefined);
 
         /*
-         * Celebrate the initial build, exactly once, when a fresh project's creation generation lands
-         * (§4.4). Ref-gated so it never fires on an edit or a self-heal — those are not "your game is
-         * ready" moments. Distinct from the §4.5.4b save nudge (that is about persistence and fires
-         * once per BROWSER); this is about the build finishing and fires once per PROJECT.
+         * THE CREATION PLAN (§4.4e) — whether this turn finished the BUILD is a question about the
+         * PLAN, not about the stream. Read from the STORE, never from a captured render value:
+         * `useStore` is a render capture and the plan advances between commits by design (the
+         * documented `projectId: undefined` post-mortem, §4.4a).
          */
-        if (creationCompleteRef.current) {
+        const livePlan = newProjectModeStore.get()?.plan;
+        const planProjectId = newProjectModeStore.get()?.projectId ?? '';
+        const outcome = readTurnOutcome(message.annotations);
+
+        /**
+         * Celebrate the initial build, exactly once (§4.4). Ref-gated so it never fires on an edit or a
+         * self-heal — those are not "your game is ready" moments. Distinct from the §4.5.4b save nudge
+         * (that is about persistence and fires once per BROWSER); this is about the build finishing and
+         * fires once per PROJECT.
+         *
+         * 🔴 **A FUNCTION, because its two callers reach this moment at different TIMES** (2026-08-14).
+         * With no plan it fires synchronously from `onFinish`, exactly as it always did; with one it
+         * fires from inside the settle-and-advance promise, on the turn that completes the LAST phase.
+         *
+         * The first draft of the phase wiring left this as an `if` placed after the advance — which is
+         * the silent version of this bug. The advance is async, so the plan is still `active` when a
+         * synchronous check runs, and the celebration would simply never have fired again, on any
+         * build, with nothing to notice it: a missing toast throws nothing.
+         */
+        const celebrateBuild = () => {
+          if (!creationCompleteRef.current) {
+            return;
+          }
+
           creationCompleteRef.current = false;
 
           /*
@@ -637,8 +752,6 @@ export const ChatImpl = memo(
            * disagree about what "finished" means) and rides the verdict on `agentMeta`, which is
            * persisted with the message — so the warning survives a reload, which a toast would not.
            */
-          const outcome = readTurnOutcome(message.annotations);
-
           if (outcome && outcome.state !== 'finished') {
             setTurnOutcomeAlert(outcome);
           }
@@ -653,21 +766,11 @@ export const ChatImpl = memo(
            * `Write src/chrome/splash.css`. We announced a finished game while writing the splash, and
            * sent the user to a preview that was mid-rebuild — which reads as a broken build.
            *
-           * So the celebration waits for every queued action to reach a terminal state (`actions-settled.ts`;
-           * failed and aborted count — waiting for `complete` would hang on the turn that most needs a
-           * message). Fire-and-forget: a slow tail must never block `onFinish`'s other work below.
+           * So the celebration waits for every queued action to reach a terminal state
+           * (`actions-settled.ts`; failed and aborted count — waiting for `complete` would hang on the
+           * turn that most needs a message). Fire-and-forget: a slow tail must never block `onFinish`.
            */
-          void waitForActionsSettled({
-            readStatuses: () =>
-              settleableStatuses(
-                Object.values(workbenchStore.artifacts.get()).flatMap((artifact) =>
-                  Object.values(artifact.runner.actions.get()).map((action) => ({
-                    type: action.type,
-                    status: action.status,
-                  })),
-                ),
-              ),
-          }).then((result) => {
+          void waitForActionsSettled({ readStatuses: readSettleableStatuses }).then((result) => {
             /*
              * A truncated or rescued build gets the persistent alert above instead. Firing a success
              * toast beside a "this build did not finish" panel is worse than either alone — it tells
@@ -686,6 +789,110 @@ export const ChatImpl = memo(
               );
             }
           });
+        };
+
+        /*
+         * Consume the phase flag: whatever happens below, the NEXT turn is not a phase unless
+         * something posts one. Read-and-clear, like every other one-shot latch in this file.
+         */
+        const wasPhaseTurn = phaseTurnRef.current;
+        phaseTurnRef.current = false;
+
+        if (wasPhaseTurn && creationPlanActive(livePlan) && livePlan) {
+          /*
+           * The server judged the turn unfinished. Do NOT advance: the next phase builds on the files
+           * this one wrote, so continuing over a truncated phase compounds a broken tree and bills for
+           * it. The persistent alert carries a "Finish the build" action, so the user has somewhere to
+           * go — and `creationCompleteRef` stays armed, so the celebration is still owed to whichever
+           * turn eventually completes the plan.
+           */
+          if (outcome && outcome.state === 'incomplete') {
+            setPhasePause('incomplete');
+            setTurnOutcomeAlert(outcome);
+          } else {
+            /*
+             * The stream ending is not the phase finishing, for the reason written in `celebrateBuild`
+             * above. Advancing before the actions land would start the next phase against a
+             * half-written tree — the same defect, one phase earlier.
+             */
+            void waitForActionsSettled({ readStatuses: readSettleableStatuses }).then(async (result) => {
+              if (!result.settled) {
+                /*
+                 * Files still moving after the timeout. Pausing is the honest answer: the next phase
+                 * would read a tree that is mid-write, and building on it silently is how a creation
+                 * ends up half-finished with every individual turn reporting success.
+                 *
+                 * 🔴 And it is SAID OUT LOUD. A plan that stops without a word strands a half-built
+                 * project and looks exactly like one that is still working — the failure this whole
+                 * feature exists to end. Same sentence the celebration uses for the same condition,
+                 * because it is the same fact about the same tree.
+                 */
+                setPhasePause('unsettled');
+                creationCompleteRef.current = false;
+                toast.info(
+                  `Your project is still writing ${result.stillPending} file(s). It will be ready in the Preview shortly.`,
+                );
+
+                return;
+              }
+
+              const advanced = advanceCreationPlan(livePlan, {
+                id: livePlan.phases[livePlan.next],
+                generationId: readGenerationId(message.annotations) ?? '',
+                at: new Date().toISOString(),
+                state: outcome?.state ?? 'finished',
+              });
+
+              const complete = isCreationPlanComplete(advanced);
+
+              /*
+               * 🔴 THE ROW IS THE SOURCE; THE LOCAL COPY IS A CACHE — so the row is written FIRST and
+               * the mirror takes only what the server accepted. `mergeCreationPlan` is monotonic
+               * server-side precisely so two tabs cannot rewind `next` and re-run a phase the user has
+               * already paid for.
+               *
+               * Completing the plan is what CLEARS the handoff (`null`): the row's presence has meant
+               * "created, never built" since migration 0016, and since phases it ends at the last one.
+               * That is also the flag the server reads to know a turn is a build (`projectOwesBuild`),
+               * so this write is what stops every later edit being treated as a creation.
+               */
+              if (planProjectId) {
+                try {
+                  await saveCreationHandoff(planProjectId, complete ? null : { plan: advanced });
+                } catch (error) {
+                  /*
+                   * Loud, and it PAUSES rather than continuing. Advancing locally over a row that did
+                   * not accept it is how the same phase runs twice on the next device — and this write
+                   * is the only thing that makes a half-finished build resumable at all.
+                   */
+                  logger.error('Could not advance the creation plan', error);
+                  setPhasePause('error');
+
+                  return;
+                }
+              }
+
+              if (complete) {
+                exitNewProjectMode(planProjectId);
+                armedPhaseRef.current = null;
+                setArmedPhase(null);
+                celebrateBuild();
+              } else {
+                updateCreationPlan(planProjectId, advanced);
+
+                /*
+                 * Arm the next phase. The effect that consumes this disarms BEFORE its `append` — the
+                 * documented rule from the repair watch, and the reason a re-render cannot post the
+                 * same phase twice.
+                 */
+                armedPhaseRef.current = advanced.next;
+                setArmedPhase(advanced.next);
+              }
+            });
+          }
+        } else {
+          // No plan (an older project, or a build that never started): unchanged single-turn behaviour.
+          celebrateBuild();
         }
 
         /*
@@ -699,12 +906,7 @@ export const ChatImpl = memo(
          * repairs means the agent is thrashing, and a third turn spends the user's credits to watch it
          * thrash again.
          */
-        const meta = message.annotations?.find(
-          (a): a is { type: 'agentMeta'; value: { generationId?: string } } =>
-            typeof a === 'object' && a !== null && (a as { type?: string }).type === 'agentMeta',
-        );
-
-        const generationId = meta?.value?.generationId;
+        const generationId = readGenerationId(message.annotations);
 
         repairWatch.current = generationId
           ? { generationId, attempt: repairAttemptRef.current, until: Date.now() + REPAIR_WINDOW_MS }
@@ -977,6 +1179,15 @@ export const ChatImpl = memo(
         watch: repairWatch.current,
         isLoading,
         now: Date.now(),
+
+        /*
+         * 🔴 Mid-creation compile errors are NORMAL (§4.4e, trap 2). The frontend phase writes a page
+         * importing art the ART phase has not rendered yet, so Vite is correctly red for the whole gap
+         * — and without this every pair of phases would fire a repair turn, billing the user to fix
+         * what the next phase was about to fix and colliding with it for the in-flight claim (§4.12).
+         * Read from the store, not a render capture: the plan advances between commits.
+         */
+        creationPlanActive: creationPlanActive(newProjectModeStore.get()?.plan),
       });
 
       if (!decision.repair) {
@@ -1006,6 +1217,59 @@ export const ChatImpl = memo(
         },
       );
     }, [actionAlert, isLoading]);
+
+    /*
+     * 🔴 RUN THE NEXT CREATION PHASE (§4.4e) — the second mechanism that starts a generation with no
+     * user action, and it deliberately copies the first one's shape (`decideAutoRepair`, above).
+     *
+     * The decision is a PURE function (`decideNextCreationTurn`) for that function's stated reason: a
+     * `run` spends the user's credits without them asking, and every branch that says *don't* is the
+     * point of it rather than an edge case around it.
+     *
+     * ⚠️ **Disarm BEFORE the `append`**, the documented rule from the repair effect. This effect re-runs
+     * on every render; without clearing the latch first, one committed render would post the same phase
+     * again — a full generation per render, on the user's bill.
+     */
+    useEffect(() => {
+      const mode = newProjectModeStore.get();
+
+      const decision = decideNextCreationTurn({
+        plan: mode?.plan,
+        projectId: activeProjectId,
+        isLoading,
+        hasError: error != null,
+        armedIndex: armedPhaseRef.current,
+        lastOutcome: null,
+        paused: phasePause,
+      });
+
+      if (decision.kind !== 'run' || !mode?.plan) {
+        return;
+      }
+
+      const plan = mode.plan;
+      const phase = plan.phases[decision.index];
+
+      // Disarm FIRST: a re-render must never be able to post the same phase twice.
+      armedPhaseRef.current = null;
+      setArmedPhase(null);
+
+      logger.debug(`Creation phase ${decision.index + 1} of ${plan.phases.length} — ${phase}`);
+
+      // This turn IS a phase; `onFinish` reads and clears it before deciding whether to advance.
+      phaseTurnRef.current = true;
+
+      append(
+        { role: 'user', content: creationPhaseMessage(plan, decision.index) },
+
+        /*
+         * `creationPhase` tells the server which phase this is: it decides the tool set (only `art`
+         * gets the media tools) and the step ceiling derived from it. The server ignores it on any turn
+         * that is not a first build, so it can never widen an ordinary edit's tools.
+         */
+        { body: { ...liveTurnBody(), creationPhase: phase } },
+      );
+    }, [armedPhase, isLoading, error, phasePause, activeProjectId, liveTurnBody]);
 
     useEffect(() => {
       const prompt = searchParams.get('prompt');
@@ -2075,6 +2339,34 @@ export const ChatImpl = memo(
        */
       creationCompleteRef.current = false;
 
+      /*
+       * 🔴 And it ends any creation PLAN in progress (§4.4e). `/clear` means "forget this
+       * conversation", and a phase plan is conversation-scoped work — the phases build on each other's
+       * files and refer to a brief that is about to stop being in the history.
+       *
+       * Without this, the local plan survives the reset and the next thing the user types is treated
+       * as a RESUME: "make the car red" would post as the front-end phase and march a four-phase build
+       * to completion. The row keeps its handoff, so the project correctly still owes a build and the
+       * card can offer one — this only stops the next message being silently conscripted into it.
+       */
+      armedPhaseRef.current = null;
+      setArmedPhase(null);
+      phaseTurnRef.current = false;
+      setPhasePause(null);
+
+      /*
+       * ⚠️ Only a plan that has actually STARTED. A `/clear` on a freshly created project — an
+       * ordinary thing to type before building anything — must leave the mode and its handoff card
+       * exactly where they are, which is the rule `a slash command never consumes the mode` pins. The
+       * mode is only spent by a build, and this is the other end of the same rule: it is released by
+       * one too.
+       */
+      const clearedMode = newProjectModeStore.get();
+
+      if (clearedMode?.plan) {
+        exitNewProjectMode(clearedMode.projectId);
+      }
+
       // Identity, history and the URL — the half that lives in `useChatHistory`.
       startFreshChat();
     };
@@ -2280,18 +2572,65 @@ export const ChatImpl = memo(
         storedMode && (!storedMode.projectId || storedMode.projectId === activeProjectId) ? storedMode : null;
 
       if (newProjectMode) {
-        exitNewProjectMode(newProjectMode.projectId);
-
         /*
-         * And on the row: the handoff ends when the build turn is SENT, so the card cannot come back on
-         * another device offering to build a game that is already being built. Cleared here rather than
-         * on success because a failed build is one the user retries — and the retry reads the LOCAL
-         * mode, which this send has already consumed.
+         * 🔴 THE BUILD STARTS A PLAN; IT NO LONGER CLEARS THE HANDOFF (§4.4e, 2026-08-14).
+         *
+         * This used to `exitNewProjectMode` + `saveCreationHandoff(id, null)` — "the handoff ends when
+         * the build turn is SENT" (migration 0016). Two things make that wrong now:
+         *
+         *   1. **The plan has to outlive the send.** It is the only record of which phases are still
+         *      owed, and without it a tab that dies mid-build strands a half-written project with
+         *      nothing able to resume it.
+         *   2. **The row is what tells the SERVER this is a first build turn** (`projectOwesBuild`).
+         *      Clearing it here raced the generation this send is about to post: whichever landed
+         *      first decided whether the turn got the creation tool policy, the preloaded skills, the
+         *      completeness pass and the §4.6 no-files refund. That race is exactly the six-day
+         *      outage — `carriesCreationBrief` had already stopped answering, and this PATCH was
+         *      removing the only other evidence.
+         *
+         * So the handoff now ends when the LAST PHASE completes (`CreationHandoff.plan`), and the mode
+         * survives with it — which also keeps the premium pill locked for every phase, not just the
+         * first, since every phase is a build turn.
+         *
+         * ⚠️ The BRIEF is still consumed on send. Only the plan outlives it: re-appending the user's
+         * words per phase would pay for them again on every turn in an UNCACHED history, forever.
+         */
+        /*
+         * 🔴 RESUME, NEVER RESTART. A plan already in flight (a reload mid-build, or a device switch)
+         * is continued from wherever the ROW says it got to; only a project with no plan starts a new
+         * one. `newCreationPlan()` unconditionally here would silently rewind `next` to 0 and re-run
+         * every phase the user has already paid for, overwriting files that were correct — the exact
+         * failure `mergeCreationPlan`'s monotonic merge exists to make impossible server-side.
          */
         if (newProjectMode.projectId) {
-          void saveCreationHandoff(newProjectMode.projectId, null).catch((error) => {
-            logger.error('Could not clear the creation handoff', error);
+          const inFlight = newProjectMode.plan;
+          const plan = inFlight && !isCreationPlanComplete(inFlight) ? inFlight : newCreationPlan();
+
+          updateCreationPlan(newProjectMode.projectId, plan);
+
+          void saveCreationHandoff(newProjectMode.projectId, { plan }).catch((error) => {
+            /*
+             * Loud, and NOT fatal to the send. A plan that failed to persist still runs from the local
+             * mode for this session; what is lost is resume-on-another-device, and failing the user's
+             * build over that would be the worse trade.
+             */
+            logger.error('Could not persist the creation plan', error);
           });
+        } else {
+          /*
+           * 🔴 THE DEGRADED UNREGISTERED PATH KEEPS THE OLD SINGLE-TURN BEHAVIOUR, and that is not a
+           * shortcut — a plan here would be INCOHERENT.
+           *
+           * Registration failed, so there is no project id, so `/api/agent` gets no `projectId`, so
+           * `requireOwnedProject` never runs and `owesBuild` is false: the server cannot recognise
+           * this as a first build turn at all, and would ignore `creationPhase` outright. A local plan
+           * would post four turns that the server treats as ordinary edits — four times the cost of
+           * the one turn it replaced, with none of the protections.
+           *
+           * So the mode is cleared on send exactly as it was before phases, which also keeps the
+           * premium pill unlocking afterwards (a mode nothing clears is a lock nothing lifts).
+           */
+          exitNewProjectMode('');
         }
       }
 
@@ -2310,8 +2649,37 @@ export const ChatImpl = memo(
       /*
        * Keyed to the MODE: a send out of New Project mode is, behaviourally, the turn that first
        * produces a game — there is no brief anymore (owner, 2026-08-08), the mode itself is the fact.
+       *
+       * 🔴 **AND TO THE BUILD, not merely to the mode being OPEN (§4.4e, 2026-08-14).** The mode used
+       * to be cleared by this very send, so `if (newProjectMode)` could only ever be the first build
+       * turn. Under phases the mode outlives the send — it ends with the PLAN — so that condition
+       * silently became "any message typed while a build is in progress", and a user asking a question
+       * mid-build re-armed the celebration for a turn that produces no game.
+       *
+       * Caught by `creation-celebration.spec.tsx`: a failed build, then `/clear` (which disarms), then
+       * an ordinary edit re-armed it and fired "🎮 Your game is ready" over a project with no game —
+       * the exact claim the whole `turn-outcome` machinery exists to stop us making.
        */
-      if (newProjectMode) {
+      /*
+       * The phase this send carries, if any. Computed HERE — above the arm that reads it — because the
+       * arm has to distinguish a build send from an ordinary message typed while a build is open, and
+       * `newProjectMode` alone stopped being able to do that the moment the mode outlived the send.
+       *
+       * `plan.next`, never a literal 0: a resumed build continues from where the ROW says it got to
+       * (see "RESUME, NEVER RESTART" above). Hardcoding the first phase would re-run a front end the
+       * user has already built and paid for.
+       */
+      const startedPlan = newProjectMode ? newProjectModeStore.get()?.plan : undefined;
+      const phaseId = startedPlan?.phases[startedPlan.next];
+
+      /*
+       * Only a send that actually carries a phase counts as one. An ordinary message typed mid-build
+       * must never tick the plan forward, or a phase the user paid for is skipped and never runs.
+       */
+      phaseTurnRef.current = Boolean(phaseId);
+
+      /* A build send: a phase, or the unregistered path's single turn (which has no plan at all). */
+      if (phaseId || (newProjectMode && !newProjectMode.projectId)) {
         creationCompleteRef.current = true;
       }
 
@@ -2323,6 +2691,18 @@ export const ChatImpl = memo(
       const modifiedFiles = workbenchStore.getModifiedFiles();
 
       chatStore.setKey('aborted', false);
+
+      /*
+       * 🔴 PHASE 1 RIDES ON THE USER'S OWN WORDS, UNTOUCHED — only the BODY says which phase it is.
+       *
+       * An earlier draft appended the phase task to this message. Visible, so not literally the hidden
+       * brief the owner retired on 2026-08-08 — but the same idea wearing a better hat, and
+       * `new-project-mode-wiring.spec.tsx` pins that rule for a reason. The task lives in the server's
+       * volatile system tail instead (`creationPhaseNote`), which is cheaper as well as cleaner: the
+       * history is UNCACHED, so anything put in a message is re-sent at full rate on every later turn
+       * forever, while a system-tail note is read once by the turn it applies to.
+       *
+       */
 
       /**
        * Post the turn — one `append`, every turn, including the first build turn. The hidden
@@ -2341,7 +2721,10 @@ export const ChatImpl = memo(
           },
 
           /* The live identity rides on EVERY send — see `liveTurnBody`. */
-          { ...attachmentOptions, body: liveTurnBody() },
+          {
+            ...attachmentOptions,
+            body: { ...liveTurnBody(), ...(phaseId ? { creationPhase: phaseId } : {}) },
+          },
         );
       };
 

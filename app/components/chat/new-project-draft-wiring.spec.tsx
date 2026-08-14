@@ -432,10 +432,18 @@ describe('the handoff card puts the prompt in the box only when asked', () => {
    * that hangs off it: exactly one `/api/agent` request, carrying the user's words and nothing hidden
    * (the machine-written brief is retired — owner, 2026-08-08).
    */
-  it('Build my game posts exactly ONE turn, carrying the user’s words alone', async () => {
+  /**
+   * ⚠️ **AMENDED for §4.4e (2026-08-14).** Two of this test's three claims were about the SHAPE of a
+   * build rather than about the card, and phases changed that shape: a build is a turn per phase, and
+   * the mode now ends with the PLAN rather than with the send (it is the only record of which phases
+   * are still owed, and it keeps the premium pill locked for every phase, not just the first).
+   *
+   * What the card is actually responsible for is unchanged and still asserted: the FIRST turn carries
+   * the user's words, nothing machine-written rides with them, and the card does not come back
+   * offering to build a game that is already being built.
+   */
+  it('Build my game posts the user’s words alone, and retires the card', async () => {
     await createThen('build my game');
-
-    expect(agentRequests()).toHaveLength(1);
 
     const posted = bodies.find((call) => call.url.includes('/api/agent'));
     const contents = (posted?.body?.messages ?? []).map((message: any) => message.content).join('\n');
@@ -443,8 +451,14 @@ describe('the handoff card puts the prompt in the box only when asked', () => {
     expect(contents).toContain(TYPED_PROMPT);
     expect(contents).not.toContain(BRIEF);
 
-    // Sent, so the mode is over — the card cannot come back offering to build a game already building.
-    expect(newProjectModeStore.get()).toBeNull();
+    /*
+     * The mode now HOLDS A PLAN rather than being cleared, and that is what retires the card: the
+     * handoff card renders only for a mode with no plan yet (a project created and not yet built), so
+     * a plan being present is exactly the "it cannot come back offering to build a game already
+     * building" guarantee this test was written for — expressed against the state that now carries it.
+     */
+    expect(newProjectModeStore.get()?.plan).toBeDefined();
+    expect(agentRequests().length).toBeGreaterThan(0);
   });
 });
 

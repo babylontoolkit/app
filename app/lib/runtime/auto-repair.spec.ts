@@ -142,3 +142,39 @@ describe('auto-repair terminates', () => {
     expect(fired).toEqual([1, 2]);
   });
 });
+
+/**
+ * 🔴 MID-CREATION, THE NEXT PHASE OWNS THE ERROR (§4.4e, `_specs/phased-creation_plan.md` trap 2).
+ *
+ * Phased creation makes a compile error between phases NORMAL rather than a defect: the frontend
+ * phase writes a landing page importing art the ART phase has not rendered yet, so Vite is correctly
+ * red for the whole gap. Every other guard in this file passes on that alert — it is `source:
+ * 'preview'`, inside the window, under the attempt cap — so without this the agent would fire a
+ * repair turn between every pair of phases, billing the user to fix what the next phase was about to
+ * fix and colliding with it for the one-generation-per-project claim (§4.12).
+ */
+describe('auto-repair — while a creation plan is still running', () => {
+  it('does not repair an error the next phase is going to fix', () => {
+    expect(decide({ creationPlanActive: true })).toEqual({ repair: false, disarm: false });
+  });
+
+  /**
+   * ⚠️ THE LOAD-BEARING HALF: `disarm: false`, never `true`.
+   *
+   * The watch must SURVIVE the gap. The last phase's output is real code with no phase after it to
+   * fix a mistake, and that is precisely the turn self-healing exists for — so a disarm here would
+   * trade a spurious repair for no repair at all, which is the more expensive direction and silent.
+   */
+  it('leaves the watch armed, so the last phase is still covered', () => {
+    expect(decide({ creationPlanActive: true })).toMatchObject({ disarm: false });
+  });
+
+  /**
+   * The CONTROL. Without it this block passes for a guard that disabled auto-repair permanently —
+   * the cheerful way a "stop repairing" fix goes green while removing the feature.
+   */
+  it('repairs again as soon as the plan is finished', () => {
+    expect(decide({ creationPlanActive: false }).repair).toBe(true);
+    expect(decide().repair).toBe(true);
+  });
+});

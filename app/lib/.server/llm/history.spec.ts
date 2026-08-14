@@ -11,6 +11,7 @@
  * looks like a model problem, not a context problem.
  */
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Message } from 'ai';
@@ -21,6 +22,7 @@ import {
   HISTORY_WINDOW_TURNS,
   IMAGE_TOKENS_UPPER_BOUND,
   MAX_HISTORY_CHARS,
+  stripReplayedReasoning,
 } from './history';
 
 const bigFile = 'const x = 1;\n'.repeat(400); // ~5KB, the size of a real generated source file
@@ -632,5 +634,134 @@ describe('defensive reasoning shapes are removed completely', () => {
     expect(out.reasoning).toBeUndefined();
     expect(stringify(out)).not.toContain('restored from storage');
     expect(out.content).toBe('Done.');
+  });
+});
+
+/**
+ * 🔴 THE REPLAYED-THINKING 400 (2026-08-14) — `stripReplayedReasoning`.
+ *
+ * Reported live, mid-creation, on Comet → Bedrock:
+ *
+ *     ValidationException: ***.***.content.0: Invalid `signature` in `thinking` block
+ *
+ * Three passes replay the provider's own assistant messages inside one generation (the forced
+ * continuation, the unproductive rescue, the creation completeness pass). Those messages open with a
+ * `reasoning` block carrying a signature scoped to the backend that minted it — and on a gateway
+ * chain the second request need not land on the same backend.
+ *
+ * ⚠️ These fixtures are `CoreMessage`-shaped (`content[]`), NOT `Message`-shaped (`parts[]`). Every
+ * other fixture in this file is the latter, which is exactly why a strip that only understood UI
+ * messages looked complete: no test in the repo had ever held the shape the failing path passes.
+ */
+describe('stripReplayedReasoning — the provider messages a continuation replays', () => {
+  const reasoning = { type: 'reasoning', text: 'Let me think about the landing page', signature: 'sig_abc' };
+
+  it('drops the reasoning block that carries the signature', () => {
+    const [message] = stripReplayedReasoning([
+      { role: 'assistant', content: [reasoning, { type: 'text', text: 'Writing the files now.' }] },
+    ]);
+
+    expect(message.content).toEqual([{ type: 'text', text: 'Writing the files now.' }]);
+  });
+
+  it('drops redacted reasoning too — it carries the same signature problem', () => {
+    const [message] = stripReplayedReasoning([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'redacted-reasoning', data: 'xxx' },
+          { type: 'text', text: 'ok' },
+        ],
+      },
+    ]);
+
+    expect(message.content).toEqual([{ type: 'text', text: 'ok' }]);
+  });
+
+  /**
+   * 🔴 THE LOAD-BEARING HALF. The continuation exists BECAUSE the model was mid-tool-loop; one that
+   * cannot see what its tools returned re-runs them, which on the media tools means paying twice.
+   */
+  it('leaves tool calls and tool results completely alone', () => {
+    const toolCall = { type: 'tool-call', toolCallId: 't1', toolName: 'generate_image', args: {} };
+    const messages = [
+      { role: 'assistant', content: [reasoning, toolCall] },
+      { role: 'tool', content: [{ type: 'tool-result', toolCallId: 't1', toolName: 'generate_image', result: {} }] },
+    ];
+
+    const stripped = stripReplayedReasoning(messages);
+
+    expect(stripped[0].content).toEqual([toolCall]);
+    expect(stripped[1]).toBe(messages[1]);
+  });
+
+  /**
+   * An empty `content: []` is itself a 400 on several providers, so a thinking-only message is
+   * dropped rather than emptied — trading a turn the model cannot see for a request it can send.
+   */
+  it('drops a message that was nothing but thinking', () => {
+    expect(stripReplayedReasoning([{ role: 'assistant', content: [reasoning] }])).toEqual([]);
+  });
+
+  it('leaves string content and user messages untouched, by identity', () => {
+    const messages = [
+      { role: 'assistant', content: 'plain text answer' },
+      { role: 'user', content: [{ type: 'text', text: 'do the thing' }] },
+    ];
+
+    const stripped = stripReplayedReasoning(messages);
+
+    expect(stripped[0]).toBe(messages[0]);
+    expect(stripped[1]).toBe(messages[1]);
+  });
+
+  /**
+   * CONTROL — without this the whole block passes for a function that returns `[]`, which would
+   * silently strip the continuation's entire context and is the failure mode pointing the other way.
+   */
+  it('CONTROL — a message with no reasoning survives intact and identical', () => {
+    const messages = [{ role: 'assistant', content: [{ type: 'text', text: 'Writing the files now.' }] }];
+    const stripped = stripReplayedReasoning(messages);
+
+    expect(stripped).toHaveLength(1);
+    expect(stripped[0]).toBe(messages[0]);
+  });
+});
+
+/**
+ * 🔴 DEFAULT-DENY: no pass may replay provider messages RAW (2026-08-14).
+ *
+ * The behavioural tests above prove `stripReplayedReasoning` works. They cannot prove the three call
+ * sites use it, and they say nothing at all about the FOURTH one somebody adds next — which is the
+ * shape this repo keeps rediscovering (`execution-queue`, `sandbox-seam`, `isSecretPath`): one rule,
+ * several doors, and a test that only knows about the doors someone enumerated.
+ *
+ * Every rescue pass in the proxy exists because a generation went wrong, so a new one is written on a
+ * bad day, by someone copying the pass above it. `(await first.response).messages` is what they will
+ * copy. This fails if they copy it unwrapped.
+ */
+describe('CONTROL — every replay of provider messages is stripped', () => {
+  const proxy = readFileSync(join(process.cwd(), 'app/lib/.server/agent/proxy.ts'), 'utf-8').replace(
+    /\/\*[\s\S]*?\*\//g,
+    '',
+  );
+
+  /* CONTROL — the scan can see the code it judges. A scan matching nothing is all-clear forever. */
+  it('reads a real proxy.ts that really does replay provider messages', () => {
+    expect(proxy).toContain('export async function runAgentGeneration');
+    expect(proxy).toContain('first.response');
+  });
+
+  it('never reads response messages without stripping replayed thinking', () => {
+    const replays = [...proxy.matchAll(/\(await first\.response\)\.messages/g)];
+
+    /* CONTROL — the three known passes are still here, so the assertion below is about something. */
+    expect(replays.length).toBeGreaterThanOrEqual(3);
+
+    for (const replay of replays) {
+      const line = proxy.slice(proxy.lastIndexOf('\n', replay.index) + 1, replay.index! + replay[0].length);
+
+      expect(line).toContain('stripReplayedReasoning(');
+    }
   });
 });

@@ -12,6 +12,7 @@ import {
   MAX_CREATION_PHASES,
   advanceCreationPlan,
   creationPhaseMessage,
+  creationPhaseNote,
   currentCreationPhase,
   describeCreationPlan,
   describeCreationPlanOutcome,
@@ -295,48 +296,69 @@ describe('advance / complete', () => {
   });
 });
 
-describe('creationPhaseMessage', () => {
+describe('creationPhaseMessage — the VISIBLE line', () => {
   const plan = newCreationPlan();
-
-  /*
-   * 🔴 The marker is what makes a phase a FIRST BUILD TURN. Ten protections hang off it, including
-   * `owesFiles` (which makes a turn that writes nothing a failure rather than a success) and
-   * `describeTurnOutcome`, which returns `finished` for any turn that is not one. Drop it and phases
-   * 2..N silently become ordinary edits.
-   */
-  it('carries CREATION_BRIEF_MARKER verbatim on EVERY phase', () => {
-    for (let n = 0; n < plan.phases.length; n++) {
-      expect(creationPhaseMessage(plan, n)).toContain(CREATION_BRIEF_MARKER);
-    }
-  });
 
   it('names the step and the total', () => {
     expect(creationPhaseMessage(plan, 0)).toContain('Step 1 of 4');
     expect(creationPhaseMessage(plan, 2)).toContain('Step 3 of 4');
   });
 
-  it('carries that phase task and no other', () => {
-    const message = creationPhaseMessage(plan, 0);
-    expect(message).toContain('bt-landing skill');
-    expect(message).not.toContain('Write the GAME');
+  it("defaults to the plan's own next phase", () => {
+    expect(creationPhaseMessage({ ...plan, next: 1 })).toContain('Step 2 of 4');
   });
 
   /*
-   * The brief rode on phase 0 and is already in the conversation. Re-sending it per phase pays for it
-   * again on every turn, forever, in an UNCACHED history.
+   * 🔴 THE TASK MOVED TO THE SYSTEM TAIL (2026-08-14, `creationPhaseNote`).
+   *
+   * This message goes into the conversation, and the conversation is UNCACHED — every byte is re-sent
+   * at full input rate on every later turn, forever. A four-phase build would weld ~5KB of scaffolding
+   * into the transcript to say something each turn needs once. It is also text the USER reads.
+   *
+   * The length bound is the assertion: it is what fails if someone moves the task back in here.
    */
-  it('does NOT repeat the brief — it points at it', () => {
-    const message = creationPhaseMessage(plan, 1);
-    expect(message).toContain('in the brief earlier in this conversation');
-    expect(message.length).toBeLessThan(2_000);
+  it('is one short line — the task is NOT in the message', () => {
+    for (let n = 0; n < plan.phases.length; n++) {
+      const message = creationPhaseMessage(plan, n);
+
+      expect(message.length).toBeLessThan(60);
+      expect(message).not.toContain('bt-landing skill');
+    }
+  });
+
+  /*
+   * ⚠️ The marker used to ride here, because `carriesCreationBrief` was the only way the server knew a
+   * phase was a first build turn. It is derived from the project ROW now (`projectOwesBuild`), which is
+   * true for every phase until the last one lands — so the marker is redundant, and leaving it would
+   * put a machine sentence in front of the user for no reason.
+   */
+  it('carries no creation marker — the row is the signal now', () => {
+    expect(creationPhaseMessage(plan, 0)).not.toContain(CREATION_BRIEF_MARKER);
+  });
+});
+
+describe('creationPhaseNote — what the step owes', () => {
+  it('carries that phase task and no other', () => {
+    const note = creationPhaseNote('frontend') ?? '';
+
+    expect(note).toContain('bt-landing skill');
+    expect(note).not.toContain('Write the GAME');
   });
 
   it('tells a phase not to rewrite what is already correct', () => {
-    expect(creationPhaseMessage(plan, 1)).toMatch(/Do NOT rewrite files that are already correct/i);
+    expect(creationPhaseNote('art')).toMatch(/Do NOT rewrite files that are already correct/i);
   });
 
-  it("defaults to the plan's own next phase", () => {
-    expect(creationPhaseMessage({ ...plan, next: 1 })).toContain('Step 2 of 4');
+  it('says the project already exists, so a phase never re-creates it', () => {
+    expect(creationPhaseNote('game')).toMatch(/already exists/i);
+  });
+
+  /*
+   * `null` is "not a phase turn" and must produce NO note — the proxy pushes whatever this returns, so
+   * a non-null default would put creation instructions on ordinary edits.
+   */
+  it('returns null when there is no phase', () => {
+    expect(creationPhaseNote(null)).toBeNull();
   });
 });
 

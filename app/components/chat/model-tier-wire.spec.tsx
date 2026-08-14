@@ -463,8 +463,14 @@ describe('the first build turn (reload) carries the rung', () => {
 
     const posts = agentPosts();
 
-    expect(posts.length).toBe(1);
-    expect(posts[0].body!.tier).toBe('premium');
+    /*
+     * ⚠️ A build is several turns since §4.4e (one per creation phase), so the count is no longer 1 —
+     * but the rule this test exists for is stronger under phases, not weaker: EVERY one of them has to
+     * carry the rung. A phase that lost it would silently run on a different model than the user is
+     * paying for, halfway through their build.
+     */
+    expect(posts.length).toBeGreaterThan(0);
+    expect(posts.every((post) => post.body!.tier === 'premium')).toBe(true);
 
     /* CONTROL — the user's words travelled, and nothing hidden travelled with them. */
     const contents = (posts[0].body!.messages as { content: string }[]).map((m) => m.content).join('\n');
@@ -499,17 +505,36 @@ describe('the auto-repair turn carries the rung it never mentions', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     });
 
-    return agentPosts();
+    /*
+     * ⚠️ **A build is FOUR turns since §4.4e**, so the repair is no longer `posts[1]` — it is whatever
+     * came after the plan finished. Returning `[first build turn, repair]` keeps every assertion below
+     * meaning exactly what it used to mean, instead of silently re-pointing them at a creation phase.
+     *
+     * The repair fires at all only because `creationPlanActive` is false by now: mid-plan it is
+     * correctly suppressed, since a phase importing art the next phase renders is legitimately red
+     * (`auto-repair.spec.ts`).
+     */
+    const posts = agentPosts();
+
+    return [posts[0], posts[posts.length - 1], posts] as const;
   }
 
   it('fires a second generation off a preview error', async () => {
-    const posts = await driveRepair('standard');
+    const [, repair, posts] = await driveRepair('standard');
 
-    // CONTROL — the repair really happened. Without this every assertion below is about post[0].
-    expect(posts.length).toBe(2);
-    expect(posts[1].body!.repairOf).toBe('gen_1');
-    expect(posts[1].body!.repairAttempt).toBe(1);
-    expect(posts[1].body!.errors).toContain('Failed to resolve import "./Boost"');
+    /*
+     * CONTROL — the repair really happened, and is a REPAIR rather than the last creation phase.
+     * Without this every assertion below is about a turn that might not exist.
+     *
+     * ⚠️ It repairs the turn that JUST finished — the last creation phase — not the first one. That is
+     * the repair watch working as designed (it is armed by every `onFinish`), and under phases the
+     * last phase is exactly the code most likely to be broken and least likely to be fixed by anything
+     * that follows. The literal `gen_1` this used to assert was only ever true because a build was one
+     * generation long.
+     */
+    expect(repair.body!.repairOf).toBe(`gen_${posts.length - 1}`);
+    expect(repair.body!.repairAttempt).toBe(1);
+    expect(repair.body!.errors).toContain('Failed to resolve import "./Boost"');
   });
 
   it.each(['standard', 'premium'] as const)(

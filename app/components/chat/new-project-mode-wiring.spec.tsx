@@ -524,25 +524,64 @@ describe('the first build send leaves the mode', () => {
  * 🔴 THE FIRST BUILD TURN IS AN ORDINARY TURN (owner, 2026-08-08).
  *
  * The hidden creation brief is RETIRED. These tests pin the negative space it left: the first build
- * send posts ONE request holding ONE plain user message — no second hidden message, no
- * `CREATION_BRIEF_MARKER` anywhere on the wire — and attachments ride on that one message. A
- * regression that quietly reintroduces a hidden machine message is exactly the complexity the owner
- * removed, and nothing about it would throw.
+ * send posts ONE plain user message — no second hidden message, no `CREATION_BRIEF_MARKER` anywhere
+ * on the wire — and attachments ride on that one message. A regression that quietly reintroduces a
+ * hidden machine message is exactly the complexity the owner removed, and nothing about it would throw.
+ *
+ * ⚠️ **AMENDED 2026-08-14 (§4.4e): the build is now several REQUESTS, and still exactly one user
+ * message per turn.** Phased creation posts a turn per phase, so "ONE request" stopped being the
+ * rule — but the rule that mattered never was about the count. It was that nothing MACHINE-WRITTEN
+ * hides inside the user's words, and that is asserted harder here than before: the first turn carries
+ * the user's text verbatim, and every later phase carries one short visible line. The phase TASK
+ * lives in the server's system tail (`creationPhaseNote`), which is why no request body contains it.
+ *
+ * An earlier draft of phases DID append the task to the user's message. It was visible rather than
+ * hidden, so it was not literally the retired brief — and it was the same idea wearing a better hat.
+ * These assertions are what caught it.
  */
 describe('the first build turn is an ordinary turn — no hidden brief', () => {
-  it('posts ONE request holding ONE plain user message, with no marker anywhere', async () => {
+  it("posts the user's words alone, with no marker and nothing hidden", async () => {
     await createProjectInMode();
 
     outbound = 'build my kart racer';
     await click('send');
-
-    expect(agentRequests()).toHaveLength(1);
 
     const users = userMessagesOf(0);
     expect(users).toHaveLength(1);
     expect(users[0].annotations).toBeUndefined();
     expect(users[0].content).toContain('build my kart racer');
     expect(JSON.stringify(posted[0])).not.toContain(CREATION_BRIEF_MARKER);
+
+    /*
+     * The phase TASK must not be on the wire from the client. It is a system note the server adds for
+     * the turn it applies to — putting it in a message would pay for it on every later turn forever,
+     * in an uncached history.
+     */
+    expect(JSON.stringify(posted[0])).not.toContain('bt-landing skill');
+  });
+
+  /**
+   * 🔴 EVERY PHASE IS ITS OWN TURN, AND EVERY ONE OF THEM SAYS WHICH PHASE IT IS.
+   *
+   * The `creationPhase` field is what makes a phase a phase server-side: it selects the tool set (only
+   * `art` gets the media tools) and the step ceiling derived from it. A phase turn that forgot it
+   * would run with the ordinary policy — which is the monolithic creation this feature replaced.
+   */
+  it('runs a turn per phase, each naming its phase in the body', async () => {
+    await createProjectInMode();
+
+    outbound = 'build my kart racer';
+    await click('send');
+
+    expect(agentRequests().length).toBeGreaterThan(1);
+
+    const phases = posted.map((body) => (body as { creationPhase?: string }).creationPhase);
+
+    expect(phases[0]).toBe('frontend');
+    expect(phases.filter(Boolean).length).toBe(posted.length);
+
+    // No phase runs twice — the latch and the monotonic merge exist to make this impossible.
+    expect(new Set(phases).size).toBe(phases.length);
   });
 
   it('a SECOND send is equally plain — nothing hidden ever enters the history', async () => {
@@ -678,8 +717,6 @@ describe('the unregistered-project fallback (no project id)', () => {
     outbound = 'build my kart racer';
     await click('send');
 
-    expect(agentRequests()).toHaveLength(1);
-
     const users = userMessagesOf(0);
     expect(users).toHaveLength(1);
     expect(users[0].annotations).toBeUndefined();
@@ -687,6 +724,17 @@ describe('the unregistered-project fallback (no project id)', () => {
     expect(JSON.stringify(posted[0])).not.toContain(CREATION_BRIEF_MARKER);
   });
 
+  /**
+   * 🔴 **AMENDED 2026-08-14 (§4.4e): the mode now ends with the PLAN, not with the send.**
+   *
+   * It used to clear the instant the build was posted. Phased creation makes that wrong twice: the
+   * plan is the only record of which phases are still owed (a tab that dies mid-build would strand a
+   * half-written project), and the mode's presence is what keeps the premium pill locked for EVERY
+   * phase rather than only the first — every phase is a build turn.
+   *
+   * The rule this test defends is unchanged in substance: the mode must not outlive the work. It just
+   * ends one moment later, and the assertion is now that it ends when the plan is complete.
+   */
   it('the first build send CLEARS the mode — it does not outlive the project it belongs to', async () => {
     await createUnregisteredProjectInMode();
 
@@ -695,6 +743,27 @@ describe('the unregistered-project fallback (no project id)', () => {
 
     expect(newProjectModeStore.get()).toBeNull();
     expect(localStorage.getItem(newProjectModeKey(''))).toBeNull();
+  });
+
+  /**
+   * 🔴 NO PLAN ON THIS PATH, AND THAT IS THE POINT (§4.4e, 2026-08-14).
+   *
+   * Phased creation needs a project ROW: the server derives "this is a build turn" from
+   * `creation_handoff` (`projectOwesBuild`), and with no project id `/api/agent` never loads one. A
+   * plan here would post four turns the server treats as ordinary EDITS — four times the cost of the
+   * single turn it replaced, with none of the protections it exists to buy.
+   *
+   * So this path keeps the pre-phase behaviour exactly, and the assertion is the request count: one
+   * send, one turn.
+   */
+  it('runs a single turn — a plan without a project row would be four ordinary edits', async () => {
+    await createUnregisteredProjectInMode();
+
+    outbound = 'build my kart racer';
+    await click('send');
+
+    expect(agentRequests()).toHaveLength(1);
+    expect((posted[0] as { creationPhase?: string }).creationPhase).toBeUndefined();
   });
 
   /**
@@ -762,8 +831,6 @@ describe('the wizard path carries its compiled selections', () => {
 
     outbound = compiled();
     await click('send');
-
-    expect(agentRequests()).toHaveLength(1);
 
     const users = userMessagesOf(0);
     expect(users).toHaveLength(1);

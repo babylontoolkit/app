@@ -8,6 +8,7 @@
  */
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { describeTurnOutcome } from '~/lib/agent/turn-outcome';
+import { projectOwesBuild } from '~/lib/agent/creation-plan';
 import { createDataStream, formatDataStreamPart, type DataStreamWriter, type Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import { runAgentGeneration } from '~/lib/.server/agent/proxy';
@@ -167,9 +168,19 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
      */
     const user = await requireVerifiedUser(request, context);
 
-    if (body.projectId) {
-      await requireOwnedProject(user, body.projectId, context);
-    }
+    /*
+     * 🔴 THE PROJECT IS KEPT, NOT DISCARDED — it is what tells the server this is a FIRST BUILD.
+     *
+     * `requireOwnedProject` has always run here and its result was thrown away. It carries
+     * `creationHandoff`, whose presence has meant "created, never built" since migration 0016, and
+     * that is the only unforgeable answer to "does this project still owe a build?"
+     * (`projectOwesBuild`). The alternative — a `firstBuild` flag in the body — puts a browser value
+     * on a path that decides whether a turn gets REFUNDED for writing no files.
+     *
+     * Free: the row is already loaded and already ownership-checked. See `projectOwesBuild` for the
+     * six-day outage this closes.
+     */
+    const project = body.projectId ? await requireOwnedProject(user, body.projectId, context) : undefined;
 
     /*
      * Attachments (§4.12), BEFORE the credit gate — a rejected upload must never cost the user
@@ -222,6 +233,13 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       useAssetLibrary: body.useAssetLibrary,
       toolkitSystems: body.toolkitSystems,
       creationPhase: body.creationPhase,
+
+      /*
+       * Does this project still owe a build? Derived from the ROW, never from the body — see the
+       * ownership check above and `projectOwesBuild`. A generation that names no project cannot be a
+       * first build (there is nothing to build into), so `undefined` resolves to `false` downstream.
+       */
+      owesBuild: projectOwesBuild(project?.creationHandoff),
 
       /*
        * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".

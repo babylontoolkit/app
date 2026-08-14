@@ -50,11 +50,35 @@ export function decideAutoRepair(input: {
   watch: RepairWatch | null;
   isLoading: boolean;
   now: number;
+
+  /**
+   * A creation plan still has phases to run (§4.4e, `creationPlanActive`).
+   *
+   * 🔴 **A compile error between phases is NORMAL and must not be repaired.** The frontend phase
+   * writes a landing page that imports art the NEXT phase renders, so for the whole gap
+   * `src/pages/Home.tsx` references a file that does not exist and Vite says so. `alert.source` is
+   * `'preview'` and the watch is inside its window, so every guard below passes and a repair turn
+   * fires — billing the user to fix what the next phase is about to fix, and colliding with it for
+   * the one-generation-per-project claim (§4.12).
+   *
+   * ⚠️ **`disarm: false`.** The watch must SURVIVE the gap: the last phase's output is real code with
+   * no phase after it, and that is precisely the turn self-healing exists for. Disarming here would
+   * trade a spurious repair for no repair at all, silently — the more expensive direction, because a
+   * spurious repair costs credits and a missing one costs the user a broken game.
+   *
+   * Optional so every existing caller and spec is byte-identical; absent means "no plan running".
+   */
+  creationPlanActive?: boolean;
 }): RepairDecision {
   const { alert, watch, isLoading, now } = input;
 
   // Nothing to react to, nothing armed, or a generation is already running.
   if (!alert || !watch || isLoading) {
+    return { repair: false, disarm: false };
+  }
+
+  // Mid-creation: the next phase owns this error. See `creationPlanActive` above for why not `disarm`.
+  if (input.creationPlanActive) {
     return { repair: false, disarm: false };
   }
 
