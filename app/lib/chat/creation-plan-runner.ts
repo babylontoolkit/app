@@ -90,10 +90,118 @@ export interface CreationTurnInput {
 
   /** Already paused. Terminal until the user acts — never re-decide it here. */
   paused: CreationPauseReason | null;
+
+  /**
+   * 🔴 `decideCreationPhaseRetry` said RUN THIS PHASE AGAIN, so the error below is expected and must
+   * not pause the plan (2026-08-14).
+   *
+   * `useChat` keeps `error` set until the next request starts, so without this the retry and the
+   * error-pause deadlock: the retry re-arms, the decider sees `hasError` and pauses, and the plan
+   * stops anyway — the automatic retry doing nothing at all, silently, which is the shape of every
+   * inert feature in this file's history.
+   *
+   * ⚠️ It suppresses the ERROR pause and nothing else. `incomplete` and `unsettled` still stop the
+   * plan while retrying, because those describe the TREE (a truncated or half-written project) rather
+   * than the transport, and re-running a phase over a half-written tree is the corruption the pause
+   * exists to prevent.
+   */
+  retrying: boolean;
+}
+
+/**
+ * 🔴 SHOULD A FAILED PHASE BE RUN AGAIN, WITHOUT ASKING? (owner, 2026-08-14.)
+ *
+ * *"just please make it finish… is that so hard to ask… for the thing to finish properly with files
+ * artifacts and what not."*
+ *
+ * ## Why an automatic retry, when the rule everywhere else is "ask"
+ *
+ * The measured remaining failure is a PROVIDER-side truncation: `gen_mstgbuqo_pkhkhi` billed 34,192
+ * output tokens, went silent for 5.4 minutes, returned no text, and reported `promptTokens: 0` on a
+ * turn carrying a ~300k prefix. It is intermittent — three such steps in the last 25 generations — and
+ * nothing in this repo can prevent it.
+ *
+ * What it did to a BUILD is the problem this fixes. A plan pauses on error, correctly, because the
+ * next phase builds on the files this one wrote. But "paused" reads to the user as *stopped*, and the
+ * arithmetic is unforgiving: at a ~1-in-8 per-phase failure rate a three-phase build finishes about
+ * **68%** of the time. One automatic retry per phase takes it to about **96%**. That is not a
+ * refinement, it is the difference between a product that finishes and one that does not.
+ *
+ * ## Why this is safe to do with the user's money
+ *
+ * **The failed generation was REFUNDED.** A hard failure refunds in full (`spec/fail-loud.md`), so the
+ * retry is the FIRST actual charge for that step — this spends nothing the user has already paid, and
+ * it is the same bargain `MAX_PROVIDER_RETRY_ATTEMPTS` already strikes one layer down.
+ *
+ * ## The branches that say NO, which are the point of the function
+ *
+ *   - **Out of credit is never retried.** A 402 fails again, identically, and it is the one failure
+ *     only the user can resolve. Retrying it spends nothing but produces a second identical refusal,
+ *     which reads as the product being broken rather than as an empty wallet.
+ *   - **A STOP is not a failure.** The user aborting is a decision; re-running what they just stopped
+ *     is the worst possible response to it, and it would be billed.
+ *   - **Once.** A phase that fails twice is not intermittent, and a loop that keeps paying to discover
+ *     that is exactly the "spends credits per render" failure the runner is shaped to prevent.
+ *   - **Only inside a plan.** An ordinary edit that fails is the user's to retry; they are sitting
+ *     there, they typed it, and they can see what happened.
+ */
+export const MAX_CREATION_PHASE_RETRIES = 1;
+
+export type CreationRetryDecision =
+  | { kind: 'retry'; index: number }
+  | { kind: 'stop'; reason: 'no-plan' | 'complete' | 'stopped' | 'unaffordable' | 'exhausted' };
+
+export interface CreationRetryInput {
+  plan: CreationPlan | null | undefined;
+
+  /** How many times THIS phase has already been retried automatically. Reset when the plan advances. */
+  attempts: number;
+
+  /**
+   * The user pressed Stop. Not a failure — a decision, and re-running it would bill for work they
+   * just cancelled.
+   */
+  stopped: boolean;
+
+  /**
+   * The generation failed for want of credits (HTTP 402). Classified by the CALLER, which is the only
+   * place that holds the transport error — this module stays pure and framework-free.
+   */
+  unaffordable: boolean;
+}
+
+export function decideCreationPhaseRetry(input: CreationRetryInput): CreationRetryDecision {
+  const { plan, attempts, stopped, unaffordable } = input;
+
+  if (!plan) {
+    return { kind: 'stop', reason: 'no-plan' };
+  }
+
+  if (isCreationPlanComplete(plan)) {
+    return { kind: 'stop', reason: 'complete' };
+  }
+
+  /*
+   * Both checked BEFORE the attempt count: a Stop and a 402 are answers, not transients, so they must
+   * not consume the one retry a genuinely transient failure is owed.
+   */
+  if (stopped) {
+    return { kind: 'stop', reason: 'stopped' };
+  }
+
+  if (unaffordable) {
+    return { kind: 'stop', reason: 'unaffordable' };
+  }
+
+  if (attempts >= MAX_CREATION_PHASE_RETRIES) {
+    return { kind: 'stop', reason: 'exhausted' };
+  }
+
+  return { kind: 'retry', index: plan.next };
 }
 
 export function decideNextCreationTurn(input: CreationTurnInput): CreationTurnDecision {
-  const { plan, projectId, isLoading, hasError, armedIndex, lastOutcome, paused } = input;
+  const { plan, projectId, isLoading, hasError, armedIndex, lastOutcome, paused, retrying } = input;
 
   /*
    * A pause is a decision that has already been made, and re-deriving it every render is how a paused
@@ -119,7 +227,7 @@ export function decideNextCreationTurn(input: CreationTurnInput): CreationTurnDe
    * broken tree AND bills for it — and the user is the one who can see whether the failure was
    * transient. Checked before the arm so a turn that errored after arming cannot slip through.
    */
-  if (hasError) {
+  if (hasError && !retrying) {
     return { kind: 'pause', reason: 'error' };
   }
 

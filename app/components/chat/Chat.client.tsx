@@ -71,7 +71,12 @@ import {
   newCreationPlan,
   parseCreationPlan,
 } from '~/lib/agent/creation-plan';
-import { creationPlanActive, decideNextCreationTurn, type CreationPauseReason } from '~/lib/chat/creation-plan-runner';
+import {
+  creationPlanActive,
+  decideCreationPhaseRetry,
+  decideNextCreationTurn,
+  type CreationPauseReason,
+} from '~/lib/chat/creation-plan-runner';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
 import { trackMediaTask } from '~/lib/media/tasks';
 import { streamActivitySize } from '~/lib/chat/stream-activity';
@@ -578,6 +583,20 @@ export const ChatImpl = memo(
      */
     const [phasePause, setPhasePause] = useState<CreationPauseReason | null>(null);
 
+    /**
+     * 🔴 THE AUTOMATIC RETRY OF A FAILED PHASE (owner, 2026-08-14 — *"just please make it finish"*).
+     *
+     * Two refs, not state, for the reason every latch in this file is a ref: they are read inside
+     * callbacks and must be the CURRENT value, not the value as of the last commit.
+     *
+     * `attempts` is keyed by phase index and RESET when the plan advances, so "once" means once per
+     * step rather than once per build — a later phase is not punished for an earlier one's bad luck.
+     * `retrying` suppresses exactly one error-pause, because `useChat` keeps `error` set until the
+     * next request starts and without it the retry re-arms into a decider that pauses anyway.
+     */
+    const phaseRetriesRef = useRef<{ index: number; attempts: number }>({ index: -1, attempts: 0 });
+    const retryingPhaseRef = useRef(false);
+
     const {
       messages,
       isLoading,
@@ -844,6 +863,9 @@ export const ChatImpl = memo(
               });
 
               const complete = isCreationPlanComplete(advanced);
+
+              /* A new step starts with its own retry, so bad luck on one phase never spends another's. */
+              phaseRetriesRef.current = { index: -1, attempts: 0 };
 
               /*
                * 🔴 THE ROW IS THE SOURCE; THE LOCAL COPY IS A CACHE — so the row is written FIRST and
@@ -1241,6 +1263,7 @@ export const ChatImpl = memo(
         armedIndex: armedPhaseRef.current,
         lastOutcome: null,
         paused: phasePause,
+        retrying: retryingPhaseRef.current,
       });
 
       if (decision.kind !== 'run' || !mode?.plan) {
@@ -1250,9 +1273,14 @@ export const ChatImpl = memo(
       const plan = mode.plan;
       const phase = plan.phases[decision.index];
 
-      // Disarm FIRST: a re-render must never be able to post the same phase twice.
+      /*
+       * Disarm FIRST: a re-render must never be able to post the same phase twice. The retry
+       * suppression is one-shot for the same reason — left set, a SECOND failure would slip past the
+       * error pause and the plan would retry forever on the user's bill.
+       */
       armedPhaseRef.current = null;
       setArmedPhase(null);
+      retryingPhaseRef.current = false;
 
       logger.debug(`Creation phase ${decision.index + 1} of ${plan.phases.length} — ${phase}`);
 
@@ -1469,6 +1497,57 @@ export const ChatImpl = memo(
         } else if (errorInfo.statusCode >= 500) {
           errorType = 'network';
           title = 'Server Error';
+        }
+
+        /*
+         * 🔴 A FAILED PHASE GETS ONE AUTOMATIC RETRY, AND THE BUILD CARRIES ON (§4.4e, 2026-08-14).
+         *
+         * Placed here because `handleError` is the ONE point every chat failure passes through, and it
+         * has already parsed the status code the decision turns on. The alternative — a `useEffect`
+         * watching `error` — would fire on renders as well as on failures, which is the "a generation
+         * per render" hazard the runner is shaped around.
+         *
+         * The measured failure is provider-side and intermittent (`gen_mstgbuqo_pkhkhi`: 34,192 output
+         * tokens, 5.4 minutes of silence, no text). At ~1-in-8 per phase a three-step build finishes
+         * ~68% of the time; one retry per step takes it to ~96%. The failed generation was refunded,
+         * so this retry is the first actual charge for the step.
+         */
+        if (context === 'chat' && phaseTurnRef.current) {
+          const livePlan = newProjectModeStore.get()?.plan;
+          const failedIndex = livePlan?.next ?? -1;
+          const seen = phaseRetriesRef.current;
+          const attempts = seen.index === failedIndex ? seen.attempts : 0;
+
+          const retry = decideCreationPhaseRetry({
+            plan: livePlan,
+            attempts,
+
+            /*
+             * A Stop aborts the fetch, which surfaces here as an error. Re-running what the user just
+             * cancelled is the worst possible answer to it, and it would be billed.
+             */
+            stopped: error?.name === 'AbortError' || Boolean(chatStore.get().aborted),
+            unaffordable: errorInfo.statusCode === 402,
+          });
+
+          if (retry.kind === 'retry') {
+            phaseRetriesRef.current = { index: failedIndex, attempts: attempts + 1 };
+            retryingPhaseRef.current = true;
+            phaseTurnRef.current = false;
+
+            armedPhaseRef.current = retry.index;
+            setArmedPhase(retry.index);
+
+            /*
+             * Said out loud, but as a toast rather than the red alert below: the user has nothing to
+             * do and nothing has been lost. If the retry ALSO fails, `attempts` is spent and the
+             * failure comes through here again — loudly, with the alert — which is the fail-loud rule
+             * kept intact rather than traded away.
+             */
+            toast.info('That step did not come back — trying it once more.');
+
+            return;
+          }
         }
 
         logStore.logError(`${context} request failed`, error, {
