@@ -29,10 +29,22 @@
  *
  * ⚠️ **Never add a router here.** Deciding which phases apply by reading the request would be the
  * fourth keyword classifier in this codebase (skills, docs, genre, landing) and the first one over
- * the MODEL's own output, which is worse. A narrow request — *"just add a rotating cube"* — is
- * handled by each phase task telling the model to write nothing and say so in one line; those turns
- * cost a few hundred output tokens against a warm prefix. Measure that before optimising it, and if
- * it is material the answer is a cheaper task wording, never a route.
+ * the MODEL's own output, which is worse. Where a step can legitimately be a no-op its own task says
+ * so and asks for one line; those turns cost a few hundred output tokens against a warm prefix.
+ * Measure that before optimising it, and if it is material the answer is a cheaper task wording,
+ * never a route.
+ *
+ * 🔴 **`frontend` IS NOT ONE OF THOSE STEPS (owner, 2026-08-14).** *"FIRST BUILD MUST redesign the
+ * landing pages and chrome as a part of the first initial build. then continue on building whatever
+ * the prompt asked for."* Its task carried a skip clause — *"if the request was a single narrow
+ * change that did not call for a redesign, leave the landing page and the chrome alone"* — written
+ * when phases were imagined as running for ordinary edits too. They do not: a plan only ever exists
+ * on a FIRST BUILD (`projectOwesBuild`), so on every turn that task can reach, the page it is being
+ * given permission to leave alone is the STOCK STARTER. The clause was an invitation to skip the one
+ * step the owner says is mandatory, and *"create an empty project for a mario kart racer, I will plan
+ * the game later"* — a real prompt from a real failed run — reads exactly like the narrow request it
+ * described. `game` and `art` keep their no-op clauses, because "the user asked for the front end
+ * only" and "this design needs no bespoke art" are genuine outcomes rather than guesses at intent.
  *
  * ## PURE, and shared by client and server
  *
@@ -125,9 +137,11 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
       'Then write `DESIGN.md`, and in it name the two or three pieces of art this design would ' +
       'benefit from — the next step renders exactly that list, so be specific about subject, ' +
       'aspect ratio and whether each needs a transparent background.\n\n' +
-      'If the request was a single narrow change that did not call for a redesign, leave the landing ' +
-      'page and the chrome alone and say so in one line — a redesign nobody asked for is ' +
-      'destructive, not generous.',
+      '🔴 THIS STEP IS NOT OPTIONAL. This is a brand-new project whose landing page and chrome are ' +
+      'the STOCK STARTER — generic, unthemed, and carrying none of this game. Redesign both, every ' +
+      'time, whatever the request says. A request for "just an empty project", or for the front end ' +
+      'only, or for one specific feature, still gets the full landing-page and chrome redesign: it is ' +
+      'the shell every later step builds inside, and there is nothing here yet to leave alone.',
   },
   {
     id: 'art',

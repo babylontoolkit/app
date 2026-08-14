@@ -71,19 +71,35 @@ describe('the phase table', () => {
   });
 
   /*
-   * The narrow-request escape hatch. "just add a rotating cube" must not trigger a full landing
-   * redesign, and the ONLY sanctioned mechanism is the task telling the model to write nothing —
-   * never a classifier over the request (the fourth one in this codebase) and never over the model's
-   * own output (worse).
+   * The narrow-request escape hatch, where it is HONEST. When a step can legitimately be a no-op the
+   * ONLY sanctioned mechanism is the task telling the model to write nothing — never a classifier over
+   * the request (the fourth one in this codebase) and never over the model's own output (worse).
+   *
+   * 🔴 **`frontend` is deliberately NOT in this list (owner, 2026-08-14).** This test used to say
+   * EVERY phase, and that was the rule the owner overruled: *"FIRST BUILD MUST redesign the landing
+   * pages and chrome as a part of the first initial build."* A plan only ever runs on a first build,
+   * so the page `frontend` was being allowed to leave alone is always the stock starter — the clause
+   * was an invitation to skip the one mandatory step, and it was written for edits that never reach it.
    */
-  it('every phase task tells the model it may write nothing', () => {
+  it('a phase that may legitimately do nothing says so', () => {
     for (const phase of CREATION_PHASES) {
-      if (phase.id === 'verify') {
-        continue; // a repair turn is only ever run when there is something to repair
+      if (phase.id === 'verify' || phase.id === 'frontend') {
+        continue; // `verify` only runs when there is something to repair; `frontend` is never optional
       }
 
       expect(phase.task.toLowerCase()).toMatch(/say so in one line/);
     }
+  });
+
+  /*
+   * CONTROL — the exemption above is narrow: `frontend` is excluded because it is MANDATORY, not
+   * because nobody checked it. Asserted positively so deleting the rule fails here too.
+   */
+  it('the frontend phase is mandatory, never a no-op', () => {
+    const frontend = CREATION_PHASES.find((p) => p.id === 'frontend')!;
+
+    expect(frontend.task).toMatch(/NOT optional/i);
+    expect(frontend.task.toLowerCase()).not.toMatch(/say so in one line/);
   });
 
   it('the game phase is told NOT to touch the landing page or chrome', () => {
@@ -338,6 +354,35 @@ describe('creationPhaseMessage — the VISIBLE line', () => {
 });
 
 describe('creationPhaseNote — what the step owes', () => {
+  /**
+   * 🔴 THE FRONT END IS NOT OPTIONAL ON A FIRST BUILD (owner, 2026-08-14).
+   *
+   * *"FIRST BUILD MUST redesign the landing pages and chrome as a part of the first initial build."*
+   *
+   * This task used to end with a skip clause — "if the request was a single narrow change that did not
+   * call for a redesign, leave the landing page and the chrome alone". A plan only ever runs on a first
+   * build, so the page it offered to leave alone is always the STOCK STARTER, and a real prompt from a
+   * real failed run ("create an empty project for a mario kart racer, I will plan the game later")
+   * reads exactly like the narrow request it described.
+   */
+  it('never offers to skip the landing page or the chrome', () => {
+    const note = creationPhaseNote('frontend') ?? '';
+
+    expect(note).toMatch(/NOT optional/i);
+    expect(note).not.toMatch(/leave the landing/i);
+    expect(note).not.toMatch(/did not call for a redesign/i);
+  });
+
+  /**
+   * CONTROL — the no-op clauses that ARE legitimate must survive. "The user asked for the front end
+   * only" and "this design needs no bespoke art" are real outcomes, not guesses at intent, and
+   * deleting them would make every narrow first build write a game nobody asked for.
+   */
+  it('CONTROL — game and art may still legitimately do nothing', () => {
+    expect(creationPhaseNote('game')).toMatch(/say so in one line/i);
+    expect(creationPhaseNote('art')).toMatch(/say so in one line/i);
+  });
+
   it('carries that phase task and no other', () => {
     const note = creationPhaseNote('frontend') ?? '';
 
