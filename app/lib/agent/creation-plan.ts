@@ -297,6 +297,24 @@ export function parseCreationPhaseId(value: unknown): CreationPhaseId | null {
   return CREATION_PHASES.some((p) => p.id === value) ? (value as CreationPhaseId) : null;
 }
 
+/**
+ * 🔴 PHASES THAT MAY NO LONGER BE SCHEDULED (2026-08-14).
+ *
+ * `verify` is declared — a stored plan naming it must still RESOLVE rather than throw — but it can no
+ * longer be RUN. Its task is a repair prompt ("The project failed to compile. Fix the errors reported
+ * below") and nothing supplies it errors, so it hunts a defect that does not exist. Removing it from
+ * `DEFAULT_CREATION_PHASES` fixed that for new builds and did nothing for the plans already on disk:
+ * the phase LIST is stored on the project row, so every in-flight build kept a 4-phase plan pointing
+ * at a step that new builds no longer have. Reported as *"it says step 3 of 4, what happened to step
+ * 4 of 4?"* — the honest answer being that step 4 was the one that failed.
+ *
+ * Filtered at the PARSE, so one rule covers both doors: a plan read back from the row and a plan
+ * posted by a browser. A stranded plan then self-heals — dropping the trailing phase makes `next`
+ * clamp to the new length, i.e. the build reads as COMPLETE, which it is: frontend, art and game all
+ * landed.
+ */
+const RETIRED_PHASES: readonly CreationPhaseId[] = ['verify'];
+
 /** Does this phase get the media tools? Unknown/absent phases never do. */
 export function phaseAllowsMedia(phase: CreationPhaseId | null): boolean {
   return phase ? phaseById(phase).allowsMedia : false;
@@ -338,7 +356,7 @@ export function parseCreationPlan(value: unknown): CreationPlan | undefined {
   const parsedPhases = phases
     .slice(0, MAX_CREATION_PHASES)
     .map(parseCreationPhaseId)
-    .filter((p): p is CreationPhaseId => p !== null);
+    .filter((p): p is CreationPhaseId => p !== null && !RETIRED_PHASES.includes(p));
 
   if (parsedPhases.length === 0) {
     return undefined;

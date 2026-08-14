@@ -538,3 +538,56 @@ describe('the default plan', () => {
     expect(() => phaseById('verify')).not.toThrow();
   });
 });
+
+/**
+ * 🔴 A STORED PLAN CARRYING A RETIRED PHASE SELF-HEALS (owner-reported 2026-08-14).
+ *
+ * *"It says step 3 of 4, what happened to step 4 of 4?"* — step 4 was `verify`, the phase that failed
+ * and was then removed from the default plan. Removing it fixed NEW builds and did nothing for the
+ * ones already on disk: the phase LIST lives on the project row, so every in-flight build kept a
+ * 4-phase plan pointing at a step new builds no longer have.
+ */
+describe('retired phases are dropped on the way in', () => {
+  const stored = {
+    v: CREATION_PLAN_VERSION,
+    phases: ['frontend', 'art', 'game', 'verify'],
+    next: 3,
+    done: [
+      { id: 'frontend', generationId: 'g1', at: 'x', state: 'rescued' },
+      { id: 'art', generationId: 'g2', at: 'x', state: 'rescued' },
+      { id: 'game', generationId: 'g3', at: 'x', state: 'rescued' },
+    ],
+  };
+
+  it('drops verify from a plan stored before it was retired', () => {
+    expect(parseCreationPlan(stored)!.phases).toEqual(['frontend', 'art', 'game']);
+  });
+
+  /**
+   * The self-heal. `next` was 3 — pointing at `verify` — and clamps to the new length, so the build
+   * reads as COMPLETE, which it is: all three building phases landed. Without this the project sits
+   * parked forever on a step that cannot succeed.
+   */
+  it('the stranded build reads as complete instead of parked on a dead step', () => {
+    expect(isCreationPlanComplete(parseCreationPlan(stored))).toBe(true);
+  });
+
+  /* The record of what ran is evidence and survives untouched — including the retired phase's own. */
+  it('keeps the done records', () => {
+    expect(parseCreationPlan(stored)!.done.map((d) => d.id)).toEqual(['frontend', 'art', 'game']);
+  });
+
+  /**
+   * CONTROL — a plan of ONLY retired phases has nothing left, which `parseCreationPlan` reports as
+   * "no plan" rather than an empty one. Without this the block passes for a parser that returns a
+   * zero-phase plan, and `currentCreationPhase` would index off the end of it.
+   */
+  it('CONTROL — a plan with nothing but retired phases is no plan at all', () => {
+    expect(parseCreationPlan({ v: CREATION_PLAN_VERSION, phases: ['verify'], next: 0, done: [] })).toBeUndefined();
+  });
+
+  /* CONTROL — an ordinary plan is untouched, so this filter cannot be silently eating live phases. */
+  it('CONTROL — a current plan passes through whole', () => {
+    expect(parseCreationPlan(newCreationPlan())!.phases).toEqual(['frontend', 'art', 'game']);
+  });
+});
