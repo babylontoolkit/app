@@ -82,6 +82,64 @@ export function parseFrontmatter(source: string): ParsedSkill | null {
 }
 
 /**
+ * How many skills one skill may declare as prerequisites.
+ *
+ * A bound on a value that arrives from an EXTERNAL repository. Each dependency is a 15–25KB body
+ * inlined into the cached prefix of a turn the user did not ask to pay extra for, so a bundle
+ * declaring eight of them would quietly multiply the cost of invoking it.
+ */
+export const MAX_SKILL_DEPENDENCIES = 2;
+
+/**
+ * 🔴 A SKILL MAY DECLARE THE SKILLS IT IS BUILT ON — `dependencies: bt-design` (2026-08-14).
+ *
+ * `bt-landing`'s own body opens with *"Prerequisite — load bt-design FIRST, before anything else…
+ * call `load_skill('bt-design')`"*, and on a live `/bt-landing` run the model simply did not. That is
+ * this codebase's oldest recurring lesson — **prose does not stop, or start, a model** (`protocol-strip`,
+ * the `load_skill` thrash, the "ALREADY LOADED" heading it ignored five times) — so the prerequisite
+ * has to be satisfied by the pipeline rather than requested of the model.
+ *
+ * Read from FRONTMATTER, never from a table in this repo. Skills are authored in
+ * `babylontoolkit/skills` and this codebase only consumes them: a hardcoded `bt-landing → bt-design`
+ * edge here would be a second copy of a fact that lives there, free to go stale silently the day the
+ * skill changes — the two-writers shape this repo keeps rediscovering. It is also why the 2026-07-26
+ * rewrite deleted the keyword router: a new skill must never need a TypeScript edit to work.
+ *
+ * Absent or unparseable → no dependencies, i.e. exactly today's behaviour. Accepts a comma- or
+ * space-separated list (`dependencies: bt-design, bt-copycat`), since the frontmatter parser is
+ * deliberately scalar-only and cannot represent a YAML sequence.
+ */
+export function parseSkillDependencies(raw: string | undefined): string[] {
+  if (!raw?.trim()) {
+    return [];
+  }
+
+  const names: string[] = [];
+
+  for (const token of raw.split(/[,\s]+/)) {
+    const name = unquote(token).trim();
+
+    /*
+     * Same validation as a skill's own `name`, and it is a WALL, not tidiness: this string reaches
+     * `getActive(name)`, which resolves an object-store key. A `../` here is a path the store was
+     * never asked to serve. Anything unrecognised is dropped rather than rejected — one malformed
+     * entry must not stop a skill loading (spec/skills.md §2).
+     */
+    if (!name || name.length > MAX_NAME || !NAME_PATTERN.test(name) || names.includes(name)) {
+      continue;
+    }
+
+    names.push(name);
+
+    if (names.length === MAX_SKILL_DEPENDENCIES) {
+      break;
+    }
+  }
+
+  return names;
+}
+
+/**
  * Validate one bundle against the agentskills.io contract.
  *
  * An invalid bundle is SKIPPED with a warning, never fatal: one bad skill in the repo must not take

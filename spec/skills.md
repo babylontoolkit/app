@@ -180,3 +180,42 @@ Platform skills (our repo) are trusted prompt content. Community/user-installed 
 ## Tests
 
 Frontmatter validation matrix; invalid-bundle skip; manifest-only resource resolution (reject non-manifest paths); loop cap; index byte-stability (same skill set → same index text).
+
+## A skill may declare what it is built on — `dependencies:` (2026-08-14)
+
+Reported live: *"I used bt-landing the last blank canvas build, but it did not pull in bt-design as it
+should have."* `bt-landing`'s own body opens with **"Prerequisite — load bt-design FIRST, before
+anything else… call `load_skill('bt-design')`"**. The tool was offered. The model did not call it.
+
+**Prose is not a mechanism** — the same lesson as `protocol-strip` and the six-round `load_skill`
+thrash, where the model called for a skill five times against a heading telling it not to. So the
+prerequisite is satisfied by the pipeline: when a skill is invoked with `/name`, every skill named in
+its `dependencies:` frontmatter is inlined alongside it.
+
+It only ever worked on the CREATION turn, where `CREATION_SKILLS` inlines the pair as a fixed
+constant. Every re-run got `bt-landing` alone and silently produced generic output — and a Blank
+Canvas project, which owes no build since 2026-08-14, is not a first build turn either.
+
+**Never regress, each silent:**
+
+- **The edge is DATA from `babylontoolkit/skills`, never a table here.** A hardcoded
+  `bt-landing → bt-design` would be a second copy of a fact authored elsewhere, free to go stale the
+  day the skill changes — and it is exactly what the 2026-07-26 keyword-router deletion removed. A new
+  skill must never need a TypeScript edit in this repo to work.
+- **ONE level, never recursive.** A dependency's own dependencies are not followed, which bounds the
+  cost at `MAX_SKILL_DEPENDENCIES` bodies and makes a cycle unrepresentable instead of something a
+  visited-set has to catch.
+- **It rides in `skillBlocks`, on the SHARED breakpoint.** Anthropic allows exactly four
+  `cache_control` blocks; a `/slash` turn that also carries a skill would be the fifth and a hard
+  HTTP 400 before a token (`MAX_CACHE_BREAKPOINTS`).
+- **Nothing already in context is re-added** — the invoked skill, or anything `stickyLoadedSkills`
+  carried. Paying for the same 20KB twice in one prompt is what `carriedSkillNames` already avoids.
+- **The name is validated like a skill's own `name`** before it reaches `getActive()`, which resolves
+  an object-store key: a `../` there is a path the store was never asked to serve. Invalid entries are
+  dropped, never fatal.
+- **`SkillVersionMeta.dependencies` is REQUIRED**, so a new store cannot compile without answering
+  (verified: the fixture failed `TS2741`). Stored records predating the field read back as `[]`.
+
+⚠️ **Inert until the skills repo declares it.** Add `dependencies: bt-design` to `bt-landing`'s
+frontmatter in `babylontoolkit/skills` and resync; absent, behaviour is byte-identical to before.
+Pinned by `skill-dependencies.spec.ts` (15 tests, mutation-verified).

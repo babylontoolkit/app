@@ -27,6 +27,14 @@ export interface SkillVersionMeta {
 
   /** Bundle-relative paths of every non-SKILL.md file (`references/foo.md`, …). */
   resourcePaths: string[];
+
+  /**
+   * Skills this one is BUILT ON, from its `dependencies:` frontmatter (`parseSkillDependencies`).
+   *
+   * Loaded alongside it when the user invokes it, because a prerequisite stated in prose is one the
+   * model can decline — and did. Always an array; an older stored record has none.
+   */
+  dependencies: string[];
   isActive: boolean;
 }
 
@@ -43,6 +51,9 @@ export interface NewSkillVersion {
 
   /** Bundle-relative path → file contents. */
   resources: Record<string, string>;
+
+  /** From `dependencies:` frontmatter — see `parseSkillDependencies`. */
+  dependencies?: string[];
 }
 
 export interface SkillStore {
@@ -71,6 +82,9 @@ interface SkillRecord {
 
   /** manifest: bundle-relative path → blob sha. */
   resources: Record<string, string>;
+
+  /** Optional: records written before 2026-08-14 have no field at all. */
+  dependencies?: string[];
 }
 
 /** Everything this store owns lives under one prefix, so a `list` can never see another subsystem. */
@@ -162,6 +176,13 @@ export class SkillVersionStore implements SkillStore {
       createdAt: record.createdAt,
       bodyBytes: record.bodyBytes,
       resourcePaths: Object.keys(record.resources).sort(),
+
+      /*
+       * `?? []` is load-bearing rather than defensive: every skill version synced before this field
+       * existed is still on disk, and a reader that gets `undefined` where it expects an array turns
+       * an old record into a crash on the money path instead of a skill with no prerequisites.
+       */
+      dependencies: record.dependencies ?? [],
       isActive: record.id === activeId,
     };
   }
@@ -179,6 +200,7 @@ export class SkillVersionStore implements SkillStore {
       bodyBytes: Buffer.byteLength(version.body, 'utf8'),
       body: version.body,
       resources: {},
+      ...(version.dependencies?.length ? { dependencies: version.dependencies } : {}),
     };
 
     for (const [resourcePath, contents] of Object.entries(version.resources)) {

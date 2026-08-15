@@ -12,7 +12,7 @@
 import { createScopedLogger } from '~/utils/logger';
 import { githubJson, githubText } from '~/lib/.server/prompt/github';
 import { SKILLS_REPO } from '~/lib/.server/prompt/sources';
-import { validateSkill } from './frontmatter';
+import { parseSkillDependencies, validateSkill } from './frontmatter';
 import { isExcludedSkill } from './exclusions';
 import { getSkillStore, type SkillVersion } from './store';
 import { MAX_SKILL_LOADS } from '~/lib/.server/agent/tools';
@@ -167,6 +167,9 @@ export async function syncSkills(githubToken?: string): Promise<SyncResult> {
         name,
         description: result.skill.frontmatter.description,
         body: result.skill.body,
+
+        /* `dependencies: bt-design` — the skills repo declares what a skill is built on (§4.11). */
+        dependencies: parseSkillDependencies(result.skill.frontmatter.dependencies),
         sourceCommitSha: head.sha,
         resources,
       });

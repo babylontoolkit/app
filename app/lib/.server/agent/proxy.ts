@@ -110,7 +110,13 @@ import {
   type HistorySize,
 } from '~/lib/.server/llm/history';
 import { envNumber } from '~/lib/.server/env';
-import { buildPreloadedSkillBlock, carriedSkillNames, loadSkillBodies, preloadSkills } from './preload-skills';
+import {
+  buildPreloadedSkillBlock,
+  carriedSkillNames,
+  loadSkillBodies,
+  preloadSkills,
+  skillDependencyNames,
+} from './preload-skills';
 import { buildProjectNotes, type GameBackendState } from './project-notes';
 import { discussModeNote } from './discuss-note';
 import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
@@ -611,7 +617,7 @@ export function statusKindFor(input: {
  */
 export async function resolveSlashInvocation(
   messages: Message[],
-): Promise<{ skillBlock: string; skillName: string; messages: Message[] } | null> {
+): Promise<{ skillBlock: string; skillName: string; dependencies: string[]; messages: Message[] } | null> {
   const index = messages.map((m) => m.role).lastIndexOf('user');
 
   if (index === -1) {
@@ -696,7 +702,7 @@ export async function resolveSlashInvocation(
   const { parts: _replacedByTask, ...withoutParts } = rewritten[index] as Message & { parts?: unknown };
   rewritten[index] = { ...withoutParts, content: `${carried}${task}` } as Message;
 
-  return { skillBlock, skillName: skill.name, messages: rewritten };
+  return { skillBlock, skillName: skill.name, dependencies: skill.dependencies ?? [], messages: rewritten };
 }
 
 /** Format compile errors into the repair turn the model sees (§4.2.7). */
@@ -1115,6 +1121,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const carried = await loadSkillBodies(carriedNames);
 
   /*
+   * 🔴 AND THE INVOKED SKILL'S DECLARED PREREQUISITES (§4.11, `skillDependencyNames`).
+   *
+   * `/bt-landing` asks the model, in its own body, to `load_skill('bt-design')` first. Live, it did
+   * not — so the prerequisite is satisfied by the pipeline instead of requested of the model. The edge
+   * is DATA from the skills repo (`dependencies:` frontmatter), never a table here: a hardcoded
+   * `bt-landing → bt-design` would be a second copy of a fact authored elsewhere.
+   *
+   * Rides in `skillBlocks` below, i.e. the SAME merged breakpoint as the invoked skill and the carried
+   * ones — never its own, or a `/slash` turn that also carries a skill would be the fifth
+   * `cache_control` block and a hard HTTP 400 (`MAX_CACHE_BREAKPOINTS`).
+   */
+  const dependencies = await loadSkillBodies(
+    skillDependencyNames({
+      invoked: slash ? { name: slash.skillName, dependencies: slash.dependencies } : undefined,
+      alreadyInContext: carriedNames,
+    }),
+  );
+
+  /*
    * 🔴 THE INVOKED SKILL AND THE PRE-LOADED SKILLS SHARE ONE BREAKPOINT — because ANTHROPIC ALLOWS
    * EXACTLY FOUR AND WE HAD FIVE (found + fixed 2026-07-17).
    *
@@ -1136,6 +1161,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * cannot open is a dangling instruction). Carried skills DO have the tools, so their paths travel.
      */
     ...(preloaded.length > 0 ? [buildPreloadedSkillBlock(preloaded)] : []),
+
+    /*
+     * A prerequisite of the invoked skill. Resource paths TRAVEL — the invoked skill's own block lists
+     * its resources unconditionally two lines above, and `bt-design` is the documented case where
+     * withholding them breaks the skill ("read `references/…` BEFORE writing any code" with no way to
+     * learn the file exists). A slash turn is never the tool-less creation turn.
+     */
+    ...(dependencies.length > 0 ? [buildPreloadedSkillBlock(dependencies, true)] : []),
     ...(carried.length > 0 ? [buildPreloadedSkillBlock(carried, true)] : []),
   ];
 

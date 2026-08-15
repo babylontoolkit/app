@@ -40,6 +40,7 @@ const BT_SPEC: SkillVersion = {
   sourceCommitSha: 'abc123',
   createdAt: '2026-07-25T00:00:00.000Z',
   bodyBytes: 20,
+  dependencies: [],
   resourcePaths: [],
   isActive: true,
   body: '# bt-spec\n\nWrite the spec to `_specs/<feature>_spec.md`.',

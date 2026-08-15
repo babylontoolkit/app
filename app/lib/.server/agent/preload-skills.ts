@@ -149,6 +149,62 @@ export function carriedSkillNames(input: {
   return stickyLoadedSkills(input.messages).filter((name) => name !== input.invokedSkillName);
 }
 
+/**
+ * 🔴 AN INVOKED SKILL'S DECLARED PREREQUISITES COME WITH IT (owner-reported live, 2026-08-14).
+ *
+ * *"I used bt-landing the last blank canvas build, but it did not pull in bt-design as it should
+ * have."* Correct, and the skill had asked for it in as many words: `bt-landing`'s body opens with
+ * *"Prerequisite — load bt-design FIRST, before anything else… call `load_skill('bt-design')`"*. The
+ * tool was offered. The model did not call it.
+ *
+ * That is the failure this repo has recorded more times than any other — **prose is not a mechanism**
+ * (`protocol-strip`; the six-round thrash where the model called `load_skill` five times against a
+ * heading telling it not to). A prerequisite the pipeline can satisfy must not be left as a request.
+ *
+ * ## Why it took a live report to surface
+ *
+ * It only ever worked on the CREATION turn, where `CREATION_SKILLS` inlines the pair as a fixed
+ * constant. Every re-run — `/bt-landing` on an established project, or on a Blank Canvas project,
+ * which since 2026-08-14 owes no build and so is not a first build turn — got `bt-landing` alone and
+ * silently produced generic output. The skill's own text says the creation case is "already
+ * satisfied", which reads as describing a general mechanism rather than the single exception it was.
+ *
+ * ## The rules
+ *
+ * **One level, never recursive.** A dependency's own dependencies are not followed. That bounds the
+ * cost at `MAX_SKILL_DEPENDENCIES` bodies and makes a cycle (`a → b → a`) unrepresentable rather than
+ * something a visited-set has to catch.
+ *
+ * **Nothing already in context is re-added.** The invoked skill's body is inlined by
+ * `resolveSlashInvocation`, and carried skills (`stickyLoadedSkills`) are inlined beside it — paying
+ * for the same 20KB twice in one prompt is the exact waste `carriedSkillNames` drops the invoked skill
+ * to avoid.
+ */
+export function skillDependencyNames(input: {
+  /** The skill the user invoked with `/name`, and what its frontmatter says it is built on. */
+  invoked?: { name: string; dependencies?: string[] };
+
+  /** Skill names whose bodies are ALREADY in this prompt — the invoked skill and any carried ones. */
+  alreadyInContext: string[];
+}): string[] {
+  if (!input.invoked?.dependencies?.length) {
+    return [];
+  }
+
+  const excluded = new Set([input.invoked.name, ...input.alreadyInContext]);
+  const names: string[] = [];
+
+  for (const name of input.invoked.dependencies) {
+    if (excluded.has(name) || names.includes(name)) {
+      continue;
+    }
+
+    names.push(name);
+  }
+
+  return names;
+}
+
 /** Load the bodies for an already-decided list of skill names, skipping any that are no longer synced. */
 export async function loadSkillBodies(names: string[]): Promise<PreloadedSkill[]> {
   if (names.length === 0) {
