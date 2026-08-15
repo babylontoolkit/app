@@ -137,6 +137,27 @@ describe('the blank canvas flag reaches the code that decides', () => {
   });
 
   /**
+   * 🔴 AND IT SURVIVES THE ROUND TRIP BACK OFF THE ROW. Found live: the rehydrate path read the
+   * handoff as `{ userPrompt, plan }` and dropped the flag, so a Blank Canvas project opened on a
+   * second device — or after a storage clear — phased its build.
+   *
+   * ⚠️ It failed WORSE than a plain regression. The SERVER reads the flag off the same row
+   * (`projectOwesBuild`), so the two halves disagreed: the client ran three phases while the server
+   * had every first-build protection switched off. The persist test above cannot see this — writing
+   * the flag and reading it back are different code, and only one of them had it.
+   */
+  it('comes BACK off the row when the mode is rehydrated', () => {
+    const hydrate = CHAT.indexOf('enterNewProjectMode({\n            projectId: activeProjectId,');
+    expect(hydrate, 'the rehydrate call must exist').toBeGreaterThan(-1);
+
+    const call = CHAT.slice(hydrate, hydrate + 400);
+    expect(call, 'the rehydrated mode must carry the flag').toMatch(/blankCanvas: handoff\.blankCanvas === true/);
+
+    /* The response is a wire value, so the same strict narrowing as the other two layers. */
+    expect(call).not.toMatch(/blankCanvas: handoff\.blankCanvas,/);
+  });
+
+  /**
    * 🔴 THE SEND SKIPS THE PLAN. Without this the flag is recorded, read, and ignored: `newCreationPlan()`
    * runs, and the front-end and art phases post themselves exactly as before.
    */

@@ -465,7 +465,9 @@ export const ChatImpl = memo(
 
       getProject(activeProjectId)
         .then((project) => {
-          const handoff = (project as { creationHandoff?: { userPrompt?: string; plan?: unknown } }).creationHandoff;
+          const handoff = (
+            project as { creationHandoff?: { userPrompt?: string; plan?: unknown; blankCanvas?: unknown } }
+          ).creationHandoff;
 
           if (!handoff || projectId.get() !== activeProjectId || newProjectModeStore.get()) {
             return;
@@ -482,10 +484,25 @@ export const ChatImpl = memo(
            * starting over. Auto-running on mount would spend credits nobody asked for at that moment,
            * which is the one thing every decider in this flow exists to prevent.
            */
+          /*
+           * 🔴 AND THE BLANK-CANVAS FLAG, or this path re-phases the one project that must never be
+           * phased (owner, 2026-08-14). It shipped carrying `userPrompt` and `plan` only — so a Blank
+           * Canvas project opened on a second device, or in a browser whose storage was cleared, came
+           * back with the flag missing and built a landing page and artwork nobody asked for.
+           *
+           * ⚠️ It fails WORSE than a plain regression, because the two sides read different copies:
+           * the SERVER derives `isFirstBuildTurn` from the ROW (`projectOwesBuild`), which does carry
+           * the flag, so the client would have run three phases with every first-build protection
+           * switched off — a shape neither branch was ever meant to produce.
+           *
+           * Same `=== true` narrowing as the other two layers: this arrives from a wire response, and
+           * a truthy `1` waving a project past its build is a silent no-op of the whole pipeline.
+           */
           enterNewProjectMode({
             projectId: activeProjectId,
             userPrompt: handoff.userPrompt,
             plan: parseCreationPlan(handoff.plan),
+            blankCanvas: handoff.blankCanvas === true ? true : undefined,
           });
         })
         .catch((error) => {

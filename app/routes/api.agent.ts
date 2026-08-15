@@ -242,6 +242,13 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       owesBuild: projectOwesBuild(project?.creationHandoff),
 
       /*
+       * Which starter game type this project was created from (§4.4) — the row, never the body, for
+       * the same reason as `owesBuild` directly above: it is a fact about the project, and a caller
+       * who could name their own starter could hand themselves a base scene from someone else's.
+       */
+      starterId: project?.templateId,
+
+      /*
        * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
        * Sanitise at the boundary so a claim pointing at the platform Supabase becomes "no backend"
        * rather than an RLS-first note scaffolding game code against our own database.

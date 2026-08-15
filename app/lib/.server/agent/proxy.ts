@@ -56,6 +56,8 @@ import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billi
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
 import { creationPhaseNote, parseCreationPhaseId, phaseOwesFiles } from '~/lib/agent/creation-plan';
+import { starterGameTypeFrom, starterGameTypeNote } from '~/lib/agent/starter-note';
+import { findRegistryEntry } from '~/lib/registry/entries';
 import { toolkitSystemsNoteForRequest } from '~/lib/agent/toolkit-systems';
 import {
   decideModelTier,
@@ -328,6 +330,16 @@ export interface AgentRequest {
    * Absent means "no project named" — a generation with nothing to build into is never a first build.
    */
   owesBuild?: boolean;
+
+  /**
+   * Which `game_registry` row this project was created from (`Project.templateId`) — the starter game
+   * type, which decides the scaffolded GameMode and the base scene (§4.4, `starterGameTypeNote`).
+   *
+   * Resolved by the ROUTE from the ownership-checked project row for the same reason as `owesBuild`:
+   * it is a fact about the project, and taking it from the body would let a caller describe their
+   * project as a starter it was never made from. An unknown id resolves to no note, never to a guess.
+   */
+  starterId?: string;
 
   /**
    * A connected Game Backend (§4.15) — the user's OWN Supabase, described so the model scaffolds
@@ -1480,6 +1492,23 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   if (phaseNote) {
     system.push({ role: 'system', content: phaseNote });
+  }
+
+  /*
+   * 🔴 THE STARTER GAME TYPE (§4.4) — same placement rule as `discussNote` above.
+   *
+   * What the user's card decided: which GameMode was scaffolded, and which base scene (if any) the
+   * play contract should preload. The scene half had never reached the model at all — see
+   * `starterGameTypeNote`, and SPEC §4.4b step 4, which has specified it since the registry existed.
+   *
+   * On EVERY turn, not just a build: the `navigate('/play', …)` call this informs is written by the
+   * front-end phase and rewritten by any later landing-page pass, so a project would lose its base
+   * scene the first time someone ran `/bt-landing` on it.
+   */
+  const starterNote = starterGameTypeNote(starterGameTypeFrom(findRegistryEntry(request.starterId)));
+
+  if (starterNote) {
+    system.push({ role: 'system', content: starterNote });
   }
 
   /*
