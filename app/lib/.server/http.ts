@@ -20,6 +20,9 @@ interface CodedError {
   isRetryable?: boolean;
   message?: string;
   name?: string;
+
+  /** Set by `RateLimitedError`; becomes the `Retry-After` header below. */
+  retryAfterSeconds?: number;
 }
 
 /**
@@ -52,6 +55,13 @@ export const SAFE_ERRORS: ReadonlySet<string> = new Set([
   'RootAbsoluteAssetError',
   'UnmountableRouterBasenameError',
   'AccountDeletionError',
+
+  /*
+   * The Unity subscription check (§4.18). A Unity Editor has no browser to read a generic 500 in, so
+   * "your email parameter is unusable" has to arrive as those words or it reads as the endpoint being
+   * down — and the developer files it against the wrong thing.
+   */
+  'InvalidEmailError',
 ]);
 
 export function errorResponse(error: unknown): Response {
@@ -64,6 +74,25 @@ export function errorResponse(error: unknown): Response {
 
   const safe = coded?.name && SAFE_ERRORS.has(coded.name);
 
+  /*
+   * `Retry-After` was PROMISED AND NEVER SENT (found 2026-08-14 by curling a real 429).
+   *
+   * `RateLimitedError`'s doc comment has always described itself as "429 + `Retry-After`", and it does
+   * carry `retryAfterSeconds` — but every throw funnels through here, and here built a body and a
+   * status and no headers at all. So the one machine-readable field a client needs in order to back
+   * off correctly was computed, documented, and dropped on the floor, for every rate-limited route.
+   *
+   * It matters most for the callers least able to improvise: a Unity Editor (§4.18a) and any script
+   * hitting the import limit will either retry immediately — making the limit worse — or give up. A
+   * sentence in prose ("about 1 minute") is for a human; this is for the client.
+   *
+   * Conditional rather than always-on: `Retry-After` on a 401 or a 404 would be meaningless.
+   */
+  const headers: Record<string, string> =
+    typeof coded?.retryAfterSeconds === 'number' && Number.isFinite(coded.retryAfterSeconds)
+      ? { 'Retry-After': String(Math.max(1, Math.ceil(coded.retryAfterSeconds))) }
+      : {};
+
   return json(
     {
       error: true,
@@ -71,7 +100,7 @@ export function errorResponse(error: unknown): Response {
       statusCode: status,
       isRetryable: coded?.isRetryable ?? status >= 500,
     },
-    { status },
+    { status, headers },
   );
 }
 

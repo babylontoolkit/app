@@ -41,7 +41,7 @@ function stripComments(source: string): string {
  * routes outright. That NO wall is present is always wrong.
  */
 const WALL =
-  /denyUnlessVerified|requireVerifiedUser|requireUser|requireAdmin|requireOwnedProject|upstreamLlmRouteDisabled|serverSideMcpDisabled/;
+  /denyUnlessVerified|requireVerifiedUser|requireUser|requireAdmin|requireOwnedProject|upstreamLlmRouteDisabled|serverSideMcpDisabled|requireUnitySubscriptionKey/;
 
 /** A Remix route only does anything if it actually exports a handler. */
 const HANDLER = /export\s+(?:async\s+function|const|function)\s+(?:loader|action)\b/;

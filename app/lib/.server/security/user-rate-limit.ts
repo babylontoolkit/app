@@ -122,17 +122,25 @@ export function getUserRateLimitStore(): UserRateLimitStore {
  */
 export const CLONE_RATE_LIMIT: UserRateLimitRule = { windowMs: 60 * 60 * 1000, max: 10 };
 
-/** A refusal a caller can act on: 429 + `Retry-After`, and a sentence naming the wait. */
+/**
+ * A refusal a caller can act on: 429 + `Retry-After`, and a sentence naming the wait.
+ *
+ * `subject` names what was throttled, and it defaults to the clone limit this class was written for so
+ * every existing call site keeps its exact wording. It is a parameter because the message is SHOWN —
+ * `RateLimitedError` is in `SAFE_ERRORS`, so a second caller reusing this class would otherwise tell a
+ * Unity developer that they had made too many "repository imports", which names the wrong cause and
+ * sends them to look for a problem that does not exist (`share/build-failure.ts`, same lesson).
+ */
 export class RateLimitedError extends Error {
   readonly statusCode = 429;
   readonly name = 'RateLimitedError';
   readonly isRetryable = true;
   readonly retryAfterSeconds: number;
 
-  constructor(resetAt: number, now: number) {
+  constructor(resetAt: number, now: number, subject = 'repository imports') {
     const seconds = Math.max(1, Math.ceil((resetAt - now) / 1000));
     const minutes = Math.ceil(seconds / 60);
-    super(`Too many repository imports. Try again in about ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+    super(`Too many ${subject}. Try again in about ${minutes} minute${minutes === 1 ? '' : 's'}.`);
     this.retryAfterSeconds = seconds;
   }
 }
