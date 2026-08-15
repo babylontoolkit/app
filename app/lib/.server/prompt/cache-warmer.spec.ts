@@ -24,6 +24,7 @@
  * this machine really does carry `KIE_API_KEY`/`LLM_MODEL`. The WHOLE precedence chain is scrubbed
  * in `beforeEach`, or these tests grade against the operator's real config with CI green.
  */
+import { DEFAULT_MODEL } from '~/utils/constants';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1033,7 +1034,18 @@ describe('🔴 the warmer follows the AUTO_MODEL_SELECT ladder, not LLM_PROVIDER
       vi.stubEnv('CACHE_WARMER_ENABLED', 'true');
       vi.stubEnv(AUTO_MODEL_SELECT_ENV_KEY, 'true');
       vi.stubEnv('LLM_PROVIDER', 'KIE');
-      vi.stubEnv('KIE_DEFAULT_MODEL', 'claude-opus-5');
+
+      /*
+       * ⚠️ MUST differ from the baked `DEFAULT_MODEL`, or the two hypotheses ("resolved against the
+       * selected gateway" and "resolved against LLM_PROVIDER") produce the same string and this test
+       * proves nothing. It stubbed `claude-opus-5` until 2026-08-14, when Opus BECAME the default and
+       * silently collapsed the discriminator — the same way the `LLM_MODEL` case in billing.spec.ts
+       * has now been invalidated twice. The guard below is the durable part, not the value.
+       */
+      const kieOnly = 'claude-sonnet-5';
+      expect(kieOnly, 'the KIE-only model must differ from the baked default').not.toBe(DEFAULT_MODEL);
+
+      vi.stubEnv('KIE_DEFAULT_MODEL', kieOnly);
       vi.stubEnv('COMET_API_KEY', 'sk-comet-123');
 
       const fetchFn = vi.fn(async () => okResponse({ cache_read_input_tokens: 5420 }));
@@ -1044,10 +1056,8 @@ describe('🔴 the warmer follows the AUTO_MODEL_SELECT ladder, not LLM_PROVIDER
       const body = JSON.parse(init.body as string);
 
       expect(url).toBe(`${COMET_DEFAULT_BASE_URL}/messages`);
-      expect(body.model, 'the model was resolved against LLM_PROVIDER, not the selected gateway').toBe(
-        'claude-sonnet-5',
-      );
-      expect(body.model).not.toBe('claude-opus-5');
+      expect(body.model, 'the model was resolved against LLM_PROVIDER, not the selected gateway').toBe(DEFAULT_MODEL);
+      expect(body.model).not.toBe(kieOnly);
     });
 
     it('skips when the SELECTED gateway has no key — never falls back to LLM_PROVIDER’s', async () => {

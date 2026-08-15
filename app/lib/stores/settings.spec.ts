@@ -40,7 +40,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ModelTierId } from './settings';
+import { MODEL_TIER_IDS, type ModelTierId } from './settings';
 
 /** The wire keys, as a browser holds them. Never imported — see the header note. */
 const MODEL_TIER_KEY = 'modelTier';
@@ -360,7 +360,7 @@ describe('the chosen rung survives a reload', () => {
   });
 
   it('every rung survives its own reload', async () => {
-    for (const tier of ['standard', 'premium', 'platinum'] as const) {
+    for (const tier of MODEL_TIER_IDS) {
       const storage = fakeStorage();
 
       const first = await loadSettings(storage);

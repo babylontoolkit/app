@@ -55,9 +55,21 @@
  *  - **2026-08-10** → back to `ENABLE_EXTENDED_MODELS`, when PLATINUM restored the second paid rung
  *    and the plural became true again; `ENABLE_PREMIUM_MODEL` is now the refused one
  *
- * ⚠️ So the name is once again accurate rather than merely historical — it governs EVERY paid rung,
- * not one of them. Per-rung control is `enabledEnvKey` (`ENABLE_PLATINUM_MODEL`), which can only ever
- * NARROW what this allows.
+ *  - **2026-08-14** → PLATINUM retired again (owner), so the ladder is back to ONE paid rung — and
+ *    the name was deliberately **NOT** flipped a third time.
+ *
+ * 🔴 **Why the third rename was refused, since precedent points the other way.** The two earlier flips
+ * were argued from grammar: one paid rung, so drop the plural. That reasoning is worth less than it
+ * costs. Each rename of a default-ON money flag has a documented failure mode — the old key stops
+ * being read, falls through to ON, and the deploy serves the expensive rung to everyone — and the
+ * knowledge base ended up asserting the INVERSE polarity for a day, on the flag deciding who gets
+ * served a paid model. Meanwhile `EXTENDED_MODELS` reads perfectly well as "the models beyond
+ * Standard", a set that is allowed to have one member. **Renaming this again needs a reason about
+ * BEHAVIOUR, not about number agreement.**
+ *
+ * ⚠️ It governs EVERY paid rung — currently exactly one. Per-rung narrowing is `enabledEnvKey`, which
+ * can only ever narrow what this allows; with one rung it is the same key, which is why
+ * `ENABLE_PLATINUM_MODEL` is now REFUSED rather than ignored.
  *
  * `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` stay refused throughout, and PLATINUM taking that
  * rung's position did NOT change that: those values were chosen against SuperMax's threshold and
@@ -125,7 +137,7 @@ const RETIRED_MODEL_TIER_ENV: ReadonlyArray<{ key: string; fix: string }> = [
    */
   {
     key: 'ENABLE_PREMIUM_MODEL',
-    fix: `renamed back to ${ENABLE_EXTENDED_MODELS_ENV_KEY} now that the ladder has two paid rungs again — copy its value across and remove the old key`,
+    fix: `the paid rung is governed by ${ENABLE_EXTENDED_MODELS_ENV_KEY} — copy its value across and remove the old key`,
   },
 
   /*
@@ -136,6 +148,32 @@ const RETIRED_MODEL_TIER_ENV: ReadonlyArray<{ key: string; fix: string }> = [
    * never set. Refusing costs them one deliberate edit; adopting costs them a mis-served paid tier
    * with nothing thrown. Same rule as `ENABLE_EXTENDED_MODELS` directly above.
    */
+  /*
+   * 🔴 PLATINUM RETIRED (owner, 2026-08-14) — and its keys are refused for the SuperMax reason, not
+   * silently folded into Premium. Premium's model DID move up to `claude-fable-5` as part of the same
+   * change, so `PLATINUM_MODEL=claude-fable-5` would happen to be right on the owner's deploy — which
+   * is exactly why adopting it is the wrong habit: it would be right by coincidence here and wrong on
+   * the next deploy, at a threshold nobody re-checked, with nothing thrown.
+   *
+   * ⚠️ `ENABLE_PLATINUM_MODEL` is refused too, and that one is the costly direction. It is a per-rung
+   * NARROWING switch: an operator who set it `false` to withdraw Platinum, and whose model has now
+   * moved into Premium, would have their withdrawal silently stop applying to the rung that inherited
+   * it. Refusing costs one deliberate edit; ignoring costs a paid rung served to people the operator
+   * had turned it off for.
+   */
+  {
+    key: 'PLATINUM_MODEL',
+    fix: 'the Platinum rung is retired — its model moved into PREMIUM_MODEL (review it against the active price list and PREMIUM_MINIMUM_CREDITS first) or remove this key',
+  },
+  {
+    key: 'PLATINUM_MINIMUM_CREDITS',
+    fix: 'the Platinum rung is retired — set the threshold in PREMIUM_MINIMUM_CREDITS or remove this key',
+  },
+  {
+    key: 'ENABLE_PLATINUM_MODEL',
+    fix: `the Platinum rung is retired — the remaining paid rung is governed by ${ENABLE_EXTENDED_MODELS_ENV_KEY}, so set that instead or remove this key`,
+  },
+
   {
     key: 'SUPERMAX_MODEL',
     fix: 'the SuperMax rung is retired and replaced by PLATINUM — move the model to PLATINUM_MODEL (reviewing it against the active price list first) or remove this key',

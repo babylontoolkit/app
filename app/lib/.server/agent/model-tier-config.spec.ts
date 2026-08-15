@@ -155,11 +155,11 @@ const configSource = readFileSync(join(REPO, 'app/lib/.server/agent/config.ts'),
 /* ============================================================ 1. getTierModel — the real seam */
 
 describe('getTierModel — every rung resolves its OWN model, from code, with no environment', () => {
-  it('resolves Premium to Opus 5', () => {
+  it('resolves Premium to Fable 5', () => {
     stubTierEnv();
 
     expect(getTierModel('premium', {})).toBe(DEFAULT_PREMIUM_MODEL);
-    expect(getTierModel('premium', {})).toBe('claude-opus-5');
+    expect(getTierModel('premium', {})).toBe('claude-fable-5');
   });
 
   /*
@@ -170,7 +170,7 @@ describe('getTierModel — every rung resolves its OWN model, from code, with no
   it.each(['KIE', 'Anthropic'])('resolves the paid rung on %s', (provider) => {
     stubTierEnv({ LLM_PROVIDER: provider });
 
-    expect(getTierModel('premium', {})).toBe('claude-opus-5');
+    expect(getTierModel('premium', {})).toBe('claude-fable-5');
   });
 
   /* The env var is a SELECTOR: it names a model, and the ACTIVE price list prices it. */
@@ -289,7 +289,7 @@ describe('getTierModel — the provider override, and what it can and cannot be 
   it.each(['Anthropic', 'KIE', 'Comet'] as const)('accepts an explicit %s and resolves the rung', (provider) => {
     stubTierEnv();
 
-    expect(getTierModel('premium', {}, provider)).toBe('claude-opus-5');
+    expect(getTierModel('premium', {}, provider)).toBe('claude-fable-5');
   });
 
   /*
@@ -384,7 +384,7 @@ describe('getPremiumModel — a deprecated wrapper, not a second implementation'
   it('agrees with getTierModel("premium") on the default', () => {
     stubTierEnv();
     expect(getPremiumModel({})).toBe(getTierModel('premium', {}));
-    expect(getPremiumModel({})).toBe('claude-opus-5');
+    expect(getPremiumModel({})).toBe('claude-fable-5');
   });
 
   it('agrees with getTierModel("premium") on a configured selector', () => {
@@ -423,9 +423,9 @@ describe('getPremiumModel — a deprecated wrapper, not a second implementation'
 
   /* It must not have quietly become "whatever rung is cheapest/most expensive" — it is PREMIUM. */
   it('resolves the premium rung specifically, not the platform model', () => {
-    stubTierEnv({ PREMIUM_MODEL: 'claude-fable-5', LLM_MODEL: 'claude-opus-5' });
+    stubTierEnv({ PREMIUM_MODEL: 'claude-opus-5', LLM_MODEL: 'claude-sonnet-5' });
 
-    expect(getPremiumModel({})).toBe('claude-fable-5');
+    expect(getPremiumModel({})).toBe('claude-opus-5');
     expect(getPremiumModel({})).toBe(getTierModel('premium', {}));
   });
 });

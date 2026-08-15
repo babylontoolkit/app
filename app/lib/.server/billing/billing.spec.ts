@@ -1006,13 +1006,15 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
    */
   it('fills a gap and refuses to overwrite, on both providers', () => {
     stubTiers();
-    expect(DEFAULT_PREMIUM_MODEL).toBe('claude-opus-5');
+    expect(DEFAULT_PREMIUM_MODEL, 'Premium took the retired Platinum rung’s model on 2026-08-14').toBe(
+      'claude-fable-5',
+    );
 
     // Gap-fill must NOT overwrite: Anthropic prices Opus 5 itself at $5/$25, the list says $2/$10.
     expect(providerRates({}).Anthropic['claude-opus-5'].inputPerMTok).toBe(5);
     expect(providerRates({}).Anthropic['claude-opus-5'].outputPerMTok).toBe(25);
 
-    // Nor for Platinum, which Anthropic also prices natively ($10/$50) where the list says $4/$20.
+    // Nor for Premium, which Anthropic also prices natively ($10/$50) where the list says $4/$20.
     expect(providerRates({}).Anthropic['claude-fable-5'].inputPerMTok).toBe(10);
     expect(providerRates({}).Anthropic['claude-fable-5'].outputPerMTok).toBe(50);
 
@@ -1116,35 +1118,40 @@ describe('the signup grant buys the hook', () => {
   });
 
   /*
-   * 🔴 ANTHROPIC HEADROOM STOPPED BEING THE CONSTRAINT ON GRANT SIZE (2026-08-12).
+   * 🔴 **ANTHROPIC HEADROOM IS THE CONSTRAINT AGAIN (2026-08-14, Opus as the default model).**
    *
-   * This test asserted that a 500-credit grant clears the floor on KIE and FAILS it on Anthropic, and it
-   * was named for that: "documents WHY 500 is not yet the default". It fails now because Sonnet 5's
-   * Anthropic row dropped from an over-stated $3/$15 to the true $2/$10 — a cold build on Anthropic went
-   * 346 -> 231 credits, so 500 clears at ~1.73x.
+   * This test has now flipped twice, and each flip is a fact about the platform rather than about the
+   * test:
    *
-   * ⚠️ Read that correctly: **the grant did not become more generous, the cost estimate stopped being
-   * inflated.** And note what the old assertion had become — a test asserting that a hypothetical grant
-   * is unaffordable, whose failure is GOOD NEWS. That is a shape worth recognising: an assertion pinned
-   * to a limitation goes red when the limitation is removed, and the temptation is to "restore" it.
+   *   - It began as "500 fails on Anthropic", documenting why the grant was not lowered.
+   *   - **2026-08-12** it went GREEN — not because the grant got more generous, but because Sonnet 5's
+   *     Anthropic row was corrected from an over-stated $3/$15 to the true $2/$10, taking a cold build
+   *     from 346 to 231 credits. It was rewritten to say the sizing question could no longer be
+   *     answered by pointing at Anthropic.
+   *   - **2026-08-14** the default model became Opus 5 (owner: Sonnet cannot reliably finish a game),
+   *     which is 2.5x Sonnet's rate on Anthropic. A 500-credit grant now buys **0.69x** of a cold
+   *     build — it cannot finish one — so Anthropic headroom is the binding constraint once more.
    *
-   * So this now records the live arithmetic instead of a verdict. **Whether to lower the grant is the
-   * owner's decision** (`SIGNUP_GRANT_CREDITS` is 1000 and pure operator cost, §4.6) — the only thing
-   * this pins is that the sizing question can no longer be answered by pointing at Anthropic.
+   * ⚠️ **The shipped 1000-credit grant clears the 1.5x floor with very little to spare.** That is the
+   * number worth watching: this is not a comfortable margin, it is a passing one, and any further move
+   * in the model or the rates puts new users below the floor — where the symptom is a free build that
+   * runs out of credits part way through, which reads exactly like the product being broken.
+   *
+   * The assertion is deliberately about the ARITHMETIC and not a verdict. Whether to raise the grant is
+   * the owner's call (`SIGNUP_GRANT_CREDITS` is pure operator cost, §4.6).
    */
-  it('no longer has an Anthropic headroom problem at 500 credits', () => {
+  it('at 500 credits a new user can no longer finish a build on Anthropic', () => {
     const target = { ...config, signupGrantCredits: 500 };
 
-    for (const provider of ['KIE', 'Anthropic'] as const) {
-      expect(grantHeadroom(target, PLATFORM_MODEL, provider), provider).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
-    }
+    expect(grantHeadroom(target, PLATFORM_MODEL, 'Anthropic')).toBeLessThan(1);
 
     /*
-     * CONTROL: the floor is still reachable, so the loop above is a measurement and not a tautology.
-     * Opus 5 on Anthropic is the tight combination (~1.56x at the shipped 1000-credit grant), and at 500
-     * it is squarely under the floor — which is why the paid rungs carry credit thresholds.
+     * CONTROL — the cheaper gateway is not in the same position, so this is a measurement of the
+     * Anthropic rate rather than a blanket statement that 500 is too small everywhere.
      */
-    expect(grantHeadroom(target, 'claude-opus-5', 'Anthropic')).toBeLessThan(MIN_GRANT_HEADROOM);
+    expect(grantHeadroom(target, PLATFORM_MODEL, 'KIE')).toBeGreaterThan(
+      grantHeadroom(target, PLATFORM_MODEL, 'Anthropic'),
+    );
   });
 });
 
@@ -1191,14 +1198,22 @@ describe('the platform model switch', () => {
 
   /*
    * ⚠️ The stubbed model MUST differ from `PLATFORM_MODEL_BY_PROVIDER.Anthropic`, or this test cannot
-   * tell "honoured" from "ignored" and passes with the override deleted. It stubbed `claude-sonnet-5`
-   * from 2026-07-18 — correct until 07-31, when Sonnet 5 BECAME the default and silently made the
-   * assertion vacuous (mutation-proven: removing the `env(context,'LLM_MODEL')` read failed 4 tests in
-   * this file and not this one). The override is the config-only revert hatch the Standard rung's
-   * vendor risk depends on, so it must stay positively asserted. Guarded below rather than re-stated.
+   * tell "honoured" from "ignored" and passes with the override deleted. It has now been invalidated
+   * TWICE by the default moving underneath it, in both directions:
+   *
+   *   - it stubbed `claude-sonnet-5` from 2026-07-18, until **07-31** when Sonnet BECAME the default
+   *     and silently made the assertion vacuous (mutation-proven: removing the `env(context,'LLM_MODEL')`
+   *     read failed 4 tests in this file and not this one);
+   *   - it was moved to `claude-opus-5`, until **2026-08-14** when Opus became the default for the same
+   *     reason, in reverse — Sonnet is no longer the model this platform builds with, so it is once
+   *     again a priced model that is not the default, and the anchor swaps back.
+   *
+   * **The guard below is the durable part, not the value.** It is what caught both flips, and it is why
+   * the assertion is stated rather than assumed. The override is the config-only revert hatch the
+   * Standard rung's vendor risk depends on, so it must stay positively asserted.
    */
   it('honours LLM_MODEL for a model the provider is priced for', () => {
-    const override = 'claude-opus-5';
+    const override = 'claude-sonnet-5';
     expect(override, 'the override must differ from the default or this proves nothing').not.toBe(
       PLATFORM_MODEL_BY_PROVIDER.Anthropic,
     );

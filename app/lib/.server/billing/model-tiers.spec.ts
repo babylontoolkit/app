@@ -114,9 +114,9 @@ afterEach(() => {
  * definition — the branch that would have handled `undefined` is the one nobody tests.
  */
 describe('the ladder table (model-tiers.ts)', () => {
-  it('is Standard · Premium · Platinum, and the paid table is that list minus the free rung, in order', () => {
-    expect([...MODEL_TIER_IDS]).toEqual(['standard', 'premium', 'platinum']);
-    expect(PAID_MODEL_TIERS.map((tier) => tier.id)).toEqual(['premium', 'platinum']);
+  it('is Standard · Premium, and the paid table is that list minus the free rung, in order', () => {
+    expect([...MODEL_TIER_IDS]).toEqual(['standard', 'premium']);
+    expect(PAID_MODEL_TIERS.map((tier) => tier.id)).toEqual(['premium']);
     expect(STANDARD_TIER_LABEL).toBe('Standard');
   });
 
@@ -224,8 +224,12 @@ describe('the ladder is coherent (Standard · Premium defaults)', () => {
    * generations; the KIE 500-rate history that makes `LLM_MODEL=claude-opus-5` the standing revert lives
    * on the constant's own doc block.
    */
-  it('runs Standard on claude-sonnet-5', () => {
-    expect(DEFAULT_MODEL).toBe('claude-sonnet-5');
+  it('runs Standard on claude-opus-5', () => {
+    /*
+     * 🔴 Opus since 2026-08-14 (owner): Sonnet could not reliably finish a game build. Sonnet remains
+     * priced and supported — it is the enhancer model — it is simply not what Standard runs.
+     */
+    expect(DEFAULT_MODEL).toBe('claude-opus-5');
   });
 
   /*
@@ -273,24 +277,26 @@ describe('the ladder is coherent (Standard · Premium defaults)', () => {
  * mis-bills every generation on that rung silently, in whichever direction the error happens to point.
  */
 describe('getModelTier — resolving a paid rung with no environment at all', () => {
-  it('defaults Premium to Opus 5 at the baked list price with a 1200-credit minimum', () => {
+  it('defaults Premium to Fable 5 at the baked list price with a 1500-credit minimum', () => {
     stubTierEnv();
 
     const tier = getModelTier('premium', {});
-    const baked = BAKED_MARKET_PRICES.llm['claude-opus-5'];
+    const baked = BAKED_MARKET_PRICES.llm['claude-fable-5'];
 
     expect(tier.id).toBe('premium');
     expect(tier.label).toBe('Premium');
     expect(tier.model).toBe(DEFAULT_PREMIUM_MODEL);
-    expect(tier.model).toBe('claude-opus-5');
+
+    /* Premium inherited the retired Platinum rung's model on 2026-08-14 — see model-tiers.ts. */
+    expect(tier.model).toBe('claude-fable-5');
     expect(tier.minimumCredits).toBe(DEFAULT_PREMIUM_MINIMUM_CREDITS);
-    expect(tier.minimumCredits).toBe(1200);
+    expect(tier.minimumCredits).toBe(1500);
     expect(tier.firstBuildLocked).toBe(false);
 
     expect(tier.rates.inputPerMTok).toBe(baked.inputPerMTok);
-    expect(tier.rates.inputPerMTok).toBe(2);
+    expect(tier.rates.inputPerMTok).toBe(4);
     expect(tier.rates.outputPerMTok).toBe(baked.outputPerMTok);
-    expect(tier.rates.outputPerMTok).toBe(10);
+    expect(tier.rates.outputPerMTok).toBe(20);
 
     // Cache is DERIVED from the final input rate: 0.1x read, 2x write (the 1-hour tier, §4.2.8).
     expect(tier.rates.cacheReadPerMTok).toBeCloseTo(baked.inputPerMTok * 0.1, 9);
@@ -330,7 +336,7 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
   it('falls back to the default minimum on an unparseable PREMIUM_MINIMUM_CREDITS', () => {
     stubTierEnv({ PREMIUM_MINIMUM_CREDITS: 'heaps' });
     expect(getModelTier('premium', {}).minimumCredits).toBe(DEFAULT_PREMIUM_MINIMUM_CREDITS);
-    expect(getModelTier('premium', {}).minimumCredits).toBe(1200);
+    expect(getModelTier('premium', {}).minimumCredits).toBe(1500);
   });
 
   /*
@@ -346,7 +352,7 @@ describe('getModelTier — the environment as SELECTOR, never as price', () => {
 
     const result = await promoteMarketPrices(memoryStore(), 'KIE', {
       ...BAKED_MARKET_PRICES,
-      llm: { ...BAKED_MARKET_PRICES.llm, 'claude-opus-5': { inputPerMTok: 7, outputPerMTok: 35 } },
+      llm: { ...BAKED_MARKET_PRICES.llm, 'claude-fable-5': { inputPerMTok: 7, outputPerMTok: 35 } },
     });
     expect(result.ok).toBe(true);
 
@@ -427,7 +433,7 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
 
     expect(tiers).toHaveLength(1 + PAID_MODEL_TIERS.length);
     expect(tiers.map((tier) => tier.id)).toEqual([...MODEL_TIER_IDS]);
-    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium', 'platinum']);
+    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium']);
 
     const [standard] = tiers;
     expect(standard.model, 'the platform model is passed IN — this file must not resolve it').toBe('claude-sonnet-5');
@@ -464,40 +470,30 @@ describe('getModelTiers — the whole ladder, never throwing', () => {
    * exactly this reason; without a second paid rung, "contained" and "the only rung" are the same
    * observation and nothing was actually being asserted.
    */
-  it('a broken selector locks ONLY its own rung — the sibling stays serveable', () => {
-    stubTierEnv({ PLATINUM_MODEL: 'claude-not-a-real-model-9' });
-
-    const tiers = getModelTiers('claude-sonnet-5', {});
-    const premium = tiers.find((tier) => tier.id === 'premium')!;
-    const platinum = tiers.find((tier) => tier.id === 'platinum')!;
-
-    expect(platinum.serveable, 'the rung whose selector is unpriceable must lock').toBe(false);
-    expect(platinum.reason, 'and it must say why, for the operator').toBeTruthy();
-
-    expect(premium.serveable, 'the untouched sibling must NOT be taken down with it').toBe(true);
-    expect(premium.reason).toBeUndefined();
-
-    expect(
-      tiers.map((tier) => tier.id),
-      'and the ladder keeps its shape — a locked rung is still a rung',
-    ).toEqual([...MODEL_TIER_IDS]);
-  });
-
-  /*
-   * The per-rung flag WITHDRAWS a rung (absent), where a broken selector LOCKS it (present, serveable
-   * false). The distinction is the one `getModelTiers` documents: locked means "an operator must fix
-   * something", withdrawn means "this deploy has decided". Rendering a withdrawal as a lock would keep
-   * advertising a class that is never coming back on this deploy.
+  /**
+   * 🔴 **DELETED 2026-08-14 — the containment property needs two paid rungs and PLATINUM is retired.**
+   *
+   * It asserted that a rung whose selector cannot be priced locks ALONE, leaving a healthy sibling
+   * serveable. With one paid rung, "contained" and "the only rung" are the same observation, so the
+   * test can no longer tell a per-rung catch apart from a whole-ladder one. `getModelTiers` still
+   * catches per rung — the behaviour is unchanged — but nothing proves it any more.
+   *
+   * ⚠️ Re-pointed at premium it would still go green while asserting nothing, which is the shape this
+   * file has twice refused to ship. Restoring a second paid rung is the trigger to write it again.
    */
-  it('ENABLE_PLATINUM_MODEL=false removes the rung entirely, leaving Premium untouched', () => {
-    stubTierEnv({ ENABLE_PLATINUM_MODEL: 'false' });
 
-    const tiers = getModelTiers('claude-sonnet-5', {});
-
-    expect(tiers.map((tier) => tier.id)).toEqual(['standard', 'premium']);
-    expect(tiers.find((tier) => tier.id === 'premium')!.serveable).toBe(true);
-  });
-
+  /**
+   * 🔴 **DELETED 2026-08-14 — `ENABLE_PLATINUM_MODEL` is retired and now REFUSED if set.**
+   *
+   * It asserted the per-rung WITHDRAWAL (absent) against a broken selector's LOCK (present,
+   * `serveable: false`) — locked means "an operator must fix something", withdrawn means "this deploy
+   * has decided". With one paid rung the per-rung flag and the master switch are the same key, so
+   * there is nothing left to withdraw independently.
+   *
+   * ⚠️ The distinction itself is NOT gone from the code, only from the test. `getModelTiers` still
+   * documents it and `ENABLE_EXTENDED_MODELS=false` still withdraws rather than locks — asserted by
+   * the master-switch case directly below, which is now the only proof of the withdrawal shape.
+   */
   /*
    * ⚠️ The one-directional rule: the MASTER switch still wins. A deploy that had already turned paid
    * models off must not start serving Platinum because a new per-rung flag defaults ON — that would be
@@ -682,14 +678,16 @@ describe('.env.example ships a working model tier ladder', () => {
 
   /*
    * The literal shipping ladder. These are the values an operator gets by copying the file, so they are
-   * pinned rather than derived: the in-code defaults deliberately DIFFER (Premium's fallback minimum is
-   * 1200 while the file ships 1500), and a test that derived from the constants would silently accept
-   * the file drifting to match a constant nobody meant to ship.
+   * pinned rather than derived. ⚠️ The in-code default and the shipped value AGREE on every key today
+   * (they diverged until 2026-08-14, when Premium's fallback minimum moved 1200 -> 1500 with the
+   * rung's model) — which makes this pin weaker than it was, not stronger: a test that derived from
+   * the constants would now be a tautology, so keep these literal. They are what an operator gets by
+   * copying the file, and that is a different fact from what the code falls back to.
    */
   it('assigns the shipping ladder', () => {
-    expect(envExampleValue(example, 'LLM_MODEL')).toBe('claude-sonnet-5');
+    expect(envExampleValue(example, 'LLM_MODEL')).toBe('claude-opus-5');
     expect(envExampleValue(example, 'ENABLE_EXTENDED_MODELS')).toBe('true');
-    expect(envExampleValue(example, 'PREMIUM_MODEL')).toBe('claude-opus-5');
+    expect(envExampleValue(example, 'PREMIUM_MODEL')).toBe('claude-fable-5');
     expect(envExampleValue(example, 'PREMIUM_MINIMUM_CREDITS')).toBe('1500');
   });
 

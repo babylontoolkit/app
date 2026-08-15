@@ -22,13 +22,16 @@
  *    list, that a `PREMIUM_MODEL` the list does not price is REFUSED, and that the retired
  *    `PREMIUM_*_DOLLARS` vars stop the show rather than being silently ignored.
  *
- * ✅ **THE COVERAGE LOST IN 2026-08-08 IS RESTORED (2026-08-10, PLATINUM).** For two days this header
- * recorded two properties as unwritable, because both could only be stated against TWO paid rungs:
- * "a balance that clears Premium and misses the rung above declines to STANDARD and never steps down
- * one rung", and "one broken selector does not take a healthy sibling rung down". Neither was ever
- * replaced by a weaker version pretending to be the same test, which is why they could simply be
- * turned back on when a second paid rung returned — they are asserted again below, the first through
- * the cross-product's `BETWEEN_PREMIUM_AND_PLATINUM` balance and the second by its own case.
+ * 🔴 **AND LOST AGAIN (2026-08-14, PLATINUM retired by the owner).** Two properties can only be stated
+ * against TWO paid rungs — "a balance that clears Premium and misses the rung above declines to
+ * STANDARD and never steps down one rung", and "one broken selector does not take a healthy sibling
+ * rung down" — so they are unwritable for the second time. They were lost with SuperMax on 2026-08-08,
+ * restored with Platinum on 2026-08-10, and are gone again now.
+ *
+ * ⚠️ **Neither has ever been replaced by a weaker version pretending to be the same test**, and that
+ * discipline is the only reason they could simply be switched back on last time. Keep it: a case
+ * re-pointed at `premium` would assert "declines to standard", which is what the code does anyway with
+ * one paid rung, and would go green while proving nothing.
  *
  * ⚠️ **The reason a FIXTURE rung could never have substituted still stands, and it is the load-bearing
  * half of this note**: `decideModelTier` validates the requested id against `MODEL_TIER_IDS` BEFORE it
@@ -104,7 +107,12 @@ function stubPremium(vars: Partial<Record<string, string>> = {}) {
     'PREMIUM_MINIMUM_CREDITS',
     'ENABLE_EXTENDED_MODELS',
 
-    // The PLATINUM rung (2026-08-10). A developer's own `.env.local` sets these now — see the note above.
+    /*
+     * Retired 2026-08-14 and REFUSED if set. They stay in the scrub list precisely BECAUSE they are
+     * refused: a developer whose `.env.local` still carries one would otherwise have every test in
+     * this file throw `NotConfiguredError` on their machine only, with CI green — the `oauth.spec.ts`
+     * trap, which this repo has now recorded four times.
+     */
     'PLATINUM_MODEL',
     'PLATINUM_MINIMUM_CREDITS',
     'ENABLE_PLATINUM_MODEL',
@@ -160,20 +168,33 @@ const BELOW_PREMIUM = PREMIUM_MINIMUM - 1;
  * again here. It is a money rule: stepping down one rung would silently serve (and bill) a model the
  * user did not ask for, on a turn they expected to be cheaper.
  */
-const PLATINUM_MINIMUM = 2000;
-const BETWEEN_PREMIUM_AND_PLATINUM = PLATINUM_MINIMUM - 1;
-const ABOVE_PLATINUM = PLATINUM_MINIMUM + 300;
-
+/**
+ * 🔴 **THE NEVER-STEP-DOWN-ONE-RUNG PROPERTY IS UNTESTABLE AGAIN (2026-08-14).**
+ *
+ * It needs two paid rungs to have any meaning: "a declined rung resolves to STANDARD and never to the
+ * rung below it" is observationally identical to "it resolves to standard" when there is only one
+ * paid rung to decline. PLATINUM was retired by the owner, so the fixtures that carried this
+ * (`PLATINUM_MINIMUM`, `BETWEEN_PREMIUM_AND_PLATINUM`, `ABOVE_PLATINUM`) are DELETED rather than
+ * re-pointed at premium — a test that cannot distinguish the rule from its absence is not a weak
+ * test, it is no test, and leaving it green is how the gap stops being looked for.
+ *
+ * ⚠️ **A fixture rung cannot restore it.** `decideModelTier` validates the requested id against
+ * `MODEL_TIER_IDS` BEFORE consulting the ladder it is handed, so an invented third rung resolves down
+ * as an unrecognised id and never exercises the ladder walk at all. The table IS the whitelist.
+ *
+ * This is the SECOND time this property has been lost — it went with SuperMax on 2026-08-08, came
+ * back with Platinum on 2026-08-10, and sat unwritten for a full day after the condition was met
+ * because nothing failed and nothing reminded anyone. **Restoring a second paid rung is the trigger
+ * to come back here.** The rule itself is still enforced in `premium.ts`; only its proof is gone.
+ */
 const LADDER: readonly ModelTierOption[] = [
   { id: 'premium', label: 'Premium', minimumCredits: PREMIUM_MINIMUM, firstBuildLocked: true, serveable: true },
-  { id: 'platinum', label: 'Platinum', minimumCredits: PLATINUM_MINIMUM, firstBuildLocked: true, serveable: true },
 ];
 
 /** `standard` is free and has no row — it is short-circuited before the ladder is ever consulted. */
 const THRESHOLDS: Record<ModelTierId, number> = {
   standard: 0,
   premium: PREMIUM_MINIMUM,
-  platinum: PLATINUM_MINIMUM,
 };
 
 describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
@@ -199,15 +220,11 @@ describe('decideModelTier — the ladder eligibility rule (§4.6.1a)', () => {
     ABOVE_PREMIUM,
 
     /*
-     * ⚠️ These three restore what the comment above has been PROMISING since SuperMax was retired
-     * ("every threshold ... on both rungs") and could not deliver with one paid rung. The middle one
-     * is the load-bearing case: a balance that clears Premium and not Platinum is the only input that
-     * can catch a decline stepping DOWN one rung instead of to standard.
+     * ⚠️ The three balances that used to sit here (`BETWEEN_PREMIUM_AND_PLATINUM`, `PLATINUM_MINIMUM`,
+     * `ABOVE_PLATINUM`) are gone with the Platinum rung. The middle one was the load-bearing case —
+     * a balance clearing Premium but not the rung above is the ONLY input that can catch a decline
+     * stepping DOWN one rung instead of to standard — and there is no rung above to miss now.
      */
-    BETWEEN_PREMIUM_AND_PLATINUM,
-    PLATINUM_MINIMUM,
-    ABOVE_PLATINUM,
-
     10_000_000,
   ];
 
@@ -686,16 +703,16 @@ describe('the premium tier config', () => {
    * Fable 5, then Opus 5 — while the rules around it did not, which is why the value is pinned here
    * literally and the rules are pinned separately.
    */
-  it('defaults to Opus 5 at the list price with a 1200-credit minimum, from code — no env required', () => {
+  it('defaults to Fable 5 at the list price with a 1500-credit minimum, from code — no env required', () => {
     stubPremium();
 
     const tier = getPremiumTier({});
-    const baked = BAKED_MARKET_PRICES.llm['claude-opus-5'];
+    const baked = BAKED_MARKET_PRICES.llm['claude-fable-5'];
 
     expect(tier.model).toBe(DEFAULT_PREMIUM_MODEL);
-    expect(tier.model).toBe('claude-opus-5');
+    expect(tier.model).toBe('claude-fable-5');
     expect(tier.minimumCredits).toBe(DEFAULT_PREMIUM_MINIMUM_CREDITS);
-    expect(tier.minimumCredits).toBe(1200);
+    expect(tier.minimumCredits).toBe(1500);
     expect(tier.rates.inputPerMTok).toBe(baked.inputPerMTok);
     expect(tier.rates.outputPerMTok).toBe(baked.outputPerMTok);
 
@@ -739,7 +756,7 @@ describe('the premium tier config', () => {
 
     const result = await promoteMarketPrices(memoryStore(), 'KIE', {
       ...BAKED_MARKET_PRICES,
-      llm: { ...BAKED_MARKET_PRICES.llm, 'claude-opus-5': { inputPerMTok: 6, outputPerMTok: 30 } },
+      llm: { ...BAKED_MARKET_PRICES.llm, 'claude-fable-5': { inputPerMTok: 6, outputPerMTok: 30 } },
     });
     expect(result.ok).toBe(true);
 
@@ -763,7 +780,7 @@ describe('the premium tier config', () => {
    */
   it('falls back to the default minimum on an unparseable threshold', () => {
     stubPremium({ PREMIUM_MINIMUM_CREDITS: 'lots' });
-    expect(getPremiumTier({}).minimumCredits).toBe(1200);
+    expect(getPremiumTier({}).minimumCredits).toBe(1500);
   });
 });
 
@@ -787,6 +804,11 @@ describe('the premium model is priceable on every provider', () => {
 
     const anthropic = providerRates({}).Anthropic;
 
+    /*
+     * Opus 5 rather than Premium's own model, deliberately: the property is "a model Anthropic prices
+     * NATIVELY keeps its own row", and any such model demonstrates it. Pinning it to whatever rung a
+     * model currently sits on is what made this test move twice in one day.
+     */
     expect(anthropic['claude-opus-5']).toEqual(MODEL_RATES['claude-opus-5']);
     expect(anthropic['claude-opus-5'].inputPerMTok, 'Anthropic list price, not the KIE list row').toBe(5);
     expect(ratesFor('claude-opus-5', 'Anthropic', {}).inputPerMTok).toBe(5);
@@ -883,10 +905,10 @@ describe('the premium model is priceable on every provider', () => {
   it('getPremiumModel returns the configured premium model on the active provider', () => {
     stubPremium();
     vi.stubEnv('LLM_PROVIDER', 'KIE');
-    expect(getPremiumModel({})).toBe('claude-opus-5');
+    expect(getPremiumModel({})).toBe('claude-fable-5');
 
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
-    expect(getPremiumModel({})).toBe('claude-opus-5');
+    expect(getPremiumModel({})).toBe('claude-fable-5');
   });
 });
 
@@ -969,7 +991,7 @@ describe('premiumSessionHint (§4.6.1 — degrade to OFF, never to ON)', () => {
  */
 describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, never to ON)', () => {
   const STANDARD_MODEL = 'claude-opus-4-8';
-  const FALLBACK_STANDARD_MODEL = 'claude-opus-5';
+  const FALLBACK_STANDARD_MODEL = 'claude-fable-5';
 
   /**
    * A healthy ladder as `getModelTiers` returns one, INCLUDING the free `standard` row.
@@ -981,14 +1003,7 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
   function ladder(overrides: Partial<Record<ModelTierId, Partial<ModelTierStatusLike>>> = {}): ModelTierStatusLike[] {
     const rows: ModelTierStatusLike[] = [
       { id: 'standard', label: 'Standard', model: STANDARD_MODEL, minimumCredits: 0, serveable: true },
-      { id: 'premium', label: 'Premium', model: 'claude-opus-5', minimumCredits: PREMIUM_MINIMUM, serveable: true },
-      {
-        id: 'platinum',
-        label: 'Platinum',
-        model: 'claude-fable-5',
-        minimumCredits: PLATINUM_MINIMUM,
-        serveable: true,
-      },
+      { id: 'premium', label: 'Premium', model: 'claude-fable-5', minimumCredits: PREMIUM_MINIMUM, serveable: true },
     ];
 
     return rows.map((row) => ({ ...row, ...(overrides[row.id] ?? {}) }));
@@ -1012,7 +1027,7 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     });
 
     expect(hint.standardModel).toBe(STANDARD_MODEL);
-    expect(hint.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
+    expect(hint.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
     expect(hint.tiers.every((row) => row.available)).toBe(true);
   });
 
@@ -1062,7 +1077,7 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
     expect(rung(hint, 'premium')).toEqual({
       id: 'premium',
       label: 'Premium',
-      model: 'claude-opus-5',
+      model: 'claude-fable-5',
       minimumCredits: PREMIUM_MINIMUM,
       available: false,
       serveable: false,
@@ -1261,7 +1276,7 @@ describe('modelTiersSessionHint (§4.6.1a — the whole ladder, degrade to OFF, 
        * fail. The `available` assertion in the loop below (`typeof … === 'boolean'`) is what catches it.
        */
       [
-        { id: 'premium', label: 'Premium', model: 'claude-opus-5', minimumCredits: 1 },
+        { id: 'premium', label: 'Premium', model: 'claude-fable-5', minimumCredits: 1 },
       ] as unknown as readonly ModelTierStatusLike[],
     ];
     const oddStandardModels: (string | null | undefined)[] = [null, undefined, '', '   ', STANDARD_MODEL];

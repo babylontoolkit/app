@@ -289,7 +289,7 @@ describe('CONTROLS — the drive reaches the loader and the payload is the real 
     expect(body.accountsEnabled).toBeTypeOf('boolean');
 
     // The ladder, in rung order — three rungs, standard first.
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
   });
 
   it('reports the balance the ledger actually returned, not a constant wearing its name', async () => {
@@ -407,7 +407,7 @@ describe('a misconfigured PREMIUM_MODEL degrades that rung to off and takes noth
     const { body } = await withBrokenPaidRung();
     const tiers = tiersOf(body);
 
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'platinum']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.standard.model).toBe(DEFAULT_MODEL);
     expect(tiers.premium.available, 'the broken rung is the only one withdrawn').toBe(false);
@@ -503,7 +503,7 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.enforced).toBe(true);
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
     expect(tiersOf(body).premium.model).toBe(DEFAULT_PREMIUM_MODEL);
   });
 
@@ -534,7 +534,7 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.modelTiers.standardModel).toBe(DEFAULT_MODEL);
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'platinum']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.premium.available).toBe(false);
     expect(tiers.premium.available).toBe(false);

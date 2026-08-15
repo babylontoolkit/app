@@ -222,7 +222,7 @@ describe('WALL 1 — the ladder itself', () => {
   it('CONTROL: the paid rungs are there when it is on', () => {
     scrub({ [ENABLE_EXTENDED_MODELS_ENV_KEY]: 'true' });
 
-    expect(getModelTiers('claude-sonnet-5', {}).map((tier) => tier.id)).toEqual(['standard', 'premium', 'platinum']);
+    expect(getModelTiers('claude-sonnet-5', {}).map((tier) => tier.id)).toEqual(['standard', 'premium']);
   });
 
   it('🔴 resolves a request for a paid rung DOWN to standard, never up', () => {

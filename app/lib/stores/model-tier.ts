@@ -28,9 +28,8 @@ export const modelTierPanelOpen = atom<boolean>(false);
  * changes how fast the user's balance moves, and that is the only thing worth saying to them.
  */
 export const MODEL_TIER_DESCRIPTIONS: Record<ModelTierId, string> = {
-  standard: 'Default. Best value — full-quality builds and edits at the lowest credit burn.',
-  premium: 'A stronger model for harder problems. Burns credits several times faster per turn.',
-  platinum: 'The most capable model available. The fastest credit burn — keep it for the hard builds.',
+  standard: 'Default. The model this platform builds games with — use it for everything.',
+  premium: 'The most capable model available, for the hard builds. Burns credits about twice as fast.',
 };
 
 /**

@@ -57,7 +57,7 @@
  */
 
 /** The rungs, in LADDER order (ascending capability). Order is meaningful — it is the ladder. ⚠️ Capability order, not price order: the two agree on every gateway today, and that is a coincidence to re-check, never a rule to reorder by. */
-export const MODEL_TIER_IDS = ['standard', 'premium', 'platinum'] as const;
+export const MODEL_TIER_IDS = ['standard', 'premium'] as const;
 
 export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
 
@@ -75,8 +75,8 @@ export type PaidModelTierId = Exclude<ModelTierId, 'standard'>;
  * sits below every paid threshold, which is the whole point of the thresholds: a brand-new account
  * cannot burn its grant on the expensive models out the gate.
  */
-export const DEFAULT_PREMIUM_MODEL = 'claude-opus-5';
-export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
+export const DEFAULT_PREMIUM_MODEL = 'claude-fable-5';
+export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1500;
 
 /**
  * PLATINUM — the second paid rung (added 2026-08-10, owner).
@@ -88,49 +88,31 @@ export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
  * and price it was never checked against. Same reasoning as `ENABLE_EXTENDED_MODELS` — a rename that
  * silently starts reading an old value is the costly direction.
  *
- * ⚠️ **Restoring a second paid rung makes four PROPERTIES WRITABLE again** — each a money rule with no
- * meaning under one paid rung: a declined rung steps down to STANDARD and never to the adjacent rung;
- * one broken selector leaves its sibling serveable; `getTierModel` names its OWN env var in its
- * refusal; and the panel can render an unserveable rung beside a serveable one.
+ * 🔴 **PLATINUM IS RETIRED (owner, 2026-08-14) — the ladder is STANDARD + PREMIUM.** *"remove PLATNUM
+ * level… we will only have Standard — the default for development — or premium IF you wanna go that
+ * high."* The rung's model moved DOWN into Premium rather than being dropped: Standard is now Opus 5
+ * (`LLM_MODEL`) and Premium is Fable 5, because *"SONNET IS NOT ABLE TO RELIABLY HANDLE GAME
+ * CREATION… PERIOD and has been causing A LOT of the reliable finishing issues"* — measured over the
+ * last 30 generations, Sonnet failed 5 of 19 with output already billed, and its completions leaned on
+ * the rescue machinery (`forced-continuation` x2, `unproductive-rescue`, `creation-completeness` x6,
+ * 6-19 steps), where Opus completed 4 of 4 in 3-6 steps.
  *
- * ✅ **ALL FOUR ARE WRITTEN AGAIN (the last two on 2026-08-11).**
- *   ✅ never-step-down-one-rung — `premium.spec.ts` (`BETWEEN_PREMIUM_AND_PLATINUM`)
- *   ✅ one broken selector leaves its sibling serveable — `model-tiers.spec.ts`
- *   ✅ `getTierModel` naming its own env var — `tier-model-provider.spec.ts`, asserted on a PLATINUM
- *      refusal, which is the only shape that can tell `modelEnvKey` apart from a hardcoded
- *      `'PREMIUM_MODEL'`: on a one-paid-rung ladder the two hypotheses are observationally identical,
- *      and the pre-existing `toContain('PREMIUM_MODEL')` passed for both. Mutation-verified.
- *   ✅ the panel's unserveable-beside-serveable copy — `ModelTierPanel.spec.tsx`, on an opt-in
- *      three-rung fixture, asserting the broken rung's sentence quotes NO threshold (credits cannot
- *      open an operator's misconfiguration) while its sibling stays pickable. Mutation-verified.
+ * ⚠️ **Sonnet is NOT removed from `MODEL_RATES`.** It remains the enhancer model
+ * (`ENHANCE_PROMPT_MODEL`) and the right tool for light work — the finding is about GAME CREATION, and
+ * generalising it into "delete the row" would break the ✨ button to make a point.
  *
- * ⚠️ They sat unwritten for a day AFTER the condition was met, which is the lesson worth keeping:
- * writing a loss down only helps if somebody re-reads it when the thing it waits for happens. Nothing
- * failed, nothing reminded anyone — the note was correct and inert.
+ * 🔴 **The four properties that need TWO paid rungs are LOST AGAIN** — the same four this comment has
+ * now watched leave, return, and leave a second time: a declined rung steps down to STANDARD and never
+ * to the adjacent rung; one broken selector leaves its sibling serveable; `getTierModel` names its OWN
+ * env var in its refusal; and the panel can render an unserveable rung beside a serveable one. On a
+ * one-paid-rung ladder each is observationally identical to a hardcoded `'premium'`, so their specs
+ * are re-anchored or deleted rather than left green and meaningless.
  *
- * An earlier version of this comment claimed all four were "asserted again as of this change" — an
- * over-claim caught by review, and the worst kind: **a comment asserting coverage that does not exist
- * is how the gap stops being looked for.** Both un-restored properties are flagged in their own spec
- * files, in the present tense, waiting for someone to notice the condition they name has been met.
+ * ⚠️ **A fixture rung does not restore them.** `decideModelTier` validates the requested id against
+ * `MODEL_TIER_IDS` BEFORE consulting the ladder it was handed, so a test cannot invent a third rung to
+ * assert against — the table IS the whitelist. Restoring them requires a real second paid rung, which
+ * is the condition to re-read this note against. It went unread for a full day last time.
  */
-export const DEFAULT_PLATINUM_MODEL = 'claude-fable-5';
-
-/**
- * Above Premium's 1200 and well above `SIGNUP_GRANT_CREDITS` (1000).
- *
- * The ladder must stay monotonic in threshold or a bare deploy offers a dearer rung for less. It is
- * cost-monotonic too, on every gateway: Comet prices fable-5 at $8/$40 against opus-5's $4/$20, and
- * Anthropic at $10/$50 against $5/$25.
- *
- * ⚠️ **This comment claimed the opposite for Anthropic** — "the fable-5 rung settled 814 credits against
- * Opus 5's 1,017, because Anthropic prices Opus 5 above the fable row" — and that was a symptom, not a
- * measurement: `MODEL_RATES` carried no fable-5 row, so the Platinum rung was priced from KIE's $4/$20
- * while Anthropic charged us $10/$50 (fixed 2026-08-12; 814/1017 is exactly 4/5, which is the tell).
- * **Rungs still order CAPABILITY, not price** — that rule is unchanged and load-bearing — it just no
- * longer has a counterexample to lean on, so do not go looking for one to justify a reordering.
- */
-export const DEFAULT_PLATINUM_MINIMUM_CREDITS = 2000;
-
 /** The static definition of a paid rung: where its config comes from and what it falls back to. */
 export interface ModelTierDefinition {
   id: PaidModelTierId;
@@ -199,16 +181,6 @@ export const PAID_MODEL_TIERS: readonly ModelTierDefinition[] = [
     defaultMinimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS,
     firstBuildLocked: false,
     enabledEnvKey: 'ENABLE_EXTENDED_MODELS',
-  },
-  {
-    id: 'platinum',
-    label: 'Platinum',
-    modelEnvKey: 'PLATINUM_MODEL',
-    minimumEnvKey: 'PLATINUM_MINIMUM_CREDITS',
-    defaultModel: DEFAULT_PLATINUM_MODEL,
-    defaultMinimumCredits: DEFAULT_PLATINUM_MINIMUM_CREDITS,
-    firstBuildLocked: false,
-    enabledEnvKey: 'ENABLE_PLATINUM_MODEL',
   },
 ];
 

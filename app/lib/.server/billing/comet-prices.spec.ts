@@ -551,16 +551,29 @@ describe('cometRates — cache rates by FAMILY, off the Comet list', () => {
   it('derives 0.1x / 2.0x for a claude row and bills a chat row at full input', () => {
     const rates = cometRates();
 
-    const sonnet = rates[DEFAULT_MODEL];
-    expect(sonnet, 'the platform default must be priced on Comet').toBeDefined();
-    expect(sonnet.inputPerMTok).toBe(1.6);
-    expect(sonnet.outputPerMTok).toBe(8.0);
-    expect(sonnet.cacheReadPerMTok).toBeCloseTo(0.16, 10);
-    expect(sonnet.cacheWritePerMTok).toBe(3.2);
+    /*
+     * ⚠️ Asserted as RATIOS off the row's own input rate, not as four absolute numbers.
+     *
+     * This block hardcoded Sonnet's Comet prices and broke the day the platform default became Opus 5
+     * (2026-08-14) — a change with nothing to do with cache derivation, which is what the test is
+     * named for. The RULE is "0.1x read, 2.0x write, off whatever this row charges"; the prices are a
+     * different fact, pinned in the price-list tests where they belong.
+     */
+    const platformDefault = rates[DEFAULT_MODEL];
+    expect(platformDefault, 'the platform default must be priced on Comet').toBeDefined();
+    expect(platformDefault.cacheReadPerMTok).toBeCloseTo(platformDefault.inputPerMTok * 0.1, 10);
+    expect(platformDefault.cacheWritePerMTok).toBeCloseTo(platformDefault.inputPerMTok * 2.0, 10);
 
     /* The read must be a real discount and the write a real surcharge — not merely "some number". */
-    expect(sonnet.cacheReadPerMTok).toBeLessThan(sonnet.inputPerMTok);
-    expect(sonnet.cacheWritePerMTok).toBeGreaterThan(sonnet.inputPerMTok);
+    expect(platformDefault.cacheReadPerMTok).toBeLessThan(platformDefault.inputPerMTok);
+    expect(platformDefault.cacheWritePerMTok).toBeGreaterThan(platformDefault.inputPerMTok);
+
+    /*
+     * CONTROL — the ratios above are satisfied by a row of all zeroes, so anchor that this really is a
+     * priced Claude row on Comet's discounted feed.
+     */
+    expect(platformDefault.inputPerMTok).toBeGreaterThan(0);
+    expect(platformDefault.outputPerMTok).toBe(platformDefault.inputPerMTok * 5);
 
     const grok = rates['grok-4.5'];
     expect(grok, 'the chat rows must be priceable through the Comet list').toBeDefined();

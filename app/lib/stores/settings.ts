@@ -262,7 +262,7 @@ const updateAutoEnabledTracking = (providerName: string, isEnabled: boolean) => 
  * lists disagreeing is that this browser asks for a rung the server declines to Standard, which is the
  * safe direction and exactly what an out-of-date tab already does.
  */
-export const MODEL_TIER_IDS = ['standard', 'premium', 'platinum'] as const;
+export const MODEL_TIER_IDS = ['standard', 'premium'] as const;
 
 export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
 

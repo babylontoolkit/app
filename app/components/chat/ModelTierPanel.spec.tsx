@@ -354,45 +354,24 @@ describe('ModelTierPanel — an unserveable rung', () => {
   });
 
   /**
-   * 🔴 AN UNSERVEABLE RUNG BESIDE A SERVEABLE ONE — the property the one-paid-rung ladder could not
-   * express, restored now that `platinum` exists (SPEC §4.6.1a; `model-tiers.ts` "WRITABLE IS NOT
-   * WRITTEN").
+   * 🔴 **DELETED 2026-08-14 — PLATINUM is retired and this property needs two paid rungs.**
    *
-   * `serveable` answers "has the operator configured and priced this?", `available` answers "can this
-   * user afford it right now?" — two fields on purpose, because folding them buys either a rung locked
-   * on the screen you just paid on, or an enabled control that hard-fails. This is the case that proves
-   * the panel keeps them apart: ONE broken selector must leave its sibling fully pickable, and the
-   * broken row must say why in words no amount of money can act on.
+   * It asserted that ONE broken selector leaves its sibling fully pickable, and that the broken row's
+   * COPY never quotes a threshold — because telling a user to buy credits for a lock that is an
+   * operator misconfiguration sends them to spend real money on something that cannot open. With a
+   * single paid rung there is no sibling to leave standing, so the "locks only the broken rung" half
+   * cannot be observed at all.
    *
-   * The COPY is the half `lockReasonFor` cannot cover. That function returns a reason enum; whether the
-   * rendered sentence quotes a threshold is a fact about `lockCopy` and the row, and quoting one here
-   * would tell a user to buy credits that cannot possibly unlock an operator's misconfiguration —
-   * spending real money on a lock that will not open. A pure-function test cannot see that.
+   * ⚠️ The `withPlatinum` fixture went with it. Keeping it would let this test be re-pointed at a
+   * hypothetical rung and look green, and `decideModelTier` validates the requested id against
+   * `MODEL_TIER_IDS` BEFORE consulting the ladder — so an invented rung is not a paid rung, it is an
+   * unrecognised string that resolves down to standard.
    *
-   * ⚠️ Asserted as an ABSENCE of the threshold, not merely the presence of "Unavailable": a row that
-   * printed both sentences would pass a presence-only check while still sending the user to the shop.
+   * This is the SECOND loss of this property (it went with SuperMax, returned with Platinum on
+   * 2026-08-10, and was written on 2026-08-11 — a full day after its condition was met, because
+   * nothing failed and nothing reminded anyone). **A second paid rung is the trigger to write it a
+   * third time.** The behaviour it covered is unchanged in `ModelTierPanel`; only its proof is gone.
    */
-  it('locks only the broken rung, and its copy never quotes a threshold credits cannot open', () => {
-    sessionStore.set(ladder({ balance: 10_000_000, premiumServeable: false, withPlatinum: true }));
-    openPanel();
-    render(<ModelTierPanel />);
-
-    expect(rows(), 'three rungs render; only one of them is broken').toHaveLength(3);
-
-    // The broken rung is locked and explains itself without naming a price.
-    expect(isLocked(row('Premium'))).toBe(true);
-    expect(copyOf(row('Premium'))).toMatch(/unavailable/i);
-    expect(copyOf(row('Premium')), 'no threshold on a lock credits cannot open').not.toMatch(/\d[\d,]*\s*credits/i);
-    expect(copyOf(row('Premium')), 'never quotes this rung’s own minimum').not.toContain('1,200');
-
-    // 🔴 The sibling is untouched — one broken selector may not take the ladder down with it.
-    expect(isLocked(row('Platinum')), 'a broken Premium must not lock Platinum').toBe(false);
-    expect(isLocked(row('Standard'))).toBe(false);
-
-    // ...and it is genuinely pickable, not merely unlocked-looking.
-    press(row('Platinum'));
-    expect(modelTierStore.get()).toBe('platinum');
-  });
 
   /**
    * CONTROL for the test above: with the SAME balance and the same three rungs, a healthy Premium is

@@ -173,7 +173,24 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * and LISTING it in `KIE_MODELS` (an unlisted default silently runs `modelsList[0]` on the enhancer
  * path while settlement charges the configured model's rates).
  */
-export const DEFAULT_MODEL = 'claude-sonnet-5';
+/*
+ * 🔴 OPUS, NOT SONNET (owner, 2026-08-14): *"SONNET IS NOT ABLE TO RELIABLY HANDLE GAME CREATION…
+ * PERIOD and has been causing A LOT of the reliable finishing issues."*
+ *
+ * This is the BAKED fallback, reached only when `LLM_MODEL` and `KIE_DEFAULT_MODEL` are both unset —
+ * so on the owner's deploy (`LLM_MODEL=claude-opus-5`) it changes nothing today. That is exactly why
+ * it mattered: a deploy that forgets the env var silently falls back to the model this platform has
+ * just concluded cannot finish a game, and the symptom is not an error, it is builds that stop.
+ *
+ * Measured over 30 generations: Sonnet failed 5 of 19 with output already billed, and the ones that
+ * completed leaned on the rescue machinery (forced-continuation, unproductive-rescue,
+ * creation-completeness; 6-19 steps). Opus completed 4 of 4 in 3-6 steps.
+ *
+ * ⚠️ Sonnet stays fully supported and priced — it is `ENHANCE_PROMPT_MODEL` and the right tool for
+ * light work. The finding is about GAME CREATION specifically; do not generalise it into removing the
+ * model.
+ */
+export const DEFAULT_MODEL = 'claude-opus-5';
 export const PROMPT_COOKIE_KEY = 'cachedPrompt';
 export const TOOL_EXECUTION_APPROVAL = {
   APPROVE: 'Yes, approved.',
