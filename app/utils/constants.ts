@@ -186,6 +186,12 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * completed leaned on the rescue machinery (forced-continuation, unproductive-rescue,
  * creation-completeness; 6-19 steps). Opus completed 4 of 4 in 3-6 steps.
  *
+ * 🔴 **And those counts UNDERSTATE it.** `completed` means the TURN finished, not that the game runs —
+ * owner, watching real builds: *"it may have passed what you call a successful creation, but the games
+ * don't work and very often just freeze at the start, whereas Opus with the same prompt creates a
+ * working game."* An unknown share of Sonnet's 14 "successes" shipped a game that never starts, and
+ * nothing here measures that.
+ *
  * ⚠️ Sonnet stays fully supported and priced — it is `ENHANCE_PROMPT_MODEL` and the right tool for
  * light work. The finding is about GAME CREATION specifically; do not generalise it into removing the
  * model.

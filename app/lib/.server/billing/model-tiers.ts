@@ -97,6 +97,21 @@ export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1500;
  * the rescue machinery (`forced-continuation` x2, `unproductive-rescue`, `creation-completeness` x6,
  * 6-19 steps), where Opus completed 4 of 4 in 3-6 steps.
  *
+ * 🔴 **AND "COMPLETED" IS NOT "WORKS" — the telemetry cannot see the real failure (owner, 2026-08-14).**
+ * *"It may have passed what you call a successful creation, but the games don't work and very often
+ * just freeze at the start, whereas Opus with the same prompt creates a working game."* The counts
+ * above are `status` — a fact about whether the TURN finished — and a Sonnet build that streams a
+ * complete artifact, writes every file and settles `completed` is counted as a success here while
+ * producing a game that freezes on load. So the measured gap UNDERSTATES the decision rather than
+ * making it: the real Sonnet failure rate includes an unknown share of its 14 "successes".
+ *
+ * ⚠️ This is the `wastedOutput` shape again, one layer out: a metric defined against the failure it
+ * expects (the turn dying) reports health on the failure it does not (the turn completing and
+ * shipping a broken game). **Nothing in this codebase currently measures whether the delivered game
+ * RUNS** — the §4.14 preview tools (`get_game_errors`, `evaluate_in_game`) are the channel that
+ * could, and wiring them to a post-build health check is the honest next thing, not another count of
+ * finish reasons.
+ *
  * ⚠️ **Sonnet is NOT removed from `MODEL_RATES`.** It remains the enhancer model
  * (`ENHANCE_PROMPT_MODEL`) and the right tool for light work — the finding is about GAME CREATION, and
  * generalising it into "delete the row" would break the ✨ button to make a point.
