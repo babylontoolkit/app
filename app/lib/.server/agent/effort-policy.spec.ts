@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { effortForTurn } from './effort-policy';
 
-const EDIT = { isRepair: false, repairAttempt: 1, isSlashInvocation: false };
+const EDIT = { isRepair: false, repairAttempt: 1 };
 
 describe('effortForTurn', () => {
   /**
@@ -37,11 +37,11 @@ describe('effortForTurn', () => {
    * and until now it thought exactly as hard as the turn that just failed, which is backwards.
    */
   it('escalates a first repair to `high`', () => {
-    expect(effortForTurn({ isRepair: true, repairAttempt: 1, isSlashInvocation: false })).toBe('high');
+    expect(effortForTurn({ isRepair: true, repairAttempt: 1 })).toBe('high');
   });
 
   it('escalates a SECOND repair to `xhigh` — it has now failed twice', () => {
-    expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: false })).toBe('xhigh');
+    expect(effortForTurn({ isRepair: true, repairAttempt: 2 })).toBe('xhigh');
   });
 
   /**
@@ -50,18 +50,30 @@ describe('effortForTurn', () => {
    * whatever it says first — so a `THINKING_EFFORT=medium` operator still gets `xhigh` on a 2nd repair.
    */
   it('speaks up on a repair rather than deferring to the operator default', () => {
-    expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: false })).toBe('xhigh');
+    expect(effortForTurn({ isRepair: true, repairAttempt: 2 })).toBe('xhigh');
     expect(effortForTurn(EDIT)).toBeUndefined();
   });
 
-  /** `/bt-spec`, `/bt-prototype` — the user explicitly asked for deep work. Answer the question asked. */
-  it('gives an explicitly invoked skill `high`', () => {
-    expect(effortForTurn({ isRepair: false, repairAttempt: 1, isSlashInvocation: true })).toBe('high');
+  /**
+   * 🔴 A `/slash` INVOCATION IS NOT SPECIAL (owner, 2026-08-14) — it used to escalate to `high`.
+   *
+   * The old rule guessed at DIFFICULTY ("a spec is deep work"), which is the prompt classifier this
+   * file forbids, one rung more abstract. And it silently overrode the one user-facing dial in the
+   * system: a `medium` session ran `/bt-landing`, logged `effort=high`, and read as the setting being
+   * broken. Escalation is now EVIDENCE-only, and a repair is the only evidence there is.
+   *
+   * Asserted as an ABSENCE, which is the shape that rots quietly — `TurnShape` no longer carries a
+   * slash field, so re-adding the rule means re-adding the field, and this test is what makes that a
+   * decision rather than a patch.
+   */
+  it('does NOT escalate a `/slash` skill invocation — evidence only', () => {
+    expect(effortForTurn({ isRepair: false, repairAttempt: 1 })).toBeUndefined();
+    expect(effortForTurn({ isRepair: false, repairAttempt: 1, baseEffort: 'medium' })).toBe('medium');
   });
 
-  /** A repair inside a slash invocation is still a repair — the stronger signal wins. */
-  it('prefers the repair signal over the slash signal', () => {
-    expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: true })).toBe('xhigh');
+  /** There is no signal here but the repair — a slash turn that is ALSO a repair is simply a repair. */
+  it('still escalates a repair, whatever the turn was invoked as', () => {
+    expect(effortForTurn({ isRepair: true, repairAttempt: 2 })).toBe('xhigh');
   });
 
   /**
@@ -95,29 +107,22 @@ describe('effortForTurn', () => {
      * `high` makes hard failures think LESS than the default session does. Silent, and backwards.
      */
     it('still escalates a second repair to `xhigh` above a `high` floor', () => {
-      expect(effortForTurn({ isRepair: true, repairAttempt: 2, isSlashInvocation: false, baseEffort: 'high' })).toBe(
-        'xhigh',
-      );
+      expect(effortForTurn({ isRepair: true, repairAttempt: 2, baseEffort: 'high' })).toBe('xhigh');
     });
 
     it('still escalates a first repair to `high` from a `medium` floor', () => {
-      expect(effortForTurn({ isRepair: true, repairAttempt: 1, isSlashInvocation: false, baseEffort: 'medium' })).toBe(
-        'high',
-      );
+      expect(effortForTurn({ isRepair: true, repairAttempt: 1, baseEffort: 'medium' })).toBe('high');
     });
 
-    /** The floor never LOWERS an escalation either — `medium` chosen, first repair, still `high`. */
-    it('never lowers an escalated turn to the floor', () => {
-      expect(effortForTurn({ isRepair: true, repairAttempt: 1, isSlashInvocation: true, baseEffort: 'medium' })).toBe(
-        'high',
-      );
-    });
-
-    /** A `high` floor and a `/slash` turn agree — the result is `high`, not a double-escalation to `xhigh`. */
+    /**
+     * A `high` floor and a first repair AGREE, and the answer is `high` — not a rung above it.
+     *
+     * `atLeast` takes the higher of the two; it must never add them. Compounding would put an ordinary
+     * first repair at `xhigh` for anyone who chose `high`, i.e. spend the evidence tier on a turn that
+     * has failed once, and it would do it only for the users who opted into thinking harder.
+     */
     it('does not compound a floor with an equal escalation', () => {
-      expect(effortForTurn({ isRepair: false, repairAttempt: 1, isSlashInvocation: true, baseEffort: 'high' })).toBe(
-        'high',
-      );
+      expect(effortForTurn({ isRepair: true, repairAttempt: 1, baseEffort: 'high' })).toBe('high');
     });
   });
 });

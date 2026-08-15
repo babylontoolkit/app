@@ -1732,14 +1732,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   /*
    * How hard to think on THIS turn (§4.2a). Decided from turn KIND — never from reading the prompt;
-   * see `effort-policy.ts`. It only ever escalates: a repair that already failed gets `high`/`xhigh`,
-   * an explicitly-invoked skill gets `high`, and everything else takes the operator's configured
+   * see `effort-policy.ts`. It only ever escalates, and since 2026-08-14 only on EVIDENCE: a repair
+   * that already failed gets `high`/`xhigh`, and everything else — a creation, an ordinary edit, a
+   * `/slash` skill invocation alike — takes the user's chosen effort, else the operator's configured
    * default. There is no cheap tier for edits — `low` breached a read-only zone when we measured it.
    */
   const effort = effortForTurn({
     isRepair,
     repairAttempt: request.repairAttempt ?? 1,
-    isSlashInvocation: Boolean(slash),
 
     /*
      * The user's session floor (§4.2.9), validated here rather than trusted: a browser body asking for

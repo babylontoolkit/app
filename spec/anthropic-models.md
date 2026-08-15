@@ -420,8 +420,16 @@ before a single token is bought.
 |---|---|---|
 | Repair, attempt 2 (the last one it gets) | `repairAttempt >= 2` | `xhigh` |
 | Repair, attempt 1 | `errors.length > 0` | `high` |
-| `/slash` skill invocation (`/bt-spec`, `/bt-prototype`) | `slash` resolved | `high` |
-| Creation and ordinary edits | — | operator default (`medium`) |
+| Creation, ordinary edits and `/slash` skill invocations | — | the user's chosen effort, else operator default (`medium`) |
+
+🔴 **A `/slash` invocation escalated to `high` until 2026-08-14 (owner decision).** The argument was
+that `/bt-spec` or `/bt-prototype` is a request for deep work. Two things wrong with it: it guesses at
+**difficulty**, which is the prompt classifier this section forbids one rung more abstract; and it
+silently overrode the only user-facing dial in the effort system, so a `medium` session running
+`/bt-landing` logged `effort=high` and read as the setting being broken. Escalation is **evidence-only**
+now — a repair is a turn the model has demonstrably failed, which nobody chose and nobody has to be
+told about. `TurnShape` no longer carries a slash field, so restoring the rule means restoring the
+field: a decision, not a patch.
 
 Precedence: **policy > `THINKING_EFFORT` > `medium`**. The policy overriding operator config is
 deliberate — a build that has already failed twice is not the place to economise, and repairs are
@@ -434,8 +442,7 @@ capped (`MAX_REPAIR_TURNS = 2`), so the escalated spend is bounded and rare.
 
 | Turn | `medium` session | `high` session |
 |---|---|---|
-| Creation / ordinary edit | `medium` | `high` |
-| `/slash` skill invocation | `high` | `high` |
+| Creation / ordinary edit / `/slash` invocation | `medium` | `high` |
 | Repair, attempt 1 | `high` | `high` |
 | Repair, attempt 2 | `xhigh` | `xhigh` |
 
