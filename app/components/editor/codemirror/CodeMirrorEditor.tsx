@@ -22,7 +22,8 @@ import { classNames } from '~/utils/classNames';
 import { debounce } from '~/utils/debounce';
 import { createScopedLogger, renderLogger } from '~/utils/logger';
 import { isFileLocked, getCurrentChatId } from '~/utils/fileLocks';
-import { BinaryContent } from './BinaryContent';
+import { isPreviewableTextMedia } from '~/lib/preview/media-kind';
+import { BinaryPreview } from './BinaryPreview';
 import { getTheme, reconfigureTheme } from './cm-theme';
 import { indentKeyBinding } from './indent';
 import { getLanguage } from './languages';
@@ -312,7 +313,9 @@ export const CodeMirrorEditor = memo(
 
     return (
       <div className={classNames('relative h-full', className)}>
-        {doc?.isBinary && <BinaryContent />}
+        {doc && (doc.isBinary || isPreviewableTextMedia(doc.filePath)) && (
+          <BinaryPreview filePath={doc.filePath} sourceAvailable={!doc.isBinary} />
+        )}
         <div className="h-full overflow-hidden" ref={containerRef} />
       </div>
     );

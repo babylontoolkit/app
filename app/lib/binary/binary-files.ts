@@ -91,7 +91,16 @@ export const BINARY_EXTENSIONS = new Set([
   'stl',
   'usdz',
 
-  // audio / video
+  /*
+   * audio / video
+   *
+   * ⚠️ Kept in step with the extensions the Code-view preview renders (`lib/preview/media-kind.ts`)
+   * and with the starter template's `MEDIA_MIME_TYPES`. This list is consulted where the BYTES ARE NOT
+   * AVAILABLE — classifying template zip entries — so a media extension missing here is classified as
+   * TEXT at ingest, which is a §1.3-principle-10 corruption (the bytes are decoded as UTF-8) rather
+   * than a cosmetic gap. `opus`, `weba`, `m4v` and `ogv` were all missing until 2026-08-15 while the
+   * template served every one of them.
+   */
   'mp3',
   'wav',
   'ogg',
@@ -99,11 +108,18 @@ export const BINARY_EXTENSIONS = new Set([
   'm4a',
   'aac',
   'flac',
+  'opus',
+  'weba',
+  'mka',
   'mp4',
   'webm',
   'mov',
   'avi',
   'mkv',
+  'm4v',
+  'ogv',
+  '3gp',
+  'apng',
 
   // fonts
   'ttf',
