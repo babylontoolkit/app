@@ -39,11 +39,21 @@ function parseCreationHandoff(value: unknown): CreationHandoff | undefined {
     return undefined;
   }
 
-  const { userPrompt, plan } = value as { userPrompt?: unknown; plan?: unknown };
+  const { userPrompt, plan, blankCanvas } = value as {
+    userPrompt?: unknown;
+    plan?: unknown;
+    blankCanvas?: unknown;
+  };
 
   const parsedPlan = parseCreationPlan(plan);
 
   return {
+    /*
+     * Strictly `true`, never truthy: this decides whether the platform runs a two-turn front-end and
+     * art build on the user's credits, and it arrives in a browser body. Anything else means "phase
+     * it", which is the behaviour every project had before this flag existed.
+     */
+    ...(blankCanvas === true ? { blankCanvas: true } : {}),
     ...(typeof userPrompt === 'string' && userPrompt.length > 0
       ? { userPrompt: userPrompt.slice(0, MAX_HANDOFF_PROMPT_CHARS) }
       : {}),

@@ -54,7 +54,7 @@ import { waitForMountVisible } from '~/lib/registry/mount';
 import { settleAfterCreation } from '~/lib/registry/settle';
 import { awaitStarterRunning, isInstallFinished } from '~/lib/registry/starter-ready';
 import { settleableStatuses, waitForActionsSettled } from '~/lib/runtime/actions-settled';
-import { decideSeed, deriveProjectTitle, findFallbackEntry } from '~/lib/registry/match';
+import { decideSeed, deriveProjectTitle, findFallbackEntry, isBlankCanvasStart } from '~/lib/registry/match';
 import { compileWizardPrompt, summarizeSelection, type WizardSelection } from '~/lib/registry/wizard';
 import { projectSeedStore, setProjectSeed } from '~/lib/stores/project';
 import {
@@ -1934,6 +1934,17 @@ export const ChatImpl = memo(
             (prompt && visiblePrompt && prompt !== visiblePrompt
               ? prompt
               : draftTextForSeed({ prompt, visiblePrompt })) || undefined,
+
+          /*
+           * 🔴 An explicitly chosen Blank Canvas is NOT phased (owner, 2026-08-14) — see
+           * `isBlankCanvasStart`, which needs the seed SOURCE as well as the entry because every typed
+           * prompt lands on that same fallback row. Recorded here, at the one moment both facts are in
+           * hand: `projectSeedStore` is in-memory and gone on reload, and the send that reads this can
+           * happen days later on another device.
+           */
+          ...(isBlankCanvasStart({ isFallbackEntry: Boolean(entry.is_fallback), seedSource })
+            ? { blankCanvas: true }
+            : {}),
         };
 
         enterNewProjectMode({ projectId: registeredProjectId ?? '', ...handoff });
@@ -2681,7 +2692,29 @@ export const ChatImpl = memo(
          * every phase the user has already paid for, overwriting files that were correct — the exact
          * failure `mergeCreationPlan`'s monotonic merge exists to make impossible server-side.
          */
-        if (newProjectMode.projectId) {
+        /*
+         * 🔴 A BLANK CANVAS BUILD IS AN ORDINARY TURN (owner, 2026-08-14).
+         *
+         * *"If we are using the BLANK CANVAS options DO NOT AUTO create front end and artwork… all
+         * operations from that point are just regular prompt turns."*
+         *
+         * No plan is started, and the handoff is CLEARED on this send — restoring, for this one path,
+         * exactly the pre-phase behaviour (migration 0016: the mode ends when the build turn is sent).
+         * That is what makes every later turn ordinary: `projectOwesBuild` reads the row, and a row
+         * with no handoff is a project that has been built.
+         *
+         * ⚠️ Clearing it here is safe ONLY because `projectOwesBuild` already answers `false` for a
+         * blank-canvas handoff. The race that made this dangerous for a phased build — whichever of
+         * the PATCH and the generation landed first decided the turn's tool policy — cannot bite when
+         * both answers are the same.
+         */
+        if (newProjectMode.projectId && newProjectMode.blankCanvas) {
+          exitNewProjectMode(newProjectMode.projectId);
+
+          void saveCreationHandoff(newProjectMode.projectId, null).catch((error) => {
+            logger.error('Could not clear the creation handoff', error);
+          });
+        } else if (newProjectMode.projectId) {
           const inFlight = newProjectMode.plan;
           const plan = inFlight && !isCreationPlanComplete(inFlight) ? inFlight : newCreationPlan();
 

@@ -577,13 +577,39 @@ export function isCreationPlanComplete(plan: CreationPlan | undefined | null): b
  * plan predicate here would return `false` for exactly the turn this function exists to identify, and
  * it would do it silently.
  */
-export function projectOwesBuild(handoff: { plan?: CreationPlan; userPrompt?: string } | null | undefined): boolean {
+export function projectOwesBuild(
+  handoff: { plan?: CreationPlan; userPrompt?: string; blankCanvas?: boolean } | null | undefined,
+): boolean {
   /*
    * Cleared. Under migration 0016 that meant "the first build turn was sent"; since phases it means
    * "the last phase completed" (`CreationHandoff.plan`). Either way the build is over, and every later
    * turn is an ordinary edit.
    */
   if (!handoff) {
+    return false;
+  }
+
+  /*
+   * 🔴 A BLANK CANVAS PROJECT NEVER OWES A *BUILD* (owner, 2026-08-14).
+   *
+   * *"If we are using the BLANK CANVAS options DO NOT AUTO create front end and artwork… all operations
+   * from that point are just regular prompt turns."*
+   *
+   * The user chose an empty scene, so there is no build the platform is entitled to run on their
+   * behalf: no phases, and no first-build treatment either. Answering `true` here would keep every one
+   * of the ten first-build protections switched on — including the forced `bt-landing` + `bt-design`
+   * preload, which pushes the model toward exactly the landing-page redesign this flag exists to
+   * prevent, on every turn, for as long as the handoff exists.
+   *
+   * ⚠️ Checked BEFORE the plan test, because a blank-canvas handoff has no plan and would otherwise
+   * take the "created, never built" branch below — which is the most-owed answer there is.
+   *
+   * ⚠️ Strictly `=== true`, not truthy. Both parse layers already narrow it, but this is the predicate
+   * the money path reads, the record arrives from a client bundle that may be older than this code,
+   * and `1` or `"yes"` exempting a project from its build is a silent no-op of the whole first-build
+   * pipeline. Caught by its own spec on the first run.
+   */
+  if (handoff.blankCanvas === true) {
     return false;
   }
 

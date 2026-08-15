@@ -257,3 +257,33 @@ export function decideSeed(prompt: string, entries: GameRegistryEntry[]): SeedDe
 
   return fallback ? { kind: 'fallback', entry: fallback } : { kind: 'vague' };
 }
+
+/**
+ * 🔴 DID THE USER ASK FOR AN EMPTY SCENE, OR IS THIS JUST WHERE A TYPED PROMPT LANDED? (owner, 2026-08-14)
+ *
+ * *"If we are using the BLANK CANVAS options DO NOT AUTO create front end and artwork… all operations
+ * from that point are just regular prompt turns. I can then use bt-landing when I want to create the
+ * frontend."*
+ *
+ * ⚠️ **THE OBVIOUS TEST IS WRONG AND WOULD DISABLE PHASES FOR EVERY BUILD.** `is_fallback` alone looks
+ * like the answer — the Blank Canvas row IS the fallback row — but since genre inference was retired
+ * (`decideSeed`, §4.4a/§4.4d) **every typed prompt seeds that same row**. "build me a mario kart clone"
+ * and "start me an empty scene" arrive at an identical entry, so a check on the entry alone would have
+ * silently turned off the front-end and art phases for the exact builds they were made mandatory for,
+ * on the day after they were made mandatory, with nothing failing.
+ *
+ * The discriminator is `seedSource`, which exists precisely to separate *chosen* from *landed on*
+ * (`ProjectSeed.seedSource`, added 2026-08-04 when the same conflation made the chip report "Started
+ * from: Blank Canvas" on a twin-stick-shooter prompt). BOTH halves are required: explicit says the user
+ * picked it, fallback says what they picked was the empty one.
+ *
+ * ⚠️ `seedSource` defaults to `'explicit'` at the call site, so an omitted value reads as chosen. That
+ * is the right default for the CHIP (do not attribute an inference to the user) and it means this
+ * predicate must never be handed a partial seed — it takes both fields explicitly for that reason.
+ */
+export function isBlankCanvasStart(input: {
+  isFallbackEntry: boolean;
+  seedSource: 'explicit' | 'inferred' | undefined;
+}): boolean {
+  return input.isFallbackEntry && input.seedSource === 'explicit';
+}

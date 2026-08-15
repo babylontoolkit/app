@@ -91,6 +91,26 @@ export interface NewProjectMode {
    * and a project whose build never started behave identically and correctly.
    */
   plan?: CreationPlan;
+
+  /**
+   * 🔴 THE USER CHOSE AN EMPTY SCENE — so this project's first build is NOT phased (owner, 2026-08-14).
+   *
+   * *"If we are using the BLANK CANVAS options DO NOT AUTO create front end and artwork… all operations
+   * from that point are just regular prompt turns."*
+   *
+   * Blank Canvas means "I will drive": auto-designing a landing page and commissioning art for a
+   * project someone deliberately started empty is the product overriding an explicit choice, and it
+   * spends two turns of their credits doing it. `/bt-landing` is how they ask for a front end when they
+   * want one.
+   *
+   * ⚠️ Set from `isBlankCanvasStart`, which needs the seed SOURCE as well as the entry — every typed
+   * prompt lands on the Blank Canvas row, so the entry alone is not the question. See that function.
+   *
+   * Consequences, all of them from this one flag: no plan is created on send, `projectOwesBuild` is
+   * false so the server treats every turn as ordinary (no forced skill preload, no phase notes), and
+   * the handoff is cleared on the first send exactly as it was before phases existed.
+   */
+  blankCanvas?: boolean;
 }
 
 /**
@@ -162,6 +182,9 @@ export function readNewProjectMode(
       projectId,
       userPrompt: typeof parsed.userPrompt === 'string' ? parsed.userPrompt : undefined,
       plan: parseCreationPlan(parsed.plan),
+
+      /* Strictly boolean: anything else is a corrupt record, and the safe reading is "phase it". */
+      blankCanvas: parsed.blankCanvas === true ? true : undefined,
     };
   } catch {
     /*
@@ -258,7 +281,10 @@ export function updateCreationPlan(
      * `handoffDismissed` is a session fact and must not reach storage (see its doc comment) — the
      * persisted record is rebuilt from the fields `readNewProjectMode` reads back, nothing more.
      */
-    storage?.setItem(newProjectModeKey(projectId), JSON.stringify({ projectId, userPrompt: mode.userPrompt, plan }));
+    storage?.setItem(
+      newProjectModeKey(projectId),
+      JSON.stringify({ projectId, userPrompt: mode.userPrompt, blankCanvas: mode.blankCanvas, plan }),
+    );
   } catch {
     // Best-effort, as everywhere else here: the in-memory store still carries the plan this session.
   }
