@@ -15,6 +15,7 @@ import { Octokit, type RestEndpointMethodTypes } from '@octokit/rest';
 import { path } from '~/utils/path';
 import { extractRelativePath } from '~/utils/diff';
 import { description } from '~/lib/persistence';
+import { refreshSavedCopiesSoon } from '~/lib/persistence/refresh-saved-copies';
 import Cookies from 'js-cookie';
 import { createSampler } from '~/utils/sampler';
 import type { ActionAlert, DeployAlert, SupabaseAlert } from '~/types/actions';
@@ -348,12 +349,22 @@ export class WorkbenchStore {
     this.#editorStore.setSelectedFile(filePath);
   }
 
-  async saveFile(filePath: string) {
+  /**
+   * Write the open document to the store and the sandbox FS. NO persistence trigger.
+   *
+   * Split out because the agent's action runner saves files through this class too (`_runAction`), and
+   * an agent write must NOT schedule a top-up: the generation is about to checkpoint both saved copies
+   * itself (`checkpointProject`), so a trigger here would append a redundant top-up row ~4s later — a
+   * second whole-project strict serialize and upload per generation, and a 20-slot history that holds
+   * ten undo points instead of twenty. Which of the two callers is a USER action is the whole question,
+   * and it is answerable here and nowhere further down (`FilesStore.saveFile` cannot tell them apart).
+   */
+  async #writeDocument(filePath: string) {
     const documents = this.#editorStore.documents.get();
     const document = documents[filePath];
 
     if (document === undefined) {
-      return;
+      return false;
     }
 
     /*
@@ -368,6 +379,28 @@ export class WorkbenchStore {
     newUnsavedFiles.delete(filePath);
 
     this.unsavedFiles.set(newUnsavedFiles);
+
+    return true;
+  }
+
+  async saveFile(filePath: string) {
+    if (!(await this.#writeDocument(filePath))) {
+      return;
+    }
+
+    /*
+     * 🔴 A MANUAL SAVE USED TO REACH NEITHER PERSISTENCE STORE (SPEC §4.5.4c, §4.12).
+     *
+     * `FilesStore.saveFile` writes the sandbox FS and the file map and stops — and `#modifiedFiles` is
+     * diff-tracking for the LLM context (cleared wholesale by `resetAllFileModifications`), not a dirty
+     * flag anybody persists from. So a hand-edited file existed on the sandbox disk and in no checkpoint,
+     * and the next reload restored the last checkpoint with `protectNothing`, which treats its map as the
+     * whole truth: the edit was not merely un-backed-up, it was overwritten. That is the "edits on source
+     * files are GONE" half of the report.
+     *
+     * Debounced and coalesced downstream, so `saveAllFiles`' loop below needs no call of its own.
+     */
+    refreshSavedCopiesSoon('editor save');
   }
 
   async saveCurrentDocument() {
@@ -398,6 +431,11 @@ export class WorkbenchStore {
   }
 
   async saveAllFiles() {
+    /*
+     * No top-up call of its own: every iteration goes through `saveFile`, whose scheduling is a trailing
+     * debounce, so N files collapse into ONE write of the project. Adding a second call here would be a
+     * second "when do we save" rule for one user action — §4.5.4c invariant 4's failure shape exactly.
+     */
     for (const filePath of this.unsavedFiles.get()) {
       await this.saveFile(filePath);
     }
@@ -485,6 +523,8 @@ export class WorkbenchStore {
           newUnsavedFiles.delete(filePath);
           this.unsavedFiles.set(newUnsavedFiles);
         }
+
+        refreshSavedCopiesSoon('file created');
       }
 
       return success;
@@ -496,7 +536,13 @@ export class WorkbenchStore {
 
   async createFolder(folderPath: string) {
     try {
-      return await this.#filesStore.createFolder(folderPath);
+      const success = await this.#filesStore.createFolder(folderPath);
+
+      if (success) {
+        refreshSavedCopiesSoon('folder created');
+      }
+
+      return success;
     } catch (error) {
       console.error('Failed to create folder:', error);
       throw error;
@@ -531,6 +577,15 @@ export class WorkbenchStore {
 
           this.setSelectedFile(nextFile);
         }
+
+        /*
+         * 🔴 A DELETION IS THE MIRROR BUG, AND THE LOUDER ONE. An un-checkpointed CREATE is a file that
+         * vanishes on reload; an un-checkpointed DELETE is a file that comes BACK, because the restore
+         * writes the last checkpoint's map and that map still contains it. Either way the user's action
+         * silently did not happen — and `FilesStore.deleteFile` persists only the deleted-paths list,
+         * which is watcher bookkeeping, not a checkpoint.
+         */
+        refreshSavedCopiesSoon('file deleted');
       }
 
       return success;
@@ -574,6 +629,8 @@ export class WorkbenchStore {
 
           this.setSelectedFile(nextFile);
         }
+
+        refreshSavedCopiesSoon('folder deleted');
       }
 
       return success;
@@ -742,7 +799,11 @@ export class WorkbenchStore {
       this.#editorStore.updateFile(fullPath, data.action.content);
 
       if (!isStreaming && data.action.content) {
-        await this.saveFile(fullPath);
+        /*
+         * `#writeDocument`, NOT `saveFile`: an agent write must not schedule a persistence top-up. The
+         * generation checkpoints both saved copies when it finishes — see `#writeDocument`.
+         */
+        await this.#writeDocument(fullPath);
       }
 
       if (!isStreaming) {

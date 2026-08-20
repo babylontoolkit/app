@@ -192,10 +192,16 @@ export interface ToolPolicyInput {
   isSlash: boolean;
 
   /**
-   * Discussion mode is active this turn (§4.2.9 — already creation-guarded by the caller: it is
-   * `discussModeNote(...) !== null`, so it can never be true on a creation turn). A discuss turn is
-   * READ-ONLY by guarantee, not just by instruction: media tools DEBIT credits, and MCP tools can
-   * mutate the sandbox (a `write_file` MCP tool is ordinary, not exotic) — neither may be offered.
+   * Discussion mode is active this turn (§4.2.9). A discuss turn is READ-ONLY by guarantee, not just
+   * by instruction: media tools DEBIT credits, and MCP tools can mutate the sandbox (a `write_file`
+   * MCP tool is ordinary, not exotic) — neither may be offered.
+   *
+   * 🔴 **It CAN be true on a first build turn, and this comment used to say the opposite.** It read
+   * *"already creation-guarded by the caller… so it can never be true on a creation turn"* — true when
+   * written, because `discussModeNote` took `isFirstBuildTurn` and returned `null` for one. The owner
+   * removed that exemption on 2026-08-09 so the handoff card's **"Plan my brief"** could be real, and
+   * this comment was not updated. It is the sentence that made the resulting bug look impossible: a
+   * reader checking whether the branch below could be reached found a comment saying it could not.
    */
   isDiscussTurn?: boolean;
 
@@ -256,6 +262,31 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
    */
   const maxToolRounds = input.budgets?.maxToolRounds ?? DEFAULT_AGENT_BUDGETS.maxToolRounds;
   const creationToolRounds = input.budgets?.creationToolRounds ?? DEFAULT_AGENT_BUDGETS.creationToolRounds;
+
+  /*
+   * 🔴 PLAN MODE OUTRANKS THE FIRST BUILD TURN (owner-reported live, 2026-08-15).
+   *
+   * *"When you hit `Plan my brief` it should NOT use the three stages card and try the multi stage
+   * build — [it should] use a skill, like `/bt-plan`, because they chose the `Plan my brief` button."*
+   *
+   * The handoff card offers Build and Plan side by side, and BOTH are first build turns — the project
+   * still owes its build either way, so `projectOwesBuild` is true for both. Deciding first-build
+   * before discuss therefore handed a planning turn the CREATION toolset: `load_skill` withheld,
+   * `read_file`/`load_reference` offered, and on the `art` phase **media tools that debit credits** —
+   * i.e. a turn the user asked to only think about the project could render art and be billed for it.
+   * §4.2.9's read-only guarantee lives in the TOOLSET; the note and the `NO_REPLAY` mark were doing
+   * their half while this branch quietly undid it.
+   *
+   * The ordering is the whole fix, and it is the rule two other consumers already follow —
+   * `shouldVerifyCreationCompleteness` is `!isFirstBuildTurn || isDiscussTurn`, and the unproductive
+   * rescue is `isFirstBuildTurn && !discussNote`. Two of four consumers agreed that a discuss turn is
+   * not a build; this file and `preloadSkills` were the two that did not, and both are money paths.
+   */
+  if (input.isDiscussTurn) {
+    return input.preloadedCount === 0 && !input.isSlash
+      ? { allowTools: true, toolset: 'skills-only', allowsMedia: false, maxSteps: maxToolRounds + 1 }
+      : { allowTools: false, toolset: 'skills-only', allowsMedia: false, maxSteps: 1 };
+  }
 
   if (input.isFirstBuildTurn) {
     /*
@@ -320,16 +351,12 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
   }
 
   /*
-   * Discussion turns (§4.2.9): the loop opens only for skill loading, and MCP tools never force it on
-   * (they are not offered, so a forced-open loop would buy rounds nothing can use). The read-only
-   * guarantee lives in the TOOLSET — `maxSteps: 1` alone would still offer spending tools on the one
-   * step it has.
+   * (Discussion turns are handled ABOVE, ahead of the first-build branch — see the comment there for
+   * why the order is the fix and not an accident. The rule itself: the loop opens only for skill
+   * loading, MCP tools never force it on (they are not offered, so a forced-open loop would buy rounds
+   * nothing can use), and the read-only guarantee lives in the TOOLSET — `maxSteps: 1` alone would
+   * still offer spending tools on the one step it has.)
    */
-  if (input.isDiscussTurn) {
-    return input.preloadedCount === 0 && !input.isSlash
-      ? { allowTools: true, toolset: 'skills-only', allowsMedia: false, maxSteps: maxToolRounds + 1 }
-      : { allowTools: false, toolset: 'skills-only', allowsMedia: false, maxSteps: 1 };
-  }
 
   /*
    * 🔴 ORDINARY TURNS ALWAYS GET THE SKILL TOOLS (2026-07-26).

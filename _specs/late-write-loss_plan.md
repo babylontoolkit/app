@@ -182,7 +182,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
 
 ## Tasks
 
-- [ ] **T1** — Pure top-up decision (`planTopUp`)
+- [x] **T1** — Pure top-up decision (`planTopUp`)
   - Files: `app/lib/persistence/top-up-plan.ts` *(new)*, `app/lib/persistence/top-up-plan.spec.ts` *(new)*
   - Details: Extract the "should we top up, and what do we write?" decision as a pure function so it can
     be tested exhaustively (`CLAUDE.md:223` — this decides what gets written over the user's project).
@@ -203,7 +203,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
     Mutation-verified: dropping the `isNewest` condition fails ≥1 named test; dropping the `streaming`
     check fails ≥1; record both counts in the spec header. Gates green.
 
-- [ ] **T2** — `selectRestoreTarget` must pick the LAST checkpoint for a message
+- [x] **T2** — `selectRestoreTarget` must pick the LAST checkpoint for a message
   - Files: `app/lib/persistence/restore-target.ts`, `app/lib/persistence/restore-target.spec.ts`
   - Details: With top-up checkpoints (T3) two rows can carry one `messageId`.
     `restore-target.ts:32`'s `findIndex` returns the oldest, so `mode: 'after'` would restore the state
@@ -220,7 +220,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
     `'no-checkpoint-for-message'` unchanged. Mutation-verified: reverting `'after'` to `findIndex` fails
     exactly the new duplicate test(s) and nothing else — record the count. Gates green.
 
-- [ ] **T3** — The top-up writes BOTH copies; rename the module to match
+- [x] **T3** — The top-up writes BOTH copies; rename the module to match
   - Files: `app/lib/persistence/refresh-working-copy.ts` → `app/lib/persistence/refresh-saved-copies.ts`,
     `app/lib/persistence/refresh-working-copy.spec.ts` → `refresh-saved-copies.spec.ts`,
     `app/lib/media/tasks.ts`
@@ -257,7 +257,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
     `grep -rn "refreshWorkingCopySoon" app` returns nothing. Mutation-verified: removing the
     `createLocalSnapshot` call fails ≥2 named tests. Gates green.
 
-- [ ] **T4** — Amend the previous top-up instead of appending a new one
+- [x] **T4** — Amend the previous top-up instead of appending a new one
   - Files: `app/lib/persistence/local-snapshots.ts`, `app/lib/persistence/local-snapshots.spec.ts`,
     `app/lib/persistence/refresh-saved-copies.ts`
   - Details: Bound the history churn (Finding B): at most **one** top-up checkpoint per real checkpoint.
@@ -286,7 +286,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
     the history, proving the amend test is measuring something. Mutation-verified: dropping the
     `isCurrent` guard fails the post-undo test; dropping the `kind` guard fails ≥1. Gates green.
 
-- [ ] **T5** — A manual editor save schedules a top-up
+- [x] **T5** — A manual editor save schedules a top-up
   - Files: `app/lib/stores/workbench.ts`, `app/lib/stores/workbench-save-trigger.spec.ts` *(new, or
     extend the nearest existing workbench spec)*
   - Details: `WorkbenchStore.saveFile` (`workbench.ts:351`) writes the sandbox FS and the map and stops —
@@ -302,7 +302,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
     a **CONTROL** asserting the file is still written to the store/FS (a "fix" that stopped saving would
     otherwise pass). Gates green.
 
-- [ ] **T6** — File-tree mutations trigger a top-up; a restore never does
+- [x] **T6** — File-tree mutations trigger a top-up; a restore never does
   - Files: `app/lib/stores/workbench.ts`, `app/lib/persistence/top-up-plan.ts` (wiring only),
     `app/lib/stores/files.ts` (flag only), plus the relevant spec files
   - Details: Two halves, and the second is what makes the first safe.
@@ -325,7 +325,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
     restore completes does schedule one. Mutation-verified: removing the suppression fails the
     restore test. Gates green.
 
-- [ ] **T7** — Drive the real UI and prove the loss is gone
+- [x] **T7** — Drive the real UI and prove the loss is gone
   - Files: none (verification); write findings into `_specs/late-write-loss_findings.md` under a
     `## Verified` section
   - Details: `CLAUDE.md:315` — every defect in this area historically lived in the wiring the unit tests
@@ -344,7 +344,7 @@ faithfully or corrects a spec statement that the code has already outgrown.
     scenario that fails leaves this box unchecked and the failure reported — a partial pass is a FAIL.
     No console errors introduced. Gates green.
 
-- [ ] **T8** — Update SPEC.md to match what was built
+- [x] **T8** — Update SPEC.md to match what was built
   - Files: `SPEC.md`
   - Details: Follow SPEC.md's "How to update this spec" contract — **replace/merge** current-state
     sections, **append** to a decisions log.

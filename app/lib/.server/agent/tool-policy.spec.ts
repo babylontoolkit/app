@@ -330,12 +330,68 @@ describe('toolPolicyForTurn — discussion turns (§4.2.9, read-only by TOOLSET,
   });
 
   /*
-   * The caller guarantees isDiscussTurn is creation-guarded (`discussModeNote` returns null on a
-   * creation turn) — but if both flags ever arrive, creation MUST win: the user asked for a game.
+   * 🔴 A PLAN TURN IS READ-ONLY EVEN WHEN IT IS ALSO THE FIRST BUILD TURN (owner, 2026-08-15).
+   *
+   * This test used to assert the OPPOSITE — "the first build turn outranks discuss if both flags are
+   * ever set", justified by a premise that has since been deleted from the code: `discussModeNote`
+   * was creation-guarded, so the pair could never both be true and the branch order was moot. That
+   * guard is gone (`proxy.ts`: *"It no longer takes `isFirstBuildTurn`: a first build turn CAN be a
+   * plan turn, deliberately"*), which is what makes the handoff card's **Plan my brief** button real:
+   * it composes `/bt-plan <brief>` AND sets `chatMode: 'discuss'`, because a prefix without the mode
+   * is a request the pipeline is free to ignore.
+   *
+   * The stale premise took the assertion down with it. `toolPolicyForTurn` still tests
+   * `isFirstBuildTurn` FIRST, so a Plan-mode first build turn gets `toolset: 'creation'` — and the
+   * read-only guarantee's toolset half is simply absent: media can be offered on the art phase (a
+   * DEBIT the user never asked for), and the skill tools the plan turn needs are not offered at all.
+   * Two consumers already encode the correct rule (`creation-completion.ts`:
+   * `if (!input.isFirstBuildTurn || input.isDiscussTurn) return false`, and `unproductive.ts`'s
+   * `isFirstBuildTurn && !discussNote`); this file and `preload-skills.ts` are the two that do not.
+   *
+   * The failure is silent in the direction this repo keeps rediscovering: nothing throws, the user
+   * gets a turn that can spend credits on renders while the toggle on screen says Plan.
    */
-  it('the first build turn outranks discuss if both flags are ever set', () => {
+  it('a first build turn in PLAN mode is read-only — discuss outranks creation', () => {
     const policy = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, isDiscussTurn: true, hasMediaTools: true });
-    expect(policy.toolset).toBe('creation');
+
+    expect(policy.toolset).toBe('skills-only');
+    expect(policy.allowsMedia).toBe(false);
+  });
+
+  /*
+   * The ART phase is the one creation phase that may render, so it is the shape where "creation wins"
+   * costs real money rather than just the wrong tool list. Asserted separately because a fix that
+   * only checked `creationPhase == null` would pass the case above and still debit here.
+   */
+  it('a plan turn cannot render, even on the phase that otherwise may', () => {
+    const policy = toolPolicyForTurn({
+      ...base,
+      isFirstBuildTurn: true,
+      isDiscussTurn: true,
+      creationPhase: 'art',
+      hasMediaTools: true,
+    });
+
+    expect(policy.allowsMedia).toBe(false);
+    expect(policy.toolset).toBe('skills-only');
+  });
+
+  /*
+   * 🔴 THE CONTROL. Without it, a "fix" that simply deleted the `isFirstBuildTurn` branch outright
+   * passes both assertions above — and hands every ordinary creation `toolset: 'all'`, which re-opens
+   * the six-round skill thrash on the most expensive generation in the product.
+   */
+  it('CONTROL: an ordinary first build turn is unchanged — it still gets the creation toolset', () => {
+    expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasMediaTools: true })).toEqual({
+      allowTools: true,
+      toolset: 'creation',
+      allowsMedia: false,
+      maxSteps: CREATION_TOOL_ROUNDS + 1,
+    });
+
+    const art = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase: 'art', hasMediaTools: true });
+    expect(art.toolset).toBe('creation');
+    expect(art.allowsMedia).toBe(true);
   });
 });
 

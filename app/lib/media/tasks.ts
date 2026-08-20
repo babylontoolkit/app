@@ -16,7 +16,7 @@
 import { atom } from 'nanostores';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { refreshWorkingCopySoon } from '~/lib/persistence/refresh-working-copy';
+import { refreshSavedCopiesSoon } from '~/lib/persistence/refresh-saved-copies';
 import { WORK_DIR } from '~/utils/constants';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -209,17 +209,18 @@ async function deliverBytes(handle: MediaTaskHandle): Promise<void> {
     workbenchStore.refreshPreviews();
 
     /*
-     * And the same correction for the RECOVERY copy (§4.5.4c).
+     * And the same correction for BOTH SAVED COPIES (§4.5.4c, §4.12).
      *
-     * The generation checkpointed ~25s ago, before this render existed, so the server working copy
-     * holds the code that references this asset and not the asset. Recovering from it would rebuild a
-     * project whose landing page points at four images that were never stored — the broken-image
-     * failure directly above, one layer down and invisible until someone actually needed the recovery.
+     * The generation checkpointed ~25s ago, before this render existed, so neither the local checkpoint
+     * nor the server working copy holds the asset — only the code that references it. That is not merely
+     * a recovery gap: the local checkpoint is restored with `protectNothing` on an ordinary reload, and
+     * a `protectNothing` restore DELETES what the incoming map does not have. So the file the user just
+     * watched appear was removed on their next refresh — the reported *"they were created and showing,
+     * but a refresh LOSES them"*.
      *
-     * Coalesced, and it reuses the last checkpoint's seq: a late asset completes that checkpoint, it
-     * does not create a new state.
+     * Coalesced, and post-stream: a burst of renders produces one write, and never during a generation.
      */
-    refreshWorkingCopySoon(`media ${handle.taskId}`);
+    refreshSavedCopiesSoon(`media ${handle.taskId}`);
 
     toast.success(`Generated ${handle.kind} saved to ${handle.destPath}`);
     logger.info(`Media task ${handle.taskId} delivered ${bytes.byteLength} bytes → ${handle.destPath}`);

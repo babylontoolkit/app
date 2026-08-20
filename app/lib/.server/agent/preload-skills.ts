@@ -301,7 +301,11 @@ export interface PreloadedSkill {
  * The creation turn — the most expensive generation in the product, and the one that produced the
  * 468s → 114s win when its tools were removed — is deliberately UNCHANGED: fixed skills, no tools.
  */
-export async function preloadSkills(slashSkill?: string, isCreation = false): Promise<PreloadedSkill[]> {
+export async function preloadSkills(
+  slashSkill?: string,
+  isCreation = false,
+  isDiscussTurn = false,
+): Promise<PreloadedSkill[]> {
   /*
    * The creation brief is machine-written and delegates to two named skills, so there is nothing to
    * infer. (It is also why the old router could not be trusted here even in its own terms: the brief's
@@ -312,7 +316,21 @@ export async function preloadSkills(slashSkill?: string, isCreation = false): Pr
    * brief's fallback sentence routes the model to the baked hard-constraints sections instead, so
    * creation never fails on its absence.
    */
-  const wanted = isCreation ? CREATION_SKILLS.filter((name) => name !== slashSkill) : [];
+  /*
+   * 🔴 A PLAN TURN GETS NONE OF THEM, even though it is a first build turn (owner, 2026-08-15).
+   *
+   * The handoff card's "Plan my brief" produces a turn that both owes a build and is read-only, so
+   * `isCreation` is true and the pair would be inlined — `bt-landing`'s landing-page REDESIGN procedure
+   * and `bt-design`, ~24KB of instructions to build a frontend, on a turn whose entire job is to write
+   * `_specs/<x>_plan.md` and touch nothing else. Two costs, and the second is the one that bites: it is
+   * paid in the most expensive prefix in the product, and it puts a "now redesign the landing page"
+   * procedure in front of a model that was asked to plan, next to the `/bt-plan` body it was actually
+   * invoked with. The user picked the skill; the pipeline should not argue with them.
+   *
+   * The build that follows is unaffected — it is still a first build turn (the handoff row survives a
+   * plan turn), so it still gets the pair when the user actually asks to build.
+   */
+  const wanted = isCreation && !isDiscussTurn ? CREATION_SKILLS.filter((name) => name !== slashSkill) : [];
 
   if (wanted.length === 0) {
     return [];

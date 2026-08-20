@@ -15,6 +15,24 @@
  * Run against `fake-indexeddb`, which is the real IndexedDB semantics (structured clone, transaction
  * lifetimes, index ranges) rather than a Map pretending to be a database — a Map would pass the binary
  * test for the wrong reason, since it never serializes anything at all.
+ *
+ * ## Mutation-verified (hand-discharged 2026-08-15, `amendLocalSnapshot`)
+ *
+ * A hole cut in an append-only history is only as good as the guards around it, and a guard is only as
+ * good as the test that would notice it gone. Each mutation was applied to the source, the suite run, and
+ * the source restored byte-exactly:
+ *
+ *   - **drop the `state?.currentSnapshotId !== existing.id` guard** → **1 failure**, and it is the right
+ *     one: *"refuses a row the pointer has moved off — the post-undo case"*. Nothing else notices, which is
+ *     the point — being newest and being current are separate questions and no other test asks this one.
+ *   - **drop the `existing.kind !== 'top-up'` condition** → **1 failure**: *"refuses a row that is not a
+ *     top-up, and writes nothing"*.
+ *   - **bump `nextSeq` on an amend** → **1 failure**: *"does not touch nextSeq"*. Asserted through the NEXT
+ *     checkpoint's seq rather than by reading the counter, so it measures the consequence rather than the
+ *     implementation.
+ *   - **implement the amend as delete-then-create** (new id, new seq, pointer moved, trim re-run) →
+ *     **6 failures**, including *"does not disturb the trim"* — the eviction the whole function exists to
+ *     prevent, arriving through the fix.
  */
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -22,6 +40,7 @@ import { bytesToBase64 } from '~/lib/binary/binary-files';
 import { openDatabase } from './db';
 import {
   MAX_CHECKPOINTS_PER_PROJECT,
+  amendLocalSnapshot,
   createLocalSnapshot,
   deleteLocalProject,
   getCurrentLocalSnapshotId,
@@ -41,6 +60,14 @@ const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
 
 /** A GLB: magic + version + length, i.e. bytes that are meaningless if a single one shifts. */
 const GLB_BYTES = new Uint8Array([0x67, 0x6c, 0x54, 0x46, 0x02, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00]);
+
+/**
+ * The LATE render — a §4.16 image that lands after the generation already checkpointed.
+ *
+ * Deliberately a different length as well as different bytes: an amend that wrote the original map back
+ * (or one that re-encoded on the way through) would still match on length alone.
+ */
+const LATE_PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xde, 0xad, 0xbe, 0xef, 0x7f]);
 
 /** Narrow a dirent to a file. `SerializedDirent` is a union, and a folder has no bytes to assert on. */
 function fileAt(map: SerializedFileMap, path: string) {
@@ -69,6 +96,44 @@ const files = (): SerializedFileMap => ({
   },
   'src/components': { type: 'folder' },
 });
+
+/** What the project looks like once the late render has landed — the map a top-up amends IN. */
+const lateFiles = (): SerializedFileMap => ({
+  'src/game.ts': { type: 'file', content: 'export const speed = 20;\n', isBinary: false },
+  'public/assets/generated/hero.png': {
+    type: 'file',
+    content: bytesToBase64(LATE_PNG_BYTES),
+    isBinary: true,
+    size: LATE_PNG_BYTES.byteLength,
+  },
+});
+
+/** A one-file map, for tests where the only thing that matters is telling two states apart. */
+const marker = (content: string): SerializedFileMap => ({
+  'src/game.ts': { type: 'file', content, isBinary: false },
+});
+
+/**
+ * The shape `planTopUp` hands to an amend: a real generation checkpoint, then the top-up that completes
+ * it — so the top-up is `kind:'top-up'`, is the newest row, and is the current pointer.
+ */
+async function seedAmendableTopUp(projectId = 'p1') {
+  const generation = await createLocalSnapshot(db, {
+    projectId,
+    files: marker('generation'),
+    messageId: 'msg-7',
+    label: 'c0',
+  });
+  const topUp = await createLocalSnapshot(db, {
+    projectId,
+    files: files(),
+    messageId: 'msg-7',
+    label: 'Unsaved changes',
+    kind: 'top-up',
+  });
+
+  return { generation, topUp };
+}
 
 beforeEach(async () => {
   db = (await openDatabase())!;
@@ -278,6 +343,281 @@ describe('the current pointer', () => {
     expect(await getCurrentLocalSnapshotId(db, 'nope')).toBeUndefined();
     expect(await readCurrentLocalSnapshot(db, 'nope')).toBeUndefined();
     expect(await listLocalSnapshots(db, 'nope')).toEqual([]);
+  });
+});
+
+/**
+ * Amending a top-up (SPEC §4.5.4c, §4.12) — the one row in an append-only history that may be rewritten.
+ *
+ * An editor save schedules a top-up every four seconds. Appending one per save pushes twenty auto-saves
+ * through a twenty-slot history in about a minute and evicts every generation checkpoint §4.12's undo
+ * actually reaches for — data loss dressed as durability. So a top-up rewrites its own row instead, which
+ * bounds a project to at most one top-up per real checkpoint.
+ *
+ * That is a hole cut in a written invariant, so the tests here are about the EDGES of the hole rather than
+ * about the happy path. Each guard fails silently and each failure lands on the only copy of the user's
+ * game: amending a generation checkpoint rewrites history; amending a row with newer siblings rewrites the
+ * MIDDLE of a version list, so "restore to here" starts landing somewhere else; and amending a row the
+ * §4.12 pointer is no longer parked on overwrites the state the user still has a way of asking for.
+ *
+ * Every refusal is therefore asserted twice — that it returned `false`, AND that the target row's bytes are
+ * exactly as they were. A guard that returns `false` after writing has refused nothing.
+ */
+describe('amending a top-up', () => {
+  /* The whole point: the late render's bytes land, and the row keeps the identity §4.12 navigates by. */
+  it('replaces the files while keeping id, seq, messageId and kind', async () => {
+    const { topUp } = await seedAmendableTopUp();
+
+    expect(await amendLocalSnapshot(db, { snapshotId: topUp.id, files: lateFiles() })).toBe(true);
+
+    const read = await readLocalSnapshot(db, topUp.id);
+
+    expect(read).toMatchObject({
+      id: topUp.id,
+      seq: topUp.seq,
+      messageId: 'msg-7',
+      kind: 'top-up',
+      label: 'Unsaved changes',
+      projectId: 'p1',
+    });
+    expect(Object.keys(read!.files).sort()).toEqual(['public/assets/generated/hero.png', 'src/game.ts']);
+    expect(fileAt(read!.files, 'src/game.ts').content).toBe('export const speed = 20;\n');
+  });
+
+  /*
+   * `spec/binary-files.md`: base64 is a WIRE format that survives only because nothing on this path
+   * reinterprets it. The amend is a NEW write of a map that has already been through structured clone
+   * once, which is exactly where a well-meaning "normalise the files first" would land.
+   */
+  it('round-trips a binary byte-for-byte across create → amend → read', async () => {
+    const { topUp } = await seedAmendableTopUp();
+
+    await amendLocalSnapshot(db, { snapshotId: topUp.id, files: lateFiles() });
+
+    const read = await readLocalSnapshot(db, topUp.id);
+
+    expect(fileAt(read!.files, 'public/assets/generated/hero.png')).toEqual({
+      type: 'file',
+      content: bytesToBase64(LATE_PNG_BYTES),
+      isBinary: true,
+      size: LATE_PNG_BYTES.byteLength,
+    });
+
+    // The true byte count, not the base64 length — 13 raw bytes become 20 characters.
+    expect(fileAt(read!.files, 'public/assets/generated/hero.png').size).toBe(13);
+    expect(fileAt(read!.files, 'public/assets/generated/hero.png').content.length).toBe(20);
+  });
+
+  /*
+   * The row already exists, so advancing the counter burns a seq for nothing — and REUSING one would put
+   * two rows on a single seq, which is the tie `seq`'s own doc comment says the ledger paid for once. The
+   * assertion is the observable version of "unchanged": the next real checkpoint gets the number it would
+   * have got had no amend ever happened.
+   */
+  it('does not touch nextSeq — the next checkpoint gets the seq it would have got anyway', async () => {
+    const { topUp } = await seedAmendableTopUp();
+
+    expect(topUp.seq).toBe(1);
+
+    for (let i = 0; i < 5; i++) {
+      await amendLocalSnapshot(db, { snapshotId: topUp.id, files: marker(`amend-${i}`) });
+    }
+
+    expect((await createLocalSnapshot(db, { projectId: 'p1', files: files() })).seq).toBe(2);
+  });
+
+  /* An amend is a write to ONE row. Moving the pointer would make it a restore nobody asked for. */
+  it('leaves the current pointer where it was', async () => {
+    const { topUp } = await seedAmendableTopUp();
+
+    await amendLocalSnapshot(db, { snapshotId: topUp.id, files: lateFiles() });
+
+    expect(await getCurrentLocalSnapshotId(db, 'p1')).toBe(topUp.id);
+    expect(await getLocalSyncState(db, 'p1')).toEqual({ localSeq: 1, syncedSeq: undefined });
+  });
+
+  /* Amending is not appending: the row count must not move, however many editor saves land. */
+  it('rewrites one row rather than adding one', async () => {
+    const { topUp } = await seedAmendableTopUp();
+
+    for (let i = 0; i < 5; i++) {
+      await amendLocalSnapshot(db, { snapshotId: topUp.id, files: marker(`amend-${i}`) });
+    }
+
+    const kept = await listLocalSnapshots(db, 'p1');
+
+    expect(kept).toHaveLength(2);
+    expect(fileAt((await readLocalSnapshot(db, topUp.id))!.files, 'src/game.ts').content).toBe('amend-4');
+  });
+
+  /*
+   * 🔴 CONTROL. Without this the test above passes for an `amendLocalSnapshot` that writes NOTHING at all,
+   * or for a fixture where five saves were never five saves. Appending the same five top-ups to the same
+   * fixture must visibly grow the history — that growth is the thing amending exists to prevent, so it has
+   * to be demonstrated rather than assumed.
+   */
+  it('CONTROL: appending the same five top-ups instead DOES grow the history', async () => {
+    await seedAmendableTopUp();
+
+    for (let i = 0; i < 5; i++) {
+      await createLocalSnapshot(db, { projectId: 'p1', files: marker(`append-${i}`), kind: 'top-up' });
+    }
+
+    expect(await listLocalSnapshots(db, 'p1')).toHaveLength(7);
+  });
+
+  /*
+   * A generation checkpoint is history, and history is append-only — there is no delete-one API here
+   * deliberately. A row with no `kind` predates the field or came from `checkpointProject`; either way it
+   * is not ours to rewrite.
+   */
+  it('refuses a row that is not a top-up, and writes nothing', async () => {
+    const ordinary = await createLocalSnapshot(db, { projectId: 'p1', files: marker('generation') });
+
+    expect(await amendLocalSnapshot(db, { snapshotId: ordinary.id, files: lateFiles() })).toBe(false);
+
+    const read = await readLocalSnapshot(db, ordinary.id);
+
+    expect(fileAt(read!.files, 'src/game.ts').content).toBe('generation');
+    expect(read!.files['public/assets/generated/hero.png']).toBeUndefined();
+  });
+
+  /*
+   * Newer siblings mean the row is in the MIDDLE of the history. Rewriting the middle of a version list is
+   * how "restore to here" starts landing somewhere else. Note the pointer is parked back ON the top-up
+   * here, so `isCurrent` passes and this test isolates the newest-row guard.
+   */
+  it('refuses a row that is not the newest, and writes nothing', async () => {
+    const { topUp } = await seedAmendableTopUp();
+
+    await createLocalSnapshot(db, { projectId: 'p1', files: marker('newer'), label: 'newer' });
+    await setCurrentLocalSnapshot(db, 'p1', topUp.id);
+
+    expect(await amendLocalSnapshot(db, { snapshotId: topUp.id, files: lateFiles() })).toBe(false);
+
+    const read = await readLocalSnapshot(db, topUp.id);
+
+    expect(fileAt(read!.files, 'src/game.ts').content).toBe('export const speed = 10;\n');
+    expect(read!.files['public/assets/generated/hero.png']).toBeUndefined();
+  });
+
+  /*
+   * 🔴 The post-undo case. After a §4.12 undo the pointer is parked on an OLDER snapshot
+   * (`Messages.client.tsx`) while the top-up is still the newest row — so `isNewest` alone waves this
+   * through, and the amend would overwrite the newest work with the state the user had just undone. That
+   * is why the two guards are separate questions and neither implies the other.
+   *
+   * The parked snapshot is asserted byte-identical afterwards as well: a refusal must leave the whole
+   * history alone, not merely the row it declined to write.
+   */
+  it('refuses a row the pointer has moved off — the post-undo case — and leaves both rows byte-identical', async () => {
+    const generation = await createLocalSnapshot(db, { projectId: 'p1', files: files(), label: 'generation' });
+    const topUp = await createLocalSnapshot(db, {
+      projectId: 'p1',
+      files: marker('the state the user undid from'),
+      kind: 'top-up',
+    });
+
+    // Undo: the pointer parks on the older snapshot while the top-up stays the newest row.
+    await setCurrentLocalSnapshot(db, 'p1', generation.id);
+
+    expect(await amendLocalSnapshot(db, { snapshotId: topUp.id, files: lateFiles() })).toBe(false);
+
+    const parked = await readLocalSnapshot(db, generation.id);
+
+    expect(fileAt(parked!.files, 'public/logo.png')).toEqual({
+      type: 'file',
+      content: bytesToBase64(PNG_BYTES),
+      isBinary: true,
+      size: PNG_BYTES.byteLength,
+    });
+    expect(fileAt(parked!.files, 'public/car.glb').content).toBe(bytesToBase64(GLB_BYTES));
+    expect(fileAt(parked!.files, 'src/game.ts').content).toBe('export const speed = 10;\n');
+
+    // …and the row the amend was aimed at is untouched too.
+    expect(fileAt((await readLocalSnapshot(db, topUp.id))!.files, 'src/game.ts')).toEqual({
+      type: 'file',
+      content: 'the state the user undid from',
+      isBinary: false,
+    });
+    expect(await getCurrentLocalSnapshotId(db, 'p1')).toBe(generation.id);
+  });
+
+  /* A row deleted by the trim between the plan and the write. `false`, not a throw — the caller appends. */
+  it('refuses a snapshot that does not exist rather than throwing', async () => {
+    await seedAmendableTopUp();
+
+    await expect(amendLocalSnapshot(db, { snapshotId: 'snp_gone', files: lateFiles() })).resolves.toBe(false);
+    expect(await listLocalSnapshots(db, 'p1')).toHaveLength(2);
+  });
+
+  /*
+   * The guards are answered from the row's OWN project. Reading the pointer or the sibling set from the
+   * wrong project would make an amend in a busy project's history depend on whatever a quiet one was doing.
+   */
+  it('never reaches into another project’s history', async () => {
+    const { topUp } = await seedAmendableTopUp('p1');
+    const other = await createLocalSnapshot(db, { projectId: 'p2', files: marker('p2 work'), kind: 'top-up' });
+
+    expect(await amendLocalSnapshot(db, { snapshotId: topUp.id, files: lateFiles() })).toBe(true);
+
+    expect(fileAt((await readLocalSnapshot(db, other.id))!.files, 'src/game.ts').content).toBe('p2 work');
+    expect(await getCurrentLocalSnapshotId(db, 'p2')).toBe(other.id);
+    expect(await listLocalSnapshots(db, 'p2')).toHaveLength(1);
+  });
+
+  /*
+   * The eviction this whole function exists to prevent. At the cap, an append costs the OLDEST checkpoint —
+   * so a long editing session would quietly consume the twenty slots §4.12's undo navigates. Amending must
+   * be a no-op for the trim however many times it runs.
+   */
+  it('does not disturb the trim, however many times it runs', async () => {
+    for (let i = 0; i < MAX_CHECKPOINTS_PER_PROJECT - 1; i++) {
+      await createLocalSnapshot(db, { projectId: 'p1', files: files(), label: `c${i}` });
+    }
+
+    const topUp = await createLocalSnapshot(db, {
+      projectId: 'p1',
+      files: files(),
+      label: 'Unsaved changes',
+      kind: 'top-up',
+    });
+
+    for (let i = 0; i < 30; i++) {
+      await amendLocalSnapshot(db, { snapshotId: topUp.id, files: marker(`save-${i}`) });
+    }
+
+    const kept = await listLocalSnapshots(db, 'p1');
+
+    expect(kept).toHaveLength(MAX_CHECKPOINTS_PER_PROJECT);
+    expect(kept.map((s) => s.label)).toContain('c0');
+    expect(kept.map((s) => s.id)).toContain(topUp.id);
+    expect(fileAt((await readLocalSnapshot(db, topUp.id))!.files, 'src/game.ts').content).toBe('save-29');
+  });
+
+  /*
+   * 🔴 CONTROL for the test above — and the measurement of the bug. Thirty appends against the identical
+   * fixture hold the row count at twenty by throwing away the twenty oldest checkpoints, `c0` first. Without
+   * this, "count is still twenty" is a fact about the cap rather than a fact about amending.
+   */
+  it('CONTROL: thirty appends at the cap evict the oldest checkpoints instead', async () => {
+    for (let i = 0; i < MAX_CHECKPOINTS_PER_PROJECT - 1; i++) {
+      await createLocalSnapshot(db, { projectId: 'p1', files: files(), label: `c${i}` });
+    }
+
+    await createLocalSnapshot(db, { projectId: 'p1', files: files(), label: 'Unsaved changes', kind: 'top-up' });
+
+    for (let i = 0; i < 30; i++) {
+      await createLocalSnapshot(db, { projectId: 'p1', files: marker(`save-${i}`), kind: 'top-up' });
+    }
+
+    const kept = await listLocalSnapshots(db, 'p1');
+
+    expect(kept).toHaveLength(MAX_CHECKPOINTS_PER_PROJECT);
+    expect(kept.map((s) => s.label)).not.toContain('c0');
+
+    // Every generation checkpoint is gone: the whole history is auto-saves.
+    expect(kept.every((s) => s.kind === 'top-up')).toBe(true);
   });
 });
 

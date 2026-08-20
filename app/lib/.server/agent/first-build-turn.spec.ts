@@ -221,8 +221,20 @@ describe('consumer 1 — the creation brief inlines bt-landing + bt-design', () 
     expect(await preloadSkills('bt-plan', false)).toEqual([]);
   });
 
-  it('is wired to the first-build flag', () => {
-    expect(proxy).toContain('preloadSkills(slash?.skillName, isFirstBuildTurn)');
+  /*
+   * 🔴 And NOT on a first build turn the user asked to PLAN (owner-reported live, 2026-08-15).
+   *
+   * "Plan my brief" produces a turn that owes a build and is read-only, so `isCreation` was true and
+   * the pair was inlined — a landing-page redesign procedure handed to a turn whose only job is to
+   * write `_specs/<x>_plan.md`, in the most expensive prefix in the product.
+   */
+  it('does NOT fire on a first build turn that is a PLAN turn', async () => {
+    expect(await preloadSkills(undefined, true, true)).toEqual([]);
+    expect(await preloadSkills('bt-plan', true, true)).toEqual([]);
+  });
+
+  it('is wired to the first-build flag AND the discuss flag', () => {
+    expect(proxy).toContain('preloadSkills(slash?.skillName, isFirstBuildTurn, discussNote !== null)');
   });
 });
 
@@ -395,12 +407,20 @@ describe('consumer 5 — the liveness panel calls a first build a creation', () 
   /*
    * The precedence is the whole content of this function, and it is the half a wiring scan cannot see.
    * A repair is a repair even on a first build (the repair copy is what tells the user their build is
-   * being fixed rather than started again), and plan mode outranks an ordinary edit.
+   * being fixed rather than started again), and PLAN MODE OUTRANKS A BUILD.
+   *
+   * 🔴 That last clause was `creation > plan` until 2026-08-15, and this test asserted it — so the
+   * defect it caused was pinned as correct. The handoff card's "Plan my brief" makes a turn that both
+   * owes a build and is read-only, and the panel told the user *"Building your project — Designing
+   * your landing page… the first build takes a few minutes"* while the model wrote one markdown file.
+   * Caught in a live drive, not here: this function's only consumer is the panel's copy, so every
+   * assertion in this file passed while the sentence on screen was wrong.
    */
-  it('keeps the precedence: repair > creation > plan > edit', () => {
+  it('keeps the precedence: repair > plan > creation > edit', () => {
     expect(statusKindFor({ isRepair: true, isFirstBuildTurn: true, isDiscussTurn: true })).toBe('repair');
-    expect(statusKindFor({ isRepair: false, isFirstBuildTurn: true, isDiscussTurn: true })).toBe('creation');
+    expect(statusKindFor({ isRepair: false, isFirstBuildTurn: true, isDiscussTurn: true })).toBe('plan');
     expect(statusKindFor({ ...base, isDiscussTurn: true })).toBe('plan');
+    expect(statusKindFor({ ...base, isFirstBuildTurn: true })).toBe('creation');
   });
 
   /*

@@ -530,8 +530,10 @@ export class ActionRunner {
      * through, so the action reported `complete` having written nothing — and that is precisely what
      * hid the path bug above for the whole life of `type="edit"`: the runner's own write threw
      * `SandboxPathError` on EVERY file action, silently, while `workbenchStore._runAction`'s separate
-     * `saveFile(fullPath)` call quietly did the real write with a correctly-joined path. The feature
-     * looked fine because a second code path was carrying it.
+     * write call quietly did the real write with a correctly-joined path. The feature looked fine
+     * because a second code path was carrying it. (That call was `saveFile(fullPath)` when this was
+     * written; it is `#writeDocument(fullPath)` now — same write, minus the persistence trigger a USER
+     * save carries. Grep for `#writeDocument` if you are looking for the second path.)
      *
      * Rethrowing hands it to `#executeAction`'s handler, which marks the action failed and surfaces it
      * (`spec/fail-loud.md`): a write the user paid for that did not land must never read as success.

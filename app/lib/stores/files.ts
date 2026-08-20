@@ -31,6 +31,7 @@ import {
 import { getCurrentChatId } from '~/utils/fileLocks';
 import { walkSandboxTree } from '~/lib/stores/refresh-walk';
 import { isDirectoryPathError } from '~/lib/sandbox/codesandbox-translate';
+import { withRestoreInFlight } from '~/lib/stores/restore-flag';
 
 const logger = createScopedLogger('FilesStore');
 
@@ -1084,6 +1085,27 @@ export class FilesStore {
    * `protectNothing`).
    */
   async restoreFiles(
+    files: SerializedFileMap,
+    options?: { protect?: (path: string) => boolean; onProgress?: (done: number, total: number) => void },
+  ): Promise<void> {
+    /*
+     * 🔴 MARK THE RESTORE, so a top-up cannot photograph it (SPEC §4.5.4c, §4.12).
+     *
+     * A restore writes and deletes files as its normal operation, and a top-up exists to notice files
+     * being written and deleted — so without this they compose into a bug. Every mount would append a
+     * checkpoint of the mount itself, and a §4.12 undo would be followed four seconds later by a
+     * checkpoint of the state the user just undid, which quietly makes the undo the newest state.
+     *
+     * Here rather than at the callers: this is the ONE function all six restore doors pass through
+     * (mount, working-copy recovery, checkpoint undo, repo restore, git pull, remix seed), and a flag
+     * set per-door is a flag the seventh door forgets. It also has to cover schedules that were already
+     * PENDING when the restore began — a 4-second debounce armed by an editor save moments earlier has
+     * no call site to thread a parameter through.
+     */
+    return withRestoreInFlight(() => this.#restoreFiles(files, options));
+  }
+
+  async #restoreFiles(
     files: SerializedFileMap,
     options?: { protect?: (path: string) => boolean; onProgress?: (done: number, total: number) => void },
   ): Promise<void> {

@@ -5,6 +5,7 @@ import { useStore } from '@nanostores/react';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { withRestoreInFlight } from '~/lib/stores/restore-flag';
 import { bootProgress, endBootPhase, importTailActive, reportBootFailure } from '~/lib/stores/boot-progress';
 import {
   bootForProject,
@@ -380,42 +381,53 @@ function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> 
     return ensureRunnableOnce(pid);
   }
 
+  /*
+   * 🔴 THE WHOLE MOUNT IS "A RESTORE IS IN FLIGHT", not just the `restoreFiles` call inside it.
+   *
+   * `FilesStore.restoreFiles` marks itself, which covers five of the six branches — but the branch that
+   * restores NOTHING (no local checkpoint, no working copy, no seed) never calls it, and that is exactly
+   * the branch where the WATCHER is the map's only writer, filling the tree asynchronously an RTT at a
+   * time. A top-up debounced from before the navigation would land in the middle of that and checkpoint
+   * a partially-filled project — which a later `protectNothing` restore then treats as the whole truth.
+   * The settle window has the same property for the same reason, so the mark covers it too.
+   */
   return mountInFlight(pid, () =>
-    doMountProjectFiles(pid, opts)
-      /*
-       * 🔴 THE MOUNT RESOLVING IS NOT THE WORKSPACE BEING FULL, and the boot surface belongs to the
-       * second fact (owner report 2026-07-31: "I see all the files loading in the workspace view…
-       * that is the whole point of that splash screen").
-       *
-       * Which branch of `doMountProjectFiles` ran decides how much of the map is filled when it
-       * returns, and only one of them fills it completely. `refreshFiles` walks the tree itself; a
-       * restore writes through synchronously — but the branch that restores NOTHING (no local
-       * checkpoint, no working copy, no seed) leaves the WATCHER as the map's only writer, and the
-       * watcher is buffered and asynchronous, an RTT per file on a server provider. So `ready` flipped,
-       * `ChatImpl` mounted the workbench, and ~88 files arrived into a file tree the user was already
-       * looking at. Exactly what the splash exists to prevent, and it varied by branch — which is why
-       * it was reported as "sometimes".
-       *
-       * Chained on SUCCESS only: a mount that failed has a failure surface to show and nothing to wait
-       * for. `settleAfterCreation` is reused rather than re-derived — the floor/ceiling/quiescence
-       * rules are the same rules, already tested against an injected clock — with the mount's own
-       * profile (`MOUNT_SETTLE_OPTIONS`), whose `minCount` is what makes it safe on the empty branch.
-       */
-      .then(async () => {
-        /* Recorded here — inside the success path, before the settle — so only a real mount counts. */
-        mountedThisLoad.add(pid);
-
-        await settleWorkspaceFiles(MOUNT_SETTLE_OPTIONS, 'settling');
-
+    withRestoreInFlight(() =>
+      doMountProjectFiles(pid, opts)
         /*
-         * 🔴 EVERY mount ends here, whatever branch filled the files and whoever asked for it. There is
-         * no longer a `prepareToRun` question: opening a project installs it and starts it, or says
-         * why it could not (`ensure-runnable.ts` documents the three ways the old conditional version
-         * silently left a user staring at an idle terminal).
+         * 🔴 THE MOUNT RESOLVING IS NOT THE WORKSPACE BEING FULL, and the boot surface belongs to the
+         * second fact (owner report 2026-07-31: "I see all the files loading in the workspace view…
+         * that is the whole point of that splash screen").
+         *
+         * Which branch of `doMountProjectFiles` ran decides how much of the map is filled when it
+         * returns, and only one of them fills it completely. `refreshFiles` walks the tree itself; a
+         * restore writes through synchronously — but the branch that restores NOTHING (no local
+         * checkpoint, no working copy, no seed) leaves the WATCHER as the map's only writer, and the
+         * watcher is buffered and asynchronous, an RTT per file on a server provider. So `ready` flipped,
+         * `ChatImpl` mounted the workbench, and ~88 files arrived into a file tree the user was already
+         * looking at. Exactly what the splash exists to prevent, and it varied by branch — which is why
+         * it was reported as "sometimes".
+         *
+         * Chained on SUCCESS only: a mount that failed has a failure surface to show and nothing to wait
+         * for. `settleAfterCreation` is reused rather than re-derived — the floor/ceiling/quiescence
+         * rules are the same rules, already tested against an injected clock — with the mount's own
+         * profile (`MOUNT_SETTLE_OPTIONS`), whose `minCount` is what makes it safe on the empty branch.
          */
-        await ensureRunnableOnce(pid);
-      })
-      .finally(endBootPhase),
+        .then(async () => {
+          /* Recorded here — inside the success path, before the settle — so only a real mount counts. */
+          mountedThisLoad.add(pid);
+
+          await settleWorkspaceFiles(MOUNT_SETTLE_OPTIONS, 'settling');
+
+          /*
+           * 🔴 EVERY mount ends here, whatever branch filled the files and whoever asked for it. There is
+           * no longer a `prepareToRun` question: opening a project installs it and starts it, or says
+           * why it could not (`ensure-runnable.ts` documents the three ways the old conditional version
+           * silently left a user staring at an idle terminal).
+           */
+          await ensureRunnableOnce(pid);
+        }),
+    ).finally(endBootPhase),
   );
 }
 

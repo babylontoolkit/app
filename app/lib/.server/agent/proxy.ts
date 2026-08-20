@@ -586,11 +586,19 @@ export function isFirstBuildTurnFor(input: { carriesBrief: boolean; owesBuild: b
 
 /**
  * The turn's identity for the liveness panel — facts, in the same precedence the effort policy uses:
- * a repair is a repair even on a first build, and plan mode outranks an ordinary edit.
+ * a repair is a repair even on a first build, and **plan mode outranks a build**.
  *
  * Pure and exported for the same reason as `carriesCreationBrief`: it is the only consumer of
  * `isFirstBuildTurn` whose correctness is an ORDERING, and an ordering degrades silently (drop the
  * first-build arm and every build narrates itself as an ordinary edit — nothing throws).
+ *
+ * 🔴 **`plan` moved ABOVE `creation` on 2026-08-15, caught in a live drive.** The handoff card's
+ * "Plan my brief" produces a turn that both owes a build and is read-only, so this returned `creation`
+ * and the liveness panel told the user *"Building your project — Designing your landing page and
+ * planning the game code. The first build takes a few minutes."* over a turn that was writing one
+ * markdown file and touching nothing else. The tool policy and the skill pre-load had the same
+ * ordering bug and were fixed with it; this one was invisible to every unit test because the panel is
+ * the only thing that reads it, which is exactly why the drive was worth doing.
  */
 export function statusKindFor(input: {
   isRepair: boolean;
@@ -601,11 +609,11 @@ export function statusKindFor(input: {
     return 'repair';
   }
 
-  if (input.isFirstBuildTurn) {
-    return 'creation';
+  if (input.isDiscussTurn) {
+    return 'plan';
   }
 
-  return input.isDiscussTurn ? 'plan' : 'edit';
+  return input.isFirstBuildTurn ? 'creation' : 'edit';
 }
 
 /**
@@ -1100,7 +1108,22 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * `preload-skills.ts` for the full post-mortem and for why removing it does not re-buy the
    * six-round pathology.
    */
-  const preloaded = await preloadSkills(slash?.skillName, isFirstBuildTurn);
+  /*
+   * Discussion mode (§4.2.9), decided ONCE — the note, the SKILL PRE-LOAD, the tool policy and the
+   * route's NO_REPLAY annotation must all agree, and `discussModeNote` owns the rule.
+   *
+   * It no longer takes `isFirstBuildTurn`: a first build turn CAN be a plan turn, deliberately (the
+   * handoff card's "Plan my brief"). `owesFiles` below is what keeps that honest — a discuss turn is
+   * excused from producing files rather than failed for it.
+   *
+   * ⚠️ Resolved HERE, above the pre-load, rather than beside the tool policy where it used to sit: the
+   * pre-load is a consumer too, and while it was computed below, the one thing that could tell this
+   * turn apart from a build was not yet in scope at the moment the decision was made. A fact needed by
+   * four seams is resolved before the first of them, not before the third.
+   */
+  const discussNote = discussModeNote({ chatMode: request.chatMode });
+
+  const preloaded = await preloadSkills(slash?.skillName, isFirstBuildTurn, discussNote !== null);
 
   /*
    * 🔴 A SKILL THE MODEL LOADED EARLIER IN THIS CONVERSATION STAYS LOADED (2026-07-26).
@@ -1431,15 +1454,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * bounded, not a full loop: skill tools are not offered and the cap is 3 — see `tool-policy.ts` for
    * why that cannot re-open the six-round skill-loading pathology.
    */
-  /*
-   * Discussion mode (§4.2.9), decided ONCE — the note, the tool policy, and the route's NO_REPLAY
-   * annotation must all agree, and `discussModeNote` owns the rule.
-   *
-   * It no longer takes `isFirstBuildTurn`: a first build turn CAN be a plan turn, deliberately (the
-   * handoff card's "Plan my brief"). `owesFiles` below is what keeps that honest — a discuss turn is
-   * excused from producing files rather than failed for it.
-   */
-  const discussNote = discussModeNote({ chatMode: request.chatMode });
+  /* Decided far above, beside the skill pre-load that is its FOURTH consumer — see the note there. */
 
   /*
    * 🔴 THE TURN'S READ BUDGETS, RESOLVED ONCE FOR THE WHOLE GENERATION (`budgets.ts`, owner 2026-08-09).

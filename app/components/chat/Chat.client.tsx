@@ -2678,7 +2678,31 @@ export const ChatImpl = memo(
       const newProjectMode =
         storedMode && (!storedMode.projectId || storedMode.projectId === activeProjectId) ? storedMode : null;
 
-      if (newProjectMode) {
+      /*
+       * 🔴 A PLAN TURN ARMS NOTHING (owner-reported live, 2026-08-15).
+       *
+       * *"When you hit `Plan my brief` it should NOT use the three stages card and try the multi stage
+       * build — [it should] use a skill, like `/bt-plan`."*
+       *
+       * The handoff card offers Build and Plan side by side and both leave New Project mode, so this
+       * block armed the §4.4e phased plan for either — the three-stage `CreationPlanCard` appeared, and
+       * `decideNextCreationTurn` then auto-posted the remaining phases as BUILD turns off the back of a
+       * turn the user had explicitly asked to be read-only. The user pressed the button that means
+       * "think about it first" and got the build anyway.
+       *
+       * 🔴 And the handoff is NOT cleared here either, which is the half that is easy to get wrong. A
+       * plan turn leaves the project still owing its build, so the row must survive: it is what makes
+       * the LATER build a first build turn (`projectOwesBuild`) — with its brief, its skill pair, its
+       * completeness pass and its §4.6 no-files refund. Clearing it would let the plan land and then
+       * silently downgrade the build that follows into an ordinary edit.
+       *
+       * Reading `chatMode` (committed render state) is safe here for the same reason the Plan button
+       * can set it: the button SENDS NOTHING, so React has committed and `useChat` has refreshed its
+       * request body long before the user presses enter.
+       */
+      const isPlanTurn = chatMode === 'discuss';
+
+      if (newProjectMode && !isPlanTurn) {
         /*
          * 🔴 THE BUILD STARTS A PLAN; IT NO LONGER CLEARS THE HANDOFF (§4.4e, 2026-08-14).
          *
@@ -2798,7 +2822,14 @@ export const ChatImpl = memo(
        * (see "RESUME, NEVER RESTART" above). Hardcoding the first phase would re-run a front end the
        * user has already built and paid for.
        */
-      const startedPlan = newProjectMode ? newProjectModeStore.get()?.plan : undefined;
+      /*
+       * `!isPlanTurn` here too, and not only on the arming above. A project can already HOLD a plan —
+       * a build that started, then a reload, then the user reaches for "Plan my brief" — and without
+       * this the plan turn would carry that plan's `creationPhase` in its body, be counted as a phase
+       * turn, and tick `next` forward. The user would have paid for a phase that never ran and the
+       * build would resume one step past a front end nobody wrote.
+       */
+      const startedPlan = newProjectMode && !isPlanTurn ? newProjectModeStore.get()?.plan : undefined;
       const phaseId = startedPlan?.phases[startedPlan.next];
 
       /*
@@ -2807,8 +2838,12 @@ export const ChatImpl = memo(
        */
       phaseTurnRef.current = Boolean(phaseId);
 
-      /* A build send: a phase, or the unregistered path's single turn (which has no plan at all). */
-      if (phaseId || (newProjectMode && !newProjectMode.projectId)) {
+      /*
+       * A build send: a phase, or the unregistered path's single turn (which has no plan at all).
+       * Never a plan turn — arming the game-ready celebration for a turn that writes one markdown file
+       * would announce a finished game over a project nobody has built yet.
+       */
+      if (phaseId || (newProjectMode && !newProjectMode.projectId && !isPlanTurn)) {
         creationCompleteRef.current = true;
       }
 
