@@ -1934,7 +1934,7 @@ ${value.content}
    *
    * Idempotent on `messageId`: a re-render, a retry, or a double `onFinish` cannot mint a duplicate.
    */
-  const checkpointProject = useCallback(async (messageId: string) => {
+  const checkpointProject = useCallback(async (messageId: string, options?: { label?: string }) => {
     const pid = projectId.get();
 
     if (!pid || !db || lastCheckpointedMessage.current === messageId) {
@@ -1945,6 +1945,28 @@ ${value.content}
        */
       if (lastCheckpointedMessage.current !== messageId) {
         logger.warn(`Checkpoint skipped for message ${messageId}: ${!db ? 'no local database' : 'no project id'}`);
+
+        /*
+         * 🔴 LOUD, like every other way this function can fail (§4.5.4b: a failed save is never
+         * silent). The two branches above are not "nothing to do" — they mean no checkpoint was
+         * written, i.e. undo and crash recovery do not cover this change. That was `logger.warn`
+         * only, which is invisible to the person whose work it is, and it is the SAME shape as the
+         * console-only `.catch(() => {})` that T17c already had to fix one screen below.
+         *
+         * `pid` may be absent here, so the guard is keyed on a sentinel rather than the project id.
+         * Once per session either way — the alternative is a toast on every generation of a session
+         * whose database never opened, which is nagging that gets dismissed unread.
+         */
+        const guardKey = pid ?? '<no-project>';
+
+        if (!warnedCheckpointFailure.has(guardKey)) {
+          warnedCheckpointFailure.add(guardKey);
+          toast.error(
+            'A checkpoint could not be saved — Undo and crash recovery will not cover this change. ' +
+              'It will retry after your next change.',
+            { autoClose: 12000 },
+          );
+        }
       }
 
       return;
@@ -2046,7 +2068,13 @@ ${value.content}
        * The working copy is deliberately sequenced after the checkpoint: a failed upload must degrade
        * to "no recovery copy", never to "no checkpoint".
        */
-      const snapshot = await createLocalSnapshot(db, { projectId: pid, files, messageId });
+      /*
+       * `label` is optional and only creation passes one (`CREATION_CHECKPOINT_LABEL`). An ordinary
+       * post-generation checkpoint stays unlabelled deliberately — §4.12's restore UI names those from
+       * the MESSAGE they follow, so a label here would be a second, competing description of the same
+       * row. Creation has no message to name it by, which is exactly why it needs one.
+       */
+      const snapshot = await createLocalSnapshot(db, { projectId: pid, files, messageId, label: options?.label });
 
       await chatSaved;
 

@@ -151,20 +151,27 @@ export const MOUNT_SETTLE_OPTIONS = {
 } as const satisfies Partial<SettleOptions>;
 
 /**
- * The tail of an IMPORT — a folder or git clone landing through the artifact replay.
+ * The tail of an IMPORT — a folder or git clone landing in the workspace.
  *
  * Deliberately the most patient profile of the three, because it is the only one waiting on work it
- * does not drive: the imported files arrive as `<boltAction type="file">` entries replayed by the
- * message parser AFTER the chat has rendered, one at a time, and a large repository takes a while to
- * get going. The ceiling is what stops a stalled replay from leaving a permanent overlay — reaching it
- * is a bound, not an error, and the workbench behind it is perfectly usable.
+ * does not drive: the reload after the hand-off mounts the import's checkpoint and the watcher fills
+ * the map behind it, one file at a time, and a large repository takes a while to get going. The
+ * ceiling is what stops a stalled tail from leaving a permanent overlay — reaching it is a bound, not
+ * an error, and the workbench behind it is perfectly usable.
+ *
+ * ⚠️ This used to say the files "arrive as `<boltAction type="file">` entries replayed by the message
+ * parser AFTER the chat has rendered". That was the whole design once, then the git door replaced it
+ * with a direct write plus a checkpoint, and the folder door followed (`import-checkpoint.ts`) — the
+ * replay now survives only for an import with no project to checkpoint. The numbers below are
+ * unchanged: this is still the door where the map is often already filling when the wait starts.
  *
  * 🔴 The floor is the load-bearing number here, and it is generous for a reason `minCount` cannot
- * cover: on this door the map is often ALREADY non-empty when the wait starts (a git clone writes to
- * disk before building the artifact, so the watcher has been filling the map for a while), and the
- * replay does not begin until the chat has rendered. A short floor would let the settle complete in
- * the GAP — quiet because the replay has not started yet, read as quiet because it has finished. The
- * exact confusion the floor exists for, one door over.
+ * cover: on this door the map is often ALREADY non-empty when the wait starts (both importers write to
+ * disk before building the hand-off, so the watcher has been filling the map for a while), and the
+ * work that follows — the mount's restore, or a replay on the degraded path — does not begin until the
+ * chat has rendered. A short floor would let the settle complete in the GAP: quiet because the next
+ * writer has not started yet, read as quiet because it has finished. The exact confusion the floor
+ * exists for, one door over.
  */
 export const IMPORT_SETTLE_OPTIONS = {
   minMs: 3_000,

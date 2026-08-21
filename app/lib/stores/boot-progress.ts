@@ -51,10 +51,12 @@ export type BootPhase =
    *
    * 🔴 An overlay phase, not a full-page one, and the only non-`creating-` member of that family — so
    * {@link coversWorkspace} is an explicit membership test rather than the name-prefix test it used to
-   * be. Import is the one door where the files cannot arrive before the chat renders: they come in as
-   * `<boltAction type="file">` entries replayed by the message parser, which only runs once the chat is
-   * mounted. Holding `ready` would deadlock it (no chat → no replay → no files), so the wait is drawn
-   * OVER the workbench instead of in front of it.
+   * be. Import is the one door where the files cannot arrive before the chat renders: the hand-off is a
+   * full page load, so the tail runs after the chat has mounted — the reload restoring the import's
+   * checkpoint, or (for an import with no project, `import-checkpoint.ts`) a `<boltAction type="file">`
+   * replay driven by the message parser, which only runs once the chat is mounted. Holding `ready`
+   * would deadlock that second case (no chat → no replay → no files), so the wait is drawn OVER the
+   * workbench instead of in front of it.
    */
   | { step: 'importing' }
 

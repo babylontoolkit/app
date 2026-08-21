@@ -7,6 +7,7 @@ import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { runPreviewToolCall } from '~/lib/preview/bridge';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
+import { CREATION_CHECKPOINT_LABEL } from '~/lib/persistence/local-snapshots';
 import {
   ApiError,
   createProject,
@@ -248,7 +249,7 @@ interface ChatProps {
   storeMessageHistory: (messages: Message[]) => Promise<void>;
 
   /** Snapshot the project to the server once a generation has finished (§4.5.5). */
-  checkpointProject: (messageId: string) => Promise<void>;
+  checkpointProject: (messageId: string, options?: { label?: string }) => Promise<void>;
   importChat: (description: string, messages: Message[]) => Promise<void>;
   exportChat: () => void;
   description?: string;
@@ -2161,21 +2162,35 @@ export const ChatImpl = memo(
         /*
          * 🔴 CHECKPOINT THE FRESH PROJECT — nothing else will (found live, 2026-07-29).
          *
-         * The server copy of a conversation is written by `checkpointProject` at the END of a
-         * generation, and creation no longer runs one. So a created-but-not-yet-built project uploaded
-         * NOTHING: `/api/chats` returned `[]`, the sidebar read "No previous conversations" next to an
-         * open chat, and the dashboard card said "No chats yet" — on a device that was looking straight
-         * at the project. §4.5.6's rule is that the sidebar lists the ACCOUNT's chats, so a project
-         * created on a laptop simply did not exist on the desktop until its first build landed.
+         * This call does TWO jobs, and for most of its life only one of them was written down.
          *
-         * The old flow hid this: creation ended by firing a generation, and that generation's
-         * checkpoint uploaded the transcript as a side effect. Removing the generation removed the
-         * upload with it — a dependency nobody had written down.
+         * **The transcript** (why it was added). The server copy of a conversation is written by
+         * `checkpointProject` at the END of a generation, and creation no longer runs one. So a
+         * created-but-not-yet-built project uploaded NOTHING: `/api/chats` returned `[]`, the sidebar
+         * read "No previous conversations" next to an open chat, and the dashboard card said "No chats
+         * yet" — on a device that was looking straight at the project. §4.5.6's rule is that the sidebar
+         * lists the ACCOUNT's chats, so a project created on a laptop simply did not exist on the
+         * desktop until its first build landed. The old flow hid this: creation ended by firing a
+         * generation, and that generation's checkpoint uploaded the transcript as a side effect.
+         * Removing the generation removed the upload with it — a dependency nobody had written down.
+         *
+         * 🔴 **The BASELINE** (why it must keep happening). `checkpointProject` also writes a LOCAL
+         * checkpoint of the files, and here that is the stock starter before a single credit of
+         * generation has been spent — the one state a user can always be returned to, and the anchor
+         * "discard my changes" means something against. That was pure luck: this call was reasoned
+         * about entirely as a transcript fix, so an optimisation that uploaded only the chat would have
+         * deleted the baseline with nothing failing and nothing saying so.
+         *
+         * `CREATION_CHECKPOINT_LABEL` is what makes it non-incidental — it names the row in §4.12's
+         * restore UI (which otherwise names checkpoints after the message they follow, and creation has
+         * no message), and it gives `creation-checkpoint.spec.ts` something to assert that a
+         * `toHaveBeenCalled` on a mock cannot.
          *
          * Fire-and-forget with the same posture as the post-generation call: this is the safety net,
-         * and a net that fails must never take the thing it was protecting down with it.
+         * and a net that fails must never take the thing it was protecting down with it. It cannot
+         * fail silently — every branch inside `checkpointProject` is loud.
          */
-        void checkpointProject(setupMessageId).catch((error) => {
+        void checkpointProject(setupMessageId, { label: CREATION_CHECKPOINT_LABEL }).catch((error) => {
           logger.error('Could not checkpoint the freshly created project', error);
         });
 

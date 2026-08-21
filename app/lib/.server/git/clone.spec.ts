@@ -917,3 +917,154 @@ describe('the clone op on the project git route', () => {
     });
   });
 });
+
+/**
+ * 🔴 PULL IS AN INGEST PATH TOO — and it was the unguarded half of the pair (found 2026-08-19).
+ *
+ * `cloneRepository` refuses an oversize tree and refuses Git-LFS; the route's `pull` did neither. It
+ * read the branch and handed the whole thing back:
+ *
+ *     const pulled = await input.provider.fetchTree(input.ref);
+ *     return json({ ok: true, files: pulled.files, head: pulled.head });
+ *
+ * So the guards were trivially walked around by the ordinary workflow they were written for: save a
+ * small project to GitHub, add gigabytes of glTF to the repo from a git client, press Sync. Two
+ * failures, and the second is the quieter one:
+ *
+ *   - **Unbounded size.** A pull runs THROUGH the server — GitHub → this process → one JSON response
+ *     → the browser — so the whole tree is held in memory and base64-serialised into a single body.
+ *     That is not a per-user problem: one pull of a multi-gigabyte repository is an availability
+ *     problem for everyone sharing the process. Downstream it also blows the client working-copy
+ *     budget, which turns the crash-recovery copy off (§4.16, `working-copy-size.ts`).
+ *   - **LFS arrives silently.** `LfsPointerError` exists because a tree hands back 130 bytes of
+ *     pointer text in place of every large asset, producing a project that mounts cleanly, looks
+ *     complete and cannot run. Clone bolts that door; pull left it open next to it.
+ *
+ * The shape is this codebase's recurring one — one half of a pair guarded, the other not, exactly as
+ * `recordAgentWrite`/`#recordRestoredFiles` and `prepareMountedProject`/`mountedThisLoad` were. Clone
+ * and pull do the same thing (fetch somebody's tree, hand it to the client); only the one with
+ * "import" in its name was read as an ingest path.
+ *
+ * The guard therefore lives in ONE function called by both (`assertFetchedTreeUsable`), never a second
+ * copy of the rule — the `isSecretPath` lesson — and it is placed inside the route's `pull` helper,
+ * which is the single choke point BOTH `op: 'pull'` and `op: 'resolve' { choice: 'pull-overwrite' }`
+ * pass through. A membership list of "the ops that pull" is the `coversWorkspace` mistake: it covers
+ * the doors somebody enumerated, and the next one walks past it.
+ */
+describe('the pull op on the project git route', () => {
+  let tmp: string;
+  let project: Project;
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'git-pull-route-'));
+
+    const projects = new FsProjectStore(tmp);
+    project = await projects.create({ userId: USER.id, name: 'Linked game', templateId: 'blank' });
+
+    // A pull needs a complete link tuple (§4.5.4b) — provider, repo and branch move together.
+    await projects.update(project.id, {
+      provider: 'github',
+      linkedRepo: 'octocat/linked-game',
+      linkedBranch: 'main',
+      lastSyncedCommitSha: 'sha-from-the-last-time-we-agreed',
+    });
+
+    setProjectStore(projects);
+    setUserRateLimitStore(new MemoryUserRateLimitStore());
+
+    // Pull resolves a provider from a stored token — it is never an anonymous path.
+    setGitTokenStore(connected('github'));
+  });
+
+  afterEach(async () => {
+    setProjectStore(undefined);
+    setUserRateLimitStore(undefined);
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  async function post(body: Record<string, unknown>, context: unknown = ctx()) {
+    const { action } = await import('~/routes/api.projects.$projectId.github');
+
+    const response = (await action({
+      request: new Request('https://app.example.com/api/projects/p/github', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+      params: { projectId: project.id },
+      context,
+    } as never)) as Response;
+
+    return { response, payload: (await response.json()) as Record<string, unknown> };
+  }
+
+  const storedProject = () => new FsProjectStore(tmp).get(project.id);
+
+  /**
+   * The CONTROL, first. Without it every assertion below passes for a pull that refuses everything —
+   * which is the cheerful way a "stop letting big things in" fix goes green while breaking Sync.
+   */
+  it('pulls an ordinary repository and advances the sync pointer', async () => {
+    seed('octocat/linked-game', { 'src/game.ts': { content: 'export const x = 1;\n' } });
+
+    const { response, payload } = await post({ op: 'pull' });
+
+    expect(response.status).toBe(200);
+    expect(payload.ok).toBe(true);
+    expect(Object.keys(payload.files as object)).toEqual(['src/game.ts']);
+    expect((await storedProject())?.lastSyncedCommitSha).not.toBe('sha-from-the-last-time-we-agreed');
+  });
+
+  it('refuses an oversize pull with a message naming the limit and its env var', async () => {
+    seed('octocat/linked-game', { 'assets/level.glb': { content: 'a'.repeat(4096) } });
+
+    const { response, payload } = await post({ op: 'pull' }, ctx({ GIT_CLONE_MAX_MB: String(1024 / (1024 * 1024)) }));
+
+    expect(response.status).toBe(413);
+    expect(payload.message).toContain('GIT_CLONE_MAX_MB');
+    expect(payload.message).toMatch(/sync limit/i);
+  });
+
+  it('reports Git-LFS on a pull rather than filling the project with placeholder text', async () => {
+    seed('octocat/linked-game', {
+      'assets/car.glb': { content: 'version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 900\n' },
+    });
+
+    const { response, payload } = await post({ op: 'pull' });
+
+    expect(response.status).toBe(422);
+    expect(payload.message).toContain('assets/car.glb');
+  });
+
+  /**
+   * 🔴 The guard runs BEFORE `lastSyncedCommitSha` moves, and that ordering is load-bearing.
+   *
+   * That column is the platform's record of what the repository looked like when we last AGREED with
+   * it, and it is what the next push's fast-forward check is measured against. Advancing it for a tree
+   * we refused would claim agreement with bytes the user never received — so the following push would
+   * measure against a commit this project has never held and fast-forward straight over it.
+   */
+  it('leaves the sync pointer untouched when it refuses', async () => {
+    seed('octocat/linked-game', { 'assets/level.glb': { content: 'a'.repeat(4096) } });
+
+    await post({ op: 'pull' }, ctx({ GIT_CLONE_MAX_MB: String(1024 / (1024 * 1024)) }));
+
+    expect((await storedProject())?.lastSyncedCommitSha).toBe('sha-from-the-last-time-we-agreed');
+  });
+
+  /**
+   * `pull-overwrite` is the divergence dialog's "use the version from my repository" button, and it
+   * reads the tree through the same helper. It is asserted separately because it is a SECOND door on
+   * the same rule, and the whole defect being fixed here was a door nobody counted.
+   */
+  it('applies the same refusal to the pull-overwrite divergence choice', async () => {
+    seed('octocat/linked-game', {
+      'assets/car.glb': { content: 'version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 900\n' },
+    });
+
+    const { response, payload } = await post({ op: 'resolve', choice: 'pull-overwrite' });
+
+    expect(response.status).toBe(422);
+    expect(payload.message).toContain('assets/car.glb');
+  });
+});

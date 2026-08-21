@@ -60,6 +60,28 @@ const STATE = 'projectState';
  */
 export const MAX_CHECKPOINTS_PER_PROJECT = 20;
 
+/**
+ * The label on the checkpoint taken when a project is CREATED, before any build turn (§4.4a).
+ *
+ * 🔴 **This checkpoint is the project's baseline and it exists on purpose — do not let it become
+ * incidental again.** Creation clones the pinned starter, scaffolds the §4.4b class, installs and
+ * serves, and contacts no model; the first build is a turn the USER sends. So there is a real moment,
+ * before a single credit of generation is spent, where the project is a known-good stock starter. That
+ * is the one state a user can always be returned to.
+ *
+ * It has been written since 2026-07-29 — but as a SIDE EFFECT. The call was added to fix a
+ * CONVERSATION problem (a created-but-unbuilt project uploaded no transcript, so `/api/chats` returned
+ * `[]` and the sidebar read "No previous conversations" beside an open chat), and it reused
+ * `checkpointProject`, which happens to write files too. Nothing named it, nothing asserted it, and the
+ * comment at the call site talks only about the transcript. An optimisation that made creation upload
+ * just the chat would have removed the baseline with nothing failing — the exact shape this codebase
+ * keeps rediscovering.
+ *
+ * A constant rather than a literal because two places must agree about it forever: the writer and the
+ * test that proves the writer still runs. A re-typed string is how the two drift.
+ */
+export const CREATION_CHECKPOINT_LABEL = 'Project created';
+
 export interface LocalSnapshot {
   id: string;
   projectId: string;

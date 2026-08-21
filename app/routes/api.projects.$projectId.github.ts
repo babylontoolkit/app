@@ -52,7 +52,7 @@ import { GitProviderError, parseRepo, type GitProvider, type GitProviderId } fro
 import { resolveProvider } from '~/lib/.server/git/resolve';
 import { configuredProviders } from '~/lib/.server/git/oauth';
 import { saveToNewRepo } from '~/lib/.server/git/save';
-import { cloneRepository, parseCloneTarget } from '~/lib/.server/git/clone';
+import { assertFetchedTreeUsable, cloneRepository, parseCloneTarget } from '~/lib/.server/git/clone';
 import { CLONE_RATE_LIMIT, enforceUserRateLimit } from '~/lib/.server/security/user-rate-limit';
 import { getOAuthConfig } from '~/lib/.server/git/oauth';
 import { errorResponse } from '~/lib/.server/http';
@@ -519,6 +519,14 @@ async function save(input: {
  * `lastSyncedCommitSha` moves here rather than on the client, because it is the platform's record of
  * what the repo looked like when we last agreed with it, and it is what the next push's
  * fast-forward check is measured against.
+ *
+ * 🔴 **THIS IS AN INGEST PATH, and it is the one that was not guarded (2026-08-19).** `cloneRepository`
+ * refuses an oversize tree and refuses Git-LFS; this read did neither, so both guards were bypassed by
+ * the ordinary workflow they were written for — save a small project, add gigabytes of glTF to the
+ * repository from a git client, press Sync. See `assertFetchedTreeUsable` for what each refusal
+ * prevents. The check lives HERE, in the shared helper, rather than on `op === 'pull'`, because
+ * `op: 'resolve' { choice: 'pull-overwrite' }` is a second door onto the same read: guarding a list of
+ * the ops someone enumerated is the `coversWorkspace` mistake, and the next door walks past it.
  */
 async function pull(input: {
   provider: GitProvider;
@@ -531,6 +539,16 @@ async function pull(input: {
   if (!pulled) {
     return json({ error: true, message: 'The linked branch has no commits to pull.' }, { status: 409 });
   }
+
+  /*
+   * 🔴 BEFORE the sync pointer moves, and that ordering is load-bearing rather than tidy.
+   *
+   * `lastSyncedCommitSha` records the commit we last AGREED with, and the next push's fast-forward
+   * check is measured against it. Stamping it for a tree we then refused would claim agreement with
+   * bytes the user never received — so the following push would measure against a commit this project
+   * has never held, and fast-forward straight over the work in the repository.
+   */
+  assertFetchedTreeUsable(pulled.files, { context: input.context, operation: 'sync' });
 
   await getProjectStore(input.context).update(input.projectId, { lastSyncedCommitSha: pulled.head });
 

@@ -187,6 +187,7 @@ vi.mock('./BaseChat', () => ({
 import Cookies from 'js-cookie';
 import { PROMPT_COOKIE_KEY } from '~/utils/constants';
 import { bootProgress } from '~/lib/stores/boot-progress';
+import { CREATION_CHECKPOINT_LABEL } from '~/lib/persistence/local-snapshots';
 import { ChatImpl } from './Chat.client';
 
 /* ------------------------------------------------------------------------------- the fetch double */
@@ -234,7 +235,7 @@ beforeEach(() => {
   bootProgress.set({ step: 'idle' });
   workbench.previews.set([]);
   workbench.firstArtifact.runner.actions.set({});
-  checkpointProject = vi.fn(async (_messageId: string) => undefined);
+  checkpointProject = vi.fn(async (_messageId: string, _options?: { label?: string }) => undefined);
 });
 
 afterEach(() => cleanup());
@@ -248,7 +249,9 @@ const noop = vi.fn();
  * fall into the catch branch — the job the now-carried prompt cookie used to do here) and the thing the
  * checkpoint tests below are about. One spy, declared per test in `beforeEach`.
  */
-let checkpointProject = vi.fn(async (_messageId: string) => undefined as void | undefined);
+let checkpointProject = vi.fn(
+  async (_messageId: string, _options?: { label?: string }) => undefined as void | undefined,
+);
 
 function mountChat() {
   render(
@@ -447,6 +450,42 @@ describe('a creation contacts no model at all', () => {
       /* The id of the ONE message creation committed — read back off the render, not pattern-matched. */
       expect(screen.getByTestId('message-ids').textContent).toBe(id);
       expect(id).toMatch(/^2-\d+$/);
+    });
+
+    /**
+     * 🔴 AND IT LABELS THE BASELINE — the half of this call that was pure luck (owner, 2026-08-15).
+     *
+     * The test above, and the comment it sits under, are entirely about the CONVERSATION. But
+     * `checkpointProject` also writes a LOCAL checkpoint of the files, and at this moment those files
+     * are the stock starter: creation clones the pinned template, scaffolds the §4.4b class, installs
+     * and serves, and contacts no model (§4.4a). So this is the project's baseline — the one state a
+     * user can always be returned to, taken before a single credit of generation is spent, and the
+     * anchor a future "discard my changes" is measured against.
+     *
+     * Nothing named it and nothing asserted it. An optimisation that made creation upload just the
+     * transcript — an entirely reasonable-looking change, given every word written about this call —
+     * would have removed the baseline with nothing failing. That is the same shape as the dependency
+     * this call was itself added to fix.
+     *
+     * ⚠️ Asserted against the exported `CREATION_CHECKPOINT_LABEL`, never a re-typed string: two places
+     * have to agree about it forever, and a literal here would go green while the writer drifted.
+     */
+    it('labels it as the project baseline, so the files half cannot be optimised away', async () => {
+      mountChat();
+      await click('new project');
+
+      expect(checkpointProject).toHaveBeenCalledTimes(1);
+
+      const [, options] = checkpointProject.mock.calls[0];
+
+      expect(options?.label).toBe(CREATION_CHECKPOINT_LABEL);
+
+      /*
+       * CONTROL — the constant is a real, non-empty string. Without this the assertion above passes
+       * for `undefined === undefined` if the import ever resolves to nothing, which is exactly the
+       * vacuous-green this file's own header warns about.
+       */
+      expect(CREATION_CHECKPOINT_LABEL).toMatch(/\S/);
     });
 
     /**

@@ -81,16 +81,27 @@ export class UnsupportedGitHostError extends Error {
   readonly isRetryable = false;
 }
 
+/**
+ * Which door a tree is arriving through, for the refusal wording only.
+ *
+ * The RULE is identical for both — same ceiling, same env var, same LFS test — and that is the point
+ * of `assertFetchedTreeUsable`. This exists because a user pressing Sync on a linked project is not
+ * importing anything, and a refusal that describes the wrong operation reads as the wrong button
+ * being broken (`share/build-failure.ts`).
+ */
+export type TreeIngestOperation = 'import' | 'sync';
+
 /** A repository whose source exceeds the shared project-source ceiling. */
 export class CloneTooLargeError extends Error {
   readonly statusCode = 413;
   readonly name = 'CloneTooLargeError';
   readonly isRetryable = false;
 
-  constructor(bytes: number, limit: number) {
+  constructor(bytes: number, limit: number, operation: TreeIngestOperation = 'import') {
     super(
       `That repository's source is ${(bytes / (1024 * 1024)).toFixed(1)}MB, over the ` +
-        `${Math.round(limit / (1024 * 1024))}MB import limit, so it cannot be imported. ` +
+        `${Math.round(limit / (1024 * 1024))}MB ${operation} limit, so it cannot be ` +
+        `${operation === 'import' ? 'imported' : 'pulled into this project'}. ` +
         'Raise GIT_CLONE_MAX_MB to allow it.',
     );
   }
@@ -109,11 +120,12 @@ export class LfsPointerError extends Error {
   readonly name = 'LfsPointerError';
   readonly isRetryable = false;
 
-  constructor(paths: string[]) {
+  constructor(paths: string[], operation: TreeIngestOperation = 'import') {
     const shown = paths.slice(0, 3).join(', ');
     super(
       `That repository stores ${paths.length} file(s) in Git-LFS (${shown}${paths.length > 3 ? ', …' : ''}), ` +
-        'which is not supported yet — importing it would replace those files with placeholder text.',
+        `which is not supported yet — ${operation === 'import' ? 'importing' : 'pulling'} it would ` +
+        'replace those files with placeholder text.',
     );
   }
 }
@@ -325,6 +337,47 @@ export function findLfsPointers(files: SerializedFileMap): string[] {
 }
 
 /**
+ * 🔴 THE ONE RULE FOR TURNING SOMEBODY'S GIT TREE INTO THIS PROJECT'S FILES — BOTH DOORS (2026-08-19).
+ *
+ * Two paths fetch a tree and hand it to the client: `cloneRepository` (import) and the project git
+ * route's `pull` helper (Sync, and the divergence dialog's "use the version from my repository").
+ * Only the one with *import* in its name was checking anything, so the guards below were walked around
+ * by the ordinary workflow they were written for — save a small project to GitHub, add gigabytes of
+ * glTF from a git client, press Sync:
+ *
+ *   - **Size.** A pull runs THROUGH the server, so an unbounded tree is held in this process and
+ *     base64-serialised into one JSON body. That makes it an availability problem for every user
+ *     sharing the process, not merely a bad experience for the one who pressed the button — and
+ *     downstream it silently disables the client's crash-recovery copy (`working-copy-size.ts`).
+ *   - **LFS.** A pointer is 130 bytes of text where a model, texture or sound should be, so the
+ *     project mounts cleanly, looks complete, and cannot run. That is the failure `LfsPointerError`
+ *     exists to make loud, and it was loud on one door and silent on the other.
+ *
+ * It is ONE exported function rather than the same four lines in two places for `isSecretPath`'s
+ * reason: a rule with two copies is a rule that will be fixed once. And callers pass their whole
+ * fetched map — never a pre-filtered one — because both questions are about what ARRIVED.
+ */
+export function assertFetchedTreeUsable(
+  files: SerializedFileMap,
+  options: { context?: unknown; operation?: TreeIngestOperation } = {},
+): void {
+  const operation = options.operation ?? 'import';
+
+  const bytes = serializedSourceBytes(files);
+  const limit = maxCloneBytes(options.context);
+
+  if (bytes > limit) {
+    throw new CloneTooLargeError(bytes, limit, operation);
+  }
+
+  const pointers = findLfsPointers(files);
+
+  if (pointers.length > 0) {
+    throw new LfsPointerError(pointers, operation);
+  }
+}
+
+/**
  * Drop the `.env` family from a clone, through the ONE rule (`git/sync-logic.ts`).
  *
  * A repository the user is importing may well be their own, and their own `.env` may well be in it (a
@@ -462,18 +515,7 @@ export async function cloneRepository(input: {
     });
   }
 
-  const bytes = serializedSourceBytes(fetched.files);
-  const limit = maxCloneBytes(context);
-
-  if (bytes > limit) {
-    throw new CloneTooLargeError(bytes, limit);
-  }
-
-  const pointers = findLfsPointers(fetched.files);
-
-  if (pointers.length > 0) {
-    throw new LfsPointerError(pointers);
-  }
+  assertFetchedTreeUsable(fetched.files, { context, operation: 'import' });
 
   const { files, removed } = stripSecrets(fetched.files);
 

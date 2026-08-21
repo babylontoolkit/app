@@ -37,10 +37,10 @@
  * connected GitHub is simply not asked again — which was the entire complaint.
  */
 import type { Message } from 'ai';
-import { toast } from 'react-toastify';
 import { generateId } from '~/utils/fileUtils';
 import { cloneRepoIntoProject, linkProjectToRepo } from '~/lib/persistence/projects';
-import { createLocalSnapshot, markSynced } from '~/lib/persistence/local-snapshots';
+import { markSynced } from '~/lib/persistence/local-snapshots';
+import { checkpointImportedProject } from '~/lib/persistence/import-checkpoint';
 import { db } from '~/lib/persistence/useChatHistory';
 import { openImportWorkspace } from '~/lib/registry/import-project';
 import { settleAfterCreation, IMPORT_SETTLE_OPTIONS } from '~/lib/registry/settle';
@@ -206,32 +206,21 @@ export async function importRepositoryIntoWorkspace(input: {
     });
 
     /*
-     * The copy that survives the hand-off's full page load — see the module header. Best-effort: a
-     * failed checkpoint must not fail an import whose files are already correctly on disk.
+     * The copy that survives the hand-off's full page load — see `import-checkpoint.ts`, which is
+     * shared with the folder door so that "an import checkpoints itself, loudly" is one rule rather
+     * than a habit each door happens to have. Best-effort: a failed checkpoint must not fail an import
+     * whose files are already correctly on disk.
      *
-     * 🔴 But it is LOUD (`spec/fail-loud.md`), not merely logged. The only ENABLED sandbox provider is
-     * session-scoped (`SANDBOX_PROVIDER_TRAITS.nodepod.outlivesSession === false`), so the runtime
-     * holding these bytes does not survive the full page load `importChat` ends in — which makes this
-     * checkpoint the thing the reload mounts from. A failure here therefore means the import may not
-     * come back, and a server-side `logger.error` is read by nobody. Same precedent, same reason, as
-     * `GitHubSyncButton`'s `snapshotLocally`: the sync itself survives, the user is told anyway.
+     * The clone's own tree is handed in because it IS the project — the server read the whole thing
+     * before a byte was written, so there is nothing to re-read out of the sandbox. No server recovery
+     * copy: this project is about to be linked, and a linked browser with no local checkpoint mounts
+     * from the repo (`selectMountSource` → `repo`, which never ranks the working copy against it).
      */
-    if (db) {
-      try {
-        await createLocalSnapshot(db, {
-          projectId: workspace.projectId,
-          files: cloned.files,
-          label: `Imported ${cloned.repo ?? name}`,
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        logger.error('Could not checkpoint the imported project', error);
-        toast.warn(
-          `Could not save a local checkpoint of ${name}: ${detail}. The files are in your workspace, but they may not ` +
-            `survive a reload — commit them to a repository before closing this tab.`,
-        );
-      }
-    }
+    await checkpointImportedProject({
+      projectId: workspace.projectId,
+      name: cloned.repo ?? name,
+      files: cloned.files,
+    });
 
     /*
      * 🔴 AN IMPORTED PROJECT IS BORN LINKED (§4.5.4b).
