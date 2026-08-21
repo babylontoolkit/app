@@ -1,13 +1,17 @@
 /**
  * The MODEL TIER LADDER (SPEC §4.6.1a) — the vocabulary of model classes a credits user may choose.
  *
- * THREE rungs, ordered by CAPABILITY: **Standard** (the operator's platform model), **Premium** and
- * **Platinum**. Each paid rung names an operator-configured model through an env SELECTOR and unlocks
- * at a credit THRESHOLD the user must hold.
+ * TWO rungs, ordered by CAPABILITY: **Standard** (the operator's platform model) and **Premium**. The
+ * paid rung names an operator-configured model through an env SELECTOR and unlocks at a credit
+ * THRESHOLD the user must hold.
  *
- * ⚠️ This comment said "Two rungs, ordered by cost" until 2026-08-11 — stale on BOTH counts, sitting
- * directly above a three-entry table. **Ordered by CAPABILITY, and that is the rule regardless of what
- * the prices happen to do.**
+ * ⚠️ **This header has now been stale in both directions, and the count is the part that keeps rotting.**
+ * It said "Two rungs, ordered by cost" until 2026-08-11 — wrong on both counts, above a three-entry
+ * table — and was then corrected to "THREE rungs … Standard, Premium and Platinum", where it sat above
+ * a TWO-entry `MODEL_TIER_IDS` from Platinum's retirement on 2026-08-14 until 2026-08-21. **Ordered by
+ * CAPABILITY, and that is the rule regardless of what the prices happen to do**; the COUNT is not a rule
+ * at all — it is data, it has changed four times, and the body of this file (which names every rung
+ * explicitly and dates every move) is the thing to trust over any summary at the top, including this one.
  *
  * ⚠️ Its evidence, though, was a mis-bill: it argued "on Anthropic the Platinum (fable-5) row settles
  * CHEAPER than Premium (opus-5)". It did, because `MODEL_RATES` had no fable-5 row and `providerRates`
@@ -21,8 +25,8 @@
  * ## Why this is a table and not two code paths
  *
  * This replaced a boolean (`PREMIUM_MODEL` or nothing), carried a third rung (`SuperMax`, 2026-07-31 →
- * 2026-08-08), dropped to one paid rung, and gained a second again as `platinum` on 2026-08-10 — three
- * shape changes, none of which changed a rule. The ladder is a LIST precisely so that number can move
+ * 2026-08-08), dropped to one paid rung, gained a second again as `platinum` on 2026-08-10, and dropped
+ * back to one on 2026-08-14 — four shape changes in a fortnight, none of which changed a rule. The ladder is a LIST precisely so that number can move
  * without the rules moving. The alternative, copying the premium
  * machinery into a per-rung twin, means every rule gets written twice and the two copies drift. The
  * rules here are money rules: the threshold that protects the free signup grant, the first-build lock,
