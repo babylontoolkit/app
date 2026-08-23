@@ -77,7 +77,18 @@ export function assembleSerializedMap(entries: WorkingCopyEntry[]): SerializedFi
  * `messageId` is the assistant turn these files contain, mirrored from the local checkpoint. It is
  * what lets a recovery mount answer "this copy already has the last paid turn" instead of shrugging —
  * a shrug is read as "no", which is what made the §4.5.4c dialog ask on every single mount.
+ *
+ * `branch` is which branch these files came from (§4.13a). There is ONE copy per project and it is
+ * overwritten in place, so the instant a branch switch lands the copy is stale-by-branch with nothing
+ * recording that — and a recovery on a fresh browser whose remote is unreachable would silently
+ * restore another branch's tree over a project that now names a different one. Absent means "written
+ * before this field existed", which `selectMountSource` treats as UNKNOWN, never as a match.
  */
-export function buildWorkingCopyBody(seq: number, entries: WorkingCopyEntry[], messageId?: string): string {
-  return JSON.stringify({ seq, messageId, files: assembleSerializedMap(entries) });
+export function buildWorkingCopyBody(
+  seq: number,
+  entries: WorkingCopyEntry[],
+  messageId?: string,
+  branch?: string,
+): string {
+  return JSON.stringify({ seq, messageId, branch, files: assembleSerializedMap(entries) });
 }

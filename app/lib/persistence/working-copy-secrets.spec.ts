@@ -11,18 +11,23 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { saveWorkingCopy } from './projects';
+import { repoStatus } from './repo-status';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 
 const text = (content: string) => ({ type: 'file' as const, content, isBinary: false });
 
 let sent: SerializedFileMap;
+let body: { files: SerializedFileMap; branch?: string; seq?: number; messageId?: string };
 
 beforeEach(() => {
   sent = {};
+  body = { files: {} };
   vi.stubGlobal(
     'fetch',
     vi.fn(async (_url: string, init: RequestInit) => {
-      sent = (JSON.parse(String(init.body)) as { files: SerializedFileMap }).files;
+      body = JSON.parse(String(init.body));
+      sent = body.files;
+
       return new Response(JSON.stringify({ ok: true, seq: 1 }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -70,5 +75,53 @@ describe('saveWorkingCopy', () => {
       String((globalThis.fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0][1].body),
     );
     expect(body.seq).toBe(42);
+  });
+});
+
+/**
+ * 🔴 THE BRANCH STAMP, ON THE WIRE (§4.13a T17).
+ *
+ * `saveWorkingCopy` is the per-generation checkpoint's writer — the most frequent working-copy write
+ * in the product — and it is the one that made the stamp rule necessary. While it could not reach
+ * `repoStatus` (an import cycle) it wrote every copy unstamped, and because a PUT replaces the whole
+ * object it also ACTIVELY UN-STAMPED: `applyBranchTree` would stamp `feature/hud`, and the next
+ * generation would overwrite the copy with nothing. The guard had a lifetime of one turn.
+ *
+ * ⚠️ Asserted BEHAVIOURALLY here, on the bytes that actually leave the browser, because the sibling
+ * source scan cannot see the difference between "the expression is present" and "the expression is in
+ * the body that is sent". This is *the* writer whose absence was the found defect, so it gets the
+ * stronger instrument.
+ */
+describe('saveWorkingCopy stamps the branch it is currently on', () => {
+  it('sends the branch from the shared store', async () => {
+    repoStatus.set({ linked: true, branch: 'feature/boost-pads' } as never);
+
+    await saveWorkingCopy('prj_1', 1, { 'src/main.ts': text('x') });
+
+    expect(body.branch).toBe('feature/boost-pads');
+  });
+
+  /**
+   * ⚠️ ABSENT, not empty and not a guess. An unstamped copy reads as UNKNOWN to `workingCopyRanks`
+   * and behaves exactly as copies did before the field existed; a copy stamped with a WRONG branch
+   * would be refused, silently turning crash recovery off for a copy that is in fact fine. So the
+   * unknown case must produce no key at all — the `remoteHead` `undefined`-vs-`null` distinction.
+   */
+  it('sends no branch at all when the project has no link', async () => {
+    repoStatus.set(undefined);
+
+    await saveWorkingCopy('prj_1', 1, { 'src/main.ts': text('x') });
+
+    expect(body.branch).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain('"branch"');
+  });
+
+  /* CONTROL: the assertions above are about the BRANCH, not about the request failing to be made. */
+  it('CONTROL — the files still travel either way', async () => {
+    repoStatus.set(undefined);
+
+    await saveWorkingCopy('prj_1', 1, { 'src/main.ts': text('x') });
+
+    expect(sent['src/main.ts']).toEqual(text('x'));
   });
 });

@@ -129,8 +129,8 @@ describe('the prerequisite reaches the prompt', () => {
   });
 
   /**
-   * 🔴 THE SAME MERGED BREAKPOINT. Anthropic allows exactly FOUR `cache_control` blocks; a `/slash`
-   * turn that also carries a skill would be the fifth and a hard HTTP 400 before a single token —
+   * 🔴 THE SAME MERGED BREAKPOINT. Anthropic allows exactly FOUR `cache_control` blocks and
+   * `MAX_CACHE_BREAKPOINTS` enforces that budget; a block claiming its own spends one of them —
    * the defect `MAX_CACHE_BREAKPOINTS` exists for, which shipped once already.
    */
   it('rides in skillBlocks rather than pushing its own cached entry', () => {

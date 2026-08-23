@@ -20,10 +20,9 @@ import { toast } from 'react-toastify';
 import { Dialog, DialogRoot, DialogTitle, DialogDescription, DialogButton } from '~/components/ui/Dialog';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { db } from '~/lib/persistence/useChatHistory';
-import { createLocalSnapshot } from '~/lib/persistence/local-snapshots';
 import { getProject, linkProjectToRepo } from '~/lib/persistence/projects';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { protectForRepoRestore } from '~/lib/persistence/restore-plan';
+import { applyBranchTree } from '~/lib/persistence/apply-branch-tree';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { PROVIDER_LABEL, type GitProvider } from '~/lib/persistence/useSaveProject';
 
@@ -275,10 +274,13 @@ export function GitHubSyncDialog({
   /**
    * Bring the repo's version down, or push to a new branch when the two have diverged.
    *
-   * The checkpoint before an overwrite happens HERE now (§4.12, §4.5.4b). The server used to take it,
-   * back when it held the files; it holds none, so the only party that can checkpoint the state about
-   * to be replaced is the one that has it. It is taken before `restoreFiles`, never after — the point
-   * is to capture what is being overwritten.
+   * ⚠️ The checkpoint before an overwrite is no longer taken HERE (§4.13a T18). It moved into
+   * `applyBranchTree`, along with the restore itself, so that a pull, a switch and a discard cannot
+   * drift into three behaviours — and it got STRICTER on the way: a lax serialize omits a binary it
+   * cannot read, and this is the only copy of what is about to be replaced.
+   *
+   * (This comment used to say the checkpoint happens here, which stayed true right up until it did
+   * not. A false claim in a doc comment is how the thing it describes survives review.)
    */
   const pull = async (op: 'pull' | 'resolve', choice?: string) => {
     setBusy(true);
@@ -294,11 +296,74 @@ export function GitHubSyncDialog({
       const result = await call(body);
 
       if (result.ok && result.files) {
-        await checkpointBeforeOverwrite();
-        await workbenchStore.restoreFiles(result.files, { protect: protectForRepoRestore });
-        await snapshotLocally(result.files, `Pulled from ${providerLabel}`);
+        /*
+         * 🔴 ONE APPLY PATH FOR EVERY TREE REPLACEMENT (§4.13a T18, Open Question 2 — converge).
+         *
+         * This used to be its own four lines: a NON-strict checkpoint, a restore, a second snapshot,
+         * a toast. That is the same operation `applyBranchTree` performs for a switch and a discard,
+         * done differently — and "one underlying operation behaves differently depending on which
+         * door reached it" is the shape this codebase keeps rediscovering (`recordAgentWrite` vs
+         * `#recordRestoredFiles`, `prepareMountedProject` vs `mountedThisLoad`, clone vs pull).
+         *
+         * What a Pull gains by converging, each of which it silently lacked:
+         *   - a STRICT before-checkpoint (the lax one omits a binary it cannot read, so the undo net
+         *     for the thing being overwritten could quietly be missing `havok.wasm`);
+         *   - `resetAllFileModifications` + `clearDeletedPaths`, so the model is not shown baselines
+         *     for a tree that no longer exists and files are not suppressed from the map;
+         *   - `markSynced` + the server working copy, written together (§4.5.4c invariant 4);
+         *   - the reinstall, and the narration that makes it bearable.
+         *
+         * ⚠️ **The honest cost, stated rather than buried: a Pull now takes 30+ seconds** instead of
+         * finishing silently in two. That is an owner decision (taken 2026-08-22), not a tidiness
+         * one. The argument for it is requirement 22's: a Pull that leaves `node_modules` describing
+         * the PRE-pull tree is a latent broken project that fails silently and much later, where the
+         * install's cost is at least visible while it happens.
+         */
+        /*
+         * 🔴 CLOSE THE DIALOG FIRST, OR THE NARRATION NARRATES TO NOBODY.
+         *
+         * `WorkspaceSplash` is deliberately `z-50` (it must sit under the sidebar and header); this
+         * dialog's overlay is `z-[9999]` with a backdrop blur. Awaiting with the modal still open puts
+         * the whole 30-second story — "Updating from trunk", the file progress bar, the reinstall, the
+         * elapsed clock — nine thousand z-index levels beneath a blurred black scrim showing two
+         * buttons that read "Working…".
+         *
+         * That inverts this task's own justification for costing the user those seconds: the install
+         * is worth doing BECAUSE its cost is visible.
+         *
+         * Closing here is safe because the server call has already returned the tree — the decision is
+         * made, and everything that follows is local work narrated by the full-page splash. ⚠️ If it
+         * FAILS there is no panel to fall back to (see the refusal branch below): the persistent toast
+         * is the whole report, which is why it names the operation and does not auto-dismiss.
+         */
+        onClose();
+
+        const applied = await applyBranchTree({
+          projectId,
+          files: result.files,
+          branch: linkedBranch ?? 'the linked branch',
+          operation: 'pull',
+          db,
+        });
+
+        if (!applied.ok) {
+          /*
+           * 🔴 THE DIALOG IS GONE, SO THIS TOAST IS THE WHOLE REPORT — hence `autoClose: false`.
+           *
+           * There is no failure panel on this path (a comment here used to claim one; a review found
+           * by rendering that `WorkspaceSplash` draws nothing for `failed` and `BootFailurePanel` is
+           * reachable only from the `!ready` boot screen). At the default 5 seconds this was the
+           * entire explanation for a possibly half-replaced tree, and then it was gone.
+           *
+           * `applied.reason` names the operation and the branch (`failureFor`), so the sentence is
+           * actionable on its own: the user can press Sync again.
+           */
+          toast.error(applied.reason, { autoClose: false });
+
+          return;
+        }
+
         toast.success(`Updated from ${providerLabel}.`);
-        setDiverged(false);
       } else if (result.ok && result.branch) {
         toast.success(`Saved your changes to a new branch: ${result.branch}`);
         setDiverged(false);
@@ -310,23 +375,20 @@ export function GitHubSyncDialog({
     }
   };
 
-  /** Capture what is about to be replaced, so any regret is one restore away (§4.12). */
-  const checkpointBeforeOverwrite = async () => {
-    await snapshotLocally(await workbenchStore.serializeFiles(), `Before updating from ${providerLabel}`);
-  };
-
-  const snapshotLocally = async (files: SerializedFileMap, label: string) => {
-    if (!db) {
-      return;
-    }
-
-    try {
-      await createLocalSnapshot(db, { projectId, files, label });
-    } catch (error) {
-      // Not fatal to the sync itself, but never silent — this is the user's undo.
-      toast.warn(`Could not save a local checkpoint: ${(error as Error).message}`);
-    }
-  };
+  /*
+   * 🔴 THE BEFORE-CHECKPOINT MOVED, IT DID NOT DISAPPEAR (§4.13a T18).
+   *
+   * This file used to own a `checkpointBeforeOverwrite` + `snapshotLocally` pair that took a
+   * NON-strict `serializeFiles()` photograph before a pull replaced the tree. `applyBranchTree` now
+   * takes that checkpoint, and takes it STRICT — which is the upgrade, not a side effect of tidying:
+   * a lax serialize silently omits a binary it cannot read, so the undo net for the very files being
+   * overwritten could be missing `havok.wasm` with nothing saying so (§4.12's poisoned-checkpoint
+   * case). A strict failure ABORTS the pull instead, leaving the project untouched.
+   *
+   * Deleted rather than left dormant: two components taking two different checkpoints of one moment
+   * is the two-writers drift this codebase keeps rediscovering, and a dead helper is how the second
+   * one comes back.
+   */
 
   return (
     <DialogRoot open onOpenChange={(o) => !o && onClose()}>

@@ -46,7 +46,7 @@ import { base64ToBytes, type SerializedFileMap } from '~/lib/binary/binary-files
 import { envNumber } from '~/lib/.server/env';
 import { DEFAULT_PROJECT_SOURCE_MAX_MB } from '~/lib/.server/storage/limits';
 import { assertPublicUrl } from '~/lib/.server/net/ssrf';
-import { GitProviderError, type GitProvider, type GitProviderId } from './provider';
+import { GitProviderError, type FetchTreeResult, type GitProvider, type GitProviderId, type RepoRef } from './provider';
 import { isSecretPath } from './sync-logic';
 import { getOAuthConfig } from './oauth';
 import { buildProvider, resolveProvider } from './resolve';
@@ -84,12 +84,36 @@ export class UnsupportedGitHostError extends Error {
 /**
  * Which door a tree is arriving through, for the refusal wording only.
  *
- * The RULE is identical for both — same ceiling, same env var, same LFS test — and that is the point
- * of `assertFetchedTreeUsable`. This exists because a user pressing Sync on a linked project is not
- * importing anything, and a refusal that describes the wrong operation reads as the wrong button
- * being broken (`share/build-failure.ts`).
+ * The RULE is identical for every door — same ceiling, same env var, same LFS test — and that is the
+ * point of `assertFetchedTreeUsable`. This exists because a user pressing Sync on a linked project is
+ * not importing anything, and a refusal that describes the wrong operation reads as the wrong button
+ * being broken (`share/build-failure.ts`). A user pressing **Discard** is importing even less.
  */
-export type TreeIngestOperation = 'import' | 'sync';
+export type TreeIngestOperation = 'import' | 'sync' | 'switch' | 'discard' | 'review';
+
+/**
+ * The verb each door uses, in the user's words.
+ *
+ * 🔴 **A `Record` over the union, so a new door cannot compile without answering.** The wording was
+ * two ternaries (`operation === 'import' ? … : …`) while there were two doors; at five that shape
+ * degrades into a chain whose default silently describes the wrong button — and the whole reason this
+ * type exists is that describing the wrong button is the defect. A missing key here is `TS2741`,
+ * which is the same guard `FIELD_COVERAGE` uses for a different money path.
+ *
+ * `limit` names the ceiling ("the 256MB import limit"), `gerund` completes "…, so it cannot be X",
+ * and `active` completes "X it would …". ⚠️ `limit` is a separate word rather than a reuse of the
+ * union member because the three new doors read badly in that slot ("the 256MB discard limit"), and
+ * because `import` and `sync` must keep their existing sentences BYTE-FOR-BYTE — those are pinned by
+ * `clone.spec.ts`, and quietly rewording a shipped refusal to suit a refactor is how a test gets
+ * edited to match the code instead of the other way round.
+ */
+const OPERATION_WORDS: Record<TreeIngestOperation, { limit: string; gerund: string; active: string }> = {
+  import: { limit: 'import', gerund: 'imported', active: 'importing' },
+  sync: { limit: 'sync', gerund: 'pulled into this project', active: 'pulling' },
+  switch: { limit: 'branch', gerund: 'switched to', active: 'switching to' },
+  discard: { limit: 'branch', gerund: 'restored', active: 'discarding your changes and restoring' },
+  review: { limit: 'branch', gerund: 'compared with your project', active: 'reviewing' },
+};
 
 /** A repository whose source exceeds the shared project-source ceiling. */
 export class CloneTooLargeError extends Error {
@@ -100,8 +124,8 @@ export class CloneTooLargeError extends Error {
   constructor(bytes: number, limit: number, operation: TreeIngestOperation = 'import') {
     super(
       `That repository's source is ${(bytes / (1024 * 1024)).toFixed(1)}MB, over the ` +
-        `${Math.round(limit / (1024 * 1024))}MB ${operation} limit, so it cannot be ` +
-        `${operation === 'import' ? 'imported' : 'pulled into this project'}. ` +
+        `${Math.round(limit / (1024 * 1024))}MB ${OPERATION_WORDS[operation].limit} limit, so it cannot be ` +
+        `${OPERATION_WORDS[operation].gerund}. ` +
         'Raise GIT_CLONE_MAX_MB to allow it.',
     );
   }
@@ -124,7 +148,7 @@ export class LfsPointerError extends Error {
     const shown = paths.slice(0, 3).join(', ');
     super(
       `That repository stores ${paths.length} file(s) in Git-LFS (${shown}${paths.length > 3 ? ', …' : ''}), ` +
-        `which is not supported yet — ${operation === 'import' ? 'importing' : 'pulling'} it would ` +
+        `which is not supported yet — ${OPERATION_WORDS[operation].active} it would ` +
         'replace those files with placeholder text.',
     );
   }
@@ -375,6 +399,47 @@ export function assertFetchedTreeUsable(
   if (pointers.length > 0) {
     throw new LfsPointerError(pointers, operation);
   }
+}
+
+/**
+ * Read a branch's whole tree and prove it is usable — **without recording agreement with it.**
+ *
+ * 🔴 **THE SEPARATION IS THE POINT OF THIS FUNCTION.** `pull()` used to do two things in one body:
+ * read a tree, and stamp `lastSyncedCommitSha`. That second half means "this project has agreed with
+ * that commit", and the next push's fast-forward check is measured against it. Every new door onto
+ * this read — Review changes, Switch, Discard — wants the FIRST half only, and the cheap way to build
+ * them (call `pull()`) silently stamps the pointer for a branch the user merely looked at. The next
+ * push then measures against a commit this project never held and fast-forwards straight over the
+ * work in the repository. Nothing throws; the user loses commits.
+ *
+ * So: this reads and refuses. The caller that genuinely agreed with the bytes moves the pointer, and
+ * it is one line at that call site where it can be seen.
+ *
+ * ⚠️ **The guard runs BEFORE anything is returned**, for the reason `pull()`'s own comment gives:
+ * refusing a tree after handing it back is not refusing it. And `operation` is required rather than
+ * defaulted, so a new door must state which words its refusal uses instead of inheriting "import"
+ * from whichever door was written first.
+ *
+ * `null` = the branch has no commits. NEVER an empty file map: `planRestore` refuses an empty
+ * incoming map by design ("a restore is never a wipe"), so a caller handed `{}` would restore nothing
+ * and report success. The caller decides the sentence, because "that branch is empty" means something
+ * different when switching to it than when discarding onto it.
+ */
+export async function readBranchTree(input: {
+  provider: GitProvider;
+  ref: RepoRef;
+  context: unknown;
+  operation: TreeIngestOperation;
+}): Promise<FetchTreeResult | null> {
+  const read = await input.provider.fetchTree(input.ref);
+
+  if (!read) {
+    return null;
+  }
+
+  assertFetchedTreeUsable(read.files, { context: input.context, operation: input.operation });
+
+  return read;
 }
 
 /**

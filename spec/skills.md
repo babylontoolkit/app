@@ -206,8 +206,10 @@ Canvas project, which owes no build since 2026-08-14, is not a first build turn 
   cost at `MAX_SKILL_DEPENDENCIES` bodies and makes a cycle unrepresentable instead of something a
   visited-set has to catch.
 - **It rides in `skillBlocks`, on the SHARED breakpoint.** Anthropic allows exactly four
-  `cache_control` blocks; a `/slash` turn that also carries a skill would be the fifth and a hard
-  HTTP 400 before a token (`MAX_CACHE_BREAKPOINTS`).
+  `cache_control` blocks and `MAX_CACHE_BREAKPOINTS` enforces that budget — a skill block claiming
+  its own would spend one of them. ⚠️ Do not restate how many are currently spent: that sentence
+  has been wrong twice, in opposite directions (`CACHE_CONTROL` in `proxy.ts` records both), and
+  `cache-breakpoints.spec.ts` owns the arithmetic because it can fail.
 - **Nothing already in context is re-added** — the invoked skill, or anything `stickyLoadedSkills`
   carried. Paying for the same 20KB twice in one prompt is what `carriedSkillNames` already avoids.
 - **The name is validated like a skill's own `name`** before it reaches `getActive()`, which resolves

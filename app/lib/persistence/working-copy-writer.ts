@@ -31,6 +31,7 @@
 import { workbenchStore } from '~/lib/stores/workbench';
 import { isSecretPath } from '~/lib/git/paths';
 import { withinWorkingCopyBudget } from './working-copy-size';
+import { branchForWorkingCopy } from './repo-status';
 import { buildWorkingCopyBody, type WorkingCopyEntry } from './working-copy-envelope';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -97,6 +98,7 @@ function saveViaWorker(
   entries: WorkingCopyEntry[],
   transfer: Transferable[],
   messageId?: string,
+  branch?: string,
 ): Promise<boolean> {
   const requestId = nextRequestId++;
 
@@ -112,7 +114,7 @@ function saveViaWorker(
     });
 
     try {
-      w.postMessage({ requestId, url, seq, messageId, entries }, transfer);
+      w.postMessage({ requestId, url, seq, messageId, branch, entries }, transfer);
     } catch {
       clearTimeout(timeout);
       pending.delete(requestId);
@@ -132,6 +134,21 @@ export async function writeWorkingCopyFromStore(
   seq: number,
   messageId?: string,
 ): Promise<WorkingCopyWriteResult> {
+  /*
+   * 🔴 THE BRANCH STAMP IS READ HERE, NOT PASSED IN (§4.13a T17).
+   *
+   * There is ONE copy per project and it is overwritten in place, so it is stale-by-branch the instant
+   * a switch lands — and `selectMountSource` will refuse to rank a copy whose stamp disagrees with the
+   * project's `linked_branch`. That makes an ABSENT stamp expensive rather than merely unknown: every
+   * writer that forgot to pass one would silently turn crash recovery off for that project.
+   *
+   * There are four writers (the per-generation checkpoint, the §8i top-up, `applyBranchTree`, and the
+   * mount) and only one of them knows about branches at all. So the value comes from the store that is
+   * already authoritative about where this project lives, which no caller can forget to consult — the
+   * `isSecretPath` rule applied to a field rather than a predicate.
+   */
+  const branch = branchForWorkingCopy();
+
   const files = workbenchStore.files.get();
 
   if (!withinWorkingCopyBudget(files)) {
@@ -198,7 +215,7 @@ export async function writeWorkingCopyFromStore(
      * fallback from here: a worker failure returns 'failed' and the caller re-warns rather than re-reads
      * detached bytes.
      */
-    const ok = await saveViaWorker(w, url, seq, entries, transfer, messageId);
+    const ok = await saveViaWorker(w, url, seq, entries, transfer, messageId, branch);
     return ok ? 'saved' : 'failed';
   }
 
@@ -207,7 +224,7 @@ export async function writeWorkingCopyFromStore(
     const response = await fetch(url, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: buildWorkingCopyBody(seq, entries, messageId),
+      body: buildWorkingCopyBody(seq, entries, messageId, branch),
       credentials: 'same-origin',
     });
 

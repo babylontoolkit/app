@@ -30,12 +30,19 @@ import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { buildCommitMessage, detectPushDivergence, isSecretPath, mapToTreeBlobs } from './sync-logic';
 import {
   GitProviderError,
+  firstLine,
+  namesAnExistingBranch,
+  parseCursor,
+  TOO_MANY_BRANCHES,
   repoFullName,
+  type BranchSummary,
   type EnsureRepoInput,
   type EnsureRepoResult,
   type FastForwardPushInput,
   type FetchTreeResult,
   type GitProvider,
+  type ListCommitsOptions,
+  type ListCommitsResult,
   type PushResult,
   type RepoRef,
 } from './provider';
@@ -59,6 +66,9 @@ interface GitLabCommitAction {
   content?: string;
   encoding?: 'base64' | 'text';
 }
+
+/** GitLab's maximum page size; `MAX_BRANCH_PAGES` bounds a remote-driven loop, as `_listTree` does. */
+const MAX_BRANCH_PAGES = 20;
 
 export class GitLabProvider implements GitProvider {
   readonly id = 'gitlab' as const;
@@ -287,34 +297,36 @@ export class GitLabProvider implements GitProvider {
   }
 
   /**
-   * Every blob path on the branch, following pagination to the end.
+   * GET a paginated collection, following `x-next-page` to the end. **The one raw-fetch door.**
    *
-   * GitLab caps a tree page at 100 and paginates; the failure mode of ignoring that is a SILENTLY
-   * partial file list — the same class of bug as GitHub's unread `truncated` flag, and the reason
-   * `fetchTree` is the reload path's biggest correctness risk. `x-next-page` is empty on the last page.
+   * It exists because `_request` cannot see response HEADERS, and GitLab's page cursor lives in one.
+   * That gap previously produced a SECOND door — `_listTree` built its own `fetch` and kept sending
+   * `Bearer ` after `_request` was made anonymous-safe, so an anonymous clone of a PUBLIC project read
+   * the branch head fine and then 401-ed on the tree, surfacing as a connect prompt for a repository
+   * that needs no connection. Branch and commit listing are both paginated too, so the choice here was
+   * one door or FOUR. One rule, one place — the `isSecretPath` discipline.
+   *
+   * ⚠️ **NO TOKEN → NO HEADER**, never an empty `Bearer `: GitLab rejects a malformed bearer outright,
+   * which turns every anonymous public read into a 401.
+   *
+   * `maxPages` is a hard stop so a misbehaving pagination header can never spin forever, and
+   * `onExhausted` supplies the message, because "too large" means something different to a caller
+   * reading a whole tree than to one paging through history.
    */
-  private async _listTree(ref: RepoRef, sha: string): Promise<GitLabTreeEntry[]> {
-    const entries: GitLabTreeEntry[] = [];
+  private async _paginate<T>(
+    path: string,
+    query: string,
+    options: { maxPages: number; onExhausted: () => GitProviderError },
+  ): Promise<T[]> {
+    const items: T[] = [];
     let page = 1;
 
-    // A hard stop so a misbehaving pagination header can never spin forever.
-    const maxPages = 200;
-
-    while (page <= maxPages) {
-      const url = `${this._host}/api/v4/projects/${this._projectId(ref)}/repository/tree?recursive=true&per_page=100&page=${page}&ref=${encodeURIComponent(sha)}`;
+    for (let requests = 0; requests < options.maxPages; requests++) {
+      const url = `${this._host}/api/v4${path}?${query}&page=${page}`;
 
       let response: Response;
 
       try {
-        /*
-         * 🔴 NO TOKEN → NO HEADER, the same rule as `_request` — and this is the SECOND door.
-         *
-         * `_request` was made anonymous-safe for the import path (`git/clone.ts`) and this method,
-         * which builds its own request because of the pagination headers, kept sending `Bearer `.
-         * GitLab rejects a malformed bearer outright, so an anonymous clone of a PUBLIC project read
-         * the branch head fine and then 401-ed on the tree — surfacing to the user as a connect prompt
-         * for a repository that needs no connection. One rule, both doors.
-         */
         response = await this._fetch(url, {
           headers: this._token ? { Authorization: `Bearer ${this._token}` } : {},
         });
@@ -326,27 +338,48 @@ export class GitLabProvider implements GitProvider {
         throw await this._toError(response);
       }
 
-      const batch = (await response.json()) as GitLabTreeEntry[];
-      entries.push(...batch);
+      items.push(...((await response.json()) as T[]));
 
       const next = response.headers.get('x-next-page');
 
+      /* Empty on the last page. A non-numeric or non-positive value is treated the same way. */
       if (!next) {
-        return entries;
+        return items;
       }
 
-      page = Number(next);
+      const parsed = Number(next);
 
-      if (!Number.isFinite(page) || page <= 0) {
-        return entries;
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return items;
       }
+
+      page = parsed;
     }
 
-    throw new GitProviderError({
-      kind: 'invalid',
-      message:
-        'This repository is too large to load in one request. Open it locally with git — the platform supports repositories under the size cap only.',
-    });
+    throw options.onExhausted();
+  }
+
+  /**
+   * Every blob path on the branch, following pagination to the end.
+   *
+   * GitLab caps a tree page at 100 and paginates; the failure mode of ignoring that is a SILENTLY
+   * partial file list — the same class of bug as GitHub's unread `truncated` flag, and the reason
+   * `fetchTree` is the reload path's biggest correctness risk.
+   */
+  private async _listTree(ref: RepoRef, sha: string): Promise<GitLabTreeEntry[]> {
+    return this._paginate<GitLabTreeEntry>(
+      `/projects/${this._projectId(ref)}/repository/tree`,
+      `recursive=true&per_page=100&ref=${encodeURIComponent(sha)}`,
+      {
+        maxPages: 200,
+        onExhausted: () =>
+          new GitProviderError({
+            kind: 'invalid',
+            message:
+              'This repository is too large to load in one request. Open it locally with git — the platform supports repositories under the size cap only.',
+          }),
+      },
+    );
   }
 
   async fetchTree(ref: RepoRef): Promise<FetchTreeResult | null> {
@@ -375,6 +408,145 @@ export class GitLabProvider implements GitProvider {
     logger.info(`Fetched ${entries.length} files from ${repoFullName(ref)}@${ref.branch} @ ${head}`);
 
     return { files, head };
+  }
+
+  /**
+   * Every branch, paginated to the end (see `GitProvider.listBranches`).
+   *
+   * ⚠️ **GitLab reports an empty repository as 404, where GitHub uses 409.** Both are "there are no
+   * branches yet" and both normalise to `[]` — the divergence is exactly what the seam exists to
+   * absorb. ⚠️ 404 is ALSO what GitLab returns for a project a token cannot see (deliberately, so the
+   * API cannot enumerate private projects), so an unreachable project reports as empty here. That is
+   * the same conflation `getDefaultBranch` already documents and accepts: from the caller's side
+   * "no branches we can reach" is the honest answer either way, and the linked-repo gate upstream has
+   * already established that this project is ours.
+   *
+   * Unlike GitHub, `default` and `protected` come back on the row, so no second request is needed.
+   */
+  async listBranches(ref: Pick<RepoRef, 'owner' | 'repo'>): Promise<BranchSummary[]> {
+    try {
+      const branches = await this._paginate<{
+        name: string;
+        commit: { id: string };
+        default?: boolean;
+        protected?: boolean;
+      }>(`/projects/${this._projectId(ref)}/repository/branches`, 'per_page=100', {
+        maxPages: MAX_BRANCH_PAGES,
+        onExhausted: () =>
+          new GitProviderError({
+            kind: 'invalid',
+            message: TOO_MANY_BRANCHES,
+          }),
+      });
+
+      return branches.map((branch) => ({
+        name: branch.name,
+        head: branch.commit.id,
+        isDefault: branch.default === true,
+        protected: branch.protected === true,
+      }));
+    } catch (error) {
+      if (error instanceof GitProviderError && error.kind === 'not-found') {
+        return [];
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Create a branch at `fromSha` (see `GitProvider.createBranch`).
+   *
+   * The FIRST `POST /repository/branches` call in this codebase — branch creation was previously only
+   * reachable as a side effect of `fastForwardPush({ createBranchIfMissing })`, which commits at the
+   * same time. This creates a branch and touches no file, which is the whole point: the user's
+   * in-progress work stays exactly where it is and simply belongs to a new branch.
+   *
+   * ⚠️ **`branch` and `ref` are QUERY parameters, not a JSON body** — GitLab accepts both, and the
+   * query form is what keeps the branch name out of a body that would need its own encoding rules.
+   * The name is encoded because a branch legally contains `/` and `#`.
+   *
+   * An existing name is a **400** here (GitLab validates rather than conflicting), so the mapping to
+   * `name-taken` is a status check on this endpoint only — the `isEmptyRepository` discipline again.
+   */
+  async createBranch(ref: Pick<RepoRef, 'owner' | 'repo'>, name: string, fromSha: string): Promise<{ head: string }> {
+    try {
+      const branch = await withRetry(() =>
+        this._request<{ commit: { id: string } }>(`/projects/${this._projectId(ref)}/repository/branches`, {
+          method: 'POST',
+          rawQuery: `branch=${encodeURIComponent(name)}&ref=${encodeURIComponent(fromSha)}`,
+        }),
+      );
+
+      return { head: branch.commit?.id ?? fromSha };
+    } catch (error) {
+      if (error instanceof GitProviderError && error.status === 400 && namesAnExistingBranch(error.message)) {
+        throw new GitProviderError({
+          kind: 'name-taken',
+          message: `A branch named ${name} already exists.`,
+          status: 400,
+          cause: error,
+        });
+      }
+
+      throw error;
+    }
+  }
+
+  /** Delete a branch; an absent one is success (see `GitProvider.deleteBranch`). */
+  async deleteBranch(ref: Pick<RepoRef, 'owner' | 'repo'>, name: string): Promise<void> {
+    try {
+      await withRetry(() =>
+        this._request<void>(`/projects/${this._projectId(ref)}/repository/branches/${encodeURIComponent(name)}`, {
+          method: 'DELETE',
+        }),
+      );
+    } catch (error) {
+      if (error instanceof GitProviderError && error.kind === 'not-found') {
+        logger.info(`Branch ${name} was already absent from ${repoFullName(ref)} — nothing to delete.`);
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * A bounded page of history (see `GitProvider.listCommits`). The cursor is a page number.
+   *
+   * ONE page, deliberately not `_paginate` — that helper walks to the END, which is the opposite of
+   * what a cursor-paged history wants. Reusing it here would read the entire history of the
+   * repository to render the first twenty rows.
+   */
+  async listCommits(ref: RepoRef, options: ListCommitsOptions): Promise<ListCommitsResult> {
+    const page = parseCursor(options.cursor);
+
+    let commits: Array<{ id: string; title?: string; message?: string; author_name?: string; created_at?: string }>;
+
+    try {
+      commits = await this._request<typeof commits>(`/projects/${this._projectId(ref)}/repository/commits`, {
+        rawQuery: `ref_name=${encodeURIComponent(ref.branch)}&per_page=${options.limit}&page=${page}`,
+      });
+    } catch (error) {
+      /* No repository we can reach, or no commits on it — an empty history, not a failure. */
+      if (error instanceof GitProviderError && error.kind === 'not-found') {
+        return { commits: [] };
+      }
+
+      throw error;
+    }
+
+    return {
+      commits: commits.map((commit) => ({
+        sha: commit.id,
+
+        /* GitLab already sends the subject as `title`; `message` is the fallback for a fake or an old API. */
+        message: commit.title ?? firstLine(commit.message ?? ''),
+        author: commit.author_name ?? '',
+        date: commit.created_at ?? '',
+      })),
+      nextCursor: commits.length === options.limit ? String(page + 1) : undefined,
+    };
   }
 
   async fastForwardPush(input: FastForwardPushInput): Promise<PushResult> {

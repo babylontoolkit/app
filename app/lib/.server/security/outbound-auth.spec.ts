@@ -102,6 +102,18 @@ const args = (method: string, params: Record<string, string> = {}, url = 'http:/
 
 type Handler = (a: any) => Promise<Response>;
 
+/** One POST to the project git route, as an anonymous caller. */
+const projectGitOp = (body: Record<string, unknown>) =>
+  (projectGitAction as Handler)({
+    request: new Request('http://localhost/api/projects/prj_anything/github', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json' },
+    }),
+    context: {},
+    params: { projectId: 'prj_anything' },
+  });
+
 const cases: Array<{ name: string; call: () => Promise<Response> }> = [
   { name: 'git-proxy loader (GET)', call: () => (gitProxyLoader as Handler)(args('GET', { '*': 'example.com/info' })) },
   {
@@ -179,17 +191,36 @@ const cases: Array<{ name: string; call: () => Promise<Response> }> = [
    */
   {
     name: 'project git action (op: clone)',
-    call: () =>
-      (projectGitAction as Handler)({
-        request: new Request('http://localhost/api/projects/prj_anything/github', {
-          method: 'POST',
-          body: JSON.stringify({ op: 'clone', repo: 'https://github.com/octocat/Hello-World' }),
-          headers: { 'Content-Type': 'application/json' },
-        }),
-        context: {},
-        params: { projectId: 'prj_anything' },
-      }),
+    call: () => projectGitOp({ op: 'clone', repo: 'https://github.com/octocat/Hello-World' }),
   },
+
+  /*
+   * The seven branch-client ops (§4.13a). Each one reaches the provider on the PLATFORM's egress with
+   * the session's credential, and three of them (`branches`, `commits`, `tree`) are whole-repository
+   * reads — the shape `git-proxy` was closed for. They are driven with bodies that would SUCCEED for a
+   * signed-in owner, for the reason the clone case states: a body the route would reject on its own
+   * merits proves nothing about the wall, because the refusal could be coming from the validation.
+   *
+   * ⚠️ `create-branch`, `delete-branch` and `switch-branch` name a branch that is deliberately legal
+   * (`validateBranchName` accepts `feature/boost-pads`), so a 401 here can only be the auth wall and
+   * never the name check running first.
+   */
+  { name: 'project git action (op: branches)', call: () => projectGitOp({ op: 'branches' }) },
+  { name: 'project git action (op: commits)', call: () => projectGitOp({ op: 'commits', limit: 20 }) },
+  { name: 'project git action (op: tree)', call: () => projectGitOp({ op: 'tree', branch: 'feature/boost-pads' }) },
+  {
+    name: 'project git action (op: create-branch)',
+    call: () => projectGitOp({ op: 'create-branch', name: 'feature/boost-pads' }),
+  },
+  {
+    name: 'project git action (op: delete-branch)',
+    call: () => projectGitOp({ op: 'delete-branch', name: 'feature/boost-pads' }),
+  },
+  {
+    name: 'project git action (op: switch-branch)',
+    call: () => projectGitOp({ op: 'switch-branch', branch: 'feature/boost-pads' }),
+  },
+  { name: 'project git action (op: discard)', call: () => projectGitOp({ op: 'discard' }) },
 ];
 
 describe('outbound routes refuse an unauthenticated caller before spending', () => {

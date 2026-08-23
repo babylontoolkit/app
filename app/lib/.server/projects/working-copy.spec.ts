@@ -210,3 +210,55 @@ describe('the cap is configurable (WORKING_COPY_MAX_MB)', () => {
     );
   });
 });
+
+/**
+ * 🔴 READING A COPY THAT PREDATES THE BRANCH STAMP (§4.13a T17).
+ *
+ * There is one object per project and it is overwritten in place, so on the day the field shipped
+ * every stored copy in existence had no `branch` key. `getWorkingCopy` must read those exactly as it
+ * always did — absent, never a fabricated value and never a parse failure, because a recovery buffer
+ * that refuses to load causes the loss it exists to prevent.
+ *
+ * The read is also the LAST door: the route coerces on the way in, but bytes already in the store were
+ * written by clients that never did, so the same normalisation runs here. That mirrors `messageId`
+ * beside it and the `isSecretPath` rule one function up — one rule, applied at every door.
+ */
+describe('the branch stamp reads as UNKNOWN when it is absent or unusable', () => {
+  /** An object written before the field existed, byte-shaped exactly as it was stored then. */
+  async function storeRaw(projectId: string, object: unknown) {
+    await objects.put(workingCopyKey(projectId), new TextEncoder().encode(JSON.stringify(object)));
+  }
+
+  it('parses a legacy object with no branch key', async () => {
+    await storeRaw('prj_old', { projectId: 'prj_old', seq: 4, updatedAt: 'then', files });
+
+    const back = await getWorkingCopy('prj_old');
+
+    expect(back).not.toBeNull();
+    expect(back!.seq).toBe(4);
+    expect(back!.branch).toBeUndefined();
+    expect(back!.files['public/assets/generated/hero.png']).toEqual(files['public/assets/generated/hero.png']);
+  });
+
+  it('drops a non-string branch rather than passing it on', async () => {
+    for (const branch of [123, true, null, { name: 'main' }]) {
+      await storeRaw('prj_bad', { projectId: 'prj_bad', seq: 1, updatedAt: 'then', branch, files });
+      expect((await getWorkingCopy('prj_bad'))!.branch, JSON.stringify(branch)).toBeUndefined();
+    }
+  });
+
+  it('drops an empty string — it is not a branch name', async () => {
+    await storeRaw('prj_empty', { projectId: 'prj_empty', seq: 1, updatedAt: 'then', branch: '', files });
+    expect((await getWorkingCopy('prj_empty'))!.branch).toBeUndefined();
+  });
+
+  /*
+   * CONTROL. Every assertion above is an absence, so a reader that simply deleted the field would pass
+   * all of them — and would silently disable the guard for every project. A real name survives the
+   * round trip untouched.
+   */
+  it('CONTROL — a real branch name survives the round trip', async () => {
+    await putWorkingCopy('prj_1', { projectId: 'prj_1', seq: 2, updatedAt: 'now', branch: 'feature/hud', files });
+    expect((await getWorkingCopy('prj_1'))!.branch).toBe('feature/hud');
+  });
+});

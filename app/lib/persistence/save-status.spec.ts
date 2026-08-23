@@ -9,7 +9,15 @@
  * So the sweep at the bottom asserts it across EVERY combination rather than the ones I thought of.
  */
 import { describe, expect, it } from 'vitest';
-import { decideNudge, describeProjectSaveBadge, describeSaveStatus, shouldWarnBeforeUnload } from './save-status';
+import {
+  decideNudge,
+  describeBranchState,
+  describeProjectSaveBadge,
+  describeSaveStatus,
+  shouldWarnBeforeUnload,
+  type BranchStateFacts,
+} from './save-status';
+import { canOpenPullRequest } from '~/lib/git/provider-urls';
 import type { SaveState } from './save-queue';
 import type { RepoStatus } from './projects';
 
@@ -429,5 +437,277 @@ describe('the beforeunload warning', () => {
 
   it('does not fire on an empty project the user just opened and closed', () => {
     expect(shouldWarnBeforeUnload({ unsavedWork: true, generationCount: 0, recoverable: false })).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------- the branch group (§4.13a, T19) */
+
+/**
+ * What the Branch menu says, and what it will not let you press.
+ *
+ * The same reason `describeSaveStatus` is tested this hard, one group over: these strings are the ONLY
+ * thing that distinguishes a control that is unavailable for a reason from one that is broken, and the
+ * two destructive warnings are the last thing a user reads before an operation they cannot take back.
+ *
+ * ⚠️ The fixture branch name is deliberately NEUTRAL. The jargon sweep below is a cartesian product
+ * over these facts, so a fixture called `origin-fix` or `pull-fixes` would make the sweep fail on the
+ * FIXTURE and read as a defect in the copy. `feature/boost-pads` contains no banned word.
+ */
+const BRANCH = 'feature/boost-pads';
+
+const branchFacts = (over: Partial<BranchStateFacts> = {}): BranchStateFacts => ({
+  linked: true,
+  branch: BRANCH,
+  provider: 'github',
+  ...over,
+});
+
+describe('the branch group — unavailable, and why', () => {
+  /**
+   * 🔴 EXPLAINED AND UNAVAILABLE, never dead items (T19). A greyed row with no reason is
+   * indistinguishable from a broken one, and here the fix is a single action away — so the sentence
+   * has to name it, and name the place the branches would live.
+   */
+  it('tells an unlinked project what to do about it, and names the provider', () => {
+    const view = describeBranchState({ linked: false, provider: 'github' });
+
+    expect(view.unavailableReason).toBeDefined();
+    expect(view.unavailableReason).toContain('GitHub');
+    expect(view.unavailableReason).toMatch(/save this project/i);
+    expect(view.canOpenChangeRequest).toBe(false);
+  });
+
+  it('names GitLab when that is where the project would live', () => {
+    expect(describeBranchState({ linked: false, provider: 'gitlab' }).unavailableReason).toContain('GitLab');
+  });
+
+  /**
+   * The CONTROL. Without it the assertion above passes for a function that returns an explanation
+   * unconditionally — which would render the whole group unavailable for every project, forever.
+   */
+  it('has nothing to explain once the project is linked', () => {
+    expect(describeBranchState(branchFacts()).unavailableReason).toBeUndefined();
+  });
+});
+
+describe('the submenu trigger IS the current-branch row (requirement 75)', () => {
+  /*
+   * The branch name is readable by opening ONE menu, and it is deliberately not in the chip's label:
+   * the header row is right-aligned, so a control that grows with unbounded user-chosen text shoves
+   * everything left (measured 16px → 486px), and truncating `feature/boost-…` is ambiguous between
+   * exactly the branches a user is most likely to confuse.
+   */
+  it('names the branch when the status has loaded', () => {
+    expect(describeBranchState(branchFacts()).triggerLabel).toBe(`Branch: ${BRANCH}`);
+  });
+
+  /** Before the status lands there is no branch to name, and inventing one would be a claim. */
+  it('says plain "Branch" while the branch is unknown', () => {
+    expect(describeBranchState(branchFacts({ branch: undefined })).triggerLabel).toBe('Branch');
+  });
+
+  /**
+   * An unlinked project has no branch even if a stale `repoStatus` still carries one — the trigger
+   * must not read `Branch: main` above a submenu that says the project is not saved anywhere.
+   */
+  it('says plain "Branch" for an unlinked project, whatever the facts still carry', () => {
+    expect(describeBranchState({ linked: false, branch: 'main' }).triggerLabel).toBe('Branch');
+  });
+});
+
+describe('"Open a pull request" is offered only when it would work', () => {
+  /*
+   * Both refusals produce an EMPTY compare page on the provider's own site, which reads as our button
+   * being broken rather than as the state it reflects.
+   */
+  it('is not offered on the default branch — there is nothing to compare against', () => {
+    const view = describeBranchState(branchFacts({ branch: 'main', defaultBranch: 'main', lastSyncedCommitSha: 'a1' }));
+
+    expect(view.canOpenChangeRequest).toBe(false);
+  });
+
+  it('is not offered before the branch has ever been pushed — the provider has no ref for it', () => {
+    expect(describeBranchState(branchFacts({ lastSyncedCommitSha: undefined })).canOpenChangeRequest).toBe(false);
+  });
+
+  it('is not offered when we do not know which branch we are on', () => {
+    expect(
+      describeBranchState(branchFacts({ branch: undefined, lastSyncedCommitSha: 'a1' })).canOpenChangeRequest,
+    ).toBe(false);
+  });
+
+  /** The CONTROL. Without it every assertion above passes for a constant `false`. */
+  it('IS offered on a pushed branch that is not the default', () => {
+    expect(
+      describeBranchState(branchFacts({ defaultBranch: 'main', lastSyncedCommitSha: 'a1' })).canOpenChangeRequest,
+    ).toBe(true);
+  });
+
+  /**
+   * 🔴 NEVER GUESS `main`. An unknown default DISABLES the default-branch rule rather than inventing
+   * one: a `master`-trunked repository would otherwise have its real trunk treated as an ordinary
+   * branch while a branch literally named `main` was refused — a wrong answer in both directions from
+   * a single assumption. The provider's own compare page is the backstop.
+   */
+  it('offers it for a branch named "main" when the real default was never read', () => {
+    expect(
+      describeBranchState(branchFacts({ branch: 'main', defaultBranch: undefined, lastSyncedCommitSha: 'a1' }))
+        .canOpenChangeRequest,
+    ).toBe(true);
+  });
+});
+
+/**
+ * 🔴 The two destructive sentences, and the difference between them.
+ *
+ * Discard is recoverable (a checkpoint is taken first) and Delete is not (a checkpoint is a snapshot of
+ * FILES and cannot restore a remote ref). A dialog that implies the usual safety net where there is
+ * none is worse than no dialog — so the copy must not converge on one reassuring paragraph.
+ */
+describe('the destructive warnings', () => {
+  it('discard names the branch it resets to, and says the change can be undone', () => {
+    const view = describeBranchState(branchFacts());
+
+    expect(view.discardWarning).toContain(BRANCH);
+    expect(view.discardWarning).toMatch(/undo|recover/i);
+  });
+
+  it('delete says plainly that the platform cannot bring the branch back', () => {
+    const view = describeBranchState(branchFacts());
+
+    expect(view.deleteWarning).toMatch(/cannot bring it back|cannot be recovered|gone/i);
+    expect(view.deleteWarning).not.toMatch(/undo/i);
+  });
+
+  /**
+   * They must not be the same sentence. Copy drifts towards one shared "are you sure?" paragraph, and
+   * the moment it does, the one operation with no undo starts promising the safety net of the one that
+   * has it.
+   */
+  it('says two DIFFERENT things — the safety net is not the same on both', () => {
+    const view = describeBranchState(branchFacts());
+
+    expect(view.discardWarning).not.toBe(view.deleteWarning);
+  });
+});
+
+/**
+ * 🔴 THE DELIBERATE DUPLICATE, PINNED.
+ *
+ * `canOfferChangeRequest` (private, here) and `canOpenPullRequest` (exported, `~/lib/git/provider-urls`)
+ * implement one predicate twice ON PURPOSE — this module is client-safe COPY and that one is
+ * client-safe LINK BUILDING, and making either import the other drags one concern into the other's
+ * bundle for three lines. The implementation says so in a comment; a comment cannot fail.
+ *
+ * What drift costs: the menu offers a pull request the URL builder then aims at an empty compare
+ * page, or the URL exists and the item that would open it is hidden. Both are silent.
+ */
+describe('the two copies of "can a pull request be opened?" agree', () => {
+  it.each([
+    ['pushed, non-default', { branch: BRANCH, defaultBranch: 'main', lastSyncedCommitSha: 'a1' }],
+    ['pushed, IS the default', { branch: 'main', defaultBranch: 'main', lastSyncedCommitSha: 'a1' }],
+    ['never pushed', { branch: BRANCH, defaultBranch: 'main' }],
+    ['no branch known', { defaultBranch: 'main', lastSyncedCommitSha: 'a1' }],
+    ['default unknown, branch named main', { branch: 'main', lastSyncedCommitSha: 'a1' }],
+    ['default unknown, ordinary branch', { branch: BRANCH, lastSyncedCommitSha: 'a1' }],
+    ['nothing known at all', {}],
+    ['branch equals default, never pushed', { branch: 'main', defaultBranch: 'main' }],
+  ] satisfies Array<[string, Partial<BranchStateFacts>]>)('%s', (_label, facts) => {
+    expect(describeBranchState({ linked: true, ...facts }).canOpenChangeRequest).toBe(canOpenPullRequest(facts));
+  });
+
+  /**
+   * The CONTROL for the agreement table: it would pass for two functions that both return `false`
+   * always. At least one row must be TRUE and at least one FALSE, on both sides.
+   */
+  it('the table actually exercises both answers', () => {
+    const pushedNonDefault = { branch: BRANCH, defaultBranch: 'main', lastSyncedCommitSha: 'a1' };
+    const onDefault = { branch: 'main', defaultBranch: 'main', lastSyncedCommitSha: 'a1' };
+
+    expect(canOpenPullRequest(pushedNonDefault)).toBe(true);
+    expect(canOpenPullRequest(onDefault)).toBe(false);
+    expect(describeBranchState({ linked: true, ...pushedNonDefault }).canOpenChangeRequest).toBe(true);
+    expect(describeBranchState({ linked: true, ...onDefault }).canOpenChangeRequest).toBe(false);
+  });
+});
+
+/**
+ * The plain-language sweep, extended to the branch group.
+ *
+ * ⚠️ **"branch" is ALLOW-LISTED, deliberately, and the scope is exactly this group.** It is not jargon
+ * here — it is the noun the feature is about, it appears on the provider's own UI, and a user who has
+ * asked to switch branches has already chosen to know the word. Everything else the sweep bans stays
+ * banned: `push`, `pull`, `remote`, `HEAD`, `fast-forward`, `ref`, `origin`, `SHA`.
+ *
+ * ⚠️ This used to end "…that is why the menu item says 'Open a change request' and not 'Open a pull
+ * request'". It says **"Open a pull request"** since 2026-08-22 (owner). Nothing here changed and
+ * nothing here is weakened: this sweep runs over `describeBranchState`'s OUTPUT, and every string it
+ * returns is still jargon-free. The menu item is a JSX label, which this sweep has never reached —
+ * the "Pull from GitHub…" row has sat outside it the whole time. A rule's rationale must not claim
+ * credit for a string it does not govern; that is how a sweep gets believed to be wider than it is.
+ *
+ * ⚠️ It is a cartesian product, so the FIXTURE matters: a branch name containing a banned word would
+ * fail here and read as a defect in the copy rather than in the fixture. See `BRANCH` above.
+ */
+describe('plain language in the branch group (§4.5.4b)', () => {
+  const branchJargon = ['push', 'pull', 'remote', 'HEAD', 'fast-forward', 'origin', 'SHA'];
+
+  const everyBranchView = () => {
+    const views: Array<ReturnType<typeof describeBranchState>> = [];
+
+    for (const linked of [true, false]) {
+      for (const branch of [undefined, BRANCH, 'main']) {
+        for (const defaultBranch of [undefined, 'main']) {
+          for (const provider of ['github', 'gitlab'] as const) {
+            for (const lastSyncedCommitSha of [undefined, 'a1b2c3']) {
+              views.push(describeBranchState({ linked, branch, defaultBranch, provider, lastSyncedCommitSha }));
+            }
+          }
+        }
+      }
+    }
+
+    return views;
+  };
+
+  it('never uses git jargon in anything the user reads', () => {
+    for (const view of everyBranchView()) {
+      const text = `${view.triggerLabel} ${view.unavailableReason ?? ''} ${view.discardWarning} ${view.deleteWarning}`;
+
+      for (const word of branchJargon) {
+        expect(text.toLowerCase(), `${word} in: ${text}`).not.toContain(word.toLowerCase());
+      }
+    }
+  });
+
+  /**
+   * `ref` is checked separately because it is a SUBSTRING of ordinary English ("refresh", "prefer").
+   * Banning it wholesale would be a tripwire on the copy rather than on the jargon, so it is matched
+   * as a whole word — which is the thing that would actually reach a user ("the ref is gone").
+   */
+  it('never says "ref" as a word', () => {
+    for (const view of everyBranchView()) {
+      const text = `${view.triggerLabel} ${view.unavailableReason ?? ''} ${view.discardWarning} ${view.deleteWarning}`;
+
+      expect(text).not.toMatch(/\brefs?\b/i);
+    }
+  });
+
+  /** The sweep is only worth anything if the strings it reads are non-empty where they are used. */
+  it('always has a trigger label, and always explains an unavailable group', () => {
+    for (const view of everyBranchView()) {
+      expect(view.triggerLabel.length).toBeGreaterThan(0);
+
+      if (view.unavailableReason !== undefined) {
+        expect(view.unavailableReason.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  /** A CONTROL for the sweep itself: it must be capable of failing. */
+  it('the sweep can fail — a banned word in the same shape of string is caught', () => {
+    const poisoned = `Branch: ${BRANCH} — pull from origin`;
+
+    expect(branchJargon.some((word) => poisoned.toLowerCase().includes(word.toLowerCase()))).toBe(true);
   });
 });

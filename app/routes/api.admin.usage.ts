@@ -71,7 +71,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
      */
     const sandboxStatus = await getSandboxProviderStatus(context);
 
-    return json({ report: buildUsageReport(records), sampled: records.length, providerBalance, vm, sandboxStatus });
+    const report = buildUsageReport(records);
+
+    /*
+     * ⚠️ `sampled` is ROWS READ, and `report.generations` is TURNS AGGREGATED — they stopped being the
+     * same number when media rows were excluded (2026-08-21), and on a media-heavy day a `?limit=500`
+     * read can aggregate far fewer turns with nothing saying so. The operator's window silently
+     * shrinks exactly when the platform is busiest, which is the wrong time for a number to lie. Both
+     * are on the wire now, with `report.media.renders` as the difference's explanation.
+     */
+    return json({ report, sampled: records.length, providerBalance, vm, sandboxStatus });
   } catch (error) {
     return errorResponse(error);
   }

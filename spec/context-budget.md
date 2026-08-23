@@ -227,7 +227,7 @@ The `# Current Project Files` block carries a cache breakpoint.
 
 This does **not** contradict §4.3.5's "volatile context last, uncached" ordering. A breakpoint caches the prefix *up to itself*, so the base prompt and the routed doc blocks keep their own cache entries regardless; a file edit invalidates only the file entry. What the breakpoint buys is the **multiplier**: steps 2..n of the tool loop read the project at a tenth of the price instead of full freight.
 
-Budget: Anthropic allows 4 breakpoints. We spend all 4 — base prompt, routed blocks, invoked skill, file context. There are none spare; adding one means taking one away.
+Budget: Anthropic allows 4 breakpoints. ⚠️ **This line read "we spend all 4 — base prompt, routed blocks, invoked skill, file context; there are none spare" until 2026-08-21, and it had been false since the file MANIFEST replaced the file dump.** With no file bodies left to split, the two file entries collapsed into one and the real maximum became **3** — base prompt, manifest, and the carried-references OR skills block (mutually exclusive, never both). One spare. The count is now pinned by `cache-breakpoints.spec.ts` and recorded per request as `breakpointCount`, so a regression back over the ceiling is visible before it is an HTTP 400. **Adding a breakpoint is still a decision, not a free slot** — and this sentence being wrong for months, in the document that memorialises the last time it was wrong, is why the number lives in a test now.
 
 ### 4. The cache TTL is 1 hour, not 5 minutes
 
@@ -265,6 +265,42 @@ written down, every one of them removable by a well-meaning refactor that would 
 no test. They are listed here so that "why is this here?" has an answer.
 
 **Ordered by what it would cost to lose them.**
+
+### 0. The request invariant — the verifier the other levers never had (2026-08-21)
+
+`app/lib/.server/agent/request-fingerprint.ts`, `app/lib/.server/agent/request-invariants.ts`,
+`spec/agent-seams.md`.
+
+Every lever below is enforced by construction, and until now **not one of them was ever checked
+against the request that actually went out.** That gap is not incidental — it is the direct cause of
+the three worst regressions this document records, and all three were found by a person noticing
+afterwards rather than by anything failing:
+
+| Incident | What was true | How it was found |
+|---|---|---|
+| The mount race | the model was shown 7 files of a 78-file tree, none of them source | the model SAID it could not see the file, and that was read as caution |
+| The double-keyed file map | 14 files listed twice, ~22.5k tokens/turn at the 2x cache-write rate, for weeks | a manual read of a working copy |
+| The history's file bodies | 83–87% of a re-sent conversation was stale duplicates | a manual read of a transcript |
+
+In every case the record was correct about everything it recorded, and **nothing anywhere compared
+the record to the request.** So: one `RequestFingerprint` per stream start (there are SIX call sites —
+until now no record said what any of them SENT), hashes and counts only, and four invariants.
+
+⚠️ Stated narrowly on purpose: `finish_reason` has named WHICH re-issue ran since migration 0002
+(`stop+forced-continuation`, `+provider-retry`, `+unproductive-rescue`, `+creation-completeness`).
+What no record carried is the REQUEST — a dropped tool set, a spliced system block, an appended user
+message. The narrower claim is the true one and it is the stronger one. INV-1 makes the de-dup backstop REPORT what it collapses instead of silently fixing
+it, which is the specific mechanism by which the double-keyed map cost real money in silence.
+
+⚠️ **It is itself subject to this document.** It is computed strictly after assembly, reads the arrays
+and mutates nothing, never enters `system[]` or a tool schema or a readable annotation, and records
+attachments by a token upper bound rather than by hashing 20MB of payload. A verifier that moved one
+byte of the cached prefix would cost more than the defects it watches for.
+
+⚠️ **A violation NEVER fails the turn** (it reports to `REQUEST_INTEGRITY` on its OWN rolling
+window (not the shared failure-rate one, whose threshold measurably silenced this signal)) **and DOES throw under VITEST**. Both halves are load-bearing: the first because a guard that
+can kill a paid turn is worse than the defect, the second because a guard that only ever reports is
+one nobody notices going quiet.
 
 ### 1. The declaration file is NEVER baked into the prompt
 
@@ -776,7 +812,7 @@ expensive" rather than only "*how* expensive is it".
 
 ## 5. The conversation history carries no file bodies (`llm/history.ts`)
 
-**The history is UNCACHED, and that is structural.** All four cache breakpoints sit on the **system**
+**The history is UNCACHED, and that is structural.** Every cache breakpoint sits on the **system**
 blocks; the messages come after them, so the conversation is outside the cached prefix. Every byte of
 every previous turn is re-sent at **full input rate on every turn, forever**, and the total grows
 monotonically with the length of the session.
@@ -847,7 +883,12 @@ invoked skill, and the file context all vary per turn and all sit in `system`, *
 breakpoint on the history would be invalidated on essentially every turn, so we would pay a **2× cache
 WRITE** each time in place of a 1× uncached read. Caching it properly means moving the volatile blocks
 *after* the history — a real restructure, to be measured against the live API rather than guessed at, and
-one that would need a fifth breakpoint or the sacrifice of an existing one. Compaction is orthogonal and
+one that would spend the breakpoint the assembly currently leaves unused. ⚠️ This read *"would need a
+fifth breakpoint or the sacrifice of an existing one"* until 2026-08-21 — the four-are-spent premise again,
+with the number elided, which is how sweep after sweep for "four" and "breakpoints" walked straight past
+it. It
+also UNDERSTATED a live option: the lever costs a sacrifice it does not cost. The count belongs to
+`cache-breakpoints.spec.ts`, not to this sentence. Compaction is orthogonal and
 composes with that change if it ever lands.
 
 ---
@@ -947,7 +988,7 @@ bytes were being re-written at 2× nearly every turn, multiplied by KIE's per-ba
 (§"QUANTIFIED") and by `maxSteps` re-sends landing on different backends mid-generation. Conversations
 average ~2 turns, so per-conversation-unique prefix bytes essentially never pay back.
 
-The shape that shipped (`proxy.ts` step 8; split rule in `~/lib/context/stable-zones.ts`, pinned by
+⚠️ **SUPERSEDED 2026-08-08 — kept because it explains how the prefix came to be ordered the way it is.** The file DUMP this restructured was replaced by a ~704-token MANIFEST, so there are no file-body zones left to split: `stable-zones.ts` is dead code (see the tombstone at `proxy.ts`'s `# Project files` block) and the four-entry shape below is a record, not a description of what runs. The shape that shipped (`proxy.ts` step 8; split rule in `~/lib/context/stable-zones.ts`, pinned by
 `stable-zones.spec.ts` + the new arrays in `cache-breakpoints.spec.ts`, both mutation-verified):
 
 |  BP | entry | shared across |
@@ -1025,7 +1066,7 @@ starting points for the history window above — but they are starting points, n
 | The classifier (net-new, zero merge surface) | `app/lib/context/opaque-files.ts` |
 | Its tests (both directions) | `app/lib/context/opaque-files.spec.ts` |
 | Marker emission + `IGNORE_PATTERNS` | `app/lib/.server/llm/utils.ts` → `createFilesContext` |
-| Cache breakpoints (all 4) + 1h TTL + `maxTokens` + repair-error truncation | `app/lib/.server/agent/proxy.ts` |
+| Cache breakpoints (the count lives in `cache-breakpoints.spec.ts`, not in a comment) + 1h TTL + `maxTokens` + repair-error truncation | `app/lib/.server/agent/proxy.ts` |
 | Per-step usage accounting (how caching is measured at all) | `app/lib/.server/agent/step-usage.ts` |
 | Out-of-band mount | `app/lib/registry/mount.ts` → `writeTextFiles` / `writeBinaryFiles` |
 | Artifact with no file bodies + short creation brief | `app/lib/registry/create-project.ts` |
@@ -1041,6 +1082,12 @@ starting points for the history window above — but they are starting points, n
 | Attachment limits (vision tokens = unbounded bill) | `app/lib/.server/agent/attachments.ts` |
 | Diff edits | `app/lib/runtime/edit-blocks.ts` |
 | Skill budget + default-to-`edit` rules (prose) | `app/lib/.server/prompt/sections/40-skill-usage.md`, `10-action-protocol.md` |
+| **The request fingerprint** (hashes, never bodies; after assembly, never in the prompt) | `app/lib/.server/agent/request-fingerprint.ts` |
+| Cache-breakpoint headroom: the assembly's real max is **3** against a ceiling of 4 — one spare, and `breakpointCount` is now recorded so a regression back over the limit is visible before it is an HTTP 400 | `app/lib/.server/agent/cache-breakpoints.spec.ts` |
+| **The four request invariants** (report in production, throw under test) | `app/lib/.server/agent/request-invariants.ts` |
+| **The ONE file-map de-dup rule**, shared by the manifest and `createFilesContext` | `app/lib/common/sandbox-paths.ts` → `dedupeByProjectPath` |
+| The seam classification, and the scan that keeps it true | `spec/agent-seams.md`, `app/lib/.server/agent/seam-classification.spec.ts` |
+| Wiring pins (one fingerprint call, six labelled call sites) | `app/lib/.server/agent/fingerprint-wiring.spec.ts` |
 
 ## How to re-measure (do this on any change to the above)
 

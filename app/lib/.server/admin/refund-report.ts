@@ -15,6 +15,7 @@
  * anti-pattern wearing an audit's clothes.
  */
 import type { LedgerEntry } from '~/lib/.server/billing/ledger';
+import { generationKind } from './generation-kind';
 import type { GenerationRecord } from '~/lib/.server/billing/generations';
 
 /** Derived from the anchor id's prefix — `gen_` LLM, `med_` media (§4.16); anything else is 'other'. */
@@ -94,16 +95,13 @@ export function causeKey(cause: string): string {
   return (firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine).replace(/\d[\d,.]*/g, '#');
 }
 
+/**
+ * ⚠️ A DELEGATE. The prefix rule moved to `generation-kind.ts` when `buildUsageReport` turned out to
+ * need it too — and had been counting media renders as generations for want of it. Two copies of one
+ * rule is the `isSecretPath` mistake; this stays as the refund report's own vocabulary.
+ */
 export function refundKind(generationId: string | undefined): RefundKind {
-  if (generationId?.startsWith('gen_')) {
-    return 'generation';
-  }
-
-  if (generationId?.startsWith('med_')) {
-    return 'media';
-  }
-
-  return 'other';
+  return generationKind(generationId);
 }
 
 export function buildRefundReport(refundEntries: LedgerEntry[], generations: GenerationRecord[]): RefundReport {

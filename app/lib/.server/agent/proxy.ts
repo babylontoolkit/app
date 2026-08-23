@@ -44,7 +44,7 @@ import type { TurnOutcomeFacts } from '~/lib/agent/turn-outcome';
 import { createFileTools } from './file-tools';
 import { createPreviewTools, type PreviewToolCallEvent } from './preview-tools';
 import { resolveAgentBudgets } from './budgets';
-import { buildFileManifest, renderFileManifest } from '~/lib/context/file-manifest';
+import { buildFileManifestWithCollapses, renderFileManifest } from '~/lib/context/file-manifest';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
 import type { IProviderSetting } from '~/types/model';
@@ -98,7 +98,18 @@ import { getObjectStore } from '~/lib/.server/storage';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
 import { cancelGenerationToolCalls } from './mcp-relay';
 import { effortForTurn } from './effort-policy';
-import { canDisableThinking, parseUserEffort } from '~/lib/modules/llm/capabilities';
+import { computeRequestFingerprint, type RequestFingerprint, type RequestKind } from './request-fingerprint';
+import {
+  checkFirstBuildManifest,
+  checkHandoffRecorded,
+  checkManifestShrink,
+  checkNoDuplicatePaths,
+  checkNoFileBodies,
+  REQUEST_INTEGRITY_RATE_CONFIG,
+  reportIntegrity,
+  type InvariantViolation,
+} from './request-invariants';
+import { canDisableThinking, parseUserEffort, supportsAdaptiveThinking } from '~/lib/modules/llm/capabilities';
 import type { LanguageModelV1 } from 'ai';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import {
@@ -120,7 +131,7 @@ import {
 import { buildProjectNotes, type GameBackendState } from './project-notes';
 import { discussModeNote } from './discuss-note';
 import { getMonitor, FUNNEL_EVENTS, ALERT_SIGNALS } from '~/lib/.server/monitoring';
-import { sharedFailureRate } from '~/lib/.server/monitoring/failure-rate';
+import { sharedFailureRate, sharedRateWindow } from '~/lib/.server/monitoring/failure-rate';
 import { recordRefundOutcome, recordRescueMarkers } from '~/lib/.server/monitoring/paid-path-rates';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep } from './step-usage';
@@ -135,30 +146,35 @@ const logger = createScopedLogger('agent-proxy');
 export const MAX_REPAIR_TURNS = 2;
 
 /**
- * Prompt-cache breakpoints (SPEC §4.2.8). Anthropic permits four, and we spend all four:
+ * Prompt-cache breakpoints (SPEC §4.2.8). Anthropic permits four. WHICH blocks carry one:
  *
- *   1. the base prompt                                  (byte-identical globally — the warmed block)
- *   2. the STARTER framework files                      (byte-identical per template pin, 2026-07-30)
- *   3. routed doc blocks + skills, sharing ONE breakpoint (append-only per conversation)
- *   4. the game-code files                              (the one entry that changes every build turn)
+ *   - the base prompt                                (byte-identical globally — the warmed block)
+ *   - the file MANIFEST                              (one entry, sorted, ~704 tokens)
+ *   - the carried references OR the skills block     (mutually exclusive — never both)
  *
- * The 2026-07-30 restructure (`spec/context-budget.md` §"shared-starter prefix restructure", built
- * after 66 real generations measured 82% of ALL spend as cache writes): the file context used to be
- * ONE entry, so every build turn re-wrote the starter's never-edited framework zones at 2× to cache
- * the handful of game files that actually changed. The split (`~/lib/context/stable-zones.ts`) puts
- * the stable half AHEAD of the per-conversation blocks — identical bytes for every project on a pin,
- * so it warms across projects the way the base prompt does — and leaves a small game-code entry as
- * the only per-turn write. Paying for the fifth position: doc blocks and skills MERGED into one
- * breakpoint region (either changes → both rewrite; both are append-only and small, so that is the
- * cheap corner to give up).
+ * 🔴 **HOW MANY THAT COMES TO IS NOT WRITTEN HERE, AND THAT IS THE POINT.** This comment has stated
+ * the count twice and been wrong both times, in opposite directions:
  *
- * ⚠️ **There are none spare, and this list is the reason to believe it.** An earlier version of this
- * comment said the same sentence while naming only base/blocks/skill/files — accurate when written,
- * and then the pre-loaded-skills block was added with a fifth breakpoint and nobody re-counted. Every
- * `/slash` turn that also routed a doc block sent five and the API refused it outright (HTTP 400,
- * "A maximum of 4 blocks with cache_control may be provided. Found 5") — 0 tokens, dead generation.
- * `countCacheBreakpoints` + `cache-breakpoints.spec.ts` now enforce what this comment asserts, because
- * a comment cannot fail. **Adding a fifth means MERGING two of the above, not adding a breakpoint.**
+ *   - It said "we spend all four — there are none spare" while naming base/blocks/skill/files.
+ *     Accurate when written; then the pre-loaded-skills block arrived with a fifth breakpoint and
+ *     nobody re-counted. Every `/slash` turn that also routed a doc block sent five and the API
+ *     refused it outright (HTTP 400, "A maximum of 4 blocks with cache_control may be provided.
+ *     Found 5") — 0 tokens, a dead generation.
+ *   - It then said the same thing for months AFTER the file manifest retired the two-part split,
+ *     by which point the real figure had dropped.
+ *
+ * So: `cache-breakpoints.spec.ts` owns the arithmetic, because that file can FAIL and this one
+ * cannot, and `breakpointCount` is recorded on every request (`request-fingerprint.ts`) so a
+ * regression back over the ceiling is visible before it is an HTTP 400. **Do not restate the count
+ * here — not even a correct one.** A number in this comment is a claim with no way to be checked, and
+ * the two above are what that costs.
+ *
+ * ⚠️ HISTORICAL, and superseded: the 2026-07-30 restructure split the file context into a starter
+ * half and a game-code half (`spec/context-budget.md` §"shared-starter prefix restructure", built
+ * after 66 real generations measured 82% of ALL spend as cache writes), paying for the extra position
+ * by MERGING docs and skills onto one breakpoint. The manifest made the split unnecessary — see the
+ * tombstone at the `# Project files` block below — so that shape is a record of what happened, not a
+ * description of what runs.
  *
  * **The TTL is the whole point.** The default `ephemeral` tier expires after 5 MINUTES, and an app
  * builder is exactly the workload that defeats it: the user generates a game, then spends several
@@ -221,6 +237,15 @@ export interface AgentRequest {
   messages: Message[];
   files?: FileMap;
   chatId?: string;
+
+  /**
+   * The client replaced this project's whole file tree since the last turn (§4.13a).
+   *
+   * Suppresses INV-3(b)'s manifest-shrink signal for exactly one turn, because a branch switch
+   * legitimately produces that shape on every use. Read as `=== true` rather than trusted as a
+   * boolean: it arrives in a browser body, and the only thing it can do is make a signal quieter.
+   */
+  treeReplaced?: boolean;
 
   /**
    * The authenticated user. Resolved by the ROUTE, never by the client (§4.5.3) — the ledger is keyed
@@ -1152,8 +1177,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * `bt-landing → bt-design` would be a second copy of a fact authored elsewhere.
    *
    * Rides in `skillBlocks` below, i.e. the SAME merged breakpoint as the invoked skill and the carried
-   * ones — never its own, or a `/slash` turn that also carries a skill would be the fifth
-   * `cache_control` block and a hard HTTP 400 (`MAX_CACHE_BREAKPOINTS`).
+   * ones — never its own. A breakpoint of its own would push a `/slash` turn that also carries a
+   * skill toward the ceiling, and the budget is `MAX_CACHE_BREAKPOINTS`'s to enforce rather than this
+   * comment's to predict — see `CACHE_CONTROL` above, where stating the count has been wrong twice.
    */
   const dependencies = await loadSkillBodies(
     skillDependencyNames({
@@ -1212,6 +1238,38 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * sorted, on one breakpoint. Do not reintroduce the split "for cache reasons": at this size the
    * split costs more in breakpoints than it can ever save in bytes.
    */
+  /*
+   * Built ONCE and shared with the fingerprint below. Two `buildFileManifest` calls would be two
+   * answers to "what was the model shown", and the whole point of the fingerprint is that there is
+   * exactly one.
+   */
+  const { entries: fileManifest, collapsed: manifestCollapses } = buildFileManifestWithCollapses(projectFiles);
+
+  /**
+   * The manifest invariants — computed ONCE, because the manifest does not change between a turn's
+   * re-issues, and collected rather than acted on (see `integrityIssues`).
+   *
+   * ⚠️ INV-3(a) is deliberately NOT given a `scaffoldedClassPath`: the class's name is a client-side
+   * fact (`create-project.ts` derives it from the project title) and the server is never told it. So
+   * what is checked here is the FRAMEWORK sentinel — which is the file that was actually missing in
+   * the incident this exists for. A heuristic stand-in ("no `src/scripts/` file") was tried and
+   * rejected because it fires on every legitimately imported or remixed project (edge case 7), and a
+   * check that is wrong on a routine operation mutes the channel in week one.
+   */
+  const manifestViolations = [
+    checkNoDuplicatePaths(manifestCollapses),
+    checkFirstBuildManifest({ isFirstBuildTurn, entries: fileManifest }),
+
+    /*
+     * `treeReplaced` (§4.13a): the client swapped the whole tree on purpose — a branch switch, a
+     * discard, a pull. That is INV-3(b)'s exact shape and it is correct, so the check re-baselines and
+     * reports nothing. It is the ONE field on this request a browser may assert about our own
+     * bookkeeping, and it is safe for a narrow reason: it can only make a SIGNAL quieter. It spends
+     * nothing, selects nothing, and reaches no file.
+     */
+    checkManifestShrink(request.chatId, fileManifest.length, { treeReplaced: request.treeReplaced === true }),
+  ].filter((v): v is InvariantViolation => v !== null);
+
   if (Object.keys(projectFiles).length > 0) {
     system.push({
       role: 'system',
@@ -1220,7 +1278,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         'Every file in the project, with its size in bytes. Call `read_file` for the ones you need ' +
         "before you change them — do not guess at a file's contents, and do not assume a path that is " +
         'not listed here exists. Files marked [binary] or [opaque] cannot be read and never need to be.\n\n' +
-        renderFileManifest(buildFileManifest(projectFiles)),
+        renderFileManifest(fileManifest),
       providerOptions: CACHE_CONTROL,
     });
   }
@@ -1826,7 +1884,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /*
    * COMPACT THE HISTORY before it goes on the wire (§4.2.8, `llm/history.ts`).
    *
-   * The conversation is UNCACHED — all four cache breakpoints are on the system blocks, and the
+   * The conversation is UNCACHED — every cache breakpoint is on the system blocks, and the
    * messages come after them — so every byte of every previous turn is re-sent at FULL input rate on
    * every turn, forever, and the bill grows with the length of the session.
    *
@@ -1941,6 +1999,27 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const stepLog: NonNullable<GenerationRecord['steps']> = [];
 
   /**
+   * One entry per stream start, IN ORDER — a turn that re-issues produces two or more.
+   *
+   * Ordered and never collapsed: a forced continuation is a second, materially different request
+   * (different tool set, different system array, an appended synthetic user message), and folding it
+   * into the first loses exactly the fact this record exists to expose.
+   */
+  const requests: RequestFingerprint[] = [];
+
+  /**
+   * What was wrong with the requests this turn assembled (`request-invariants.ts`).
+   *
+   * 🔴 Accumulated, never thrown from here. A violation NEVER fails a generation in production
+   * (§4.2 step 2a): the defect costs tokens, a guard that kills the turn costs the turn. It is
+   * reported once at the end and persisted on the record.
+   *
+   * Seeded with the per-turn manifest findings, which are computed with the manifest itself because
+   * they do not change between a turn's re-issues.
+   */
+  const integrityIssues: InvariantViolation[] = [...manifestViolations];
+
+  /**
    * `toolsOverride` exists for ONE caller: the tool-free retry.
    *
    * Everywhere else the tool set must keep travelling even when calls are forbidden — Anthropic
@@ -1950,17 +2029,89 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * the point: a model that can SEE `generate_image` but may not call it tells the user it is missing.
    */
   const startStream = (
+    kind: RequestKind,
     history: CoreMessage[],
     allowTools: boolean,
     toolsOverride?: SkillTools,
     modelOverride?: LanguageModelV1,
   ) => {
     const activeTools = toolsOverride ?? tools;
+    const toolChoice = allowTools ? 'auto' : Object.keys(activeTools).length > 0 ? 'none' : undefined;
+    const maxSteps = allowTools ? toolPolicy.maxSteps : 1;
+
+    /*
+     * ⚠️ HOISTED, like `toolChoice` and `maxSteps` above, and for the same reason: a literal repeated
+     * between the record and the wire is two writers for one fact. Change one and the fingerprint
+     * describes a request that was never sent — true, self-consistent, and about nothing — with
+     * nothing turning red, in the one module whose entire purpose is that the two agree.
+     */
+    const maxTokens = 64_000;
+
+    /*
+     * 🔴 THE RECORD OF WHAT WE ACTUALLY SENT (§4.2 step 2a, `request-fingerprint.ts`).
+     *
+     * Computed HERE and nowhere else, because this closure is the only place the assembled `system`
+     * and `coreMessages` meet — and, more to the point, the only place that sees the RE-ISSUES. The
+     * tool-free retry, the forced continuation, the rescue and the completeness pass each splice in
+     * synthetic system and user messages (the same-as-first retry does not — it re-sends byte-identical
+     * arrays, though its `thinkingMode` still differs on the final retry — see `retryThinkingMode`),
+     * and until now no persisted record said what any of them SENT.
+     *
+     * ⚠️ Narrowly: `finish_reason` has named WHICH re-issue ran since migration 0002. What nothing
+     * carried is the request itself.
+     *
+     * Strictly AFTER assembly and strictly READ-ONLY: it hashes the arrays and mutates nothing, so it
+     * cannot perturb a byte of the cached prefix. A verifier that moved the cache would cost more
+     * than the defects it watches for (§4.2.8).
+     */
+    requests.push(
+      computeRequestFingerprint({
+        kind,
+        messages: history,
+        toolNames: Object.keys(activeTools),
+        toolChoice: toolChoice ?? 'omitted',
+        maxSteps,
+        maxTokens,
+        model,
+        provider: config.provider,
+        effort,
+
+        /*
+         * TWO ways thinking ends up off, and recording only one of them is a fingerprint that lies.
+         *
+         * `modelOverride` is passed for exactly ONE reason — the last-resort attempt's
+         * thinking-disabled instance (`retryThinkingMode`), which is only constructed when thinking is
+         * genuinely being switched off. That direction is an equivalence, not an inference, and the
+         * model ID is unchanged by it, which is why `model` above is the plain id.
+         *
+         * ⚠️ The CONVERSE does not hold, and assuming it did was wrong: `thinkingFetch` early-returns
+         * on a model outside `supportsAdaptiveThinking`, so no `thinking` field and no
+         * `output_config.effort` are sent at all. `MODELS_WITHOUT_ADAPTIVE_THINKING` is an OPEN set in
+         * both directions (§4.2a: `claude-haiku-4-5`, a 2025 model, dropped it), and `LLM_MODEL` is a
+         * config swap — so this is reachable without a code change, and recording `'adaptive'` there
+         * would put a thinking mode in the record that never reached the wire.
+         */
+        thinkingMode: modelOverride || !supportsAdaptiveThinking(model) ? 'disabled' : 'adaptive',
+        manifest: fileManifest,
+      }),
+    );
+
+    /*
+     * INV-2 runs PER ASSEMBLY, not once per turn, because each re-issue builds a different array —
+     * the continuation and the rescue splice in `stripReplayedReasoning((await first.response)
+     * .messages)`, i.e. content that never went through `compactHistory` at all. Checking only the
+     * first request would inspect the one array nobody was ever worried about.
+     */
+    const bodies = checkNoFileBodies(history);
+
+    if (bodies) {
+      integrityIssues.push({ ...bodies, detail: `[${kind}] ${bodies.detail}` });
+    }
 
     return _streamText({
       model: modelOverride ?? modelInstance,
       messages: history,
-      maxTokens: 64_000,
+      maxTokens,
       tools: activeTools,
 
       onStepFinish: (step) => {
@@ -2052,7 +2203,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * With an EMPTY tool set there is nothing to forbid, and sending `'none'` alongside no tools is a
        * malformed request — so the field is omitted entirely on that path.
        */
-      toolChoice: allowTools ? 'auto' : Object.keys(activeTools).length > 0 ? 'none' : undefined,
+      toolChoice,
 
       /*
        * +1 for the ANSWER step. `maxSteps` counts every LLM round trip, tool calls included, so
@@ -2061,7 +2212,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * everything else the full `MAX_TOOL_ROUNDS + 1`. The forced continuation passes `allow: false`,
        * which must always mean exactly one step.
        */
-      maxSteps: allowTools ? toolPolicy.maxSteps : 1,
+      maxSteps,
     });
   };
 
@@ -2307,7 +2458,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * call, one answer, no round trips (§4.4b). `tool-policy.ts` decides; skill tools are never
        * offered on creation, so the model cannot abandon its draft to go load skills.
        */
-      let first = startStream([...system, ...coreMessages], allowTools);
+      let first = startStream('first', [...system, ...coreMessages], allowTools);
 
       /*
        * BOUNDED RETRIES, and only while the provider has broken before producing anything
@@ -2412,9 +2563,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
            * adaptive attempts are a dice roll against that window; disabling thinking is not — the model
            * starts emitting text immediately, so the stream can never go quiet long enough to be killed.
            *
-           * Scoped to the FINAL attempt on purpose (`retryThinkingMode`): attempts 1 and 2 are unchanged,
-           * so the reasoning text a good backend gives us is never sacrificed on a healthy generation.
-           * The turn that loses thinking is one the silent think had already killed twice.
+           * Scoped to the end of the ladder on purpose (`retryThinkingMode`), so the reasoning text a
+           * good backend gives us is never sacrificed on a healthy generation: a turn that loses
+           * thinking is one the silent think had already killed.
+           *
+           * ⚠️ `attempt` is the 0-based index of the attempt that just FAILED, so `attempt + 1` is the
+           * 1-based number of the retry about to run — the unit `retryThinkingMode` takes. Those two
+           * disagreed until 2026-08-21 (a 0-based reader against a 1-based caller), which silently
+           * disabled thinking on the last TWO retries; `retry-policy.spec.ts` pins this sequence now,
+           * not just the function, because a function-only spec cannot see a caller with wrong units.
            *
            * ⚠️ CLAMPED. Fable 5 rejects `{type:'disabled'}` outright and Opus 5 rejects it above `high`,
            * so an unclamped override would trade a timeout for a hard 400 on the attempt that has already
@@ -2446,8 +2603,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
            */
           first =
             toolMode === 'same-as-first'
-              ? startStream([...system, ...coreMessages], allowTools, undefined, lastResortModel)
-              : startStream([...system, ...alreadyStarted, ...coreMessages], false, {} as SkillTools, lastResortModel);
+              ? startStream('provider-retry', [...system, ...coreMessages], allowTools, undefined, lastResortModel)
+              : startStream(
+                  'provider-retry-tool-free',
+                  [...system, ...alreadyStarted, ...coreMessages],
+                  false,
+                  {} as SkillTools,
+                  lastResortModel,
+                );
         }
       }
 
@@ -2474,6 +2637,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         const priorMessages = stripReplayedReasoning((await first.response).messages);
 
         const continuation = startStream(
+          'forced-continuation',
           [
             ...system,
             ...coreMessages,
@@ -2561,6 +2725,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         const priorMessages = stripReplayedReasoning((await first.response).messages);
 
         const rescue = startStream(
+          'unproductive-rescue',
           [...system, ...coreMessages, ...priorMessages, { role: 'user', content: UNPRODUCTIVE_RESCUE_PROMPT }],
           false,
         );
@@ -2606,6 +2771,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         const priorMessages = stripReplayedReasoning((await first.response).messages);
 
         const completion = startStream(
+          'creation-completeness',
           [...system, ...coreMessages, ...priorMessages, { role: 'user', content: CREATION_COMPLETION_PROMPT }],
           false,
         );
@@ -2821,6 +2987,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       }
 
       /*
+       * INV-4 — a handoff that HAPPENED reached the record.
+       *
+       * §4.2a's fallback swaps the serving model mid-stream while the turn still bills at the
+       * REQUESTED model's rates, and `fallbackHandoffs` is what keeps that visible. Until migration
+       * 0023 it had no column, so on the backend that bills real money it did not. This is the check
+       * that the two agree — and a handoff is NOT itself a violation, only losing one is.
+       */
+      const observedHandoffs = fallbackHandoffs.map((h) => `${h.from}→${h.to}`);
+      const recordedHandoffs = observedHandoffs.length ? observedHandoffs : undefined;
+
+      /*
        * Tell the cache warmer that ORGANIC traffic just warmed the shared prefix. Its next cycle then
        * no-ops instead of paying a read to discover what this generation already did — which is what
        * makes the warmer's steady-state cost proportional to how QUIET the platform is, rather than a
@@ -2838,7 +3015,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * points at it). Everything the anchor could not know until the generation was over lands here:
        * which skills fired, which doc snapshot answered, where the time actually went.
        */
-      await getGenerationLog(request.context).record({
+      const generationRow: Parameters<ReturnType<typeof getGenerationLog>['record']>[0] = {
         id: generationId,
         chatId: request.chatId,
         userId: user.id,
@@ -2906,8 +3083,70 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          * turn still BILLS at the requested model's rates (settlement never re-derives the model
          * mid-turn) — this field is what makes that visible instead of silent.
          */
-        fallbackHandoffs: fallbackHandoffs.length ? fallbackHandoffs.map((h) => `${h.from}→${h.to}`) : undefined,
+        fallbackHandoffs: recordedHandoffs,
+
+        /*
+         * 🔴 WHAT WE SENT, beside what it cost — hashes and counts, never bodies (§4.2 step 2a).
+         *
+         * `undefined` when the turn never reached `startStream`, which the column's NULL preserves as
+         * a distinct fact from "a request was assembled and there was nothing wrong with it". Those
+         * are different answers and a reader must be able to tell them apart.
+         */
+        requestFingerprints: requests.length ? requests : undefined,
+      };
+
+      /*
+       * 🔴 INV-4 READS THE PAYLOAD, NOT A LOCAL COPY OF IT.
+       *
+       * `checkHandoffRecorded(observed, recordedHandoffs)` would be `checkHandoffRecorded(x, x)` —
+       * the second argument derived from the first one line above — and therefore incapable of firing
+       * for any input. It has to interrogate the object that is ABOUT TO BE PERSISTED, so that an edit
+       * to the record line below (dropping the field, or writing an empty array) is caught. That is
+       * exactly what this invariant claims to do, and a check that verifies its own copy is the
+       * vacuous-assertion shape this whole feature exists to remove.
+       */
+      const handoffViolation = checkHandoffRecorded(observedHandoffs, generationRow.fallbackHandoffs);
+
+      if (handoffViolation) {
+        integrityIssues.push(handoffViolation);
+      }
+
+      generationRow.integrityIssues = requests.length
+        ? integrityIssues.map((v) => `${v.invariant}: ${v.detail}`)
+        : undefined;
+
+      /*
+       * 🔴 ONE REPORT PER TURN, CALLED BARE — and the absence of a `try/catch` here is deliberate.
+       *
+       * `reportIntegrity` is TOTAL in production: the reporter and the rate window are both wrapped
+       * inside it, so the only thing that can escape is its deliberate test-mode throw. Catching here
+       * would swallow precisely the exception that is supposed to fail a suite, which turns "it throws
+       * under test" into a sentence in a comment with nothing behind it.
+       *
+       * Recorded on EVERY generation, violating or not, because a window fed only failures has no
+       * denominator and its rate is always 1.0 — the same rule the failure-rate call below follows.
+       * It runs inside the settlement `finally`, so a Stop and a failed turn are sampled too.
+       */
+      reportIntegrity(integrityIssues, {
+        reporter: {
+          alert: (detail, tags) =>
+            monitor.alert(ALERT_SIGNALS.REQUEST_INTEGRITY, detail, {
+              severity: 'warning',
+              scope: 'request-integrity',
+              tags,
+            }),
+        },
+        tags: { generationId, model, provider: config.provider ?? 'unknown' },
+
+        /*
+         * Its OWN config — the shared default's 50%-of-20 threshold silences every incident this
+         * signal was built for (`REQUEST_INTEGRITY_RATE_CONFIG`). `sharedRateWindow` fixes a window's
+         * config on FIRST use, so this must stay the only creator of the `'request-integrity'` one.
+         */
+        window: sharedRateWindow('request-integrity', REQUEST_INTEGRITY_RATE_CONFIG),
       });
+
+      await getGenerationLog(request.context).record(generationRow);
 
       /*
        * A PAID generation must leave a record even if the browser never saves one (§4.5.6).

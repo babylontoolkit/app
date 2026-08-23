@@ -368,3 +368,128 @@ export function shouldWarnBeforeUnload(facts: {
 }): boolean {
   return facts.unsavedWork && facts.generationCount > 0 && !facts.recoverable;
 }
+
+/* ------------------------------------------------------------------ branches (§4.13a) */
+
+/**
+ * What the Branch menu says, and what it will not let you press.
+ *
+ * A sibling of {@link describeSaveStatus}, and here for the same reason: **every user-facing string
+ * about branches comes from a tested function, never invented in a component.** The two things this
+ * buys are the two things the header keeps getting wrong — the git-jargon sweep can only cover words
+ * it can reach, and a control that is dead for a reason is only honest if the reason travels with it.
+ */
+export interface BranchStateFacts {
+  /** The project has a complete link tuple (§4.5.4b). Everything here is unavailable without one. */
+  linked: boolean;
+
+  /** The branch the project is on. Absent while the status has not loaded. */
+  branch?: string;
+
+  /** The repository's default branch, READ from the provider — never guessed. */
+  defaultBranch?: string;
+
+  /** Where the code lives, for the copy. */
+  provider?: 'github' | 'gitlab';
+
+  /** The commit the platform last agreed with. Absent = linked but never pushed. */
+  lastSyncedCommitSha?: string;
+}
+
+export interface BranchStateView {
+  /**
+   * The submenu's trigger, which IS the read-only current-branch row (requirement 75).
+   *
+   * 🔴 It is not the chip's label. The header row is right-aligned, so a control that grows with
+   * unbounded user-chosen text shoves everything left — measured 16px → 486px when the preview booted
+   * — and truncating was considered and rejected, because `feature/boost-…` is ambiguous between
+   * exactly the branches a user is most likely to confuse.
+   */
+  triggerLabel: string;
+
+  /** Why the group is unavailable, or `undefined` when it is. Never an empty menu with dead rows. */
+  unavailableReason?: string;
+
+  /**
+   * May we offer to open a pull request on the provider's site?
+   *
+   * ⚠️ The FIELD keeps the neutral name; the LABEL says "Open a pull request" (owner, 2026-08-22).
+   * Deliberate: GitLab calls the same thing a merge request, so the field describes the capability
+   * and the component chooses the word. Renaming this to match one provider's vocabulary would make
+   * the GitLab case read as a bug in the code rather than as a choice in the copy.
+   */
+  canOpenChangeRequest: boolean;
+
+  /** The confirmation body for Discard. Names the branch, and says the change is recoverable. */
+  discardWarning: string;
+
+  /**
+   * The confirmation body for Delete.
+   *
+   * ⚠️ It states plainly that the platform cannot bring the branch back. It is the ONE operation in
+   * this feature with no undo — a checkpoint is a snapshot of FILES and cannot restore a remote ref —
+   * and a destructive dialog that implies the usual safety net is worse than no dialog.
+   */
+  deleteWarning: string;
+}
+
+export function describeBranchState(facts: BranchStateFacts): BranchStateView {
+  const where = facts.provider === 'gitlab' ? 'GitLab' : 'GitHub';
+  const branch = facts.branch;
+
+  /*
+   * The trigger has to say something before the status loads, and "Branch" alone would read as a
+   * button rather than as the answer to "which branch am I on?". Naming the unloaded state is honest
+   * and momentary.
+   */
+  const triggerLabel = branch ? `Branch: ${branch}` : 'Branch';
+
+  if (!facts.linked) {
+    return {
+      triggerLabel: 'Branch',
+
+      /*
+       * EXPLAINED AND UNAVAILABLE, never dead items. A greyed row with no reason is indistinguishable
+       * from a broken one, and the fix is one action away — so the sentence names it.
+       */
+      unavailableReason: `Save this project to ${where} first — branches live in your repository.`,
+      canOpenChangeRequest: false,
+      discardWarning: '',
+      deleteWarning: '',
+    };
+  }
+
+  return {
+    triggerLabel,
+    canOpenChangeRequest: canOfferChangeRequest(facts),
+    discardWarning:
+      `This replaces every file in the project with the version saved to ${branch ?? 'your repository'}. ` +
+      'Your current files are checkpointed first, so you can undo it.',
+    deleteWarning:
+      'Deleting a branch happens in your repository, and we cannot bring it back. ' +
+      'Any work that is only on that branch is gone.',
+  };
+}
+
+/**
+ * May the "Open a pull request" item be offered?
+ *
+ * 🔴 Offered only when it can WORK. Both refusals produce an empty compare page on the provider's own
+ * site, which reads as our button being broken rather than as the state it actually reflects.
+ *
+ * ⚠️ Duplicated in shape by `canOpenPullRequest` in `~/lib/git/provider-urls`, which is the one the
+ * URL builder uses — and that is deliberate, not drift: this module is client-safe COPY and that one
+ * is client-safe LINK BUILDING, and making either import the other drags one concern into the other's
+ * bundle for a three-line predicate. They are pinned against each other by a spec that drives both.
+ */
+function canOfferChangeRequest(facts: BranchStateFacts): boolean {
+  if (!facts.branch) {
+    return false;
+  }
+
+  if (facts.defaultBranch && facts.branch === facts.defaultBranch) {
+    return false;
+  }
+
+  return Boolean(facts.lastSyncedCommitSha);
+}

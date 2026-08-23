@@ -50,7 +50,6 @@ import {
   saveMessages,
   saveProjectToRepo,
   saveWorkingCopy,
-  type RepoStatus,
 } from './projects';
 import { withinWorkingCopyBudget } from './working-copy-size';
 import {
@@ -60,13 +59,15 @@ import {
   readCurrentLocalSnapshot,
   type LocalSyncState,
 } from './local-snapshots';
-import { decideLiveSandboxIsTruth, selectMountSource, type MountSource } from './mount-source';
+import { decideLiveSandboxIsTruth, selectMountSource, workingCopyRanks, type MountSource } from './mount-source';
+import { repoStatus } from './repo-status';
 import { detectUnappliedTurn, resolvedUnappliedTurn } from './unapplied-turn';
 import { applyTranscriptArtifact } from './apply-artifact';
 import { protectForRepoRestore, protectNothing } from './restore-plan';
 import { hasRestorableHistory, markAsTranscript } from './transcript';
 import { devScriptFromManifest, findManifest } from './dependencies';
 import { ensureProjectRunnable, type EnsureRunnableOutcome } from './ensure-runnable';
+import { onRunnableStep, sharedRunnableRun, type RunnableStep } from './runnable-run';
 import { awaitRunningPreview } from './port-settle';
 import { awaitShellAttached } from './shell-attach';
 import { SaveQueue, saveState } from './save-queue';
@@ -80,8 +81,8 @@ import {
   type SettleResult,
 } from '~/lib/registry/settle';
 import { identityForMount } from './mount-identity';
-import { runCheckpointSerialize, CHECKPOINT_SETTLE_TIMEOUT_MS } from './checkpoint-run';
-import { waitForActionsSettled } from '~/lib/runtime/actions-settled';
+import { runCheckpointSerialize } from './checkpoint-run';
+import { waitForWorkbenchActionsSettled } from './workbench-settle';
 import { slugForChat } from './chat-slug';
 import { createScopedLogger } from '~/utils/logger';
 import { createSingleFlight } from '~/utils/single-flight';
@@ -187,8 +188,14 @@ function startImportTail(): void {
  */
 export const unsavedWork = atom<boolean>(false);
 
-/** The project's repo link, as of the last time we looked. `undefined` = not loaded yet. */
-export const repoStatus = atom<RepoStatus | undefined>(undefined);
+/**
+ * The project's repo link, as of the last time we looked. `undefined` = not loaded yet.
+ *
+ * ⚠️ RE-EXPORTED, not declared here — it lives in `repo-status.ts` so `projects.ts` can read it too
+ * without an import cycle. See that module: while it was declared here, the branch stamp on the
+ * working copy was silently absent on the most frequent writer in the product.
+ */
+export { repoStatus };
 
 /** The repo moved AND this browser has unsaved work. The user must choose (§4.13) — we never merge. */
 export const mountDivergence = atom<{ projectId: string; remoteHead: string } | undefined>(undefined);
@@ -546,9 +553,34 @@ async function doMountProjectFiles(pid: string, _opts: MountOptions = {}): Promi
     syncedSeq: sync.syncedSeq,
     hasServerSeed: undefined,
     hasWorkingCopy: Boolean(working),
+
+    /*
+     * The branch stamp (§4.13a T17). `working.branch` is absent on any copy written before the field
+     * existed, and that stays UNKNOWN — never a match — so old copies behave exactly as they did.
+     */
+    workingCopyBranch: working?.branch,
+    linkedBranch: status.branch,
   });
 
   logger.info(`Mounting project ${pid} from: ${decision.source}`);
+
+  /*
+   * 🔴 A DEGRADED CAPABILITY REPORTS OFF, AND SAYS SO (`spec/fail-loud.md` rule 2).
+   *
+   * If a recovery copy exists but its branch stamp disagrees with the project's, it was not used. That
+   * is the right call — restoring it would replace the user's files with another branch's — but a
+   * recovery that silently does not happen is indistinguishable from one that was never available,
+   * which is the whole failure class this rule is written against. Logged rather than toasted: it is
+   * reachable only on a fresh browser with an unreachable remote, and the user in that state is
+   * already being shown an empty project, which is the honest outcome.
+   */
+  if (working) {
+    const verdict = workingCopyRanks({ workingCopyBranch: working.branch, linkedBranch: status.branch });
+
+    if (!verdict.ranks) {
+      logger.warn(`Recovery copy for ${pid} was not used: ${verdict.reason}`);
+    }
+  }
 
   /*
    * 🔴 THE BOOT IS PER PROJECT, AND THIS IS WHERE THE PROJECT ID FINALLY EXISTS.
@@ -793,13 +825,14 @@ async function mountFromRepo(pid: string): Promise<void> {
  * finished run is not remembered — re-opening a project that turns out not to be serving must be able
  * to fix it, and the `already-running` check makes that free.
  */
-let runnableInFlight: Promise<void> | undefined;
-
-function ensureRunnableOnce(pid: string): Promise<void> {
-  if (runnableInFlight) {
-    return runnableInFlight;
-  }
-
+/**
+ * Run the install/serve sequence, narrating through `emit`.
+ *
+ * Split out of the two entry points below so the WORK is written once: `ensureRunnableOnce` and
+ * `ensureRunnableNow` differ only in whether they wait for it, and a second copy of this body is how
+ * the two would drift into installing different things.
+ */
+function runProjectRunnable(pid: string, emit: (step: RunnableStep) => void): Promise<EnsureRunnableOutcome> {
   /**
    * The install is narrated by a TOAST, exactly as it was before this rewrite.
    *
@@ -811,7 +844,7 @@ function ensureRunnableOnce(pid: string): Promise<void> {
    */
   let installToast: ReturnType<typeof toast.loading> | undefined;
 
-  const run = (async () => {
+  const run = (async (): Promise<EnsureRunnableOutcome> => {
     try {
       /*
        * A sandbox that OUTLIVES the session (CodeSandbox) replays its ports asynchronously, so "is
@@ -826,7 +859,13 @@ function ensureRunnableOnce(pid: string): Promise<void> {
         });
 
         if (serving) {
-          return;
+          /*
+           * Already serving — nothing to install and nothing to start. Reported as the outcome the
+           * rest of the sequence would have produced, rather than as a bare `return`: a caller that
+           * is holding a splash over this (§4.13a) has to be able to tell "the work is done" from
+           * "the work never ran", and both used to look like `undefined` here.
+           */
+          return 'already-running';
         }
       }
 
@@ -864,6 +903,13 @@ function ensureRunnableOnce(pid: string): Promise<void> {
          * must never write to it.
          */
         onStep: (step) => {
+          /*
+           * Broadcast FIRST, then decide whether to toast. The toast is this door's own narration;
+           * the broadcast is how a door that is showing a splash (a branch switch) hears the same
+           * steps without either of them knowing about the other.
+           */
+          emit(step);
+
           if (step === 'installing') {
             installToast = toast.loading('Getting this project ready — installing its dependencies…');
           }
@@ -886,11 +932,21 @@ function ensureRunnableOnce(pid: string): Promise<void> {
 
       // Any other outcome already reported through `onProblem`, or has nothing to say (no dev script).
       dismissInstallToast();
+
+      return outcome;
     } catch (error) {
       dismissInstallToast();
       logger.error('Could not make the mounted project runnable', error);
-    } finally {
-      runnableInFlight = undefined;
+
+      /*
+       * ⚠️ RETHROWN, not swallowed into a plausible outcome. The mount's entry point swallows it (it
+       * never waits and has nothing to do with it), but a caller that is HOLDING A SPLASH over this
+       * needs to know the difference between "the install reported a problem" — which
+       * `EnsureRunnableOutcome` already names, and which is not fatal to a branch switch — and "the
+       * whole sequence blew up". Returning `install-failed` here would make those indistinguishable
+       * and would be a claim about which step failed that nothing checked.
+       */
+      throw error;
     }
   })();
 
@@ -901,13 +957,46 @@ function ensureRunnableOnce(pid: string): Promise<void> {
     }
   }
 
-  runnableInFlight = run;
+  return run;
+}
 
+/**
+ * The MOUNT's entry point: start the work and return immediately.
+ *
+ * 🔴 Resolves without waiting, deliberately — see `runnable-run.ts`. The install needs the agent's
+ * shell, and the shell does not exist until the workbench renders, which does not happen until this
+ * mount resolves. Awaiting here waits for something that cannot happen until we return.
+ */
+function ensureRunnableOnce(pid: string): Promise<void> {
   /*
-   * Deliberately NOT awaited by the mount — see the doc above. The returned promise exists so a caller
-   * that genuinely wants to wait (a test) can, and so concurrent callers share one run.
+   * The rejection is swallowed HERE rather than inside the run, because this caller never looks at
+   * the result: an unhandled rejection on a promise nobody awaits is a console error on every failed
+   * install. `ensureRunnableNow` gets the real thing.
    */
+  void sharedRunnableRun((emit) => runProjectRunnable(pid, emit)).catch(() => undefined);
+
   return Promise.resolve();
+}
+
+/**
+ * A door that IS holding a splash over this — the branch switch, the discard, the pull (§4.13a).
+ *
+ * Returns the real run, shares the single-flight with the mount's detached call, and narrates through
+ * `onStep` so the caller can raise its own phases. It writes NO `bootProgress` itself: the phase
+ * belongs to whoever can guarantee it comes down.
+ *
+ * ⚠️ It REJECTS when the sequence blows up. The caller is showing a full-page cover, so it owns the
+ * decision between "report a failure surface" and "take the cover down and carry on" — a project
+ * whose files landed correctly and whose install failed is not a failed switch, and this function is
+ * not the place to decide that.
+ */
+export function ensureRunnableNow(
+  pid: string,
+  options: { onStep?: (step: RunnableStep) => void } = {},
+): Promise<EnsureRunnableOutcome> {
+  const stop = options.onStep ? onRunnableStep(options.onStep) : undefined;
+
+  return sharedRunnableRun((emit) => runProjectRunnable(pid, emit)).finally(() => stop?.());
 }
 
 /**
@@ -2002,17 +2091,9 @@ ${value.content}
        */
       const outcome = await runCheckpointSerialize({
         serialize: () => workbenchStore.serializeFiles({ strict: true }),
-        waitForWrites: () =>
-          waitForActionsSettled({
-            readStatuses: () =>
-              Object.values(workbenchStore.artifacts.get()).flatMap((artifact) =>
-                Object.values(artifact.runner.actions.get())
-                  // The dev server (`start`) runs for the life of the project — waiting on it is the stuck-closed trap.
-                  .filter((action) => action.type !== 'start')
-                  .map((action) => action.status),
-              ),
-            timeoutMs: CHECKPOINT_SETTLE_TIMEOUT_MS,
-          }),
+
+        // One reader, shared with `applyBranchTree`'s strict before-checkpoint (`workbench-settle.ts`).
+        waitForWrites: waitForWorkbenchActionsSettled,
       });
 
       if (outcome.kind !== 'ok') {

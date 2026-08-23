@@ -85,6 +85,22 @@ const OVERLAY_ONLY_PHASES: BootPhase[] = [
    * Same list, same treatment, two independent reasons — so neither is load-bearing for the other.
    */
   { step: 'cloning' },
+
+  /*
+   * The four BRANCH phases (§4.13a). Overlay-only for `cloning`'s reason and not `importing`'s: a
+   * switch, a discard, a pull and a divergence-resolve are all started from a workspace the user is
+   * already looking at, so `ready` is true and there is no full-page `BootScreen` to render into.
+   *
+   * ⚠️ The fixture branch name is `feature/boost-pads` deliberately — a neutral one. The sibling
+   * jargon sweep in `save-status.spec.ts` is a cartesian product over its facts, so a fixture branch
+   * containing `origin`, `pull`, `ref` or `HEAD` fails a test that is checking the COPY and reads as
+   * a code bug. Same discipline here so the two files cannot teach different habits.
+   */
+  { step: 'switching-branch', branch: 'feature/boost-pads' },
+  { step: 'discarding', branch: 'feature/boost-pads' },
+  { step: 'pulling', branch: 'feature/boost-pads' },
+  { step: 'branch-install' },
+  { step: 'branch-serve' },
 ];
 
 /**
@@ -453,5 +469,190 @@ describe('the import flag composes with the phase instead of competing for it', 
   /* The flag is plain state with one writer — and it must start down, or every load opens covered. */
   it('defaults to inactive', () => {
     expect(importTailActive.get()).toBe(false);
+  });
+});
+
+/**
+ * The four BRANCH phases (§4.13a) — the properties the generic sweeps above cannot see.
+ *
+ * Everything before this point is parameterized over `OVERLAY_ONLY_PHASES`, which is exactly what
+ * makes it durable and exactly what makes it blunt: it proves each of the four is covered, is not a
+ * creation, and has *a* distinct title, but it cannot say WHICH phase broke when one regresses, and it
+ * is structurally blind to the one thing that is specific to this pair — that the branch NAME travels
+ * on the phase and comes out the other side in the copy. A set-size assertion reports "17 titles, 18
+ * phases"; the tests below name the phase.
+ */
+describe('the branch phases (§4.13a)', () => {
+  const BRANCH_PHASES = {
+    'switching-branch': (branch: string): BootPhase => ({ step: 'switching-branch', branch }),
+    discarding: (branch: string): BootPhase => ({ step: 'discarding', branch }),
+
+    /*
+     * ⚠️ `pulling` joined LATE (§4.13a T18), and its absence here was found by a review rather than by
+     * a failure: `phaseFor` was a two-arm ternary that routed a Pull to `switching-branch`, so the
+     * user who pressed Sync read "Switching to trunk" full-screen for thirty seconds. The map is the
+     * thing that decides which phases get the name-in-copy assertion, so a phase missing from it is a
+     * phase whose copy nobody checks.
+     */
+    pulling: (branch: string): BootPhase => ({ step: 'pulling', branch }),
+  } as const;
+
+  const BRANCHLESS_PHASES: BootPhase[] = [{ step: 'branch-install' }, { step: 'branch-serve' }];
+
+  /*
+   * 🔴 THE NAME RIDES ON THE PHASE SO THAT IT CAN REACH THE COPY, AND THIS IS THE ONLY TEST OF THAT.
+   *
+   * `bootPhaseCopy` takes the phase and nothing else, so a branch name held anywhere else — a second
+   * atom, a prop on the surface, a closure in the caller — simply cannot appear in the sentence. The
+   * failure is silent and it is the worst one this surface has: "Switching branch" over a workspace
+   * whose every file is about to be replaced, at the last moment the user could have noticed they
+   * picked the wrong one. The copy must name it, and it must name THIS one.
+   */
+  for (const [step, make] of Object.entries(BRANCH_PHASES)) {
+    it(`names the branch in the copy for ${step}`, () => {
+      const copy = bootPhaseCopy(make('feature/boost-pads'));
+
+      expect(`${copy.title} ${copy.detail}`).toContain('feature/boost-pads');
+    });
+
+    /*
+     * The control, and it is not ceremony: `toContain` against one fixture passes just as happily for
+     * a hardcoded sentence that mentions a branch name it never read. Two different names must produce
+     * two different sentences, or the name is decoration rather than data.
+     */
+    it(`CONTROL: a different branch produces different copy for ${step}`, () => {
+      const first = bootPhaseCopy(make('feature/boost-pads'));
+      const second = bootPhaseCopy(make('hotfix/kart-drift'));
+
+      expect(`${second.title} ${second.detail}`).toContain('hotfix/kart-drift');
+      expect(`${second.title} ${second.detail}`).not.toBe(`${first.title} ${first.detail}`);
+    });
+  }
+
+  /*
+   * 🔴 NONE OF THE FOUR IS A CREATION PHASE.
+   *
+   * `isCreationPhase` is a `startsWith('creating-')` NAME test, so the whole rule is "do not name one
+   * of these `creating-anything`" — a one-word edit away at all times, and a tempting one (`branch-`
+   * and `creating-` phases narrate the same kinds of wait). A branch switch that answered `true` here
+   * would inherit the New Project family: the creation handoff card and the §4.4b scaffolding, on a
+   * project that already exists.
+   */
+  it('is never a creation phase', () => {
+    for (const phase of [...BRANCHLESS_PHASES, ...Object.values(BRANCH_PHASES).map((make) => make('x'))]) {
+      expect({ step: phase.step, creation: isCreationPhase(phase) }).toEqual({ step: phase.step, creation: false });
+    }
+  });
+
+  /*
+   * The other direction. Without it the assertion above passes for an `isCreationPhase` that has been
+   * broken into returning `false` for everything — which would take the creation overlay down for the
+   * whole New Project flow while this file reported that the branch phases were fine.
+   */
+  it('CONTROL: isCreationPhase still recognises a real creation phase', () => {
+    expect(isCreationPhase({ step: 'creating-install' })).toBe(true);
+  });
+
+  /*
+   * The distinct-title sweep above already fails if one of these `case` arms is deleted — but it fails
+   * as "18 phases, 17 titles", which names nothing. These four name themselves, so deleting a `case`
+   * produces a failure that says which one. Each asserts the title is not the `default` arm's fallback
+   * AND is about the right thing, because falling through to "Opening project" is the exact regression:
+   * the generic sentence is not wrong-looking, it is just describing work that is not happening.
+   */
+  it('gives switching-branch its own words rather than the default arm', () => {
+    const copy = bootPhaseCopy({ step: 'switching-branch', branch: 'feature/boost-pads' });
+
+    expect(copy.title).not.toBe(bootPhaseCopy({ step: 'idle' }).title);
+    expect(copy.title.toLowerCase()).toContain('switching');
+  });
+
+  it('gives discarding its own words rather than the default arm', () => {
+    const copy = bootPhaseCopy({ step: 'discarding', branch: 'feature/boost-pads' });
+
+    expect(copy.title).not.toBe(bootPhaseCopy({ step: 'idle' }).title);
+
+    /*
+     * "Discarding", not "Switching". The two operations write the same bytes by the same path and are
+     * opposite intentions — one is "go somewhere else", the other is "undo what I did" — so the user
+     * who just pressed the destructive control needs their own word back or they cannot tell whether
+     * they hit the right button.
+     */
+    expect(copy.title.toLowerCase()).toContain('discard');
+    expect(copy.title.toLowerCase()).not.toContain('switching');
+  });
+
+  it('gives branch-install its own words rather than the default arm', () => {
+    const copy = bootPhaseCopy({ step: 'branch-install' });
+
+    expect(copy.title).not.toBe(bootPhaseCopy({ step: 'idle' }).title);
+    expect(copy.title.toLowerCase()).toContain('install');
+
+    /*
+     * And not `creating-install`'s sentence. A user who watched "Installing project dependencies" when
+     * the project was created would read the identical line here as the project being rebuilt from
+     * scratch; this one has to say a step is being REDONE because the files changed.
+     */
+    expect(copy.title).not.toBe(bootPhaseCopy({ step: 'creating-install' }).title);
+  });
+
+  it('gives branch-serve its own words rather than the default arm', () => {
+    const copy = bootPhaseCopy({ step: 'branch-serve' });
+
+    expect(copy.title).not.toBe(bootPhaseCopy({ step: 'idle' }).title);
+    expect(copy.title).not.toBe(bootPhaseCopy({ step: 'creating-serve' }).title);
+    expect(copy.detail.toLowerCase()).toContain('dev server');
+  });
+
+  /*
+   * 🔴 NO PROGRESS BAR ON THE INSTALL — the necessary half, asserted on the phase itself.
+   *
+   * `BootScreen` computes its bar fraction ONLY from `phase.step === 'files'` with `done`/`total`, so a
+   * phase carrying neither field cannot produce one whatever the component does. That is a real
+   * property and it is worth pinning here (it is what stops someone "helpfully" adding a `done`/`total`
+   * to `branch-install` and inventing a bar that fills, reaches the end and keeps spinning — which
+   * converts "slow" into "stuck", the despair this surface exists to prevent).
+   *
+   * ⚠️ It is only the NECESSARY half: it cannot see the component. The sufficient half — that the real
+   * `BootScreen` renders no bar for `branch-install` and DOES for `files` — is driven against the real
+   * component in `app/components/chat/BootScreen.spec.tsx`, because a rule about what a renderer draws
+   * is a fact about the renderer, and re-typing its predicate here would pin this file's memory of it.
+   */
+  it('carries no done/total, so no phase in the family can produce a progress bar', () => {
+    for (const phase of [...BRANCHLESS_PHASES, ...Object.values(BRANCH_PHASES).map((make) => make('x'))]) {
+      const fields = Object.keys(phase);
+
+      expect({ step: phase.step, fields }).toEqual({
+        step: phase.step,
+        fields: fields.filter((field) => field !== 'done' && field !== 'total'),
+      });
+    }
+  });
+
+  /*
+   * They are ORDINARY phases, not terminal ones. `failed` is the only member that survives the mount
+   * path's `finally`; a branch phase that stuck would leave a permanent spinner over a workspace the
+   * user could otherwise be using, on the very path — switch, discard — that is meant to hand control
+   * straight back.
+   */
+  it('endBootPhase clears every branch phase', () => {
+    for (const phase of [...BRANCHLESS_PHASES, ...Object.values(BRANCH_PHASES).map((make) => make('x'))]) {
+      bootProgress.set(phase);
+      endBootPhase();
+      expect({ step: phase.step, after: bootProgress.get() }).toEqual({ step: phase.step, after: { step: 'idle' } });
+    }
+  });
+
+  /*
+   * CONTROL for the clear above: it passes for an `endBootPhase` that clears unconditionally, which
+   * would erase a failure a fraction of a second after the user was given the only explanation they
+   * get. (The main suite pins this too — repeated here so the branch family cannot be "fixed" by
+   * weakening the guard.)
+   */
+  it('CONTROL: endBootPhase still refuses to clear a failure', () => {
+    reportBootFailure({ message: 'Could not read the branch.', retryable: true });
+    endBootPhase();
+    expect(bootProgress.get().step).toBe('failed');
+    bootProgress.set({ step: 'idle' });
   });
 });

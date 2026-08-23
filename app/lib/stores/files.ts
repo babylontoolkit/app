@@ -640,6 +640,39 @@ export class FilesStore {
   }
 
   /**
+   * Forget every recorded deletion (§4.13a).
+   *
+   * 🔴 **`#deletedPaths` is GLOBAL and PERSISTED, and it outlives the tree it describes.** It is
+   * backed by one `localStorage['bolt-deleted-paths']` key that is keyed by neither project nor
+   * branch, and `refreshFiles` honours it as a `skip:` predicate — so a path recorded here is
+   * suppressed from the map *forever*, on every project, whatever is actually on disk.
+   *
+   * That is defensible for its original purpose (a user deleted a file; a reload must not resurrect
+   * it) and false the moment a door REPLACES the whole tree. Two ways it bites a branch switch, and
+   * neither has a natural symptom:
+   *
+   *   - a file the user deleted on branch A is written back by the switch to branch B, and is then
+   *     invisible in the tree while sitting on disk — so it builds, and the editor says it is not
+   *     there;
+   *   - worse, `restoreFiles`' own deletion pass calls `deleteFile`, which RECORDS every path the
+   *     incoming tree does not have. So a single switch permanently suppresses every file unique to
+   *     the branch being left, and switching back shows a project with holes in it.
+   *
+   * Called by the tree-replacing doors, not by `restoreFiles` itself: a checkpoint undo restores a
+   * tree from THIS project's own history, where the user's deletions are part of what is being
+   * restored. "Which deletions still mean something?" is a per-door question, like `protect`.
+   *
+   * ⚠️ The global (not per-project) keying is a PRE-EXISTING defect with a wider blast radius than
+   * this feature — a file deleted in one project is suppressed in another. Recorded in SPEC §10
+   * rather than migrated here, because changing the storage shape is a data migration on a key every
+   * existing browser already holds.
+   */
+  clearDeletedPaths() {
+    this.#deletedPaths.clear();
+    this.#persistDeletedPaths();
+  }
+
+  /**
    * Record a write the ACTION RUNNER has already made to the sandbox FS — map update only, no disk.
    *
    * 🔴 Exists because "on disk is not visible" applies to the PERSISTENCE path too. On WebContainer

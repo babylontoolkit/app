@@ -26,6 +26,8 @@ interface UsageReport {
   visibleTextChars: number;
   charsPerOutputToken: number;
   markers: { forcedContinuation: number; unproductiveRescue: number; providerRetry: number; rescued: number };
+  integrity: { turnsWithViolations: number; byInvariant: Record<string, number>; turnsWithReissues: number };
+  media: { renders: number; creditsCharged: number; rawCostUsd: number };
   byModel: Array<{ model: string; generations: number; rawCostUsd: number }>;
 }
 
@@ -531,6 +533,39 @@ export function AdminTab() {
                 <span>Forced continuation: {report.markers.forcedContinuation}</span>
                 <span>Unproductive rescue: {report.markers.unproductiveRescue}</span>
                 <span>Provider retry: {report.markers.providerRetry}</span>
+              </div>
+            )}
+            {/*
+             * Media spend, beside the generation numbers rather than inside them. `med_*` rows share
+             * the `generations` table but are not model turns, so folding them into the counters above
+             * dilutes every one of them — and excluding them WITHOUT this row made real KIE money
+             * vanish from a section headed "Usage & cost".
+             */}
+            {report.media?.renders > 0 && (
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-bolt-elements-textSecondary">
+                <span>Media renders: {report.media.renders}</span>
+                <span>Media credits: {report.media.creditsCharged.toLocaleString()}</span>
+                <span>Media raw cost: ${report.media.rawCostUsd.toFixed(2)}</span>
+              </div>
+            )}
+            {/*
+             * 🔴 RENDERED WHENEVER THE REPORT CARRIES THE FIELD, not only when something is wrong.
+             *
+             * Hiding a zero makes "the platform is healthy" and "the verifier never ran" look identical
+             * on screen — and this report cannot distinguish "never checked" from "checked and clean"
+             * either, so an operator would have no way to tell. An integrity counter that disappears
+             * when the integrity check is dead is `spec/fail-loud.md` rule 9 one level up: a metric that
+             * reports success on the failure it does not expect.
+             */}
+            {report.integrity && (
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-bolt-elements-textSecondary">
+                <span>Request mismatches: {report.integrity.turnsWithViolations}</span>
+                <span>Turns that re-issued: {report.integrity.turnsWithReissues}</span>
+                {Object.entries(report.integrity.byInvariant).map(([id, count]) => (
+                  <span key={id}>
+                    {id}: {count}
+                  </span>
+                ))}
               </div>
             )}
             {report.byModel.length > 0 && (

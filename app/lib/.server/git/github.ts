@@ -19,11 +19,18 @@ import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import { buildCommitMessage, detectPushDivergence, mapToTreeBlobs } from './sync-logic';
 import {
   GitProviderError,
+  firstLine,
+  namesAnExistingBranch,
+  parseCursor,
+  TOO_MANY_BRANCHES,
+  type BranchSummary,
   type EnsureRepoInput,
   type EnsureRepoResult,
   type FastForwardPushInput,
   type FetchTreeResult,
   type GitProvider,
+  type ListCommitsOptions,
+  type ListCommitsResult,
   type PushResult,
   type RepoRef,
 } from './provider';
@@ -170,6 +177,16 @@ async function mapErrors<T>(fn: () => Promise<T>): Promise<T> {
     throw toGitHubError(error);
   }
 }
+
+/**
+ * Page size for branch listing. GitHub's maximum, so the common repository is one request.
+ *
+ * `MAX_BRANCH_PAGES` is a hard stop, not a policy: a repository with more than this many branches is
+ * pathological, and the alternative to a bound is an unbounded loop driven by a remote server —
+ * `_listTree`'s `maxPages` for the same reason.
+ */
+const BRANCH_PAGE_SIZE = 100;
+const MAX_BRANCH_PAGES = 20;
 
 export class GitHubProvider implements GitProvider {
   readonly id = 'github' as const;
@@ -384,6 +401,196 @@ export class GitHubProvider implements GitProvider {
     logger.info(`Fetched ${entries.length} files from ${ref.owner}/${ref.repo}@${ref.branch} @ ${head}`);
 
     return { files, head };
+  }
+
+  /**
+   * Every branch, paginated to the end (see `GitProvider.listBranches`).
+   *
+   * ⚠️ **The 409 is swallowed here for the same endpoint-specific reason `getBranchHead` documents.**
+   * A repository with no commits has no branches, and Save creates exactly such a repository moments
+   * before this is first called, so "empty" is an ordinary state and not a failure. `isEmptyRepository`
+   * is deliberately the shared predicate rather than a second status check.
+   *
+   * The default branch costs one extra call and is worth it: `repos.listBranches` does not report
+   * which branch is the default, and inferring it from the name `main` is precisely the guess
+   * `getDefaultBranch`'s comment refuses. It is skipped entirely when there are no branches.
+   */
+  async listBranches(ref: Pick<RepoRef, 'owner' | 'repo'>): Promise<BranchSummary[]> {
+    const raw: Array<{ name: string; commit: { sha: string }; protected?: boolean }> = [];
+
+    /*
+     * ⚠️ The default branch costs one extra call and cannot be inferred. `repos.listBranches` does not
+     * report which branch is the default, and reading `main` as the answer is precisely the guess
+     * `getDefaultBranch`'s comment refuses — a repository whose trunk is `master` or `develop` would
+     * be reported as having no default at all. Skipped entirely when there are no branches.
+     */
+    const finish = async (branches: typeof raw): Promise<BranchSummary[]> => {
+      if (branches.length === 0) {
+        return [];
+      }
+
+      const defaultBranch = await this.getDefaultBranch(ref);
+
+      return branches.map((branch) => ({
+        name: branch.name,
+        head: branch.commit.sha,
+        isDefault: branch.name === defaultBranch,
+        protected: branch.protected === true,
+      }));
+    };
+
+    try {
+      for (let page = 1; page <= MAX_BRANCH_PAGES; page++) {
+        const { data } = await withRetry(() =>
+          mapErrors(() =>
+            this._octokit.repos.listBranches({
+              owner: ref.owner,
+              repo: ref.repo,
+              per_page: BRANCH_PAGE_SIZE,
+              page,
+            }),
+          ),
+        );
+
+        raw.push(...data);
+
+        /* A short page is the last page — the only end signal that needs no extra request. */
+        if (data.length < BRANCH_PAGE_SIZE) {
+          return finish(raw);
+        }
+      }
+
+      /*
+       * 🔴 THE CAP REFUSES; IT DOES NOT TRUNCATE. Falling out of the loop and returning what we had
+       * would hand back a silently partial branch list — the same class of bug as GitHub's unread
+       * `truncated` flag that `_listTree` names, and it would diverge from the GitLab adapter, which
+       * throws. A seam whose two implementations answer an identical condition differently is exactly
+       * what the seam exists to absorb, and the silent half is always the one that gets shipped.
+       */
+      throw new GitProviderError({ kind: 'invalid', message: TOO_MANY_BRANCHES });
+    } catch (error) {
+      if (isEmptyRepository(error)) {
+        return [];
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Create a branch at `fromSha` (see `GitProvider.createBranch`).
+   *
+   * `git.createRef` is the whole safety argument: unlike `updateRef` it has no `force` and CANNOT
+   * move an existing ref — GitHub answers 422 "Reference already exists" instead. So the never-clobber
+   * rule is enforced by the endpoint rather than by a flag somebody could pass differently later.
+   */
+  async createBranch(ref: Pick<RepoRef, 'owner' | 'repo'>, name: string, fromSha: string): Promise<{ head: string }> {
+    try {
+      await withRetry(() =>
+        mapErrors(() =>
+          this._octokit.git.createRef({
+            owner: ref.owner,
+            repo: ref.repo,
+            ref: `refs/heads/${name}`,
+            sha: fromSha,
+          }),
+        ),
+      );
+    } catch (error) {
+      /*
+       * ⚠️ 422 ALSO covers an invalid source sha ("Object does not exist"), so the status alone maps a
+       * bad `fromSha` onto "that name is taken" — a refusal naming the wrong cause, which sends the
+       * user to rename and hit the identical failure. See `namesAnExistingBranch` for why this one is
+       * a message check where `isEmptyRepository` is deliberately not.
+       */
+      if (error instanceof GitProviderError && error.status === 422 && namesAnExistingBranch(error.message)) {
+        throw new GitProviderError({
+          kind: 'name-taken',
+          message: `A branch named ${name} already exists.`,
+          status: 422,
+          cause: error,
+        });
+      }
+
+      throw error;
+    }
+
+    return { head: fromSha };
+  }
+
+  /**
+   * Delete a branch (see `GitProvider.deleteBranch`).
+   *
+   * ⚠️ **GitHub reports an absent ref as 422, not 404**, and both mean "there is nothing to delete",
+   * so both resolve. Scoped to THIS endpoint deliberately — the same reasoning `isEmptyRepository`
+   * spells out for 409: 422 on a ref DELETE is "no such ref", while 422 elsewhere (a create, a push)
+   * is a real refusal, and swallowing it globally would hide a failed write.
+   */
+  async deleteBranch(ref: Pick<RepoRef, 'owner' | 'repo'>, name: string): Promise<void> {
+    try {
+      await withRetry(() =>
+        mapErrors(() =>
+          this._octokit.git.deleteRef({
+            owner: ref.owner,
+            repo: ref.repo,
+            ref: `heads/${name}`,
+          }),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof GitProviderError && (error.status === 404 || error.status === 422)) {
+        logger.info(`Branch ${name} was already absent from ${ref.owner}/${ref.repo} — nothing to delete.`);
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  /** A bounded page of history (see `GitProvider.listCommits`). The cursor is a page number. */
+  async listCommits(ref: RepoRef, options: ListCommitsOptions): Promise<ListCommitsResult> {
+    const page = parseCursor(options.cursor);
+
+    let data: Array<{
+      sha: string;
+      commit: { message: string; author: { name?: string | null; date?: string | null } | null };
+    }>;
+
+    try {
+      ({ data } = await withRetry(() =>
+        mapErrors(() =>
+          this._octokit.repos.listCommits({
+            owner: ref.owner,
+            repo: ref.repo,
+            sha: ref.branch,
+            per_page: options.limit,
+            page,
+          }),
+        ),
+      ));
+    } catch (error) {
+      /* An empty repository has no history. Same normalisation as `listBranches`, same reason. */
+      if (isEmptyRepository(error)) {
+        return { commits: [] };
+      }
+
+      throw error;
+    }
+
+    return {
+      commits: data.map((entry) => ({
+        sha: entry.sha,
+        message: firstLine(entry.commit.message),
+        author: entry.commit.author?.name ?? '',
+        date: entry.commit.author?.date ?? '',
+      })),
+
+      /*
+       * A FULL page means there may be more; a short one is definitively the end. Never an empty
+       * string — the seam's own comment says an empty cursor reads as "there is more".
+       */
+      nextCursor: data.length === options.limit ? String(page + 1) : undefined,
+    };
   }
 
   async fastForwardPush(input: FastForwardPushInput): Promise<PushResult> {

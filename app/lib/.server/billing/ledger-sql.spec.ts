@@ -384,6 +384,208 @@ describe('the migrations', () => {
 
     expect(columns).toEqual(expect.arrayContaining(['tool_rounds', 'duration_ms', 'finish_reason', 'steps']));
   });
+
+  /*
+   * Migration 0023: three fields the TYPE declared and Postgres never had. The TS mirror could not
+   * catch this — `FsGenerationStore` writes the whole record, so all three were present in local dev
+   * and absent in the only deploy that bills money. This is the SQL half, which is the half that was
+   * missing (`ledger-sql.spec.ts`'s own reason for existing: the mirror proves we wrote the rules
+   * twice, not that the DATABASE enforces them).
+   */
+  describe('migration 0023 — the generation record is complete on Postgres', () => {
+    it('adds the three columns the record type has always declared', async () => {
+      const { rows } = await db.query<{ column_name: string; is_nullable: string; column_default: string | null }>(
+        `select column_name, is_nullable, column_default from information_schema.columns
+         where table_schema = 'public' and table_name = 'generations'`,
+      );
+      const columns = rows.filter((r) => ['raw_stops', 'fallback_handoffs', 'blocks_loaded'].includes(r.column_name));
+
+      expect(columns.map((c) => c.column_name).sort()).toEqual(['blocks_loaded', 'fallback_handoffs', 'raw_stops']);
+
+      /*
+       * 🔴 NULLABLE AND UNDEFAULTED, asserted rather than assumed. For an array column `NULL` (never
+       * recorded) and `'{}'` (recorded, none) are different facts, and a default would collapse the
+       * two so that no reader could ever tell a pre-migration row from a turn that genuinely had none.
+       */
+      for (const column of columns) {
+        expect(column.is_nullable, `${column.column_name} must stay nullable`).toBe('YES');
+        expect(column.column_default, `${column.column_name} must have no default`).toBeNull();
+      }
+    });
+
+    /*
+     * 🔴 THE DIRECT REGRESSION TEST FOR THE LIVE DEFECT. A handoff means a DIFFERENT MODEL SERVED THE
+     * TURN while the turn billed at the requested model's rates (§4.2a). Before 0023 this string had
+     * nowhere to land on the backend that bills real money.
+     */
+    it('round-trips a refusal-fallback handoff', async () => {
+      await db.query(
+        `insert into public.generations (id, user_id, model, fallback_handoffs, raw_stops, blocks_loaded)
+         values ($1, $2, 'claude-fable-5', $3, $4, $5)`,
+        [
+          'gen_fallback',
+          USER,
+          ['claude-fable-5\u2192claude-opus-5'],
+          ['refusal', 'end_turn'],
+          ['racing-system', 'react-training'],
+        ],
+      );
+
+      const { rows } = await db.query<{
+        fallback_handoffs: string[];
+        raw_stops: string[];
+        blocks_loaded: string[];
+      }>(`select fallback_handoffs, raw_stops, blocks_loaded from public.generations where id = 'gen_fallback'`);
+
+      expect(rows[0].fallback_handoffs).toEqual(['claude-fable-5\u2192claude-opus-5']);
+      expect(rows[0].raw_stops).toEqual(['refusal', 'end_turn']);
+      expect(rows[0].blocks_loaded).toEqual(['racing-system', 'react-training']);
+
+      await db.exec(`delete from public.generations where id = 'gen_fallback'`);
+    });
+
+    /*
+     * CONTROL. A `not null` column with no default would break the three-column insert every foreign
+     * key test in this file leans on — and it would break it from a migration, i.e. far from the test
+     * that fails. It must still be legal to write a generation row knowing only its identity.
+     */
+    it('CONTROL — a row can still be created from identity alone, and reads back NULL not empty', async () => {
+      await createGeneration('gen_bare');
+
+      const { rows } = await db.query<{
+        fallback_handoffs: string[] | null;
+        raw_stops: string[] | null;
+        blocks_loaded: string[] | null;
+      }>(`select fallback_handoffs, raw_stops, blocks_loaded from public.generations where id = 'gen_bare'`);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].fallback_handoffs, 'never recorded is NULL, not an empty array').toBeNull();
+      expect(rows[0].raw_stops).toBeNull();
+      expect(rows[0].blocks_loaded).toBeNull();
+
+      await db.exec(`delete from public.generations where id = 'gen_bare'`);
+    });
+  });
+
+  /*
+   * Migration 0024: the record of WHAT WE SENT. `jsonb` for migration 0002's stated reason for
+   * `steps` — written once, read whole, never joined or filtered on.
+   */
+  describe('migration 0024 — the request is on the record', () => {
+    it('adds the fingerprint columns, nullable and undefaulted', async () => {
+      const { rows } = await db.query<{
+        column_name: string;
+        data_type: string;
+        is_nullable: string;
+        column_default: string | null;
+      }>(
+        `select column_name, data_type, is_nullable, column_default from information_schema.columns
+         where table_schema = 'public' and table_name = 'generations'
+           and column_name in ('request_fingerprints', 'integrity_issues')`,
+      );
+
+      expect(rows.map((r) => r.column_name).sort()).toEqual(['integrity_issues', 'request_fingerprints']);
+
+      /*
+       * The TYPES, not just presence and nullability. `jsonb` is migration 0002's stated case for
+       * `steps` — written once, read whole, never joined or filtered on — and `text[]` is what keeps
+       * the NULL-vs-empty distinction the whole column family rests on. A scalar `text` column would
+       * accept every write here and quietly stop being either.
+       */
+      expect(rows.find((r) => r.column_name === 'request_fingerprints')?.data_type).toBe('jsonb');
+      expect(rows.find((r) => r.column_name === 'integrity_issues')?.data_type).toBe('ARRAY');
+
+      for (const row of rows) {
+        expect(row.is_nullable, `${row.column_name} must stay nullable`).toBe('YES');
+        expect(row.column_default, `${row.column_name} must have no default`).toBeNull();
+      }
+    });
+
+    it('round-trips an ordered FOUR-request turn intact, and the row stays bounded', async () => {
+      /*
+       * Four, because that is a real worst case: a provider retry, its tool-free variant, a forced
+       * continuation and a completeness pass can all fire in one turn. Two would round-trip fine and
+       * prove nothing about the shape Open Question 2 actually worried about.
+       */
+      const fingerprints = [
+        { kind: 'first', breakpointCount: 3, messages: { count: 4, chars: 812, sha256: 'aa'.repeat(32) } },
+        { kind: 'provider-retry', breakpointCount: 3, messages: { count: 4, chars: 812, sha256: 'aa'.repeat(32) } },
+        {
+          kind: 'provider-retry-tool-free',
+          breakpointCount: 3,
+          messages: { count: 5, chars: 940, sha256: 'cc'.repeat(32) },
+        },
+        {
+          kind: 'forced-continuation',
+          breakpointCount: 3,
+          messages: { count: 6, chars: 1204, sha256: 'bb'.repeat(32) },
+        },
+      ];
+
+      /*
+       * 🔴 BOUNDED BY CONSTRUCTION, asserted rather than assumed (Open Question 2). The entire
+       * justification for putting this on the row rather than in its own table is that it is small and
+       * read whole. A fingerprint that started carrying bodies would round-trip perfectly and silently
+       * make `generations` the widest table in the database — and since §4.5.4b says the platform
+       * stores no project files, "the row got big" is the symptom of a rule being broken.
+       */
+      expect(JSON.stringify(fingerprints).length).toBeLessThan(4_000);
+
+      await db.query(
+        `insert into public.generations (id, user_id, model, request_fingerprints, integrity_issues)
+         values ($1, $2, 'claude-sonnet-5', $3, $4)`,
+        ['gen_fp', USER, JSON.stringify(fingerprints), ['INV-1: two spellings of src/pages/Home.tsx']],
+      );
+
+      const { rows } = await db.query<{ request_fingerprints: unknown[]; integrity_issues: string[] }>(
+        `select request_fingerprints, integrity_issues from public.generations where id = 'gen_fp'`,
+      );
+
+      /* ORDER is the point — a re-issue is a different request, and merging them loses the fact. */
+      expect(rows[0].request_fingerprints).toEqual(fingerprints);
+      expect((rows[0].request_fingerprints as Array<{ kind: string }>).map((f) => f.kind)).toEqual([
+        'first',
+        'provider-retry',
+        'provider-retry-tool-free',
+        'forced-continuation',
+      ]);
+      expect(rows[0].integrity_issues).toEqual(['INV-1: two spellings of src/pages/Home.tsx']);
+
+      await db.exec(`delete from public.generations where id = 'gen_fp'`);
+    });
+
+    /*
+     * 🔴 "NO FINGERPRINT" AND "AN EMPTY FINGERPRINT" ARE DIFFERENT FACTS (edge case 3). A turn that
+     * failed before `startStream` — a gate refusal, a claim conflict — never assembled a request; a
+     * turn that assembled one and had nothing wrong with it did. Collapsing the two is the
+     * `remoteHead` `undefined`-vs-`null` mistake one subsystem over.
+     */
+    it('CONTROL — a turn that never reached startStream reads back NULL, not an empty array', async () => {
+      await createGeneration('gen_nostream');
+
+      const { rows } = await db.query<{ request_fingerprints: unknown; integrity_issues: unknown }>(
+        `select request_fingerprints, integrity_issues from public.generations where id = 'gen_nostream'`,
+      );
+
+      expect(rows[0].request_fingerprints).toBeNull();
+      expect(rows[0].integrity_issues).toBeNull();
+
+      /* …and a turn that DID assemble one, cleanly, is distinguishable from it. */
+      await db.query(
+        `insert into public.generations (id, user_id, model, request_fingerprints, integrity_issues)
+         values ('gen_clean', $1, 'claude-sonnet-5', $2, $3)`,
+        [USER, JSON.stringify([{ kind: 'first' }]), []],
+      );
+
+      const { rows: clean } = await db.query<{ integrity_issues: string[] }>(
+        `select integrity_issues from public.generations where id = 'gen_clean'`,
+      );
+
+      expect(clean[0].integrity_issues, 'checked and clean is an EMPTY array, never NULL').toEqual([]);
+
+      await db.exec(`delete from public.generations where id in ('gen_nostream', 'gen_clean')`);
+    });
+  });
 });
 
 describe('append_ledger_entry (the only way a ledger row is written)', () => {

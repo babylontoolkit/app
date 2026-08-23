@@ -23,11 +23,10 @@ import { useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { Dialog, DialogRoot, DialogTitle, DialogDescription, DialogButton } from '~/components/ui/Dialog';
-import { mountDivergence, repoStatus, startGitConnect, unsavedWork } from '~/lib/persistence';
+import { mountDivergence, repoStatus, startGitConnect } from '~/lib/persistence';
 import { db } from '~/lib/persistence/useChatHistory';
-import { createLocalSnapshot, markSynced } from '~/lib/persistence/local-snapshots';
+import { applyBranchTree } from '~/lib/persistence/apply-branch-tree';
 import { resolveDivergence, type DivergenceChoice } from '~/lib/persistence/projects';
-import { protectForRepoRestore } from '~/lib/persistence/restore-plan';
 import { workbenchStore } from '~/lib/stores/workbench';
 
 export function SaveDivergenceDialog() {
@@ -69,40 +68,63 @@ export function SaveDivergenceDialog() {
 
       if (choice === 'pull-overwrite' && result.files) {
         /*
-         * 🔴 Checkpoint BEFORE overwriting, never after. This is the only moment the version being
-         * replaced still exists anywhere — it is the unsaved side, so there is no repo to get it back
-         * from. Taking it afterwards would checkpoint the thing that replaced it (§4.12).
+         * 🔴 ONE APPLY PATH FOR EVERY TREE REPLACEMENT (§4.13a T18, Open Question 2 — converge).
+         *
+         * This arm used to hand-roll the whole sequence: a NON-strict before-checkpoint, a restore, a
+         * second checkpoint, `markSynced`, `unsavedWork(false)`. Every step was right and it was a
+         * SECOND implementation of what `applyBranchTree` does for a switch and a discard — which is
+         * the one-half-of-a-pair-guarded shape this codebase keeps rediscovering. The steps it was
+         * missing were the ones nobody had thought to add here yet: `resetAllFileModifications`,
+         * `clearDeletedPaths`, the server working copy, and the reinstall.
+         *
+         * ⚠️ The before-checkpoint is now STRICT. That is the real upgrade: this is *the* moment the
+         * version being replaced exists nowhere else — it is the unsaved side, so there is no repo to
+         * get it back from — and a lax serialize omits a binary it cannot read. A strict failure
+         * ABORTS the resolve and leaves the user's files exactly where they were, which is the only
+         * acceptable answer when the alternative is destroying the only copy without a net.
          */
-        if (db) {
-          await createLocalSnapshot(db, {
-            projectId: divergence.projectId,
-            files: await workbenchStore.serializeFiles(),
-            label: 'Before taking the other version',
-          });
-        }
-
         /*
-         * A real switch, not an overlay: the user asked for the repo's version, and an overlay would
-         * hand them a THIRD version — the repo's files plus every file only this browser had.
-         * `protectForRepoRestore` keeps the secrets the repo never carried.
+         * 🔴 CLOSE FIRST, OR THE NARRATION IS INVISIBLE. `WorkspaceSplash` is `z-50` by design (under
+         * the sidebar and header); this dialog's overlay is `z-[9999]` with a backdrop blur, so
+         * awaiting with it open buries the whole 30-second story beneath a black scrim.
+         *
+         * Safe here for a stronger reason than in the sync dialog: the server has ALREADY resolved the
+         * divergence — the choice is made and recorded — so there is no longer a decision this dialog
+         * is holding open. What follows is local work narrated by the full-page splash. ⚠️ If it
+         * FAILS there is no panel to fall back to (see the refusal branch below): the persistent toast
+         * is the whole report.
          */
-        await workbenchStore.restoreFiles(result.files, { protect: protectForRepoRestore });
+        close();
 
-        if (db) {
+        const applied = await applyBranchTree({
+          projectId: divergence.projectId,
+          files: result.files,
+
           /*
-           * These files came FROM the repo, so they are saved by definition — checkpoint them and mark
-           * them synced. Without the mark, a project that just resolved cleanly would immediately
-           * claim unsaved work and nag the user to save what they had literally just downloaded.
+           * The divergence signal carries only a project id and a remote head, so the branch name
+           * comes from `repoStatus` — the same store the working-copy stamp reads (`repo-status.ts`).
+           * One reader, one answer.
            */
-          await createLocalSnapshot(db, {
-            projectId: divergence.projectId,
-            files: result.files,
-            label: 'Updated from your repository',
-          });
-          await markSynced(db, divergence.projectId);
+          branch: repo?.branch ?? 'your repository',
+          operation: 'pull',
+          db,
+        });
+
+        if (!applied.ok) {
+          /*
+           * 🔴 LOUD, AND IT STAYS ON SCREEN (`autoClose: false`).
+           *
+           * The dialog cannot "stay open" any more — the server already resolved the divergence, so
+           * re-asking would offer a decision the user has spent, and the second press would be refused
+           * as no longer divergent. That makes this toast the WHOLE report: there is no failure panel
+           * on this path (a comment here used to claim one; a review found by rendering that there is
+           * not). `applied.reason` names the operation and the branch, so it is actionable alone.
+           */
+          toast.error(applied.reason, { autoClose: false });
+
+          return;
         }
 
-        unsavedWork.set(false);
         toast.success('Updated. You are now on the version from your repository.');
       } else if (choice === 'push-to-new-branch') {
         /*

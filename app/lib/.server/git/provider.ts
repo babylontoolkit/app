@@ -167,6 +167,106 @@ export interface FastForwardPushInput {
   createBranchIfMissing?: boolean;
 }
 
+/**
+ * Does this provider message mean "that branch is already there"?
+ *
+ * 🔴 **A MESSAGE CHECK, DELIBERATELY — and the opposite call from `isEmptyRepository`, for a reason
+ * worth stating.** Both providers report a duplicate branch name with the SAME status they use for an
+ * invalid source sha (GitLab 400, GitHub 422), so the status alone cannot tell the two apart, and a
+ * blanket mapping told a user "a branch named X already exists" when their sha was bad — a refusal
+ * naming the wrong cause, which sends them to rename and hit the identical failure.
+ *
+ * `isEmptyRepository` chose status-over-message because there a drifting message would silently
+ * RESTORE a bug (every first save failing). Here the failure direction is the safe one: if a provider
+ * rewords its error this stops matching, and the user sees the provider's own sentence through the
+ * ordinary mapper instead of a friendlier one of ours. A degraded explanation, never a wrong action.
+ */
+export function namesAnExistingBranch(message: string): boolean {
+  return /already exists|already been taken/i.test(message);
+}
+
+/**
+ * One sentence for both adapters. A branch list that hit its cap is the same problem on either
+ * provider, and two independently-worded refusals for one condition is how they drift apart.
+ */
+export const TOO_MANY_BRANCHES =
+  'This repository has too many branches to list here. Open it locally with git, or use the provider’s own branch page.';
+
+/**
+ * The history cursor is opaque at the seam and a page number underneath. Anything unparseable — a
+ * hand-edited query string, a cursor minted by the other provider — falls back to page 1 rather than
+ * throwing: a bad cursor should show the first page of history, never an error card. (`Number('')` is
+ * `0`, which both providers reject, so the guard is `> 0` and not merely `isFinite`.)
+ */
+export function parseCursor(cursor: string | undefined): number {
+  const page = Number(cursor);
+
+  return Number.isInteger(page) && page > 0 ? page : 1;
+}
+
+/**
+ * The commit SUBJECT. A commit body is unbounded — a squash-merge routinely carries dozens of lines —
+ * and every one of them would ride into a list that renders one row per commit.
+ */
+export function firstLine(message: string): string {
+  return message.split('\n', 1)[0];
+}
+
+/** One branch, as the branch picker and the switch decision need it. */
+export interface BranchSummary {
+  name: string;
+
+  /** The branch's head commit sha — what a create-from-here branches off. */
+  head: string;
+
+  /** The repository's default branch. Not a guess: `main` is a convention, not a rule. */
+  isDefault: boolean;
+
+  /**
+   * The provider will refuse a push (and usually a delete). Advisory only — it is a snapshot of a
+   * rule the provider owns and enforces, so the UI may DIM a branch with it but must never treat its
+   * absence as permission. The authoritative answer is the provider's own refusal.
+   */
+  protected: boolean;
+}
+
+/**
+ * One commit, for the history list.
+ *
+ * 🔴 **SHORT MESSAGE ONLY — never file contents, never a diff.** The temptation is real (a history
+ * list wants to show what changed) and the cost is not local: an unbounded read of a large
+ * repository's contents is an availability problem for everyone sharing the process, which is the
+ * lesson `assertFetchedTreeUsable` exists for. A user who wants the diff has the provider's own
+ * commit page, and `provider-urls.ts` links to it.
+ */
+export interface CommitSummary {
+  sha: string;
+
+  /** The first line only. A commit body can be arbitrarily long and no list renders it. */
+  message: string;
+
+  /** A display name. Never an email — that is PII we have no reason to move or render. */
+  author: string;
+
+  /** ISO 8601, as the provider reported it. Formatting is the UI's business. */
+  date: string;
+}
+
+export interface ListCommitsOptions {
+  /** Hard bound, applied by the CALLER's policy and again by the route. Never unbounded. */
+  limit: number;
+
+  /** Opaque to everyone but the adapter that issued it — a page number on both providers today. */
+  cursor?: string;
+}
+
+export interface ListCommitsResult {
+  commits: CommitSummary[];
+
+  /** Absent = the end of the history. Never an empty string, which reads as "there is more". */
+  nextCursor?: string;
+}
+
 export interface FetchTreeResult {
   files: SerializedFileMap;
   head: string;
@@ -219,6 +319,56 @@ export interface GitProvider {
    * partial result is unacceptable and MUST throw rather than return a truncated map.
    */
   fetchTree(ref: RepoRef): Promise<FetchTreeResult | null>;
+
+  /**
+   * Every branch in the repository, paginated to the end.
+   *
+   * ⚠️ **A repository with no commits returns `[]`, not an error** — and the two providers disagree
+   * about how they say so: GitHub answers **409** (`isEmptyRepository`, the same quirk that broke
+   * every first save in 2026-07) and GitLab answers **404**. Both normalise here, because "this
+   * repository has no branches yet" is an ordinary state for a repo Save created moments ago, and a
+   * caller made to distinguish two provider status codes has been handed the adapter's job.
+   *
+   * ⚠️ COORDINATE, not `RepoRef` — the `getDefaultBranch` rule. Asking which branch to look at in
+   * order to list the branches is the contradiction that method's comment already names.
+   */
+  listBranches(ref: Pick<RepoRef, 'owner' | 'repo'>): Promise<BranchSummary[]>;
+
+  /**
+   * Create a branch at `fromSha`. Returns the head it was created at.
+   *
+   * 🔴 **IT MUST NEVER FORCE-UPDATE AN EXISTING REF.** A create that moved somebody's branch is a
+   * force-push wearing a friendlier verb, and it destroys commits nobody read — the precise thing
+   * §4.13's fast-forward-only rule exists to prevent, arriving through a door that does not look like
+   * a push. An existing name raises `GitProviderError{ kind: 'name-taken' }`, reusing `ensureRepo`'s
+   * kind because the caller's recovery is identical: show the name back and let the user pick another.
+   *
+   * ⚠️ COORDINATE plus an explicit `name`, so a caller cannot accidentally create the branch it is
+   * currently on by passing a stale `RepoRef`.
+   */
+  createBranch(ref: Pick<RepoRef, 'owner' | 'repo'>, name: string, fromSha: string): Promise<{ head: string }>;
+
+  /**
+   * Delete a branch.
+   *
+   * ⚠️ **An absent branch is SUCCESS, not an error.** The intent — "this branch should not exist" —
+   * is already satisfied, and a second click, a double-submit or a retry after a dropped response
+   * must not produce a red error for a state the user asked for and got. A provider REFUSAL
+   * (protected branch, insufficient permission) is different in kind and surfaces with the provider's
+   * own reason through the existing mappers, because that is a rule we do not own.
+   *
+   * 🔴 There is no undo. A checkpoint snapshots FILES (§4.12) and cannot restore a remote ref, which
+   * is why this is the one operation in the feature whose confirmation says so plainly.
+   */
+  deleteBranch(ref: Pick<RepoRef, 'owner' | 'repo'>, name: string): Promise<void>;
+
+  /**
+   * A bounded page of the branch's history, newest first.
+   *
+   * Takes a full `RepoRef` — unlike the three above, this one is asking about a specific branch, so
+   * the branch is not a guess the caller was forced to invent.
+   */
+  listCommits(ref: RepoRef, options: ListCommitsOptions): Promise<ListCommitsResult>;
 
   /** Commit + push the working copy, fast-forward only. The atomic write primitive. */
   fastForwardPush(input: FastForwardPushInput): Promise<PushResult>;

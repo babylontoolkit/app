@@ -1,8 +1,8 @@
 /**
  * History compaction (SPEC §4.2.8, `spec/context-budget.md`).
  *
- * The failure this prevents is silent and permanent: the conversation history is UNCACHED (all four
- * cache breakpoints sit on the system blocks), so every byte of every previous turn is re-sent at full
+ * The failure this prevents is silent and permanent: the conversation history is UNCACHED (every
+ * cache breakpoint sits on the system blocks), so every byte of every previous turn is re-sent at full
  * input rate on every subsequent turn — forever, growing with the session. A regression here throws
  * nothing and breaks nothing. It just quietly multiplies the bill of every long conversation.
  *

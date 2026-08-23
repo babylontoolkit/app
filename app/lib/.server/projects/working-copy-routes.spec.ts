@@ -20,7 +20,7 @@ import { bytesToBase64 } from '~/lib/binary/binary-files';
 import { FsObjectStore } from '~/lib/.server/storage/store';
 import { setObjectStore } from '~/lib/.server/storage';
 import { FsProjectStore, setProjectStore } from './store';
-import { getWorkingCopy, putWorkingCopy } from './working-copy';
+import { getWorkingCopy, putWorkingCopy, workingCopyKey } from './working-copy';
 import type { Project } from './types';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 
@@ -45,13 +45,15 @@ const FILES: SerializedFileMap = {
 };
 
 let tmp: string;
+let objects: FsObjectStore;
 let projects: FsProjectStore;
 let mine: Project;
 let theirs: Project;
 
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'working-routes-'));
-  setObjectStore(new FsObjectStore(path.join(tmp, 'objects')));
+  objects = new FsObjectStore(path.join(tmp, 'objects'));
+  setObjectStore(objects);
 
   projects = new FsProjectStore(path.join(tmp, 'projects'));
   setProjectStore(projects);
@@ -159,5 +161,94 @@ describe('what the route refuses, and why each refusal is a data-loss guard', ()
 
   it('refuses a method that is neither PUT nor POST', async () => {
     expect((await put(mine.id, { seq: 1, files: FILES }, 'DELETE')).status).toBe(405);
+  });
+});
+
+/**
+ * 🔴 THE BRANCH STAMP IS COERCED AT THE DOOR (§4.13a T17).
+ *
+ * `branch` arrives in a BROWSER BODY and feeds `workingCopyRanks`, which decides whether this copy may
+ * be restored OVER the user's project. So anything the route does not recognise must become
+ * `undefined` — "cannot say" — rather than a value that comparison might accidentally match or, worse,
+ * a stamp the user never chose.
+ *
+ * The empty string is the case worth its own assertion: `''` is not a branch name, it is what a
+ * half-initialised status or a hand-built request produces, and storing it would put a stamp on the
+ * copy that says nothing while looking like an answer.
+ */
+describe('the branch stamp (§4.13a)', () => {
+  it('stores a real branch name and hands it back', async () => {
+    expect((await put(mine.id, { seq: 1, files: FILES, branch: 'feature/hud' })).status).toBe(200);
+    expect((await getWorkingCopy(mine.id))!.branch).toBe('feature/hud');
+
+    const body = (await (await get(mine.id)).json()) as { copy: { branch?: string } };
+    expect(body.copy.branch).toBe('feature/hud');
+  });
+
+  /*
+   * 🔴 ASSERTED ON THE STORED BYTES, NOT ON `getWorkingCopy`.
+   *
+   * The reader coerces too — deliberately, because bytes already in the store were written by clients
+   * that never did — so a route that stored the raw value would be MASKED on the way back out, and a
+   * test reading through `getWorkingCopy` would pass for a route with no coercion at all. That is the
+   * defence-in-depth pair failing quietly down to one wall, which is the shape §5 keeps warning about.
+   * So this opens the object and looks at what was actually written.
+   */
+  async function storedBranch(projectId: string): Promise<unknown> {
+    const bytes = await objects.get(workingCopyKey(projectId));
+    expect(bytes, 'nothing was stored at all').toBeTruthy();
+
+    const parsed = JSON.parse(new TextDecoder().decode(bytes!)) as { branch?: unknown };
+
+    return parsed.branch;
+  }
+
+  it('stores an empty string as absent — it is not a branch name', async () => {
+    expect((await put(mine.id, { seq: 1, files: FILES, branch: '' })).status).toBe(200);
+
+    expect(await storedBranch(mine.id)).toBeUndefined();
+    expect((await getWorkingCopy(mine.id))!.branch).toBeUndefined();
+  });
+
+  it('drops a non-string branch rather than storing it', async () => {
+    for (const branch of [123, true, null, { name: 'main' }, ['main']]) {
+      expect((await put(mine.id, { seq: 1, files: FILES, branch })).status).toBe(200);
+
+      expect(await storedBranch(mine.id), JSON.stringify(branch)).toBeUndefined();
+      expect((await getWorkingCopy(mine.id))!.branch, JSON.stringify(branch)).toBeUndefined();
+    }
+  });
+
+  /*
+   * CONTROL for the two above: every assertion there is an absence, so a route that had stopped
+   * writing the field at all would satisfy both. A real name must reach the stored bytes.
+   */
+  it('CONTROL — a real branch name really does reach the stored object', async () => {
+    await put(mine.id, { seq: 1, files: FILES, branch: 'feature/hud' });
+    expect(await storedBranch(mine.id)).toBe('feature/hud');
+  });
+
+  /*
+   * A body with no branch at all — every client bundle written before T17, and the two writers that
+   * still go through `saveWorkingCopy`. It must store cleanly and read as UNKNOWN, which is what keeps
+   * old copies behaving exactly as they did.
+   */
+  it('accepts a body with no branch at all', async () => {
+    expect((await put(mine.id, { seq: 1, files: FILES })).status).toBe(200);
+    expect((await getWorkingCopy(mine.id))!.branch).toBeUndefined();
+    expect((await getWorkingCopy(mine.id))!.seq).toBe(1);
+  });
+
+  /*
+   * A bad branch is not a reason to refuse the WRITE. The stamp is an optimisation on the recovery
+   * decision; the files are the thing being protected, and 400-ing here would throw away a good copy
+   * over a field that safely degrades to "unknown".
+   */
+  it('never refuses the write over the stamp — the files still land', async () => {
+    await put(mine.id, { seq: 9, files: FILES, branch: 42 });
+
+    const copy = (await getWorkingCopy(mine.id))!;
+    expect(copy.seq).toBe(9);
+    expect(copy.files['public/assets/generated/hero.png']).toEqual(FILES['public/assets/generated/hero.png']);
   });
 });

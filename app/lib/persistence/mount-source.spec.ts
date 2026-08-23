@@ -12,7 +12,13 @@
  * choosing — that is the user's call, always.
  */
 import { describe, expect, it } from 'vitest';
-import { decideLiveSandboxIsTruth, selectMountSource, type MountFacts, type MountSource } from './mount-source';
+import {
+  decideLiveSandboxIsTruth,
+  selectMountSource,
+  workingCopyRanks,
+  type MountFacts,
+  type MountSource,
+} from './mount-source';
 
 /** A linked project sitting exactly where it was last saved. Each test perturbs one fact. */
 const inSync: MountFacts = {
@@ -307,6 +313,202 @@ describe('the server working copy (§4.5.4c)', () => {
         hasWorkingCopy: true,
       }),
     ).toMatchObject({ source: 'diverged' });
+  });
+});
+
+/**
+ * 🔴 THE BRANCH STAMP ON THE RECOVERY COPY (§4.13a T17).
+ *
+ * There is exactly ONE working copy per project and it is overwritten in place, so the instant a
+ * branch switch lands it describes a tree the project is no longer on — with nothing in the object
+ * saying so. `hasWorkingCopy` is a boolean and cannot see that.
+ *
+ * The blast radius is narrow and entirely silent: the copy is never ranked against a local checkpoint,
+ * so this only bites on a FRESH BROWSER, on a LINKED project, whose remote we could not reach. In
+ * exactly that state a recovery would restore another branch's tree over a project whose link tuple
+ * names a different one, and the user opens a game they did not write, with no error anywhere.
+ *
+ * Two directions, and only one of them is obvious:
+ *
+ *   - a stamp that DISAGREES must not rank (the loss above);
+ *   - a stamp that is ABSENT must still rank. Every copy written before the field existed has none,
+ *     and reading silence as disagreement would turn crash recovery OFF for every project that has not
+ *     checkpointed since — the `remoteHead` `undefined`-vs-`null` distinction, in the same file.
+ *
+ * The CONTROL comes first deliberately: without it, an implementation that simply never ranks the
+ * working copy passes every other assertion in this block.
+ */
+describe('the working copy carries the branch it was written from (§4.13a)', () => {
+  /** The three states that produce `working` — each enumerated so no gate can be dropped unnoticed. */
+  const RANKING_STATES: Array<{ what: string; facts: MountFacts }> = [
+    { what: 'unlinked with nothing in this browser', facts: { linked: false, hasWorkingCopy: true } },
+    {
+      what: 'linked but the provider is unreachable',
+      facts: { linked: true, remoteHead: undefined, hasWorkingCopy: true },
+    },
+    { what: 'linked to a branch with no commits', facts: { linked: true, remoteHead: null, hasWorkingCopy: true } },
+  ];
+
+  /*
+   * 🔴 THE CONTROL. Every other test in this block asserts that something does NOT happen, and a gate
+   * that refused the working copy outright — or a `workingCopyRanks` hardwired to `false` — would
+   * satisfy all of them while silently deleting §4.5.4c. This is the ordinary case: the stamp agrees
+   * with the project's branch, and the recovery still happens, in all three states.
+   */
+  it('CONTROL — a stamp matching the linked branch still mounts the recovery copy, in every state', () => {
+    for (const { what, facts } of RANKING_STATES) {
+      expect(
+        selectMountSource({ ...facts, workingCopyBranch: 'feature/hud', linkedBranch: 'feature/hud' }),
+        what,
+      ).toEqual({ source: 'working' });
+    }
+  });
+
+  /*
+   * The loss this exists to prevent. `main` on disk, `feature/hud` on the project — restoring would
+   * replace the user's files with another branch's, so the decision falls through to the honest empty
+   * project instead.
+   */
+  it('refuses a copy stamped with a different branch, in every state', () => {
+    for (const { what, facts } of RANKING_STATES) {
+      expect(selectMountSource({ ...facts, workingCopyBranch: 'main', linkedBranch: 'feature/hud' }), what).toEqual({
+        source: 'empty',
+      });
+    }
+  });
+
+  /*
+   * 🔴 ABSENT IS UNKNOWN, NOT A MISMATCH. Every copy written before T17 has no stamp, and treating
+   * that as disagreement would silently switch crash recovery off for exactly the oldest projects —
+   * the ones most likely to need it. Old copies must behave EXACTLY as they did before the field
+   * existed, which is why this is asserted against the same three states rather than spot-checked.
+   */
+  it('still mounts an UNSTAMPED copy — silence is not disagreement', () => {
+    for (const { what, facts } of RANKING_STATES) {
+      expect(selectMountSource({ ...facts, workingCopyBranch: undefined, linkedBranch: 'feature/hud' }), what).toEqual({
+        source: 'working',
+      });
+    }
+  });
+
+  /*
+   * The other unknown side: a project whose own branch we do not know (an unlinked project, or a
+   * status read that could not answer). There is nothing to disagree WITH, so the pre-stamp behaviour
+   * stands — the same bias, from the opposite direction.
+   */
+  it('still mounts when the project’s own branch is unknown', () => {
+    for (const { what, facts } of RANKING_STATES) {
+      expect(selectMountSource({ ...facts, workingCopyBranch: 'main', linkedBranch: undefined }), what).toEqual({
+        source: 'working',
+      });
+    }
+  });
+
+  /*
+   * A mismatch removes the working copy from the decision; it does not rewrite the rest of it. An
+   * unlinked project with a remix seed still gets its seed rather than an empty editor.
+   */
+  it('falls back to the remix seed rather than to nothing when the stamp disagrees', () => {
+    expect(
+      selectMountSource({
+        linked: false,
+        hasWorkingCopy: true,
+        hasServerSeed: true,
+        workingCopyBranch: 'main',
+        linkedBranch: 'feature/hud',
+      }),
+    ).toEqual({ source: 'seed' });
+  });
+
+  /*
+   * CONTROL for the branch above — the seed only wins because the copy was refused. With a matching
+   * stamp the working copy still beats the seed (the seed is the state the project was BORN in).
+   */
+  it('CONTROL — a matching stamp still beats the remix seed', () => {
+    expect(
+      selectMountSource({
+        linked: false,
+        hasWorkingCopy: true,
+        hasServerSeed: true,
+        workingCopyBranch: 'feature/hud',
+        linkedBranch: 'feature/hud',
+      }),
+    ).toEqual({ source: 'working' });
+  });
+
+  /*
+   * The stamp is only ever consulted where the copy could be MOUNTED. A mismatched stamp must not
+   * disturb a decision that was never going to use the copy — otherwise the guard would start
+   * changing outcomes on paths that have their own, correct, answers.
+   */
+  it('changes nothing on the decisions that never reach the working copy', () => {
+    const stamped = { workingCopyBranch: 'main', linkedBranch: 'feature/hud', hasWorkingCopy: true } as const;
+
+    // Local checkpoints always win — there is nothing to compare, so nothing is compared.
+    expect(selectMountSource({ ...inSync, ...stamped })).toMatchObject({ source: 'local' });
+
+    // A reachable repo outranks the copy either way.
+    expect(
+      selectMountSource({ linked: true, remoteHead: 'abc123', lastSyncedCommitSha: 'abc123', ...stamped }),
+    ).toEqual({ source: 'repo', reason: 'no-local-copy' });
+
+    // And a divergence is still a divergence.
+    expect(
+      selectMountSource({
+        linked: true,
+        remoteHead: 'newsha',
+        lastSyncedCommitSha: 'oldsha',
+        localSeq: 5,
+        syncedSeq: 2,
+        ...stamped,
+      }),
+    ).toMatchObject({ source: 'diverged' });
+  });
+});
+
+/**
+ * `workingCopyRanks` on its own — a "may we overwrite the user's files" question, which is the
+ * category `restore-target.ts` and `planRestore` are in, and the reason it is pure and exported.
+ *
+ * The REASON is part of the contract, not decoration. A recovery that silently does not happen is
+ * indistinguishable from one that was never available (`spec/fail-loud.md`), and a refusal that names
+ * no cause is read as the feature being broken — so the sentence has to name BOTH branches: the one
+ * the copy holds and the one the project is on.
+ */
+describe('workingCopyRanks', () => {
+  it('ranks a matching stamp, and says nothing about why', () => {
+    expect(workingCopyRanks({ workingCopyBranch: 'main', linkedBranch: 'main' })).toEqual({ ranks: true });
+  });
+
+  it('refuses a mismatch and names BOTH branches', () => {
+    const verdict = workingCopyRanks({ workingCopyBranch: 'main', linkedBranch: 'feature/hud' });
+
+    expect(verdict.ranks).toBe(false);
+    expect(verdict.reason).toContain('main');
+    expect(verdict.reason).toContain('feature/hud');
+  });
+
+  /* Unknown on either side is not disagreement — the pre-stamp behaviour stands. */
+  it('ranks when either side is unknown', () => {
+    expect(workingCopyRanks({ workingCopyBranch: undefined, linkedBranch: 'main' })).toEqual({ ranks: true });
+    expect(workingCopyRanks({ workingCopyBranch: 'main', linkedBranch: undefined })).toEqual({ ranks: true });
+    expect(workingCopyRanks({})).toEqual({ ranks: true });
+  });
+
+  /*
+   * An empty string is not a branch name. It can only arrive from a malformed body or a half-written
+   * status, and matching it against a real branch — or refusing a copy because of it — would both be
+   * decisions taken on a value that means nothing.
+   */
+  it('treats an empty string as unknown rather than as a name', () => {
+    expect(workingCopyRanks({ workingCopyBranch: '', linkedBranch: 'main' })).toEqual({ ranks: true });
+    expect(workingCopyRanks({ workingCopyBranch: 'main', linkedBranch: '' })).toEqual({ ranks: true });
+  });
+
+  /* Branch names are case-sensitive in git, and `Main` is a different branch from `main`. */
+  it('compares names exactly', () => {
+    expect(workingCopyRanks({ workingCopyBranch: 'Main', linkedBranch: 'main' }).ranks).toBe(false);
+    expect(workingCopyRanks({ workingCopyBranch: 'feature/hud', linkedBranch: 'feature/hud ' }).ranks).toBe(false);
   });
 });
 

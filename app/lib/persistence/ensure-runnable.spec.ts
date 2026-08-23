@@ -6,6 +6,8 @@
  * on top of a running install, and — the one that made all of it invisible — a workspace that could
  * not run and said nothing.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { ensureProjectRunnable, type EnsureRunnableDeps } from './ensure-runnable';
 
@@ -242,5 +244,45 @@ describe('ensureProjectRunnable', () => {
     // It still ran: a workspace that cannot install is worse than one that interrupted something.
     expect(execute).toHaveBeenCalled();
     expect(c.now()).toBeGreaterThanOrEqual(5_000);
+  });
+});
+
+/**
+ * The rejected design, pinned as an ABSENCE (T14).
+ *
+ * ⚠️ A source scan, not a behavioural test — there is no behaviour to observe, which is the point. The
+ * old code asked `decideDependencyInstall` whether an install was needed, and got it wrong in a way
+ * nobody could see: it reads a FILE MAP, which is a stale watcher-filled copy that carries
+ * `node_modules` on some paths and not on others, so the workspace installed sometimes and sat at an
+ * idle terminal the rest of the time (owner: *"there should not be a decision making"*). Deleting the
+ * conditional fixed it; nothing stops it being reintroduced as an obvious-looking optimisation, and if
+ * it were, every test above would still pass — they all drive a project that has to install.
+ *
+ * The module's own doc NAMES `decideDependencyInstall` to explain why it was rejected, so comments are
+ * stripped first: a gate that fires on the explanation of a fix forces the next person to delete the
+ * warning in order to get green (`no-client-token.spec.ts`'s established pattern).
+ */
+describe('the dependency decision stays deleted', () => {
+  const MODULE = path.join(process.cwd(), 'app/lib/persistence/ensure-runnable.ts');
+  const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+  const code = stripComments(fs.readFileSync(MODULE, 'utf8'));
+
+  it('consults no dependency decision and does not import the module that makes one', () => {
+    expect(code).not.toContain('decideDependencyInstall');
+    expect(code).not.toMatch(/from\s+['"]\.\/dependencies['"]/);
+  });
+
+  /*
+   * CONTROL. The two assertions above are equally satisfied by a scanner that reads an empty string —
+   * a wrong path, a comment stripper that ate the file. This proves the same stripped source still
+   * carries the code it is supposed to.
+   */
+  it('the scanner is reading real code — the same stripped source still contains the function itself', () => {
+    expect(code).toContain('export async function ensureProjectRunnable');
+    expect(code).toContain("'npm install'");
+
+    // And the stripper really strips: the rejected name survives in the ORIGINAL, in prose only.
+    expect(fs.readFileSync(MODULE, 'utf8')).toContain('decideDependencyInstall');
   });
 });

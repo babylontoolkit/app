@@ -2,7 +2,7 @@ import { type Message } from 'ai';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, MODEL_REGEX, PROVIDER_REGEX } from '~/utils/constants';
 import { IGNORE_PATTERNS, type FileMap } from './constants';
 import ignore from 'ignore';
-import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
+import { dedupeByProjectPath, toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { ContextAnnotation } from '~/types/context';
 import { isOpaqueToModel } from '~/lib/context/opaque-files';
 
@@ -75,6 +75,18 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
   });
 
   /*
+   * ⚠️ FOLDERS OUT BEFORE THE DE-DUP, not after — the ordering is the whole content of this line.
+   *
+   * De-duplicating first lets a FOLDER dirent win the slot for a path a FILE dirent also occupies
+   * (`/home/project/src/pages` the folder sorts before `src/pages` the file), after which the
+   * `type == 'file'` filter below drops the folder and the file is gone from the context entirely —
+   * one file in the map, zero in what the model is shown. `buildFileManifest` has always filtered
+   * first, so the two paths agreed about the RULE and disagreed about the ORDER it runs in, which is
+   * the drift that sharing one implementation is supposed to make impossible.
+   */
+  filePaths = filePaths.filter((x) => files[x]?.type === 'file');
+
+  /*
    * 🔴 ONE ENTRY PER FILE, keyed by the path the model is shown — a backstop on the money path.
    *
    * The map is supposed to arrive with a single spelling per file (`toSandboxStoreKey`, one writer,
@@ -88,19 +100,13 @@ export function createFilesContext(files: FileMap, useRelativePath?: boolean) {
    * cached block stays a pure function of the map's content. This is not a second copy of the key
    * rule: it de-duplicates on `toProjectRelativePath`, the same normalisation every branch below
    * already applies.
+   *
+   * ⚠️ And it is no longer a second copy of the DE-DUP rule either. `dedupeByProjectPath` is the one
+   * implementation, shared with `buildFileManifest` on the agent path — they had been two separate
+   * pieces of code enforcing one rule, with nothing cross-checking them, which is this codebase's own
+   * `isSecretPath` rule broken.
    */
-  const seenRelativePaths = new Set<string>();
-  filePaths = filePaths.filter((x) => {
-    const relPath = toProjectRelativePath(x);
-
-    if (seenRelativePaths.has(relPath)) {
-      return false;
-    }
-
-    seenRelativePaths.add(relPath);
-
-    return true;
-  });
+  filePaths = dedupeByProjectPath(filePaths, (x) => x).kept;
 
   const fileContexts = filePaths
     .filter((x) => files[x] && files[x].type == 'file')

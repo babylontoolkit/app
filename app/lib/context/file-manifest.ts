@@ -48,7 +48,7 @@
  *    prompt; this file must not encode them, or two places disagree about what is writable.
  */
 import type { FileMap } from '~/lib/.server/llm/constants';
-import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
+import { dedupeByProjectPath, toProjectRelativePath, type CollapsedPath } from '~/lib/common/sandbox-paths';
 import { isOpaqueToModel } from './opaque-files';
 
 export interface ManifestEntry {
@@ -66,37 +66,51 @@ export interface ManifestEntry {
 
 /** Kept small on purpose: this is a listing, and every byte of it is paid for on every turn. */
 export function buildFileManifest(files: FileMap): ManifestEntry[] {
-  const seen = new Set<string>();
-  const entries: ManifestEntry[] = [];
+  return buildFileManifestWithCollapses(files).entries;
+}
 
-  for (const rawPath of Object.keys(files).sort()) {
-    const dirent = files[rawPath];
+/**
+ * The same manifest, plus WHAT THE DE-DUP COLLAPSED.
+ *
+ * `spec/fail-loud.md` rule 3: a best-effort step that cannot fail the request must still REPORT. The
+ * backstop below silently fixed a double-keyed map for weeks — 14 files, ~22.5k tokens a turn at the
+ * 2x cache-write rate — and the reason nobody noticed is that it fixed it quietly. `request-invariants`
+ * turns the collapse into a signal; `buildFileManifest` stays the one-line caller everyone else uses.
+ */
+export function buildFileManifestWithCollapses(files: FileMap): {
+  entries: ManifestEntry[];
+  collapsed: CollapsedPath[];
+} {
+  const candidates = Object.keys(files)
+    .sort()
+    .flatMap((rawPath) => {
+      const dirent = files[rawPath];
 
-    if (!dirent || dirent.type !== 'file') {
-      continue;
-    }
+      return dirent && dirent.type === 'file' ? [{ rawPath, dirent }] : [];
+    });
 
+  /*
+   * ONE de-dup rule, shared with `createFilesContext` (`~/lib/common/sandbox-paths`). It used to live
+   * here AND there, in two implementations, which is the `isSecretPath` rule broken: two copies of one
+   * rule drift, and you find out when a file is collapsed on one path and listed twice on the other.
+   */
+  const { kept, collapsed } = dedupeByProjectPath(candidates, (candidate) => candidate.rawPath);
+
+  const entries: ManifestEntry[] = kept.map(({ rawPath, dirent }) => {
     const path = toProjectRelativePath(rawPath);
 
-    if (seen.has(path)) {
-      continue;
-    }
-
-    seen.add(path);
-
     if (dirent.isBinary) {
-      entries.push({ path, size: dirent.size ?? 0, kind: 'binary' });
-      continue;
+      return { path, size: dirent.size ?? 0, kind: 'binary' as const };
     }
 
-    entries.push({
+    return {
       path,
       size: dirent.content.length,
-      kind: isOpaqueToModel(path) ? 'opaque' : 'text',
-    });
-  }
+      kind: isOpaqueToModel(path) ? ('opaque' as const) : ('text' as const),
+    };
+  });
 
-  return entries;
+  return { entries, collapsed };
 }
 
 /**

@@ -2,7 +2,7 @@
  * The project's server WORKING COPY — crash recovery (SPEC §4.5.4c).
  *
  *   GET  /api/projects/:id/working  → { copy } | 404
- *   PUT  /api/projects/:id/working  ← { seq, files, messageId? }  → { ok, seq }
+ *   PUT  /api/projects/:id/working  ← { seq, files, messageId?, branch? }  → { ok, seq }
  *
  * ## Why this one DOES have a write method, when the seed route deliberately does not
  *
@@ -63,7 +63,12 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     const user = await requireUser(request, context);
     const project = await requireOwnedProject(user, params.projectId!, context);
 
-    const body = (await request.json()) as { seq?: number; files?: SerializedFileMap; messageId?: string };
+    const body = (await request.json()) as {
+      seq?: number;
+      files?: SerializedFileMap;
+      messageId?: string;
+      branch?: string;
+    };
 
     /*
      * `seq` is REQUIRED and must be a real number.
@@ -107,6 +112,15 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
          * not a string is stored as absent (= "cannot say", which asks).
          */
         messageId: typeof body.messageId === 'string' ? body.messageId : undefined,
+
+        /*
+         * Which branch these files came from (§4.13a). Coerced exactly like `messageId` and for the
+         * same reason: it arrives in a browser body and feeds a comparison that decides whether this
+         * copy may be restored over the user's project, so anything unrecognised becomes `undefined`
+         * — "cannot say" — rather than a value that comparison might accidentally match. An empty
+         * string is not a branch name and must not be stored as one.
+         */
+        branch: typeof body.branch === 'string' && body.branch ? body.branch : undefined,
         files: body.files,
       },
       context,

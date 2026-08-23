@@ -37,16 +37,28 @@ import { useStore } from '@nanostores/react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { classNames } from '~/utils/classNames';
 import { repoStatus } from '~/lib/persistence';
-import { type SaveTone } from '~/lib/persistence/save-status';
+import { describeBranchState, type SaveTone } from '~/lib/persistence/save-status';
 import { PROVIDER_LABEL, useSaveProject, type GitProvider } from '~/lib/persistence/useSaveProject';
 import { GitHubSyncDialog } from '~/components/github/GitHubSyncButton';
 import { TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
 
-/** Where a linked project's code actually is, so "Open on GitHub" can be a real link. */
-const PROVIDER_ORIGIN: Record<GitProvider, string> = {
-  github: 'https://github.com',
-  gitlab: 'https://gitlab.com',
-};
+/*
+ * 🔴 Every provider link comes from this module and NONE is built here (§4.13a). The chip used to
+ * hold its own `PROVIDER_ORIGIN` and concatenate a path — fine for one link, and three chances to
+ * ship a broken one as soon as there were three. A source scan pins the absence.
+ */
+import { branchTreeUrl, commitUrl, newPullRequestUrl, repoUrl } from '~/lib/git/provider-urls';
+import { useBranchActions, type SwitchPrompt } from '~/lib/persistence/useBranchActions';
+import { BRANCH_DELETE_ENABLED } from '~/lib/persistence/branch-delete';
+import {
+  BranchHistoryDialog,
+  DeleteBranchDialog,
+  DiscardChangesDialog,
+  NewBranchDialog,
+  ReviewChangesDialog,
+  SwitchBranchDialog,
+  SwitchWithChangesDialog,
+} from './branch/BranchDialogs.client';
 
 /*
  * Tone drives the chip's colour and nothing else.
@@ -100,6 +112,30 @@ export function GitStatusChip() {
 
   const [dialogOpen, setDialogOpen] = useState(false);
 
+  /* The Branch group (§4.13a). One hook, so the sync dialog's branch field can share it on day one. */
+  const branch = useBranchActions();
+  const [switchOpen, setSwitchOpen] = useState(false);
+  const [newBranchOpen, setNewBranchOpen] = useState(false);
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [switchPrompt, setSwitchPrompt] = useState<SwitchPrompt | undefined>();
+
+  const defaultBranch = branch.branches?.find((b) => b.isDefault)?.name;
+
+  /*
+   * 🔴 Every branch string the user reads comes from here, never from a literal in this file — the
+   * `describeSaveStatus` rule, applied to the group beside it.
+   */
+  const branchView = describeBranchState({
+    linked: repo?.linked === true,
+    branch: repo?.branch,
+    defaultBranch,
+    provider: providerToUse,
+    lastSyncedCommitSha: repo?.lastSyncedCommitSha,
+  });
+
   if (!activeProjectId) {
     return null;
   }
@@ -113,7 +149,11 @@ export function GitStatusChip() {
        * put — opening this menu shoved the whole chat off-screen left. Non-modal keeps the menu out of
        * the layout's business, matching every other dropdown in the header.
        */}
-      <DropdownMenu.Root modal={false}>
+      {/*
+       * The branch list is fetched when the MENU OPENS, not on mount: it is a provider round trip that
+       * most sessions never need, and a list read at mount is stale by the time it is looked at.
+       */}
+      <DropdownMenu.Root modal={false} onOpenChange={(open) => open && repo?.linked && void branch.refreshBranches()}>
         <DropdownMenu.Trigger asChild>
           <button
             type="button"
@@ -150,6 +190,128 @@ export function GitStatusChip() {
 
             <DropdownMenu.Separator className="h-px bg-bolt-elements-borderColor my-1" />
 
+            {/*
+             * 🔴 THE BRANCH GROUP IS A SUBMENU WHOSE TRIGGER LABEL IS THE CURRENT BRANCH (§4.13a,
+             * Open Question 5) — and it is emphatically NOT a second toolbar button.
+             *
+             * A "Branch ▾" beside this chip would reproduce the four-git-controls defect exactly:
+             * two adjacent controls answering one question ("where does my game live?"), each named
+             * against the other. That was fixed by giving them a PARENT, and this is the parent.
+             *
+             * The trigger doubles as requirement 75's read-only current-branch row — the branch is
+             * readable by opening one menu — while the top level stays about STATE and the header row
+             * does not grow (requirement 77).
+             *
+             * ⚠️ It sits FIRST, above the commit action (owner, 2026-08-22). It reads as a heading
+             * rather than as a peer of the actions under it: every one of them — commit, pull, open —
+             * is scoped to whichever branch this row names, so naming the branch after offering to
+             * write to it puts the answer below the question. Moving it also costs nothing the
+             * comment above cares about; it is still one parent, still not a second button.
+             */}
+            <DropdownMenu.Sub>
+              <DropdownMenu.SubTrigger className={TOOLBAR_MENU_ITEM}>
+                <div className="i-ph:git-branch" />
+                <span className="truncate">{branchView.triggerLabel}</span>
+                <div className="i-ph:caret-right ml-auto text-[10px] opacity-70" />
+              </DropdownMenu.SubTrigger>
+              <DropdownMenu.Portal>
+                {/*
+                 * ⚠️ `TOOLBAR_MENU_CONTENT` or it loses `z-[1000]` and falls BEHIND the workbench:
+                 * Radix copies the content's computed z-index onto its fixed popper wrapper, and the
+                 * workbench sits at `.z-workbench` (3). Same trap the top-level menu already carries.
+                 */}
+                <DropdownMenu.SubContent className={classNames(TOOLBAR_MENU_CONTENT, 'min-w-[220px]')}>
+                  {/*
+                   * EXPLAINED AND UNAVAILABLE, never a list of dead items. A greyed row with no
+                   * reason is indistinguishable from a broken one, and the fix is one action away.
+                   */}
+                  {branchView.unavailableReason ? (
+                    <div className="px-3 py-2 text-xs text-bolt-elements-textSecondary leading-relaxed max-w-[240px]">
+                      {branchView.unavailableReason}
+                    </div>
+                  ) : (
+                    <>
+                      <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} onSelect={() => setNewBranchOpen(true)}>
+                        <div className="i-ph:plus" />
+                        <span>New branch…</span>
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} onSelect={() => setSwitchOpen(true)}>
+                        <div className="i-ph:arrows-left-right" />
+                        <span>Switch branch…</span>
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} onSelect={() => setHistoryOpen(true)}>
+                        <div className="i-ph:clock-counter-clockwise" />
+                        <span>Branch history…</span>
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} onSelect={() => setReviewOpen(true)}>
+                        <div className="i-ph:list-magnifying-glass" />
+                        <span>Review changes…</span>
+                      </DropdownMenu.Item>
+
+                      {/*
+                       * ⚠️ `defaultBranch` is passed THROUGH to `newPullRequestUrl`, undefined and all — never
+                       * `?? 'main'`. The predicate that offered this item refuses to guess a default it could not
+                       * read, and a fallback here would put the guess back one layer down: on a `master`-trunked
+                       * repository the user would land on the empty compare page the predicate exists to prevent.
+                       * `newPullRequestUrl` handles the unknown case by letting the provider supply its own default.
+                       */}
+                      {branchView.canOpenChangeRequest && repo?.repo && repo.branch && (
+                        <DropdownMenu.Item
+                          className={TOOLBAR_MENU_ITEM}
+                          onSelect={() =>
+                            window.open(
+                              newPullRequestUrl(providerToUse, repo.repo!, repo.branch!, defaultBranch),
+                              '_blank',
+                            )
+                          }
+                        >
+                          <div className="i-ph:arrow-square-out" />
+                          <span>Open a pull request</span>
+                        </DropdownMenu.Item>
+                      )}
+
+                      {/*
+                       * 🔴 THE DESTRUCTIVE ROW IS SEPARATED AND LAST. A menu where a destructive
+                       * action sits between two ordinary ones is a menu you fire it from by
+                       * mis-aiming.
+                       *
+                       * ⚠️ This was a PAIR until 2026-08-22, when the owner turned branch deletion
+                       * off. Discard is the survivor and the separator stays with it — it is still
+                       * the one row here that throws work away.
+                       */}
+                      <DropdownMenu.Separator className="h-px bg-bolt-elements-borderColor my-1" />
+                      <DropdownMenu.Item
+                        className={classNames(TOOLBAR_MENU_ITEM, 'text-bolt-elements-icon-error')}
+                        onSelect={() => setDiscardOpen(true)}
+                      >
+                        <div className="i-ph:arrow-counter-clockwise" />
+                        <span>Discard all changes…</span>
+                      </DropdownMenu.Item>
+
+                      {/*
+                       * HIDE-DON'T-DELETE (§4.1a): the row is gone, not greyed. A permanently
+                       * disabled row is a dead end rather than a roadmap, and the thing the user
+                       * should do instead — delete it on GitHub — is not something a tooltip on a
+                       * dimmed control communicates.
+                       *
+                       * 🔴 This is the COSMETIC half. `decideBranchDelete` refuses on both walls, so
+                       * removing this line re-shows the item and still cannot delete anything.
+                       */}
+                      {BRANCH_DELETE_ENABLED && (
+                        <DropdownMenu.Item
+                          className={classNames(TOOLBAR_MENU_ITEM, 'text-bolt-elements-icon-error')}
+                          onSelect={() => setDeleteOpen(true)}
+                        >
+                          <div className="i-ph:trash" />
+                          <span>Delete a branch…</span>
+                        </DropdownMenu.Item>
+                      )}
+                    </>
+                  )}
+                </DropdownMenu.SubContent>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Sub>
+
             {view.action !== 'none' && (
               <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} onSelect={runAction}>
                 <div className={view.action === 'reconnect' ? 'i-ph:plugs' : 'i-ph:cloud-arrow-up'} />
@@ -167,10 +329,22 @@ export function GitStatusChip() {
               <span>{repo?.linked ? `Pull from ${providerName}…` : 'Link a repository…'}</span>
             </DropdownMenu.Item>
 
+            {/*
+             * BRANCH-AWARE: a linked project is on one branch at a time (§4.13a), and opening the
+             * repository root shows whichever branch the provider defaults to — which after a switch
+             * is not the one the user is looking at.
+             */}
             {repo?.linked && repo.repo && (
               <DropdownMenu.Item
                 className={TOOLBAR_MENU_ITEM}
-                onSelect={() => window.open(`${PROVIDER_ORIGIN[providerToUse]}/${repo.repo}`, '_blank')}
+                onSelect={() =>
+                  window.open(
+                    repo.branch
+                      ? branchTreeUrl(providerToUse, repo.repo!, repo.branch)
+                      : repoUrl(providerToUse, repo.repo!),
+                    '_blank',
+                  )
+                }
               >
                 <div className="i-ph:arrow-square-out" />
                 <span className="truncate">Open {repo.repo}</span>
@@ -223,6 +397,100 @@ export function GitStatusChip() {
       {dialogOpen && (
         <GitHubSyncDialog projectId={activeProjectId} provider={providerToUse} onClose={() => setDialogOpen(false)} />
       )}
+
+      <SwitchBranchDialog
+        open={switchOpen}
+        onClose={() => setSwitchOpen(false)}
+        branches={branch.branches}
+        loading={branch.loadingBranches}
+        currentBranch={repo?.branch}
+        onPick={async (name) => {
+          setSwitchOpen(false);
+
+          /*
+           * `switchTo` returns a PROMPT rather than resolving the three-way choice itself — the hook
+           * must not own a dialog, or the sync dialog's branch field would inherit this one's.
+           */
+          const prompt = await branch.switchTo(name);
+
+          if (prompt) {
+            setSwitchPrompt(prompt);
+          }
+        }}
+      />
+
+      <SwitchWithChangesDialog
+        prompt={switchPrompt}
+        onCancel={() => setSwitchPrompt(undefined)}
+        onCommitFirst={() => {
+          /*
+           * The only answer that loses nothing, so it is offered first — and it hands off to the ONE
+           * sanctioned push writer (`requestSave` via the chip's own action) rather than inventing a
+           * second one. The user re-opens the switch afterwards, on a clean tree.
+           */
+          setSwitchPrompt(undefined);
+          runAction();
+        }}
+        onDiscardAndSwitch={() => {
+          const target = switchPrompt?.branch;
+          setSwitchPrompt(undefined);
+
+          if (target) {
+            void branch.switchDiscardingChanges(target);
+          }
+        }}
+      />
+
+      <NewBranchDialog
+        open={newBranchOpen}
+        onClose={() => setNewBranchOpen(false)}
+        onCreate={branch.create}
+        busy={branch.busy}
+      />
+
+      <DiscardChangesDialog
+        open={discardOpen}
+        onClose={() => setDiscardOpen(false)}
+        onConfirm={() => {
+          setDiscardOpen(false);
+          void branch.discard();
+        }}
+        view={branchView}
+        busy={branch.busy}
+      />
+
+      <ReviewChangesDialog
+        open={reviewOpen}
+        onClose={() => setReviewOpen(false)}
+        load={branch.review}
+        branch={repo?.branch}
+        compareUrl={
+          repo?.repo && repo.branch
+            ? newPullRequestUrl(providerToUse, repo.repo, repo.branch, defaultBranch)
+            : undefined
+        }
+      />
+
+      <BranchHistoryDialog
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        load={branch.history}
+        branch={repo?.branch}
+        commitUrlFor={repo?.repo ? (sha) => commitUrl(providerToUse, repo.repo!, sha) : undefined}
+      />
+
+      {/* Not mounted while the switch is off — an unreachable dialog is still a mounted component. */}
+      <DeleteBranchDialog
+        open={BRANCH_DELETE_ENABLED && deleteOpen}
+        onClose={() => setDeleteOpen(false)}
+        branches={branch.branches}
+        loading={branch.loadingBranches}
+        currentBranch={repo?.branch}
+        defaultBranch={defaultBranch}
+        onDelete={branch.remove}
+        view={branchView}
+        busy={branch.busy}
+      />
     </>
   );
 }

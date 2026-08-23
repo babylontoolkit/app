@@ -123,6 +123,38 @@ export function getUserRateLimitStore(): UserRateLimitStore {
 export const CLONE_RATE_LIMIT: UserRateLimitRule = { windowMs: 60 * 60 * 1000, max: 10 };
 
 /**
+ * Branch CREATE and DELETE — writes against the user's own repository (SPEC §4.13).
+ *
+ * Looser than a clone because the cost is a single small API call rather than a whole repository
+ * through our egress, and tighter than nothing because these are WRITES landing in somebody's account
+ * with their name on them: a runaway client that created a branch per keystroke would fill a real
+ * person's repository with rubbish they then have to clean up by hand.
+ *
+ * Create and delete deliberately SHARE one bucket. They are the same class of action from the
+ * provider's point of view, and splitting them lets a loop alternate between the two and spend twice
+ * the budget — the same reason a rate limit is keyed on the user rather than on the endpoint.
+ */
+export const BRANCH_WRITE_RATE_LIMIT: UserRateLimitRule = { windowMs: 60 * 60 * 1000, max: 60 };
+
+/**
+ * Reading a whole branch's tree — the Review-changes and Switch reads.
+ *
+ * ⚠️ **THREE TIMES the clone allowance, and that is deliberate — do not read it as "safer than a
+ * clone".** Each call is bounded by the same `GIT_CLONE_MAX_MB` ceiling, so the worst-case egress on
+ * this bucket is genuinely LARGER than on the import bucket. (An earlier version of this comment
+ * claimed it was "well below the clone budget", which contradicted its own previous sentence and the
+ * number underneath it — a false claim about a safety property, the class this repo keeps finding.)
+ *
+ * What actually justifies the higher number is not size, it is REACH. An import names an arbitrary
+ * URL, so its budget is a limit on pulling other people's repositories through our egress. A tree read
+ * runs after the linked-repo gate and can only ever read the project's OWN repository — the same
+ * bytes, over and over — so a runaway client here re-reads one known repo rather than harvesting a
+ * catalogue. Against that, an interactive action (look at a branch, change your mind, look at another)
+ * needs more headroom than a once-per-project import.
+ */
+export const TREE_READ_RATE_LIMIT: UserRateLimitRule = { windowMs: 60 * 60 * 1000, max: 30 };
+
+/**
  * A refusal a caller can act on: 429 + `Retry-After`, and a sentence naming the wait.
  *
  * `subject` names what was throttled, and it defaults to the clone limit this class was written for so
@@ -155,6 +187,28 @@ export async function enforceUserRateLimit(input: {
   userId: string;
   bucket: string;
   rule: UserRateLimitRule;
+
+  /**
+   * What was throttled, in the user's words — "branch operations", "repository imports".
+   *
+   * 🔴 **THREADED THROUGH, because this function silently dropped it and that is a defect factory.**
+   * `RateLimitedError` has taken a `subject` since it was written, with a comment explaining exactly
+   * why; this function constructed the error with two arguments and let the default win. So the
+   * parameter existed, was documented, was tested at the class — and was unreachable through THIS
+   * function, which is how every bucket routed through it would have inherited "repository imports"
+   * and named the wrong operation (`share/build-failure.ts`: the same class of defect as naming no
+   * cause at all — the user goes looking for a problem that does not exist).
+   *
+   * ⚠️ Not "the only place that throws it": `licensing/unity-api-key.ts` constructs the error itself,
+   * deliberately bypassing this function because it keys on an IP fingerprint rather than a user id,
+   * and it has always passed its own subject. Stated because the tempting summary — "no production
+   * 429 has ever named anything but repository imports" — is untrue, and a future reader would act
+   * on it.
+   *
+   * Optional, so every existing call site keeps its exact wording rather than being migrated in a
+   * task that is not about them.
+   */
+  subject?: string;
   now?: number;
 }): Promise<void> {
   const now = input.now ?? Date.now();
@@ -164,6 +218,6 @@ export async function enforceUserRateLimit(input: {
     logger.warn(
       `Rate limited ${input.bucket} for user ${input.userId} until ${new Date(decision.resetAt).toISOString()}`,
     );
-    throw new RateLimitedError(decision.resetAt, now);
+    throw new RateLimitedError(decision.resetAt, now, input.subject);
   }
 }

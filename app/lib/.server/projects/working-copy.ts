@@ -140,6 +140,22 @@ export interface WorkingCopy {
    */
   messageId?: string;
 
+  /**
+   * Which branch these files came from (§4.13a).
+   *
+   * 🔴 There is exactly ONE copy per project, overwritten in place, so the moment a branch switch
+   * lands it describes a tree the project is no longer on — with nothing in the object saying so.
+   * `selectMountSource` never ranks this copy against a local checkpoint, which narrows the blast
+   * radius to one state: a fresh browser, a linked project, and a remote we could not reach. In
+   * exactly that state a recovery would silently restore another branch's tree over a project whose
+   * link tuple names a different one, and the user would find a game they did not write.
+   *
+   * ⚠️ **Optional, and absent means UNKNOWN — never a match.** Every copy written before this field
+   * existed has none, and reading silence as agreement is the `remoteHead` `undefined`-vs-`null`
+   * mistake one file over: it would let precisely the oldest, most stale copies through the check.
+   */
+  branch?: string;
+
   files: SerializedFileMap;
 }
 
@@ -206,7 +222,18 @@ export async function getWorkingCopy(projectId: string, context?: unknown): Prom
      * decides whether to offer to overwrite the user's files, and `undefined` (= "cannot say", ask)
      * is the safe reading of anything we do not recognise.
      */
-    return typeof parsed.messageId === 'string' ? parsed : { ...parsed, messageId: undefined };
+    /*
+     * Both optional fields are normalised the same way, and for the same reason: each feeds a
+     * comparison that decides whether to overwrite the user's files, so anything we do not recognise
+     * becomes `undefined` — "cannot say" — rather than a value the comparison might accidentally
+     * match. A non-string `branch` that survived would be compared against `linked_branch` and could
+     * never equal it, which happens to be safe today and is safe by accident rather than by rule.
+     */
+    return {
+      ...parsed,
+      messageId: typeof parsed.messageId === 'string' ? parsed.messageId : undefined,
+      branch: typeof parsed.branch === 'string' && parsed.branch ? parsed.branch : undefined,
+    };
   } catch (error) {
     logger.error(`Working copy for ${projectId} could not be parsed: ${(error as Error).message}`);
     return null;

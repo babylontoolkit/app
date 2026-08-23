@@ -22,6 +22,7 @@
  * bytes survive the round trip base64-encoded as a WIRE format (never as live store state).
  */
 import { isSecretPath, normalizeRepoFileMap } from '~/lib/git/paths';
+import { branchForWorkingCopy } from './repo-status';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
 import type { CreationPlan } from '~/lib/agent/creation-plan';
 import type { Project } from '~/types/project';
@@ -610,9 +611,25 @@ export async function saveWorkingCopy(
     }
   }
 
+  /*
+   * 🔴 THE BRANCH STAMP (§4.13a T17), read from the store rather than taken as a parameter — for the
+   * same reason `writeWorkingCopyFromStore` does it, and because THIS is the writer that made that
+   * reason concrete.
+   *
+   * There is ONE working copy per project and a PUT replaces the whole object. This function is the
+   * per-generation checkpoint's writer, i.e. the most frequent working-copy write in the product, and
+   * while it could not reach `repoStatus` (an import cycle: `useChatHistory` imports this file) it
+   * wrote every copy unstamped. Two silent consequences: the mismatch guard was inert on the common
+   * path, and it ACTIVELY UN-STAMPED — `applyBranchTree` would stamp `feature/hud` and the very next
+   * generation would overwrite the copy with nothing, giving the protection a lifetime of one turn.
+   *
+   * Threading it through this signature was the other option and was rejected: it restores exactly the
+   * forgettable shape the store-read exists to eliminate, and there would then be two rules for one
+   * field. `repo-status.ts` was extracted instead so both writers read the same answer.
+   */
   await api<{ ok: true; seq: number }>(`/api/projects/${projectId}/working`, {
     method: 'PUT',
-    body: JSON.stringify({ seq, messageId, files: safe }),
+    body: JSON.stringify({ seq, messageId, branch: branchForWorkingCopy(), files: safe }),
   });
 }
 
@@ -623,13 +640,24 @@ export async function saveWorkingCopy(
  * checkpointed, and also what the server returns for bytes it could not parse or order. It is never a
  * reason to fail a mount: the caller falls back to its other sources (`mount-source.ts`).
  */
-export async function loadWorkingCopy(
-  projectId: string,
-): Promise<{ seq: number; updatedAt: string; files: SerializedFileMap; messageId?: string } | null> {
+export interface WorkingCopySummary {
+  seq: number;
+  updatedAt: string;
+  files: SerializedFileMap;
+  messageId?: string;
+
+  /**
+   * Which branch these files came from (§4.13a).
+   *
+   * ⚠️ Absent means the copy predates the stamp, and `selectMountSource` treats that as UNKNOWN — it
+   * never reads silence as agreement. See `WorkingCopy.branch` for why that direction matters.
+   */
+  branch?: string;
+}
+
+export async function loadWorkingCopy(projectId: string): Promise<WorkingCopySummary | null> {
   try {
-    const { copy } = await api<{
-      copy: { seq: number; updatedAt: string; files: SerializedFileMap; messageId?: string };
-    }>(`/api/projects/${projectId}/working`);
+    const { copy } = await api<{ copy: WorkingCopySummary }>(`/api/projects/${projectId}/working`);
     return copy;
   } catch {
     return null;
@@ -663,4 +691,266 @@ export async function renameServerChat(projectId: string, serverChatId: string, 
     method: 'PATCH',
     body: JSON.stringify({ title }),
   });
+}
+
+/* ------------------------------------------------------------------ branches */
+
+/*
+ * The branch client (§4.13a).
+ *
+ * Every helper below follows the OUTCOME convention the git functions on this page deliberately use
+ * rather than `api()`'s throw. These operations replace the user's whole working tree or write to
+ * their own account, so a failure has to be LOUD at the call site — and a thrown error at a caller
+ * that forgot a `catch` is the opposite of loud: it is a spinner that stops and a user who does not
+ * know why. The caller must read `ok`.
+ *
+ * ⚠️ **None of them accepts or forwards a credential.** The server resolves it from the session
+ * (`no-client-token.spec.ts`); a `token` parameter here would be the deleted browser-PAT flow coming
+ * back through a new door.
+ *
+ * The summary shapes are declared HERE rather than imported from `~/lib/.server/git/provider`, which
+ * is server-only — importing it would pull the adapters (and their secrets reach) into the client
+ * bundle. They are the wire shape, so they must stay structurally identical to the server's.
+ */
+
+/** One branch, as the picker and the switch decision need it. Mirrors the server's `BranchSummary`. */
+export interface BranchSummary {
+  name: string;
+  head: string;
+  isDefault: boolean;
+
+  /** Advisory. The provider owns the rule — DIM a protected branch, never treat its absence as permission. */
+  protected: boolean;
+}
+
+/** One commit for the history list. Short message only — never a diff. Mirrors `CommitSummary`. */
+export interface CommitSummary {
+  sha: string;
+  message: string;
+  author: string;
+  date: string;
+}
+
+/** What every branch helper returns when it did not work. */
+export interface BranchOutcomeBase {
+  ok: boolean;
+
+  /** The provider connection lapsed; send the user back through OAuth. */
+  reconnect?: boolean;
+
+  /** Worth trying again (rate limit, transport). A refused branch name is not. */
+  retryable?: boolean;
+  message?: string;
+}
+
+export interface ListBranchesOutcome extends BranchOutcomeBase {
+  branches?: BranchSummary[];
+}
+
+export interface ListCommitsOutcome extends BranchOutcomeBase {
+  commits?: CommitSummary[];
+
+  /** Absent = the end of the history. Never an empty string, which reads as "there is more". */
+  nextCursor?: string;
+}
+
+/** A read or a replacement that carries a tree. `files` is normalised at the fetch boundary. */
+export interface BranchTreeOutcome extends BranchOutcomeBase {
+  files?: SerializedFileMap;
+  head?: string;
+  branch?: string;
+}
+
+export interface BranchWriteOutcome extends BranchOutcomeBase {
+  branch?: string;
+  head?: string;
+
+  /**
+   * `'name-taken'` — the branch already exists. The route echoes the TYPED name back in `name` so
+   * the dialog can put it straight back in the field for editing; it never suffixes to `-2` and
+   * never adopts, for `ensureRepo`'s reason (a name the user did not choose is a surprise, and
+   * adopting somebody else's branch is destructive).
+   *
+   * ⚠️ Read the wire's own field rather than re-deriving a boolean here: the server already decides
+   * this, and a second predicate on the client is two readers of one fact.
+   */
+  kind?: string;
+  name?: string;
+}
+
+/**
+ * One POST to the project git route, parsed into an outcome.
+ *
+ * ⚠️ Written ONCE, for the reason `isSecretPath` is one rule in one place: seven copies of the
+ * "parse, fall back on a non-JSON body, log a failure" dance is seven chances for one of them to
+ * turn an HTML 500 page into an unhandled `SyntaxError` at the call site.
+ */
+async function postGitOp<T extends BranchOutcomeBase>(
+  projectId: string,
+  body: Record<string, unknown>,
+  transportMessage: string,
+): Promise<T> {
+  let response: Response;
+
+  try {
+    response = await fetch(`/api/projects/${projectId}/github`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, retryable: true, message: transportMessage } as T;
+  }
+
+  const payload = (await response.json().catch(() => null)) as (T & { error?: boolean; isRetryable?: boolean }) | null;
+
+  if (!payload) {
+    // A non-JSON body (an HTML 500 page) must not become a silent success or an unhandled throw.
+    return {
+      ok: false,
+      retryable: response.status >= 500,
+      message: `The server returned an error (${response.status}).`,
+    } as T;
+  }
+
+  if (!payload.ok) {
+    logger.error(`Git op ${String(body.op)} failed for ${projectId}: ${payload.message ?? response.status}`);
+
+    /*
+     * The route's refusals carry `{ error: true, message }` and no `ok` at all, so an outcome built
+     * from the payload alone would be `{ ok: undefined }` — falsy, but not the `false` the callers
+     * and their tests read. Normalised here so every refusal has the same shape.
+     */
+    /*
+     * ⚠️ THE RETRY SIGNAL HAS TWO SPELLINGS ON THE WIRE, and reading only one reports every failure
+     * of the other class as "not worth retrying".
+     *
+     * `providerErrorResponse` (the git route's own mapper) sends `retryable`. Anything that is NOT a
+     * `GitProviderError` — a store failure, a bug — rethrows to `http.ts`'s uniform envelope, which
+     * sends **`isRetryable`**. Same fact, two field names, and the second one is invisible to a
+     * client that only knows the first: a JSON-bodied 500 would arrive as `retryable: undefined`
+     * while the NON-JSON 500 path two lines up correctly infers `true` from the status. Collapsed
+     * here, at the one boundary that sees both, rather than at each of the seven call sites.
+     */
+    return {
+      ...payload,
+      ok: false,
+      retryable: payload.retryable ?? payload.isRetryable ?? response.status >= 500,
+      message: payload.message ?? `The server returned an error (${response.status}).`,
+    };
+  }
+
+  return payload;
+}
+
+/** Every branch in the project's linked repository. An empty repository legitimately returns `[]`. */
+export async function listBranches(projectId: string): Promise<ListBranchesOutcome> {
+  return postGitOp<ListBranchesOutcome>(
+    projectId,
+    { op: 'branches' },
+    'Could not reach the server to read the branches.',
+  );
+}
+
+/** One bounded page of a branch's history. `limit` is clamped server-side; a bad value never refuses. */
+export async function listCommits(
+  projectId: string,
+  input: { branch?: string; limit?: number; cursor?: string } = {},
+): Promise<ListCommitsOutcome> {
+  return postGitOp<ListCommitsOutcome>(
+    projectId,
+    { op: 'commits', ...input },
+    'Could not reach the server to read the history.',
+  );
+}
+
+/**
+ * Read a branch's tree WITHOUT agreeing with it — the Review-changes read.
+ *
+ * The difference between this and `pullFromRepo` is a line the server deliberately omits: it does not
+ * move `lastSyncedCommitSha`. Looking at a branch is not agreeing with it.
+ */
+export async function readBranchTree(projectId: string, input: { branch?: string } = {}): Promise<BranchTreeOutcome> {
+  const outcome = await postGitOp<BranchTreeOutcome>(
+    projectId,
+    { op: 'tree', ...input },
+    'Could not reach the server to read the branch.',
+  );
+
+  return withNormalizedFiles(outcome);
+}
+
+/**
+ * Create a branch from what the user is looking at, and point the project at it.
+ *
+ * **No file is touched** — the in-progress work carries onto the new branch, which is the whole
+ * feature. A collision returns `kind: 'name-taken'` with the typed name intact in `name` for
+ * editing; it never suffixes and never adopts.
+ */
+export async function createBranch(projectId: string, name: string): Promise<BranchWriteOutcome> {
+  return postGitOp<BranchWriteOutcome>(
+    projectId,
+    { op: 'create-branch', name },
+    'Could not reach the server to create the branch.',
+  );
+}
+
+/**
+ * Delete a branch in the user's own repository.
+ *
+ * ⚠️ The one operation in this group with **no undo** — a checkpoint is a snapshot of FILES and
+ * cannot restore a remote ref. The current branch and the repository default are refused server-side,
+ * each with its own sentence.
+ */
+export async function deleteBranch(projectId: string, name: string): Promise<BranchWriteOutcome> {
+  return postGitOp<BranchWriteOutcome>(
+    projectId,
+    { op: 'delete-branch', name },
+    'Could not reach the server to delete the branch.',
+  );
+}
+
+/**
+ * Switch the project to another branch: read its tree and move the link tuple to it.
+ *
+ * The server writes BOTH tuple fields in one update against the head it actually just read. The
+ * caller applies the returned files through `applyBranchTree` — never by re-mounting.
+ */
+export async function switchBranch(projectId: string, branch: string): Promise<BranchTreeOutcome> {
+  const outcome = await postGitOp<BranchTreeOutcome>(
+    projectId,
+    { op: 'switch-branch', branch },
+    'Could not reach the server to switch branches. Your work is still here — try again.',
+  );
+
+  return withNormalizedFiles(outcome);
+}
+
+/**
+ * Read the project's own branch back, so the client can reset to it.
+ *
+ * The pointer is NOT moved — it already names this branch, and the client is the party that decides
+ * whether the reset landed. Refused for an unlinked project: there is nothing to reset *to*, and it
+ * must never degrade to "delete everything".
+ */
+export async function discardChanges(projectId: string): Promise<BranchTreeOutcome> {
+  const outcome = await postGitOp<BranchTreeOutcome>(
+    projectId,
+    { op: 'discard' },
+    'Could not reach the server. Your work is still here — try again.',
+  );
+
+  return withNormalizedFiles(outcome);
+}
+
+/**
+ * Fetch-boundary normalization, exactly as `getRepoStatus`/`pullFromRepo`/`cloneRepoIntoProject` do.
+ *
+ * A damaged repo (one carrying a nested workdir prefix) must not round-trip its damage into the
+ * sandbox — and these files are about to REPLACE the working tree, so a wrong prefix here is not a
+ * cosmetic path bug, it is a restore that deletes everything it failed to match.
+ */
+function withNormalizedFiles(outcome: BranchTreeOutcome): BranchTreeOutcome {
+  return outcome.files ? { ...outcome, files: normalizeRepoFileMap(outcome.files) } : outcome;
 }

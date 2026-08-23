@@ -71,7 +71,17 @@ export class FakeRepoStore {
   /** commitSha → {treeSha, parents, message}. */
   readonly commits = new Map<string, { treeSha: string; parents: string[]; message: string }>();
 
-  /** branch → commitSha. */
+  /**
+   * branch → commitSha.
+   *
+   * ⚠️ **ONE NAMESPACE FOR THE WHOLE FAKE, not one per repository** — as are `blobs`, `trees` and
+   * `commits`. The fake models one repository's git data and a SET of names that exist, which has
+   * been sufficient because every path through it operates on a single repo. Stated here because it
+   * bounds what a cross-repo test can prove: listing branches for repo B returns repo A's branches,
+   * so a test asserting isolation must assert on the REQUEST (`h.requests` — the path actually sent)
+   * or on an unregistered repo's 404, never on the returned branch names. A test that appears to
+   * prove per-repo isolation against this fake is proving nothing, which is worse than not having it.
+   */
   readonly branches = new Map<string, string>();
 
   readonly repos = new Set<string>();
@@ -89,6 +99,14 @@ export class FakeRepoStore {
    * lookup from a constant when every answer is the same constant.
    */
   readonly defaultBranches = new Map<string, string>();
+
+  /**
+   * Branches the provider will refuse to write.
+   *
+   * A set rather than a flag on the branch, for `defaultBranches`' stated reason: a branch that exists
+   * and is unprotected must still EXIST, so "registered" and "has metadata" stay different facts.
+   */
+  readonly protectedBranches = new Set<string>();
 
   /** The fake's own default, matching what both providers create a repo with. */
   static readonly DEFAULT_BRANCH = 'main';
@@ -144,6 +162,31 @@ export class FakeRepoStore {
 
     for (const [path, blobSha] of tree) {
       out.set(path, this.blobs.get(blobSha)!);
+    }
+
+    return out;
+  }
+
+  /**
+   * A branch's commits, newest first, walked through first parents.
+   *
+   * ⚠️ It takes a BRANCH NAME, and returns `[]` for one that does not exist rather than throwing — a
+   * history read of an absent branch is an empty list on both providers, not a failure.
+   */
+  historyOf(branch: string): Array<{ sha: string; message: string }> {
+    const out: Array<{ sha: string; message: string }> = [];
+    let cursor = this.branches.get(branch);
+
+    /* Bounded: a fake with a cyclic parent chain must fail a test, never hang the suite. */
+    for (let step = 0; cursor && step < 1000; step++) {
+      const commit = this.commits.get(cursor);
+
+      if (!commit) {
+        break;
+      }
+
+      out.push({ sha: cursor, message: commit.message });
+      cursor = commit.parents[0];
     }
 
     return out;
@@ -261,6 +304,57 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
 
         return { data: { full_name: fullName, default_branch: store.defaultBranchOf(fullName) } };
       },
+      listBranches: async (params: { owner: string; repo: string; per_page: number; page: number }) => {
+        record('GET', `/repos/${params.owner}/${params.repo}/branches`, params);
+
+        const fullName = `${params.owner}/${params.repo}`;
+
+        if (!store.repos.has(fullName)) {
+          throw new FakeHttpError(404, 'Not Found', { headers: {} });
+        }
+
+        /*
+         * ⚠️ 409, NOT an empty array. A repository with no commits refuses every ref read on real
+         * GitHub — the same quirk that broke every first save in 2026-07 (`isEmptyRepository`). A
+         * fake that returned `[]` here would let an adapter with no empty-repo handling pass, and the
+         * failure would then appear only against real GitHub, on a repo Save had just created.
+         */
+        if (store.commits.size === 0) {
+          throw new FakeHttpError(409, 'Git Repository is empty.', { headers: {} });
+        }
+
+        const all = [...store.branches].map(([name, sha]) => ({
+          name,
+          commit: { sha },
+          protected: store.protectedBranches.has(name),
+        }));
+
+        const start = (params.page - 1) * params.per_page;
+
+        return { data: all.slice(start, start + params.per_page) };
+      },
+      listCommits: async (params: { owner: string; repo: string; sha: string; per_page: number; page: number }) => {
+        record('GET', `/repos/${params.owner}/${params.repo}/commits`, params);
+
+        const fullName = `${params.owner}/${params.repo}`;
+
+        if (!store.repos.has(fullName)) {
+          throw new FakeHttpError(404, 'Not Found', { headers: {} });
+        }
+
+        if (store.commits.size === 0) {
+          throw new FakeHttpError(409, 'Git Repository is empty.', { headers: {} });
+        }
+
+        const history = store.historyOf(params.sha).map((entry) => ({
+          sha: entry.sha,
+          commit: { message: entry.message, author: { name: 'Fake Author', date: '2026-08-21T00:00:00Z' } },
+        }));
+
+        const start = (params.page - 1) * params.per_page;
+
+        return { data: history.slice(start, start + params.per_page) };
+      },
       get: async (params: { owner: string; repo: string }) => {
         record('GET', `/repos/${params.owner}/${params.repo}`);
 
@@ -362,7 +456,44 @@ export function createFakeGitHub(options: { login?: string; store?: FakeRepoStor
       },
       createRef: async (params: { ref: string; sha: string }) => {
         record('POST', '/git/refs', params);
-        store.branches.set(params.ref.replace(/^refs\/heads\//, ''), params.sha);
+
+        const branch = params.ref.replace(/^refs\/heads\//, '');
+
+        /*
+         * ⚠️ REAL GITHUB REFUSES A CREATE ONTO AN EXISTING REF with 422 "Reference already exists" —
+         * `createRef` has no `force` and cannot move one. A fake that overwrote instead would let a
+         * provider that silently clobbers somebody's branch pass every test, which is the one
+         * outcome `GitProvider.createBranch`'s comment calls a force-push wearing a friendlier verb.
+         */
+        if (store.branches.has(branch)) {
+          throw new FakeHttpError(422, 'Reference already exists', { headers: {} });
+        }
+
+        /*
+         * ⚠️ REAL GITHUB RETURNS 422 FOR AN UNKNOWN SHA TOO — "Object does not exist" — i.e. the SAME
+         * status as the duplicate above, with only the prose distinguishing them. Modelling it is what
+         * lets a test prove `createBranch` does not report "that name is taken" for a bad source sha.
+         * A fake that accepted any sha makes that defect unreachable, which is how it shipped.
+         */
+        if (!store.commits.has(params.sha)) {
+          throw new FakeHttpError(422, 'Object does not exist', { headers: {} });
+        }
+
+        store.branches.set(branch, params.sha);
+
+        return { data: {} };
+      },
+      deleteRef: async (params: { ref: string }) => {
+        record('DELETE', `/git/refs/${params.ref}`, params);
+
+        const branch = params.ref.replace(/^heads\//, '');
+
+        /* Real GitHub: 422 "Reference does not exist" — NOT a 404, which is what one would guess. */
+        if (!store.branches.has(branch)) {
+          throw new FakeHttpError(422, 'Reference does not exist', { headers: {} });
+        }
+
+        store.branches.delete(branch);
 
         return { data: {} };
       },
@@ -485,9 +616,116 @@ export function createFakeGitLab(options: { login?: string; store?: FakeRepoStor
       const branchMatch = rest.match(/^\/repository\/branches\/(.+)$/);
 
       if (branchMatch) {
-        const head = store.branches.get(decodeURIComponent(branchMatch[1]));
+        const name = decodeURIComponent(branchMatch[1]);
+
+        if (method === 'DELETE') {
+          /* GitLab: 404 for an absent branch — where GitHub uses 422. The seam absorbs the difference. */
+          if (!store.branches.has(name)) {
+            return json({ message: '404 Branch Not Found' }, 404);
+          }
+
+          if (store.protectedBranches.has(name)) {
+            return json({ message: 'Protected branch cannot be deleted' }, 405);
+          }
+
+          store.branches.delete(name);
+
+          return json(undefined, 204);
+        }
+
+        const head = store.branches.get(name);
 
         return head ? json({ commit: { id: head } }) : json({ message: '404 Branch Not Found' }, 404);
+      }
+
+      /*
+       * Branch LIST and CREATE share the collection path; the method separates them.
+       *
+       * The match is strict equality, not a prefix, so `/repository/branches/main` cannot reach here
+       * whatever the order — deliberately, because a prefix match would let a single-branch READ fall
+       * through to the collection and answer the wrong question with a 200.
+       */
+      if (rest === '/repository/branches') {
+        const fullName = decodeURIComponent(projectMatch[1]);
+
+        if (!store.repos.has(fullName)) {
+          return json({ message: '404 Project Not Found' }, 404);
+        }
+
+        if (method === 'POST') {
+          const name = url.searchParams.get('branch')!;
+          const from = url.searchParams.get('ref')!;
+
+          /* Real GitLab validates rather than conflicting: 400, not GitHub's 422. */
+          if (store.branches.has(name)) {
+            return json({ message: 'Branch already exists' }, 400);
+          }
+
+          if (!store.commits.has(from)) {
+            return json({ message: '400 Invalid reference name' }, 400);
+          }
+
+          store.branches.set(name, from);
+
+          return json({ name, commit: { id: from } });
+        }
+
+        /*
+         * ⚠️ A project with no commits answers 404 here, where GitHub answers 409. Reproducing BOTH
+         * shapes is the point of having two fakes — an adapter that handles only one passes half the
+         * contract suite and fails against the other provider in production.
+         */
+        if (store.commits.size === 0) {
+          return json({ message: '404 Repository Not Found' }, 404);
+        }
+
+        const entries = [...store.branches].map(([name, sha]) => ({
+          name,
+          commit: { id: sha },
+          default: name === store.defaultBranchOf(fullName),
+          protected: store.protectedBranches.has(name),
+        }));
+
+        /*
+         * 🔴 REAL PAGING, not a permanently-empty `x-next-page`.
+         *
+         * Every other GitLab arm hardcodes the last-page header, which meant the multi-page walk in
+         * `_paginate` was UNREACHABLE through the fake — and that walk is now shared with `fetchTree`,
+         * the reload path. An unreachable loop behind a passing suite is the "test drove around the
+         * wiring" shape this codebase keeps recording, so the one collection a test can grow past a
+         * page pages honestly.
+         */
+        const perPage = Number(url.searchParams.get('per_page') ?? '100');
+        const page = Number(url.searchParams.get('page') ?? '1');
+        const start = (page - 1) * perPage;
+        const slice = entries.slice(start, start + perPage);
+        const hasMore = start + perPage < entries.length;
+
+        return json(slice, 200, { 'x-next-page': hasMore ? String(page + 1) : '' });
+      }
+
+      if (rest === '/repository/commits' && method === 'GET') {
+        const fullName = decodeURIComponent(projectMatch[1]);
+
+        if (!store.repos.has(fullName)) {
+          return json({ message: '404 Project Not Found' }, 404);
+        }
+
+        const perPage = Number(url.searchParams.get('per_page') ?? '20');
+        const page = Number(url.searchParams.get('page') ?? '1');
+        const history = store.historyOf(url.searchParams.get('ref_name') ?? '');
+        const start = (page - 1) * perPage;
+
+        return json(
+          history.slice(start, start + perPage).map((entry) => ({
+            id: entry.sha,
+            title: entry.message.split('\n', 1)[0],
+            author_name: 'Fake Author',
+            created_at: '2026-08-21T00:00:00Z',
+          })),
+          200,
+          { 'x-next-page': '' },
+        );
       }
 
       if (rest.startsWith('/repository/tree')) {

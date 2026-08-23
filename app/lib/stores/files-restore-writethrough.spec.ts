@@ -28,9 +28,11 @@
  * convention as `files-exclusions.spec.ts`).
  */
 /* eslint-disable @typescript-eslint/no-empty-function */
-import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { base64ToBytes, bytesToBase64, type SerializedFileMap } from '~/lib/binary/binary-files';
-import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
+import { SANDBOX_ROOTS, toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import type { SandboxProvider } from '~/lib/sandbox';
 import { resolveInWorkdir } from '~/lib/sandbox/codesandbox-translate';
 import { WORK_DIR } from '~/utils/constants';
@@ -778,5 +780,320 @@ describe('restoreFiles — a write that FAILED is not recorded as present', () =
 
     // The restore could not overwrite it, and must not have removed it either.
     expect(disk.has('public/babylon.png')).toBe(true);
+  });
+});
+
+/**
+ * 🔴 T12 — THE PER-TREE STATE A BRANCH SWITCH MAKES FALSE (`_specs/github-branch-client_plan.md`).
+ *
+ * Two silent failures. Neither throws, neither has a natural symptom, and both survive for the life
+ * of the browser rather than for the life of the turn.
+ *
+ * **(a) `#modifiedFiles` is not cleared by `restoreFiles`.** That is correct in general — it is
+ * LLM diff-tracking ("the original content since the last user message"), not a dirty flag — and it
+ * is wrong for a door that REPLACES the whole tree: afterwards the baselines describe a tree that no
+ * longer exists, so the `<bolt_file_modifications>` block the model is shown is a diff against
+ * fiction and every later `type="edit"` is computed from it. `resetAllFileModifications()` already
+ * exists and is called from three action-runner sites only; a tree-replacing door owes it too.
+ *
+ * **(b) `#deletedPaths` is GLOBAL, PERSISTED, and honoured by `refreshFiles` as a `skip:`
+ * predicate.** So a path recorded there is suppressed from the map forever, whatever is on disk.
+ * Two ways that bites a switch, and the second is the nastier one:
+ *
+ *   - a file the user deleted on branch A is written back by the switch to branch B, and is then on
+ *     disk (it builds!) and invisible in the file tree;
+ *   - `restoreFiles`' OWN deletion pass calls `deleteFile`, which records every path the incoming
+ *     tree does not have — so ONE switch permanently suppresses every file unique to the branch
+ *     being left, and switching back shows a project with holes in it.
+ *
+ * T15's `applyBranchTree` is the caller and does not exist yet, so these drive the SEQUENCE a
+ * tree-replacing door performs: restore → `resetFileModifications()` → `clearDeletedPaths()`.
+ *
+ * ⚠️ Every assertion here is paired with a CONTROL, because both halves of this task are "clear some
+ * state", and "clear it everywhere / never record it at all" passes a one-sided test while being a
+ * strictly worse bug: a `getFileModifications()` that always returns nothing, or a `deleteFile` that
+ * stops remembering, would go green on the un-controlled version of each.
+ */
+
+/** The one `localStorage` key `#deletedPaths` is persisted under (`files.ts` `#persistDeletedPaths`). */
+const DELETED_PATHS_KEY = 'bolt-deleted-paths';
+
+/**
+ * A real-enough `localStorage`.
+ *
+ * Vitest runs these in the node environment, where `localStorage` is genuinely `undefined` — and
+ * `FilesStore` guards every access with `typeof localStorage !== 'undefined'`, so without a stub the
+ * PERSISTED half of `clearDeletedPaths` is unreachable and its test would pass for a function that
+ * only ever touched the in-memory set. Installed BEFORE the store is constructed, because the
+ * constructor seeds `#deletedPaths` from this key.
+ */
+function installLocalStorage() {
+  const backing = new Map<string, string>();
+
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => backing.get(key) ?? null,
+    setItem: (key: string, value: string) => void backing.set(key, String(value)),
+    removeItem: (key: string) => void backing.delete(key),
+    clear: () => backing.clear(),
+    key: (index: number) => [...backing.keys()][index] ?? null,
+    get length() {
+      return backing.size;
+    },
+  });
+
+  return backing;
+}
+
+/** What `bolt-deleted-paths` currently holds, parsed. `[]` covers "written empty" and "never written". */
+function persistedDeletedPaths(): string[] {
+  const raw = localStorage.getItem(DELETED_PATHS_KEY);
+
+  return raw ? (JSON.parse(raw) as string[]) : [];
+}
+
+function textFile(content: string) {
+  return { type: 'file', content, isBinary: false } as const;
+}
+
+describe.each(WORKDIRS)('T12 — invalidating per-tree state (%s)', (_label, workdir) => {
+  const p = (rel: string) => `${workdir}/${rel}`;
+
+  beforeEach(() => {
+    installLocalStorage();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /*
+   * ────────────────────────── (b) the deleted-path set ──────────────────────────
+   */
+
+  it('clearDeletedPaths() empties the PERSISTED key, not just the in-memory set', async () => {
+    const { store } = newStore(workdir);
+
+    await store.restoreFiles({ [p('src/main.ts')]: textFile('v1') }, { protect: () => false });
+    await store.deleteFile(p('src/main.ts'));
+
+    /*
+     * CONTROL. Without this the assertion below passes for a test that never recorded a deletion —
+     * and, worse, for a `deleteFile` that quietly stopped persisting anything at all.
+     */
+    expect(persistedDeletedPaths()).toEqual([p('src/main.ts')]);
+
+    store.clearDeletedPaths();
+
+    /*
+     * The in-memory half alone is not enough: this key is read by the CONSTRUCTOR, so a set cleared
+     * only in memory comes straight back on the next page load — i.e. the suppression outlives the
+     * fix by exactly one reload, which is the shape of bug nobody reproduces.
+     */
+    expect(persistedDeletedPaths()).toEqual([]);
+  });
+
+  it("records the restore's OWN deletions, and clears those too", async () => {
+    const { store } = newStore(workdir);
+
+    // Branch A: two files.
+    await store.restoreFiles(
+      { [p('src/A.ts')]: textFile('a'), [p('src/B.ts')]: textFile('b') },
+      {
+        protect: () => false,
+      },
+    );
+
+    // Switch to branch B, whose tree does not have `B.ts`. `restoreFiles` deletes it — via `deleteFile`.
+    await store.restoreFiles({ [p('src/A.ts')]: textFile('a2') }, { protect: () => false });
+
+    /*
+     * CONTROL, and the finding itself: the user never deleted `B.ts`. The SWITCH did, and the switch
+     * recorded it in a global, persisted set that outlives the tree it describes.
+     */
+    expect(persistedDeletedPaths()).toEqual([p('src/B.ts')]);
+
+    store.clearDeletedPaths();
+    expect(persistedDeletedPaths()).toEqual([]);
+  });
+
+  /*
+   * ────────────────────────── (a) the modification baselines ──────────────────────────
+   */
+
+  it('resetFileModifications() after a restore leaves no baselines behind', async () => {
+    const { store } = newStore(workdir);
+
+    await store.restoreFiles({ [p('src/main.ts')]: textFile('v1') }, { protect: () => false });
+
+    // A user edit: this is what records a baseline (`FilesStore.saveFile`), and what goes stale.
+    await store.saveFile(p('src/main.ts'), 'v1 + my edit');
+
+    // The branch switch replaces the tree the baseline was taken against.
+    await store.restoreFiles({ [p('src/main.ts')]: textFile('branch B content') }, { protect: () => false });
+
+    store.resetFileModifications();
+
+    expect(store.getFileModifications()).toBeUndefined();
+    expect(store.getModifiedFiles()).toBeUndefined();
+  });
+
+  /**
+   * 🔴 THE CONTROL for (a). Without it, "clear the modifications everywhere" passes — including the
+   * two ways of doing it that are strictly worse than the bug: clearing `#modifiedFiles` inside
+   * `restoreFiles` itself (which would silently drop a user's un-sent edits from the model's
+   * context on every mount), or a `getFileModifications` that always returns nothing.
+   *
+   * It also SHOWS the defect: with the reset omitted, the surviving baseline diffs `v1` against
+   * branch B's content and reports the user as having made an edit they never made.
+   */
+  it('CONTROL: without the reset, the stale baseline still produces a (fictional) modification', async () => {
+    const { store } = newStore(workdir);
+
+    await store.restoreFiles({ [p('src/main.ts')]: textFile('v1') }, { protect: () => false });
+    await store.saveFile(p('src/main.ts'), 'v1 + my edit');
+
+    // A baseline really is recorded — the edit is visible before any restore happens.
+    expect(store.getFileModifications()).toBeDefined();
+
+    await store.restoreFiles({ [p('src/main.ts')]: textFile('branch B content') }, { protect: () => false });
+
+    const modifications = store.getFileModifications();
+
+    expect(modifications).toBeDefined();
+    expect(Object.keys(modifications!)).toEqual([p('src/main.ts')]);
+  });
+});
+
+/**
+ * The `refreshFiles`-observable half of (b) — the symptom a user actually reports.
+ *
+ * ⚠️ **Parameterized over the INCOMING map's root rather than the store's workdir, and that is a
+ * fidelity decision, not a shortcut.** `refreshFiles` keys both its rebuilt map and its `skip`
+ * lookup off the `WORK_DIR` CONSTANT, not off `sandbox.workdir` (the suite above already flags this
+ * in "inherited behaviours"). In production the two are the same value — `WORK_DIR` and the
+ * provider's workdir come from the one build-time switch — but in a test they can be made to differ,
+ * and a store whose provider workdir is not `WORK_DIR` cannot exhibit the suppression at all: the
+ * deleted path is recorded under one root and looked up under another, so the bug silently does not
+ * reproduce and every assertion here would pass against a `clearDeletedPaths` that does nothing.
+ *
+ * So the store sits at `WORK_DIR` and the BRANCH TREE carries each provider root in turn — which is
+ * the shape production actually produces (a tree map can outlive the provider that wrote it; that is
+ * why `SANDBOX_ROOTS` is a list) and covers both workdirs on the one axis that can fail.
+ */
+describe.each(SANDBOX_ROOTS)('T12 — a suppressed file is on disk and invisible (incoming root %s)', (incomingRoot) => {
+  const p = (rel: string) => `${WORK_DIR}/${rel}`;
+  const incoming = (rel: string) => `${incomingRoot}/${rel}`;
+
+  beforeEach(() => {
+    installLocalStorage();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('a file deleted on the old branch comes back when the switch clears the set — and not before', async () => {
+    const { store, disk } = newStore(WORK_DIR);
+
+    // Branch A, and the user deletes a file on it.
+    await store.restoreFiles({ [p('src/main.ts')]: textFile('v1') }, { protect: () => false });
+    await store.deleteFile(p('src/main.ts'));
+
+    // Switch to branch B, whose tree HAS that path. The bytes land on disk.
+    await store.restoreFiles({ [incoming('src/main.ts')]: textFile('v2') }, { protect: () => false });
+    expect(decoder.decode(disk.get('src/main.ts'))).toBe('v2');
+
+    /*
+     * CONTROL — the defect, driven. Without the invalidation the very next full re-scan drops the
+     * file: present on disk (so it compiles, so the game runs), absent from the file tree, with
+     * nothing anywhere saying why. This is what proves `clearDeletedPaths()` is load-bearing rather
+     * than a no-op the assertion below would not notice.
+     */
+    await store.refreshFiles();
+    expect(store.files.get()[p('src/main.ts')]).toBeUndefined();
+
+    // The third step a tree-replacing door owes.
+    store.clearDeletedPaths();
+    await store.refreshFiles();
+
+    expect(store.getFile(p('src/main.ts'))?.content).toBe('v2');
+  });
+
+  it('🔴 and the same for files the SWITCH ITSELF deleted — switching back must not show holes', async () => {
+    const { store, disk } = newStore(WORK_DIR);
+
+    // Branch A: two files, neither of which the user has touched.
+    await store.restoreFiles(
+      { [p('src/A.ts')]: textFile('a'), [p('src/B.ts')]: textFile('b') },
+      {
+        protect: () => false,
+      },
+    );
+
+    // Switch to branch B — `restoreFiles`' deletion pass removes `B.ts` and RECORDS it.
+    await store.restoreFiles({ [incoming('src/A.ts')]: textFile('a2') }, { protect: () => false });
+    expect(disk.has('src/B.ts')).toBe(false);
+
+    // Switch back to branch A. The bytes are written back.
+    await store.restoreFiles(
+      { [incoming('src/A.ts')]: textFile('a'), [incoming('src/B.ts')]: textFile('b') },
+      {
+        protect: () => false,
+      },
+    );
+    expect(decoder.decode(disk.get('src/B.ts'))).toBe('b');
+
+    /*
+     * CONTROL — without the invalidation the round trip is lossy in the file tree only. Every file
+     * unique to a branch you have ever left is suppressed, permanently, on every project in this
+     * browser, because the set is global and persisted.
+     */
+    await store.refreshFiles();
+    expect(store.files.get()[p('src/B.ts')]).toBeUndefined();
+    expect(store.getFile(p('src/A.ts'))?.content).toBe('a'); // …and the rest of the tree looks fine.
+
+    store.clearDeletedPaths();
+    await store.refreshFiles();
+
+    expect(store.getFile(p('src/B.ts'))?.content).toBe('b');
+    expect(store.getFile(p('src/A.ts'))?.content).toBe('a');
+  });
+});
+
+/**
+ * The `workbenchStore` passthroughs, pinned by SOURCE rather than by a unit test.
+ *
+ * ⚠️ Importing `workbench.ts` boots a sandbox, an editor store and a watcher — the reason
+ * `execution-queue.ts` was extracted into its own module in the first place, after a one-line bug
+ * (`.then()` with no `.catch()`) survived because no test could reach the store. So these two
+ * delegates cannot be unit-tested here, and "it is only one line" is precisely the argument that
+ * left that queue unguarded.
+ *
+ * A scan is the honest alternative: it cannot prove the delegate does the right thing, but it can
+ * prove it still EXISTS and still points at the `FilesStore` method — which is the regression that
+ * would otherwise leave T15's tree-replacing doors calling nothing at all, silently, because the
+ * doors are wired to the store and every unit test drives the store directly.
+ */
+describe('the workbench delegates the tree-invalidation calls to the files store', () => {
+  const source = () => fs.readFile(path.resolve(process.cwd(), 'app/lib/stores/workbench.ts'), 'utf8');
+
+  it.each([
+    ['clearDeletedPaths', 'clearDeletedPaths'],
+    ['resetAllFileModifications', 'resetFileModifications'],
+  ])('%s calls through to the store', async (method, target) => {
+    const code = await source();
+
+    expect(code).toMatch(new RegExp(`${method}\\(\\)\\s*\\{[^}]*this\\.#filesStore\\.${target}\\(\\)`));
+  });
+
+  /**
+   * 🔴 THE CONTROL. The regex above passes for a scanner that matches anything — a typo in the
+   * method name, a `[^}]*` that swallowed the whole file, a `RegExp` built from an empty string.
+   * A method that does NOT exist must not match.
+   */
+  it('the scan does not match a method the store does not have', async () => {
+    const code = await source();
+
+    expect(code).not.toMatch(/clearEverything\(\)\s*\{[^}]*this\.#filesStore\.clearEverything\(\)/);
   });
 });

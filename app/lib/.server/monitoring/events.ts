@@ -94,6 +94,22 @@ export const ALERT_SIGNALS = {
    * has to a data-loss signal, and one that no failure metric can ever show.
    */
   SANDBOX_CLEAN_BOOT_RATE: 'sandbox_clean_boot_rate',
+
+  /**
+   * The request we ASSEMBLED does not satisfy something we believe about every request
+   * (`agent/request-invariants.ts`, SPEC §4.2 step 2a).
+   *
+   * A duplicate file listed twice, a file body that survived compaction, a first build turn whose
+   * manifest is missing the framework, a model handoff that never reached the record. Every one of
+   * those has happened, none of them threw, and in each case the token count moved in a direction
+   * that reads as ordinary — which is §4.2.8's stated failure mode: *a regression here throws no
+   * error and fails no build; it silently multiplies the input bill.*
+   *
+   * ⚠️ It is a RATE, on its OWN rolling window (`REQUEST_INTEGRITY_RATE_CONFIG` — the shared default's
+   * 50%-of-20 threshold measurably silenced it). A per-turn alert on a systemic mismatch is a pager
+   * that gets muted inside a day, and a muted pager is the same as no guard.
+   */
+  REQUEST_INTEGRITY: 'request_integrity',
 } as const;
 
 export type AlertSignal = (typeof ALERT_SIGNALS)[keyof typeof ALERT_SIGNALS];

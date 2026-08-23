@@ -63,8 +63,16 @@ export interface GenerationRecord {
   /** Skill fires — slash and auto (§4.11 metrics). */
   skillsLoaded: string[];
 
-  /** On-demand doc blocks routed into this generation. */
-  blocksLoaded: string[];
+  /**
+   * On-demand doc blocks routed into this generation (§4.2.8).
+   *
+   * ⚠️ OPTIONAL, and for `provider`'s reason: absent is a real state. `toGenerationRecord` returned a
+   * hardcoded `[]` here for the life of the Supabase store, so every Postgres deploy reported "no doc
+   * blocks were loaded" for every generation — confidently wrong rather than absent, on a number the
+   * whole §4.2.8 context-budget programme is measured by. Rows written before migration 0023 genuinely
+   * do not know. A reader must handle absence; it must never default.
+   */
+  blocksLoaded?: string[];
 
   /**
    * UNCACHED input only. Anthropic reports cached input separately, and `@ai-sdk/anthropic` maps
@@ -168,10 +176,126 @@ export interface GenerationRecord {
   repairOf?: string;
   finishReason?: string;
 
+  /**
+   * WHAT WE ACTUALLY SENT — one entry per model request this turn (`agent/request-fingerprint.ts`).
+   *
+   * Hashes, counts and short strings, never bodies: the assembled arrays hold the whole system
+   * prompt, the compacted conversation and up to 20MB of attachment payload, and storing those would
+   * make this record a way to keep project files on our servers (§4.5.4b, migration 0007).
+   *
+   * ⚠️ `undefined` means the turn never reached `startStream` — a gate refusal, a `NotConfiguredError`,
+   * a claim conflict. That is NOT the same as an empty fingerprint and must never be collapsed with it.
+   */
+  requestFingerprints?: unknown[];
+
+  /**
+   * Request invariants violated while assembling this turn (`agent/request-invariants.ts`).
+   *
+   * ⚠️ A violation NEVER fails a generation in production (§4.2 step 2a) — it reports here and to
+   * monitoring. `undefined` means "never checked"; an empty array means "checked and clean".
+   */
+  integrityIssues?: string[];
+
   /** `running` is what settlement anchors; the proxy resolves it to `completed` / `failed`. */
   status?: 'running' | 'completed' | 'failed';
   error?: string;
 }
+
+/**
+ * 🔴 EVERY FIELD THIS TYPE DECLARES IS EITHER WRITTEN, OR DECLARED DERIVED, AND NOTHING ELSE IS LEGAL.
+ *
+ * Live defect, found 2026-08-21: `rawStops`, `fallbackHandoffs` and `blocksLoaded` were declared above
+ * and written in local FS mode — and **until migration 0023 no migration created a column for them**,
+ * so the Supabase store did not mention them and they vanished on Postgres. One of
+ * them is `fallbackHandoffs`, whose entire reason for existing is to record that a DIFFERENT MODEL
+ * SERVED THE TURN while the turn billed at the requested model's rates (§4.2a). In production that
+ * fact had no column to land in. `blocksLoaded` was worse than absent: `toGenerationRecord` hardcoded
+ * `[]`, so every Postgres deploy confidently reported that no doc blocks were loaded — the exact
+ * pattern migration 0021 was written to kill for `provider`. And `chatId` is written to `message_id`
+ * and never read back at all.
+ *
+ * The migration fixes those instances. THIS table is what makes another one impossible, and the
+ * load-bearing half is that it is a `Record` over `keyof GenerationRecord`: a new field cannot compile
+ * without an answer here. That is the `FamilyPolicy` lesson (`spec/model-families.md`) — a required
+ * key in a `Record` over a union is the only thing that reliably notices, because a field added to a
+ * type and forgotten in a payload throws nothing, fails no build and simply reads back as absent.
+ *
+ * ⚠️ The declaration is a CONTRACT, not documentation. `field-coverage.spec.ts` scans the Supabase
+ * upsert payload, `toGenerationRecord` AND `supabase/migrations/`, and fails when the code and this
+ * table disagree in either direction — a `derived` field that secretly reads its own column is as
+ * wrong as a `persisted` field with no column. The migration half is not optional: without it, a red
+ * entry could be turned green by adding one line to the payload, producing a store Postgres rejects
+ * at runtime, which is this very defect class wearing a fresh coat.
+ *
+ * ⚠️ Enhancer rows (`api.enhancer.ts` → `settleGeneration`) receive only the ANCHOR write and never
+ * the proxy's enrichment upsert, so every proxy-enriched field below is legitimately NULL on them.
+ * That is by design and must not be "fixed" by teaching the enhancer to write fields it does not know.
+ *
+ * The three answers, and each is checked differently:
+ *   - `persisted` — a column the STORE writes and `toGenerationRecord` reads back.
+ *   - `database`  — a real column the DATABASE fills in (a default). The store must never send it: a
+ *                   second writer for a value it cannot know is how a client clock ends up deciding
+ *                   when a row happened.
+ *   - `derived`   — not a column at all, computed on read. The reason must say from WHAT, and a
+ *                   `derived` field caught reading a column of its own name is mislabelled.
+ */
+export type FieldCoverage =
+  | { kind: 'persisted'; column: string }
+  | { kind: 'database'; column: string; reason: string }
+  | { kind: 'derived'; reason: string };
+
+export const FIELD_COVERAGE: Record<keyof GenerationRecord, FieldCoverage> = {
+  id: { kind: 'persisted', column: 'id' },
+  createdAt: {
+    kind: 'database',
+    column: 'created_at',
+    reason:
+      'Filled by the column default. The store never sends it: a client clock must not decide when a row happened, which is the same reason the ledger orders by `seq` and never by `created_at` (migration 0003).',
+  },
+  chatId: { kind: 'persisted', column: 'message_id' },
+  userId: { kind: 'persisted', column: 'user_id' },
+  projectId: { kind: 'persisted', column: 'project_id' },
+  model: { kind: 'persisted', column: 'model' },
+  provider: { kind: 'persisted', column: 'provider' },
+  creditsCharged: { kind: 'persisted', column: 'credits_charged' },
+  rawCostUsd: { kind: 'persisted', column: 'raw_cost_usd' },
+  promptVersionId: { kind: 'persisted', column: 'prompt_version_id' },
+  skillsLoaded: { kind: 'persisted', column: 'skills_loaded' },
+  blocksLoaded: { kind: 'persisted', column: 'blocks_loaded' },
+  promptTokens: { kind: 'persisted', column: 'input_tokens' },
+  completionTokens: { kind: 'persisted', column: 'output_tokens' },
+
+  /*
+   * 🔴 DERIVED ON PURPOSE, and a stored copy would be a SECOND WRITER that can disagree.
+   *
+   * `accumulateStepUsage` (`step-usage.ts`) subtracts the cached portion from the wire's `totalTokens`
+   * by exactly the amount it subtracts from `promptTokens`, specifically so all three derivations of
+   * this number agree by construction. That was not always true: before T12 (2026-08-11) the FS
+   * record persisted the wire's number while `gate.ts` and this mapper both derived it — one field,
+   * two values, differing by exactly the cache read, caught live on `gen_msopyq5f` (17,464 + 78
+   * stored as 35,431). Adding a `total_tokens` column would reopen that gap under a new name.
+   */
+  totalTokens: {
+    kind: 'derived',
+    reason:
+      "`input_tokens + output_tokens`. `accumulateStepUsage` subtracts the cached portion from the wire total by exactly the amount it subtracts from `promptTokens`, so the FS record, `gate.ts` and this mapper agree — PROVIDED the wire reports `totalTokens === promptTokens + completionTokens` per step, which `ai@4`'s `calculateLanguageModelUsage` guarantees for every SDK-sourced step. A non-SDK usage source would break the derivation silently. A stored copy would be a second writer for one fact.",
+  },
+
+  cacheReadTokens: { kind: 'persisted', column: 'cached_input_tokens' },
+  cacheCreationTokens: { kind: 'persisted', column: 'cache_write_tokens' },
+  toolRounds: { kind: 'persisted', column: 'tool_rounds' },
+  statusKind: { kind: 'persisted', column: 'status_kind' },
+  rawStops: { kind: 'persisted', column: 'raw_stops' },
+  fallbackHandoffs: { kind: 'persisted', column: 'fallback_handoffs' },
+  durationMs: { kind: 'persisted', column: 'duration_ms' },
+  steps: { kind: 'persisted', column: 'steps' },
+  repairOf: { kind: 'persisted', column: 'repair_of' },
+  finishReason: { kind: 'persisted', column: 'finish_reason' },
+  status: { kind: 'persisted', column: 'status' },
+  error: { kind: 'persisted', column: 'error' },
+  requestFingerprints: { kind: 'persisted', column: 'request_fingerprints' },
+  integrityIssues: { kind: 'persisted', column: 'integrity_issues' },
+};
 
 /** An upsert. Only the identity fields are required — everything else fills in as it becomes known. */
 export type GenerationUpsert = Partial<GenerationRecord> & { id: string; userId: string; model: string };
@@ -376,6 +500,29 @@ export class SupabaseGenerationStore implements GenerationStore {
         finish_reason: row.finishReason ?? null,
         repair_of: row.repairOf ?? null,
         steps: row.steps ?? null,
+
+        /*
+         * Migration 0023. `?? null` for the same reason as `provider` above and NOT `?? []`: for an
+         * array column, NULL means "never recorded" and `'{}'` means "recorded, and there were none".
+         * Defaulting to an empty array would answer a question we were not asked — which is exactly
+         * what `toGenerationRecord` used to do for `blocks_loaded`, reporting "no doc blocks were
+         * loaded" for every row on every Postgres deploy.
+         *
+         * 🔴 `fallback_handoffs` is the one that matters: it records that a DIFFERENT MODEL SERVED
+         * THE TURN while the turn billed at the requested model's rates (§4.2a). Until 0023 it had
+         * nowhere to land on the only backend that bills real money.
+         */
+        raw_stops: row.rawStops ?? null,
+        fallback_handoffs: row.fallbackHandoffs ?? null,
+        blocks_loaded: row.blocksLoaded ?? null,
+
+        /*
+         * Migration 0024. `?? null` for the reason above, and here it carries a second meaning worth
+         * stating: NULL means the turn never reached `startStream` at all, which is a different fact
+         * from a turn that assembled a request and had nothing wrong with it.
+         */
+        request_fingerprints: row.requestFingerprints ?? null,
+        integrity_issues: row.integrityIssues ?? null,
       },
       { onConflict: 'id' },
     );
@@ -463,6 +610,9 @@ function toGenerationRecord(r: any): GenerationRecord {
   return {
     id: r.id,
     createdAt: r.created_at,
+
+    /* Written to `message_id` since this store existed, and never once read back until 2026-08-21. */
+    chatId: r.message_id ?? undefined,
     userId: r.user_id,
     projectId: r.project_id ?? undefined,
     model: r.model,
@@ -471,7 +621,14 @@ function toGenerationRecord(r: any): GenerationRecord {
     rawCostUsd: Number(r.raw_cost_usd),
     promptVersionId: r.prompt_version_id,
     skillsLoaded: r.skills_loaded ?? [],
-    blocksLoaded: [],
+
+    /*
+     * 🔴 `?? undefined`, NEVER `?? []`. This line read `blocksLoaded: []` for the life of the store,
+     * so a Postgres deploy answered "no on-demand doc blocks were loaded" for every generation with
+     * total confidence and no way to tell it from the truth — the pattern migration 0021 killed for
+     * `provider`. Absent must read as absent: a pre-0023 row genuinely does not know.
+     */
+    blocksLoaded: r.blocks_loaded ?? undefined,
     promptTokens: r.input_tokens,
     completionTokens: r.output_tokens,
     totalTokens: r.input_tokens + r.output_tokens,
@@ -483,6 +640,10 @@ function toGenerationRecord(r: any): GenerationRecord {
     finishReason: r.finish_reason ?? undefined,
     repairOf: r.repair_of ?? undefined,
     steps: r.steps ?? undefined,
+    rawStops: r.raw_stops ?? undefined,
+    fallbackHandoffs: r.fallback_handoffs ?? undefined,
+    requestFingerprints: r.request_fingerprints ?? undefined,
+    integrityIssues: r.integrity_issues ?? undefined,
     status: r.status,
     error: r.error ?? undefined,
   };

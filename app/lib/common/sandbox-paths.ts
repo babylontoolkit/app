@@ -128,3 +128,58 @@ export function stripSandboxRootPrefix(rawPath: string): string {
 
   return rawPath;
 }
+
+/** One collapsed file: the project-relative path, and the two raw spellings that produced it. */
+export interface CollapsedPath {
+  path: string;
+  kept: string;
+  dropped: string;
+}
+
+export interface DedupedPaths<T> {
+  kept: T[];
+  collapsed: CollapsedPath[];
+}
+
+/**
+ * 🔴 ONE ENTRY PER FILE, KEYED BY `toProjectRelativePath` — ONE RULE, IN ONE PLACE.
+ *
+ * The file map is CLIENT-SUPPLIED, so a stale bundle, a working copy written before the
+ * `toSandboxStoreKey` fix, or a future ingest path can still hand us `src/pages/Home.tsx` AND
+ * `/home/project/src/pages/Home.tsx`. Measured on a real project: 14 files listed twice, ~22.5k
+ * tokens per turn at the 2x cache-write rate — and worse than the bill, the model is shown two copies
+ * of one file and can edit one while the other goes stale.
+ *
+ * The rule existed twice — `buildFileManifest` had one copy, `createFilesContext` the other — which is
+ * a straight violation of this codebase's own `isSecretPath` rule. Two implementations of one rule
+ * drift, and the way you find out is that a file is de-duplicated on one path and not the other.
+ *
+ * ⚠️ It RETURNS what it collapsed, and callers are expected to report it (`spec/fail-loud.md` rule 3:
+ * *a best-effort step that cannot fail the request must still REPORT*). A backstop that silently
+ * fixes things is exactly why the double-keyed map cost 22.5k tokens a turn for weeks with nothing
+ * anywhere saying so.
+ *
+ * FIRST spelling wins, and callers pass a SORTED list, so the choice is deterministic and the cached
+ * block stays a pure function of the map's content.
+ */
+export function dedupeByProjectPath<T>(items: readonly T[], rawPathOf: (item: T) => string): DedupedPaths<T> {
+  const firstSpelling = new Map<string, string>();
+  const kept: T[] = [];
+  const collapsed: CollapsedPath[] = [];
+
+  for (const item of items) {
+    const raw = rawPathOf(item);
+    const path = toProjectRelativePath(raw);
+    const seen = firstSpelling.get(path);
+
+    if (seen !== undefined) {
+      collapsed.push({ path, kept: seen, dropped: raw });
+      continue;
+    }
+
+    firstSpelling.set(path, raw);
+    kept.push(item);
+  }
+
+  return { kept, collapsed };
+}

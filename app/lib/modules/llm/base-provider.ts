@@ -180,9 +180,14 @@ export abstract class BaseProvider implements ProviderInfo {
      * Force thinking off for THIS request (§4.2a). OPTIONAL and additive, like `effort` — providers that
      * do not model thinking ignore it, and omitting it leaves the operator's `THINKING_MODE` in charge.
      *
-     * Set by the agent proxy on its LAST-RESORT retry only: a step that emits no bytes for ~30s is killed
-     * by KIE's gateway, and an extended think is exactly that silence, so the final attempt trades depth
-     * for a stream that cannot go quiet. Never set on a healthy generation (`retryThinkingMode`).
+     * Set by the agent proxy on its late retries: a step that emits no bytes for ~30s is killed by KIE's
+     * gateway, and an extended think is exactly that silence, so those attempts trade depth for a stream
+     * that cannot go quiet. Never set on a healthy generation (`retryThinkingMode`).
+     *
+     * ⚠️ WHICH retries is asserted in `retry-policy.spec.ts` and stated in no comment. This sentence
+     * used to name a single attempt — the twin of the same option's declaration in
+     * `providers/anthropic.ts`, which got corrected while this one did not, in a pass whose whole
+     * subject was siblings drifting apart. Every wrong version of this rule was a count.
      */
     thinkingMode?: ThinkingMode;
   }): LanguageModelV1;

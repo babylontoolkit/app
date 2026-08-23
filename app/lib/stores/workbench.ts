@@ -449,8 +449,32 @@ export class WorkbenchStore {
     return this.#filesStore.getModifiedFiles();
   }
 
+  /**
+   * Drop every recorded "original content" baseline (§4.13a).
+   *
+   * The baselines feed the `<bolt_file_modifications>` block the model is shown, so after a door
+   * that REPLACES the whole tree they describe files that no longer exist — and every later
+   * `type="edit"` is computed against fiction. Nothing throws; the diffs are just wrong.
+   *
+   * ⚠️ **It is the USER-EDIT path whose baselines go stale, not the agent-write path** — worth
+   * stating because the reverse is the intuitive reading. `#modifiedFiles` is written by `saveFile`
+   * (an editor save) and `createFile`, and NOT by `recordAgentWrite`: the model already knows what
+   * it wrote, so the block exists to tell it what the *user* changed underneath it. A branch switch
+   * therefore strands exactly the edits the model has not seen.
+   */
   resetAllFileModifications() {
     this.#filesStore.resetFileModifications();
+  }
+
+  /**
+   * Forget every recorded deletion — see `FilesStore.clearDeletedPaths`.
+   *
+   * Owed by any door that REPLACES the whole tree (a branch switch, a discard, a pull), because
+   * `#deletedPaths` describes the tree that is being thrown away and is otherwise applied to its
+   * replacement forever.
+   */
+  clearDeletedPaths() {
+    this.#filesStore.clearDeletedPaths();
   }
 
   /**

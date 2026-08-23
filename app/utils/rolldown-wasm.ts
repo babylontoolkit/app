@@ -20,12 +20,24 @@
  *   2. a local `./rolldown-binding.wasi.cjs` artifact — not shipped in the npm package;
  *   3. **`require('@rolldown/binding-wasm32-wasi')` as a plain dependency** ← the door;
  *   4. a WebContainer-only auto-downloader, gated on `process.versions.webcontainer`, which
- *      pnpm-installs the same package into `/tmp`. Nodepod does not set that, so it never fires.
+ *      pnpm-installs the same package into `/tmp`.
+ *
+ * ⚠️ **This said "Nodepod does not set that, so it never fires" until 2026-08-22, and both halves
+ * were wrong.** Nodepod sets `process.versions.webcontainer = '1.0.0'` deliberately
+ * (`src/constants/config.ts` `NODE_SUB_VERSIONS`) — it presents as a WebContainer so packages that
+ * special-case one take the same path — so step 4 DOES fire, and it announces itself in rolldown's
+ * own words: `[rolldown] Downloading @rolldown/binding-wasm32-wasi@<v> on WebContainer...`. It then
+ * **fails**: measured in-pod on the AppTemplate, the loader threw `Cannot find native binding`
+ * while the spawned `pnpm i` was still fetching, and the install only reported `Done in 121.8s`
+ * afterwards — i.e. two minutes of dead time bought a dev server that had already given up. So step
+ * 4 is not a fallback we can lean on; it is a slow way to reach the same failure.
  *
  * Step 3 is gated on nothing. And the package is **NOT** among rolldown's `optionalDependencies`
- * (verified against the published manifest — the 14 entries there are all native triples), so no
- * amount of `npm install`, cache clearing or lockfile deleting will ever bring it in. It has to be
- * named. That is the whole fix.
+ * (verified against the published manifest — the 15 entries at 1.2.5 are all native triples, none
+ * of them wasm), so no amount of `npm install`, cache clearing or lockfile deleting will ever bring
+ * it in. It has to be named. That is the whole fix — and it is what Nodepod itself asks for: its
+ * resolver lets `wasm32-wasi` through and throws `MODULE_NOT_FOUND` for every platform-native
+ * sibling with the message `install @rolldown/binding-wasm32-wasi` (`src/script-engine.ts`).
  *
  * ## Why the version is resolved rather than guessed
  *
@@ -205,7 +217,13 @@ function usesRolldown(files: TextFile[], versions: Set<string>): boolean {
   return false;
 }
 
-/** Already declared as a dependency — the starter template does this, and it needs nothing added. */
+/**
+ * Already declared as a dependency — nothing to add.
+ *
+ * The starter template declares it as of 2026-08-22 (`AppTemplate` devDependencies, pinned exactly
+ * to the rolldown its lockfile resolves). It did NOT before that date, while this comment already
+ * claimed it did — so every project made from the starter hit the step-4 failure above.
+ */
 function alreadyDeclared(files: TextFile[]): boolean {
   const pkg = readJson(files, 'package.json');
 

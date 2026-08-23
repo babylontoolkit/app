@@ -347,7 +347,7 @@ puts Sonnet 5 at `medium` on par with Sonnet 4.6 at `high`.
 **Config, never hardcoded:** `THINKING_EFFORT=medium|high|xhigh|max` (`DEFAULT_EFFORT` in
 `capabilities.ts`). Raise it for hard work. There is nothing below `medium` to drop to.
 
-### 3.4b The last-resort retry runs THINKING-OFF — the silence is the failure (2026-07-27)
+### 3.4b The last-resort retry runs THINKING-OFF — the silence is the failure (2026-07-27; units defect fixed 2026-08-21)
 
 Measured against KIE: **every step that emitted no bytes for ~30s was killed** with `Internal error, please
 try again later` (28,956ms / 31,532ms / 30,058ms, all zero-output), while every step that emitted anything
@@ -356,25 +356,41 @@ requests (3/21 opus-4-8, 1/7 opus-5: identical rates, so it tracks the BACKEND, 
 other 86% a long think puts nothing on the wire and their own gateway times out the request they are
 buffering.
 
-Retrying is a dice roll against the same window. The final attempt therefore sends
+Retrying is a dice roll against the same window. The final retry therefore sends
 `thinking: {type: 'disabled'}` (`retryThinkingMode`, `getModelInstance({ thinkingMode })`): text starts
 within ~1s, the stream is never quiet, and the timeout cannot fire.
 
 | Attempt | Thinking | Why |
 |---|---|---|
-| 1 | adaptive | normal quality |
-| 2 | adaptive | likely a different backend; often just works |
-| 3 (last) | **disabled** | guaranteed early bytes — cannot hit the silent-stream timeout |
+| first request | adaptive | normal quality |
+| earlier retries | adaptive | byte-identical to a build with no retry logic at all |
+| the final retry | **disabled** | guaranteed early bytes — cannot hit the silent-stream timeout |
 
-**Scoped to the last attempt deliberately.** The tempting generalisation — "if the stream goes quiet, drop
-thinking" — would sacrifice the reasoning text on exactly the long thinks whose reasoning is worth reading,
-on every generation. Here attempts 1–2 are byte-identical to a build with no retry logic, and the only turn
-that loses thinking is one the silent think had already killed twice: you cannot lose reasoning on a turn
-that was about to die. The trade on that attempt is real (no extended thinking is a weaker build — §3.5a)
+⚠️ **HOW MANY retries keep thinking is deliberately not a number in this table** — the sequence is
+asserted in `retry-policy.spec.ts`, at the function AND at the call site, and stated in no document.
+Every wrong version of this rule was a count somebody typed.
+
+🔴 **AND IT WAS WRONG FOR THREE WEEKS, BECAUSE TWO SIDES OF ONE SEAM COUNTED DIFFERENT THINGS (found +
+fixed 2026-08-21).** `retryThinkingMode` shipped reading a 0-based attempt index (`>= maxAttempts - 1`)
+while `proxy.ts` called it with `attempt + 1` — a 1-based retry number — so the values were 1,2,3
+against a threshold of 2 and thinking was disabled on the last two retries rather than the last one.
+Nobody chose that: it fell out of a units disagreement, on a mitigation whose entire justification is
+that the common path keeps its reasoning. **The function's own spec was green the whole time**, because
+it asserted the contract the function implemented; nothing asserted the sequence the only caller
+produced. `retryNumber >= maxRetries` now compares two numbers of the same kind, with no `- 1` for an
+off-by-one to live in, and the spec pins the call site by reading `proxy.ts` rather than re-typing its
+expression. **The generalisable lesson: a function-only spec cannot see a caller whose units are
+wrong, and both sides of that seam had documented themselves correctly in isolation.**
+
+**Scoped to the end of the ladder deliberately.** The tempting generalisation — "if the stream goes quiet,
+drop thinking" — would sacrifice the reasoning text on exactly the long thinks whose reasoning is worth
+reading, on every generation. Here the common path is byte-identical to a build with no retry logic, and
+a turn that loses thinking is one the silent think had already killed: you cannot lose reasoning on a turn
+that was about to die. The trade on that retry is real (no extended thinking is a weaker build — §3.5a)
 and still better than a red error card and no game.
 
 ⚠️ **Clamp with `canDisableThinking(model, effort)`.** Fable 5 rejects `{type:'disabled'}` outright and
-Opus 5 rejects it above `high`; an unclamped override swaps a timeout for a hard 400 on the attempt that
+Opus 5 rejects it above `high`; an unclamped override swaps a timeout for a hard 400 on the retry that
 had already failed twice. Pinned at the wire in `anthropic.spec.ts` (serialized body, both directions).
 
 ### 3.5a `low` is REMOVED — it is a correctness bug, not a discount

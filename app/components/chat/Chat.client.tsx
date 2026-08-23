@@ -1,4 +1,5 @@
 import { useStore } from '@nanostores/react';
+import { clearTreeReplaced, isTreeReplaced, treeReplacedProject } from '~/lib/persistence/tree-replacement-signal';
 import type { Message } from 'ai';
 import { useChat } from '@ai-sdk/react';
 import { useAnimate } from 'framer-motion';
@@ -360,6 +361,14 @@ export const ChatImpl = memo(
      * `useChat` body, the auto-repair `append`, and `reload()` all read the value React last committed.
      * A ref updated outside render would be the `projectId: undefined` bug again in the other direction.
      */
+    /*
+     * "The tree was replaced on purpose" (§4.13a). Read here so it rides in the `useChat` body from
+     * committed render state; cleared in `onFinish` rather than at send time, because clearing at
+     * send races the very request that is meant to carry it (`tree-replacement-signal.ts`).
+     */
+    const treeReplacedFor = useStore(treeReplacedProject);
+    const treeReplaced = isTreeReplaced(treeReplacedFor, activeProjectId);
+
     const selectedTier = useStore(modelTierStore);
     const session = useStore(sessionStore);
     const tierRequested = canUseTier(session, selectedTier) ? selectedTier : 'standard';
@@ -675,6 +684,17 @@ export const ChatImpl = memo(
          */
         toolkitSystems,
 
+        /*
+         * The whole file tree was replaced since the last turn (§4.13a — a branch switch, a discard,
+         * a pull). Suppresses INV-3(b)'s manifest-shrink signal for exactly one turn: a switch from a
+         * 90-file feature branch to a 60-file default is that signal's exact shape and it is correct.
+         *
+         * ⚠️ A `useStore` render capture, deliberately — the same reason `tierRequested` is one. The
+         * `useChat` body is refreshed from committed render state, so a ref updated outside render is
+         * the documented `projectId: undefined` bug in the other direction.
+         */
+        treeReplaced,
+
         designScheme,
         supabase: {
           isConnected: supabaseConn.isConnected,
@@ -745,6 +765,14 @@ export const ChatImpl = memo(
       onFinish: (message, response) => {
         const usage = response.usage;
         setData(undefined);
+
+        /*
+         * The tree-replacement suppression is spent (§4.13a). Cleared on FINISH, not on send: the
+         * body is composed from committed render state, so clearing when the request goes out races
+         * the request that is meant to carry the flag. One turn late is harmless — the server
+         * re-baselines every call — and one turn early restores the noise it exists to prevent.
+         */
+        clearTreeReplaced();
 
         /*
          * THE CREATION PLAN (§4.4e) — whether this turn finished the BUILD is a question about the

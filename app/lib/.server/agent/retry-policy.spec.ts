@@ -2,6 +2,8 @@
  * Money tests. A `true` here re-runs a generation nobody asked for; a `false` hands the user a long
  * wait and an error where the product should have worked.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   EMPTY_RESPONSE_ERROR,
@@ -238,32 +240,107 @@ describe('retryToolMode', () => {
  * into their own timeout. Disabling thinking makes text start flowing immediately, which the timeout
  * cannot fire against.
  */
+/**
+ * 🔴 THE SEQUENCE THE CALL SITE ACTUALLY PRODUCES — because every prose copy of this got it wrong.
+ *
+ * `retryThinkingMode` takes a 1-BASED retry number, which is what `proxy.ts` passes (`attempt + 1`,
+ * where `attempt` is the 0-based index of the attempt that just failed). Those two disagreed about
+ * the unit until 2026-08-21 — a 0-based reader against a 1-based caller — and the product silently
+ * ran `adaptive, disabled, disabled`: thinking off for the last TWO retries, on a mitigation whose
+ * whole justification is that the common path keeps its reasoning.
+ *
+ * The function's own spec was green throughout, because it asserted the contract the function
+ * implemented; nothing asserted the sequence the ONLY CALLER produced. That is the generalisable
+ * part — **a function-only spec cannot see a caller whose units are wrong**, and this defect is
+ * precisely a units disagreement across a seam that both sides documented correctly in isolation.
+ *
+ * Many places said "only the last", all copied from one doc comment: `retry-policy.ts`, `proxy.ts`,
+ * `CLAUDE.md`, `spec/anthropic-models.md`, `base-provider.ts`, `providers/anthropic.ts`, this file
+ * and two `_specs` documents. Nine rounds of adversarial review corrected them one at a time and
+ * each sweep missed the copy that had reworded itself — including one "fix" that removed the digits
+ * and kept the claim. So the sequence is asserted HERE, where it can fail, and the prose says none
+ * of it.
+ */
+describe('the sequence the CALL SITE produces (proxy.ts passes attempt + 1)', () => {
+  /** Exactly `proxy.ts`'s expression, so this describe fails if the call site's units drift again. */
+  const asCalledByProxy = (loopAttempt: number) => retryThinkingMode(loopAttempt + 1);
+
+  it('keeps thinking until the final retry', () => {
+    expect([0, 1, 2].map(asCalledByProxy)).toEqual(['adaptive', 'adaptive', 'disabled']);
+  });
+
+  /*
+   * THE REGRESSION, recorded as the thing this is NOT. A 0-indexed reader (`>= max - 1`) against
+   * this 1-based caller is what shipped, and it is the single most likely way to reintroduce the
+   * defect — so it is asserted as false rather than described in a sentence.
+   */
+  it('is NOT adaptive, disabled, disabled — that was the units bug, not a policy', () => {
+    expect([0, 1, 2].map(asCalledByProxy)).not.toEqual(['adaptive', 'disabled', 'disabled']);
+  });
+
+  /*
+   * THE CONTROL. Without it, "keeps thinking until the final retry" also passes for a function that
+   * returns `adaptive` for everything — i.e. for the mitigation having been deleted outright, which
+   * is the cheerful way a fix in this direction goes green while removing the guard.
+   */
+  it('CONTROL — the final retry really does turn thinking off', () => {
+    expect(asCalledByProxy(MAX_PROVIDER_RETRY_ATTEMPTS - 1)).toBe('disabled');
+  });
+
+  /*
+   * 🔴 AND THE CALL SITE IS READ FROM SOURCE, not re-typed above.
+   *
+   * `asCalledByProxy` is a COPY of `proxy.ts`'s expression, so on its own it pins a sequence this
+   * file believes the caller produces — which is the same shape as the defect: a contract asserted
+   * on one side of a seam while the other side quietly disagrees. Reading the real line is what
+   * makes the pin about the product rather than about this file's memory of it.
+   */
+  it('proxy.ts really passes attempt + 1 — the units this describe assumes', () => {
+    const proxy = readFileSync(join(process.cwd(), 'app/lib/.server/agent/proxy.ts'), 'utf8');
+
+    /* The CONTROL: if the symbol ever moves or is renamed, the assertion below must not go vacuous. */
+    expect(proxy).toContain('retryThinkingMode');
+    expect(proxy).toContain('retryThinkingMode(attempt + 1)');
+  });
+});
+
 describe('retryThinkingMode', () => {
   /**
    * THE LOAD-BEARING ONE — the reasoning text is worth keeping, and the tempting version of this idea
    * ("if it goes quiet, drop thinking") would eat it on every long think. The common path must be
    * byte-identical to a build with no retry logic at all.
    */
-  it('keeps thinking on the early attempts — a healthy generation never loses its reasoning', () => {
-    expect(retryThinkingMode(0)).toBe('adaptive');
+  it('keeps thinking on the earlier retries — a healthy generation never loses its reasoning', () => {
     expect(retryThinkingMode(1)).toBe('adaptive');
+    expect(retryThinkingMode(MAX_PROVIDER_RETRY_ATTEMPTS - 1)).toBe('adaptive');
   });
 
-  /** Only the final attempt trades depth for a stream that cannot go quiet. */
-  it('disables thinking on the last attempt', () => {
-    expect(retryThinkingMode(MAX_PROVIDER_RETRY_ATTEMPTS - 1)).toBe('disabled');
+  /**
+   * The end of the ladder trades depth for a stream that cannot go quiet. ⚠️ The COUNT is asserted by
+   * the call-site describe above, never restated here — every wrong version of this rule was a number.
+   */
+  it('disables thinking once the retry number reaches the bound', () => {
     expect(retryThinkingMode(MAX_PROVIDER_RETRY_ATTEMPTS)).toBe('disabled');
   });
 
-  /** It tracks the BOUND, so raising the retry cap cannot silently move which attempt goes thinking-free. */
-  it('follows the configured bound rather than a hardcoded attempt number', () => {
-    expect(retryThinkingMode(1, 5)).toBe('adaptive');
-    expect(retryThinkingMode(3, 5)).toBe('adaptive');
-    expect(retryThinkingMode(4, 5)).toBe('disabled');
+  /**
+   * 🔴 THE UNITS, asserted rather than described. `retryNumber` counts retries from ONE, so a `0` is
+   * not "the first retry" — it is a value the call site never produces, and reading it as an index is
+   * exactly the mistake that shipped. It must not be at or past the bound.
+   */
+  it('takes a 1-based retry number, so zero is below the bound rather than at it', () => {
+    expect(retryThinkingMode(0)).toBe('adaptive');
   });
 
-  /** A single-attempt configuration has no "early" attempt to protect — the one try is the last one. */
+  /** It tracks the BOUND, so raising the retry cap cannot silently move which retry goes thinking-free. */
+  it('follows the configured bound rather than a hardcoded retry number', () => {
+    expect(retryThinkingMode(1, 5)).toBe('adaptive');
+    expect(retryThinkingMode(4, 5)).toBe('adaptive');
+    expect(retryThinkingMode(5, 5)).toBe('disabled');
+  });
+
+  /** A single-retry configuration has no earlier retry to protect — the one retry is the last one. */
   it('degrades sanely at a bound of one', () => {
-    expect(retryThinkingMode(0, 1)).toBe('disabled');
+    expect(retryThinkingMode(1, 1)).toBe('disabled');
   });
 });

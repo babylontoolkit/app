@@ -3,8 +3,8 @@
  *
  * ## Why this exists
  *
- * The history is **uncached and re-sent in full on every turn**. All four Anthropic cache breakpoints
- * sit on the *system* blocks, and the messages come after them, so nothing in the conversation is ever
+ * The history is **uncached and re-sent in full on every turn**. Every Anthropic cache breakpoint
+ * sits on the *system* blocks, and the messages come after them, so nothing in the conversation is ever
  * served from cache — every turn pays full input rate for every byte of every previous turn, forever,
  * and the bill grows monotonically with the length of the session.
  *

@@ -68,6 +68,44 @@ interface Claim {
 
 const claims = new Map<string, Claim>();
 
+/**
+ * Is this claim still holding the project?
+ *
+ * ONE rule, read by both the writer (`claimProject`, which throws on a live claim) and the reader
+ * (`isProjectClaimed`, which refuses an operation on one) — the `isSecretPath` discipline. Two private
+ * copies of "is it live" is the shape this codebase keeps rediscovering: they agree on the day they
+ * are written and drift the first time the TTL or the abort rule moves, and the two failure directions
+ * are opposite and both silent (a reader that thinks a live claim is dead lets a branch switch replace
+ * files under a running generation; one that thinks a dead claim is live strands the user behind a
+ * wall nothing can clear).
+ *
+ * `now` is a parameter, not a `Date.now()` call, so a test can age a claim without a fake timer.
+ */
+function isClaimLive(claim: Claim, now: number): boolean {
+  return !claim.signal?.aborted && now - claim.claimedAt < CLAIM_TTL_MS;
+}
+
+/**
+ * Does a generation currently hold this project? A READ — it never claims and never evicts.
+ *
+ * Added for the tree-replacing git operations (§4.13a): a branch switch and a discard both overwrite
+ * the whole working tree, which is exactly the interleaving this lock exists to prevent, but they are
+ * not generations and must not take the lock to find out. They ask, and refuse themselves.
+ *
+ * 🔴 **IT MUST NOT MUTATE, and the tempting version does.** The obvious implementation deletes an
+ * expired entry while it is there ("tidy up as you go"), and that silently changes `claimProject`'s
+ * semantics: a takeover of a stale claim is a WARN-logged event that says something failed to release
+ * its `finally`, and a reader that swept the corpse first turns that signal off — the takeover looks
+ * like an ordinary claim and the leak it was reporting becomes invisible. Worse, this runs on a
+ * REFUSAL path, and a refusal with a side effect is a refusal that behaves differently depending on
+ * how many times the user pressed the button.
+ */
+export function isProjectClaimed(projectId: string): boolean {
+  const claim = claims.get(projectId);
+
+  return claim !== undefined && isClaimLive(claim, Date.now());
+}
+
 /** What the claim decision needs to know about a request. */
 export interface ClaimDecisionInput {
   /** The project this generation names, if any. A generation with no project locks nothing. */
@@ -117,7 +155,8 @@ export function claimProject(projectId: string, userId: string, signal?: AbortSi
   const existing = claims.get(projectId);
 
   if (existing) {
-    const age = Date.now() - existing.claimedAt;
+    const now = Date.now();
+    const age = now - existing.claimedAt;
 
     if (existing.signal?.aborted) {
       /*
@@ -126,7 +165,8 @@ export function claimProject(projectId: string, userId: string, signal?: AbortSi
        * the error's own advice ("press Stop, before starting another change") false.
        */
       logger.info(`In-flight claim on project ${projectId} was aborted — taking it over`);
-    } else if (age < CLAIM_TTL_MS) {
+    } else if (isClaimLive(existing, now)) {
+      /* Not aborted (the branch above) and inside the TTL — a live generation owns the tree. */
       throw new GenerationInFlightError();
     } else {
       /*

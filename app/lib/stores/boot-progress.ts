@@ -82,6 +82,68 @@ export type BootPhase =
   | { step: 'cloning' }
 
   /*
+   * ---- BRANCH phases (§4.13a — switch, discard, and the pull/resolve that converge on them) ----
+   *
+   * 🔴 OVERLAY-ONLY, for `cloning`'s reason: the user pressed a control in a workspace they are
+   * looking at, so `ready` is already true and there is no full-page `BootScreen` to render into.
+   * {@link coversWorkspace} grants the cover to every phase that is not `idle` or `failed`, so these
+   * need no gate of their own.
+   *
+   * 🔴 And NONE of them may begin with `creating-`: {@link isCreationPhase} is a name-prefix test, and
+   * a branch switch is emphatically not a New Project — it would inherit the creation handoff card and
+   * the §4.4b scaffolding family it has nothing to do with.
+   *
+   * ⚠️ The file-writing step in the middle is the EXISTING {@link BootPhase} `files`, not a fifth
+   * member: `restoreFiles` already takes an `onProgress`, and `BootScreen` draws its bar only for
+   * `files`. A parallel branch-file phase would be a second thing to keep in step with the bar, for
+   * no behaviour.
+   */
+
+  /**
+   * Reading the target branch from the provider, before a byte of the workspace has changed.
+   *
+   * 🔴 The branch name rides ON THE PHASE, because `bootPhaseCopy` takes only the phase — a name held
+   * anywhere else cannot reach the copy, and "Switching branch" without saying which one is the
+   * heading-that-is-true-of-three-steps failure `creating-settle` was written to avoid. This is also
+   * the one moment where naming it matters most: it is the last point at which the user could realise
+   * they picked the wrong branch, and the operation replaces every file in the project.
+   */
+  | { step: 'switching-branch'; branch: string }
+
+  /** The same read, for a discard: the branch the project is being reset TO (§4.12). */
+  | { step: 'discarding'; branch: string }
+
+  /**
+   * The same read, for a PULL or a divergence-resolve (§4.13a T18).
+   *
+   * ⚠️ Its own member rather than borrowing `switching-branch`, and the reason is the one
+   * `discarding` already records: the three operations write the same bytes by the same path and
+   * they are three different intentions. Routed to the switch phase, a Pull told the user
+   * "Switching to trunk" — on a full-screen surface, for thirty seconds, while they sat on trunk
+   * having pressed Sync. That is `spec/fail-loud.md`'s wrong-operation defect on the largest surface
+   * the product has.
+   */
+  | { step: 'pulling'; branch: string }
+
+  /**
+   * Re-running `npm install` for the tree that just landed.
+   *
+   * 🔴 NO PROGRESS BAR, and the elapsed clock instead — both already automatic (`BootScreen` draws
+   * the bar only for `files`, and the clock appears after 5s on every phase). `npm install` emits no
+   * structured progress, so any bar here would be invented: it would fill, reach the end, and keep
+   * spinning, which converts "slow" into "stuck" — the despair this surface exists to prevent, and
+   * exactly the rule the batched-delivery expectation bar is capped for.
+   *
+   * The install itself is unconditional (`ensureProjectRunnable`), and this phase is the half that
+   * makes that defensible: 30 seconds of narrated work is a wait, and 30 seconds of silence is a
+   * broken button.
+   */
+  | { step: 'branch-install' }
+
+  /** Install is done; waiting for the dev server to bind a port again. */
+  | { step: 'branch-serve' }
+
+  /*
    * ---- CREATION phases (New Project, `create-project.ts` + `startProject`) ----
    * The same silence, one page earlier: creating a project serializes behind the starter download,
    * the sandbox boot (a VM fork on a server provider), the template mount and the visibility wait,
@@ -319,6 +381,54 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          */
         title: 'Reading your repository',
         detail: 'Fetching the files from your repository. This can take a moment.',
+      };
+    case 'switching-branch':
+      return {
+        /*
+         * The BRANCH is the subject and it is named, for the reason on the phase itself: this is the
+         * last moment before every file in the project is replaced, and a heading that does not say
+         * where you are going cannot be checked by the person reading it.
+         */
+        title: `Switching to ${phase.branch}`,
+        detail: 'Reading the branch from your repository. This can take a moment.',
+      };
+    case 'discarding':
+      return {
+        /*
+         * "Discarding your changes", not "Switching" — the two operations write the same bytes by the
+         * same path, and they are opposite intentions. One is "go somewhere else", the other is
+         * "undo what I did", and the user who pressed the destructive button needs to see their own
+         * word reflected back or they cannot tell whether they hit the right control.
+         */
+        title: 'Discarding your changes',
+        detail: `Restoring the version committed to ${phase.branch}.`,
+      };
+    case 'pulling':
+      return {
+        /*
+         * "Updating", not "Switching" — the user pressed Sync, or chose "use the version from my
+         * repository". Neither is a move to somewhere else, and both leave them on the branch they
+         * were already on.
+         */
+        title: `Updating from ${phase.branch}`,
+        detail: 'Reading the latest version from your repository. This can take a moment.',
+      };
+    case 'branch-install':
+      return {
+        /*
+         * "Reinstalling", not "Installing" — `creating-install`'s wording, and the spec's
+         * distinct-title assertion caught the collision. The difference is not cosmetic: a user who
+         * has already watched "Installing project dependencies" once, when the project was created,
+         * would read the identical sentence here as the project being rebuilt from scratch. This one
+         * says a step is being REDONE because the files changed.
+         */
+        title: 'Reinstalling project dependencies',
+        detail: 'Your dependencies may have changed with the branch. This can take a moment.',
+      };
+    case 'branch-serve':
+      return {
+        title: 'Restarting your project',
+        detail: 'Launching the dev server against the new files.',
       };
     case 'creating-starter':
       return {

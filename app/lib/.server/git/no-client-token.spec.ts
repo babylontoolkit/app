@@ -128,13 +128,49 @@ describe('the sync route never takes a token from the caller', () => {
    * The whole point. A token in the body used to BE the auth path; now the request is indistinguishable
    * from one without it, because the field is not read.
    */
-  it.each(['push', 'pull'])('ignores body.token on %s and demands a real connection', async (op) => {
+  it.each([
+    'push',
+    'pull',
+
+    /*
+     * The seven branch-client ops (§4.13a). Every one of them reaches a provider on the SESSION's
+     * credential, so every one of them is a door the deleted `body.token` path could be reintroduced
+     * through — and `branches`, `commits` and `tree` are the ones most likely to look harmless, being
+     * reads. They are listed individually rather than derived from the route's `op` union on purpose:
+     * a list generated from the code under test grows silently when the code does, which is the one
+     * thing this file exists to prevent.
+     */
+    'branches',
+    'commits',
+    'tree',
+    'create-branch',
+    'delete-branch',
+    'switch-branch',
+    'discard',
+  ])('ignores body.token on %s and demands a real connection', async (op) => {
     const response = await post({ op, token: 'gho_a_token_the_client_supplied' });
-    const payload = (await response.json()) as { reconnect?: boolean; kind?: string; message?: string };
+    const payload = (await response.json()) as {
+      ok?: boolean;
+      reconnect?: boolean;
+      kind?: string;
+      message?: string;
+    };
 
     expect(response.status).toBe(401);
     expect(payload).toMatchObject({ reconnect: true, kind: 'auth' });
     expect(payload.message).toMatch(/connect/i);
+
+    // A lapsed connection is LOUD — never an op that quietly does nothing and reports success.
+    expect(payload).not.toMatchObject({ ok: true });
+
+    /*
+     * ⚠️ A FORWARD guard, and vacuous today — say so rather than let it read as coverage.
+     * For these ops `resolveProvider` throws on the empty store before `buildProvider` is ever
+     * reached, so `providerTokens` is empty and this passes trivially. The non-vacuous version of
+     * this assertion is the clone case below, which asserts `length > 0` first. This line exists so
+     * that an op which later grows an anonymous-read path cannot acquire one built from body.token.
+     */
+    expect(providerTokens).not.toContain('gho_a_token_the_client_supplied');
   });
 
   /** The inherited connector cookie was the fallback path. It is gone too — the cookie above is set. */

@@ -230,7 +230,7 @@ export interface RetryDecisionInput {
  * it will tell the user about it.
  */
 /**
- * Should THIS retry attempt run with extended thinking disabled? (§4.2a, measured 2026-07-27)
+ * Should THIS retry run with extended thinking disabled? (§4.2a, measured 2026-07-27)
  *
  * ## The mechanism, not the symptom
  *
@@ -241,27 +241,52 @@ export interface RetryDecisionInput {
  * not: the model starts emitting text within a second or two, the stream is never quiet, and the timeout
  * cannot fire.
  *
- * ## Why ONLY the last attempt
+ * ## Why the end of the ladder and not everywhere
  *
  * Because thinking is worth having, and the reasoning text — when a backend does forward it — is worth
  * reading. The tempting version of this idea is "if the stream goes quiet, drop thinking", and that would
  * eat the reasoning on exactly the long thinks whose reasoning has the most in it, on every generation.
- * Scoped to the final attempt, the common path is untouched: attempts 1 and 2 are byte-identical to what
- * ships today, and the only turn that loses thinking is one where the silent think has ALREADY killed the
- * generation twice. You cannot lose reasoning text on a turn that was about to die.
+ * Scoped to the end rather than everywhere, so the common path keeps its reasoning: a turn that loses
+ * thinking is one where the silent think has ALREADY killed the generation more than once. You cannot
+ * lose reasoning text on a turn that was about to die.
  *
- * The trade on that last attempt is real and deliberate: no extended thinking is a weaker build (that is
+ * ⚠️ HOW MANY retries keep thinking is NOT stated here, and that is deliberate. Every wrong version of
+ * this comment was a count: "attempts 1 and 2 are byte-identical", then "the earlier retries are
+ * byte-identical", which is the same claim with the digits removed and was written by the pass that
+ * corrected the first one. `retry-policy.spec.ts` holds the sequence — including the one the CALL SITE
+ * produces — because a sequence in a test can fail and a sequence in a sentence cannot.
+ *
+ * 🔴 **THE PARAMETER IS A 1-BASED RETRY NUMBER, AND THE UNITS ARE WHY THIS WAS WRONG UNTIL 2026-08-21.**
+ *
+ * It shipped as `attempt >= maxAttempts - 1` reading a 0-based index, while `proxy.ts` called it with
+ * `attempt + 1` from a loop counting the attempt that had just FAILED — so the values were 1,2,3 against
+ * a threshold of 2, and the modes were adaptive, **disabled, disabled**: the last TWO retries rather than
+ * the last one, on a mitigation whose entire justification is that the common path keeps its reasoning.
+ * Nobody chose that. It fell out of two functions disagreeing about what the number COUNTED, and every
+ * document describing the behaviour was accurate about the intent and false about the code — which is
+ * how eight copies of one sentence were all wrong in the same way.
+ *
+ * Fixed by making the unit explicit rather than by moving the `+ 1`: `retryNumber` is which retry is
+ * about to run (1st, 2nd, 3rd) and `maxRetries` is how many there are, so the comparison is between two
+ * numbers of the same kind and there is no `- 1` left for an off-by-one to live in. ⚠️ The call site is
+ * pinned as well as the function — a contract this one satisfied while its only caller did not is
+ * exactly what a function-only spec cannot see.
+ *
+ * The trade on that last retry is real and deliberate: no extended thinking is a weaker build (that is
  * why `low` effort is banned outright — an under-thinking model returns a confident WRONG answer, not a
  * smaller correct one). It is still better than a red error card and no game, which is the alternative it
  * replaces — and it never runs on a healthy generation.
  *
  * ⚠️ The caller MUST clamp with `canDisableThinking(model, effort)`: Fable 5 rejects `{type:'disabled'}`
  * outright and Opus 5 rejects it above `high`, so an unclamped "disabled" trades one failure for a 400 on
- * the attempt that had already failed twice — the worst possible moment, exactly as
+ * the retry that had already failed twice — the worst possible moment, exactly as
  * `THINKING_DISABLED_EFFORT_CEILING` warns.
  */
-export function retryThinkingMode(attempt: number, maxAttempts = MAX_PROVIDER_RETRY_ATTEMPTS): 'adaptive' | 'disabled' {
-  return attempt >= maxAttempts - 1 ? 'disabled' : 'adaptive';
+export function retryThinkingMode(
+  retryNumber: number,
+  maxRetries = MAX_PROVIDER_RETRY_ATTEMPTS,
+): 'adaptive' | 'disabled' {
+  return retryNumber >= maxRetries ? 'disabled' : 'adaptive';
 }
 
 export type RetryToolMode = 'same-as-first' | 'tool-free';

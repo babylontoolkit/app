@@ -66,6 +66,56 @@ export interface MountFacts {
    * `empty` it replaces.
    */
   hasWorkingCopy?: boolean;
+
+  /**
+   * Which branch the working copy says its files came from (§4.13a).
+   *
+   * 🔴 There is ONE copy per project, overwritten in place, so it is stale-by-branch the instant a
+   * switch lands. `hasWorkingCopy` alone cannot see that, and the blast radius is narrow but real:
+   * this decision never ranks the copy against a local checkpoint, so it only matters on a FRESH
+   * BROWSER, on a LINKED project, whose remote we could not reach — and in exactly that state a
+   * recovery would restore another branch's tree over a project whose link tuple names a different
+   * one. The user opens a game they did not write, with no error anywhere.
+   *
+   * ⚠️ **`undefined` is UNKNOWN and is never read as a match.** Every copy written before the stamp
+   * existed has none, and treating silence as agreement would wave through precisely the oldest and
+   * most stale copies — the `remoteHead` `undefined`-vs-`null` distinction, in the same file.
+   */
+  workingCopyBranch?: string;
+
+  /** The branch the project's link tuple names right now, to compare the stamp against. */
+  linkedBranch?: string;
+}
+
+/**
+ * May the working copy be restored?
+ *
+ * Pure and separate so the rule is readable and testable on its own — this is a "may we overwrite the
+ * user's files" question, which is the category `restore-target.ts` and `planRestore` are in.
+ *
+ * `spec/fail-loud.md` rule 2: a capability we cannot vouch for reports OFF, never ON. So the answer is
+ * NO whenever the two names are both known and disagree, and YES in every state where the question
+ * does not arise — an unlinked project (no branch to disagree with), an unstamped copy (unknown, and
+ * the pre-stamp behaviour is what those copies were written under), or a project whose own branch we
+ * do not know.
+ */
+export function workingCopyRanks(facts: Pick<MountFacts, 'workingCopyBranch' | 'linkedBranch'>): {
+  ranks: boolean;
+  reason?: string;
+} {
+  const stamped = facts.workingCopyBranch;
+  const linked = facts.linkedBranch;
+
+  if (!stamped || !linked || stamped === linked) {
+    return { ranks: true };
+  }
+
+  return {
+    ranks: false,
+    reason:
+      `the recovery copy on our servers was saved from ${stamped}, and this project is on ${linked}. ` +
+      "It was not restored, because it would have replaced your files with another branch's.",
+  };
 }
 
 /**
@@ -107,7 +157,7 @@ export function selectMountSource(facts: MountFacts): MountSource {
      * remaining copy here, so it wins over `empty` and over a remix seed (the seed is the state the
      * project was BORN in; the working copy is where it actually got to).
      */
-    if (facts.hasWorkingCopy) {
+    if (facts.hasWorkingCopy && workingCopyRanks(facts).ranks) {
       return { source: 'working' };
     }
 
@@ -127,8 +177,13 @@ export function selectMountSource(facts: MountFacts): MountSource {
       return { source: 'local', unsavedWork };
     }
 
-    /* Offline with nothing local: the recovery copy is all we can reach, and it beats a blank editor. */
-    return facts.hasWorkingCopy ? { source: 'working' } : { source: 'empty' };
+    /*
+     * Offline with nothing local: the recovery copy is all we can reach, and it beats a blank editor —
+     * unless its branch STAMP disagrees with the project's, which is the one state this whole check
+     * exists for (fresh browser + linked project + unreachable remote). Restoring there hands the user
+     * another branch's game with nothing saying so.
+     */
+    return facts.hasWorkingCopy && workingCopyRanks(facts).ranks ? { source: 'working' } : { source: 'empty' };
   }
 
   // Linked to a branch with no commits yet — a save that created the repo and failed to push.
@@ -137,8 +192,8 @@ export function selectMountSource(facts: MountFacts): MountSource {
       return { source: 'local', unsavedWork: true };
     }
 
-    /* The repo genuinely holds nothing, so it cannot be the source — the recovery copy can. */
-    return facts.hasWorkingCopy ? { source: 'working' } : { source: 'empty' };
+    /* The repo genuinely holds nothing, so it cannot be the source — a stamp-matching recovery copy can. */
+    return facts.hasWorkingCopy && workingCopyRanks(facts).ranks ? { source: 'working' } : { source: 'empty' };
   }
 
   /*

@@ -127,13 +127,15 @@ export default class AnthropicProvider extends BaseProvider {
     effort?: EffortLevel;
 
     /**
-     * Force thinking OFF for THIS request (§4.2a) — the last-resort retry, and nothing else.
+     * Force thinking OFF for THIS request (§4.2a) — the late retries, and nothing else.
      *
      * KIE kills any step that puts no bytes on the wire for ~30s, and an extended think is exactly that:
      * silence. Disabling thinking makes the model start emitting text almost immediately, so the stream
      * can never go quiet long enough to be killed. See `retryThinkingMode` in `retry-policy.ts` for why
-     * this is scoped to the final attempt — a general "go quiet, drop thinking" rule would eat the
-     * reasoning text on precisely the long thinks whose reasoning is worth reading.
+     * this is scoped late rather than everywhere — a general "go quiet, drop thinking" rule would eat
+     * the reasoning text on precisely the long thinks whose reasoning is worth reading. ⚠️ WHICH
+     * retries is asserted in `retry-policy.spec.ts` and stated in no comment: every wrong version of
+     * that sentence was a count somebody typed.
      *
      * Omitted on every ordinary generation, which keeps the operator's `THINKING_MODE` authoritative.
      */

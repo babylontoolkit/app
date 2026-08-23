@@ -14,6 +14,7 @@
  * answered with "more caching" before the step log is read — this report IS that step log, aggregated.
  */
 import type { GenerationRecord } from '~/lib/.server/billing/generations';
+import { generationKind } from './generation-kind';
 
 export interface ModelUsage {
   model: string;
@@ -81,7 +82,56 @@ export interface UsageReport {
    */
   markers: MarkerCounts;
 
+  /**
+   * Request-integrity findings (`agent/request-invariants.ts`, SPEC §4.2 step 2a).
+   *
+   * A violation never fails a turn, so without a counter here it is a row in a database nobody reads
+   * — which is `spec/fail-loud.md` rule 9 waiting to fire. `turnsWithReissues` is the companion
+   * number: a turn that assembled more than one request paid for the prefix again, and a rising
+   * fraction means a rescue is firing systematically rather than occasionally.
+   */
+  integrity: IntegrityCounts;
+
+  /**
+   * 🔴 MEDIA SPEND, REPORTED BESIDE THE GENERATION NUMBERS RATHER THAN INSIDE THEM.
+   *
+   * Excluding `med_*` rows from the counters above is right — their neighbours are cache hit rate,
+   * chars-per-output-token and a per-model TOKEN table, and a media dollar in `rawCostUsd` while the
+   * render is absent from `generations` makes $/generation wrong the other way. But excluding it
+   * without a counterpart made real KIE money — several dollars on a landing pass that commissions
+   * eight renders — **vanish from every admin screen the moment the fix landed**, on a section headed
+   * "Usage & cost" with a stat labelled "Raw cost".
+   *
+   * ⚠️ That is the exact shape this codebase keeps recording: *a fix can blind the metric that
+   * measured it* (`wastedOutput`, 2026-07-16). The exclusion is the fix; these fields are what stop it
+   * from being the next instance.
+   */
+  media: MediaUsage;
+
   byModel: ModelUsage[];
+}
+
+export interface MediaUsage {
+  /** `med_*` rows in the sample. Also the denominator that explains a shrunken `generations`. */
+  renders: number;
+  creditsCharged: number;
+  rawCostUsd: number;
+}
+
+export interface IntegrityCounts {
+  /** Turns whose request violated at least one invariant. */
+  turnsWithViolations: number;
+
+  /** How many of each invariant fired across the sample, keyed `INV-1` … `INV-4`. */
+  byInvariant: Record<string, number>;
+
+  /**
+   * Turns that started more than one model request (a retry, a forced continuation, a rescue).
+   *
+   * ⚠️ A four-fingerprint turn is ONE turn (edge case 11). Counting fingerprints instead of turns
+   * would inflate `generations` by exactly the turns that went wrong, which is backwards.
+   */
+  turnsWithReissues: number;
 }
 
 export interface MarkerCounts {
@@ -102,7 +152,31 @@ function n(value: number | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-export function buildUsageReport(records: GenerationRecord[]): UsageReport {
+export function buildUsageReport(allRecords: GenerationRecord[]): UsageReport {
+  /*
+   * 🔴 MEDIA RENDERS SHARE THIS TABLE AND ARE NOT GENERATIONS (`generation-kind.ts`, edge case 4).
+   *
+   * A `med_*` row is a paid image or video task (§4.16). It has no prompt, no tool rounds, no finish
+   * reason and no step log — and crucially those are ABSENT, not zero. Counting them here diluted
+   * `failureRate` (they cannot fail the way a generation does), `avgToolRounds` (a divisor that grew
+   * with every render) and `byModel` (a media model id in the LLM cost table) on the one screen an
+   * operator reads to decide whether the platform is healthy. On a landing-page pass that commissions
+   * eight images, that is eight phantom generations per turn.
+   *
+   * `refundKind()` has split the two since the refund report was written; this call site simply never
+   * got the same rule.
+   */
+  const records = allRecords.filter((rec) => generationKind(rec.id) !== 'media');
+
+  /*
+   * ⚠️ `!== 'media'`, deliberately NOT `=== 'generation'`, and the difference is a recorded decision
+   * rather than an oversight. `generationKind` answers `'other'` for an unrecognised prefix, and an
+   * `'other'` row still joins the generation numbers here. Tightening it would be more principled and
+   * is NOT safe today: legacy rows predate the `gen_` prefix (`agent/usage.ts` only DEFAULTS to it
+   * when an id is absent), so `=== 'generation'` would silently drop historical turns out of the very
+   * report an operator uses to read history. Revisit when the id prefix is known to be universal.
+   */
+
   const report: UsageReport = {
     generations: records.length,
     completed: 0,
@@ -121,6 +195,8 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
     visibleTextChars: 0,
     charsPerOutputToken: 0,
     markers: { forcedContinuation: 0, unproductiveRescue: 0, providerRetry: 0, rescued: 0 },
+    integrity: { turnsWithViolations: 0, byInvariant: {}, turnsWithReissues: 0 },
+    media: { renders: 0, creditsCharged: 0, rawCostUsd: 0 },
     byModel: [],
   };
 
@@ -128,6 +204,16 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
   let durationSum = 0;
   let durationCount = 0;
   let toolRoundSum = 0;
+
+  for (const rec of allRecords) {
+    if (generationKind(rec.id) !== 'media') {
+      continue;
+    }
+
+    report.media.renders++;
+    report.media.creditsCharged += n(rec.creditsCharged);
+    report.media.rawCostUsd += n(rec.rawCostUsd);
+  }
 
   for (const rec of records) {
     if (rec.status === 'failed') {
@@ -147,6 +233,24 @@ export function buildUsageReport(records: GenerationRecord[]): UsageReport {
     if (rec.durationMs !== undefined) {
       durationSum += rec.durationMs;
       durationCount++;
+    }
+
+    /*
+     * Counted per TURN, not per finding or per fingerprint. A turn that re-issued four times is one
+     * turn that went wrong four ways, and reporting it as four would inflate exactly the rows that
+     * already cost the most.
+     */
+    if (rec.integrityIssues?.length) {
+      report.integrity.turnsWithViolations++;
+
+      for (const issue of rec.integrityIssues) {
+        const id = issue.split(':')[0]?.trim() || 'unknown';
+        report.integrity.byInvariant[id] = (report.integrity.byInvariant[id] ?? 0) + 1;
+      }
+    }
+
+    if ((rec.requestFingerprints?.length ?? 0) > 1) {
+      report.integrity.turnsWithReissues++;
     }
 
     report.silentStepOutputTokens += silentStepOutput(rec);
