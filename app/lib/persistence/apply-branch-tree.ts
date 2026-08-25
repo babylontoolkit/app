@@ -78,13 +78,22 @@ export type ApplyBranchTreeResult =
 /**
  * The phase each door raises while it reads and writes.
  *
+ * ⚠️ EXPORTED, because the phase has to go up BEFORE the caller's network read (owner, 2026-08-22).
+ * Reported as *"once I select switch branch it takes quite a few seconds where it is doing nothing and
+ * not displaying a splash screen"* — this phase's own doc says it covers "reading the target branch
+ * from the provider, before a byte of the workspace has changed", and it never did: the only writer
+ * was `applyBranchTree`, which the caller reaches only AFTER awaiting that read. So the surface
+ * described as covering the read went up once the read had finished. The caller raises it now and this
+ * module re-asserts the identical value, so there is still exactly one rule deciding which phase a
+ * given operation shows.
+ *
  * ⚠️ THREE CASES, not a two-arm ternary. This routed `pull` to `switching-branch`, so a Sync or a
  * divergence-resolve announced "Switching to trunk" full-screen for thirty seconds to a user who was
  * already on trunk and had pressed neither switch nor branch. It is the fourth of four strings that
  * vary by operation and the last to be given a case — and the only one on a surface the user cannot
  * look away from.
  */
-function phaseFor(operation: ApplyBranchTreeInput['operation'], branch: string) {
+export function phaseFor(operation: ApplyBranchTreeInput['operation'], branch: string) {
   switch (operation) {
     case 'discard':
       return { step: 'discarding', branch } as const;
@@ -324,6 +333,20 @@ export async function applyBranchTree(input: ApplyBranchTreeInput): Promise<Appl
      */
     try {
       await ensureRunnableNow(projectId, {
+        /*
+         * 🔴 RESTART, not "ensure runnable" (owner, 2026-08-22).
+         *
+         * Without this the very first line of `ensureProjectRunnable` returns `already-running` — the
+         * previous branch's dev server is still up — so this step did NOTHING on a switch: no install,
+         * no restart. The user was left with a Vite process serving the module graph of the branch
+         * they had just left, and the only cures were a full page reload or a manual Ctrl-C plus
+         * `npm run dev`, which is exactly how it was reported.
+         *
+         * ⚠️ It also means the T18 convergence never actually converged: the owner accepted a 30-second
+         * narrated install on every Pull, and that install has been skipped every time a dev server
+         * was running — which is every time.
+         */
+        restart: true,
         onStep: (step) => {
           if (step === 'installing') {
             bootProgress.set({ step: 'branch-install' });
@@ -334,6 +357,33 @@ export async function applyBranchTree(input: ApplyBranchTreeInput): Promise<Appl
       });
     } catch (error) {
       logger.error(`Could not restart the project after ${operation} on ${branch}`, error);
+    }
+
+    /*
+     * 🔴 STEP 9 — RELOAD THE PREVIEW, or the user is looking at the branch they just left.
+     *
+     * Reported 2026-08-22: *"when I switched the branch the preview did not work — I had to actually
+     * RELOAD the page."* Nothing here had ever asked. Vite's HMR is driven by module invalidation, and
+     * this operation invalidates nothing it can see: the files are written straight to the sandbox FS,
+     * `public/` assets change without a module graph edit, and the dev server is reinstalled and
+     * restarted underneath the running document. The iframe holds a page built from the old branch and
+     * a dead HMR socket, and only a manual reload clears it.
+     *
+     * AFTER the install, and outside its `try`: before it would reload into a server that is about to
+     * restart, and skipping it when the install failed would leave the stale document on screen in the
+     * one case the user most needs to see what actually landed. The tree is on disk either way.
+     */
+    try {
+      workbenchStore.refreshPreviews();
+    } catch (error) {
+      /*
+       * ⚠️ A COSMETIC STEP MAY NEVER FAIL THE OPERATION — the same rule the reinstall above follows,
+       * and its own spec caught this: the first draft ran unguarded, so a preview layer that could not
+       * answer turned a switch whose tree had already landed, checkpointed and repointed into
+       * `ok: false`. The user would be told their branch did not switch when it did, and would press
+       * the button again.
+       */
+      logger.error(`Could not reload the preview after ${operation} on ${branch}`, error);
     }
 
     return { ok: true, undoSeq, serverCopySkipped };

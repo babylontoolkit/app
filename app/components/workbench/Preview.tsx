@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { IconButton } from '~/components/ui/IconButton';
 import { workbenchStore } from '~/lib/stores/workbench';
+import { previewReloadRequest } from '~/lib/stores/preview-reload';
 import { attachPreviewBridge, detachPreviewBridge, notifyPreviewReloading } from '~/lib/preview/bridge';
 import { PortDropdown } from './PortDropdown';
 import { ScreenshotSelector } from './ScreenshotSelector';
@@ -382,6 +383,34 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
       current.src = url ? previewUrlWithPath(url, committedPathRef.current) : current.src;
     });
   };
+
+  /*
+   * 🔴 ANSWER A RELOAD REQUEST FROM THE STORE (§4.13a, §4.16 — reported 2026-08-22).
+   *
+   * A branch switch replaces the whole module graph, every `public/` asset, and reinstalls and
+   * restarts the dev server; a §4.16 media render drops a file into `public/` ~30 seconds after the
+   * `<img>` that references it already 404'd. Neither invalidates a Vite module, so HMR reloads
+   * nothing and the iframe keeps showing the old document until the user reloads the whole page.
+   *
+   * The request is answered HERE, not in the store, because `reloadPreview` re-mints an expiring
+   * preview URL before assigning `src` — the store has no iframe ref and no business minting one.
+   *
+   * ⚠️ The ref is seeded with the CURRENT value so a mount never counts as a request: a preview that
+   * mounts after the request has already loaded fresh, and reloading it again is a visible flash for
+   * nothing. The guard also makes the effect idempotent, which is what lets `reloadPreview` stay in
+   * the dep array despite being rebuilt on every render.
+   */
+  const reloadRequest = useStore(previewReloadRequest);
+  const lastReloadRequest = useRef(reloadRequest);
+
+  useEffect(() => {
+    if (lastReloadRequest.current === reloadRequest) {
+      return;
+    }
+
+    lastReloadRequest.current = reloadRequest;
+    reloadPreview();
+  }, [reloadRequest, reloadPreview]);
 
   const toggleFullscreen = async () => {
     if (!isFullscreen && containerRef.current) {

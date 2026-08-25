@@ -30,10 +30,11 @@ import { toast } from 'react-toastify';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { streamingState } from '~/lib/stores/streaming';
 import { db, repoStatus, unsavedWork } from './useChatHistory';
-import { applyBranchTree } from './apply-branch-tree';
+import { applyBranchTree, phaseFor } from './apply-branch-tree';
 import { decideBranchSwitch } from './branch-switch';
 import { decideDiscard } from './discard';
 import { branchDeleteAvailability, decideBranchDelete } from './branch-delete';
+import { bootProgress, endBootPhase } from '~/lib/stores/boot-progress';
 import {
   createBranch,
   deleteBranch,
@@ -188,10 +189,35 @@ export function useBranchActions(): BranchActions {
       operation: 'switch' | 'discard',
       fallbackBranch: string,
     ) => {
+      /*
+       * 🔴 THE SPLASH GOES UP BEFORE THE NETWORK READ (owner, 2026-08-22).
+       *
+       * Reported as *"once I select switch branch it takes quite a few seconds where it is doing
+       * nothing and not displaying a splash screen."* Reading a branch tree from the provider is a
+       * multi-second round trip, and the only writer of these phases was `applyBranchTree` — which
+       * this function reaches only after awaiting that read. So the phase whose own doc says it covers
+       * "reading the target branch from the provider, before a byte of the workspace has changed" went
+       * up at the moment the read FINISHED, and the user pressed a menu item into silence.
+       *
+       * `phaseFor` is shared with `applyBranchTree` rather than re-derived here: three operations show
+       * three different sentences on a full-page surface, and a second copy of that mapping is how a
+       * Pull comes to announce "Switching to trunk" (`spec/fail-loud.md`'s wrong-operation defect on
+       * the largest surface the product has).
+       */
+      bootProgress.set(phaseFor(operation, fallbackBranch));
+
       const outcome = await read();
 
       if (!outcome.ok || !outcome.files) {
+        /*
+         * ⚠️ UNCOVER on the read's own failure paths. `applyBranchTree`'s `finally` is what normally
+         * brings this down, and these two returns never reach it — leaving a full-page splash over a
+         * workspace with nothing running, which `endBootPhase` cannot clear later because nothing else
+         * would call it.
+         */
+        endBootPhase();
         toast.error(outcome.message ?? 'Could not read that branch.', { autoClose: false });
+
         return;
       }
 

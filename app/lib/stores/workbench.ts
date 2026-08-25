@@ -8,6 +8,7 @@ import { unreachable } from '~/utils/unreachable';
 import { EditorStore } from './editor';
 import { FilesStore, type FileMap } from './files';
 import { PreviewsStore } from './previews';
+import { requestPreviewReload } from './preview-reload';
 import { TerminalStore } from './terminal';
 import JSZip from 'jszip';
 import fileSaver from 'file-saver';
@@ -142,18 +143,22 @@ export class WorkbenchStore {
     /*
      * ⚠️ `refreshAllPreviews()` alone does NOT refresh THIS tab — it only posts to the
      * BroadcastChannel, and a BroadcastChannel never delivers to the context that posted it. So the
-     * local remount (`refreshPreview`, which flips `ready` off and back on) has to be driven here,
-     * and the broadcast is what carries it to any other tab the user has open.
+     * local reload has to be driven here, and the broadcast is what carries it to any other tab.
      */
-    const previews = this.#previewsStore.previews.get();
-
-    for (const preview of previews) {
-      const previewId = this.#previewsStore.getPreviewId(preview.baseUrl);
-
-      if (previewId) {
-        this.#previewsStore.refreshPreview(previewId);
-      }
-    }
+    /*
+     * 🔴 THIS USED TO CALL `refreshPreview` PER PREVIEW, AND THAT DID NOTHING (fixed 2026-08-22).
+     *
+     * That method flips `PreviewInfo.ready` false→true inside a `requestAnimationFrame` — and `ready`
+     * has **no readers**: it is written in three places in `previews.ts` and read nowhere in the app.
+     * The iframe carries no `key` and its `src` was unchanged, so React re-rendered an identical
+     * element and the browser was never asked for anything. The comment above described a "local
+     * remount" that had never happened, which is why §4.16's generated media stayed invisible until a
+     * manual reload and why a branch switch showed the previous branch's page.
+     *
+     * `requestPreviewReload()` is answered by `Preview.tsx`, which owns the iframe ref and re-mints an
+     * expiring preview URL before assigning `src` — the only path that genuinely reloads.
+     */
+    requestPreviewReload();
 
     this.#previewsStore.refreshAllPreviews();
   }

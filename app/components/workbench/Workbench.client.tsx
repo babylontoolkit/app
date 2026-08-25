@@ -15,6 +15,7 @@ import {
 import { IconButton } from '~/components/ui/IconButton';
 import { Slider, type SliderOptions } from '~/components/ui/Slider';
 import { workbenchStore, type WorkbenchViewType } from '~/lib/stores/workbench';
+import { treeRevision } from '~/lib/stores/tree-revision';
 import { classNames } from '~/utils/classNames';
 import { cubicEasingFn } from '~/utils/easings';
 import { renderLogger } from '~/utils/logger';
@@ -291,6 +292,23 @@ export const Workbench = memo(
     renderLogger.trace('Workbench');
 
     const [fileHistory, setFileHistory] = useState<Record<string, FileHistory>>({});
+
+    /*
+     * 🔴 A TREE REPLACEMENT INVALIDATES EVERY DIFF ON SCREEN (reported 2026-08-22).
+     *
+     * `fileHistory` is written by `DiffView` and was cleared by nothing, so after "Discard all
+     * changes" the file tree still showed `+11 −8` on a file whose changes had just been thrown away
+     * — and the dropdown and the diff view's *before* side were stale with it. Discard itself was
+     * correct; this was a fourth copy of "what changed" living where none of its resets could reach.
+     *
+     * Keyed on the revision, not on a boolean: two replacements in a row must clear twice. Firing
+     * once on mount is deliberate and free — the state is already empty then.
+     */
+    const treeRev = useStore(treeRevision);
+
+    useEffect(() => {
+      setFileHistory({});
+    }, [treeRev]);
 
     // const modifiedFiles = Array.from(useStore(workbenchStore.unsavedFiles).keys());
 

@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { ensureProjectRunnable, type EnsureRunnableDeps } from './ensure-runnable';
+import { ensureProjectRunnable, SHELL_IDLE_CEILING_MS, type EnsureRunnableDeps } from './ensure-runnable';
 
 /** A clock that runs as fast as the test wants it to; nothing here waits on a real timer. */
 function clock() {
@@ -284,5 +284,116 @@ describe('the dependency decision stays deleted', () => {
 
     // And the stripper really strips: the rejected name survives in the ORIGINAL, in prose only.
     expect(fs.readFileSync(MODULE, 'utf8')).toContain('decideDependencyInstall');
+  });
+});
+
+/**
+ * 🔴 RESTART MODE — replacing a dev server that is already running (§4.13a, owner 2026-08-22).
+ *
+ * Reported as *"something is wrong with SWITCHING BRANCHES… I have to either RELOAD the page or
+ * control-break in the terminal and manually fire off `npm run dev` — ONLY THEN does the proper preview
+ * show."* The Ctrl-C is the diagnosis: the stale thing was the dev SERVER, holding the previous
+ * branch's module graph in memory, not the iframe in front of it.
+ *
+ * This module's whole contract is "unless it is already serving", which is right for a mount and
+ * backwards for a branch operation — so `applyBranchTree` got `already-running` off the first line and
+ * ran nothing at all.
+ */
+describe('restart mode replaces a running dev server', () => {
+  it('installs and starts even though something is already serving', async () => {
+    const execute = vi.fn(async () => ({ exitCode: 0, output: '' }));
+    const startDevServer = vi.fn();
+
+    const outcome = await ensureProjectRunnable(
+      deps({
+        restart: true,
+
+        /* Serving throughout — the old server's port, which is the whole point. */
+        runningPreviews: () => 1,
+        execute,
+        startDevServer,
+      }),
+    );
+
+    expect(outcome).toBe('started');
+    expect(execute).toHaveBeenCalledWith(expect.any(String), 'npm install');
+    expect(startDevServer).toHaveBeenCalledWith('npm run dev');
+  });
+
+  /**
+   * CONTROL — the exact same facts WITHOUT `restart` must still stand down. Without this the test
+   * above passes for a module that lost its `already-running` guard entirely, which would make every
+   * mount Ctrl-C a healthy dev server.
+   */
+  it('CONTROL — without restart, a serving project is left alone', async () => {
+    const execute = vi.fn(async () => ({ exitCode: 0, output: '' }));
+    const startDevServer = vi.fn();
+
+    const outcome = await ensureProjectRunnable(deps({ runningPreviews: () => 1, execute, startDevServer }));
+
+    expect(outcome).toBe('already-running');
+    expect(execute).not.toHaveBeenCalled();
+    expect(startDevServer).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ⚠️ THE IDLE WAIT IS SKIPPED, and this is the difference between a fix and a four-minute stall.
+   * The shell is busy *because* the dev server being replaced is running in it, so the quiescence loop
+   * can never be satisfied — it would poll to the full ceiling and then run the same command anyway,
+   * with the workspace covered the whole time. `executeCommand` writes `\x03` first, so the install
+   * command IS the Ctrl-C the user has been typing by hand.
+   */
+  it('does not wait for a shell that is busy running the server it is replacing', async () => {
+    const c = clock();
+    const execute = vi.fn(async () => ({ exitCode: 0, output: '' }));
+
+    const outcome = await ensureProjectRunnable(
+      deps({
+        restart: true,
+        runningPreviews: () => 1,
+        shellBusy: () => true,
+        execute,
+        now: c.now,
+        wait: c.wait,
+      }),
+    );
+
+    expect(outcome).toBe('started');
+    expect(execute).toHaveBeenCalled();
+    expect(c.now(), 'the restart sat through the idle ceiling').toBeLessThan(SHELL_IDLE_CEILING_MS);
+  });
+
+  /**
+   * 🔴 The subtle one. The Ctrl-C kills the server, but the preview store need not deregister its port
+   * before the post-install check runs. Reading a stale registration there would return
+   * `already-running` from a restart that has just torn the dev server DOWN — leaving the project with
+   * no server at all, which is worse than the bug being fixed.
+   */
+  it('starts the server even if the old port is still registered after the install', async () => {
+    const startDevServer = vi.fn();
+
+    const outcome = await ensureProjectRunnable(
+      deps({ restart: true, runningPreviews: () => 1, shellBusy: () => true, startDevServer }),
+    );
+
+    expect(startDevServer).toHaveBeenCalledTimes(1);
+    expect(outcome).toBe('started');
+  });
+
+  /** A failed install is still a failed install — restart mode changes what runs, not what is reported. */
+  it('still reports an install failure', async () => {
+    const onProblem = vi.fn();
+
+    const outcome = await ensureProjectRunnable(
+      deps({
+        restart: true,
+        runningPreviews: () => 1,
+        execute: async () => ({ exitCode: 1, output: 'ENOENT' }),
+        onProblem,
+      }),
+    );
+
+    expect(outcome).toBe('install-failed');
+    expect(onProblem).toHaveBeenCalledWith('install-failed', 'ENOENT');
   });
 });

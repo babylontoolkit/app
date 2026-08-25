@@ -333,8 +333,14 @@ describe('the two entry points differ in exactly one way', () => {
      * ⚠️ And it hands `sharedRunnableRun` the REAL work. Asserting only `return sharedRunnableRun`
      * passes for `sharedRunnableRun(async () => 'started')` — a function that returns the right
      * SHAPE and installs nothing.
+     *
+     * ⚠️ Matched by CALL rather than by the exact argument list. This read `runProjectRunnable(pid,
+     * emit)` verbatim until 2026-08-22, when `ensureRunnableNow` gained a third argument (`restart`,
+     * for the branch doors — a mount ensures, a switch REPLACES). The property under test is "it calls
+     * the real work with the real arguments", and pinning the argument list made a legitimate new
+     * argument look like a regression while proving nothing extra.
      */
-    expect(body).toContain('runProjectRunnable(pid, emit)');
+    expect(body).toMatch(/runProjectRunnable\(pid, emit[,)]/);
   });
 
   /**

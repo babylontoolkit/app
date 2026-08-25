@@ -32,6 +32,7 @@ import { getCurrentChatId } from '~/utils/fileLocks';
 import { walkSandboxTree } from '~/lib/stores/refresh-walk';
 import { isDirectoryPathError } from '~/lib/sandbox/codesandbox-translate';
 import { withRestoreInFlight } from '~/lib/stores/restore-flag';
+import { bumpTreeRevision } from '~/lib/stores/tree-revision';
 
 const logger = createScopedLogger('FilesStore');
 
@@ -1135,6 +1136,20 @@ export class FilesStore {
      * PENDING when the restore began — a 4-second debounce armed by an editor save moments earlier has
      * no call site to thread a parameter through.
      */
+    /*
+     * 🔴 AND ANNOUNCE THE REPLACEMENT, so the workbench's own "what changed" state cannot outlive it.
+     *
+     * `Workbench.client.tsx` keeps `fileHistory` — the source of the file-tree's `+11 −8` badge, the
+     * modified-files dropdown and the diff view's *before* side — in a component-local `useState` that
+     * nothing resets. After a discard it kept describing a change against content that had just been
+     * thrown away (reported 2026-08-22). Raised HERE for the same reason the flag above is: this is the
+     * one function every restore door passes through.
+     *
+     * Before the work, not after: a restore that throws still leaves the tree part-written, which is
+     * precisely the state whose stale diff would be most wrong.
+     */
+    bumpTreeRevision();
+
     return withRestoreInFlight(() => this.#restoreFiles(files, options));
   }
 

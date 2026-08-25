@@ -832,7 +832,11 @@ async function mountFromRepo(pid: string): Promise<void> {
  * `ensureRunnableNow` differ only in whether they wait for it, and a second copy of this body is how
  * the two would drift into installing different things.
  */
-function runProjectRunnable(pid: string, emit: (step: RunnableStep) => void): Promise<EnsureRunnableOutcome> {
+function runProjectRunnable(
+  pid: string,
+  emit: (step: RunnableStep) => void,
+  options: { restart?: boolean } = {},
+): Promise<EnsureRunnableOutcome> {
   /**
    * The install is narrated by a TOAST, exactly as it was before this rewrite.
    *
@@ -852,7 +856,7 @@ function runProjectRunnable(pid: string, emit: (step: RunnableStep) => void): Pr
        * real — see `awaitRunningPreview`. A tab-local runtime (Nodepod, WebContainer) dies with the
        * tab, so there is never a port to wait for and this would be pure dead time on every open.
        */
-      if (SANDBOX_OUTLIVES_SESSION) {
+      if (SANDBOX_OUTLIVES_SESSION && !options.restart) {
         const serving = await awaitRunningPreview({
           runningPreviews: () => workbenchStore.previews.get().length,
           wait: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
@@ -870,6 +874,7 @@ function runProjectRunnable(pid: string, emit: (step: RunnableStep) => void): Pr
       }
 
       const outcome = await ensureProjectRunnable({
+        restart: options.restart,
         waitForShell: () =>
           awaitShellAttached({
             attached: () => Boolean(workbenchStore.boltTerminal.process),
@@ -992,11 +997,13 @@ function ensureRunnableOnce(pid: string): Promise<void> {
  */
 export function ensureRunnableNow(
   pid: string,
-  options: { onStep?: (step: RunnableStep) => void } = {},
+  options: { onStep?: (step: RunnableStep) => void; restart?: boolean } = {},
 ): Promise<EnsureRunnableOutcome> {
   const stop = options.onStep ? onRunnableStep(options.onStep) : undefined;
 
-  return sharedRunnableRun((emit) => runProjectRunnable(pid, emit)).finally(() => stop?.());
+  return sharedRunnableRun((emit) => runProjectRunnable(pid, emit, { restart: options.restart })).finally(() =>
+    stop?.(),
+  );
 }
 
 /**

@@ -96,6 +96,29 @@ export interface EnsureRunnableDeps {
   wait: (ms: number) => Promise<void>;
   now: () => number;
 
+  /**
+   * 🔴 REPLACE a running dev server instead of standing down for it (§4.13a — owner, 2026-08-22).
+   *
+   * Reported as *"something is wrong with SWITCHING BRANCHES… I have to either RELOAD the page or
+   * control-break in the terminal and manually fire off `npm run dev` — ONLY THEN does the proper
+   * preview show for the branch."* Exactly right, and the Ctrl-C is the tell: the stale thing was the
+   * dev SERVER, not the iframe.
+   *
+   * This module's contract is "make it runnable unless it already is", which is correct for a mount
+   * and precisely backwards for a branch operation — there the running server is a Vite process
+   * holding the PREVIOUS branch's module graph and dependency optimisation in memory. Files written
+   * straight to the sandbox FS do not necessarily reach its watcher, so it keeps serving the old
+   * branch indefinitely. `applyBranchTree`'s step 7 called this and got `already-running` back on the
+   * first line: no install, no restart, nothing. ⚠️ That also silently voided the T18 convergence the
+   * owner accepted a 30-second install to buy — the install it promised has never run on a switch.
+   *
+   * `restart` skips every "something is already serving" exit AND the idle wait, because the process
+   * making the shell busy is the one being replaced: `executeCommand` writes `\x03` first, so the
+   * install command IS the Ctrl-C. Waiting for a dev server to go idle is waiting for a process that
+   * by definition never exits — it would burn the full ceiling and then do the same thing anyway.
+   */
+  restart?: boolean;
+
   shellIdleCeilingMs?: number;
   shellIdleWindowMs?: number;
   previewTimeoutMs?: number;
@@ -115,7 +138,7 @@ export async function ensureProjectRunnable(deps: EnsureRunnableDeps): Promise<E
   const idleCeilingMs = deps.shellIdleCeilingMs ?? SHELL_IDLE_CEILING_MS;
   const previewTimeoutMs = deps.previewTimeoutMs ?? PREVIEW_TIMEOUT_MS;
 
-  if (deps.runningPreviews() > 0) {
+  if (!deps.restart && deps.runningPreviews() > 0) {
     return 'already-running';
   }
 
@@ -135,7 +158,12 @@ export async function ensureProjectRunnable(deps: EnsureRunnableDeps): Promise<E
   const startedAt = deps.now();
   let idleSince: number | undefined;
 
-  while (deps.now() - startedAt < idleCeilingMs) {
+  /*
+   * ⚠️ Skipped entirely on a restart. The shell is busy because the dev server we are replacing is
+   * running in it, so this loop would poll to the full `idleCeilingMs` (four minutes) and then run the
+   * install regardless — four minutes of a covered workspace to reach the same command.
+   */
+  while (!deps.restart && deps.now() - startedAt < idleCeilingMs) {
     if (deps.runningPreviews() > 0) {
       // Something else got there first and it is serving. Nothing left to do, and nothing to report.
       return 'already-running';
@@ -172,8 +200,16 @@ export async function ensureProjectRunnable(deps: EnsureRunnableDeps): Promise<E
     return 'install-failed';
   }
 
-  // The replay's own `start` action may have landed while we installed.
-  if (deps.runningPreviews() > 0) {
+  /*
+   * The replay's own `start` action may have landed while we installed.
+   *
+   * 🔴 Never on a restart, and this is the subtle one: the Ctrl-C above kills the dev server, but the
+   * preview store does not necessarily deregister its port before this line runs. Reading a stale
+   * registration here would return `already-running` from a restart that has just torn the server
+   * down — leaving the project with no dev server at all, which is strictly worse than the bug being
+   * fixed.
+   */
+  if (!deps.restart && deps.runningPreviews() > 0) {
     return 'already-running';
   }
 
@@ -196,6 +232,14 @@ export async function ensureProjectRunnable(deps: EnsureRunnableDeps): Promise<E
    * registering. Without this check a dev server that dies on startup (a bad `vite.config.ts`, a port
    * conflict, a missing native binding) leaves exactly the silent idle terminal this module exists to
    * abolish.
+   */
+  /*
+   * ⚠️ ON A RESTART THIS CONFIRMS LESS THAN IT LOOKS LIKE IT DOES, and that is the deliberate choice.
+   * The old server's port may still be registered when we get here, so a restart can return `started`
+   * without having seen the NEW server come up. Waiting for the registration to disappear first would
+   * be stricter — and would report `no-preview` on a perfectly healthy project whenever the store does
+   * not deregister, turning a silent weakness into a loud false alarm on the operation the user just
+   * performed. The command was issued either way; a genuinely dead dev server still shows itself.
    */
   const waitingSince = deps.now();
 

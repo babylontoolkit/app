@@ -1,4 +1,5 @@
 import { atom } from 'nanostores';
+import { requestPreviewReload } from '~/lib/stores/preview-reload';
 import type { SandboxProvider } from '~/lib/sandbox';
 import { previewIdFromUrl, remintDelayMs, REMINT_RETRY_DELAY_MS } from './preview-url';
 
@@ -177,16 +178,53 @@ export class PreviewsStore {
     }
   }
 
+  /**
+   * Ports that have served at least once this page load — the restart detector above.
+   *
+   * Never pruned: it answers "has this port ever served", not "is it serving now", so a provider that
+   * does or does not deregister on Ctrl-C gives the same answer either way.
+   */
+  #everServed = new Set<number>();
+
   async #init() {
     const sandbox = await this.#sandbox;
 
     // Listen for server ready events
     sandbox.onServerReady((port, url) => {
       console.log('[Preview] Server ready on port:', port, url);
+
+      /*
+       * 🔴 A SERVER THAT COMES BACK ON A PORT WE HAVE ALREADY SERVED IS A RESTART — RELOAD THE IFRAME
+       * (§4.13a, owner 2026-08-22).
+       *
+       * Reported as *"you still have to hit the workspace reload to see the actual preview for the
+       * version we just switched to."* A branch operation now genuinely restarts the dev server, but
+       * the new Vite binds the SAME port, so `baseUrl` is an identical string, React re-renders an
+       * identical `<iframe src>` and the browser is never asked for anything. The document on screen
+       * stays the one the previous server rendered.
+       *
+       * This is the precise moment, which is why it lives here rather than in the caller: a reload
+       * fired when `ensureRunnableNow` RESOLVES can land while the replacement server is still booting
+       * (its wait can be satisfied by the outgoing server's port, which has not deregistered yet), and
+       * a reload into a booting server shows a connection error and then nothing further.
+       *
+       * ⚠️ `#everServed` is never pruned, deliberately. Keying off the live `#availablePreviews` would
+       * ask "is a preview registered right now", and whether a port deregisters on Ctrl-C is a
+       * provider detail — if it does, the restart looks like a first boot and no reload is requested,
+       * which is the bug. "Has this port ever served in this page's life" is answerable without
+       * knowing that.
+       */
+      const restarted = this.#everServed.has(port);
+      this.#everServed.add(port);
+
       this.broadcastUpdate(url);
 
       // Initial storage sync when preview is ready
       this._broadcastStorageSync();
+
+      if (restarted) {
+        requestPreviewReload();
+      }
     });
 
     // Listen for port events

@@ -24,6 +24,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { bootProgress } from '~/lib/stores/boot-progress';
 
 /**
  * Everything a `vi.mock` factory closes over must be HOISTED with it — the factories are lifted above
@@ -93,7 +94,15 @@ vi.mock('~/lib/persistence/useChatHistory', async () => {
   };
 });
 
-vi.mock('~/lib/persistence/apply-branch-tree', () => ({ applyBranchTree: seams.applyBranchTree }));
+/**
+ * ⚠️ `phaseFor` is the REAL one, not a stub. The property under test is that the hook and
+ * `applyBranchTree` show the same sentence for the same operation — a mocked mapping would assert the
+ * hook calls *something*, which is exactly the second copy the export exists to prevent.
+ */
+vi.mock('~/lib/persistence/apply-branch-tree', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('~/lib/persistence/apply-branch-tree')>()),
+  applyBranchTree: seams.applyBranchTree,
+}));
 
 vi.mock('~/lib/persistence/projects', () => ({
   listBranches: seams.listBranches,
@@ -917,5 +926,80 @@ describe('branch deletion is switched off', () => {
     } finally {
       branchDeleteGate.open = false;
     }
+  });
+});
+
+/**
+ * 🔴 THE SPLASH GOES UP BEFORE THE NETWORK READ (owner, 2026-08-22).
+ *
+ * Reported as *"once I select switch branch it takes quite a few seconds where it is doing nothing and
+ * not displaying a splash screen."* Reading a branch tree is a multi-second round trip, and the only
+ * writer of these phases was `applyBranchTree` — reached only AFTER awaiting that read. The phase whose
+ * own doc says it covers "reading the target branch from the provider, before a byte of the workspace
+ * has changed" went up at the moment the read finished.
+ */
+describe('the branch read is covered', () => {
+  beforeEach(() => bootProgress.set({ step: 'idle' }));
+
+  it('raises the phase before the server is asked, naming the branch', async () => {
+    let phaseAtRead: unknown;
+
+    seams.switchBranch.mockImplementationOnce(async () => {
+      phaseAtRead = bootProgress.get();
+      return { ok: true, files: {}, branch: 'feature/skins' };
+    });
+
+    const result = actions();
+
+    await act(async () => {
+      await result.current.switchTo('feature/skins');
+    });
+
+    expect(phaseAtRead, 'the read ran with the workspace uncovered').toEqual({
+      step: 'switching-branch',
+      branch: 'feature/skins',
+    });
+  });
+
+  /**
+   * ⚠️ And it comes DOWN when the read itself fails. `applyBranchTree`'s `finally` is what normally
+   * uncovers, and a failed read never reaches it — leaving a full-page splash over a workspace with
+   * nothing running and nothing left to clear it.
+   */
+  it('uncovers when the read fails', async () => {
+    seams.switchBranch.mockResolvedValueOnce({ ok: false, message: 'no such branch' });
+
+    const result = actions();
+
+    await act(async () => {
+      await result.current.switchTo('feature/skins');
+    });
+
+    expect(bootProgress.get()).toEqual({ step: 'idle' });
+  });
+
+  /**
+   * A discard reads too, and shows its OWN sentence. Routed to the switch phase it would tell a user
+   * who pressed "Discard all changes" that their branch was being switched — the wrong-operation
+   * defect on the largest surface the product has.
+   */
+  it('a discard raises the discard phase, not the switch phase', async () => {
+    /* `decideDiscard` refuses with nothing to discard, and a refusal never reaches the read. */
+    unsavedWork.set(true);
+
+    let phaseAtRead: unknown;
+
+    seams.discardChanges.mockImplementationOnce(async () => {
+      phaseAtRead = bootProgress.get();
+      return { ok: true, files: {}, branch: 'main' };
+    });
+
+    const result = actions();
+
+    await act(async () => {
+      await result.current.discard();
+    });
+
+    expect(phaseAtRead).toMatchObject({ step: 'discarding' });
   });
 });

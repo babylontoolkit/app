@@ -86,7 +86,11 @@ const createLocalSnapshot = vi.fn(async (_db: unknown, _input: any) => ({ id: 's
 const markSynced = vi.fn(async (_db: unknown, _projectId: string) => undefined);
 const writeWorkingCopyFromStore = vi.fn(async (_projectId: string, _seq: number) => 'saved' as string);
 const unsavedWorkSet = vi.fn((_value: boolean) => undefined);
-const ensureRunnableNow = vi.fn(async (_pid: string, _options: { onStep?: (step: string) => void } = {}) => 'started');
+const ensureRunnableNow = vi.fn(
+  async (_pid: string, _options: { onStep?: (step: string) => void; restart?: boolean } = {}) => 'started',
+);
+
+const refreshPreviews = vi.fn(() => undefined);
 
 const toastWarn = vi.fn((_message: string) => undefined);
 
@@ -98,6 +102,7 @@ vi.mock('~/lib/stores/workbench', () => ({
     restoreFiles: (...args: unknown[]) => restoreFiles(...(args as [SerializedFileMap, any])),
     resetAllFileModifications: () => resetAllFileModifications(),
     clearDeletedPaths: () => clearDeletedPaths(),
+    refreshPreviews: () => refreshPreviews(),
 
     /* The REAL `waitForWorkbenchActionsSettled` reads this. No artifacts = settled immediately. */
     artifacts: { get: () => ({}) },
@@ -1044,5 +1049,95 @@ describe('🔴 this module never reaches for the mount', () => {
     /* …and the strip really removed the doc comment that mentions the forbidden name. */
     expect(raw).toContain('mountProjectFiles');
     expect(code.length).toBeLessThan(raw.length);
+  });
+});
+
+/**
+ * 🔴 THE PREVIEW IS RELOADED, AND ITS FAILURE IS NOT THE OPERATION'S (§4.13a, §4.16).
+ *
+ * Reported 2026-08-22: *"when I switched the branch the preview did not work — I had to actually
+ * RELOAD the page."* Nothing asked. This operation replaces the whole module graph, changes `public/`
+ * assets without a module graph edit, and reinstalls and restarts the dev server underneath a running
+ * document — none of which Vite's HMR can see, so the iframe keeps serving the previous branch.
+ */
+describe('the preview is reloaded after the tree lands', () => {
+  it('asks for a reload on a successful switch', async () => {
+    const result = await run();
+
+    expect(result).toMatchObject({ ok: true });
+    expect(refreshPreviews).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * AFTER the reinstall/restart. Before it, the reload lands on a dev server that is about to go down
+   * and the user is back where they started.
+   */
+  it('asks after the restart, not before it', async () => {
+    await run();
+
+    expect(refreshPreviews.mock.invocationCallOrder[0]).toBeGreaterThan(ensureRunnableNow.mock.invocationCallOrder[0]);
+  });
+
+  /**
+   * A failed install must not skip it: the tree landed either way, and leaving the previous branch's
+   * document on screen is worst precisely when something went wrong and the user needs to see what
+   * actually happened.
+   */
+  it('asks even when the restart failed', async () => {
+    ensureRunnableNow.mockRejectedValueOnce(new Error('install exploded'));
+
+    const result = await run();
+
+    expect(result).toMatchObject({ ok: true });
+    expect(refreshPreviews).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * 🔴 AND A THROWING RELOAD STILL REPORTS SUCCESS — the reinstall's rule, applied to the step after
+   * it. The first draft of this call ran unguarded and this suite caught it: an unavailable preview
+   * layer turned a switch whose tree had already landed, checkpointed and repointed into `ok: false`,
+   * telling the user their branch had not switched when it had.
+   */
+  it('a throwing reload does not fail a switch that landed', async () => {
+    refreshPreviews.mockImplementationOnce(() => {
+      throw new Error('no preview layer here');
+    });
+
+    const result = await run();
+
+    expect(result).toMatchObject({ ok: true });
+
+    /* And the workspace is uncovered — a swallowed error must not strand the splash either. */
+    expect(bootProgress.get()).toEqual({ step: 'idle' });
+  });
+});
+
+/**
+ * 🔴 THE DEV SERVER IS RESTARTED, NOT MERELY "ENSURED" (owner, 2026-08-22).
+ *
+ * Reported as *"something is wrong with SWITCHING BRANCHES… I have to either RELOAD the page or
+ * control-break in the terminal and manually fire off `npm run dev`."* `ensureProjectRunnable` returns
+ * `already-running` on its first line when a preview is serving — which it always is after a mount —
+ * so this step ran NOTHING on a switch. The old Vite process kept serving the previous branch's module
+ * graph, and the two cures the user found are the two ways to get a fresh process.
+ *
+ * ⚠️ It also means T18's convergence never converged: the 30-second install the owner accepted on every
+ * Pull was skipped every single time.
+ */
+describe('the runnable step restarts rather than standing down', () => {
+  it('asks for a restart', async () => {
+    await run();
+
+    expect(ensureRunnableNow).toHaveBeenCalledWith('prj_1', expect.objectContaining({ restart: true }));
+  });
+
+  /**
+   * On every door. A discard and a pull replace the tree exactly as a switch does — the dev server is
+   * just as stale after them, and a flag set for one operation is a flag the other two forget.
+   */
+  it.each(['switch', 'discard', 'pull'] as const)('asks for a restart on a %s too', async (operation) => {
+    await run({ operation });
+
+    expect(ensureRunnableNow).toHaveBeenCalledWith('prj_1', expect.objectContaining({ restart: true }));
   });
 });
