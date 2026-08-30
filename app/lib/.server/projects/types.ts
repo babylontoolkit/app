@@ -127,17 +127,9 @@ export interface Project {
   gameBackendRef?: string;
 
   /**
-   * Unity Project Licenser (§4.18) — the linked Unity project's `productGUID` (32 hex chars). A plain
-   * pointer that follows `gameBackendRef`; NEVER a credential. It is the value the generated
-   * `license.json` is locked to (the license `key` is a hash over `plan-<guid>`), so a license only
-   * validates in the Unity project it was linked for. `undefined` = no Unity project linked.
-   */
-  linkedUnityProjectId?: string;
-
-  /**
    * The provider sandbox VM holding this project's workspace (`spec/sandbox-codesandbox.md`).
    *
-   * A plain pointer following `gameBackendRef`/`linkedUnityProjectId` — NEVER a credential, and not
+   * A plain pointer following `gameBackendRef` — NEVER a credential, and not
    * part of the client wire contract (`app/types/project.ts`): the browser supplies a PROJECT id it
    * must own, and the server mints every scoped session from the platform API key.
    *

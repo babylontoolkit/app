@@ -15,8 +15,6 @@
  * refused rather than launched. The blast radius stays the user's own sandbox and its own npm deps.
  */
 
-import { isLoopbackHttpUrl } from './loopback';
-
 export interface McpServerSpec {
   name: string;
   command: string;
@@ -135,27 +133,21 @@ export function parseMcpConfig(jsonText: string | undefined | null): McpConfigRe
       });
     } else {
       /*
-       * sse / streamable-http — network transports. No process spawn, but they still travel with the
-       * project, so the URL is third-party content and gets the same treatment as a stdio command:
-       * an allow-rule. Only a loopback http URL (the Unity Editor bridge companion on the user's own
-       * machine) is accepted — anything else would point the user's browser at an arbitrary host.
+       * sse / streamable-http — network transports, REFUSED outright.
+       *
+       * The only network MCP endpoint this platform ever spoke to was the Unity Editor bridge
+       * companion on the user's own loopback interface (§4.17), and that is removed. With no client
+       * left to connect one, accepting a URL server would park dead config in the project that reads
+       * as support — and `.mcp.json` travels with remixes and imports, so a URL in it is third-party
+       * content that would otherwise turn the user's browser into a relay against an arbitrary host.
+       * Refused BY NAME, because "we do not support network MCP transports" is a product boundary and
+       * a server that silently never starts is a bug report.
        */
-      const url = typeof raw.url === 'string' ? raw.url : '';
-
-      if (!url) {
-        rejected.push({ name, reason: `${transport} server has no url` });
-        continue;
-      }
-
-      if (!isLoopbackHttpUrl(url)) {
-        rejected.push({
-          name,
-          reason: `url "${url}" must be a loopback http URL (http://127.0.0.1 / localhost / [::1])`,
-        });
-        continue;
-      }
-
-      servers.push({ name, command: '', args: [], envKeys: [], transport, url });
+      rejected.push({
+        name,
+        reason: `${transport} servers are not supported — only stdio servers run in the sandbox`,
+      });
+      continue;
     }
   }
 

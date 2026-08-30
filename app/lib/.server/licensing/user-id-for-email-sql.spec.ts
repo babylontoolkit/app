@@ -1,5 +1,5 @@
 /**
- * `public.user_id_for_email` against a REAL Postgres (migration 0022, SPEC §4.18).
+ * `public.user_id_for_email` against a REAL Postgres (migration 0022, SPEC §4.18a).
  *
  * The function itself is three lines; the GRANTS are the reason this file exists. Postgres grants
  * EXECUTE on a new function to PUBLIC by default, so a `security definer` lookup over `auth.users` is

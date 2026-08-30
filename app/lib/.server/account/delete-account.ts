@@ -11,8 +11,7 @@
  * 1. **Every project, through the shared reaper** (`purgeProject`). Published build, remix seed,
  *    conversation, working copy, VM, row.
  * 2. **Git tokens.** The one credential we hold on the user's behalf.
- * 3. **The auth user** — which cascades `profiles`, `entitlements`, `asset_entitlements`,
- *    `unity_license_entitlements`.
+ * 3. **The auth user** — which cascades `profiles`, `entitlements` and `asset_entitlements`.
  *
  * 🔴 **The identity goes LAST, and a failed purge ABORTS before it.** The user id is the only handle on
  * everything above: `projects.user_id` is how their projects are found, and each project id is how its
@@ -154,9 +153,8 @@ export async function deleteAccount(user: AuthUser, context?: unknown): Promise<
   }
 
   /*
-   * Last. This cascades `profiles`, `entitlements`, `asset_entitlements` and
-   * `unity_license_entitlements`; migration 0017 detached `credit_ledger` and `generations` so the
-   * financial and cost record survives it (§4.5.1).
+   * Last. This cascades `profiles`, `entitlements` and `asset_entitlements`; migration 0017 detached
+   * `credit_ledger` and `generations` so the financial and cost record survives it (§4.5.1).
    */
   if (isSupabaseConfigured(context)) {
     const admin = await createAdminClient(context);

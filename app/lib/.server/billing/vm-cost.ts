@@ -171,7 +171,7 @@ export function getVmCostConfig(context?: unknown): VmCostConfig {
 
   /*
    * A nonsensical override falls back rather than being obeyed — the same rule as
-   * `sandboxHibernationSeconds` and the Unity price ladder. Obeying `0` or a NaN here would silently
+   * `sandboxHibernationSeconds`. Obeying `0` or a NaN here would silently
    * report that VM time is free, which is the exact belief this module exists to end.
    *
    * ⚠️ The predicate is `> 0`, NOT `>= 0`. It shipped as `>= 0`, which OBEYED a literal `0` — so

@@ -12,7 +12,7 @@
 import { atom } from 'nanostores';
 import { sandbox } from '~/lib/sandbox';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { McpBridge, UNITY_SERVER_NAME, type McpTool } from '~/lib/mcp/webcontainer-bridge';
+import { McpBridge, type McpTool } from '~/lib/mcp/webcontainer-bridge';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('mcp-bridge-store');
@@ -80,17 +80,6 @@ export async function syncMcpBridge(): Promise<void> {
  * without it, two servers exposing the same tool name resolve to whichever launched first.
  */
 export async function callMcpTool(toolName: string, args: unknown, server?: string): Promise<unknown> {
-  if (server === UNITY_SERVER_NAME) {
-    /*
-     * Unity Editor bridge tools (§4.17) execute against the loopback connection, never a WebContainer
-     * process. Dynamic import on purpose: `unityBridge` reads `mcpToolsAtom` at module-eval time for
-     * its combined atom, so a static import back would be a TDZ-fragile cycle.
-     */
-    const { callUnityTool } = await import('~/lib/stores/unityBridge');
-
-    return callUnityTool(toolName, args);
-  }
-
   if (!_bridge) {
     throw new Error('No MCP servers are running for this project.');
   }

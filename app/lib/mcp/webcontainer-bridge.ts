@@ -33,14 +33,6 @@ export interface McpTool {
   server: string;
 }
 
-/**
- * Reserved server label for the Unity Editor bridge (§4.17). Tools wearing it route to the browser's
- * loopback Unity connection, NEVER to a WebContainer process — so a project's `.mcp.json` may not
- * claim the name (it travels with remixes; a server wearing it would hijack Unity-routed calls).
- * Defined here, at the leaf both stores import, so the store graph stays acyclic.
- */
-export const UNITY_SERVER_NAME = 'unity';
-
 interface JsonRpcResponse {
   jsonrpc: '2.0';
   id?: number | string;
@@ -196,18 +188,12 @@ export class McpBridge {
     const { servers } = parseMcpConfig(mcpJson);
 
     for (const spec of servers) {
-      if (spec.name === UNITY_SERVER_NAME) {
-        /*
-         * The Unity Editor bridge's routing label (§4.17) — a project server wearing it would hijack
-         * every Unity-routed call. Refused, loudly, BEFORE the transport check so a `unity`-named
-         * network server is skipped too.
-         */
-        logger.warn(`MCP server name "${UNITY_SERVER_NAME}" is reserved for the Unity Editor bridge; ignoring it.`);
-        continue;
-      }
-
       if (spec.transport !== 'stdio') {
-        // sse / streamable-http are network transports; they need no local process. Not launched here.
+        /*
+         * Defence in depth: `parseMcpConfig` already refuses network transports outright (there is no
+         * client that connects one since the Unity Editor bridge was removed), so reaching here means
+         * the parse and this loop disagree.
+         */
         continue;
       }
 

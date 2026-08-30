@@ -108,7 +108,7 @@ export function ModelTierPill() {
    * row's right-hand margin (owner, 2026-08-04).
    *
    * The row is `p-4` on both sides. On the left the first control is a stock `IconButton`, whose base
-   * class is `p-1`, so the Unity glyph sits 16 + 4 = 20px from the border. The pill was overriding to
+   * class is `p-1`, so its glyph sits 16 + 4 = 20px from the border. The pill was overriding to
    * `px-1.5`, putting its glyph at 16 + 6 = 22px — the row read off-centre by 2px with nothing in the
    * layout to blame it on. Anything that changes this must change `IconButton`'s base padding with it,
    * or the asymmetry comes straight back. Pinned in `ModelTierPill.spec.tsx`.

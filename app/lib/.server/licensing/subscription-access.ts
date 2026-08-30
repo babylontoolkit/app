@@ -1,5 +1,5 @@
 /**
- * "Does this Unity developer have an active subscription?" — the pure decision (SPEC §4.18, §4.6).
+ * "Does this Unity developer have an active subscription?" — the pure decision (SPEC §4.18a, §4.6).
  *
  * Consumed by the Unity Editor over `GET /api/unity/subscription`, which is the only caller that asks
  * this question about SOMEBODY ELSE by email. Everything that decides the answer lives here as a pure
@@ -8,7 +8,7 @@
  *
  * ## Access is subscription OR credits (owner decision, 2026-08-14)
  *
- * §4.18 retired the PayPal-era Pro Tools subscription and made the platform credits-based —
+ * §4.18a retired the PayPal-era Pro Tools subscription and made the platform credits-based —
  * "the credit balance IS the Pro Tools entitlement". A monthly plan is therefore not the only way to
  * be a paying customer: someone who bought a one-off credit pack has paid us money and expects the
  * Editor tools to work. Gating Unity on the subscription alone would lock out exactly those people,

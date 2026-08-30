@@ -1,5 +1,5 @@
 /**
- * Email → entitlement, for the Unity Editor subscription check (SPEC §4.18, §4.6).
+ * Email → entitlement, for the Unity Editor subscription check (SPEC §4.18a, §4.6).
  *
  * The decision itself is pure and lives in `subscription-access.ts`; this module is the two lookups
  * that feed it, plus the email→user-id step that has to happen first because every entitlement fact we

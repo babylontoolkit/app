@@ -34,5 +34,5 @@
     "**/.client/**/*.ts",
     "**/.client/**/*.tsx"
   ],
-  "exclude": ["functions", "node_modules", "build", "dist", "companion"]
+  "exclude": ["functions", "node_modules", "build", "dist"]
 }

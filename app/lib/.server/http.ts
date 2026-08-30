@@ -57,7 +57,7 @@ export const SAFE_ERRORS: ReadonlySet<string> = new Set([
   'AccountDeletionError',
 
   /*
-   * The Unity subscription check (§4.18). A Unity Editor has no browser to read a generic 500 in, so
+   * The Unity subscription check (§4.18a). A Unity Editor has no browser to read a generic 500 in, so
    * "your email parameter is unusable" has to arrive as those words or it reads as the endpoint being
    * down — and the developer files it against the wrong thing.
    */

@@ -393,9 +393,10 @@ describe('ModelTierPill — the first-build lock', () => {
     render(<ModelTierPill />);
 
     expect(pill().className).toContain('px-1');
-    expect(pill().className, 'px-1.5 puts the pill 2px further from the border than the Unity button').not.toContain(
-      'px-1.5',
-    );
+    expect(
+      pill().className,
+      'px-1.5 puts the pill 2px further from the border than the IconButton leading the row',
+    ).not.toContain('px-1.5');
   });
 
   it('explains the threshold lock and never claims a first-build one', () => {

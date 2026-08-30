@@ -11,11 +11,16 @@ Pro Tools?* One boolean, plus a short reason. It does not return a tier, an expi
 ## TL;DR
 
 ```bash
-GET /api/unity/subscription?email=<address>
+POST /api/unity/subscription
 Authorization: Bearer <UNITY_SUBSCRIPTION_API_KEY>
+Content-Type: application/json
+
+{"email":"dev@studio.com"}
 
 200 {"email":"dev@studio.com","hasActiveSubscription":true,"reason":"credits"}
 ```
+
+`GET /api/unity/subscription?email=<address>` works identically and is still supported.
 
 Local setup is one line:
 
@@ -60,7 +65,26 @@ Three details that are easy to get wrong if you reimplement this logic anywhere 
 
 ### Request
 
-`GET /api/unity/subscription?email=<url-encoded address>`
+Two forms, one handler. **POST is preferred** — the email travels in the body, so it stays out of
+access logs, proxy logs and browser history:
+
+```
+POST /api/unity/subscription
+Content-Type: application/json
+
+{"email":"dev@studio.com"}
+```
+
+```
+GET /api/unity/subscription?email=<url-encoded address>
+```
+
+GET is kept working because it is what shipped and an Editor already in the field must not break. The
+method was never the security axis: both go through the same authentication, the same rate limit and
+the same answer, in that order. The only difference is where the address ends up.
+
+A POST body that is not JSON, or that has no string `email`, gets the same `400` as a missing address
+— never a `500`, which would read to the Editor as "the platform is down".
 
 The key goes in a **header**, one of these two — never in the query string, which is refused on
 purpose (a credential in a URL lands in access logs, proxy logs and browser history):
@@ -78,7 +102,7 @@ The email is normalised server-side: trimmed and lowercased, so `  DEV@Studio.co
 | Status | Body | What to do |
 |---|---|---|
 | `200` | `{"email":…,"hasActiveSubscription":true\|false,"reason":…}` | Trust it |
-| `400` | `{"error":true,"message":"A valid \"email\" query parameter is required."}` | Fix the address |
+| `400` | `{"error":true,"message":"A valid \"email\" is required…"}` | Fix the address (or the JSON body) |
 | `401` | `{"error":true,"message":"A valid API key is required."}` | Missing or wrong key |
 | `429` | `{"error":true,…}` + `Retry-After: <seconds>` | Back off for that many seconds |
 | `503` | `{"error":true,"message":"The Unity subscription API is not configured…"}` | Server has no key set |
@@ -102,6 +126,7 @@ Drop-in, works in Editor code. Uses `UnityWebRequest` and `JsonUtility`, no depe
 ```csharp
 using System;
 using System.Collections;
+using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -126,10 +151,24 @@ public static class BabylonToolkitSubscription
     /// </summary>
     public static IEnumerator Check(string email, Action<bool, string> done)
     {
-        var url = Endpoint + "?email=" + UnityWebRequest.EscapeURL(email);
+        /*
+         * POST: the address travels in the body, so it never lands in an access or proxy log.
+         *
+         * For the GET form, replace the three lines building `body` and the `using` header with:
+         *
+         *     var url = Endpoint + "?email=" + UnityWebRequest.EscapeURL(email);
+         *     using (var request = UnityWebRequest.Get(url))
+         *
+         * and drop the uploadHandler/downloadHandler/Content-Type lines. Everything below is identical
+         * — same key header, same status handling, same response shape.
+         */
+        var body = Encoding.UTF8.GetBytes("{\"email\":\"" + email.Replace("\"", "\\\"") + "\"}");
 
-        using (var request = UnityWebRequest.Get(url))
+        using (var request = new UnityWebRequest(Endpoint, "POST"))
         {
+            request.uploadHandler = new UploadHandlerRaw(body);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("Authorization", "Bearer " + ApiKey);
             request.timeout = 15;
 
@@ -322,6 +361,5 @@ For a deployed environment, the Admin tab's usage report is the equivalent.
 ## Related
 
 - [SPEC.md](SPEC.md) §4.18a — the design, and why open question #12 was reopened
-- [SPEC.md](SPEC.md) §4.18 — the Unity Project Licenser (`license.json` generation, the credit ladder)
 - [CREDITS.md](CREDITS.md) — the credit system this endpoint reads
 - [DEPLOY.md](DEPLOY.md) §1.4 — SSM parameters

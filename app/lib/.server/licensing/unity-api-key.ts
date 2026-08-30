@@ -1,6 +1,6 @@
 /**
  * The wall on `GET /api/unity/subscription` — a shared API key held by the Unity Editor tool
- * (SPEC §4.18, §5, `spec/spend-holes.md`).
+ * (SPEC §4.18a, §5, `spec/spend-holes.md`).
  *
  * This route is the one place in the product that answers a question about SOMEBODY ELSE from an
  * email, so it cannot use any of the session walls (`denyUnlessVerified` and friends): the caller is

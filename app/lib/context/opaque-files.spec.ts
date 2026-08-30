@@ -66,11 +66,14 @@ describe('isOpaqueToModel', () => {
   });
 
   /*
-   * The Unity Project License (§4.18) is machine-generated crypto that ships with the project but must
-   * never be rewritten by the model. It matches at the root ONLY — a `src/license.json` is a source
-   * file the agent may legitimately author, so the exact-path rule (same as the lockfile) is required.
+   * A root `license.json` is machine-generated crypto that ships with the project but must never be
+   * rewritten by the model. The licenser that generated it was removed 2026-08-30 (SPEC §4.18) and this
+   * rule STAYS: an imported or cloned project can still carry one, and un-hiding it would feed those
+   * bytes to the model on every turn — a context regression that throws nothing (§4.2.8). It matches at
+   * the root ONLY — a `src/license.json` is a source file the agent may legitimately author, so the
+   * exact-path rule (same as the lockfile) is required.
    */
-  it('hides the root Unity Project License', () => {
+  it('hides a root license.json', () => {
     expect(isOpaqueToModel('license.json')).toBe(true);
   });
 

@@ -79,7 +79,6 @@ const LABELS: Record<string, string> = {
   generation: 'Generation',
   media: 'Media render',
   search: 'Web search',
-  license: 'Unity license',
   project_create: 'New project',
   refund: 'Refund',
   promo: 'Promo',

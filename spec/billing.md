@@ -146,7 +146,7 @@ session → verified? → active Pro entitlement + BYOK enabled? use user's key,
 
 ## Entitlements (Pro Tools) — RETIRED 2026-07-20
 
-> **RETIRED.** The external ASMX license service (`licenser.asmx`) and its `ValidateSubscription` operation are no longer called: the SOAP client is deleted, `refreshEntitlement`/`linkSubscriberEmail` and the `/api/entitlement` route are removed, and `getEntitlement` returns the stored row without revalidating. BYOK/Pro is disabled by default (`PRO_FEATURES_ENABLED=false`) and is a **manual, testing-only** knob; the `entitlements` table and `resolveByok` remain but are inert. The only subscription signal the platform reads is the live **Stripe** plan, consumed solely by the Unity Project Licenser (SPEC §4.18) to pick a license tier. See SPEC §4.6.1. The historical design below is kept for context only.
+> **RETIRED.** The external ASMX license service (`licenser.asmx`) and its `ValidateSubscription` operation are no longer called: the SOAP client is deleted, `refreshEntitlement`/`linkSubscriberEmail` and the `/api/entitlement` route are removed, and `getEntitlement` returns the stored row without revalidating. BYOK/Pro is disabled by default (`PRO_FEATURES_ENABLED=false`) and is a **manual, testing-only** knob; the `entitlements` table and `resolveByok` remain but are inert. The only subscription signal the platform reads is the live **Stripe** plan, consumed solely by the Unity Editor subscription check (SPEC §4.18a) to answer whether a developer has paid. (It previously also picked a tier for the Unity Project Licenser, which was removed 2026-08-30.) See SPEC §4.6.1. The historical design below is kept for context only.
 
 - ~~`ValidateSubscription(email) → {active, tier: indie|small_business|enterprise, expiry}`~~ (retired); server-to-server (shared secret min., mTLS preferred); timeout 5s; response cached 24h per user.
 - Lifecycle: check on sign-in + daily job for active entitlements + freshness check when honoring BYOK. Fail-open grace: service unreachable ≤72h → status unchanged. Explicit `active:false` → `status='lapsed'` → BYOK no longer honored; fall back to credits with notice.
@@ -351,7 +351,7 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   written**). The posture follows the same reasoning as `'media'` vs `'search'`: it debits before
   anything is provisioned, so it must REFUSE rather than overdraw — the opposite of `'generation'`,
   whose overdraft allowance exists only because settlement runs after the spend has happened.
-  Not anchored to a `generations` row (generation_id null, like `'grant'`/`'license'`). The new balance
+  Not anchored to a `generations` row (generation_id null, like `'grant'`/`'search'`). The new balance
   rides back on the response so the client can settle it without a second round trip — the enhancer's
   drifted-balance defect is the precedent: a settled charge the UI cannot see reads as a leak. A debit that throws AFTER the row exists (a concurrent
   creation drained the balance between quote and debit) **rolls the project back and returns a
@@ -367,16 +367,18 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   because it refuses BEFORE anything is provisioned — a clean, described 402 leaves nothing half-made,
   which is categorically different from a mid-creation failure. Pinned by `project-create.spec.ts` +
   the route specs + `ledger-sql.spec.ts`.
-- **Unity license debits (§4.18, migration 0012) are a FLAT charge, like `'media'` and unlike `'generation'`**:
-  ledger reason `'license'`, taken BEFORE the license is issued at a fixed per-tier credit price (the
-  ladder in `unity-license-pricing.ts`), **never allowed to go negative** (enforced+insufficient → 402,
-  no license). NOT anchored to a `generations` row (generation_id null, like `'grant'`/`'search'`). Charged
-  **once per (user, Unity project id, tier)** — recorded in `unity_license_entitlements` (unique index on
-  the triple) — so re-generation/re-download is free and a re-linked GUID cannot mint free licenses. The
-  concurrent-generate TOCTOU is closed by honouring `grant()`'s `{granted}` return: the racer whose insert
-  the unique index rejects gets its redundant debit refunded (`unity-license-service.ts`). The credit
-  balance IS the Pro Tools entitlement (the credits-based replacement for the retired PayPal subscription).
-  Pinned by `unity-license-service.spec.ts` + `ledger-sql.spec.ts`.
+- **The `'license'` ledger reason is GONE, and its schema was DELETED rather than migrated away
+  (SPEC §4.18, 2026-08-30).** The Unity Project Licenser debited it as a flat per-tier charge before
+  issuing a `license.json`. A first pass kept the reason readable "because the ledger is append-only"
+  and added a migration to drop the table; the owner correctly rejected that — **the platform has never
+  been deployed**, so a first deploy would have created the column and table only to drop them. So
+  migrations `0011`/`0012` are deleted from the repo, `'license'` is out of `0015`'s CHECK constraint,
+  out of `LedgerReason`, out of `ledger-display.ts` and out of `money-paths.spec.ts`, and the numbering
+  gap at 0011/0012 is deliberate. 🔴 **The append-only rule was not broken, it had nothing to protect** —
+  it exists to stop a schema edit invalidating rows a live database holds, and the local FS ledger was
+  grepped first (zero `license` rows). **That licence is one-time and expires at the first deploy:**
+  after a database exists, removing a ledger reason must again be a forward migration that leaves the
+  value readable.
 - **🔴 ANTHROPIC SELLS FABLE 5 AND `MODEL_RATES` DENIED IT — THE PLATINUM RUNG WAS UNDER-BILLED BY 2.5×
   (found + fixed 2026-08-12).** `PLATINUM_MODEL=claude-fable-5` is live and `Anthropic` is the last rung
   of `LLM_PROVIDER_CHAIN`, and there was no `claude-fable-5` row in the Anthropic table — three comments

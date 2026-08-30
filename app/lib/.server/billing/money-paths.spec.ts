@@ -59,7 +59,7 @@ const REASON = /reason:\s*'([a-z_]+)'/g;
  * unclassified reason" test below — which is how a NEW debit reason gets noticed on the day it lands
  * rather than the day someone audits.
  */
-const DEBIT_REASONS = new Set(['generation', 'media', 'search', 'license', 'project_create']);
+const DEBIT_REASONS = new Set(['generation', 'media', 'search', 'project_create']);
 
 /** The reasons that GIVE credits. A grant has nothing to refund; its risk is duplication, not silence. */
 const CREDIT_REASONS = new Set(['grant', 'purchase', 'refund', 'promo', 'adjustment']);
@@ -70,12 +70,12 @@ const CREDIT_REASONS = new Set(['grant', 'purchase', 'refund', 'promo', 'adjustm
  * already-failed request, so neither can rethrow its way to loudness).
  *
  * ⚠️ TYPED REFUSALS ARE DELIBERATELY NOT IN HERE, and that is the whole difference between a guard and
- * a decoration. `MediaRefusedError` / `LicenseRefusedError` appear in their modules for the
+ * a decoration. `MediaRefusedError` appears in its module for the
  * REFUSE-BEFORE-SPEND path, which every debiting module has anyway — so accepting them would make this
  * test pass for any file that can refuse a request, whether or not it can give money back. The first
  * draft included them, and stripping every refund out of `media/service.ts` still went green.
  */
-const LOUDNESS = /reason:\s*'refund'|refundGeneration|refundMediaTask|refundLicense|ALERT_SIGNALS\.LEDGER_INTEGRITY/;
+const LOUDNESS = /reason:\s*'refund'|refundGeneration|refundMediaTask|ALERT_SIGNALS\.LEDGER_INTEGRITY/;
 
 /**
  * Debit sites that legitimately have no refund or alert, each with the sentence rule 4 demands.
@@ -182,7 +182,6 @@ describe('every ledger-debiting call site can make its own failure loud', () => 
         'lib/.server/billing/gate.ts',
         'lib/.server/media/service.ts',
         'lib/.server/agent/web-search-tool.ts',
-        'lib/.server/licensing/unity-license-service.ts',
         'lib/.server/billing/project-create-service.ts',
       ]),
     );

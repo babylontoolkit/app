@@ -57,7 +57,6 @@ export const LEDGER_REASONS = [
   'generation',
   'media',
   'search',
-  'license',
   'project_create',
   'refund',
   'promo',
@@ -191,9 +190,9 @@ function mayGoNegative(reason: LedgerReason): boolean {
    * 'search' joins them: it is debited mid-generation after the vendor was already paid, so it cannot
    * be refused without eating the cost AND losing the audit trail (migration 0010).
    *
-   * 🔴 'media', 'license' and 'project_create' are deliberately ABSENT: each debits BEFORE the spend it
-   * pays for, so each must refuse rather than overdraw. Adding one here silently converts a refusal into
-   * free work on the platform's bill.
+   * 🔴 'media' and 'project_create' are deliberately ABSENT: each debits BEFORE the spend it pays for,
+   * so each must refuse rather than overdraw. Adding one here silently converts a refusal into free
+   * work on the platform's bill.
    */
   return reason === 'generation' || reason === 'adjustment' || reason === 'search';
 }

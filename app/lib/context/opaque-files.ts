@@ -47,10 +47,14 @@ const OPAQUE_EXTENSIONS = ['.svg'];
 /**
  * Exact root-relative paths that are in the project but never in the conversation:
  *   - Generated dependency graphs (see `hygiene.ts`): never authored, never edited, always huge.
- *   - `license.json` (§4.18): the Unity Project License. It is machine-generated crypto (a
- *     deterministic `secret`/`key` pair, §4.18), ships with the project on every egress path (ZIP,
- *     GitHub push, share build), and no correct edit to it exists — the model must never rewrite it.
- *     Deliberately NOT an `isSecretPath` (it must travel with the user's repo, unlike `.env`).
+ *   - `license.json`: a Unity Toolkit project licence. The licenser that generated these was removed
+ *     2026-08-30 (§4.18) and the rule STAYS, deliberately: a project imported or cloned from outside
+ *     can still carry one. It is machine-generated crypto (a deterministic `secret`/`key` pair), it
+ *     ships with the project on every egress path (ZIP, GitHub push, share build), and no correct edit
+ *     to it exists — the model must never rewrite it. Dropping it from this set would start feeding
+ *     those bytes to the model on every turn of such a project: a context regression that throws
+ *     nothing and just costs money (§4.2.8). Deliberately NOT an `isSecretPath` (it must travel with
+ *     the user's repo, unlike `.env`).
  */
 const OPAQUE_FILES = new Set([
   'package-lock.json',

@@ -126,7 +126,7 @@ regression hides *inside* the machinery built to catch the last one.
 | Failure-RATE alerting | `monitoring/failure-rate.ts` | A spike of hard failures, as a rate rather than anecdotes |
 | Heartbeat during stream silence | `agent/heartbeat.ts` | Long thinks reading as hangs while credits burn |
 | `finish_reason` markers `+forced-continuation` / `+unproductive-rescue` / `+provider-retry` | `proxy.ts` | Doubled/rescued generations recording as ordinary turns |
-| `LEDGER_INTEGRITY` alerts on the un-throwable money writes | `gate.ts`, `media/service.ts`, `unity-license-service.ts` | Anchor/charge/refund failures that were log-only, i.e. invisible in production |
+| `LEDGER_INTEGRITY` alerts on the un-throwable money writes | `gate.ts`, `media/service.ts` | Anchor/charge/refund failures that were log-only, i.e. invisible in production |
 | Media task-record write refunds if it cannot be stored | `media/service.ts` | A paid, running render that nothing can poll and nothing can refund |
 | Enhancer zero-text / stream-error → refund + `failed` | `api.enhancer.ts` | A truncated or empty enhancement charged as a success |
 | Default-deny over every ledger-debiting call site | `billing/money-paths.spec.ts` | A debit path shipping with no refund, no alert and no written excuse — the moment it lands |
@@ -205,8 +205,6 @@ exactly 11 call sites, and every one is below. The KIE-reaching set is enumerate
 | 3 | `media/service.ts` `startMediaTask` | `media` | REFUSED BEFORE SPEND (unpriced / 402 / 4K cut-out / empty prompt) · DELIVERED | quote = debit (same code path); `media-task` data part; panel + tool result name the exact price |
 | 4 | `media/service.ts` `refundMediaTask` | `refund` | REFUNDED | `refunded` latch (exactly once); task record `status: failed` + `error`; toast |
 | 5 | `agent/web-search-tool.ts` `debitSearch` | `search` | DELIVERED only | **SANCTIONED after-the-fact debit** (§Scope). May go negative; a failed debit is logged and the research answer proceeds |
-| 6 | `licensing/unity-license-service.ts` | `license` | REFUSED BEFORE SPEND (invalid tier / 402) · DELIVERED | flat price shown on the button; unlock row makes re-issue free |
-| 7 | `licensing/unity-license-service.ts` `refundLicense` | `refund` | REFUNDED | grant-throws and grant-race-loser paths; `LicenseRefusedError` to the caller |
 | 8 | `billing/ledger.ts` `ensureSignupGrant` | `grant` | credit — not a debit | partial unique index; `DuplicateGrantError` → null |
 | 9 | `billing/stripe.ts` pack purchase | `purchase` | credit — not a debit | idempotent on `session.id`; `DuplicatePaymentError` → 2xx |
 | 10 | `billing/stripe.ts` subscription invoice | `purchase` | credit — not a debit | idempotent on `invoice.id`; unattributable invoice logged loudly, never 500 |
@@ -253,9 +251,9 @@ category Stage A removed from the money paths.
    `status: failed`. Its four-state mapping is in the route's doc comment (the §"When you add a paid
    path" checklist item). Pinned in `billing/enhancer-settlement.spec.ts` — ⚠️ deliberately NOT in
    `app/routes/`, where Remix would compile it as a route and 500 every request.
-3. **Four money-path swallows were log-only, i.e. invisible in production** (`gate.ts`,
-   `media/service.ts`, `unity-license-service.ts`). Rule 4 forbids `catch` + log on a money path, and
-   these three writes genuinely cannot refund or retry their way out — settlement runs inside the
+3. **Money-path swallows were log-only, i.e. invisible in production** (`gate.ts`,
+   `media/service.ts`; a third, `unity-license-service.ts`, went with SPEC §4.18 on 2026-08-30). Rule 4
+   forbids `catch` + log on a money path, and these writes genuinely cannot refund or retry their way out — settlement runs inside the
    proxy's `finally`, and a refund is itself the compensating step for an already-failed request — so
    **reporting is the only loudness available to them**. The FK-anchor failure is the exact defect
    that would have billed ZERO on every production generation forever, and it announced itself only
@@ -334,8 +332,8 @@ generalised there into named `sharedRateWindow(name, config)` windows (bounded, 
 database read, because the alert has to fire when the database is what is down). Two signals:
 `RESCUE_MARKER_RATE` at 25% over a 40-generation window (a rescue is *expected* to fire sometimes, so
 the threshold sits well above zero) and `REFUND_RATE` at 20% over 50, per ledger reason. Recorded
-from `proxy.ts` (all three markers plus the `generation` refund outcome), from `media/service.ts` at
-each of the four terminal points, and from `unity-license-service.ts`. The §4.10 panel gained a
+from `proxy.ts` (all three markers plus the `generation` refund outcome) and from `media/service.ts`
+at each of the four terminal points. The §4.10 panel gained a
 **Rescued turns** stat with the per-marker breakdown beneath it, counted from `finish_reason` by a
 pure `countMarkers`.
 

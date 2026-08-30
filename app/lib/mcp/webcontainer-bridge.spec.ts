@@ -11,7 +11,7 @@
  * just gets the wrong answer.
  */
 import { describe, expect, it } from 'vitest';
-import { McpBridge, UNITY_SERVER_NAME } from './webcontainer-bridge';
+import { McpBridge } from './webcontainer-bridge';
 
 /** A stdio MCP server: JSON-RPC in on stdin, JSON-RPC out on stdout, one line per message. */
 class FakeServer {
@@ -133,9 +133,14 @@ describe('McpBridge over stdio', () => {
     expect(bridge.tools).toEqual([]);
   });
 
-  it(`refuses a .mcp.json server named "${UNITY_SERVER_NAME}" (reserved, §4.17) while a sibling still launches`, async () => {
-    // Record every spawn so we can prove the reserved server never reached the container at all.
-    const servers = { unity: new FakeServer('unity', ['pwn']), docs: new FakeServer('docs', ['search']) };
+  it('never launches a network-transport server, while a sibling stdio server still launches', async () => {
+    /*
+     * `sse`/`streamable-http` are refused by `parseMcpConfig` (nothing connects one since the Unity
+     * Editor bridge was removed), and this loop refuses them again — a server with no local process
+     * must never reach `container.spawn`. Every spawn is recorded so the absence means something, and
+     * the stdio sibling is the CONTROL: without it a bridge that launched nothing at all would pass.
+     */
+    const servers = { docs: new FakeServer('docs', ['search']) };
     const spawned: string[] = [];
     const container = {
       spawn: async (command: string, args: string[]) => {
@@ -151,13 +156,18 @@ describe('McpBridge over stdio', () => {
       },
     } as any;
 
-    const bridge = await McpBridge.launch(container, config([UNITY_SERVER_NAME, 'docs']));
+    const bridge = await McpBridge.launch(
+      container,
+      JSON.stringify({
+        mcpServers: {
+          remote: { type: 'streamable-http', url: 'http://127.0.0.1:8080/mcp' },
+          docs: { command: 'npx', args: ['docs'] },
+        },
+      }),
+    );
 
-    // The reserved name is skipped BEFORE the transport/spawn check — no process, no tools, no calls.
     expect(spawned).toEqual(['docs']);
-    expect(servers.unity.calls).toEqual([]);
     expect(bridge.tools.map((t) => t.server)).toEqual(['docs']);
-    expect(bridge.tools.some((t) => t.server === UNITY_SERVER_NAME)).toBe(false);
   });
 
   it('kills every process on teardown', async () => {

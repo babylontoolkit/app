@@ -19,7 +19,6 @@ describe('describeLedgerEntry', () => {
     expect(describeLedgerEntry({ delta: -316, reason: 'generation' }).label).toBe('Generation');
     expect(describeLedgerEntry({ delta: -24, reason: 'media' }).label).toBe('Media render');
     expect(describeLedgerEntry({ delta: -2, reason: 'search' }).label).toBe('Web search');
-    expect(describeLedgerEntry({ delta: -500, reason: 'license' }).label).toBe('Unity license');
     expect(describeLedgerEntry({ delta: 100, reason: 'promo' }).label).toBe('Promo');
     expect(describeLedgerEntry({ delta: 50000, reason: 'adjustment' }).label).toBe('Adjustment');
   });

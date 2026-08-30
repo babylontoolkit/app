@@ -1651,7 +1651,7 @@ describe('ledger', () => {
    * The debit-before-spend family, pinned as a FAMILY rather than one reason at a time — this is the
    * list whose membership decides whether a refusal is possible at all.
    */
-  it.each(['media', 'license', 'project_create'] as const)('%s may never overdraw', async (reason) => {
+  it.each(['media', 'project_create'] as const)('%s may never overdraw', async (reason) => {
     await ledger.append({ userId: 'u1', delta: 10, reason: 'grant' });
 
     await expect(ledger.append({ userId: 'u1', delta: -50, reason })).rejects.toThrow(/negative/i);

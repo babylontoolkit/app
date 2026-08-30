@@ -110,7 +110,6 @@ export default defineConfig((config) => {
         '**/.{idea,git,cache,output,temp}/**',
         '**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build}.config.*',
         '**/tests/preview/**', // Exclude preview tests that require Playwright
-        '**/companion/**', // The Unity companion CLI is its own package with its own node:test runner
       ],
     },
   };

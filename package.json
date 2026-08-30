@@ -26,7 +26,6 @@
     "dockerrun": "docker run -it -d --name bolt-ai-live -p 5173:5173 --env-file .env.local bolt-ai",
     "dockerbuild:prod": "docker build -t bolt-ai:production -t bolt-ai:latest --target bolt-ai-production .",
     "dockerbuild": "docker build -t bolt-ai:development -t bolt-ai:latest --target development .",
-    "companion": "node companion/src/cli.js",
     "credits": "node scripts/credits.mjs",
     "clean:projects": "node scripts/clean-projects.mjs --yes",
     "sweep:sandboxes": "node scripts/sweep-legacy-sandboxes.mjs",

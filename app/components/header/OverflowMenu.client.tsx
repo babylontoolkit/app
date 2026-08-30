@@ -30,8 +30,8 @@
  * the signal to add a new group with its own separator — not to drop it at the end.
  *
  * Likely future groups, so the shape is obvious rather than guessed: **Project** (settings, rename,
- * delete), **View** (theme, layout). The Unity bridge and MCP still have their own composer-row
- * controls and join **Connections** if they ever leave the row.
+ * delete), **View** (theme, layout). MCP still has its own composer-row control and joins
+ * **Connections** if it ever leaves the row.
  *
  * Export ZIP is in group 2 because it had no header home at all despite being, under repo-primary
  * persistence, one of the few ways to get your game out of the browser — and it is available to ALL

@@ -1,8 +1,8 @@
 /**
- * The plain project POINTERS round-trip through BOTH store backends: `linkedUnityProjectId` (§4.18)
- * and `sandboxId` (`spec/sandbox-codesandbox.md`).
+ * The plain project POINTERS round-trip through BOTH store backends: `gameBackendRef` (§4.15) and
+ * `sandboxId` (`spec/sandbox-codesandbox.md`).
  *
- * Each is a plain pointer, never a credential — they follow `gameBackendRef`. A store backend that
+ * Each is a plain pointer, never a credential. A store backend that
  * silently drops one is the exact failure this test guards: the FS backend round-trips the whole
  * domain object, the Supabase backend maps camelCase ⇄ snake_case by hand in
  * `rowToProject`/`projectToRow`, and a missing entry in either map is a silent data loss with no
@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * A minimal fluent stub of the Supabase query builder. Every chainable method returns `this`; the
  * terminal `.single()`/`.maybeSingle()` resolve to `{ data, error }`. `insert`/`update` capture the
  * row they were handed so the test can assert `projectToRow`'s output; the row returned from the
- * terminal is what `rowToProject` will parse, so it carries `linked_unity_project_id`.
+ * terminal is what `rowToProject` will parse, so it carries `game_backend_ref`.
  */
 let captured: { insert?: Record<string, any>; update?: Record<string, any> };
 let returnRow: Record<string, any>;
@@ -65,7 +65,7 @@ vi.mock('~/lib/.server/supabase/client', () => ({
 // eslint-disable-next-line @typescript-eslint/naming-convention -- destructured class constructors keep their PascalCase names
 const { FsProjectStore, SupabaseProjectStore } = await import('./store');
 
-describe('FsProjectStore round-trips linkedUnityProjectId', () => {
+describe('FsProjectStore round-trips gameBackendRef', () => {
   let tmp: string;
 
   beforeEach(async () => {
@@ -82,48 +82,48 @@ describe('FsProjectStore round-trips linkedUnityProjectId', () => {
       userId: 'user-1',
       name: 'Unity Game',
       templateId: 'racing',
-      linkedUnityProjectId: 'a'.repeat(32),
+      gameBackendRef: 'gb_aaa',
     });
 
-    expect(created.linkedUnityProjectId).toBe('a'.repeat(32));
+    expect(created.gameBackendRef).toBe('gb_aaa');
 
     // A separate instance proves it survived the write to disk, not just the in-memory object.
     const read = await new FsProjectStore(tmp).get(created.id);
-    expect(read?.linkedUnityProjectId).toBe('a'.repeat(32));
+    expect(read?.gameBackendRef).toBe('gb_aaa');
   });
 
   it('a project created without the field reads back without it', async () => {
     const store = new FsProjectStore(tmp);
     const created = await store.create({ userId: 'user-1', name: 'No Unity', templateId: 'racing' });
 
-    expect(created.linkedUnityProjectId).toBeUndefined();
-    expect((await new FsProjectStore(tmp).get(created.id))?.linkedUnityProjectId).toBeUndefined();
+    expect(created.gameBackendRef).toBeUndefined();
+    expect((await new FsProjectStore(tmp).get(created.id))?.gameBackendRef).toBeUndefined();
   });
 
   it('update sets, changes, and clears the field', async () => {
     const store = new FsProjectStore(tmp);
     const created = await store.create({ userId: 'user-1', name: 'Unity Game', templateId: 'racing' });
 
-    const set = await store.update(created.id, { linkedUnityProjectId: 'b'.repeat(32) });
-    expect(set.linkedUnityProjectId).toBe('b'.repeat(32));
-    expect((await new FsProjectStore(tmp).get(created.id))?.linkedUnityProjectId).toBe('b'.repeat(32));
+    const set = await store.update(created.id, { gameBackendRef: 'gb_bbb' });
+    expect(set.gameBackendRef).toBe('gb_bbb');
+    expect((await new FsProjectStore(tmp).get(created.id))?.gameBackendRef).toBe('gb_bbb');
 
-    const changed = await store.update(created.id, { linkedUnityProjectId: 'c'.repeat(32) });
-    expect(changed.linkedUnityProjectId).toBe('c'.repeat(32));
+    const changed = await store.update(created.id, { gameBackendRef: 'gb_ccc' });
+    expect(changed.gameBackendRef).toBe('gb_ccc');
 
-    const cleared = await store.update(created.id, { linkedUnityProjectId: undefined });
-    expect(cleared.linkedUnityProjectId).toBeUndefined();
-    expect((await new FsProjectStore(tmp).get(created.id))?.linkedUnityProjectId).toBeUndefined();
+    const cleared = await store.update(created.id, { gameBackendRef: undefined });
+    expect(cleared.gameBackendRef).toBeUndefined();
+    expect((await new FsProjectStore(tmp).get(created.id))?.gameBackendRef).toBeUndefined();
   });
 });
 
-describe('SupabaseProjectStore maps linkedUnityProjectId in both directions', () => {
+describe('SupabaseProjectStore maps gameBackendRef in both directions', () => {
   beforeEach(() => {
     captured = {};
     returnRow = {};
   });
 
-  it('projectToRow emits linked_unity_project_id on create (camelCase → snake_case)', async () => {
+  it('projectToRow emits game_backend_ref on create (camelCase → snake_case)', async () => {
     // rowToProject needs a well-formed row to return; the assertion is on `captured.insert`.
     returnRow = { id: 'prj_1', user_id: 'user-1', name: 'Unity Game', created_at: 'now', updated_at: 'now' };
 
@@ -131,31 +131,31 @@ describe('SupabaseProjectStore maps linkedUnityProjectId in both directions', ()
       userId: 'user-1',
       name: 'Unity Game',
       templateId: 'racing',
-      linkedUnityProjectId: 'd'.repeat(32),
+      gameBackendRef: 'gb_ddd',
     });
 
-    expect(captured.insert).toHaveProperty('linked_unity_project_id', 'd'.repeat(32));
+    expect(captured.insert).toHaveProperty('game_backend_ref', 'gb_ddd');
   });
 
-  it('rowToProject maps linked_unity_project_id back to linkedUnityProjectId (snake_case → camelCase)', async () => {
+  it('rowToProject maps game_backend_ref back to gameBackendRef (snake_case → camelCase)', async () => {
     returnRow = {
       id: 'prj_1',
       user_id: 'user-1',
       name: 'Unity Game',
-      linked_unity_project_id: 'e'.repeat(32),
+      game_backend_ref: 'gb_eee',
       created_at: 'now',
       updated_at: 'now',
     };
 
     const project = await new SupabaseProjectStore().get('prj_1');
-    expect(project?.linkedUnityProjectId).toBe('e'.repeat(32));
+    expect(project?.gameBackendRef).toBe('gb_eee');
   });
 
   it('a row without the column reads back with the field undefined', async () => {
     returnRow = { id: 'prj_1', user_id: 'user-1', name: 'No Unity', created_at: 'now', updated_at: 'now' };
 
     const project = await new SupabaseProjectStore().get('prj_1');
-    expect(project?.linkedUnityProjectId).toBeUndefined();
+    expect(project?.gameBackendRef).toBeUndefined();
   });
 
   it('update writes the column through projectToRow, and clearing it emits null', async () => {
@@ -163,17 +163,17 @@ describe('SupabaseProjectStore maps linkedUnityProjectId in both directions', ()
       id: 'prj_1',
       user_id: 'user-1',
       name: 'Unity Game',
-      linked_unity_project_id: 'f'.repeat(32),
+      game_backend_ref: 'gb_fff',
       created_at: 'now',
       updated_at: 'now',
     };
 
-    await new SupabaseProjectStore().update('prj_1', { linkedUnityProjectId: 'f'.repeat(32) });
-    expect(captured.update).toHaveProperty('linked_unity_project_id', 'f'.repeat(32));
+    await new SupabaseProjectStore().update('prj_1', { gameBackendRef: 'gb_fff' });
+    expect(captured.update).toHaveProperty('game_backend_ref', 'gb_fff');
 
     // Clearing: `projectToRow` maps an explicit `undefined` to `null` so the DB column is nulled.
-    await new SupabaseProjectStore().update('prj_1', { linkedUnityProjectId: undefined });
-    expect(captured.update).toHaveProperty('linked_unity_project_id', null);
+    await new SupabaseProjectStore().update('prj_1', { gameBackendRef: undefined });
+    expect(captured.update).toHaveProperty('game_backend_ref', null);
   });
 });
 

@@ -1,5 +1,5 @@
 /**
- * The Unity Editor subscription check (SPEC §4.18): the pure decision, the shared-key wall, and the
+ * The Unity Editor subscription check (SPEC §4.18a): the pure decision, the shared-key wall, and the
  * route's symmetry between "no account" and "account with nothing".
  *
  * ⚠️ **EVERY test here scrubs the environment first.** `env()` falls back to `process.env`, and vitest

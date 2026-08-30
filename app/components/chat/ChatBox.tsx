@@ -14,7 +14,6 @@ import { SpeechRecognitionButton } from '~/components/chat/SpeechRecognition';
 import { ContextIndicator } from './ContextIndicator';
 import { EffortPanel } from './EffortPanel';
 import { SupabaseConnection } from './SupabaseConnection';
-import { UnityConnection } from './UnityConnection';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import styles from './BaseChat.module.scss';
 import type { ProviderInfo } from '~/types/model';
@@ -350,12 +349,10 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
         <div className="flex justify-between items-center text-sm p-4 pt-2">
           <div className="flex gap-1 items-center">
             {/*
-             * The Unity Editor bridge (§4.17) leads the toolbar, in the slot the design-scheme picker
-             * used to hold. That picker is HIDDEN, not deleted (upstream code — the hide-don't-delete
+             * The design-scheme picker is HIDDEN, not deleted (upstream code — the hide-don't-delete
              * rule): it feeds `designScheme` through to the prompt, so removing the component would
              * mean unpicking the prop chain for a control the owner does not want surfaced.
              */}
-            <UnityConnection />
             {false && <ColorSchemeDialog designScheme={props.designScheme} setDesignScheme={props.setDesignScheme} />}
             <McpTools />
             <IconButton title="Upload file" className="transition-all" onClick={() => props.handleFileUpload()}>

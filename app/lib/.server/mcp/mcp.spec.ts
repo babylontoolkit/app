@@ -65,22 +65,34 @@ describe('parsing .mcp.json', () => {
     expect(abs.rejected[0].name).toBe('evil');
   });
 
-  it('accepts an sse/streamable-http server ONLY with a loopback http url (§4.17)', () => {
-    // A non-loopback url is third-party content pointing the browser at an arbitrary host — refused.
-    const remote = JSON.stringify({ mcpServers: { remote: { type: 'sse', url: 'https://mcp.example.com' } } });
-    const { servers: remoteServers, rejected } = parseMcpConfig(remote);
+  it('REJECTS every network-transport server, loopback included', () => {
+    /*
+     * `sse`/`streamable-http` used to be accepted at a LOOPBACK http url, for one caller: the Unity
+     * Editor bridge companion on the user's own machine (§4.17, removed 2026-08-30). With that client
+     * gone nothing connects a network transport, so accepting one would park dead config in the
+     * project that reads as support — and `.mcp.json` travels with remixes and imports, so a URL in it
+     * is third-party content that would otherwise make the user's browser a relay.
+     *
+     * The loopback case is the one that matters here: it is the URL that USED to be allowed, so a
+     * partial revert restores exactly it. Refused by NAME, never silently dropped.
+     */
+    for (const [label, url] of [
+      ['remote', 'https://mcp.example.com'],
+      ['loopback', 'http://127.0.0.1:8080/mcp'],
+    ] as const) {
+      const { servers, rejected } = parseMcpConfig(
+        JSON.stringify({ mcpServers: { [label]: { type: 'streamable-http', url } } }),
+      );
 
-    expect(remoteServers).toHaveLength(0);
-    expect(rejected[0].name).toBe('remote');
-    expect(rejected[0].reason).toMatch(/loopback/);
+      expect(servers, `${label} must not be launchable`).toHaveLength(0);
+      expect(rejected[0].name).toBe(label);
+      expect(rejected[0].reason).toMatch(/not supported/i);
+    }
 
-    // The Unity Editor bridge companion on the user's own machine still parses.
-    const local = JSON.stringify({
-      mcpServers: { unity: { type: 'streamable-http', url: 'http://127.0.0.1:8080/mcp' } },
-    });
-    const { servers } = parseMcpConfig(local);
-
-    expect(servers[0]).toMatchObject({ name: 'unity', transport: 'streamable-http', url: 'http://127.0.0.1:8080/mcp' });
+    // Control: an ordinary stdio server is unaffected, so this is a transport rule and not a parse break.
+    expect(
+      parseMcpConfig(JSON.stringify({ mcpServers: { docs: { command: 'npx', args: ['docs'] } } })).servers,
+    ).toHaveLength(1);
   });
 
   it('is tolerant of a missing, empty, or malformed file', () => {

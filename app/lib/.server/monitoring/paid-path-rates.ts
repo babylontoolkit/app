@@ -94,14 +94,14 @@ export function recordRescueMarkers(monitor: Monitor, outcome: RescueMarkerOutco
 }
 
 /** The ledger reasons whose work can end in a refund (`spec/fail-loud.md` §Scope). */
-export type RefundableReason = 'generation' | 'media' | 'license';
+export type RefundableReason = 'generation' | 'media';
 
 /**
  * Record whether one unit of paid work ended in a refund, alerting when a reason's rate crosses.
  *
- * "Unit of work" is per reason and is the thing the user asked for: one generation, one media task
- * reaching a terminal state, one license issue. Called once per unit with `false` when it delivered —
- * the denominator again.
+ * "Unit of work" is per reason and is the thing the user asked for: one generation, or one media task
+ * reaching a terminal state. Called once per unit with `false` when it delivered — the denominator
+ * again.
  */
 export function recordRefundOutcome(monitor: Monitor, reason: RefundableReason, refunded: boolean): void {
   const result = sharedRateWindow(`refund:${reason}`, REFUND_RATE_CONFIG).record(refunded);

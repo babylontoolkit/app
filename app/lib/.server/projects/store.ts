@@ -218,7 +218,6 @@ function rowToProject(row: Record<string, any>): Project {
     // `?? true` mirrors the column default, so a row written before 0006 reads as auto-push ON.
     autoPush: row.auto_push ?? true,
     gameBackendRef: row.game_backend_ref ?? undefined,
-    linkedUnityProjectId: row.linked_unity_project_id ?? undefined,
     sandboxId: row.sandbox_id ?? undefined,
     creationHandoff: row.creation_handoff ?? undefined,
     createdAt: row.created_at,
@@ -247,7 +246,6 @@ function projectToRow(project: Partial<Project>): Record<string, any> {
     lastSyncedCommitSha: 'last_synced_commit_sha',
     githubInstallationRef: 'github_installation_ref',
     gameBackendRef: 'game_backend_ref',
-    linkedUnityProjectId: 'linked_unity_project_id',
     sandboxId: 'sandbox_id',
     creationHandoff: 'creation_handoff',
     autoPush: 'auto_push',

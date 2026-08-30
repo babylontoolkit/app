@@ -74,89 +74,35 @@ describe('the MCP note (§4.14)', () => {
   });
 });
 
-describe('the Unity Exporter block (§4.17)', () => {
-  const unityTool = { name: 'unity_open_scene', description: 'Open a scene', server: 'unity' };
-
-  it('frames the bridge and pins the GUIDED EXPORT contract when a unity tool is live', () => {
-    const note = mcpNote(undefined, [unityTool]);
-
-    expect(note).toContain('## Unity Exporter');
-
-    /* WHERE the tools act — a Unity change is invisible to the web game until it is exported. */
-    expect(note).toMatch(/local unity exporter/i);
-    expect(note).toMatch(/NOT on the web project files/i);
-
-    /* The guided export: run the exporter, then TELL THE USER to import — the platform moves nothing. */
-    expect(note).toMatch(/exporter/i);
-    expect(note).toMatch(/tell the\s+user to import/i);
-
-    /*
-     * The constraint that makes the contract honest. A model that announces the assets have arrived, or
-     * invents a path for one, is describing something that did not happen — and the user acts on it.
-     */
-    expect(note).toMatch(/cannot move those files yourself/i);
-    expect(note).toMatch(/never state or imply that exported assets are already in the project/i);
-    expect(note).toMatch(/never invent paths/i);
-
-    /* Slow editor operations, and the same untrusted-results frame as any other MCP tool. */
-    expect(note).toMatch(/one clear editor operation at a time/i);
-    expect(note).toMatch(/untrusted/i);
-  });
-
-  it('is absent when the live tools come from some other server', () => {
-    const note = mcpNote(undefined, [{ name: 'search_docs', server: 'docs' }]);
-
-    expect(note).toContain('search_docs');
-    expect(note).not.toContain('Unity Exporter');
-    expect(note).not.toMatch(/unity/i);
-  });
-
-  it('is absent when there are no live tools at all', () => {
-    const note = mcpNote(
-      files({ '.mcp.json': JSON.stringify({ mcpServers: { kie: { command: 'node_modules/.bin/kie' } } }) }),
-    );
-
-    expect(note).not.toContain('Unity Exporter');
-  });
-
+describe('`unity` is an ordinary server name now (the Unity Editor bridge was removed)', () => {
   /*
-   * The block rides the MCP note, which lives in the VOLATILE tail (§4.2.8) — it must never become a
-   * cached block, and it must survive the entry point the proxy actually calls.
+   * §4.17 reserved `unity` as a routing label: a declared server wearing it was refused at launch and
+   * filtered out of this note, and live `unity` tools got their own Unity Exporter frame appended.
+   * All three are gone with the bridge. Asserted so the special-casing cannot creep back in silently —
+   * a filtered-out server is described to the model as absent while its tools are offered, or vice
+   * versa, and neither direction throws.
    */
-  it('travels through buildProjectNotes — the volatile-tail entry point', () => {
-    const notes = buildProjectNotes({ files: files({ 'src/x.ts': 'x' }), mcpLiveTools: [unityTool] });
-
-    expect(notes.some((n) => n.includes('## Unity Exporter'))).toBe(true);
-  });
-
-  /*
-   * `unity` is a RESERVED label (§4.17): the bridge owns it, so a declared server by that name is never
-   * launched. The model must therefore never be told one is available — describing a server that cannot
-   * start buys only failed tool calls. With nothing else declared, the whole note collapses to null.
-   */
-  it('never advertises a declared `unity` server — the reserved name is filtered out', () => {
-    const declared = files({
-      '.mcp.json': JSON.stringify({ mcpServers: { unity: { command: 'node_modules/.bin/unity-mcp' } } }),
-    });
-
-    expect(mcpNote(declared)).toBeNull();
-    expect(buildProjectNotes({ files: declared })).toEqual([]);
-  });
-
-  it('filters the reserved name without disturbing the servers declared alongside it', () => {
+  it('describes a declared `unity` server like any other, with no Unity frame', () => {
     const note = mcpNote(
       files({
-        '.mcp.json': JSON.stringify({
-          mcpServers: {
-            unity: { command: 'node_modules/.bin/unity-mcp' },
-            kie: { command: 'node_modules/.bin/kie' },
-          },
-        }),
+        '.mcp.json': JSON.stringify({ mcpServers: { unity: { command: 'node_modules/.bin/unity-mcp' } } }),
       }),
     );
 
-    expect(note).toContain('kie');
-    expect(note).not.toMatch(/unity/i);
+    expect(note).toContain('unity');
+    expect(note).not.toMatch(/Unity Exporter/i);
+    expect(note).not.toMatch(/GUIDED EXPORT|bridge has no file channel/i);
+  });
+
+  it('adds no Unity frame when a live tool is tagged `unity`', () => {
+    const note = mcpNote(files({ 'src/x.ts': 'x' }), [
+      { name: 'unity_open_scene', description: 'Open a scene', server: 'unity' },
+    ]);
+
+    expect(note).not.toMatch(/Unity Exporter/i);
+
+    // Control: the live tool still reaches the note at all, so the absence above is about the FRAME.
+    expect(note).toContain('unity_open_scene');
   });
 });
 
