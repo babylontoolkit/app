@@ -7,6 +7,13 @@ import { HeaderActionButtons } from './HeaderActionButtons.client';
 import { ProjectTitle } from './ProjectTitle.client';
 import { CreditsIndicator } from '~/components/chat/CreditsIndicator.client';
 import { AccountMenu } from '~/components/auth/AccountMenu.client';
+
+/*
+ * The ONE sign-in dialog (§4.5.1). Mounted here because the header is present on every route a gate
+ * can be raised from, and because a dialog owned by the creation path would unmount the instant that
+ * path navigated — taking the form away while the user was typing in it.
+ */
+import { AuthGate } from '~/components/auth/AuthGate.client';
 import { useSession } from '~/lib/hooks/useSession';
 import { brand } from '~/config/brand';
 
@@ -199,6 +206,16 @@ export function Header() {
           )}
         </ClientOnly>
       )}
+
+      {/*
+       * 🔴 OUTSIDE the `chat.started` conditional, and that placement is the point.
+       *
+       * Both arms above render an action cluster, so a gate mounted in either one unmounts the moment
+       * the flag flips — which is exactly what starting a project does. The dialog would vanish from
+       * under a visitor part-way through typing their password, on the single flow it exists to serve.
+       * It renders a `position: fixed` overlay and contributes no width, so it is inert here.
+       */}
+      <ClientOnly>{() => <AuthGate />}</ClientOnly>
     </header>
   );
 }

@@ -13,30 +13,36 @@ import { useState } from 'react';
 import { toast } from 'react-toastify';
 import { classNames } from '~/utils/classNames';
 import { refreshSession, sessionStore } from '~/lib/stores/session';
-import { AuthDialog } from './AuthDialog.client';
+import { requestSignIn } from '~/lib/stores/auth-gate';
 
 export function AccountMenu() {
   const session = useStore(sessionStore);
   const [open, setOpen] = useState(false);
-  const [authOpen, setAuthOpen] = useState(false);
 
   // Local mode: a single developer, no accounts, nothing to sign into.
   if (session.loading || !session.accountsEnabled) {
     return null;
   }
 
+  /*
+   * The header's own door into the gate — through the SAME store every other door uses, so there is
+   * exactly one dialog in the app (`AuthGate`). This button used to hold an `open` flag and render an
+   * `AuthDialog` of its own, which made "the auth dialog is open" a thing with two writers in two
+   * places: the drift this codebase has now found three times (two buttons called Sync, three flags
+   * meaning "the UI is open", two components drawing one save state), fixed each time by a parent.
+   *
+   * No reason sentence — pressing "Sign in" IS the intent, and narrating it back is noise. The
+   * destination is simply where the user already is.
+   */
   if (!session.authenticated) {
     return (
-      <>
-        <button
-          onClick={() => setAuthOpen(true)}
-          className="px-3 py-1 rounded-md text-xs font-medium bg-bolt-elements-button-primary-background
-            hover:bg-bolt-elements-button-primary-backgroundHover text-bolt-elements-button-primary-text"
-        >
-          Sign in
-        </button>
-        <AuthDialog open={authOpen} onClose={() => setAuthOpen(false)} />
-      </>
+      <button
+        onClick={() => requestSignIn({ reason: '', redirectTo: window.location.pathname + window.location.search })}
+        className="px-3 py-1 rounded-md text-xs font-medium bg-bolt-elements-button-primary-background
+          hover:bg-bolt-elements-button-primary-backgroundHover text-bolt-elements-button-primary-text"
+      >
+        Sign in
+      </button>
     );
   }
 

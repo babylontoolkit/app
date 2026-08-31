@@ -49,6 +49,7 @@ import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
 import { resetActiveSkills, updateActiveSkills } from '~/lib/stores/active-skills';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
+import { requestSignIn } from '~/lib/stores/auth-gate';
 import { rollbackRegisteredProject } from '~/lib/registry/creation-rollback';
 import { onSandboxFailure, SANDBOX_REQUIRES_PROJECT } from '~/lib/sandbox';
 import { asCreationFailure } from '~/lib/registry/creation-errors';
@@ -1856,6 +1857,37 @@ export const ChatImpl = memo(
          * message names the price and the balance, so it is the whole alert rather than a "Details:" tail
          * under a headline blaming infrastructure.
          */
+        /*
+         * 🔴 A `401` IS THE SIGN-UP GATE, NOT AN ERROR (§4.5.1).
+         *
+         * An anonymous visitor typing a game idea and pressing send is the funnel working. Until this
+         * branch existed they got `requireUser`'s sentence as a red toast — "You must be signed in to
+         * do that." — which is true, offers no way to do it, and threw away the prompt they had just
+         * written. The gate raises the dialog instead and carries the destination, so signing in lands
+         * them back here rather than on a generic dashboard.
+         *
+         * `403` is deliberately NOT folded in: that is `requireVerifiedUser`, i.e. the user IS signed
+         * in and has not confirmed their email. Offering them a sign-in form would be a false
+         * statement about what is wrong, and they would sign in successfully and hit the identical
+         * refusal. It falls through to the ordinary error path, where the server's own sentence tells
+         * them to check their inbox.
+         *
+         * `requestSignIn` returns `false` when there is nothing to sign into (local mode), and the
+         * fall-through below then reports the failure — a gate that silently declines leaves the user
+         * looking at a button that did nothing.
+         */
+        if (error instanceof ApiError && error.statusCode === 401) {
+          const opened = requestSignIn({
+            reason: 'Sign in to start building your game.',
+            redirectTo: window.location.pathname + window.location.search,
+          });
+
+          if (opened) {
+            setFakeLoading(false);
+            return false;
+          }
+        }
+
         if (error instanceof ApiError && error.statusCode === 402) {
           toast.error(error.message);
           setLlmErrorAlert({

@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { toast } from 'react-toastify';
 import { classNames } from '~/utils/classNames';
 import { refreshSession } from '~/lib/stores/session';
+import { safeRedirect, MIN_PASSWORD_LENGTH } from '~/lib/auth/safe-redirect';
 
 interface Props {
   open: boolean;
@@ -19,11 +20,19 @@ interface Props {
 
   /** Where to land after auth. Defaults to the current page. */
   redirectTo?: string;
+
+  /**
+   * One sentence naming what the visitor was trying to do, shown above the form.
+   *
+   * Empty when they simply pressed "Sign in" — there is no intent to restate, and inventing one
+   * ("Sign in to sign in") is worse than saying nothing.
+   */
+  reason?: string;
 }
 
 type Mode = 'signin' | 'signup' | 'reset';
 
-export function AuthDialog({ open, onClose, redirectTo }: Props) {
+export function AuthDialog({ open, onClose, redirectTo, reason }: Props) {
   const [mode, setMode] = useState<Mode>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -66,9 +75,18 @@ export function AuthDialog({ open, onClose, redirectTo }: Props) {
         await post({ intent: 'signin', email, password });
         await refreshSession();
 
-        // The preserved intent — back to the New Project / Remix the visitor started (§4.5.1).
-        if (redirectTo) {
-          window.location.href = redirectTo;
+        /*
+         * The preserved intent — back to the New Project / Remix the visitor started (§4.5.1).
+         *
+         * Through `safeRedirect` even though the store already applied it, because this is the line
+         * that actually performs the navigation: a prop is a value some other component chose, and
+         * the check belongs where the consequence is. A full page load, not a router navigate — the
+         * session arrived as an httpOnly cookie and the whole app needs to re-read it.
+         */
+        const destination = redirectTo ? safeRedirect(redirectTo) : null;
+
+        if (destination) {
+          window.location.href = destination;
         } else {
           onClose();
         }
@@ -84,6 +102,11 @@ export function AuthDialog({ open, onClose, redirectTo }: Props) {
     setBusy(true);
 
     try {
+      /*
+       * `redirectTo` goes to the SERVER, which folds it into the `/auth/callback?next=` address it
+       * hands Supabase — the browser never performs this hop itself, so it cannot apply the
+       * destination here. The server re-runs `safeRedirect` on the way in for exactly that reason.
+       */
       const data = await post({ intent: 'oauth', provider, redirectTo });
 
       if (data.url) {
@@ -110,6 +133,13 @@ export function AuthDialog({ open, onClose, redirectTo }: Props) {
           border border-bolt-elements-borderColor shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
+        {/*
+         * The intent, above the form. A gate that says only "Sign in" makes the user reconstruct why
+         * they are looking at it; naming the thing they clicked is what turns a toll booth back into
+         * an invitation (§4.5.1).
+         */}
+        {reason ? <p className="text-xs text-accent-500 font-medium mb-1">{reason}</p> : null}
+
         <h2 className="text-lg font-semibold text-bolt-elements-textPrimary mb-1">
           {mode === 'signup' ? 'Create your account' : mode === 'reset' ? 'Reset your password' : 'Welcome back'}
         </h2>
@@ -136,7 +166,7 @@ export function AuthDialog({ open, onClose, redirectTo }: Props) {
             <input
               type="password"
               required
-              minLength={8}
+              minLength={MIN_PASSWORD_LENGTH}
               autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
               placeholder="Password"
               value={password}

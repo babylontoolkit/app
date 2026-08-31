@@ -12,22 +12,15 @@ import { redirect, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
 import { createRequestClient, isSupabaseConfigured } from '~/lib/.server/supabase/client';
 
-const logger = createScopedLogger('auth.callback');
-
-/**
- * Only ever redirect to a path on THIS site.
- *
- * `next` is attacker-controllable (it rides in the URL). Without this, the callback is an open
- * redirect: a link that signs a user in and then bounces them to a look-alike phishing page, with our
- * domain in the referrer chain to make it convincing.
+/*
+ * The wall against an open redirect, and it is SHARED (`~/lib/auth/safe-redirect`) rather than
+ * private to this file. `next` is attacker-controllable — it rides in a URL — and three layers now
+ * handle it (the dialog, `/api/auth` when it builds this address, and here). A second copy of the
+ * rule is how one of them ends up more permissive than the others, silently.
  */
-function safeRedirect(next: string | null): string {
-  if (!next || !next.startsWith('/') || next.startsWith('//')) {
-    return '/';
-  }
+import { safeRedirect } from '~/lib/auth/safe-redirect';
 
-  return next;
-}
+const logger = createScopedLogger('auth.callback');
 
 export async function loader({ request, context }: LoaderFunctionArgs) {
   const url = new URL(request.url);

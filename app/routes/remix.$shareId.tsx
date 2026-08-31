@@ -24,8 +24,17 @@ import BackgroundRays from '~/components/ui/BackgroundRays';
 import { BootScreen } from '~/components/chat/BootScreen';
 import { bootProgress } from '~/lib/stores/boot-progress';
 import { setPendingRemix } from '~/lib/persistence/pending-remix';
+import { describeAuthFailure, requestSignIn } from '~/lib/stores/auth-gate';
 
-type State = { kind: 'working' } | { kind: 'signin' } | { kind: 'error'; message: string };
+type State =
+  | { kind: 'working' }
+
+  /** Not signed in. The gate is already open over this screen; the copy behind it explains why. */
+  | { kind: 'signin' }
+
+  /** Signed in, email unconfirmed — a different problem, and a sign-in form does not solve it. */
+  | { kind: 'verify'; message: string }
+  | { kind: 'error'; message: string };
 
 export default function RemixRoute() {
   const { shareId } = useParams();
@@ -50,12 +59,36 @@ export default function RemixRoute() {
           return;
         }
 
-        if (response.status === 401 || response.status === 403) {
-          setState({ kind: 'signin' });
+        const data = (await response.json()) as { projectId?: string; message?: string };
+
+        /*
+         * 🔴 `401` AND `403` ARE DIFFERENT ANSWERS AND USED TO SHARE A SCREEN.
+         *
+         * Both landed on "Sign in to remix" with a link to `/`. For an anonymous visitor that was
+         * merely a dead end — the intent was dropped, so signing in returned them to the dashboard and
+         * the game they clicked Remix on was gone. For a signed-in user whose email is unconfirmed it
+         * was actively wrong: they would sign in again, succeed, and hit the identical refusal, with
+         * nothing anywhere naming the real problem.
+         *
+         * The gate now opens over this screen carrying the remix URL, so finishing sign-in re-enters
+         * this route and the clone completes by itself (§4.5.1 — the intent survives auth).
+         */
+        const failure = describeAuthFailure(response.status, data.message);
+
+        if (failure.kind === 'verify') {
+          setState({ kind: 'verify', message: failure.message });
           return;
         }
 
-        const data = (await response.json()) as { projectId?: string; message?: string };
+        if (failure.kind === 'signin') {
+          setState({ kind: 'signin' });
+          requestSignIn({
+            reason: 'Sign in to make your own copy of this game.',
+            redirectTo: window.location.pathname + window.location.search,
+          });
+
+          return;
+        }
 
         if (response.ok && data.projectId) {
           /*
@@ -107,14 +140,25 @@ export default function RemixRoute() {
               <>
                 <h1 className="text-xl font-semibold text-bolt-elements-textPrimary">Sign in to remix</h1>
                 <p className="mt-2 text-bolt-elements-textSecondary">
-                  Remixing makes your own editable copy of this game. Sign in and try again.
+                  Remixing makes your own editable copy of this game. Sign in and we will pick up right here.
                 </p>
-                <a
-                  href="/"
+                <button
+                  onClick={() =>
+                    requestSignIn({
+                      reason: 'Sign in to make your own copy of this game.',
+                      redirectTo: window.location.pathname + window.location.search,
+                    })
+                  }
                   className="inline-block mt-4 px-4 py-2 rounded-lg bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover"
                 >
-                  Go to sign in
-                </a>
+                  Sign in
+                </button>
+              </>
+            )}
+            {state.kind === 'verify' && (
+              <>
+                <h1 className="text-xl font-semibold text-bolt-elements-textPrimary">Verify your email first</h1>
+                <p className="mt-2 text-bolt-elements-textSecondary">{state.message}</p>
               </>
             )}
             {state.kind === 'error' && (
