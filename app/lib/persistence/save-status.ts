@@ -279,6 +279,21 @@ export interface NudgeFacts {
    * argument that bans a clock here); every nudge waits until the work is actually finished.
    */
   applying?: boolean;
+
+  /**
+   * The project is mirrored into the user's projects folder on THIS machine (§4.5.4d). It lives on
+   * their disk, in a form any editor can open — GitHub is optional from here, so a "save it for safety"
+   * nudge would be false. Treated like `linked`.
+   */
+  onDisk?: boolean;
+
+  /**
+   * This browser can keep projects on disk, so the first-save moment was answered by the first-run
+   * folder GATE (`decideFolderGate`) before the builder rendered, not by the GitHub toast (owner,
+   * 2026-09-15). False again when the user declined a gate that was not required. The milestone banner
+   * still runs for a project that is neither on disk nor linked.
+   */
+  folderSetupCoversFirstSave?: boolean;
 }
 
 /**
@@ -305,8 +320,8 @@ export function decideNudge(facts: NudgeFacts): Nudge {
     return 'none';
   }
 
-  // Saved is saved. Nothing to nudge about, ever.
-  if (facts.linked) {
+  // Saved is saved. Nothing to nudge about, ever. On the user's own disk counts (§4.5.4d).
+  if (facts.linked || facts.onDisk) {
     return 'none';
   }
 
@@ -319,7 +334,7 @@ export function decideNudge(facts: NudgeFacts): Nudge {
    * The first creation. This is the moment the user has something they would miss and no idea it is
    * temporary — the single highest-value thing we ever say about saving.
    */
-  if (facts.generationCount === 1 && !facts.firstToastShown) {
+  if (facts.generationCount === 1 && !facts.firstToastShown && !facts.folderSetupCoversFirstSave) {
     return 'toast';
   }
 

@@ -35,12 +35,15 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 /**
- * `BootScreen` is the ONE legitimate exception: it already carries `.creation-splash`, which has its
- * own `left` rule from the boot-surface unification. Adding `.overlay-centered` on top would shift it
- * twice. Listed by name with the reason, never pattern-matched away.
+ * `BootScreen` is one legitimate exception: it already carries `.creation-splash`, which has its own
+ * `left` rule from the boot-surface unification. Adding `.overlay-centered` on top would shift it twice.
+ * The first-run projects-folder gate is the other: it is the one overlay drawn OVER the sidebar rather
+ * than beside it. Listed by name with the reason, never pattern-matched away.
  */
 const EXEMPT: Record<string, string> = {
   'app/components/chat/BootScreen.tsx': 'Uses .creation-splash, which is already offset by its own rule.',
+  'app/components/persistence/ProjectsFolderGate.client.tsx':
+    'Opaque and z-max: it covers the docked sidebar too (a workspace is being held open on a question, §4.5.4d), so the viewport IS its column. Offsetting it would centre on a column nothing else is drawing.',
 };
 
 describe('the docked-sidebar offset exists and is exact', () => {

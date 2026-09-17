@@ -47,6 +47,7 @@ import { useRemixProject } from '~/components/chat/RemixProjectButton.client';
 import { classNames } from '~/utils/classNames';
 import { brand } from '~/config/brand';
 import { TOOLBAR_ICON_BUTTON_FILLED, TOOLBAR_MENU_CONTENT, TOOLBAR_MENU_ITEM } from './toolbar-button';
+import { localProjectState, reloadFromDisk } from '~/lib/local-project';
 
 /** One definition, so the group boundaries stay identical as groups are added. */
 const SEPARATOR = 'h-px bg-bolt-elements-borderColor my-1';
@@ -55,6 +56,8 @@ export function OverflowMenu() {
   const activeProjectId = useStore(projectIdStore);
   const startNewChat = useStartNewChat();
   const { remix: remixProject, busy: remixing } = useRemixProject();
+  const diskState = useStore(localProjectState);
+  const onDisk = diskState.kind === 'connected' && diskState.project !== undefined;
 
   if (!activeProjectId) {
     return null;
@@ -124,6 +127,21 @@ export function OverflowMenu() {
               <div className="i-ph:copy" />
               <span>Remix project</span>
             </DropdownMenu.Item>
+
+            {/*
+             * The disk folder (§4.5.4d) — group 2's question exactly ("how do I get my game out of
+             * this session?"), answered permanently: it is already out, in `<folder>/<project>`.
+             * Offered ONLY while the open project is mirrored, never as a disabled row (§4.1a: a
+             * permanently-disabled item is a dead end). External edits are polled in by themselves;
+             * this is the "now, please" for the impatient and the one honest control when the poll
+             * is deferred behind a running generation.
+             */}
+            {onDisk && (
+              <DropdownMenu.Item className={TOOLBAR_MENU_ITEM} onSelect={() => void reloadFromDisk()}>
+                <div className="i-ph:folder-open" />
+                <span>Reload from disk</span>
+              </DropdownMenu.Item>
+            )}
           </DropdownMenu.Group>
 
           <DropdownMenu.Separator className={SEPARATOR} />

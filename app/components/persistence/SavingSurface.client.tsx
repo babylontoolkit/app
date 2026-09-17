@@ -4,7 +4,8 @@
  * The header's `GitStatusChip` carries the state and every action on it; this carries the three things
  * that interrupt: the save-reminder toast after EACH project's first creation, the recurring banner, and
  * the browser's own unload warning. Plus the divergence dialog, which is the only one of the four the
- * user did not implicitly ask for.
+ * user did not implicitly ask for. The projects-folder setup (§4.5.4d) is NOT here any more: it is a
+ * gate before the GUI (`ProjectsFolderGate.client.tsx`), not a nudge inside it.
  *
  * ## The rule this file exists to keep
  *
@@ -30,6 +31,7 @@ import { saveWarningCopy } from '~/lib/persistence/save-warning-copy';
 import { SANDBOX_OUTLIVES_SESSION } from '~/lib/sandbox';
 import { workingCopySafe } from '~/lib/persistence/useChatHistory';
 import { saving } from '~/config/saving';
+import { folderGateSkipped, localProjectState } from '~/lib/local-project';
 import { SaveDivergenceDialog } from './SaveDivergenceDialog.client';
 import { UnappliedTurnDialog } from './UnappliedTurnDialog.client';
 
@@ -75,30 +77,40 @@ export function SavingSurface() {
 /** Stable empty fallback so the hook below can subscribe unconditionally (hooks cannot be optional). */
 const NO_ACTIONS = map({});
 
-function SaveNudges() {
-  const activeProjectId = useStore(projectIdStore);
-  const repo = useStore(repoStatus);
-  const count = useStore(generationCount);
-  const [dismissedAt, setDismissedAt] = useState<number | undefined>();
-
-  /*
-   * Mid-work gate (T17): a creation checkpoints after its first machine-written message, so
-   * `generationCount` reaches 1 while the real generation is still streaming — and the "not saved"
-   * toast fired over a half-built project. Both signals are stores, so the nudge recomputes (and the
-   * toast finally fires) the moment the last file action lands. No timers — the file's own rule.
-   */
+/**
+ * "Is a generation still landing?" — the reason the nudges have no timer.
+ *
+ * Mid-work gate (T17): a creation checkpoints after its first machine-written message, so
+ * `generationCount` reaches 1 while the real generation is still streaming — and the "not saved" toast
+ * fired over a half-built project. Both signals are stores, so the prompt recomputes (and finally
+ * fires) the moment the last file action lands.
+ */
+function useApplying(): boolean {
   const streaming = useStore(streamingState);
   const artifacts = useStore(workbenchStore.artifacts);
   const firstArtifactId = Object.keys(artifacts)[0];
   const actions = useStore(firstArtifactId ? artifacts[firstArtifactId].runner.actions : NO_ACTIONS);
-  const applying =
+
+  return (
     streaming ||
     Object.values(actions).some((action) => {
       const a = action as { status?: string; type?: string };
 
       // `start` actions (the dev server) run for the whole session — they never hold a nudge back.
       return a.type !== 'start' && (a.status === 'pending' || a.status === 'running');
-    });
+    })
+  );
+}
+
+function SaveNudges() {
+  const activeProjectId = useStore(projectIdStore);
+  const repo = useStore(repoStatus);
+  const count = useStore(generationCount);
+  const [dismissedAt, setDismissedAt] = useState<number | undefined>();
+  const diskState = useStore(localProjectState);
+  const folderDeclined = useStore(folderGateSkipped);
+
+  const applying = useApplying();
 
   /** Projects whose intro toast fired THIS session — the StrictMode double-fire guard, per project. */
   const shownProjects = useRef<Set<string>>(new Set());
@@ -119,6 +131,15 @@ function SaveNudges() {
           shownProjects.current.has(activeProjectId) || localStorage.getItem(introShownKey(activeProjectId)) === '1',
         bannerDismissedAtCount: dismissedAt,
         bannerEvery: saving.bannerEveryNGenerations,
+
+        /*
+         * §4.5.4d: a project in the user's projects folder is saved for the purposes of nagging, and on
+         * a browser that can keep projects on disk the first-save moment was answered by the first-run
+         * GATE before the builder rendered — the GitHub toast is the fallback for browsers that cannot
+         * (Safari, Firefox), and for a user who pressed "Not now" on a gate that was not required.
+         */
+        onDisk: diskState.kind === 'connected' && diskState.project !== undefined,
+        folderSetupCoversFirstSave: diskState.kind !== 'unavailable' && !folderDeclined,
       })
     : 'none';
 

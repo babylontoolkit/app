@@ -64,6 +64,9 @@ const RESUME_PHASES: BootPhase[] = [
    * of `creating-settle` — the mount promise resolving is not the workspace having finished filling.
    */
   { step: 'settling' },
+
+  /* The disk-folder permission gate (§4.5.4d): the mount holds `ready` on it, so it is full-page. */
+  { step: 'disk-permission', folderName: 'BabylonToolkit Projects' },
 ];
 
 /**

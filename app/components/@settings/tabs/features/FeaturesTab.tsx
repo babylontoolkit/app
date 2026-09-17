@@ -6,6 +6,7 @@ import { useSettings } from '~/lib/hooks/useSettings';
 import { classNames } from '~/utils/classNames';
 import { toast } from 'react-toastify';
 import type { ToolkitSystemsPreference } from '~/lib/agent/toolkit-systems';
+import { ProjectsFolderCard } from './ProjectsFolderCard';
 
 interface FeatureToggle {
   id: string;
@@ -391,6 +392,33 @@ export default function FeaturesTab() {
         description="Essential features that are enabled by default for optimal performance"
         onToggleFeature={handleToggleFeature}
       />
+
+      {/*
+       * Where projects LIVE (§4.5.4d). A section of its own because it is a place, not a switch: the
+       * folder on this computer that every opened project is kept in, edited by the builder and by
+       * whatever editor the user prefers. Chromium only; the card says so on other browsers.
+       */}
+      <motion.div
+        layout
+        className="flex flex-col gap-4"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.3 }}
+      >
+        <div className="flex items-center gap-3">
+          <div className="i-ph:hard-drives text-xl text-purple-500" />
+          <div>
+            <h3 className="text-lg font-medium text-bolt-elements-textPrimary">Where your projects live</h3>
+            <p className="text-sm text-bolt-elements-textSecondary">
+              A folder on this computer that holds every project you open here
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <ProjectsFolderCard />
+        </div>
+      </motion.div>
 
       {/*
        * Placed AFTER Core Features deliberately: "Use Asset Library" is the owner-chosen first card

@@ -11,6 +11,7 @@ import { useEffect } from 'react';
 import { refreshSession, sessionStore, canGenerate, type SessionState } from '~/lib/stores/session';
 import { profileStore } from '~/lib/stores/profile';
 import { startLocalOwnerSync } from '~/lib/persistence/local-owner-sync';
+import { startLocalProjectSync } from '~/lib/local-project';
 import { resolveDisplayIdentity, type DisplayIdentity } from '~/lib/identity';
 
 let started = false;
@@ -30,6 +31,7 @@ export function useSession(): SessionState & { refresh: () => Promise<SessionSta
        * something else refreshed.
        */
       startLocalOwnerSync();
+      startLocalProjectSync();
       void refreshSession();
     }
   }, []);

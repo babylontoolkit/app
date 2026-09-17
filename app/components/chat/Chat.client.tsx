@@ -9,6 +9,7 @@ import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { runPreviewToolCall } from '~/lib/preview/bridge';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
 import { CREATION_CHECKPOINT_LABEL } from '~/lib/persistence/local-snapshots';
+import { ensureFolderForProject, requireProjectsFolderForWorkspace } from '~/lib/local-project';
 import {
   ApiError,
   createProject,
@@ -1775,6 +1776,26 @@ export const ChatImpl = memo(
       const { entry, prompt, visiblePrompt, matched, seedSource = 'explicit' } = options;
       const title = prompt ? deriveProjectTitle(prompt, entry.title) : entry.title;
 
+      /*
+       * 🔴 THE PROJECTS FOLDER IS ASKED FOR HERE — before the project row, before a credit is debited,
+       * before a byte is written (SPEC §4.5.4d, owner 2026-09-17).
+       *
+       * This is one of the two doors into a workspace, and the only moment at which "where should this
+       * live?" is a question with an answer. Asking earlier — which is what covering the landing page
+       * did — asks it of someone who is still deciding whether to build anything; asking later means the
+       * first minutes of the project are written somewhere the user never chose, which is the volatile
+       * sandbox this whole feature exists to get out of.
+       *
+       * A cancel unwinds like every other creation refusal above it (401, 402, no-sandbox): nothing was
+       * made, so there is nothing to roll back — just stop being busy and report `false`.
+       */
+      if ((await requireProjectsFolderForWorkspace('create')) === 'cancelled') {
+        setFakeLoading(false);
+        toast.info('No project was created. You can choose a projects folder any time in Settings.');
+
+        return false;
+      }
+
       // ================= PHASE 1 — CREATE THE PROJECT. Nothing below may be skipped or deferred. ====
 
       /*
@@ -2251,6 +2272,17 @@ export const ChatImpl = memo(
         void checkpointProject(setupMessageId, { label: CREATION_CHECKPOINT_LABEL }).catch((error) => {
           logger.error('Could not checkpoint the freshly created project', error);
         });
+
+        /*
+         * 🔴 PUT THE PROJECT ON THE USER'S DISK, from jump street (§4.5.4d, owner 2026-09-15). The
+         * starter is mounted and verified; if this browser has a projects folder, the project gets
+         * `<folder>/<slug>/` now and every later change is written through. Fire-and-forget with the
+         * same posture as the checkpoint above: the disk is the extra copy, and a disk that cannot be
+         * written (it says so, loudly) must never make a created project read as not created.
+         */
+        if (registeredProjectId) {
+          void ensureFolderForProject(registeredProjectId, title);
+        }
 
         return true;
       } catch (error) {

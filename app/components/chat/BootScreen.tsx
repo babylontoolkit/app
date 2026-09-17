@@ -28,6 +28,7 @@ import {
   importTailActive,
   shouldCoverWorkspace,
 } from '~/lib/stores/boot-progress';
+import { grantFolderAccess, skipFolderAccess } from '~/lib/local-project';
 
 /**
  * The terminal state: no spinner, the server's own sentence, and a way forward.
@@ -61,6 +62,54 @@ function BootFailurePanel({ message, retryable }: { message: string; retryable: 
   );
 }
 
+/**
+ * The disk-folder gate (SPEC §4.5.4d): a project that lives in the user's projects folder cannot be read
+ * until the browser is told, by a CLICK, that this session may open that folder. No spinner — nothing is
+ * happening until the user decides — and a way past it that does not need the folder at all.
+ */
+function DiskPermissionPanel({ folderName }: { folderName: string }) {
+  const copy = bootPhaseCopy({ step: 'disk-permission', folderName });
+  const [busy, setBusy] = useState(false);
+
+  const grant = async () => {
+    setBusy(true);
+
+    try {
+      await grantFolderAccess();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex max-w-md flex-col items-center gap-4 text-center" role="dialog" aria-live="polite">
+      <div className="i-ph:folder-open text-4xl text-bolt-elements-textSecondary" aria-hidden="true" />
+      <div>
+        <div className="text-lg font-medium text-bolt-elements-textPrimary">{copy.title}</div>
+        <div className="mt-1 text-sm text-bolt-elements-textSecondary">{copy.detail}</div>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void grant()}
+          className="rounded-md bg-bolt-elements-button-primary-background px-4 py-2 text-sm text-bolt-elements-button-primary-text hover:bg-bolt-elements-button-primary-backgroundHover disabled:opacity-60"
+        >
+          Open my projects folder
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={skipFolderAccess}
+          className="rounded-md border border-bolt-elements-borderColor px-4 py-2 text-sm text-bolt-elements-textSecondary hover:bg-bolt-elements-background-depth-3 disabled:opacity-60"
+        >
+          Not now
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Spinner + phase copy + progress + elapsed — the shared body of both boot surfaces. */
 function BootStatusPanel() {
   const phase = effectiveBootPhase(useStore(bootProgress), useStore(importTailActive));
@@ -84,6 +133,10 @@ function BootStatusPanel() {
    */
   if (phase.step === 'failed') {
     return <BootFailurePanel message={phase.message} retryable={phase.retryable} />;
+  }
+
+  if (phase.step === 'disk-permission') {
+    return <DiskPermissionPanel folderName={phase.folderName} />;
   }
 
   const copy = bootPhaseCopy(phase);

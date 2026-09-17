@@ -711,3 +711,26 @@ describe('plain language in the branch group (§4.5.4b)', () => {
     expect(branchJargon.some((word) => poisoned.toLowerCase().includes(word.toLowerCase()))).toBe(true);
   });
 });
+
+/*
+ * The disk folder (§4.5.4d, owner 2026-09-15): a project on the user's own disk is saved for the
+ * purposes of nagging, and on a browser that can do it the first-save moment belongs to the first-run
+ * folder gate, not the GitHub toast.
+ */
+describe('nudges and the projects folder', () => {
+  const firstCreation = { linked: false, generationCount: 1, firstToastShown: false, bannerEvery: 5 };
+
+  it('CONTROL: without the folder facts the first creation still toasts', () => {
+    expect(decideNudge(firstCreation)).toBe('toast');
+  });
+
+  it('a project on disk is never nudged — not the toast, not the banner', () => {
+    expect(decideNudge({ ...firstCreation, onDisk: true })).toBe('none');
+    expect(decideNudge({ ...firstCreation, onDisk: true, generationCount: 5 })).toBe('none');
+  });
+
+  it('when the folder gate covers the first save, the GitHub toast stands down but the milestone banner does not', () => {
+    expect(decideNudge({ ...firstCreation, folderSetupCoversFirstSave: true })).toBe('none');
+    expect(decideNudge({ ...firstCreation, folderSetupCoversFirstSave: true, generationCount: 5 })).toBe('banner');
+  });
+});

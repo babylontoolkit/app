@@ -13,6 +13,7 @@ import { DndProvider } from 'react-dnd';
 import { HTML5Backend } from 'react-dnd-html5-backend';
 import { ClientOnly } from 'remix-utils/client-only';
 import { cssTransition, ToastContainer } from 'react-toastify';
+import { ProjectsFolderGate } from './components/persistence/ProjectsFolderGate.client';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
 import globalStyles from './styles/index.scss?url';
@@ -217,6 +218,13 @@ export default function App() {
   return (
     <Layout>
       <Outlet />
+      {/*
+       * The first-run projects-folder gate (SPEC §4.5.4d): on a browser that can keep projects on disk,
+       * the folder is chosen or reconnected BEFORE the builder is on screen. `Layout` renders its children
+       * client-only, which is what a component reading IndexedDB and the picker needs. It draws nothing
+       * outside the builder routes and nothing once a folder is connected.
+       */}
+      <ProjectsFolderGate />
     </Layout>
   );
 }

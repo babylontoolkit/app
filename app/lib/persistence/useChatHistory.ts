@@ -84,6 +84,14 @@ import { identityForMount } from './mount-identity';
 import { runCheckpointSerialize } from './checkpoint-run';
 import { waitForWorkbenchActionsSettled } from './workbench-settle';
 import { slugForChat } from './chat-slug';
+import {
+  attachFolder,
+  ensureFolderForProject,
+  openFolderForProject,
+  ProjectsFolderDeclinedError,
+  readFolderForMount,
+  requireProjectsFolderForWorkspace,
+} from '~/lib/local-project';
 import { createScopedLogger } from '~/utils/logger';
 import { createSingleFlight } from '~/utils/single-flight';
 
@@ -389,6 +397,30 @@ function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> 
   }
 
   /*
+   * 🔴 THE PROJECTS FOLDER IS ASKED FOR BEFORE THE PROJECT OPENS (SPEC §4.5.4d, owner 2026-09-17).
+   *
+   * This is the second of the two doors into a workspace — open, resume, remix, an import's own mount —
+   * and it is deliberately OUTSIDE `mountInFlight`: concurrent callers join one gate (the promise does
+   * its own joining) rather than serialising behind a mount that has not been allowed to start.
+   *
+   * A cancel THROWS rather than resolving, because every caller reads a resolved mount as success and
+   * would set `ready` over the top of it — measured live: the failure panel was replaced by the very
+   * workspace the user had just declined to open. `handleOpenFailure` turns it into the boot failure
+   * surface plus that caller's own retry, and `mountedThisLoad` is untouched here, so the retry is a
+   * genuinely fresh attempt that raises the gate again.
+   */
+  return requireProjectsFolderForWorkspace('open').then((outcome) => {
+    if (outcome === 'cancelled') {
+      throw new ProjectsFolderDeclinedError();
+    }
+
+    return mountFilesNow(pid, opts);
+  });
+}
+
+/** The mount itself, once the workspace is allowed to open. */
+function mountFilesNow(pid: string, opts: MountOptions): Promise<void> {
+  /*
    * 🔴 THE WHOLE MOUNT IS "A RESTORE IS IN FLIGHT", not just the `restoreFiles` call inside it.
    *
    * `FilesStore.restoreFiles` marks itself, which covers five of the six branches — but the branch that
@@ -425,6 +457,13 @@ function mountProjectFiles(pid: string, opts: MountOptions = {}): Promise<void> 
           mountedThisLoad.add(pid);
 
           await settleWorkspaceFiles(MOUNT_SETTLE_OPTIONS, 'settling');
+
+          /*
+           * A project opened from a checkpoint, the repo, a seed or a recovery copy gets its folder on
+           * disk NOW if the user has a projects folder (§4.5.4d) — a no-op when the mount came from the
+           * disk (already attached) or when no folder is connected. Never fails the open.
+           */
+          await ensureFolderForProject(pid);
 
           /*
            * 🔴 EVERY mount ends here, whatever branch filled the files and whoever asked for it. There is
@@ -491,6 +530,21 @@ async function settleWorkspaceFiles(
  * button that runs `retry`.
  */
 function handleOpenFailure(pid: string, error: unknown, onUsable: () => void, retry: () => void): void {
+  /*
+   * 🔴 A DECLINED PROJECTS FOLDER IS AN OPEN FAILURE, NOT A WARNING (§4.5.4d, found by driving it
+   * 2026-09-17). It is checked FIRST and never reaches `describeSandboxFailure`, which classifies
+   * PROVIDER failures and correctly recognises nothing here — and an unclassified error takes the
+   * warn-and-continue arm below, i.e. sets `ready` and renders the workspace the user just declined to
+   * open. The surface is always retryable because the user can always change their mind, and `retry` is
+   * the caller's own fresh attempt, which raises the gate again.
+   */
+  if (error instanceof ProjectsFolderDeclinedError) {
+    logger.warn(`Project ${pid} was not opened — no projects folder on this computer yet.`);
+    reportBootFailure({ message: error.message, retryable: true }, retry);
+
+    return;
+  }
+
   const failure = describeSandboxFailure(error);
 
   if (!failure) {
@@ -543,8 +597,15 @@ async function doMountProjectFiles(pid: string, _opts: MountOptions = {}): Promi
    */
   const working = sync.localSeq === undefined ? await loadWorkingCopy(pid) : null;
 
+  /*
+   * The project's folder on the user's disk (§4.5.4d), if this browser has one. May hold the mount on
+   * the boot screen's permission button — a browser re-grants folder access only inside a click.
+   */
+  const diskFolder = await openFolderForProject(pid);
+
   const decision = selectMountSource({
     linked: status.linked,
+    hasLocalDir: diskFolder !== undefined,
     lastSyncedCommitSha: status.lastSyncedCommitSha,
 
     // Deliberately preserves the absent/null distinction — see `RepoStatus.remoteHead`.
@@ -672,6 +733,48 @@ async function doMountProjectFiles(pid: string, _opts: MountOptions = {}): Promi
 
     if (decision.source === 'diverged') {
       mountDivergence.set({ projectId: pid, remoteHead: decision.remoteHead });
+    }
+
+    return;
+  }
+
+  if (decision.source === 'disk') {
+    /*
+     * The folder on the user's disk IS the project (§4.5.4d). Read it whole, restore it as the whole
+     * truth (`protectNothing` — a file the folder does not have is one the project does not have), and
+     * start mirroring into it with the stamps just read, so the watcher's replay of this restore
+     * compares as identical instead of rewriting the folder onto itself.
+     *
+     * The local checkpoint written here is what §4.12 undo steps back to after an external edit, and
+     * it carries the previous checkpoint's `messageId` so `checkUnappliedTurn` still knows which turn
+     * the project contains (the working-copy branch's lesson: an unknown turn re-asks forever).
+     */
+    bootProgress.set({ step: 'files' });
+
+    const previous = db ? await readCurrentLocalSnapshot(db, pid) : undefined;
+    const { files, index } = await readFolderForMount(diskFolder!);
+
+    await workbenchStore.restoreFiles(files, {
+      protect: protectNothing,
+      onProgress: (done, total) => bootProgress.set({ step: 'files', done, total }),
+    });
+
+    if (db) {
+      await createLocalSnapshot(db, {
+        projectId: pid,
+        files,
+        messageId: previous?.messageId,
+        label: 'Loaded from disk',
+      });
+    }
+
+    await attachFolder(pid, diskFolder!, index);
+
+    lastMount = { source: 'disk', messageId: previous?.messageId };
+    unsavedWork.set(decision.unsavedWork);
+
+    if (decision.divergedFrom) {
+      mountDivergence.set({ projectId: pid, remoteHead: decision.divergedFrom });
     }
 
     return;

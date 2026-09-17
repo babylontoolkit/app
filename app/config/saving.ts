@@ -35,4 +35,23 @@ export const saving = {
    * they might close. A 5-second toast they can miss is worse than useless here.
    */
   introToastAutoCloseMs: 60_000 as number | false,
+
+  /**
+   * The projects-folder GATE (§4.5.4d, owner 2026-09-17): on a browser that can keep projects on disk,
+   * a WORKSPACE does not open until this machine has a folder for it — creating a project and opening
+   * one both wait for it. `true` = no way into a workspace without a folder (the second button is
+   * *Cancel*, which leaves the user where they were); `false` = the gate still asks but offers *Not
+   * now*, which opens the workspace anyway and is remembered for the session.
+   *
+   * ⚠️ It is not a page cover. Browsing the app builder, the gallery, help and a shared game never
+   * raise it, because the question has no meaning until there is a project.
+   */
+  requireProjectsFolder: true,
+
+  /**
+   * How long the gate may show "Checking your account…" before it gives up and opens the workspace
+   * anyway. The account resolves from `/api/me`; if that never answers, a cover that waits forever is a
+   * trap, not a setup step. Reaching this is abnormal and silent.
+   */
+  folderGateCheckCeilingMs: 8_000,
 } as const;

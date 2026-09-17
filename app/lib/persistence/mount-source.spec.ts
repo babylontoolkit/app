@@ -614,3 +614,69 @@ describe('decideLiveSandboxIsTruth — the warm-boot gate', () => {
     expect(decideLiveSandboxIsTruth({ bootRestoredFilesystem: true, identity: 'match', source: 'local' })).toBe(true);
   });
 });
+
+/*
+ * The disk folder (§4.5.4d) — first, whatever else exists. Wrong answers here mount over the one copy
+ * the user can edit in another program.
+ */
+describe("disk — the project folder on the user's disk outranks everything", () => {
+  it('unlinked: mounts the disk and reports the work as unsaved (nothing is on GitHub)', () => {
+    expect(selectMountSource({ linked: false, hasLocalDir: true, localSeq: 4 })).toEqual({
+      source: 'disk',
+      unsavedWork: true,
+    });
+  });
+
+  it('beats a remix seed and a recovery copy', () => {
+    expect(
+      selectMountSource({ linked: false, hasLocalDir: true, hasServerSeed: true, hasWorkingCopy: true }),
+    ).toMatchObject({
+      source: 'disk',
+    });
+  });
+
+  it('linked and in sync: disk, nothing unsaved', () => {
+    expect(selectMountSource({ ...inSync, hasLocalDir: true })).toEqual({ source: 'disk', unsavedWork: false });
+  });
+
+  it('linked with unsaved checkpoints: disk, unsaved', () => {
+    expect(selectMountSource({ ...inSync, hasLocalDir: true, localSeq: 7 })).toEqual({
+      source: 'disk',
+      unsavedWork: true,
+    });
+  });
+
+  it('remote moved AND unsaved work: disk, with the divergence to resolve — never a silent winner', () => {
+    expect(selectMountSource({ ...inSync, hasLocalDir: true, localSeq: 7, remoteHead: 'def456' })).toEqual({
+      source: 'disk',
+      unsavedWork: true,
+      divergedFrom: 'def456',
+    });
+  });
+
+  it('remote moved with nothing unsaved: disk, no divergence (the repo is never auto-mounted over the disk)', () => {
+    expect(selectMountSource({ ...inSync, hasLocalDir: true, remoteHead: 'def456' })).toEqual({
+      source: 'disk',
+      unsavedWork: false,
+    });
+  });
+
+  it('remote unreachable: disk, no divergence claimed from a question we could not ask', () => {
+    expect(selectMountSource({ ...inSync, hasLocalDir: true, localSeq: 7, remoteHead: undefined })).toEqual({
+      source: 'disk',
+      unsavedWork: true,
+    });
+  });
+
+  it('empty remote branch: disk, unsaved', () => {
+    expect(selectMountSource({ ...inSync, hasLocalDir: true, remoteHead: null })).toEqual({
+      source: 'disk',
+      unsavedWork: true,
+    });
+  });
+
+  it('control: without a disk folder every prior answer is unchanged', () => {
+    expect(selectMountSource({ ...inSync, hasLocalDir: false })).toEqual({ source: 'local', unsavedWork: false });
+    expect(selectMountSource({ linked: false, hasLocalDir: false })).toEqual({ source: 'empty' });
+  });
+});

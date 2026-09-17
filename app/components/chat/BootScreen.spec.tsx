@@ -106,3 +106,24 @@ describe('the boot surface draws a progress bar only where there is real progres
     expect(screen.getByText(/feature\/boost-pads/)).toBeInTheDocument();
   });
 });
+
+/*
+ * The disk-folder gate (§4.5.4d). The mount holds `ready` on this phase until the user clicks — so the
+ * surface must offer BOTH ways forward, and must not spin: nothing is happening until they decide.
+ */
+describe('the disk-permission phase is a decision, not a wait', () => {
+  afterEach(() => {
+    cleanup();
+    bootProgress.set({ step: 'idle' });
+  });
+
+  it('names the folder and offers the grant and the skip, with no progress bar and no spinner', () => {
+    const container = draw({ step: 'disk-permission', folderName: 'BabylonToolkit Projects' });
+
+    expect(screen.getByText(/Reconnect BabylonToolkit Projects/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Open my projects folder/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Not now/ })).toBeInTheDocument();
+    expect(progressBars(container)).toHaveLength(0);
+    expect(container.querySelector('.i-svg-spinners\\:90-ring-with-bg')).toBeNull();
+  });
+});

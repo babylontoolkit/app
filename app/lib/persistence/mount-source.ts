@@ -85,6 +85,18 @@ export interface MountFacts {
 
   /** The branch the project's link tuple names right now, to compare the stamp against. */
   linkedBranch?: string;
+
+  /**
+   * This browser has the project's folder on the user's DISK (SPEC §4.5.4d) — found by marker under
+   * the remembered projects folder, with access granted for this session.
+   *
+   * 🔴 It outranks every other source, linked or not. The disk is the one copy the user can edit
+   * outside the builder, so anything else mounted over it would silently discard those edits; and it
+   * is written through on every change, so it is never older than the local checkpoint beside it.
+   * The repo comparison still runs — `unsavedWork` and a divergence are reported exactly as for a
+   * local checkpoint — but the FILES come from the disk.
+   */
+  hasLocalDir?: boolean;
 }
 
 /**
@@ -128,8 +140,12 @@ export function workingCopyRanks(facts: Pick<MountFacts, 'workingCopyBranch' | '
  * - `diverged` — both sides moved since they last agreed. The platform NEVER merges (§4.13): the caller
  *   must ask the user, and until they answer the LOCAL files stay on screen, because they are the
  *   unsaved ones.
+ * - `disk`     — the project's folder on the user's disk (§4.5.4d). `divergedFrom` carries the remote
+ *   head when both sides moved, so the caller shows the same two-button choice it shows for `diverged`
+ *   — over the DISK files, which are the unsaved ones here.
  */
 export type MountSource =
+  | { source: 'disk'; unsavedWork: boolean; divergedFrom?: string }
   | { source: 'local'; unsavedWork: boolean }
   | { source: 'repo'; reason: 'no-local-copy' | 'remote-ahead' }
   | { source: 'seed' }
@@ -140,6 +156,29 @@ export type MountSource =
 export function selectMountSource(facts: MountFacts): MountSource {
   const hasLocal = facts.localSeq !== undefined;
   const unsavedWork = hasLocal && facts.localSeq! > (facts.syncedSeq ?? -1);
+
+  /*
+   * 🔴 THE DISK FIRST, WHATEVER ELSE EXISTS (§4.5.4d). It is the copy the user may have edited in
+   * another program since the last checkpoint, so it can never be ranked below a checkpoint; and it is
+   * theirs, on their machine, so it is never ranked below the repo either. Reporting stays honest:
+   * an unlinked project is "unsaved" (nothing on GitHub), a linked one is unsaved when the browser
+   * checkpointed past the last push, and a remote that moved WITH unsaved work is a divergence the
+   * user must resolve — the same rule as `local`, with the disk standing in for the checkpoint.
+   */
+  if (facts.hasLocalDir) {
+    if (!facts.linked) {
+      return { source: 'disk', unsavedWork: true };
+    }
+
+    const remoteMoved =
+      facts.remoteHead !== undefined && facts.remoteHead !== null && facts.remoteHead !== facts.lastSyncedCommitSha;
+
+    return {
+      source: 'disk',
+      unsavedWork: facts.remoteHead === null ? true : unsavedWork,
+      ...(remoteMoved && unsavedWork ? { divergedFrom: facts.remoteHead as string } : {}),
+    };
+  }
 
   /*
    * UNLINKED: the browser is the whole story. A seed is the only other possibility, and it exists

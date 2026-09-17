@@ -47,6 +47,14 @@ export type BootPhase =
   | { step: 'settling' }
 
   /**
+   * The project's folder on disk is remembered but this session has not been granted access to it
+   * (SPEC §4.5.4d). A browser re-grants folder access only inside a user gesture, so the mount holds
+   * here and the boot screen shows a button; "skip" opens the project from its other copies. A resume
+   * phase like the rest — the mount holds `ready` until the user decides.
+   */
+  | { step: 'disk-permission'; folderName: string }
+
+  /**
    * A folder or repository IMPORT landing in the workspace.
    *
    * 🔴 An overlay phase, not a full-page one, and the only non-`creating-` member of that family — so
@@ -365,6 +373,11 @@ export function bootPhaseCopy(phase: BootPhase): { title: string; detail: string
          */
         title: 'Reading project workspace files',
         detail: 'Reading files as they arrive in your workspace.',
+      };
+    case 'disk-permission':
+      return {
+        title: `Reconnect ${phase.folderName}`,
+        detail: 'Your browser needs a click before this session can open the project from your projects folder.',
       };
     case 'importing':
       return {
