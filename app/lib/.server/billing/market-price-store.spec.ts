@@ -486,38 +486,40 @@ describe('marketPriceProvidersFor', () => {
    * whichever direction the stale numbers point. These assertions are the wall against someone
    * "simplifying" this to `[platformProvider]`.
    */
-  it('always includes KIE, because the paid rungs price from it on every provider', () => {
+  it('always includes KIE (media and web-search price from it on every provider)', () => {
     for (const platform of ['KIE', 'Comet', 'Anthropic', 'not-a-provider', '']) {
       expect(marketPriceProvidersFor(platform), platform).toContain('KIE');
     }
   });
 
-  it('returns the platform’s own marketplace first, then KIE', () => {
-    expect(marketPriceProvidersFor('Comet')).toEqual(['Comet', 'KIE']);
-  });
-
-  it('does not duplicate KIE when KIE is the platform provider', () => {
-    expect(marketPriceProvidersFor('KIE')).toEqual(['KIE']);
-  });
-
   /*
-   * Anthropic is not a marketplace: its rates are first-party, hand-maintained in `MODEL_RATES`, and
-   * there is nothing for an operator to promote. It still needs KIE's list for the rungs.
+   * 🔴 ALL lists, own first (2026-09-29). A paid rung is now accepted if ANY list prices its model
+   * (`getModelTier`), so every list must be loaded before the ladder is read — one left on its baked
+   * table is an operator's promoted prices silently ignored.
    */
-  it('yields only KIE for Anthropic, which has no marketplace of its own', () => {
-    expect(marketPriceProvidersFor('Anthropic')).toEqual(['KIE']);
+  it('returns the platform’s own list first, then every other list', () => {
+    expect(marketPriceProvidersFor('Comet')).toEqual(['Comet', 'KIE', 'Anthropic']);
+    expect(marketPriceProvidersFor('KIE')).toEqual(['KIE', 'Comet', 'Anthropic']);
+    expect(marketPriceProvidersFor('Anthropic')).toEqual(['Anthropic', 'KIE', 'Comet']);
+  });
+
+  it('never duplicates a list', () => {
+    for (const platform of [...MARKET_PRICE_PROVIDERS, 'nonsense']) {
+      const lists = marketPriceProvidersFor(platform);
+      expect(new Set(lists).size, platform).toBe(lists.length);
+    }
   });
 
   /*
    * The argument is a plain `string` (to keep this module out of the `config -> rates ->
    * market-price-store` import cycle), so an unrecognised value is REACHABLE — a typo'd `LLM_PROVIDER`,
-   * or a stale deploy naming a provider that has since been removed. It must degrade to KIE, never to
-   * an empty list: refreshing nothing means every list serves baked with nothing said about it.
+   * or a stale deploy naming a provider that has since been removed. It must degrade to EVERY list,
+   * never to an empty one: refreshing nothing means every list serves baked with nothing said about it.
    */
-  it('degrades an unknown provider name to KIE rather than to nothing', () => {
-    expect(marketPriceProvidersFor('Bedrock')).toEqual(['KIE']);
-    expect(marketPriceProvidersFor('')).toEqual(['KIE']);
-    expect(marketPriceProvidersFor('kie'), 'match is exact, not case-folded').toEqual(['KIE']);
+  it('degrades an unknown provider name to every list rather than to nothing', () => {
+    expect(marketPriceProvidersFor('Bedrock')).toEqual([...MARKET_PRICE_PROVIDERS]);
+    expect(marketPriceProvidersFor('')).toEqual([...MARKET_PRICE_PROVIDERS]);
+    expect(marketPriceProvidersFor('kie'), 'match is exact, not case-folded').toEqual([...MARKET_PRICE_PROVIDERS]);
   });
 
   it('only ever names providers the store can actually serve', () => {

@@ -98,6 +98,13 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
     'claude-fable-5': { inputPerMTok: 4.0, outputPerMTok: 20.0 },
 
     /*
+     * Opus 5.5 — KIE's public feed, 2026-09-29: $1.60 input / $8.00 output (320 / 1600 credits per
+     * million). KIE lists NO Sonnet 5.5 and NO Fable 5.1 as of that date, so those two are absent on
+     * purpose: a rung naming them runs on Comet or Anthropic, which do price them.
+     */
+    'claude-opus-5-5': { inputPerMTok: 1.6, outputPerMTok: 8.0 },
+
+    /*
      * THE PLATFORM DEFAULT (`DEFAULT_MODEL`) — the Standard rung — since 2026-07-31. Row captured from
      * the feed 2026-07-18, ~0.283x of Anthropic's list. Every promoted price list MUST carry a row for
      * whatever `DEFAULT_MODEL` names (`validateMarketPriceList`), because an unpriced default bills at

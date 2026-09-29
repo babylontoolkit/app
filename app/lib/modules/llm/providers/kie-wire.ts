@@ -217,6 +217,15 @@ export const KIE_MODELS: ModelInfo[] = [
     maxCompletionTokens: 128_000,
   },
 
+  /* Opus 5.5 — priced from KIE's feed 2026-09-29 ($1.60/$8). KIE lists no Sonnet 5.5 / Fable 5.1. */
+  {
+    name: 'claude-opus-5-5',
+    label: 'Claude Opus 5.5 (KIE)',
+    provider: 'KIE',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+
   /*
    * 🔴 THE REST OF KIE'S CLAUDE CATALOGUE — listed 2026-07-31 to close a LATENT MIS-BILL.
    *

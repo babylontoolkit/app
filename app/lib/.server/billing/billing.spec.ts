@@ -94,9 +94,15 @@ const KIE_ENV = [
    * list" failed — on that developer's machine only, with CI green, blaming code they had not touched.
    *
    * Scrub the whole precedence chain, not the variable that happens to be under test.
+   *
+   * ⚠️ The ENHANCER keys joined the list 2026-09-29 — the same trap a THIRD time. `kieEnvModel`'s
+   * listing (`env-models.ts`) returns the enhancer's model too, so a developer with
+   * `ENHANCE_PROMPT_MODEL` in `.env.local` saw "reaches the provider model list" fail with CI green.
    */
   'LLM_MODEL',
   'KIE_DEFAULT_MODEL',
+  'ENHANCE_PROMPT_MODEL',
+  'KIE_ENHANCE_PROMPT_MODEL',
   'KIE_INPUT_DOLLARS',
   'KIE_OUTPUT_DOLLARS',
   'KIE_CACHED_INPUT',
@@ -314,10 +320,28 @@ describe('rate table', () => {
     }
   });
 
+  /*
+   * ⚠️ The ONE recorded exception class (2026-09-29): Anthropic publishes cache reads BELOW 0.1x for
+   * the 5.5 / 5.1 generation — Opus 5.5 $0.20 (0.05x), Fable 5.1 $0.25 (0.025x). Those rows state the
+   * vendor's number in `MODEL_RATES`; they are listed here by provider/model so the exception cannot
+   * spread silently to any other row, and so each is still pinned to an exact figure.
+   */
+  const OFF_MULTIPLE_CACHE_READS: Record<string, number> = {
+    'Anthropic/claude-opus-5-5': 0.2,
+    'Anthropic/claude-fable-5-1': 0.25,
+  };
+
   it('bills cache READS at 0.1x input on every DERIVED (claude) row — the margin lever', () => {
     for (const [provider, table] of Object.entries(providerRates())) {
       for (const [model, rates] of Object.entries(table)) {
         if (cacheProfileOf(model) !== 'derived') {
+          continue;
+        }
+
+        const exception = OFF_MULTIPLE_CACHE_READS[`${provider}/${model}`];
+
+        if (exception !== undefined) {
+          expect(rates.cacheReadPerMTok, `${provider}/${model} (vendor-published)`).toBe(exception);
           continue;
         }
 
@@ -476,14 +500,15 @@ describe('rate table', () => {
    * Anthropic is not a marketplace. Its rates are first-party and hand-maintained in `MODEL_RATES`, so
    * there is no list for an operator to promote and nothing for the store to key.
    */
-  it('has a marketplace price list for every platform provider except Anthropic', () => {
-    expect([...MARKET_PRICE_PROVIDERS].sort()).toEqual(
-      PLATFORM_PROVIDERS.filter((provider) => provider !== 'Anthropic').sort(),
-    );
-
-    // Control: the filter really removed something, so the equality above is not comparing two full lists.
-    expect(PLATFORM_PROVIDERS).toContain('Anthropic');
-    expect(MARKET_PRICE_PROVIDERS).not.toContain('Anthropic' as never);
+  /*
+   * 🔴 ANTHROPIC HAS A PRICE LIST TOO, SINCE 2026-09-29 — the "one permitted difference" is gone. It
+   * was excluded because its rates were first-party and hand-maintained in `MODEL_RATES`, which made a
+   * newly released model on Anthropic a source edit and a redeploy. Every platform provider now has a
+   * promotable list, so the two sets are EQUAL, and a new provider forgotten in the store fails here.
+   */
+  it('has a price list for every platform provider, Anthropic included', () => {
+    expect([...MARKET_PRICE_PROVIDERS].sort()).toEqual([...PLATFORM_PROVIDERS].sort());
+    expect(MARKET_PRICE_PROVIDERS).toContain('Anthropic');
   });
 
   /*
@@ -530,7 +555,9 @@ describe('rate table', () => {
           continue;
         }
 
-        const derived = ratesFromBase(rates.inputPerMTok, rates.outputPerMTok);
+        const derived = ratesFromBase(rates.inputPerMTok, rates.outputPerMTok, {
+          cacheReadPerMTok: OFF_MULTIPLE_CACHE_READS[`${provider}/${model}`],
+        });
 
         /*
          * `toBeCloseTo`, not `toEqual`: 3 * 0.1 is 0.30000000000000004 in binary float, so a derived
@@ -581,6 +608,9 @@ describe('KIE rates', () => {
     ['claude-sonnet-4-6', 0.85, 4.275],
     ['claude-sonnet-4-5', 0.85, 4.275],
     ['claude-opus-4-5', 1.425, 7.15],
+
+    /* 2026-09-29, KIE's feed: 320 / 1600 credits per million. KIE lists no Sonnet 5.5 / Fable 5.1. */
+    ['claude-opus-5-5', 1.6, 8.0],
   ])('prices %s at $%s / $%s — the feed-confirmed numbers', (model, input, output) => {
     expect(KIE_MODEL_RATES[model].inputPerMTok).toBe(input);
     expect(KIE_MODEL_RATES[model].outputPerMTok).toBe(output);
@@ -596,6 +626,7 @@ describe('KIE rates', () => {
       'claude-opus-4-7',
       'claude-opus-4-8',
       'claude-opus-5',
+      'claude-opus-5-5',
       'claude-sonnet-4-5',
       'claude-sonnet-4-6',
       'claude-sonnet-5',
@@ -1006,17 +1037,18 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
    */
   it('fills a gap and refuses to overwrite, on both providers', () => {
     stubTiers();
-    expect(DEFAULT_PREMIUM_MODEL, 'Premium took the retired Platinum rung’s model on 2026-08-14').toBe(
-      'claude-fable-5',
-    );
+    expect(DEFAULT_PREMIUM_MODEL, 'the owner ladder of 2026-09-29').toBe('claude-opus-5-5');
 
-    // Gap-fill must NOT overwrite: Anthropic prices Opus 5 itself at $5/$25, the list says $2/$10.
-    expect(providerRates({}).Anthropic['claude-opus-5'].inputPerMTok).toBe(5);
-    expect(providerRates({}).Anthropic['claude-opus-5'].outputPerMTok).toBe(25);
+    // Gap-fill must NOT overwrite: every table that sells Opus 5.5 keeps its OWN price.
+    expect(providerRates({}).Anthropic['claude-opus-5-5'].inputPerMTok).toBe(4);
+    expect(providerRates({}).Anthropic['claude-opus-5-5'].outputPerMTok).toBe(20);
+    expect(providerRates({}).KIE['claude-opus-5-5'].inputPerMTok).toBe(1.6);
+    expect(providerRates({}).Comet['claude-opus-5-5'].inputPerMTok).toBe(3.2);
 
-    // Nor for Premium, which Anthropic also prices natively ($10/$50) where the list says $4/$20.
-    expect(providerRates({}).Anthropic['claude-fable-5'].inputPerMTok).toBe(10);
-    expect(providerRates({}).Anthropic['claude-fable-5'].outputPerMTok).toBe(50);
+    // Nor for Platinum, which Anthropic sells at $10/$50 where Comet charges $8/$40.
+    expect(providerRates({}).Anthropic['claude-fable-5-1'].inputPerMTok).toBe(10);
+    expect(providerRates({}).Anthropic['claude-fable-5-1'].outputPerMTok).toBe(50);
+    expect(providerRates({}).Comet['claude-fable-5-1'].inputPerMTok).toBe(8);
 
     // Gap-fill MUST fill: Anthropic bakes no GPT row, so the injection is its only price.
     stubTiers({ PREMIUM_MODEL: 'gpt-5-6-sol' });
@@ -1024,7 +1056,7 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
     expect(providerRates({}).Anthropic['gpt-5-6-sol'].outputPerMTok).toBe(8.4);
 
     // KIE states both itself; the ladder introduces no second opinion.
-    expect(providerRates({}).KIE['claude-opus-5'].inputPerMTok).toBe(2);
+    expect(providerRates({}).KIE['claude-opus-5-5'].inputPerMTok).toBe(1.6);
     expect(providerRates({}).KIE['gpt-5-6-sol'].outputPerMTok).toBe(8.4);
   });
 
@@ -1033,9 +1065,23 @@ describe('the paid tier ladder in providerRates (§4.6.1a)', () => {
    * be a no-op — the table is `kieRates()` and nothing more. A row that appeared here would mean the
    * ladder had introduced a second opinion about a price KIE already states.
    */
-  it('is idempotent on KIE — its table is kieRates() plus nothing', () => {
+  /*
+   * ⚠️ No longer "plus nothing" (2026-09-29): Platinum's default, Fable 5.1, is a model KIE does not
+   * sell, so the ladder gap-fills exactly that one row — at the MOST EXPENSIVE list price ($10/$50),
+   * the safe direction. Every row KIE states itself must still be untouched.
+   */
+  it('on KIE, adds only the rung models KIE does not sell and changes none it does', () => {
     stubTiers();
-    expect(providerRates({}).KIE).toEqual(kieRates({}));
+
+    const table = providerRates({}).KIE;
+    const own = kieRates({});
+
+    expect(Object.keys(table).filter((model) => !(model in own))).toEqual(['claude-fable-5-1']);
+    expect(table['claude-fable-5-1'].outputPerMTok).toBe(50);
+
+    for (const [model, rates] of Object.entries(own)) {
+      expect(table[model], model).toEqual(rates);
+    }
   });
 
   /*
@@ -1118,40 +1164,35 @@ describe('the signup grant buys the hook', () => {
   });
 
   /*
-   * 🔴 **ANTHROPIC HEADROOM IS THE CONSTRAINT AGAIN (2026-08-14, Opus as the default model).**
-   *
-   * This test has now flipped twice, and each flip is a fact about the platform rather than about the
-   * test:
+   * 🔴 THIS TEST HAS FLIPPED THREE TIMES, and each flip is a fact about the platform's DEFAULT MODEL
+   * rather than about the grant:
    *
    *   - It began as "500 fails on Anthropic", documenting why the grant was not lowered.
-   *   - **2026-08-12** it went GREEN — not because the grant got more generous, but because Sonnet 5's
-   *     Anthropic row was corrected from an over-stated $3/$15 to the true $2/$10, taking a cold build
-   *     from 346 to 231 credits. It was rewritten to say the sizing question could no longer be
-   *     answered by pointing at Anthropic.
-   *   - **2026-08-14** the default model became Opus 5 (owner: Sonnet cannot reliably finish a game),
-   *     which is 2.5x Sonnet's rate on Anthropic. A 500-credit grant now buys **0.69x** of a cold
-   *     build — it cannot finish one — so Anthropic headroom is the binding constraint once more.
+   *   - **2026-08-12** it went green when Sonnet 5's Anthropic row was corrected from an over-stated
+   *     $3/$15 to the true $2/$10 (a cold build 346 -> 231 credits).
+   *   - **2026-08-14** the default became Opus 5 (2.5x Sonnet on Anthropic) and 500 could no longer
+   *     finish a build there.
+   *   - **2026-09-29** Platinum was restored and the baked default went back to Sonnet 5, so 500 clears
+   *     the floor on every gateway again.
    *
-   * ⚠️ **The shipped 1000-credit grant clears the 1.5x floor with very little to spare.** That is the
-   * number worth watching: this is not a comfortable margin, it is a passing one, and any further move
-   * in the model or the rates puts new users below the floor — where the symptom is a free build that
-   * runs out of credits part way through, which reads exactly like the product being broken.
-   *
-   * The assertion is deliberately about the ARITHMETIC and not a verdict. Whether to raise the grant is
-   * the owner's call (`SIGNUP_GRANT_CREDITS` is pure operator cost, §4.6).
+   * ⚠️ Read it correctly: **the grant did not become more generous, the default model got cheaper.** A
+   * deploy that sets `LLM_MODEL=claude-opus-5` is back in the 2026-08-14 position, which the CONTROL
+   * below keeps in view. Whether to lower the grant is the owner's decision (`SIGNUP_GRANT_CREDITS` is
+   * pure operator cost, §4.6) — this records the arithmetic, never a verdict.
    */
-  it('at 500 credits a new user can no longer finish a build on Anthropic', () => {
+  it('has no Anthropic headroom problem at 500 credits on the baked default', () => {
     const target = { ...config, signupGrantCredits: 500 };
 
-    expect(grantHeadroom(target, PLATFORM_MODEL, 'Anthropic')).toBeLessThan(1);
+    for (const provider of ['KIE', 'Anthropic'] as const) {
+      expect(grantHeadroom(target, PLATFORM_MODEL, provider), provider).toBeGreaterThanOrEqual(MIN_GRANT_HEADROOM);
+    }
 
     /*
-     * CONTROL — the cheaper gateway is not in the same position, so this is a measurement of the
-     * Anthropic rate rather than a blanket statement that 500 is too small everywhere.
+     * CONTROL: the floor is still reachable, so the loop above is a measurement and not a tautology.
+     * Opus 5 on Anthropic is the tight combination, and at 500 it is squarely under the floor — which is
+     * why the paid rungs carry credit thresholds.
      */
-    expect(grantHeadroom(target, PLATFORM_MODEL, 'KIE')).toBeGreaterThan(
-      grantHeadroom(target, PLATFORM_MODEL, 'Anthropic'),
-    );
+    expect(grantHeadroom(target, 'claude-opus-5', 'Anthropic')).toBeLessThan(MIN_GRANT_HEADROOM);
   });
 });
 
@@ -1207,13 +1248,15 @@ describe('the platform model switch', () => {
    *   - it was moved to `claude-opus-5`, until **2026-08-14** when Opus became the default for the same
    *     reason, in reverse — Sonnet is no longer the model this platform builds with, so it is once
    *     again a priced model that is not the default, and the anchor swaps back.
+   *   - **2026-09-29** Platinum was restored and the baked default went back to Sonnet, so the anchor
+   *     is Opus again — a THIRD flip, caught by the guard exactly as the first two were.
    *
    * **The guard below is the durable part, not the value.** It is what caught both flips, and it is why
    * the assertion is stated rather than assumed. The override is the config-only revert hatch the
    * Standard rung's vendor risk depends on, so it must stay positively asserted.
    */
   it('honours LLM_MODEL for a model the provider is priced for', () => {
-    const override = 'claude-sonnet-5';
+    const override = 'claude-opus-5';
     expect(override, 'the override must differ from the default or this proves nothing').not.toBe(
       PLATFORM_MODEL_BY_PROVIDER.Anthropic,
     );

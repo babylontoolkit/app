@@ -84,7 +84,7 @@ const UNIT_LABEL: Record<MediaRow['unit'], string> = {
  * what the SERVER says it loaded, never what the local state hoped for. Promoting Comet's rates
  * over KIE's pointer is a silent repricing of every generation, so this is not a cosmetic filter.
  */
-type PriceProvider = 'KIE' | 'Comet';
+type PriceProvider = 'KIE' | 'Comet' | 'Anthropic';
 
 /**
  * Map a vendor feed row onto the panel's three columns.
@@ -257,19 +257,22 @@ export function MarketPricesSection() {
             onChange={(e) => setProvider(e.target.value as PriceProvider)}
             aria-label="Price list provider"
           >
-            {(state.providers ?? ['KIE', 'Comet']).map((name) => (
+            {(state.providers ?? ['KIE', 'Comet', 'Anthropic']).map((name) => (
               <option key={name} value={name}>
                 {name}
               </option>
             ))}
           </select>
-          <button
-            className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
-            disabled={busy}
-            onClick={() => void fetchFeed()}
-          >
-            Fetch {provider} feed
-          </button>
+          {/* Anthropic publishes a pricing page, not a feed — there is nothing for this button to fetch. */}
+          {provider !== 'Anthropic' && (
+            <button
+              className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
+              disabled={busy}
+              onClick={() => void fetchFeed()}
+            >
+              Fetch {provider} feed
+            </button>
+          )}
           <button
             className="text-xs px-2 py-1 rounded bg-bolt-elements-background-depth-3 text-bolt-elements-textSecondary disabled:opacity-50"
             disabled={busy}

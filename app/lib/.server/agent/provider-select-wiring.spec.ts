@@ -120,7 +120,7 @@ describe('the model is validated against the gateway that will serve it', () => 
   });
 
   it('getPlatformConfig goes through the ladder resolver', () => {
-    expect(config()).toMatch(/provider: resolvePlatformProvider\(context\)/);
+    expect(config()).toMatch(/provider: resolvePlatformProvider\(context, /);
   });
 
   /* The ladder is the ONLY thing allowed to widen the answer — one door, so the flag cannot be bypassed. */

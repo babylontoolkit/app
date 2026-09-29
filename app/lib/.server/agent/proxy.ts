@@ -776,7 +776,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   ensureCacheWarmer(request.context);
 
-  const config = getPlatformConfig(request.context);
+  /*
+   * The requested rung rides into provider selection so a paid turn is routed to a gateway that SELLS
+   * its model (a rung may name a model only some gateways carry). Routing only — the tier decision
+   * below still re-derives eligibility from the balance, and a BYOK turn ignores the provider anyway.
+   */
+  const config = getPlatformConfig(request.context, request.tier ?? (request.premium ? 'premium' : undefined));
   const user = request.user;
   const monitor = getMonitor(request.context);
 

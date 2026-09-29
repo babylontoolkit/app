@@ -69,6 +69,27 @@ export default class AnthropicProvider extends BaseProvider {
       maxTokenAllowed: 1_000_000,
       maxCompletionTokens: 128_000,
     },
+    {
+      name: 'claude-sonnet-5-5',
+      label: 'Claude Sonnet 5.5',
+      provider: 'Anthropic',
+      maxTokenAllowed: 1_000_000,
+      maxCompletionTokens: 128_000,
+    },
+    {
+      name: 'claude-opus-5-5',
+      label: 'Claude Opus 5.5',
+      provider: 'Anthropic',
+      maxTokenAllowed: 1_000_000,
+      maxCompletionTokens: 128_000,
+    },
+    {
+      name: 'claude-fable-5-1',
+      label: 'Claude Fable 5.1',
+      provider: 'Anthropic',
+      maxTokenAllowed: 1_000_000,
+      maxCompletionTokens: 128_000,
+    },
   ];
 
   async getDynamicModels(

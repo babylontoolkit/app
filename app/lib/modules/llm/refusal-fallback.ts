@@ -45,13 +45,26 @@ import type { TappedStop } from '~/lib/modules/llm/stop-reason-tap';
  *
  * Every entry MUST be one of the primary's `allowed_fallback_models` (Models API, under the
  * fallback beta header) — an unlisted target is a hard 400 on EVERY request, before a token.
- * Verified 2026-08-06: claude-fable-5 permits ['claude-opus-4-8', 'claude-opus-5'].
+ * Verified 2026-08-06: claude-fable-5 permits ['claude-opus-4-8', 'claude-opus-5']; the 2026-09-29
+ * rows below were verified the same way. A model NOT listed here simply gets no fallback (a refusal
+ * surfaces as `describeRefusal` copy) — never a 400 — so a new model needs no entry to WORK.
  *
  * Opus 5 also carries classifiers but has not been observed refusing platform turns; it gets an
  * entry only if that changes, with its own allowed-targets check first.
  */
 const REFUSAL_FALLBACKS: Record<string, string> = {
   'claude-fable-5': 'claude-opus-5',
+
+  /*
+   * The 5.5 / 5.1 generation (2026-09-29). Each target verified against the Models API under the
+   * fallback beta header the same day: fable-5-1 and opus-5-5 permit ['claude-opus-4-8',
+   * 'claude-opus-5']; sonnet-5-5 permits ['claude-sonnet-5']. Opus 5.5 and Sonnet 5.5 are listed
+   * (unlike Opus 5) because their classifiers are broader — `bio` and `reasoning_extraction` join
+   * `cyber`, and Sonnet 5.5 declines in five categories.
+   */
+  'claude-fable-5-1': 'claude-opus-5',
+  'claude-opus-5-5': 'claude-opus-5',
+  'claude-sonnet-5-5': 'claude-sonnet-5',
 };
 
 export const SERVER_SIDE_FALLBACK_BETA = 'server-side-fallback-2026-07-01';

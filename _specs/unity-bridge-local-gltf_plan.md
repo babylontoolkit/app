@@ -313,8 +313,11 @@ fork, exporter, Agent Reference, and the Desktop Agent), and each repository's w
 - **D27 — Dev-server state from the browser** is `running | not-running | blocked | old-exporter`, decided by
   `checkDevServer` (Design Reference). The explainer is shown at most once per session per cause. Binds: T5, T22.
 - **D28 — Exporter dev server.**
-  - A new setting `ServerListenAllInterfaces` (default `false`) chooses the prefixes:
-    `http://*:{port}/` versus `http://localhost:{port}/` + `http://127.0.0.1:{port}/`, with HTTPS the same.
+  - A new setting `ServerListenAllInterfaces` (default **`true`**, owner 2026-09-29 — keeps today's LAN
+    access for phone/device testing) chooses the prefixes: `http://*:{port}/` (localhost, 127.0.0.1 and
+    the private IP) versus `http://localhost:{port}/` + `http://127.0.0.1:{port}/` when turned off, with
+    HTTPS the same. A settings file saved before this setting existed loads as `true` (Newtonsoft runs the
+    constructor defaults first), so no existing project loses LAN access.
   - `ResolveInsideRoot` returns `null` → 403.
   - `AddCorsHeaders` is applied to **every** response, and the old CORS block in `WriteResponseStream` is
     **removed**, because a duplicated `Access-Control-Allow-Origin` fails CORS.
@@ -1836,7 +1839,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
        - after `public bool EnableSecureSockets { get; set; }` (~749), add
          `public bool ServerListenAllInterfaces { get; set; }`;
        - in the defaults method, after `EnableSecureSockets = false;` (~996), add
-         `ServerListenAllInterfaces = false;`.
+         `ServerListenAllInterfaces = true;` (LAN serving stays the default — D28).
     2. `CVPanel.cs`: find the line
        `EditorGUILayout.HelpBox("A secure socket layer certificate enabled port is required.", MessageType.Info);`.
        Two lines below it is `EditorGUILayout.Space();` and then the `}` that closes the
@@ -1847,7 +1850,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
        EditorGUILayout.Space();
        if (CanvasToolsInfo.Instance.ServerListenAllInterfaces == true)
        {
-           EditorGUILayout.HelpBox("Other computers on your network can read the export folder while the server runs.", MessageType.Warning);
+           EditorGUILayout.HelpBox("Other devices on your network can read the export folder while the server runs. Turn off to serve this computer only.", MessageType.Info);
            EditorGUILayout.Space();
        }
        ```
@@ -1928,7 +1931,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
        var info = CanvasToolsInfo.Instance;
        info.HostPreviewType = (int)EditorHostingType.InternalWebServer;
        string scheme = info.EnableSecureSockets ? "https" : "http";
-       // Loopback-only (the default) is reachable ONLY as localhost; the alias is meaningful only when serving the LAN.
+       // LAN serving (the default) may report the alias; loopback-only is reachable ONLY as localhost.
        string alias = UnityTools.ReadServerAliasName();
        string host = info.ServerListenAllInterfaces && !string.IsNullOrWhiteSpace(alias) ? alias : "localhost";
        if (WebServer.IsStarted)
@@ -1997,7 +2000,13 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
       4. `find_gameobjects` by name `DirtyMarker` → still found;
       5. clean up: `save_all`, open the scene that was active before step 1, then `delete_asset` on
          `Assets/_BridgeTest` with `confirm` true;
-    - `bt_devserver_status` shows `project` and `listen : loopback`.
+    - `bt_devserver_status` shows `project` and `listen : all` (the default), and the server answers on
+      `http://localhost:<port>/`, `http://127.0.0.1:<port>/` and `http://<private-ip>:<port>/`
+      (`ipconfig getifaddr en0` on macOS). Then turn the setting off
+      (`unity command eval 'CanvasToolsInfo.Instance.ServerListenAllInterfaces = false; CanvasToolsInfo.SaveSettings(); return "ok";' --project-path "$PROJ"`
+      — `CanvasToolsInfo` is in the global namespace), restart the server,
+      and confirm `listen : loopback`, localhost still answers and the private IP is refused. Turn it back on
+      and restart before moving on.
   - Do not: commit; undo the owner's three uncommitted hunks (PrepareExporter comment, `sceneFmt` comments,
     `compileScripts` default `true`).
   - Verify: `unity command bt_status --project-path <proj> --format json` → `success: true`, then the

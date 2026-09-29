@@ -21,6 +21,7 @@ import { getObjectStore } from '~/lib/.server/storage';
 import { errorResponse } from '~/lib/.server/http';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
 import { BAKED_COMET_PRICES } from '~/lib/.server/billing/baked-comet-prices';
+import { BAKED_ANTHROPIC_PRICES } from '~/lib/.server/billing/baked-anthropic-prices';
 import {
   activeMarketPriceVersionId,
   ensureMarketPrices,
@@ -41,6 +42,7 @@ const logger = createScopedLogger('api.admin.market-prices');
 const BAKED_BY_PROVIDER: Record<MarketPriceProvider, typeof BAKED_MARKET_PRICES> = {
   KIE: BAKED_MARKET_PRICES,
   Comet: BAKED_COMET_PRICES,
+  Anthropic: BAKED_ANTHROPIC_PRICES,
 };
 
 /**
@@ -166,6 +168,19 @@ export async function action({ request, context }: ActionFunctionArgs) {
        * strings; Comet: one authenticated GET returning numbers plus a per-row ratio), so this is a
        * dispatch rather than a URL swap. Both are for the operator's EYES and neither ever writes.
        */
+      if (provider === 'Anthropic') {
+        /* Anthropic publishes a pricing PAGE, not a machine-readable feed — say so rather than 500. */
+        return json(
+          {
+            error: true,
+            message:
+              'Anthropic has no pricing feed to fetch. Copy input/output USD per million tokens from ' +
+              "Anthropic's published pricing page into the list, then promote.",
+          },
+          400,
+        );
+      }
+
       if (provider === 'Comet') {
         const apiKey = env(context, 'COMET_API_KEY');
 

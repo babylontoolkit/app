@@ -101,8 +101,10 @@ Two capabilities and a cleanup, all of which have to land together to be true:
   - send `Cross-Origin-Resource-Policy: cross-origin`;
   - serve glTF with the registered types (`model/gltf+json`, `model/gltf-binary`).
 - **A3. The dev server is safe on a real network.**
-  - It binds to **loopback only** by default; listening on all interfaces becomes an explicit exporter
-    setting, labelled as exposing the export folder to the local network.
+  - It **keeps serving the local network by default** (`localhost`, `127.0.0.1` and the machine's LAN
+    address, as today), so phones, tablets and other machines can test a build (owner, 2026-09-29).
+    Loopback-only becomes an explicit exporter setting: turning the "Serve To Local Network" toggle off
+    binds `localhost` + `127.0.0.1` only.
   - Every request path is resolved and **refused if it escapes the web root** (`..`, encoded `..`,
     absolute paths).
 - **A4. Port collisions are loud and solvable.**
@@ -116,7 +118,8 @@ Two capabilities and a cleanup, all of which have to land together to be true:
   Chrome's Local Network Access permission. The permission names are **`loopback-network`** (Chrome
   145+, the one a `localhost` dev server needs) and **`local-network-access`** (the original name,
   Chrome 142–144). Both are delegated; a name a browser does not know is ignored, not an error.
-  `local-network` (LAN addresses) is not delegated — the dev server is loopback-only by default (A3).
+  `local-network` (LAN addresses) is not delegated — the builder preview always addresses the dev
+  server as `localhost`; the LAN binding (A3) exists for other devices, not for the preview.
   A same-origin iframe needs no delegation at all, and the Nodepod preview is same-origin, so this is
   belt-and-braces there and load-bearing for any provider whose preview is cross-origin. The surfaces:
   - the main iframe;
@@ -608,9 +611,12 @@ Two capabilities and a cleanup, all of which have to land together to be true:
   prompt on the author's behalf.
 - **`.gltf` becomes opaque to the model.** Exported glTF is generated and large, and §4.9 introspection
   already gives the model the part it needs. This is the §4.2.8 default ("generated → opaque").
-- **Loopback-only dev server by default.** It serves the Unity export folder with no authentication,
-  and currently has no path containment. On a café network that is a file server for anyone. Rejected:
-  containment fix alone (still exposes the whole export to the LAN).
+- **The dev server keeps serving the local network by default (owner, 2026-09-29: option 1).** The owner
+  tests builds from phones and other machines over the private IP, and that is how the server behaves
+  today (`http://*:{port}/`). It serves the Unity export folder with no authentication, so the exposure is
+  bounded instead: path containment (A3) confines it to the web root, and a loopback-only toggle is
+  available for untrusted networks. Rejected: loopback-only by default — it silently breaks LAN device
+  testing for every existing project.
 - **Doc fixes are made at source, owner-directed.** CLAUDE.md's "never edit the Agent Reference from
   here" protects against casual drift. The owner directed this sweep, as with the 2026-08-05 fix. The
   platform must also not *depend* on the doc fixes: the identity-section override (B10) makes the
@@ -625,8 +631,8 @@ Two capabilities and a cleanup, all of which have to land together to be true:
   (Redis/Durable Objects) — infrastructure for a scale the platform does not have.
 - **Local Network Access names: `loopback-network` + `local-network-access` (resolved 2026-09-27 from
   Chrome's and MDN's published docs; the owner did not know the name, so it was looked up rather than
-  guessed).** Rejected: `local-network` — it covers LAN addresses, which the loopback-only dev server
-  (A3) never uses.
+  guessed).** Rejected: `local-network` — it covers LAN addresses, and the builder preview never
+  addresses the dev server by one (it always uses `localhost`, A3).
 - **Personal identity removed from the Agent Reference (owner, 2026-09-27: "remove my name and email,
   that must have been a mistake").** Done in the local clone the same day: the six example values in
   `unity-exporter-cli.md` are now `<Licensee Name>` / `you@example.com`, and the `companyName` line is

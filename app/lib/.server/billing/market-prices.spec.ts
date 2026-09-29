@@ -147,10 +147,13 @@ describe('validation — the promotion wall', () => {
   it('pins which models the Comet list prices — rates live in comet-prices.spec.ts', () => {
     expect(Object.keys(BAKED_COMET_PRICES.llm).sort()).toEqual([
       'claude-fable-5',
+      'claude-fable-5-1',
       'claude-haiku-4-5-20251001',
       'claude-opus-4-8',
       'claude-opus-5',
+      'claude-opus-5-5',
       'claude-sonnet-5',
+      'claude-sonnet-5-5',
       'grok-4.5',
       'kimi-k3',
       'qwen3-coder',

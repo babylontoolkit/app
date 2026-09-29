@@ -28,7 +28,7 @@
  * twice in this repo for want of one sibling in a scrub list).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
+import { invalidateMarketPricesCache, MARKET_PRICE_PROVIDERS } from '~/lib/.server/billing/market-price-store';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
 import { DEFAULT_PREMIUM_MODEL } from '~/lib/.server/billing/model-tiers';
 import { DEFAULT_MODEL } from '~/utils/constants';
@@ -289,7 +289,7 @@ describe('CONTROLS — the drive reaches the loader and the payload is the real 
     expect(body.accountsEnabled).toBeTypeOf('boolean');
 
     // The ladder, in rung order — three rungs, standard first.
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
   });
 
   it('reports the balance the ledger actually returned, not a constant wearing its name', async () => {
@@ -323,7 +323,8 @@ describe('CONTROLS — the drive reaches the loader and the payload is the real 
 
     await callMe();
 
-    expect(doors.ensureMarketPrices).toHaveBeenCalledTimes(1);
+    // One refresh per price list — every list can price a rung since 2026-09-29, so all are loaded.
+    expect(doors.ensureMarketPrices).toHaveBeenCalledTimes(MARKET_PRICE_PROVIDERS.length);
   });
 
   /*
@@ -407,7 +408,7 @@ describe('a misconfigured PREMIUM_MODEL degrades that rung to off and takes noth
     const { body } = await withBrokenPaidRung();
     const tiers = tiersOf(body);
 
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'platinum']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.standard.model).toBe(DEFAULT_MODEL);
     expect(tiers.premium.available, 'the broken rung is the only one withdrawn').toBe(false);
@@ -503,7 +504,7 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.enforced).toBe(true);
-    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium']);
+    expect(body.credits?.modelTiers.tiers.map((row) => row.id)).toEqual(['standard', 'premium', 'platinum']);
     expect(tiersOf(body).premium.model).toBe(DEFAULT_PREMIUM_MODEL);
   });
 
@@ -534,7 +535,7 @@ describe('no billing configuration at all', () => {
 
     expect(status).toBe(200);
     expect(body.credits?.modelTiers.standardModel).toBe(DEFAULT_MODEL);
-    expect(Object.keys(tiers)).toEqual(['standard', 'premium']);
+    expect(Object.keys(tiers)).toEqual(['standard', 'premium', 'platinum']);
     expect(tiers.standard.available).toBe(true);
     expect(tiers.premium.available).toBe(false);
     expect(tiers.premium.available).toBe(false);

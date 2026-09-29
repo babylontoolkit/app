@@ -7,13 +7,13 @@
  */
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { env, envFlag, NotConfiguredError } from '~/lib/.server/env';
-import { getModelTier, kieDefaultModel, providerRates } from '~/lib/.server/billing/rates';
+import { getModelTier, kieDefaultModel, nativeProviderRates, providerRates } from '~/lib/.server/billing/rates';
 import {
   ENABLE_EXTENDED_MODELS_ENV_KEY,
   modelTierEnabled,
   extendedModelsEnabled,
 } from '~/lib/.server/billing/premium-model-flag';
-import { paidModelTierDefinition, type PaidModelTierId } from '~/lib/.server/billing/model-tiers';
+import { PAID_MODEL_TIERS, paidModelTierDefinition, type PaidModelTierId } from '~/lib/.server/billing/model-tiers';
 import { providerUnhealthyUntil, selectPlatformProvider } from './provider-select';
 import { createScopedLogger } from '~/utils/logger';
 
@@ -183,10 +183,10 @@ export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = 
  * a real model we simply have no rates for, is a describable error at config time — not a 404 at the
  * first generation, and not a silent mis-bill.
  *
- * To move to a new model (Fable 5, a newer Opus): add its row to the provider's rate table, then set
- * `LLM_MODEL`. The rate row is a code change because a PRICE cannot be guessed — but it is one table
- * entry, not a rebuild of the billing path, and `SIGNUP_GRANT_CREDITS` should be re-checked against
- * `grantHeadroom()` afterwards since a cheaper model makes the grant go further.
+ * To move to a new model: add its price row in Settings → Admin → Marketplace prices (every provider,
+ * Anthropic included since 2026-09-29), promote, then set `LLM_MODEL`. NO code change — a price cannot
+ * be guessed, but it is the operator's to state, not the source's. `SIGNUP_GRANT_CREDITS` should be
+ * re-checked against `grantHeadroom()` afterwards, since a cheaper model makes the grant go further.
  */
 /**
  * How an operator makes an unpriced model billable, per provider.
@@ -199,7 +199,7 @@ export const PLATFORM_MODEL_BY_PROVIDER: Record<PlatformProviderName, string> = 
  * file and the symptom does not move.
  */
 const UNPRICED_MODEL_FIX: Record<PlatformProviderName, string> = {
-  Anthropic: 'Add it to MODEL_RATES in billing/rates.ts first.',
+  Anthropic: 'Add its row to the Anthropic price list (Settings → Admin → Marketplace prices) and promote.',
   KIE: 'Add its row to the KIE Marketplace price list (Settings → Admin → Marketplace prices) and promote.',
   Comet: 'Add its row to the Comet Marketplace price list (Settings → Admin → Marketplace prices) and promote.',
 };
@@ -609,7 +609,11 @@ export function getProviderChain(context?: unknown): PlatformProviderName[] {
  * at the provider's most expensive row. Skipping an unpriceable rung is therefore not fussiness: it is
  * the difference between failing over to a discount and failing over to the biggest bill we can write.
  */
-export function resolvePlatformProvider(context?: unknown, nowMs: number = Date.now()): PlatformProviderName {
+export function resolvePlatformProvider(
+  context?: unknown,
+  nowMs: number = Date.now(),
+  alsoRuns?: string,
+): PlatformProviderName {
   const fixed = getPlatformProvider(context);
 
   if (!envFlag(context, AUTO_MODEL_SELECT_ENV_KEY)) {
@@ -638,15 +642,30 @@ export function resolvePlatformProvider(context?: unknown, nowMs: number = Date.
    */
   try {
     const rates = providerRates(context);
+    const native = nativeProviderRates(context);
 
-    const selection = selectPlatformProvider({
-      chain: getProviderChain(context),
-      fixed,
-      isConfigured: (provider) => Boolean(env(context, platformKeyEnvFor(provider))?.trim()),
-      canPrice: (provider) => Boolean(rates[provider]?.[platformModelFor(provider, context)]),
-      unhealthyUntilMs: providerUnhealthyUntil,
-      nowMs,
-    });
+    const select = (withRung: boolean) =>
+      selectPlatformProvider({
+        chain: getProviderChain(context),
+        fixed,
+        isConfigured: (provider) => Boolean(env(context, platformKeyEnvFor(provider))?.trim()),
+        canPrice: (provider) =>
+          Boolean(rates[provider]?.[platformModelFor(provider, context)]) &&
+          (!withRung || !alsoRuns || Boolean(native[provider]?.[alsoRuns])),
+        unhealthyUntilMs: providerUnhealthyUntil,
+        nowMs,
+      });
+
+    /*
+     * 🔴 `alsoRuns` — the requested paid rung's model (2026-09-29). The chain used to be gated on the
+     * STANDARD model only, which was safe while every rung had to be priced by KIE. A rung may now name
+     * a model only some gateways sell (Fable 5.1: Comet + Anthropic, not KIE), so a Platinum turn must
+     * go to a gateway that sells it NATIVELY — `providerRates` gap-fills every rung into every table
+     * and would say yes for all of them. If nothing in the chain sells it, fall back to the standard
+     * gate: the tier decision then resolves down or refuses loudly, exactly as before.
+     */
+    const withRung = select(true);
+    const selection = withRung.reason === 'no_candidate' ? select(false) : withRung;
 
     /*
      * Worded without "this request" on purpose: `getPlatformConfig` is also called by `/api/me` and the
@@ -702,9 +721,13 @@ export function providersToPrice(context?: unknown): PlatformProviderName[] {
   }
 }
 
-export function getPlatformConfig(context?: unknown): PlatformConfig {
+/**
+ * `requestedTier`: the paid rung this generation ASKED for, so the gateway chosen can serve its model
+ * (see `resolvePlatformProvider`'s `alsoRuns`). Absent/standard = gate on the standard model only.
+ */
+export function getPlatformConfig(context?: unknown, requestedTier?: string): PlatformConfig {
   return {
-    provider: resolvePlatformProvider(context),
+    provider: resolvePlatformProvider(context, Date.now(), requestedTierModel(context, requestedTier)),
     anthropicApiKey: env(context, 'ANTHROPIC_API_KEY'),
     kieApiKey: env(context, 'KIE_API_KEY'),
     cometApiKey: env(context, 'COMET_API_KEY'),
@@ -712,6 +735,26 @@ export function getPlatformConfig(context?: unknown): PlatformConfig {
     githubToken: env(context, 'GITHUB_API_KEY') || env(context, 'VITE_GITHUB_ACCESS_TOKEN'),
     adminToken: env(context, 'ADMIN_TOKEN'),
   };
+}
+
+/**
+ * The model a requested paid rung would run, for ROUTING only — never for billing or authorization
+ * (the tier decision re-derives all of that from the balance later). `undefined` for standard, an
+ * unknown id, or a rung whose config cannot be resolved: routing then gates on the standard model,
+ * which is exactly what it did before rungs could name gateway-specific models.
+ */
+function requestedTierModel(context: unknown, requestedTier: string | undefined): string | undefined {
+  const definition = PAID_MODEL_TIERS.find((tier) => tier.id === requestedTier);
+
+  if (!definition) {
+    return undefined;
+  }
+
+  try {
+    return getModelTier(definition.id, context).model;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

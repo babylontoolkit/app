@@ -19,7 +19,8 @@ import { env, envFlag, envNumber, NotConfiguredError } from '~/lib/.server/env';
 import { modelTierEnabled, extendedModelsEnabled, refuseRetiredModelTierEnv } from './premium-model-flag';
 import type { MarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
-import { activeMarketPrices } from './market-price-store';
+import { MODEL_RATES } from './baked-anthropic-prices';
+import { activeMarketPrices, MARKET_PRICE_PROVIDERS } from './market-price-store';
 import { FAMILY_POLICY, familyOf } from '~/lib/modules/llm/model-families';
 import {
   PAID_MODEL_TIERS,
@@ -80,105 +81,7 @@ export function ratesFromBase(
   };
 }
 
-/**
- * Published list prices, USD per million tokens. Verified against Anthropic's model pricing table
- * (2026-08-12).
- *
- * ## What belongs in here, and why the table is deliberately not the whole price list
- *
- * A row here is an assertion that this platform may be asked to SERVE that model on Anthropic — the
- * `MODEL_RATES` lookup is what `getPlatformModel` and the tier ladder validate a selector against, so
- * **adding a row widens what a deploy can select.** Anthropic publishes rows for Opus 4.5/4.6/4.7,
- * Sonnet 4.5/4.6 and Mythos 5 that are deliberately ABSENT: nothing selects them, and an absent row
- * makes `LLM_MODEL=claude-opus-4-7` on Anthropic a loud config refusal rather than a live model whose
- * rates nobody checked. Do not paste the vendor's table in wholesale — add the row when a selector
- * needs it, which is the same "model and price are ONE fact" rule the marketplace list follows.
- *
- * ## 🔴 SONNET 5 IS $2/$10 AND THE INTRO-PRICING CARVE-OUT IS DEAD (2026-08-12)
- *
- * This row was deliberately held at the STANDARD **$3/$15** for weeks because $2/$10 was announced as
- * introductory pricing expiring 2026-08-31, and seeding a rate that was about to rise would have
- * compressed margin the day it lapsed. **Anthropic has now made $2/$10 the standard price and
- * cancelled the scheduled increase**, so the premise is gone and the carve-out inverted from prudent
- * to wrong: we were pricing the platform's most common turn at **1.5x what it costs us**.
- *
- * That is not a margin windfall, it is a **user over-charge**, and it is worth being precise about the
- * direction because this file's other fallbacks lean the opposite way. Credits are cost-proportional
- * (`creditsForUsage`), so an OVERSTATED cost in this table is billed straight through to the customer:
- * every Anthropic-served Sonnet 5 turn charged 1.5x the credits it should have. It also fed
- * `savings.ts`, whose reference table IS this one — so the "you saved N" figure shown next to a money
- * number claimed a ~47% discount on Comet where the honest number is 20%.
- *
- * ⚠️ **The generalisable rule: a rate held deliberately off a vendor's current price is a DATED
- * decision that needs an expiry review, not a comment.** Three documents plus a spec assertion all
- * faithfully recorded *why* $3/$15 was right, and every one of them kept reading as correct after the
- * fact underneath it changed — the same "cite config as DATED evidence" failure this repo has now
- * recorded four times. A price that is intentionally not the vendor's price should be the rarest thing
- * in this file.
- */
-export const MODEL_RATES: Record<string, ModelRates> = {
-  /*
-   * THE PLATFORM DEFAULT (`DEFAULT_MODEL`, the §4.6.1a Standard rung). $2/$10 is the STANDARD price as
-   * of 2026-08-12 — the introductory-rate carve-out is retired; see the header.
-   */
-  'claude-sonnet-5': {
-    inputPerMTok: 2.0,
-    outputPerMTok: 10.0,
-    cacheReadPerMTok: 0.2, // 0.1x
-    cacheWritePerMTok: 4.0, // 2x — the 1h tier
-  },
-  'claude-haiku-4-5': {
-    inputPerMTok: 1.0,
-    outputPerMTok: 5.0,
-    cacheReadPerMTok: 0.1,
-    cacheWritePerMTok: 2.0,
-  },
-  'claude-opus-4-8': {
-    inputPerMTok: 5.0,
-    outputPerMTok: 25.0,
-    cacheReadPerMTok: 0.5,
-    cacheWritePerMTok: 10.0,
-  },
-
-  // The §4.6.1a PREMIUM rung. Anthropic prices Opus 5 as a drop-in at Opus 4.8's exact rates.
-  'claude-opus-5': {
-    inputPerMTok: 5.0,
-    outputPerMTok: 25.0,
-    cacheReadPerMTok: 0.5,
-    cacheWritePerMTok: 10.0,
-  },
-
-  /*
-   * 🔴 THE §4.6.1a PLATINUM RUNG — AND ANTHROPIC SELLS IT, WHICH THIS FILE USED TO DENY (2026-08-12).
-   *
-   * `PLATINUM_MODEL=claude-fable-5` is live in the owner's deploy and `Anthropic` is the last rung of
-   * `LLM_PROVIDER_CHAIN`, so this row is load-bearing rather than documentation. Until now there was
-   * NO fable-5 row here and three comments in this file asserted the reason was that "Anthropic does
-   * not sell it" — false, and expensive: `providerRates`' gap-fill therefore priced the Platinum rung
-   * on Anthropic from the KIE-shaped marketplace list at **$4/$20 against a true $10/$50**, so we ate
-   * ~60% of the cost of every Anthropic-served Platinum turn, silently, with the credit count going
-   * DOWN so it read as a cheaper turn. That is the exact mirror of the 231-vs-576 defect recorded on
-   * `providerRates` — same mechanism, opposite direction, and the direction that loses money.
-   *
-   * ⚠️ It also retro-corrects a MEASUREMENT this repo reasoned from: "on Anthropic the fable-5 rung
-   * settled 814 credits against Opus 5's 1,017" was quoted in four places as evidence that the ladder
-   * is not cost-monotonic on Anthropic. 814/1017 is exactly 4/5 — it is the gap-filled $4/$20 rate,
-   * i.e. the mis-bill, not a fact about Anthropic's prices. At the real $10/$50 the same turn is ~2,035
-   * credits and Anthropic IS cost-monotonic. The ladder still orders CAPABILITY, not price (do not
-   * reorder it), but that rule no longer has a live counterexample to point at.
-   *
-   * ⚠️ Adding this row also raises `mostExpensive(MODEL_RATES)` from Opus 5's $25 output to $50, so an
-   * UNPRICED model on Anthropic now falls back to twice what it used to. That is the direction this
-   * file's fallbacks are documented to err in (our own favour, recoverable) — noted because it is a
-   * real behaviour change and not a side effect anyone would look for.
-   */
-  'claude-fable-5': {
-    inputPerMTok: 10.0,
-    outputPerMTok: 50.0,
-    cacheReadPerMTok: 1.0,
-    cacheWritePerMTok: 20.0,
-  },
-};
+export { MODEL_RATES };
 
 /**
  * KIE.ai's rates (`providers/kie.ts`), USD per million tokens — DERIVED from the marketplace price
@@ -373,6 +276,34 @@ export function cometRates(context?: unknown): Record<string, ModelRates> {
 }
 
 /**
+ * Anthropic's rate table — the ACTIVE Anthropic price list (Settings → Admin → Marketplace prices), as
+ * `ModelRates` (2026-09-29).
+ *
+ * The twin of `kieRates`/`cometRates`, so a model released after this build ships is one Admin-panel
+ * row away on Anthropic too, never a code change.
+ *
+ * ⚠️ One difference, and it is the safe one: `MODEL_RATES` states EXACT cache rates (some models read
+ * cache far below the family's 0.1x), while a promoted claude row cannot carry cache keys. So a row
+ * the list prices at the SAME input/output as `MODEL_RATES` keeps the exact cache numbers; anything
+ * else — a new model, or a repriced one — derives 0.1x / 2x like every other claude row. Deriving can
+ * only over-state a deep cache discount, never under-state one.
+ */
+export function anthropicRates(context?: unknown): Record<string, ModelRates> {
+  refuseRetiredPriceEnv(context);
+
+  const derived = llmRatesFromList(activeMarketPrices('Anthropic'));
+
+  return Object.fromEntries(
+    Object.entries(derived).map(([model, rates]) => {
+      const exact = MODEL_RATES[model];
+      const same = exact && exact.inputPerMTok === rates.inputPerMTok && exact.outputPerMTok === rates.outputPerMTok;
+
+      return [model, same ? exact : rates];
+    }),
+  );
+}
+
+/**
  * The MODEL TIER LADDER (SPEC §4.6.1a) — the paid rungs above the platform model, resolved and priced.
  *
  * The ladder's shape lives in `model-tiers.ts` (data only, no imports); this is where a rung meets the
@@ -506,10 +437,23 @@ export function getModelTier(id: PaidModelTierId, context?: unknown): ModelTier 
    * false for the same reason and cost real money — standing. **When you find one false claim in a
    * comment, audit the whole comment, not the sentence.**
    */
-  const row = activeMarketPrices('KIE').llm[model];
+  /*
+   * 🔴 ANY PROVIDER'S LIST MAY PRICE A RUNG (2026-09-29). This read KIE's list alone, so a rung whose
+   * model KIE does not sell — `PLATINUM_MODEL=claude-fable-5-1` — was refused on every deploy,
+   * including ones that never touch KIE. Every list is consulted now, and when several price the model
+   * the MOST EXPENSIVE row wins: this `rates` value is only ever used to gap-fill a provider that does
+   * not price the model itself (`providerRates`' `withTiers`, fill never overwrite), and a gap-fill
+   * must err towards over-charging ourselves, never towards under-billing.
+   */
+  const row = MARKET_PRICE_PROVIDERS.map((provider) => activeMarketPrices(provider).llm[model])
+    .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
+    .sort((a, b) => b.outputPerMTok - a.outputPerMTok || b.inputPerMTok - a.inputPerMTok)[0];
 
   if (!row) {
-    const priced = Object.keys(activeMarketPrices('KIE').llm).join(', ') || '(none)';
+    const priced =
+      [...new Set(MARKET_PRICE_PROVIDERS.flatMap((provider) => Object.keys(activeMarketPrices(provider).llm)))]
+        .sort()
+        .join(', ') || '(none)';
 
     throw new NotConfiguredError(
       `${definition.modelEnvKey}="${model}"`,
@@ -698,10 +642,30 @@ export function providerRates(context?: unknown): Record<string, Record<string, 
       table as Record<string, ModelRates>,
     );
 
+  const native = nativeProviderRates(context);
+
   return {
-    Anthropic: withTiers(MODEL_RATES),
-    KIE: withTiers(kieRates(context)),
-    Comet: withTiers(cometRates(context)),
+    Anthropic: withTiers(native.Anthropic),
+    KIE: withTiers(native.KIE),
+    Comet: withTiers(native.Comet),
+  };
+}
+
+/**
+ * Each provider's OWN price table — what it sells, with NO tier gap-fill (2026-09-29).
+ *
+ * `providerRates` injects every paid rung's model into every table so settlement can never refuse.
+ * That makes it the wrong question for ROUTING: after the injection every provider "prices" Fable 5.1,
+ * including KIE, which does not sell it. The provider picker asks this table instead, so a turn on a
+ * paid rung is only ever routed to a gateway that actually serves that rung's model.
+ */
+export function nativeProviderRates(
+  context?: unknown,
+): Record<'Anthropic' | 'KIE' | 'Comet', Record<string, ModelRates>> {
+  return {
+    Anthropic: anthropicRates(context),
+    KIE: kieRates(context),
+    Comet: cometRates(context),
   };
 }
 

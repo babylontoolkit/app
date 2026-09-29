@@ -1039,10 +1039,11 @@ describe('🔴 the warmer follows the AUTO_MODEL_SELECT ladder, not LLM_PROVIDER
        * ⚠️ MUST differ from the baked `DEFAULT_MODEL`, or the two hypotheses ("resolved against the
        * selected gateway" and "resolved against LLM_PROVIDER") produce the same string and this test
        * proves nothing. It stubbed `claude-opus-5` until 2026-08-14, when Opus BECAME the default and
-       * silently collapsed the discriminator — the same way the `LLM_MODEL` case in billing.spec.ts
-       * has now been invalidated twice. The guard below is the durable part, not the value.
+       * silently collapsed the discriminator, then `claude-sonnet-5` until 2026-09-29, when Sonnet
+       * became the default again — the same way the `LLM_MODEL` case in billing.spec.ts keeps being
+       * invalidated. The guard below is the durable part, not the value.
        */
-      const kieOnly = 'claude-sonnet-5';
+      const kieOnly = 'claude-opus-5';
       expect(kieOnly, 'the KIE-only model must differ from the baked default').not.toBe(DEFAULT_MODEL);
 
       vi.stubEnv('KIE_DEFAULT_MODEL', kieOnly);

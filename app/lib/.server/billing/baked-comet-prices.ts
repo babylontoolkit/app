@@ -69,6 +69,16 @@ export const COMET_PRICE_PROVENANCE: Record<string, CometPriceProvenance> = {
   'claude-opus-5': { officialInputPerMTok: 5.0, officialOutputPerMTok: 25.0, ratio: 0.8 },
   'claude-opus-4-8': { officialInputPerMTok: 5.0, officialOutputPerMTok: 25.0, ratio: 0.8 },
   'claude-fable-5': { officialInputPerMTok: 10.0, officialOutputPerMTok: 50.0, ratio: 0.8 },
+
+  /*
+   * The 5.5 / 5.1 generation, captured from `GET /api/models` 2026-09-29. ⚠️ Opus 5.5's row carries
+   * NO `input`/`output` — it is `billing_mode: 'tiered_expr'` with the expression
+   * `p * 4 + c * 20 + cr * 0.2 + cc * 5 + cc1h * 8`, i.e. official $4 input / $20 output — so a feed
+   * reader that only looks at `pricing.input` sees null for it. Read the expression.
+   */
+  'claude-sonnet-5-5': { officialInputPerMTok: 2.0, officialOutputPerMTok: 10.0, ratio: 0.8 },
+  'claude-opus-5-5': { officialInputPerMTok: 4.0, officialOutputPerMTok: 20.0, ratio: 0.8 },
+  'claude-fable-5-1': { officialInputPerMTok: 10.0, officialOutputPerMTok: 50.0, ratio: 0.8 },
   'grok-4.5': { officialInputPerMTok: 2.0, officialOutputPerMTok: 6.0, ratio: 0.8 },
   'kimi-k3': { officialInputPerMTok: 3.0, officialOutputPerMTok: 15.0, ratio: 0.8 },
   'qwen3-coder': { officialInputPerMTok: 0.3, officialOutputPerMTok: 1.2, ratio: 0.8 },
@@ -145,6 +155,17 @@ export const BAKED_COMET_PRICES: MarketPriceList = {
 
     /* What `PREMIUM_MODEL` names on the owner's deploy. Probed 200. official 10/50 x 0.80 -> 8/40 */
     'claude-fable-5': { inputPerMTok: 8.0, outputPerMTok: 40.0 },
+
+    /*
+     * The 5.5 / 5.1 generation (2026-09-29, owner's Standard · Premium · Platinum). Captured from the
+     * feed, charged = official x 0.80:
+     *   sonnet-5-5  2.00 / 10.00 -> 1.60 / 8.00
+     *   opus-5-5    4.00 / 20.00 -> 3.20 / 16.00   (from the tiered_expr — see the provenance note)
+     *   fable-5-1  10.00 / 50.00 -> 8.00 / 40.00
+     */
+    'claude-sonnet-5-5': { inputPerMTok: 1.6, outputPerMTok: 8.0 },
+    'claude-opus-5-5': { inputPerMTok: 3.2, outputPerMTok: 16.0 },
+    'claude-fable-5-1': { inputPerMTok: 8.0, outputPerMTok: 40.0 },
 
     /*
      * ------------------------------------------------------------------------------------------ *

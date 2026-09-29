@@ -174,29 +174,23 @@ export const PROVIDER_REGEX = /\[Provider: (.*?)\]\n\n/;
  * path while settlement charges the configured model's rates).
  */
 /*
- * 🔴 OPUS, NOT SONNET (owner, 2026-08-14): *"SONNET IS NOT ABLE TO RELIABLY HANDLE GAME CREATION…
- * PERIOD and has been causing A LOT of the reliable finishing issues."*
+ * 🔴 SONNET AGAIN, AS THE BASE OF A THREE-RUNG LADDER (owner, 2026-09-29) — baked Standard
+ * `claude-sonnet-5` · Premium `claude-opus-5-5` · Platinum `claude-fable-5-1`; the owner's deploy runs
+ * `claude-sonnet-5-5` on `LLM_MODEL`. Not Sonnet 5.5 HERE because every price list — KIE's included —
+ * must price the platform default, and KIE does not sell Sonnet 5.5 (feed, 2026-09-29).
  *
- * This is the BAKED fallback, reached only when `LLM_MODEL` and `KIE_DEFAULT_MODEL` are both unset —
- * so on the owner's deploy (`LLM_MODEL=claude-opus-5`) it changes nothing today. That is exactly why
- * it mattered: a deploy that forgets the env var silently falls back to the model this platform has
- * just concluded cannot finish a game, and the symptom is not an error, it is builds that stop.
+ * This is the BAKED fallback, reached only when `LLM_MODEL` and `KIE_DEFAULT_MODEL` are both unset.
+ * It moved to Opus on 2026-08-14 when Platinum was retired and Fable became Premium; with three rungs
+ * the fallback returns to the bottom of the ladder, so no rung resolves to the one below it.
  *
- * Measured over 30 generations: Sonnet failed 5 of 19 with output already billed, and the ones that
- * completed leaned on the rescue machinery (forced-continuation, unproductive-rescue,
- * creation-completeness; 6-19 steps). Opus completed 4 of 4 in 3-6 steps.
- *
- * 🔴 **And those counts UNDERSTATE it.** `completed` means the TURN finished, not that the game runs —
- * owner, watching real builds: *"it may have passed what you call a successful creation, but the games
- * don't work and very often just freeze at the start, whereas Opus with the same prompt creates a
- * working game."* An unknown share of Sonnet's 14 "successes" shipped a game that never starts, and
- * nothing here measures that.
- *
- * ⚠️ Sonnet stays fully supported and priced — it is `ENHANCE_PROMPT_MODEL` and the right tool for
- * light work. The finding is about GAME CREATION specifically; do not generalise it into removing the
- * model.
+ * ⚠️ **The 2026-08-14 finding still stands and is why this is only a FALLBACK:** measured over 30
+ * generations, Sonnet 5 failed 5 of 19 game builds with output already billed, leaned on the rescue
+ * machinery to finish the rest, and `completed` never meant the game RUNS — owner: *"the games don't
+ * work and very often just freeze at the start, whereas Opus with the same prompt creates a working
+ * game."* A deploy that wants Opus building games sets `LLM_MODEL` (config only, no rebuild), and
+ * nothing here measures whether a delivered game starts.
  */
-export const DEFAULT_MODEL = 'claude-opus-5';
+export const DEFAULT_MODEL = 'claude-sonnet-5';
 export const PROMPT_COOKIE_KEY = 'cachedPrompt';
 export const TOOL_EXECUTION_APPROVAL = {
   APPROVE: 'Yes, approved.',

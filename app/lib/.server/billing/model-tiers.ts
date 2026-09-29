@@ -1,14 +1,16 @@
 /**
  * The MODEL TIER LADDER (SPEC §4.6.1a) — the vocabulary of model classes a credits user may choose.
  *
- * TWO rungs, ordered by CAPABILITY: **Standard** (the operator's platform model) and **Premium**. The
- * paid rung names an operator-configured model through an env SELECTOR and unlocks at a credit
- * THRESHOLD the user must hold.
+ * THREE rungs, ordered by CAPABILITY: **Standard** (the operator's platform model), **Premium** and
+ * **Platinum** (restored 2026-09-29). Each paid rung names an operator-configured model through an env
+ * SELECTOR and unlocks at a credit THRESHOLD the user must hold. `ENABLE_EXTENDED_MODELS` is the master
+ * switch over both paid rungs; `ENABLE_PLATINUM_MODEL` narrows Platinum alone.
  *
  * ⚠️ **This header has now been stale in both directions, and the count is the part that keeps rotting.**
  * It said "Two rungs, ordered by cost" until 2026-08-11 — wrong on both counts, above a three-entry
  * table — and was then corrected to "THREE rungs … Standard, Premium and Platinum", where it sat above
- * a TWO-entry `MODEL_TIER_IDS` from Platinum's retirement on 2026-08-14 until 2026-08-21. **Ordered by
+ * a TWO-entry `MODEL_TIER_IDS` from Platinum's retirement on 2026-08-14 until 2026-08-21, and Platinum
+ * came back on 2026-09-29. **Ordered by
  * CAPABILITY, and that is the rule regardless of what the prices happen to do**; the COUNT is not a rule
  * at all — it is data, it has changed four times, and the body of this file (which names every rung
  * explicitly and dates every move) is the thing to trust over any summary at the top, including this one.
@@ -25,8 +27,8 @@
  * ## Why this is a table and not two code paths
  *
  * This replaced a boolean (`PREMIUM_MODEL` or nothing), carried a third rung (`SuperMax`, 2026-07-31 →
- * 2026-08-08), dropped to one paid rung, gained a second again as `platinum` on 2026-08-10, and dropped
- * back to one on 2026-08-14 — four shape changes in a fortnight, none of which changed a rule. The ladder is a LIST precisely so that number can move
+ * 2026-08-08), dropped to one paid rung, gained a second again as `platinum` on 2026-08-10, dropped
+ * back to one on 2026-08-14, and regained it on 2026-09-29 — five shape changes, none of which changed a rule. The ladder is a LIST precisely so that number can move
  * without the rules moving. The alternative, copying the premium
  * machinery into a per-rung twin, means every rule gets written twice and the two copies drift. The
  * rules here are money rules: the threshold that protects the free signup grant, the first-build lock,
@@ -61,7 +63,7 @@
  */
 
 /** The rungs, in LADDER order (ascending capability). Order is meaningful — it is the ladder. ⚠️ Capability order, not price order: the two agree on every gateway today, and that is a coincidence to re-check, never a rule to reorder by. */
-export const MODEL_TIER_IDS = ['standard', 'premium'] as const;
+export const MODEL_TIER_IDS = ['standard', 'premium', 'platinum'] as const;
 
 export type ModelTierId = (typeof MODEL_TIER_IDS)[number];
 
@@ -79,8 +81,8 @@ export type PaidModelTierId = Exclude<ModelTierId, 'standard'>;
  * sits below every paid threshold, which is the whole point of the thresholds: a brand-new account
  * cannot burn its grant on the expensive models out the gate.
  */
-export const DEFAULT_PREMIUM_MODEL = 'claude-fable-5';
-export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1500;
+export const DEFAULT_PREMIUM_MODEL = 'claude-opus-5-5';
+export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1200;
 
 /**
  * PLATINUM — the second paid rung (added 2026-08-10, owner).
@@ -92,46 +94,44 @@ export const DEFAULT_PREMIUM_MINIMUM_CREDITS = 1500;
  * and price it was never checked against. Same reasoning as `ENABLE_EXTENDED_MODELS` — a rename that
  * silently starts reading an old value is the costly direction.
  *
- * 🔴 **PLATINUM IS RETIRED (owner, 2026-08-14) — the ladder is STANDARD + PREMIUM.** *"remove PLATNUM
- * level… we will only have Standard — the default for development — or premium IF you wanna go that
- * high."* The rung's model moved DOWN into Premium rather than being dropped: Standard is now Opus 5
- * (`LLM_MODEL`) and Premium is Fable 5, because *"SONNET IS NOT ABLE TO RELIABLY HANDLE GAME
- * CREATION… PERIOD and has been causing A LOT of the reliable finishing issues"* — measured over the
- * last 30 generations, Sonnet failed 5 of 19 with output already billed, and its completions leaned on
- * the rescue machinery (`forced-continuation` x2, `unproductive-rescue`, `creation-completeness` x6,
- * 6-19 steps), where Opus completed 4 of 4 in 3-6 steps.
+ * 🔴 **PLATINUM IS RESTORED (owner, 2026-09-29) — the ladder is STANDARD · PREMIUM · PLATINUM again.**
+ * It was retired on 2026-08-14 (*"we will only have Standard … or premium IF you wanna go that
+ * high"*), with its model moved down into Premium. The owner has since put `PLATINUM_MODEL` back in
+ * their deploy, so the rung comes back as a real table entry — the refusal of `PLATINUM_*` in
+ * `premium-model-flag.ts` is removed with it, because refusing a key the ladder READS is an outage.
  *
- * 🔴 **AND "COMPLETED" IS NOT "WORKS" — the telemetry cannot see the real failure (owner, 2026-08-14).**
- * *"It may have passed what you call a successful creation, but the games don't work and very often
- * just freeze at the start, whereas Opus with the same prompt creates a working game."* The counts
- * above are `status` — a fact about whether the TURN finished — and a Sonnet build that streams a
- * complete artifact, writes every file and settles `completed` is counted as a success here while
- * producing a game that freezes on load. So the measured gap UNDERSTATES the decision rather than
- * making it: the real Sonnet failure rate includes an unknown share of its 14 "successes".
+ * The defaults are the owner's ladder (2026-09-29): Premium `claude-opus-5-5` @ 1200, Platinum
+ * `claude-fable-5-1` @ 2000 — the thresholds are the reviewed 2026-08-10 values. These are only
+ * FALLBACKS: the live models are `PREMIUM_MODEL` / `PLATINUM_MODEL`, and adopting a model released
+ * later is an env change plus a price row in Settings → Admin → Marketplace prices — no code.
+ * ⚠️ The baked Standard default (`DEFAULT_MODEL`) stays `claude-sonnet-5`, not Sonnet 5.5: every
+ * price list must price the platform default (`validateMarketPriceList`), and KIE does not sell Sonnet
+ * 5.5 (its feed, 2026-09-29). `LLM_MODEL` is what picks the live Standard model.
  *
- * ⚠️ This is the `wastedOutput` shape again, one layer out: a metric defined against the failure it
- * expects (the turn dying) reports health on the failure it does not (the turn completing and
- * shipping a broken game). **Nothing in this codebase currently measures whether the delivered game
- * RUNS** — the §4.14 preview tools (`get_game_errors`, `evaluate_in_game`) are the channel that
- * could, and wiring them to a post-build health check is the honest next thing, not another count of
- * finish reasons.
+ * ⚠️ **The 2026-08-14 evidence about Sonnet still stands** — measured over 30 generations it failed
+ * 5 of 19 with output already billed, and "completed" never meant "the game runs". Restoring a third
+ * rung does not revisit it; which model sits on which rung is config (`LLM_MODEL`, `PREMIUM_MODEL`,
+ * `PLATINUM_MODEL`), not code.
  *
- * ⚠️ **Sonnet is NOT removed from `MODEL_RATES`.** It remains the enhancer model
- * (`ENHANCE_PROMPT_MODEL`) and the right tool for light work — the finding is about GAME CREATION, and
- * generalising it into "delete the row" would break the ✨ button to make a point.
- *
- * 🔴 **The four properties that need TWO paid rungs are LOST AGAIN** — the same four this comment has
- * now watched leave, return, and leave a second time: a declined rung steps down to STANDARD and never
- * to the adjacent rung; one broken selector leaves its sibling serveable; `getTierModel` names its OWN
- * env var in its refusal; and the panel can render an unserveable rung beside a serveable one. On a
- * one-paid-rung ladder each is observationally identical to a hardcoded `'premium'`, so their specs
- * are re-anchored or deleted rather than left green and meaningless.
- *
- * ⚠️ **A fixture rung does not restore them.** `decideModelTier` validates the requested id against
- * `MODEL_TIER_IDS` BEFORE consulting the ladder it was handed, so a test cannot invent a third rung to
- * assert against — the table IS the whitelist. Restoring them requires a real second paid rung, which
- * is the condition to re-read this note against. It went unread for a full day last time.
+ * ✅ **A second paid rung makes the four two-paid-rung PROPERTIES writable again**, and their specs
+ * are restored from the 2026-08-10 ladder rather than re-derived: a declined rung steps down to
+ * STANDARD and never to the adjacent rung (`premium.spec.ts`); one broken selector leaves its sibling
+ * serveable (`model-tiers.spec.ts`); `getTierModel` names its OWN env var in its refusal
+ * (`tier-model-provider.spec.ts`, asserted on a PLATINUM refusal); and the panel renders an
+ * unserveable rung beside a serveable one (`ModelTierPanel.spec.tsx`).
  */
+export const DEFAULT_PLATINUM_MODEL = 'claude-fable-5-1';
+
+/**
+ * Above Premium's 1200 and well above `SIGNUP_GRANT_CREDITS` (1000).
+ *
+ * The ladder must stay monotonic in threshold or a bare deploy offers a dearer rung for less. It is
+ * cost-monotonic too, on every gateway: Comet prices fable-5 at $8/$40 against opus-5's $4/$20, and
+ * Anthropic at $10/$50 against $5/$25. **Rungs still order CAPABILITY, not price** — the two agreeing
+ * is a coincidence to re-check, never a rule to reorder by.
+ */
+export const DEFAULT_PLATINUM_MINIMUM_CREDITS = 2000;
+
 /** The static definition of a paid rung: where its config comes from and what it falls back to. */
 export interface ModelTierDefinition {
   id: PaidModelTierId;
@@ -200,6 +200,16 @@ export const PAID_MODEL_TIERS: readonly ModelTierDefinition[] = [
     defaultMinimumCredits: DEFAULT_PREMIUM_MINIMUM_CREDITS,
     firstBuildLocked: false,
     enabledEnvKey: 'ENABLE_EXTENDED_MODELS',
+  },
+  {
+    id: 'platinum',
+    label: 'Platinum',
+    modelEnvKey: 'PLATINUM_MODEL',
+    minimumEnvKey: 'PLATINUM_MINIMUM_CREDITS',
+    defaultModel: DEFAULT_PLATINUM_MODEL,
+    defaultMinimumCredits: DEFAULT_PLATINUM_MINIMUM_CREDITS,
+    firstBuildLocked: false,
+    enabledEnvKey: 'ENABLE_PLATINUM_MODEL',
   },
 ];
 

@@ -1,5 +1,6 @@
 /**
- * `ENABLE_EXTENDED_MODELS` — the master switch for the PAID rung of the model ladder (SPEC §4.6.1a).
+ * `ENABLE_EXTENDED_MODELS` — the master switch for the PAID rungs of the model ladder (SPEC §4.6.1a):
+ * Premium AND Platinum. `ENABLE_PLATINUM_MODEL` narrows Platinum alone; nothing can widen past this.
  *
  * ## Why a flag and not "just unset the selector"
  *
@@ -67,9 +68,15 @@
  * Standard", a set that is allowed to have one member. **Renaming this again needs a reason about
  * BEHAVIOUR, not about number agreement.**
  *
- * ⚠️ It governs EVERY paid rung — currently exactly one. Per-rung narrowing is `enabledEnvKey`, which
- * can only ever narrow what this allows; with one rung it is the same key, which is why
- * `ENABLE_PLATINUM_MODEL` is now REFUSED rather than ignored.
+ *  - **2026-09-29** → PLATINUM restored (owner), so there are TWO paid rungs again and the plural is
+ *    literally true. The name did not move — which is the paragraph above working as intended. The
+ *    only edit was to STOP refusing `PLATINUM_MODEL`, `PLATINUM_MINIMUM_CREDITS` and
+ *    `ENABLE_PLATINUM_MODEL`, because the ladder reads them again, and refusing a key the ladder reads
+ *    is an outage (every Platinum row would render locked with a "retired" reason).
+ *
+ * ⚠️ It governs EVERY paid rung — Premium and Platinum. Per-rung narrowing is `enabledEnvKey`, which
+ * can only ever narrow what this allows: Premium's is this same key, Platinum's is
+ * `ENABLE_PLATINUM_MODEL`.
  *
  * `SUPERMAX_MODEL` / `SUPERMAX_MINIMUM_CREDITS` stay refused throughout, and PLATINUM taking that
  * rung's position did NOT change that: those values were chosen against SuperMax's threshold and
@@ -137,7 +144,7 @@ const RETIRED_MODEL_TIER_ENV: ReadonlyArray<{ key: string; fix: string }> = [
    */
   {
     key: 'ENABLE_PREMIUM_MODEL',
-    fix: `the paid rung is governed by ${ENABLE_EXTENDED_MODELS_ENV_KEY} — copy its value across and remove the old key`,
+    fix: `the paid rungs are governed by ${ENABLE_EXTENDED_MODELS_ENV_KEY} — copy its value across and remove the old key`,
   },
 
   /*
@@ -148,32 +155,6 @@ const RETIRED_MODEL_TIER_ENV: ReadonlyArray<{ key: string; fix: string }> = [
    * never set. Refusing costs them one deliberate edit; adopting costs them a mis-served paid tier
    * with nothing thrown. Same rule as `ENABLE_EXTENDED_MODELS` directly above.
    */
-  /*
-   * 🔴 PLATINUM RETIRED (owner, 2026-08-14) — and its keys are refused for the SuperMax reason, not
-   * silently folded into Premium. Premium's model DID move up to `claude-fable-5` as part of the same
-   * change, so `PLATINUM_MODEL=claude-fable-5` would happen to be right on the owner's deploy — which
-   * is exactly why adopting it is the wrong habit: it would be right by coincidence here and wrong on
-   * the next deploy, at a threshold nobody re-checked, with nothing thrown.
-   *
-   * ⚠️ `ENABLE_PLATINUM_MODEL` is refused too, and that one is the costly direction. It is a per-rung
-   * NARROWING switch: an operator who set it `false` to withdraw Platinum, and whose model has now
-   * moved into Premium, would have their withdrawal silently stop applying to the rung that inherited
-   * it. Refusing costs one deliberate edit; ignoring costs a paid rung served to people the operator
-   * had turned it off for.
-   */
-  {
-    key: 'PLATINUM_MODEL',
-    fix: 'the Platinum rung is retired — its model moved into PREMIUM_MODEL (review it against the active price list and PREMIUM_MINIMUM_CREDITS first) or remove this key',
-  },
-  {
-    key: 'PLATINUM_MINIMUM_CREDITS',
-    fix: 'the Platinum rung is retired — set the threshold in PREMIUM_MINIMUM_CREDITS or remove this key',
-  },
-  {
-    key: 'ENABLE_PLATINUM_MODEL',
-    fix: `the Platinum rung is retired — the remaining paid rung is governed by ${ENABLE_EXTENDED_MODELS_ENV_KEY}, so set that instead or remove this key`,
-  },
-
   {
     key: 'SUPERMAX_MODEL',
     fix: 'the SuperMax rung is retired and replaced by PLATINUM — move the model to PLATINUM_MODEL (reviewing it against the active price list first) or remove this key',

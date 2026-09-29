@@ -672,7 +672,7 @@ describe('the media provider list agrees with its neighbours', () => {
     expect(MEDIA_PROVIDERS).not.toContain('Anthropic' as never);
   });
 
-  it('matches the marketplace price providers exactly — an unpriced gateway is an unbillable render', () => {
+  it('is priced by a marketplace list — an unpriced gateway is an unbillable render', () => {
     /*
      * 🔴 Media debits happen BEFORE any spend, from an EXACT price, and `lookupMediaPrice` has no
      * most-expensive fallback: a media provider with no promotable price list cannot render at all,
@@ -680,7 +680,17 @@ describe('the media provider list agrees with its neighbours', () => {
      * are declared separately on purpose (the `config -> rates -> market-price-store` cycle), which is
      * precisely why something has to relate them — see `billing.spec.ts`'s sibling assertion.
      */
-    expect([...MEDIA_PROVIDERS].sort()).toEqual([...MARKET_PRICE_PROVIDERS].sort());
+    for (const provider of MEDIA_PROVIDERS) {
+      expect(MARKET_PRICE_PROVIDERS, provider).toContain(provider);
+    }
+
+    /*
+     * ⚠️ No longer EQUAL (2026-09-29): Anthropic has a price list (for LLM rows) but sells no renders,
+     * so it is the one list with no media provider — an empty `media` table, which is valid.
+     */
+    expect(MARKET_PRICE_PROVIDERS.filter((p) => !(MEDIA_PROVIDERS as readonly string[]).includes(p))).toEqual([
+      'Anthropic',
+    ]);
   });
 });
 

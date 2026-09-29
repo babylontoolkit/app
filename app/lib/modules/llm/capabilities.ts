@@ -89,23 +89,50 @@ export function supportsSamplingParams(modelId: string): boolean {
  */
 const MODELS_WITHOUT_ADAPTIVE_THINKING = ['claude-3', 'claude-haiku-4-5'];
 
-/** Fable 5 thinks unconditionally: an explicit `{type: 'disabled'}` is a 400. Never send it one. */
-const MODELS_THAT_CANNOT_DISABLE_THINKING = ['claude-fable-5'];
-
 /**
- * Models that accept `{type: 'disabled'}` only up to a CEILING effort — above it, it is a 400.
+ * 🔴 AN ALLOW-LIST, NOT A DENY-LIST (owner, 2026-09-29): the models KNOWN to accept
+ * `{type: 'disabled'}`, and up to which effort. Anything not named here — including every model
+ * released after this was written — is never sent `disabled`.
  *
- * Opus 5 is the first model to gate the two parameters against each other: `thinking: {type:'disabled'}`
- * is accepted at effort `high` and below, and rejected at `xhigh`/`max`. `MODELS_THAT_CANNOT_DISABLE_THINKING`
- * above cannot express that — it is unconditional — so the rule needs its own table.
+ * It was a deny-list (`['claude-fable-5']` + an Opus 5 ceiling), so a brand-new id defaulted to "may
+ * disable". That was right for the 4.x generation and wrong for the one after it: Fable 5/5.1 and
+ * Opus 5.5 400 on `disabled` at EVERY effort, and Sonnet 5.5 400s on it outright (its thinking-off
+ * form is a different shape, `between_tools`). With a deny-list, putting a new model in `LLM_MODEL`
+ * meant a code edit here or a hard 400 on the retry attempt that had already failed twice — and
+ * `claude-opus-5` / `claude-sonnet-5` as `startsWith` prefixes silently matched `claude-opus-5-5` /
+ * `claude-sonnet-5-5`, handing them the older model's permission.
  *
- * ⚠️ This is REACHABLE FROM AN ENV FILE ALONE, and at the worst possible moment: `effort-policy.ts` only
- * ever escalates, taking a 2nd repair attempt to `xhigh`. So an operator running `THINKING_MODE=disabled`
- * would get a hard 400 on the turn that had already failed twice — the generation least able to afford it.
+ * The inversion is safe because a `false` costs almost nothing: `thinkingFetch` CLAMPS to `adaptive`,
+ * which every current model accepts, so the only thing a missing entry loses is the last-retry
+ * thinking-off mitigation (`retryThinkingMode`). A wrong `true` is a 400 on a turn the user has
+ * already waited through twice. Choose the cheap failure.
+ *
+ * Matching is EXACT on the bare id, or the id plus a date suffix (`claude-opus-4-8-20260101`) — never
+ * a bare prefix, which is how `claude-opus-5` came to speak for `claude-opus-5-5`.
+ *
+ * ⚠️ Opus 5 accepts `disabled` only at effort `high` and below (`xhigh`/`max` are a 400). This is
+ * REACHABLE FROM AN ENV FILE ALONE: `effort-policy.ts` only ever escalates, taking a 2nd repair attempt
+ * to `xhigh`, so an operator running `THINKING_MODE=disabled` would otherwise 400 on exactly that turn.
  */
-const THINKING_DISABLED_EFFORT_CEILING: Record<string, EffortLevel> = {
+const THINKING_DISABLE_ALLOWED: Record<string, EffortLevel | 'any'> = {
+  'claude-opus-4-6': 'any',
+  'claude-opus-4-7': 'any',
+  'claude-opus-4-8': 'any',
+  'claude-sonnet-4-6': 'any',
+  'claude-sonnet-5': 'any',
   'claude-opus-5': 'high',
 };
+
+/** The allow-list entry for an id: an exact match, or the same id with a `-YYYYMMDD` date suffix. */
+function thinkingDisableRule(id: string): EffortLevel | 'any' | undefined {
+  if (THINKING_DISABLE_ALLOWED[id]) {
+    return THINKING_DISABLE_ALLOWED[id];
+  }
+
+  const undated = id.replace(/-\d{8}$/, '');
+
+  return undated === id ? undefined : THINKING_DISABLE_ALLOWED[undated];
+}
 
 export type ThinkingMode = 'adaptive' | 'disabled';
 
@@ -237,7 +264,8 @@ export function supportsAdaptiveThinking(modelId: string): boolean {
  * Whether `{type: 'disabled'}` may be sent for this model AT THIS EFFORT.
  *
  * Two independent reasons to say no, and the second is why `effort` is a parameter here at all:
- *   1. The model cannot disable thinking at any effort (Fable 5).
+ *   1. The model is not on the allow-list (`THINKING_DISABLE_ALLOWED`) — Fable 5/5.1, Opus 5.5,
+ *      Sonnet 5.5, and every model nobody has checked yet.
  *   2. The model allows it only up to a ceiling effort (Opus 5: `high`; `xhigh`/`max` are a 400).
  *
  * ⚠️ **The caller CLAMPS on a `false` — it must never throw or propagate the 400.** `thinkingFetch` falls
@@ -246,19 +274,13 @@ export function supportsAdaptiveThinking(modelId: string): boolean {
  * preference, and a preference that cannot be honoured on this turn is not a reason to burn the turn.
  */
 export function canDisableThinking(modelId: string, effort: EffortLevel = DEFAULT_EFFORT): boolean {
-  const id = bareModelId(modelId);
+  const rule = thinkingDisableRule(bareModelId(modelId));
 
-  if (MODELS_THAT_CANNOT_DISABLE_THINKING.some((locked) => id.startsWith(locked))) {
+  if (!rule) {
     return false;
   }
 
-  const ceiling = Object.entries(THINKING_DISABLED_EFFORT_CEILING).find(([model]) => id.startsWith(model))?.[1];
-
-  if (!ceiling) {
-    return true;
-  }
-
-  return EFFORT_LEVELS.indexOf(effort) <= EFFORT_LEVELS.indexOf(ceiling);
+  return rule === 'any' || EFFORT_LEVELS.indexOf(effort) <= EFFORT_LEVELS.indexOf(rule);
 }
 
 /**

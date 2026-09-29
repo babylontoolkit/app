@@ -136,6 +136,29 @@ export const COMET_MODELS: ModelInfo[] = [
     maxCompletionTokens: 128_000,
   },
 
+  /* The 5.5 / 5.1 generation — in Comet's feed and priced in its baked list, 2026-09-29. */
+  {
+    name: 'claude-sonnet-5-5',
+    label: 'Claude Sonnet 5.5 (Comet)',
+    provider: 'Comet',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'claude-opus-5-5',
+    label: 'Claude Opus 5.5 (Comet)',
+    provider: 'Comet',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+  {
+    name: 'claude-fable-5-1',
+    label: 'Claude Fable 5.1 (Comet)',
+    provider: 'Comet',
+    maxTokenAllowed: 1_000_000,
+    maxCompletionTokens: 128_000,
+  },
+
   /*
    * 🔴 `claude-haiku-4-5` IS NOT LISTED, AND THE SPEC SAYING IT WAS PROBED IS WRONG.
    *

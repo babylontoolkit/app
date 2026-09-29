@@ -118,7 +118,7 @@ describe('the charged rate is official x ratio, per row (AC8)', () => {
     const rows = Object.entries(BAKED_COMET_PRICES.llm);
 
     /* A `for` loop over an empty object asserts nothing at all — pin that there is something to check. */
-    expect(rows.length, 'the price list must actually price something').toBe(8);
+    expect(rows.length, 'the price list must actually price something').toBe(11);
 
     for (const [model, rate] of rows) {
       const provenance = COMET_PRICE_PROVENANCE[model];
@@ -216,6 +216,11 @@ describe('the charged rate is official x ratio, per row (AC8)', () => {
       'claude-opus-5': { inputPerMTok: 4.0, outputPerMTok: 20.0 },
       'claude-opus-4-8': { inputPerMTok: 4.0, outputPerMTok: 20.0 },
       'claude-fable-5': { inputPerMTok: 8.0, outputPerMTok: 40.0 },
+
+      /* 2026-09-29 feed capture, official x 0.8 (Opus 5.5 from its tiered_expr: $4 / $20). */
+      'claude-sonnet-5-5': { inputPerMTok: 1.6, outputPerMTok: 8.0 },
+      'claude-opus-5-5': { inputPerMTok: 3.2, outputPerMTok: 16.0 },
+      'claude-fable-5-1': { inputPerMTok: 8.0, outputPerMTok: 40.0 },
       'grok-4.5': { inputPerMTok: 1.6, outputPerMTok: 4.8 },
       'kimi-k3': { inputPerMTok: 2.4, outputPerMTok: 12.0 },
       'qwen3-coder': { inputPerMTok: 0.24, outputPerMTok: 0.96 },
@@ -491,6 +496,9 @@ describe('the shipped ids (FR4)', () => {
       'claude-opus-5',
       'claude-opus-4-8',
       'claude-fable-5',
+      'claude-sonnet-5-5',
+      'claude-opus-5-5',
+      'claude-fable-5-1',
     ]);
     expect(COMET_MODELS.map((m) => m.name)).not.toContain('claude-haiku-4-5-20251001');
   });

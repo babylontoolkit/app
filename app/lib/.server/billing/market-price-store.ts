@@ -27,6 +27,7 @@ import type { MarketPriceList } from './market-prices';
 import { validateMarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { BAKED_COMET_PRICES } from './baked-comet-prices';
+import { BAKED_ANTHROPIC_PRICES } from './baked-anthropic-prices';
 
 const logger = createScopedLogger('market-price-store');
 
@@ -39,10 +40,14 @@ const logger = createScopedLogger('market-price-store');
  * instead, which is the same guarantee without the edge — the identical trade `model-families.ts`
  * makes to stay client-safe.
  *
- * `Anthropic` is absent because it is not a marketplace: Anthropic's rates are first-party and live
- * in `MODEL_RATES`, hand-maintained in code. There is nothing for an operator to promote.
+ * 🔴 `Anthropic` JOINED 2026-09-29 (owner). It was absent on the grounds that Anthropic is not a
+ * marketplace and its first-party rates "live in `MODEL_RATES`, hand-maintained in code" — which made
+ * adopting a newly released model on Anthropic a source edit and a redeploy, while the same model on
+ * a gateway was one row in the Admin panel. The rates are still first-party; the list is just where an
+ * operator states them. Its baked fallback is `BAKED_ANTHROPIC_PRICES` (built from `MODEL_RATES`).
+ * `PLATFORM_PROVIDERS` and this list are now the SAME set.
  */
-export const MARKET_PRICE_PROVIDERS = ['KIE', 'Comet'] as const;
+export const MARKET_PRICE_PROVIDERS = ['KIE', 'Comet', 'Anthropic'] as const;
 export type MarketPriceProvider = (typeof MARKET_PRICE_PROVIDERS)[number];
 
 /**
@@ -57,25 +62,26 @@ export type MarketPriceProvider = (typeof MARKET_PRICE_PROVIDERS)[number];
 const STORE_SLUG: Record<MarketPriceProvider, string> = {
   KIE: 'kie',
   Comet: 'comet',
+  Anthropic: 'anthropic',
 };
 
 /** The baked fallback per provider — real, current-at-build pricing, never a zero rate. */
 const BAKED_BY_PROVIDER: Record<MarketPriceProvider, MarketPriceList> = {
   KIE: BAKED_MARKET_PRICES,
   Comet: BAKED_COMET_PRICES,
+  Anthropic: BAKED_ANTHROPIC_PRICES,
 };
 
 /**
- * Every marketplace list a generation on `platformProvider` prices from — and there are usually TWO.
+ * Every price list a generation on `platformProvider` prices from — which is now ALL of them, the
+ * serving provider's own first.
  *
- * 🔴 KIE's list is ALWAYS in the answer, on every provider, because `getModelTier` prices the §4.6.1a
- * paid rungs from it regardless of who is serving. So an Anthropic or Comet deploy that refreshed
- * only "its own" list would price every premium rung from KIE's BAKED table forever — the operator's
- * promoted rung prices silently ignored, with nothing throwing and the credit total moving in
- * whichever direction the stale numbers happen to point.
- *
- * `Anthropic` contributes nothing of its own (its rates are first-party, in `MODEL_RATES`), so it
- * yields just KIE. A marketplace provider yields itself plus KIE, de-duplicated.
+ * 🔴 It used to be "own + KIE", because `getModelTier` priced every paid rung from KIE's list alone.
+ * That made a rung whose model KIE does not sell (Fable 5.1, 2026-09-29) unconfigurable on ANY
+ * gateway — refused on a Comet or Anthropic deploy for a reason that had nothing to do with either.
+ * A rung is now accepted if ANY list prices its model (`getModelTier`), so every list must be loaded
+ * before the ladder is read: a list left on its baked table here is an operator's promoted prices
+ * silently ignored. Loading is a cached read per list, at doorways that already await several.
  *
  * Takes a plain string rather than `PlatformProviderName` to keep this module free of the
  * `config -> rates -> market-price-store` import cycle.
@@ -83,7 +89,7 @@ const BAKED_BY_PROVIDER: Record<MarketPriceProvider, MarketPriceList> = {
 export function marketPriceProvidersFor(platformProvider: string): MarketPriceProvider[] {
   const own = MARKET_PRICE_PROVIDERS.find((name) => name === platformProvider);
 
-  return own && own !== 'KIE' ? [own, 'KIE'] : ['KIE'];
+  return own ? [own, ...MARKET_PRICE_PROVIDERS.filter((name) => name !== own)] : [...MARKET_PRICE_PROVIDERS];
 }
 
 /** The immutable-versions prefix for a provider. */
