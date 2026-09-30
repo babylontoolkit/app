@@ -1829,7 +1829,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 
 ### Phase 3 — Exporter (C#) fixes
 
-- [ ] **T8** — Make the Toolkit dev server safe on a network and correct for browsers
+- [x] **T8** — Make the Toolkit dev server safe on a network and correct for browsers
   - Depends on: —
   - Files (all under `PE`): `Core/Projects/WebTools.cs`, `Core/Libraries/CanvasToolsInformation.cs`,
     `Core/Utilities/CVPanel.cs`, `Core/Projects/UnityTools_HX.cs`
@@ -1919,7 +1919,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: the `dotnet build` above → `0 Error(s)`, then the curl commands above.
   - Verify level: live
 
-- [ ] **T9** — Fix the `bt_*` CLI bridge (port, auto port, status, unsaved scenes, silent failures)
+- [x] **T9** — Fix the `bt_*` CLI bridge (port, auto port, status, unsaved scenes, silent failures)
   - Depends on: T8
   - Files: `PE/Project/BabylonToolkit-2024/Packages/com.babylontoolkit.editor/Editor/CLI/BabylonToolkitCliCommands.cs`
   - Applies: D29, D30, D33; Design Reference › Auto port
@@ -2013,7 +2013,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
     acceptance commands.
   - Verify level: live
 
-- [ ] **T10** — Close the owner-email substring bypass and drop the dead Basic-auth header
+- [ ] **T10** — Close the owner-email substring bypass and drop the dead Basic-auth header ⏭️ DEFERRED (auto-pilot): the session's permission classifier denied the edit to `BabylonLicense.cs` as security-weakening (it actually tightens the owner check and removes a dead credential); needs the owner to approve or make the edit by hand
   - Depends on: —
   - Files: `PE/Core/System/BabylonLicense.cs`
   - Applies: D31, D32, D33
@@ -2050,7 +2050,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 
 ### Phase 4 — Agent Reference documentation (AgentReference clone, owner-directed)
 
-- [ ] **T11** — Fix the router and the Blender document
+- [x] **T11** — Fix the router and the Blender document
   - Depends on: —
   - Files: `AgentReference/reference.md`, `AgentReference/references/unity-blender-cli.md`
   - Applies: D33, D34; spec D6, D7
@@ -2190,7 +2190,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: the greps + the headless run above.
   - Verify level: live
 
-- [ ] **T12** — Fix the Unity editor-commands and CLI reference documents
+- [x] **T12** — Fix the Unity editor-commands and CLI reference documents
   - Depends on: —
   - Files: `AgentReference/references/unity-editor-commands.md`, `AgentReference/references/unity-cli-reference.md`
   - Applies: D33; spec D8, D9
@@ -2279,7 +2279,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: the greps above.
   - Verify level: standard
 
-- [ ] **T13** — Fix and split the exporter document; fix the authoring recipes
+- [x] **T13** — Fix and split the exporter document; fix the authoring recipes
   - Depends on: T11, T12
   - Files: `AgentReference/references/unity-exporter-cli.md`, `AgentReference/references/unity-authoring-recipes.md`,
     `AgentReference/references/unity-exporter-licensing.md` (create), `AgentReference/references/unity-exporter-internals.md` (create),
@@ -2374,7 +2374,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 
 ### Phase 5 — Bridge server core
 
-- [ ] **T14** — Shared bridge protocol, tier classifier, pricing and validation
+- [x] **T14** — Shared bridge protocol, tier classifier, pricing and validation
   - Depends on: —
   - Files: `app/lib/bridge/protocol.ts`, `tiers.ts`, `pricing.ts`, `validate.ts` (create) + `tiers.spec.ts`,
     `pricing.spec.ts`, `validate.spec.ts`
@@ -2427,7 +2427,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/bridge` → pass.
   - Verify level: standard
 
-- [ ] **T15** — Migration 0025, the `bridge` ledger reason, the bridge store, and the project link field
+- [x] **T15** — Migration 0025, the `bridge` ledger reason, the bridge store, and the project link field
   - Depends on: T14
   - Files: `supabase/migrations/0025_unity_bridge.sql` (create); `app/lib/.server/billing/ledger.ts`,
     `ledger-sql.spec.ts`, `money-paths.spec.ts`, `app/lib/billing/ledger-display.ts`,
@@ -2479,7 +2479,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
     failures; `pnpm typecheck` → 0 errors.
   - Verify level: standard
 
-- [ ] **T16** — Device pairing, device-token auth, and the devices route
+- [x] **T16** — Device pairing, device-token auth, and the devices route
   - Depends on: T15
   - Files: `app/lib/.server/bridge/auth.ts`, `pairing.ts` (create) + specs;
     `app/routes/api.bridge.pair.ts`, `app/routes/api.bridge.devices.ts` (create);

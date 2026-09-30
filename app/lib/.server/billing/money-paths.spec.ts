@@ -59,7 +59,7 @@ const REASON = /reason:\s*'([a-z_]+)'/g;
  * unclassified reason" test below — which is how a NEW debit reason gets noticed on the day it lands
  * rather than the day someone audits.
  */
-const DEBIT_REASONS = new Set(['generation', 'media', 'search', 'project_create']);
+const DEBIT_REASONS = new Set(['generation', 'media', 'search', 'project_create', 'bridge']);
 
 /** The reasons that GIVE credits. A grant has nothing to refund; its risk is duplication, not silence. */
 const CREDIT_REASONS = new Set(['grant', 'purchase', 'refund', 'promo', 'adjustment']);

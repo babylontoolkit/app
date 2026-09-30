@@ -649,6 +649,39 @@ describe('credit_ledger.generation_id → generations(id)', () => {
 
     await expect(append({ delta: -150, reason: 'project_create' })).rejects.toThrow(/insufficient|balance|negative/i);
   });
+
+  /*
+   * The 'bridge' reason (migration 0025): a Unity Bridge operation, the 'media' shape — debited BEFORE
+   * dispatch and anchored to a generations row (the job id), so it must REFUSE rather than overdraw.
+   */
+  it('accepts a bridge debit anchored to a generations row', async () => {
+    await append({ delta: 10, reason: 'grant' });
+    await createGeneration('brg_t');
+
+    const row = await append({ delta: -2, reason: 'bridge', generationId: 'brg_t' });
+
+    expect(row.balance_after).toBe(8);
+  });
+
+  it('REFUSES a bridge debit that would overdraw', async () => {
+    await append({ delta: 1, reason: 'grant' });
+    await createGeneration('brg_t');
+
+    await expect(append({ delta: -2, reason: 'bridge', generationId: 'brg_t' })).rejects.toThrow(
+      /insufficient|balance|negative/i,
+    );
+  });
+
+  /*
+   * D13 latch 2: a bridge job is refunded exactly once, enforced by the partial unique index on the
+   * refund's note `bridge:<jobId>` — never by a read-then-write check two racing settlers can both pass.
+   */
+  it('REFUSES a second bridge refund for the same job', async () => {
+    await append({ delta: 10, reason: 'refund', note: 'bridge:brg_x' });
+
+    await expect(append({ delta: 10, reason: 'refund', note: 'bridge:brg_x' })).rejects.toThrow(/duplicate|unique/i);
+    expect(await balance()).toBe(10);
+  });
 });
 
 /**

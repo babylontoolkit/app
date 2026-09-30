@@ -46,6 +46,9 @@ const logger = createScopedLogger('ledger');
  * `mayGoNegative` below. Not anchored to a generations row (creation runs no generation at all).
  */
 /**
+ * 'bridge' — a Unity Bridge operation, debited BEFORE dispatch and refunded if it never ran (§4.17). Never negative.
+ */
+/**
  * The runtime inventory. The union is DERIVED from it rather than declared beside it, so a reason cannot
  * exist in the type and be invisible to the tests that check the type against the SQL `CHECK` constraint
  * (`ledger-sql.spec.ts`) — the three lockstep places (union, `mayGoNegative`, SQL) drifting apart is a
@@ -58,6 +61,7 @@ export const LEDGER_REASONS = [
   'media',
   'search',
   'project_create',
+  'bridge',
   'refund',
   'promo',
   'adjustment',
@@ -190,7 +194,7 @@ function mayGoNegative(reason: LedgerReason): boolean {
    * 'search' joins them: it is debited mid-generation after the vendor was already paid, so it cannot
    * be refused without eating the cost AND losing the audit trail (migration 0010).
    *
-   * 🔴 'media' and 'project_create' are deliberately ABSENT: each debits BEFORE the spend it pays for,
+   * 🔴 'media', 'project_create' and 'bridge' are deliberately ABSENT: each debits BEFORE the spend it pays for,
    * so each must refuse rather than overdraw. Adding one here silently converts a refusal into free
    * work on the platform's bill.
    */

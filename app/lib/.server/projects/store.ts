@@ -219,6 +219,7 @@ function rowToProject(row: Record<string, any>): Project {
     autoPush: row.auto_push ?? true,
     gameBackendRef: row.game_backend_ref ?? undefined,
     sandboxId: row.sandbox_id ?? undefined,
+    bridgeLink: row.bridge_link ?? undefined,
     creationHandoff: row.creation_handoff ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -247,6 +248,7 @@ function projectToRow(project: Partial<Project>): Record<string, any> {
     githubInstallationRef: 'github_installation_ref',
     gameBackendRef: 'game_backend_ref',
     sandboxId: 'sandbox_id',
+    bridgeLink: 'bridge_link',
     creationHandoff: 'creation_handoff',
     autoPush: 'auto_push',
   };

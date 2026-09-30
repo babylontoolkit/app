@@ -39,6 +39,15 @@ export interface CreationHandoff {
   plan?: CreationPlan;
 }
 
+/** A project's Unity Bridge link (SPEC §4.17, D44). */
+export interface BridgeLink {
+  deviceId: string;
+  unityProjectKey: string;
+  unityProjectName: string;
+  allowScripts: boolean;
+  linkedAt: string;
+}
+
 export interface Project {
   id: string;
   userId: string;
@@ -144,6 +153,13 @@ export interface Project {
    * identity against. `undefined` = no VM has been created for this project yet.
    */
   sandboxId?: string;
+
+  /**
+   * The Unity Bridge link (SPEC §4.17, migration 0025): which paired Desktop Agent device and which
+   * Unity project on it this builder project drives. `undefined` = not linked. A fact about the author's
+   * machine — never carried by a remix (D44).
+   */
+  bridgeLink?: BridgeLink;
 
   /**
    * The creation → build handoff for a project that has never been built (§4.4a, migration 0016).

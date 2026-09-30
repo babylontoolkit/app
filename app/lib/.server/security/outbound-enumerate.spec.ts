@@ -41,7 +41,7 @@ function stripComments(source: string): string {
  * routes outright. That NO wall is present is always wrong.
  */
 const WALL =
-  /denyUnlessVerified|requireVerifiedUser|requireUser|requireAdmin|requireOwnedProject|upstreamLlmRouteDisabled|serverSideMcpDisabled|requireUnitySubscriptionKey/;
+  /denyUnlessVerified|requireVerifiedUser|requireUser|requireAdmin|requireOwnedProject|upstreamLlmRouteDisabled|serverSideMcpDisabled|requireUnitySubscriptionKey|requireBridgeDevice/;
 
 /** A Remix route only does anything if it actually exports a handler. */
 const HANDLER = /export\s+(?:async\s+function|const|function)\s+(?:loader|action)\b/;
@@ -73,6 +73,8 @@ const PUBLIC_BY_DESIGN: Record<string, string> = {
     'Server-side MCP is fail-closed (§4.14 RCE); the guard 404s it unless explicitly enabled.',
   'api.update.ts':
     'Upstream self-update; refuses to auto-pull, and the Features toggle that drove it is hidden (§2.3).',
+  'api.bridge.pair.ts':
+    'Device-code pairing: a CLI has no session; start is fingerprint-rate-limited and redeem needs the pairing secret.',
 
   /*
    * ⚠️ NOT a blessing — these two run `execSync` on the host and return branch/commit/disk facts to an
