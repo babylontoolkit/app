@@ -118,7 +118,7 @@ regression hides *inside* the machinery built to catch the last one.
 | Guard | Where | Catches |
 |---|---|---|
 | Zero-text → hard failure → auto-refund | `proxy.ts` (`producedText`) | The clean-`stop`-that-said-nothing (10,054 tokens, 405 credits) |
-| Unproductive-turn rescue, ONE bounded pass, `+unproductive-rescue` marker | `agent/unproductive.ts` + `proxy.ts` | The 316-credit promise; preamble-only turns |
+| Unproductive-turn rescue, ONE bounded pass, `+unproductive-rescue` marker | `agent/unproductive.ts` + `proxy.ts` | The 316-credit promise; preamble-only turns; and (2026-09-30, owner) a build turn that **paid for media and then ended with zero text** — the one zero-text turn that is retried before the refund, with tools OFF and `MEDIA_SPENT_RESCUE_PROMPT`, because media is not refunded and a user Retry re-commissions the art (`gen_munxw16w_nk741t`: six extra renders across four attempts) |
 | Forced continuation, gated on a REAL last-step tool call | `shouldForceContinuation` | Tool-cap truncation, without the 2× spurious re-run |
 | Transport-envelope strip + loose drift tripwire → monitoring | `chat/message-envelope.ts`, `transport-envelope.spec.ts` | The `/slash` drop, and its silent return under a changed format |
 | Media: quote=debit, refuse-not-guess, refund-exactly-once latch, never-negative `'media'` | `media/service.ts`, migration 0009 | Charging for renders that cannot be priced or never delivered |
@@ -217,7 +217,7 @@ exactly 11 call sites, and every one is below. The KIE-reaching set is enumerate
 
 | Path | Gate | Settles | Failure handling |
 |---|---|---|---|
-| `agent/proxy.ts` (generation, repair, forced continuation, unproductive rescue, paid model tiers) | `checkCreditGate` once | `settleGeneration` in `finally` | zero-text → hard failure → auto-refund; abort → CHARGED AS CONSUMED |
+| `agent/proxy.ts` (generation, repair, forced continuation, unproductive rescue, paid model tiers) | `checkCreditGate` once | `settleGeneration` in `finally` | zero-text → hard failure → auto-refund (a build turn that already paid for media gets ONE tools-off rescue pass first); abort → CHARGED AS CONSUMED |
 | `routes/api.enhancer.ts` | `checkCreditGate` | `settleGeneration` on stream end | **FIXED in Stage A** — see defect 2 |
 | `media/kie-client.ts` `create` | debit precedes it | n/a (fixed price) | create throws → refund + anchor `failed` + 502 |
 | `media/kie-client.ts` `query` | n/a | n/a | flaky poll ≠ failure (stays pending); a reported failure refunds once |

@@ -52,7 +52,13 @@ const env = Object.fromEntries(
     .filter((l) => l.trim() && !l.trim().startsWith('#') && l.includes('='))
     .map((l) => {
       const i = l.indexOf('=');
-      return [l.slice(0, i).trim(), l.slice(i + 1).trim().replace(/^["']|["']$/g, '')];
+      return [
+        l.slice(0, i).trim(),
+        l
+          .slice(i + 1)
+          .trim()
+          .replace(/^["']|["']$/g, ''),
+      ];
     }),
 );
 
@@ -148,11 +154,20 @@ const FAMILY = familyOf(MODEL);
  * exactly the plausible-but-wrong answer this file's header is a monument to.
  */
 if (IS_ANTHROPIC && FAMILY !== 'claude') {
-  throw new Error(`PROBE_PROVIDER=Anthropic serves claude models only; "${MODEL}" is ${FAMILY}. Use PROBE_PROVIDER=KIE.`);
+  throw new Error(
+    `PROBE_PROVIDER=Anthropic serves claude models only; "${MODEL}" is ${FAMILY}. Use PROBE_PROVIDER=KIE.`,
+  );
 }
 
 // ~1.5k tokens of stable filler — the cacheable prefix.
-const PREFIX = 'The quick brown fox jumps over the lazy dog. '.repeat(300);
+/**
+ * `PROBE_PREFIX_REPEAT` scales the prefix (default 300 ≈ 5.4k real tokens). Added 2026-09-30: a
+ * gateway can route a small request and a real ~54k-token build prefix differently (capacity-based
+ * cross-region routing on Bedrock is the suspect), so a probe at the default size cannot speak for a
+ * build. 3000 ≈ 54k tokens ≈ $0.30 on Sonnet 5.5 for 12 requests.
+ */
+const PREFIX_REPEAT = Math.max(300, Number(process.env.PROBE_PREFIX_REPEAT) || 300);
+const PREFIX = 'The quick brown fox jumps over the lazy dog. '.repeat(PREFIX_REPEAT);
 const SYSTEM_TEXT = `You are a cache probe. Reference text follows.\n\n${PREFIX}`;
 
 const N = Number(process.argv[2] || 12);
@@ -187,6 +202,7 @@ function cacheRequest() {
     return {
       url: `${CODEX_BASE}/responses`,
       headers: {},
+
       /*
        * OpenAI caches long prefixes automatically — there is no breakpoint to place — so the stable
        * bytes go in `instructions`, which is what leads the prompt on this wire. `stream: true`
@@ -312,6 +328,50 @@ function countersFrom(family, raw) {
 
 const { url, headers, body } = cacheRequest();
 
+/**
+ * `PROBE_VARY_TAIL=1` (claude family) — same cached prefix, a DIFFERENT final user message per request.
+ *
+ * Added 2026-09-30. Identical requests hit 11/12 on Comet, yet a real build's tool loop re-wrote the
+ * same 53,880-token prefix on three of six steps. The steps of a tool loop share the prefix and differ
+ * in the tail, so a gateway that routes on the WHOLE request (or at random per distinct body) looks
+ * perfect to an identical-request probe and scatters a real generation. This mode is that shape.
+ */
+const VARY_TAIL = process.env.PROBE_VARY_TAIL === '1' && FAMILY === 'claude';
+
+/**
+ * `PROBE_REAL_SHAPE=1` (claude family) — send what a real build step sends that the bare probe does
+ * not: a tool definition, adaptive thinking with `output_config.effort`, and enough `max_tokens` for
+ * the model to actually think. Added 2026-09-30, when a bare probe hit 9/10 at build size while a real
+ * build re-wrote its prefix on three of six steps — so the difference had to be in these fields.
+ */
+const REAL_SHAPE = process.env.PROBE_REAL_SHAPE === '1' && FAMILY === 'claude';
+
+function probeBody(i) {
+  let next = body;
+
+  if (VARY_TAIL) {
+    next = { ...next, messages: [{ role: 'user', content: `ok ${i} ${Date.now()}` }] };
+  }
+
+  if (REAL_SHAPE) {
+    next = {
+      ...next,
+      max_tokens: 2048,
+      thinking: { type: 'adaptive', display: 'summarized' },
+      output_config: { effort: 'medium' },
+      tools: [
+        {
+          name: 'read_file',
+          description: 'Read a project file by path.',
+          input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+        },
+      ],
+    };
+  }
+
+  return next;
+}
+
 console.log(
   `provider=${PROVIDER_LABEL}  model=${MODEL}  family=${FAMILY}  requests=${N}  ` +
     `delay=${DELAY_MS}ms  prefix≈${Math.round(PREFIX.length / 4)} tokens\n`,
@@ -335,6 +395,7 @@ for (let i = 1; i <= N; i++) {
 
   const res = await fetch(url, {
     method: 'POST',
+
     /*
      * Anthropic authenticates with `x-api-key`; KIE proxies the same wire behind a bearer token.
      * Sending the wrong one is a 401 that reads like a dead model rather than a dead credential.
@@ -342,10 +403,11 @@ for (let i = 1; i <= N; i++) {
     headers: {
       'content-type': 'application/json',
       ...(IS_ANTHROPIC ? { 'x-api-key': KEY } : { authorization: `Bearer ${KEY}` }),
+
       /* Comet accepts either; sending the bearer above is enough, and the unused header is ignored. */
       ...headers,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(probeBody(i)),
   });
 
   const ms = Date.now() - t0;

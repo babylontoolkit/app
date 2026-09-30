@@ -81,6 +81,16 @@ export interface UnproductiveTurnInput {
   /** Tool calls across every step. A tool call is work; the tool-CAP case is not ours. */
   toolCalls: number;
 
+  /**
+   * How many of those tool calls were PAID media generations (`MEDIA_TOOL_NAMES`).
+   *
+   * Media is debited when the call is made and is NOT refunded when the turn fails — the render is
+   * real and still lands in the project. So a build turn that commissioned art and then ended silent
+   * has already spent money the user keeps paying for on every Retry, because a fresh attempt starts
+   * over and commissions NEW art. See the zero-text rule in `shouldRescueUnproductiveTurn`.
+   */
+  mediaCalls: number;
+
   /** Visible text characters, summed from the step log (`step.text`), not the raw stream. */
   textChars: number;
 
@@ -151,8 +161,25 @@ export function shouldRescueUnproductiveTurn(input: UnproductiveTurnInput): bool
     return false;
   }
 
-  // Zero text is the EXISTING hard failure (refund, §4.6) — do not spend a second pass on silence.
-  if (input.textChars <= 0 || input.outTokens < MIN_BILLED_OUTPUT_TOKENS) {
+  /*
+   * Zero text is the EXISTING hard failure (refund, §4.6) — with ONE exception (owner, 2026-09-30).
+   *
+   * A build turn that already PAID for media and then ended silent is retried once before it is
+   * called a failure. Measured live the same day on Comet → Sonnet 5.5 (`gen_munxw16w_nk741t` and the
+   * three before it): the turn read files, called `generate_image`, thought ~1,100 tokens and ended
+   * with no text. Refunding the generation did not refund the images, and each Retry started over and
+   * commissioned new ones — six extra renders across four attempts, for a game that was never written.
+   * The rescue pass runs with tools OFF (`startStream(…, false)`), so it cannot buy more art; it can
+   * only write the game against art that is already paid for and on its way into the project.
+   *
+   * Scoped to `requiresAction` (a turn that owes files) and to MEDIA calls, not any tool call: silence
+   * after a few `read_file`s has spent nothing the user keeps, so the refund is still the right answer.
+   */
+  if (input.textChars <= 0) {
+    return input.requiresAction && input.mediaCalls > 0;
+  }
+
+  if (input.outTokens < MIN_BILLED_OUTPUT_TOKENS) {
     return false;
   }
 
@@ -191,6 +218,24 @@ export const UNPRODUCTIVE_RESCUE_PROMPT =
   'You have no skill-loading tools this turn — everything you need is already in the context above, ' +
   'including any invoked skill. Do not describe your plan or say you are about to start: carry out ' +
   'the request now, completely, in this response.';
+
+/**
+ * The corrective turn for a build that paid for media and then went silent (see the zero-text rule).
+ *
+ * Its own sentence because the generic one is wrong here twice: the model did not "announce" anything
+ * (it said nothing), and the failure to prevent is a second round of art — so it names the renders as
+ * already paid for and still arriving, and points at the paths the tool calls above returned.
+ */
+export const MEDIA_SPENT_RESCUE_PROMPT =
+  'Your last response ended without writing anything, but the images and videos you generated above are ' +
+  'already paid for and are rendering into the project at the paths those tool calls returned. You have ' +
+  'no tools this turn, so do not try to generate or read anything more — everything you need is in the ' +
+  'context above. Write the complete project now, in this response, referencing those paths.';
+
+/** Which corrective sentence a rescued turn gets. The media-spent case is the only silent one. */
+export function rescuePromptFor(input: Pick<UnproductiveTurnInput, 'textChars' | 'mediaCalls'>): string {
+  return input.textChars <= 0 && input.mediaCalls > 0 ? MEDIA_SPENT_RESCUE_PROMPT : UNPRODUCTIVE_RESCUE_PROMPT;
+}
 
 /**
  * 🔴 A BUILD TURN THAT WROTE NO FILES IS A FAILURE, EVEN AFTER THE RESCUES RAN (2026-08-07, §4.6).

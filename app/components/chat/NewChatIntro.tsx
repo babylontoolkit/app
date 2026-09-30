@@ -68,7 +68,7 @@ export function NewChatIntro() {
             <div className="i-ph:check-circle-duotone text-sm text-bolt-elements-icon-success shrink-0 mt-px" />
             <span>
               The assistant still reads your code, your{' '}
-              <code className="text-bolt-elements-textPrimary">CLAUDE.md</code> and your skills on every message.
+              <code className="text-bolt-elements-textPrimary">AGENTS.md</code> and your skills on every message.
             </span>
           </li>
           <li className="flex items-start gap-2">

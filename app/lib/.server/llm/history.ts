@@ -233,25 +233,65 @@ function stripReasoning(message: Message): Message {
  * they are correct.
  */
 export function compactHistory(messages: Message[], options: { maxTurns?: number } = {}): Message[] {
-  const compacted = messages.map((message) => {
-    if (message.role !== 'assistant' && message.role !== 'user') {
-      return message;
-    }
+  const compacted = messages
+    .map((message) => {
+      if (message.role !== 'assistant' && message.role !== 'user') {
+        return message;
+      }
 
-    // Thinking first: it must go whether or not the content is a plain string (see `stripReasoning`).
-    const stripped = message.role === 'assistant' ? stripReasoning(message) : message;
-    const withParts = compactTextParts(stripped);
+      // Thinking first: it must go whether or not the content is a plain string (see `stripReasoning`).
+      const stripped = message.role === 'assistant' ? stripReasoning(message) : message;
+      const withParts = compactTextParts(stripped);
 
-    if (typeof withParts.content !== 'string') {
-      return withParts;
-    }
+      if (typeof withParts.content !== 'string') {
+        return withParts;
+      }
 
-    const content = compactContent(withParts.content);
+      const content = compactContent(withParts.content);
 
-    return content === withParts.content ? withParts : { ...withParts, content };
-  });
+      return content === withParts.content ? withParts : { ...withParts, content };
+    })
+    .filter(saysSomething);
 
   return windowHistory(compacted, options.maxTurns ?? HISTORY_WINDOW_TURNS);
+}
+
+/**
+ * 🔴 An assistant turn with nothing left to send is DROPPED — or it kills every later turn in the chat.
+ *
+ * Measured live 2026-09-30 (Comet → Bedrock, `gen_munxuwgc_dor14m`): a first build turn ran its tool
+ * loop, streamed only thinking, and FAILED. The client kept that turn as an assistant message whose
+ * `content` is `''` and whose only part is `reasoning`. `stripReasoning` removed the reasoning (it must
+ * — see above), leaving nothing, and `convertToCoreMessages` turned it into
+ * `{ role: 'assistant', content: [] }`. The API refuses that before a token:
+ *
+ *     messages: all messages must have non-empty content except for the optional final assistant message
+ *
+ * and since the message lives in the history, EVERY later turn in that chat failed the same way in ~2s,
+ * with nothing the user could do but start a new chat. This is `stripReplayedReasoning`'s rule (below)
+ * applied to the client's history — the sibling had it, this one did not, which is the "two siblings
+ * must not diverge" warning on that function coming true.
+ *
+ * Only ASSISTANT messages are dropped: they said nothing the model needs. A user message is never
+ * dropped here — it may carry only an attachment, and what the user sent is not ours to discard.
+ */
+function saysSomething(message: Message): boolean {
+  if (message.role !== 'assistant') {
+    return true;
+  }
+
+  if (typeof message.content === 'string' && message.content.trim().length > 0) {
+    return true;
+  }
+
+  return (message.parts ?? []).some((part) => {
+    if (part.type === 'text') {
+      return typeof part.text === 'string' && part.text.trim().length > 0;
+    }
+
+    // `reasoning` is already stripped; `step-start` is a boundary marker that converts to nothing.
+    return part.type !== 'reasoning' && part.type !== 'step-start';
+  });
 }
 
 /**

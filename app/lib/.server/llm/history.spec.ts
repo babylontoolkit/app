@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import type { Message } from 'ai';
+import { convertToCoreMessages, type Message } from 'ai';
 import {
   compactHistory,
   historySavings,
@@ -763,5 +763,70 @@ describe('CONTROL — every replay of provider messages is stripped', () => {
 
       expect(line).toContain('stripReplayedReasoning(');
     }
+  });
+});
+
+describe('compactHistory — a turn that was ONLY thinking is dropped, never sent empty', () => {
+  /*
+   * Measured live 2026-09-30 (`gen_munxuwgc_dor14m`, Comet → Bedrock): a failed build turn left an
+   * assistant message that was only reasoning. Stripping the reasoning left `content: []` on the wire,
+   * and the API refused EVERY later turn in that chat with "all messages must have non-empty content".
+   * Asserted on what `convertToCoreMessages` produces, because that is what reaches the provider.
+   */
+  const thinkingOnly = (): Message =>
+    ({
+      id: 'a-failed',
+      role: 'assistant',
+      content: '',
+      reasoning: 'I should read the Home page first...',
+      parts: [{ type: 'reasoning', reasoning: 'I should read the Home page first...', details: [] }],
+    }) as unknown as Message;
+
+  const wire = (messages: Message[]) => convertToCoreMessages(compactHistory(messages) as any);
+
+  it('never sends an assistant message with empty content', () => {
+    const out = wire([userTurn('build my game'), thinkingOnly(), userTurn('try again')]);
+
+    const empty = out.filter(
+      (m) => m.role === 'assistant' && (Array.isArray(m.content) ? m.content.length === 0 : !String(m.content).trim()),
+    );
+    expect(empty).toEqual([]);
+  });
+
+  it('drops only the empty turn — both user messages survive', () => {
+    const out = compactHistory([userTurn('build my game'), thinkingOnly(), userTurn('try again')]);
+
+    expect(out.map((m) => m.id)).not.toContain('a-failed');
+    expect(out.filter((m) => m.role === 'user')).toHaveLength(2);
+  });
+
+  it('CONTROL: an assistant turn that said something is kept', () => {
+    const answered = {
+      ...thinkingOnly(),
+      id: 'a-ok',
+      content: 'Built it.',
+      parts: [{ type: 'text', text: 'Built it.' }],
+    };
+    const out = compactHistory([userTurn('build my game'), answered as unknown as Message]);
+
+    expect(out.map((m) => m.id)).toContain('a-ok');
+  });
+
+  it('CONTROL: an assistant turn whose only content is a tool invocation is kept', () => {
+    const tooled = {
+      id: 'a-tool',
+      role: 'assistant',
+      content: '',
+      parts: [
+        { type: 'reasoning', reasoning: 'x', details: [] },
+        {
+          type: 'tool-invocation',
+          toolInvocation: { state: 'result', toolCallId: 't1', toolName: 'read_file', args: {}, result: 'ok' },
+        },
+      ],
+    } as unknown as Message;
+    const out = compactHistory([userTurn('build my game'), tooled]);
+
+    expect(out.map((m) => m.id)).toContain('a-tool');
   });
 });

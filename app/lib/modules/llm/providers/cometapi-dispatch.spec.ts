@@ -59,6 +59,7 @@ import {
 } from '~/lib/modules/llm/capabilities';
 import { requireFamily, FAMILY_POLICY } from '~/lib/modules/llm/model-families';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
+import { tapStopReasons } from '~/lib/modules/llm/stop-reason-tap';
 import {
   cometEnvModel,
   cometGeminiBaseUrl,
@@ -229,7 +230,7 @@ function buildInstance(
     headers,
 
     // NO `kieFetch` — `thinkingFlag` is KIE's private field. The chain is thinkingFetch -> rateLimit.
-    fetch: thinkingFetch(mode, effort, model, rateLimitFetch({ provider: PROVIDER_NAME }, spy)),
+    fetch: thinkingFetch(mode, effort, model, tapStopReasons(rateLimitFetch({ provider: PROVIDER_NAME }, spy))),
   });
 
   const instance = supportsSamplingParams(model) ? comet(model) : stripSamplingParams(comet(model));
@@ -624,7 +625,7 @@ describe('cometapi.ts really wires the branches this spec reproduces', () => {
     expect(code).toContain("if (wire === 'gemini')");
     expect(code).toContain('cometGeminiBaseUrl(base)');
 
-    expect(code).toContain('thinkingFetch(thinkingMode, effort, model, rateLimitFetch(');
+    expect(code).toContain('thinkingFetch(thinkingMode, effort, model, tapStopReasons(rateLimitFetch(');
   });
 
   /*

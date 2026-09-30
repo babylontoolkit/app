@@ -41,12 +41,19 @@
  *  - **`kieFetch`** — it sets `thinkingFlag`, a field private to KIE's Claude adapter. Comet is a
  *    native passthrough and has no such field; `scripts/stream-probe.mjs`'s Comet block omits it for
  *    the same reason.
- *  - **`refusalFallbackFetch` / `tapStopReasons`** — `anthropic.ts` wraps both; `kie.ts` wraps
- *    neither, and this file follows KIE. Whether Comet forwards `fallbacks` and the
- *    `server-side-fallback-2026-07-01` beta header is UNPROBED (spec OQ2/OQ3). A beta header a gateway
- *    rejects is a hard 400 on every request; a `fallbacks` field it silently drops is a Fable 5
- *    refusal surfacing as today's error, which is survivable. Wire them only once probed — the
- *    asymmetry of those two failures is why the default is "not wired".
+ *  - **`refusalFallbackFetch`** — `anthropic.ts` wraps it; `kie.ts` does not, and this file follows
+ *    KIE. Whether Comet forwards `fallbacks` and the `server-side-fallback-2026-07-01` beta header is
+ *    UNPROBED (spec OQ2/OQ3). A beta header a gateway rejects is a hard 400 on every request; a
+ *    `fallbacks` field it silently drops is a Fable 5 refusal surfacing as today's error, which is
+ *    survivable. Wire it only once probed — the asymmetry of those two failures is why the default is
+ *    "not wired".
+ *
+ * `tapStopReasons` IS wired on the Claude branch (2026-09-30), and it never belonged in the list above:
+ * it changes nothing about the REQUEST — it tees the response and reads `stop_reason` off the copy, so
+ * no gateway can reject it. It was left out only because it had been grouped with the fallback. The
+ * cost of that was measured the same day: four Comet build turns ended with thinking and no text,
+ * `generations.rawStops` was `[]` on every one, and nothing could say whether the model finished
+ * (`end_turn`), was refused, or hit a ceiling — which is the one question such a failure raises.
  */
 import { BaseProvider } from '~/lib/modules/llm/base-provider';
 import {
@@ -69,6 +76,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { cometEnvModel, cometGeminiBaseUrl, COMET_DEFAULT_BASE_URL, COMET_MODELS, COMET_WIRES } from './comet-wire';
 import { requireFamily } from '~/lib/modules/llm/model-families';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
+import { tapStopReasons } from '~/lib/modules/llm/stop-reason-tap';
 
 export default class CometApiProvider extends BaseProvider {
   name = 'Comet';
@@ -210,9 +218,10 @@ export default class CometApiProvider extends BaseProvider {
      * unchanged. `thinkingFetch` only rewrites the request BODY (it never looks at the URL), which is
      * why a passthrough gateway composes with it exactly as the direct provider does.
      *
-     * The chain reads outside-in: thinkingFetch -> rateLimitFetch. `rateLimitFetch` sits closest to
-     * the network because it is the only one that decides whether to send the finished body AGAIN — it
-     * must see the request exactly as the vendor will.
+     * The chain reads outside-in: thinkingFetch -> tapStopReasons -> rateLimitFetch. `rateLimitFetch`
+     * sits closest to the network because it is the only one that decides whether to send the finished
+     * body AGAIN — it must see the request exactly as the vendor will. The tap sits just above it, as in
+     * `anthropic.ts`, so it reads the response that actually came back rather than a retried one's.
      */
     const comet = createAnthropic({
       apiKey,
@@ -224,7 +233,7 @@ export default class CometApiProvider extends BaseProvider {
        */
       headers,
 
-      fetch: thinkingFetch(thinkingMode, effort, model, rateLimitFetch({ provider: this.name })),
+      fetch: thinkingFetch(thinkingMode, effort, model, tapStopReasons(rateLimitFetch({ provider: this.name }))),
     });
 
     const instance = supportsSamplingParams(model) ? comet(model) : stripSamplingParams(comet(model));

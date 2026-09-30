@@ -35,8 +35,8 @@ import {
 import {
   isFailedBuildTurn,
   NO_FILES_WRITTEN_ERROR,
+  rescuePromptFor,
   shouldRescueUnproductiveTurn,
-  UNPRODUCTIVE_RESCUE_PROMPT,
 } from './unproductive';
 import { ACTION_CLOSE_TAG, ACTION_OPEN_TAG, createTagCounter, isTruncatedAction } from './action-tags';
 import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './creation-completion';
@@ -92,7 +92,8 @@ import { createRepairTool, repairUnavailableToolCall } from './tool-repair';
 import { createWebFetchTool } from './web-fetch-tool';
 import { createWebSearchTool } from './web-search-tool';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
-import { createMediaTools, type MediaTaskEvent } from './media-tools';
+import { createMediaTools, MEDIA_TOOL_NAMES, type MediaTaskEvent } from './media-tools';
+import { prefixChanges, stepPrefixHashes, type StepPrefixHashes } from './step-prefix';
 import { createBridgeTools } from './bridge-tools';
 import {
   resolveBridgeTurn,
@@ -1114,7 +1115,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
 
   /*
-   * The project's own `CLAUDE.md` (§4.2) is LIFTED OUT of the file map before the split — it becomes
+   * The project's own `AGENTS.md` (legacy `CLAUDE.md` when that is all it has, §4.2) is LIFTED OUT of the file map before the split — it becomes
    * the Project Instructions block further down, and the same bytes must never be sent twice (paid
    * twice per turn, and two copies to disagree after an edit).
    */
@@ -1126,7 +1127,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     contextFiles = rest;
 
     if (instructions.truncated) {
-      logger.warn(`Project CLAUDE.md exceeded ${MAX_INSTRUCTIONS_CHARS} chars and was truncated`);
+      logger.warn(`Project ${instructions.path} exceeded ${MAX_INSTRUCTIONS_CHARS} chars and was truncated`);
     }
   }
 
@@ -2067,6 +2068,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /** One warning per generation when the family's usage namespace is absent — see the step handler. */
   let warnedMissingUsageNamespace = false;
   const stepLog: NonNullable<GenerationRecord['steps']> = [];
+  let previousStepPrefix: StepPrefixHashes | undefined;
 
   /**
    * One entry per stream start, IN ORDER — a turn that re-issues produces two or more.
@@ -2106,6 +2108,17 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     modelOverride?: LanguageModelV1,
   ) => {
     const activeTools = toolsOverride ?? tools;
+
+    /*
+     * ⚠️ `'none'` makes `@ai-sdk/anthropic` DELETE the `tools` array, and tools come first in the cache
+     * order — so every tools-off re-issue (completeness pass, rescue, forced continuation) is a
+     * different cached prefix and re-writes it (measured 2026-09-30, step hashes `tools: none`: 51,350
+     * tokens re-written on one build, ~$0.16 of $0.55). The obvious fix — keep the tools and send the
+     * API's native `tool_choice: {type:'none'}` — was PROBED and REJECTED: on Comet → Sonnet 5.5, when
+     * the model wants a tool, it returns `content: []` with 1 output token (2/2), i.e. the
+     * empty-response failure, while today's no-tools request answers normally (2/2). These passes run
+     * right after a tool loop, which is exactly when the model wants a tool. Re-probe before changing.
+     */
     const toolChoice = allowTools ? 'auto' : Object.keys(activeTools).length > 0 ? 'none' : undefined;
     const maxSteps = allowTools ? toolPolicy.maxSteps : 1;
 
@@ -2221,6 +2234,23 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         const textChars = step.text?.length ?? 0;
         const reasoningChars = step.reasoning?.length ?? 0;
 
+        /*
+         * Did the cached prefix change since the previous step of THIS generation? It should not — see
+         * `step-prefix.ts` for the build that re-wrote ~54k tokens on three of six steps with nothing
+         * saying why. Warned per occurrence, because each one is a full-prefix write at 2×.
+         */
+        const prefix = stepPrefixHashes(step.request?.body);
+        const changed = prefixChanges(previousStepPrefix, prefix);
+
+        if (changed.length > 0) {
+          logger.warn(
+            `Cached prefix changed between steps ${stepIndex} and ${stepIndex + 1} (${changed.join(', ')}) — ` +
+              `this step re-wrote ${cache.cacheCreationTokens} cache tokens`,
+          );
+        }
+
+        previousStepPrefix = prefix ?? previousStepPrefix;
+
         stepLog.push({
           ms,
           outTokens: out,
@@ -2230,6 +2260,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           tools,
           textChars,
           reasoningChars,
+          ...(prefix ? { prefix } : {}),
         });
 
         /*
@@ -2738,6 +2769,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        */
       const visibleTextChars = stepLog.reduce((n, step) => n + (step.textChars ?? 0), 0);
       const toolCallCount = stepLog.reduce((n, step) => n + step.tools.length, 0);
+      const mediaCallCount = stepLog.reduce(
+        (n, step) => n + step.tools.filter((name) => (MEDIA_TOOL_NAMES as readonly string[]).includes(name)).length,
+        0,
+      );
 
       /*
        * A creation MUST write files (§4.4b). ONE predicate, read by both the rescue below and the
@@ -2774,6 +2809,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
            */
           truncatedAction: isTruncatedAction(openedActions.count, closedActions.count),
           toolCalls: toolCallCount,
+          mediaCalls: mediaCallCount,
           textChars: visibleTextChars,
           outTokens: totals.completionTokens,
 
@@ -2788,15 +2824,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       ) {
         unproductiveRescue = true;
         logger.warn(
-          `Unproductive turn (${visibleTextChars} chars text on ${totals.completionTokens} out tokens, no actions, ` +
-            'no tool calls) — the model announced work it did not do; forcing one corrective pass',
+          `Unproductive turn (${visibleTextChars} chars text on ${totals.completionTokens} out tokens, ` +
+            `${toolCallCount} tool call(s), ${mediaCallCount} paid media, no actions) — forcing one corrective pass`,
         );
 
         const priorMessages = stripReplayedReasoning((await first.response).messages);
+        const rescuePrompt = rescuePromptFor({ textChars: visibleTextChars, mediaCalls: mediaCallCount });
 
         const rescue = startStream(
           'unproductive-rescue',
-          [...system, ...coreMessages, ...priorMessages, { role: 'user', content: UNPRODUCTIVE_RESCUE_PROMPT }],
+          [...system, ...coreMessages, ...priorMessages, { role: 'user', content: rescuePrompt }],
           false,
         );
 

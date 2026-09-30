@@ -1,5 +1,5 @@
 /**
- * The project's `CLAUDE.md` as a system block (SPEC §4.2).
+ * The project's `AGENTS.md` (legacy `CLAUDE.md`) as a system block (SPEC §4.2).
  *
  * Three classes of failure, all silent. **Authority**: the file is promoted but the model is not told
  * what outranks what — so a `CLAUDE.md` imported from another host has it scaffold a second project
@@ -13,7 +13,12 @@ import { describe, expect, it } from 'vitest';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { createFilesContext } from '~/lib/.server/llm/utils';
 import { SANDBOX_ROOTS } from '~/lib/common/sandbox-paths';
-import { buildProjectInstructions, instructionsKey, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
+import {
+  buildProjectInstructions,
+  INSTRUCTIONS_PATHS,
+  instructionsKey,
+  MAX_INSTRUCTIONS_CHARS,
+} from './project-instructions';
 
 const file = (content: string, isBinary = false) => ({ type: 'file' as const, content, isBinary });
 
@@ -44,8 +49,10 @@ describe('finding the project instructions', () => {
 
   it('ignores files that merely look like it', () => {
     const files = project({
-      '/home/project/AGENTS.md': file('# for a different tool'),
+      '/home/project/.github/copilot-instructions.md': file('# for a different tool'),
+      '/home/project/docs/AGENTS.md': file('# docs'),
       '/home/project/docs/CLAUDE.md': file('# docs'),
+      '/home/project/AGENTS.md.bak': file('# old'),
       '/home/project/CLAUDE.md.bak': file('# old'),
     });
     expect(instructionsKey(files)).toBeNull();
@@ -192,7 +199,8 @@ describe.each(SANDBOX_ROOTS)('project instructions under the %s root', (root) =>
 
   it('still ignores files that merely look like it', () => {
     const files = under({
-      [`${root}/AGENTS.md`]: file('# for a different tool'),
+      [`${root}/.github/copilot-instructions.md`]: file('# for a different tool'),
+      [`${root}/src/AGENTS.md`]: file('# nested'),
       [`${root}/CLAUDE.md.bak`]: file('# old'),
     });
 
@@ -219,5 +227,71 @@ describe.each(SANDBOX_ROOTS)('project instructions under the %s root', (root) =>
 
     expect(built.truncated).toBe(true);
     expect(built.block).toContain('truncated');
+  });
+});
+
+/**
+ * `AGENTS.md` is THE instructions file (owner, 2026-09-30); `CLAUDE.md` is the legacy fallback.
+ *
+ * Two silent failures to rule out: a project on the new starter whose `AGENTS.md` is never promoted
+ * (its instructions reach the model as an anonymous file, with no precedence statement), and a project
+ * with BOTH files getting both promoted — two sources of truth, paid for twice on every turn.
+ */
+describe('AGENTS.md first, CLAUDE.md as the fallback', () => {
+  it('promotes a root AGENTS.md and names it in the block', () => {
+    const built = buildProjectInstructions(project({ '/home/project/AGENTS.md': file('# House rules\n\nUse tabs.') }))!;
+
+    expect(built.key).toBe('/home/project/AGENTS.md');
+    expect(built.path).toBe('AGENTS.md');
+    expect(built.block).toContain('<project_instructions path="AGENTS.md">');
+    expect(built.block).toContain('Use tabs.');
+    expect(built.block).toContain('`AGENTS.md` cannot waive these');
+    expect(built.block).not.toContain('CLAUDE.md');
+  });
+
+  it('prefers AGENTS.md when both exist — and promotes only that one', () => {
+    const files = project({
+      '/home/project/CLAUDE.md': file('# Old rules\n\nUse spaces.'),
+      '/home/project/AGENTS.md': file('# New rules\n\nUse tabs.'),
+    });
+    const built = buildProjectInstructions(files)!;
+
+    expect(built.path).toBe('AGENTS.md');
+    expect(built.block).toContain('Use tabs.');
+    expect(built.block).not.toContain('Use spaces.');
+  });
+
+  it('prefers AGENTS.md regardless of the order the file map lists them in', () => {
+    const files: FileMap = {
+      '/home/project/AGENTS.md': file('# New'),
+      '/home/project/CLAUDE.md': file('# Old'),
+    };
+
+    expect(instructionsKey(files)).toBe('/home/project/AGENTS.md');
+    expect(instructionsKey(Object.fromEntries(Object.entries(files).reverse()))).toBe('/home/project/AGENTS.md');
+  });
+
+  it('CONTROL: a project with only CLAUDE.md still gets it promoted, named as CLAUDE.md', () => {
+    const built = buildProjectInstructions(project({ '/home/project/CLAUDE.md': file('# Legacy') }))!;
+
+    expect(built.path).toBe('CLAUDE.md');
+    expect(built.block).toContain('<project_instructions path="CLAUDE.md">');
+  });
+
+  it('caps a huge AGENTS.md and says which file it truncated', () => {
+    const built = buildProjectInstructions(project({ '/home/project/AGENTS.md': file('x'.repeat(50_000)) }))!;
+
+    expect(built.truncated).toBe(true);
+    expect(built.block).toContain(`this AGENTS.md exceeds ${MAX_INSTRUCTIONS_CHARS} characters`);
+  });
+
+  it('lists AGENTS.md first — the order IS the precedence', () => {
+    expect(INSTRUCTIONS_PATHS[0]).toBe('AGENTS.md');
+  });
+
+  it('finds AGENTS.md under every sandbox root', () => {
+    for (const root of SANDBOX_ROOTS) {
+      expect(instructionsKey({ [`${root}/AGENTS.md`]: file('# rules') })).toBe(`${root}/AGENTS.md`);
+    }
   });
 });

@@ -109,6 +109,14 @@ interface CommonArgs {
   file_name?: string;
 }
 
+/**
+ * The names `createMediaTools` registers — one list, read by the proxy to count how many PAID media
+ * calls a turn made (`unproductive.ts` `mediaCalls`). `media-tools.spec.ts` pins it against the
+ * factory's real keys, so adding a fourth tool without listing it here fails a test rather than
+ * silently exempting that tool from the media-spent rescue.
+ */
+export const MEDIA_TOOL_NAMES = ['generate_image', 'generate_video', 'generate_google_video'] as const;
+
 export function createMediaTools(ctx: MediaToolContext) {
   /*
    * 🔴 PER GATEWAY, NEVER A LITERAL (T9, 2026-08-11 — see `media/provider-defaults.ts` for the

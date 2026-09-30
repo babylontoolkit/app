@@ -15,6 +15,8 @@ import {
   UNPRODUCTIVE_DENSITY,
   shouldRescueUnproductiveTurn,
   UNPRODUCTIVE_RESCUE_PROMPT,
+  MEDIA_SPENT_RESCUE_PROMPT,
+  rescuePromptFor,
   type UnproductiveTurnInput,
 } from './unproductive';
 import { shouldRetryGeneration } from './retry-policy';
@@ -26,6 +28,7 @@ const DEMO_FAILURE: UnproductiveTurnInput = {
   emittedAction: false,
   truncatedAction: false,
   toolCalls: 0,
+  mediaCalls: 0,
   textChars: 83,
   outTokens: 524,
   requiresAction: false,
@@ -122,6 +125,7 @@ describe('shouldRescueUnproductiveTurn — a turn that had to WRITE', () => {
     emittedAction: false,
     truncatedAction: false,
     toolCalls: 0,
+    mediaCalls: 0,
     textChars: 31_852,
     outTokens: 12_215,
     requiresAction: true,
@@ -181,6 +185,7 @@ describe('isFailedBuildTurn', () => {
     emittedAction: false,
     truncatedAction: false,
     toolCalls: 0,
+    mediaCalls: 0,
     textChars: 31_852,
     outTokens: 12_215,
     requiresAction: true,
@@ -315,6 +320,8 @@ describe('a turn cut off mid-action is rescued, not billed as a success', () => 
     truncatedAction: true,
 
     toolCalls: 1,
+
+    mediaCalls: 0,
     textChars: 7_695,
     outTokens: 13_436,
     requiresAction: false,
@@ -355,5 +362,65 @@ describe('a turn cut off mid-action is rescued, not billed as a success', () => 
    */
   it('CONTROL: a complete action is not rescued', () => {
     expect(shouldRescueUnproductiveTurn({ ...PACMAN_TRUNCATION, truncatedAction: false })).toBe(false);
+  });
+});
+
+/**
+ * A build that PAID for media and then went silent is retried once before it fails (owner, 2026-09-30).
+ *
+ * The anchor is `gen_munxw16w_nk741t` (Comet → Sonnet 5.5): read files, one `generate_image`, ~1,100
+ * output tokens of thinking, zero text. The refund covered the generation and not the image, and every
+ * Retry commissioned new art. Each guard below is a case where retrying would be the WRONG spend.
+ */
+describe('shouldRescueUnproductiveTurn — a silent build that already paid for media', () => {
+  const SILENT_AFTER_MEDIA: UnproductiveTurnInput = {
+    aborted: false,
+    alreadyContinued: false,
+    emittedAction: false,
+    truncatedAction: false,
+    toolCalls: 4,
+    mediaCalls: 1,
+    textChars: 0,
+    outTokens: 1_732,
+    requiresAction: true,
+  };
+
+  it('retries the measured generation instead of failing it', () => {
+    expect(shouldRescueUnproductiveTurn(SILENT_AFTER_MEDIA)).toBe(true);
+  });
+
+  it('CONTROL: silence with no paid media is still the refunded hard failure', () => {
+    expect(shouldRescueUnproductiveTurn({ ...SILENT_AFTER_MEDIA, mediaCalls: 0 })).toBe(false);
+  });
+
+  it('never on a turn that did not owe files — an edit or a plan may legitimately end quietly', () => {
+    expect(shouldRescueUnproductiveTurn({ ...SILENT_AFTER_MEDIA, requiresAction: false })).toBe(false);
+  });
+
+  it('never after a Stop, and never as a second extra pass', () => {
+    expect(shouldRescueUnproductiveTurn({ ...SILENT_AFTER_MEDIA, aborted: true })).toBe(false);
+    expect(shouldRescueUnproductiveTurn({ ...SILENT_AFTER_MEDIA, alreadyContinued: true })).toBe(false);
+  });
+
+  it('does not need the output floor — a silent turn can be cheap and still have bought art', () => {
+    expect(shouldRescueUnproductiveTurn({ ...SILENT_AFTER_MEDIA, outTokens: 40 })).toBe(true);
+  });
+});
+
+describe('rescuePromptFor', () => {
+  it('tells a silent media-spent build that its art is paid for and not to make more', () => {
+    expect(rescuePromptFor({ textChars: 0, mediaCalls: 2 })).toBe(MEDIA_SPENT_RESCUE_PROMPT);
+    expect(MEDIA_SPENT_RESCUE_PROMPT).toMatch(/already paid for/);
+    expect(MEDIA_SPENT_RESCUE_PROMPT).toMatch(/do not try to generate/);
+  });
+
+  it('keeps the original sentence for every other rescued turn', () => {
+    expect(rescuePromptFor({ textChars: 83, mediaCalls: 0 })).toBe(UNPRODUCTIVE_RESCUE_PROMPT);
+    expect(rescuePromptFor({ textChars: 31_852, mediaCalls: 3 })).toBe(UNPRODUCTIVE_RESCUE_PROMPT);
+  });
+
+  /* The retry ladder re-runs a turn whose error matches this pattern; a rescue sentence must not. */
+  it('cannot be mistaken for the empty-response error', () => {
+    expect(MEDIA_SPENT_RESCUE_PROMPT).not.toMatch(/returned an empty response/i);
   });
 });

@@ -1058,7 +1058,7 @@ showing through, where the chat *was* the project and 1:1 was a tautology. Two t
   anyway. Starting a new chat is the honest version of the same saving.
 
 **Nothing is lost, because the conversation was never the grounding.** Every turn the agent is sent the
-project's files fresh from the WebContainer FS, the project's `CLAUDE.md` as its own instructions block,
+project's files fresh from the WebContainer FS, the project's `AGENTS.md` (legacy `CLAUDE.md`) as its own instructions block,
 and the skills index. A new chat sees the whole game; it just does not see the talking.
 
 **`/clear` is this feature's chat-command spelling (2026-07-18, `app/lib/chat/client-commands.ts`).**

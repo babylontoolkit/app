@@ -996,7 +996,7 @@ average ~2 turns, so per-conversation-unique prefix bytes essentially never pay 
 | 1 | base prompt | everyone (warmed) |
 | 2 | **starter framework files** (`src/babylon/**`, `src/routing/**`, `public/scripts/**`, shell + config) | every project on a template pin |
 | 3 | routed doc blocks + skills — **merged onto ONE breakpoint** (rides the skills block, else the last doc block) | the conversation (append-only) |
-| 4 | **game-code files** (+ project `CLAUDE.md` just ahead of it, inside the segment) | the turn — the only per-turn write left |
+| 4 | **game-code files** (+ project `AGENTS.md` / legacy `CLAUDE.md` just ahead of it, inside the segment) | the turn — the only per-turn write left |
 |   | notes → discuss → media (uncached tail) | — |
 
 Four decisions worth keeping the reasons for: **(a)** the split rule is **default-MUTABLE** — a

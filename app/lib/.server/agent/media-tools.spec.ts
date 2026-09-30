@@ -26,7 +26,7 @@ import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from '~/lib/.server/billing/generations';
 import { invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
 import { mediaModelDefaults } from '~/lib/media/provider-defaults';
-import { createMediaTools, type MediaTaskEvent } from './media-tools';
+import { createMediaTools, MEDIA_TOOL_NAMES, type MediaTaskEvent } from './media-tools';
 import { setMediaDispatcher } from '~/lib/.server/media/dispatch';
 
 /*
@@ -547,5 +547,17 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
 
     expect(general).toMatch(/^Started \(/);
     expect(kie.created[0].model).toBe('kling-3.0/video');
+  });
+});
+
+describe('MEDIA_TOOL_NAMES', () => {
+  /*
+   * The proxy counts a turn's PAID media calls by these names (the media-spent rescue in
+   * `unproductive.ts`). A tool registered here but missing from the list would silently never count.
+   */
+  it('names exactly the tools the factory registers', () => {
+    const { tools } = toolsWith();
+
+    expect(Object.keys(tools).sort()).toEqual([...MEDIA_TOOL_NAMES].sort());
   });
 });

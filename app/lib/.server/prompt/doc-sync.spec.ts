@@ -644,26 +644,30 @@ describe('project SPEC.md workflow', () => {
   });
 
   /*
-   * The CLAUDE.md half. The FILE is promoted to its own system block by the proxy
-   * (`project-instructions.ts`) — these assertions cover the always-baked rules ABOUT it, which must
-   * hold on every turn whether or not a given project has one.
+   * The instructions-file half (`AGENTS.md`, legacy `CLAUDE.md`). The FILE is promoted to its own
+   * system block by the proxy (`project-instructions.ts`) — these assertions cover the always-baked
+   * rules ABOUT it, which must hold on every turn whether or not a given project has one.
    */
   describe.each([
-    [/`CLAUDE\.md` outranks your defaults/i, 'the user’s project instructions beat the agent’s habits'],
+    [/`AGENTS\.md` outranks your defaults/i, 'the user’s project instructions beat the agent’s habits'],
     [/never outranks the platform's non-negotiables/i, 'but never the rules the project needs to run'],
-    [/Ignore its host-setup directives/i, 'a CLAUDE.md written for another tool cannot stall the agent'],
-    [/disagree, say so and ask/i, 'a CLAUDE.md/SPEC.md conflict is surfaced, never silently resolved'],
-    [/Never create a `CLAUDE\.md` unasked/i, 'no instructions file is invented'],
-  ])('the CLAUDE.md rules state %s', (pattern) => {
+    [/Ignore its host-setup directives/i, 'an instructions file written for another tool cannot stall the agent'],
+    [/disagree, say so and ask/i, 'an AGENTS.md/SPEC.md conflict is surfaced, never silently resolved'],
+    [/Never create an `AGENTS\.md` unasked/i, 'no instructions file is invented'],
+    [
+      /`CLAUDE\.md`\*\* instead; it is treated exactly the same way/i,
+      'a legacy CLAUDE.md project is still told what it has',
+    ],
+  ])('the AGENTS.md rules state %s', (pattern) => {
     it('— and it reaches the assembled prompt', () => {
       expect(section).toMatch(pattern);
       expect(assemblePrompt([], '', '')).toMatch(pattern);
     });
   });
 
-  it('CLAUDE.md is never opaque to the model', () => {
+  it.each([['AGENTS.md'], ['CLAUDE.md']])('%s is never opaque to the model', (path) => {
     // If it were, the proxy would lift an empty marker into the system block — instructions with no text.
-    expect(isOpaqueToModel('CLAUDE.md')).toBe(false);
+    expect(isOpaqueToModel(path)).toBe(false);
   });
 });
 

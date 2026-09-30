@@ -170,6 +170,13 @@ export interface GenerationRecord {
      */
     textChars?: number;
     reasoningChars?: number;
+
+    /**
+     * Short hashes of what this step sent BEFORE the conversation — `tools`, then each `system` block
+     * (`agent/step-prefix.ts`). Consecutive steps of one generation should match; a step whose
+     * `cacheWrite` is the whole prefix again names the block that changed here. Hashes only.
+     */
+    prefix?: { tools: string; system: string[] };
   }>;
 
   /** Set when this is a self-healing repair turn; points at the generation it repairs (§4.2.7). */
