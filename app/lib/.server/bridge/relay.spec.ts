@@ -16,7 +16,6 @@ import {
 const dispatch = (jobId: string): BridgeDispatch => ({
   jobId,
   op: { kind: 'unity.command', name: 'set_transform', params: {} },
-  unityProjectKey: 'k1',
   allowScripts: false,
   consentGranted: false,
 });

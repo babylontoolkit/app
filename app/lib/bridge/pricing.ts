@@ -50,6 +50,9 @@ export function isLongOperation(op: BridgeOperation): boolean {
       return Array.isArray(op.args) && typeof op.args[0] === 'string' && LONG_CLI.has(op.args[0]);
     case 'blender.script':
       return op.timeoutSeconds > 120;
+    case 'unity.project':
+      // open/create launch or build a Unity project and wait for the editor — minutes, not seconds.
+      return op.action === 'open' || op.action === 'create';
     default:
       return false;
   }

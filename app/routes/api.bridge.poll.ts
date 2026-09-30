@@ -58,8 +58,13 @@ export async function action({ request, context }: ActionFunctionArgs) {
       // Content comparison, key-order-insensitive: jsonb re-orders keys (see persist-hello.ts).
       if (shouldPersistHello(device.capabilities, hello, lastWrite, now)) {
         try {
-          await getBridgeStore(context).putDevice({
-            ...device,
+          const store = getBridgeStore(context);
+
+          // Re-read: the row may have changed since authentication (e.g. the user flipped "Allow scripts").
+          const current = (await store.getDevice(device.id)) ?? device;
+
+          await store.putDevice({
+            ...current,
             capabilities: hello,
             lastSeenAt: new Date(now).toISOString(),
           });

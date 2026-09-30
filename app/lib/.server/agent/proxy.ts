@@ -103,7 +103,6 @@ import {
 } from '~/lib/.server/bridge/service';
 import { bridgeTurnNotes } from './bridge-notes';
 import { cancelGenerationBridgeJobs } from '~/lib/.server/bridge/relay';
-import type { BridgeLink } from '~/lib/.server/projects/types';
 import { resolveMediaProvider } from '~/lib/.server/media/provider';
 import { getObjectStore } from '~/lib/.server/storage';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
@@ -402,12 +401,6 @@ export interface AgentRequest {
    * client-side in the sandbox; the server never runs these.
    */
   mcpLiveTools?: Array<{ name: string; description?: string; server: string; inputSchema?: unknown }>;
-
-  /**
-   * The project's Unity Bridge link (§4.17). Derived by the ROUTE from the project row — never taken
-   * from the browser body, because it decides which paired device a paid operation is dispatched to.
-   */
-  bridgeLink?: BridgeLink;
 
   /** The local scene dev server the client remembered for this project (§4.17, D38) — a hint, never trusted. */
   localSceneServer?: { origin: string; scenes?: string[] };
@@ -1548,27 +1541,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     }
   };
 
+  /*
+   * The Unity Bridge (§4.17, D54): no project link — the user's most recently seen present device is the
+   * one this turn may drive, resolved from the session user on the server, never from the body.
+   */
   const bridgeTurn = await resolveBridgeTurn({
     user,
     projectId: request.projectId,
-    link: request.bridgeLink,
     context: request.context,
   });
   const isDiscussTurn = discussNote !== null;
 
   const bridgeTools =
-    bridgeTurn.state === 'online' &&
-    bridgeTurn.device &&
-    request.projectId &&
-    request.bridgeLink &&
-    !isDiscussTurn &&
-    !isFirstBuildTurn
+    bridgeTurn.state === 'online' && bridgeTurn.device && request.projectId && !isDiscussTurn && !isFirstBuildTurn
       ? createBridgeTools({
           userId: user.id,
           projectId: request.projectId,
           generationId,
-          link: request.bridgeLink,
           deviceId: bridgeTurn.device.id,
+          deviceName: bridgeTurn.device.name,
           abortSignal: request.abortSignal,
           context: request.context,
           emit: emitBridgeEvent,
@@ -1685,7 +1676,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     bridgeTurn,
     finishedJobs,
     localSceneServer: request.localSceneServer,
-    linkName: request.bridgeLink?.unityProjectName,
   })) {
     system.push({ role: 'system', content: note });
   }

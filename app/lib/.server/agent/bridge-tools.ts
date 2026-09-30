@@ -2,19 +2,22 @@
  * Unity Bridge tools (SPEC §4.17, D17, D21) — the model-facing half of the bridge.
  *
  * Each tool builds a `BridgeOperation` and hands it to `runBridgeOperation` (`bridge/service.ts`), which
- * owns everything that matters: validation, the tier (consent / scripts / refused), the price, the debit,
- * dispatch to the user's helper, and the refund when a job never starts.
+ * owns everything that matters: validation, the tier (consent / scripts / refused) and dispatch to the
+ * user's helper. Bridge operations are not billed per operation (D53).
  *
  * 🔴 **Never fatal.** Every parameter is optional in zod and validated in `execute` — a schema rejection
  * kills a paid generation after the tokens are spent (`tools.ts`). A missing value comes back as a
- * sentence the model can act on, and nothing is debited.
+ * sentence the model can act on, and nothing is dispatched.
  *
- * Offered only in toolset `'all'` on a turn whose linked device is present (`resolveBridgeTurn`, D19) —
- * never on a discuss (Plan) turn or the first build turn (D18).
+ * Offered only in toolset `'all'` on a turn where one of the user's paired devices is present
+ * (`resolveBridgeTurn`, D19/D54) — never on a discuss (Plan) turn or the first build turn (D18). There is
+ * no project link (D54): `unity_project` opens or creates the Unity project, and every other Unity tool
+ * works on the one opened or created last (the helper's "current project").
  */
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { BridgeOperation } from '~/lib/bridge/protocol';
+import { isValidProjectName } from '~/lib/bridge/validate';
 import {
   jobControl,
   runBridgeOperation,
@@ -132,15 +135,61 @@ const VIEWS = ['game', 'scene'] as const;
 const DEV_SERVER_ACTIONS = ['start', 'status'] as const;
 const EDITOR_ACTIONS = ['status', 'open', 'close'] as const;
 const JOB_ACTIONS = ['status', 'wait', 'cancel'] as const;
+const PROJECT_ACTIONS = ['list', 'open', 'create'] as const;
 
 export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Record<string, ReturnType<typeof tool>> {
   const run = (op: BridgeOperation, label: string, { toolCallId, abortSignal }: ToolOptions) =>
     runBridgeOperation(op, label, { ...ctx, toolCallId, abortSignal: abortSignal ?? ctx.abortSignal });
 
   const tools = {
+    unity_project: tool({
+      description:
+        "List, open or create the Unity project on the user's computer (inside the helper's projects folder). Every other Unity tool works on the project opened or created last. Create makes an empty Unity project — add the Babylon Toolkit package with unity_command package_add afterwards.",
+      parameters: z.object({
+        action: z.string().optional().describe('"list" (default), "open" or "create".'),
+        name: z
+          .string()
+          .optional()
+          .describe('The Unity project folder name inside the projects folder (for open and create).'),
+      }),
+      execute: async ({ action, name }, options) => {
+        const a = choice(action, PROJECT_ACTIONS, 'list');
+
+        if (a === null) {
+          return oneOf('unity_project', 'action', PROJECT_ACTIONS);
+        }
+
+        if (a === 'list') {
+          return asText(await run({ kind: 'unity.project', action: 'list' }, 'unity_project list', options));
+        }
+
+        if (!nonEmpty(name)) {
+          return needs(
+            'unity_project',
+            'name',
+            `the Unity project to ${a} (a folder name inside the projects folder — call unity_project with action "list" to see them)`,
+          );
+        }
+
+        const projectName = name.trim();
+
+        if (!isValidProjectName(projectName)) {
+          return `unity_project name "${projectName.slice(0, 80)}" is not allowed — use a plain folder name inside the projects folder (letters, digits, spaces, "_", "-" and "."; up to 64 characters; no "/" or "..").`;
+        }
+
+        return asText(
+          await run(
+            { kind: 'unity.project', action: a, name: projectName },
+            `unity_project ${a} ${projectName}`,
+            options,
+          ),
+        );
+      },
+    }),
+
     unity_list_commands: tool({
       description:
-        "List the Unity Editor commands available on the user's linked Unity project (filter with query). Use before unity_command — never guess a command name.",
+        'List the Unity Editor commands available on the current Unity project (filter with query). Use before unity_command — never guess a command name.',
       parameters: z.object({
         query: z.string().optional().describe('Filter the command list, e.g. "transform".'),
       }),
@@ -152,7 +201,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_command: tool({
       description:
-        "Run one Unity Editor command (unity command <name>) on the user's linked Unity project, e.g. create_gameobject, set_component_properties, save_all, bt_export_level. params are the command's parameters. Paths are relative to the Unity project. Destructive commands ask the user first.",
+        "Run one Unity Editor command (unity command <name>) on the current Unity project, e.g. create_gameobject, set_component_properties, save_all, bt_export_level. params are the command's parameters. Paths are relative to the Unity project. Destructive commands ask the user first.",
       parameters: z.object({
         name: z.string().optional().describe('The command name, e.g. "set_transform".'),
         params: z
@@ -206,7 +255,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_run_script: tool({
       description:
-        'Run a C# script in the linked Unity Editor (run_script). entry is "Class.Method". Needs the user\'s "Allow scripts" switch.',
+        'Run a C# script in the Unity Editor of the current project (run_script). entry is "Class.Method". Needs the user\'s "Allow scripts" switch.',
       parameters: z.object({
         source: z.string().optional().describe('The C# source of the script.'),
         entry: z.string().optional().describe('The static method to call, as "Class.Method".'),
@@ -314,7 +363,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
     }),
 
     unity_dev_server: tool({
-      description: 'Start or check the Babylon Toolkit dev server in the linked Unity Editor.',
+      description: 'Start or check the Babylon Toolkit dev server for the current Unity project.',
       parameters: z.object({
         action: z.string().optional().describe('"status" (default) or "start".'),
         port: numberish().describe('Port for start (optional).'),
@@ -353,7 +402,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_editor: tool({
       description:
-        'Check, open or close the Unity Editor for the linked project. close refuses if there are unsaved changes.',
+        'Check, open or close the Unity Editor for the current project. close refuses if there are unsaved changes.',
       parameters: z.object({
         action: z.string().optional().describe('"status" (default), "open" or "close".'),
       }),

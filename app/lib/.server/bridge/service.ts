@@ -12,7 +12,9 @@
  *   - a job that never started is settled by ONE function, `markNotStarted`, which never touches a
  *     terminal row or a started one (the latch);
  *   - every row write goes through one rule: never overwrite a terminal row;
- *   - nothing on a tool path throws: every outcome is a sentence for the model.
+ *   - nothing on a tool path throws: every outcome is a sentence for the model;
+ *   - "Allow scripts" is read from the DEVICE row at dispatch time (D54), never from a builder project and
+ *     never cached for the turn — a user who flips it after a refusal gets the retry in the same turn.
  *
  * All writes for one job are serialised through an in-process chain (`withJobLock`). The relay lives on
  * ONE server instance (D5), so this makes the latch a real guarantee there rather than a read-then-write
@@ -34,9 +36,8 @@ import {
 import { classifyOperation } from '~/lib/bridge/tiers';
 import { validateOperation } from '~/lib/bridge/validate';
 import { awaitClientToolResult } from '~/lib/.server/agent/mcp-relay';
-import type { BridgeLink } from '~/lib/.server/projects/types';
 import { isBridgeEnabled, mintId } from './auth';
-import { cancelBridgeJob, deviceHello, enqueueBridgeJob, getJobHandle, isDevicePresent } from './relay';
+import { cancelBridgeJob, deviceHello, deviceLastSeen, enqueueBridgeJob, getJobHandle, isDevicePresent } from './relay';
 import { getBridgeStore, type BridgeDeviceRow, type BridgeJobRow } from './store';
 
 const logger = createScopedLogger('bridge.service');
@@ -46,8 +47,10 @@ export interface BridgeRunContext {
   projectId: string;
   generationId: string;
   toolCallId: string;
-  link: BridgeLink;
+
+  /** The paired device this turn dispatches to (D54: the user's most recently seen present device). */
   deviceId: string;
+  deviceName: string;
   abortSignal?: AbortSignal;
   context: unknown;
   emit: (event: BridgeUiEvent) => void;
@@ -289,6 +292,13 @@ const settledRow = (jobId: string, context: unknown) => withJobLock(jobId, () =>
  * ---------------------------------------------------------------------------------------------
  */
 
+/** The device's own "Allow scripts" switch, read fresh. Missing / revoked / someone else's → false. */
+async function deviceAllowsScripts(ctx: Pick<BridgeRunContext, 'deviceId' | 'userId' | 'context'>): Promise<boolean> {
+  const device = await getBridgeStore(ctx.context).getDevice(ctx.deviceId);
+
+  return Boolean(device && device.userId === ctx.userId && !device.revokedAt && device.allowScripts === true);
+}
+
 export async function runBridgeOperation(
   op: BridgeOperation,
   label: string,
@@ -307,8 +317,10 @@ export async function runBridgeOperation(
       return `The Unity Bridge does not run this: ${reason}`;
     }
 
-    if (tier === 'scripts' && !ctx.link.allowScripts) {
-      return 'Scripts are switched off for this Unity link. Ask the user to turn on "Allow scripts" in the Unity Bridge panel (the cube icon), then try again.';
+    const allowScripts = await deviceAllowsScripts(ctx);
+
+    if (tier === 'scripts' && !allowScripts) {
+      return `Scripts are switched off on "${ctx.deviceName}". Ask the user to turn on "Allow scripts" in the Unity Bridge panel (the cube icon), then try again.`;
     }
 
     // D16: consent BEFORE dispatch.
@@ -318,7 +330,7 @@ export async function runBridgeOperation(
         toolCallId: ctx.toolCallId,
         operation: label,
         tier: 'consent',
-        target: ctx.link.unityProjectName,
+        target: deviceHello(ctx.deviceId)?.currentProject ?? ctx.deviceName,
       });
 
       const answer = await awaitClientToolResult({
@@ -357,8 +369,7 @@ export async function runBridgeOperation(
       dispatch: {
         jobId,
         op,
-        unityProjectKey: ctx.link.unityProjectKey,
-        allowScripts: ctx.link.allowScripts,
+        allowScripts,
         consentGranted: tier === 'consent',
       },
       onEvent: makeOnEvent({ jobId, label, context: ctx.context, emit: ctx.emit }),
@@ -483,13 +494,18 @@ export async function jobControl(
  * ---------------------------------------------------------------------------------------------
  */
 
+/**
+ * Which paired device (if any) this turn may drive (D54 — there is no project link). The user's
+ * present, non-revoked devices are candidates and the most recently seen one wins; with devices but none
+ * present the turn is `offline`; with none it is `none`. Offered only on turns with a project, because a
+ * job is recorded under the project id.
+ */
 export async function resolveBridgeTurn(input: {
   user: { id: string };
   projectId?: string;
-  link?: BridgeLink;
   context: unknown;
 }): Promise<{ state: 'none' | 'disabled' | 'offline' | 'online'; device?: BridgeDeviceRow; hello?: BridgeHello }> {
-  if (!input.projectId || !input.link) {
+  if (!input.projectId) {
     return { state: 'none' };
   }
 
@@ -498,22 +514,51 @@ export async function resolveBridgeTurn(input: {
   }
 
   try {
-    const device = await getBridgeStore(input.context).getDevice(input.link.deviceId);
+    const picked = pickBridgeDevice(await getBridgeStore(input.context).listDevices(input.user.id), input.user.id);
 
-    if (!device || device.revokedAt || device.userId !== input.user.id) {
-      return { state: 'none' };
+    if (picked.state === 'online') {
+      return { ...picked, hello: deviceHello(picked.device.id) ?? picked.device.capabilities };
     }
 
-    if (isDevicePresent(device.id)) {
-      return { state: 'online', device, hello: deviceHello(device.id) ?? device.capabilities };
-    }
-
-    return { state: 'offline', device };
+    return picked;
   } catch (error) {
     // A store outage must not take the turn down — the bridge is simply not offered.
     logger.warn(`resolveBridgeTurn failed: ${error instanceof Error ? error.message : String(error)}`);
     return { state: 'none' };
   }
+}
+
+/**
+ * THE device rule (D54), shared by the turn and the panel so they can never disagree: revoked rows and
+ * other users' rows are ignored; the most recently seen PRESENT device wins (`online`); with devices but
+ * none present, the most recently seen one is reported (`offline`); with none, `none`.
+ */
+export function pickBridgeDevice(
+  rows: BridgeDeviceRow[],
+  userId: string,
+): { state: 'none' } | { state: 'online' | 'offline'; device: BridgeDeviceRow } {
+  const devices = rows.filter((device) => !device.revokedAt && device.userId === userId);
+
+  if (devices.length === 0) {
+    return { state: 'none' };
+  }
+
+  const present = devices
+    .filter((device) => isDevicePresent(device.id))
+    .sort((a, b) => deviceLastSeen(b.id) - deviceLastSeen(a.id))[0];
+
+  if (present) {
+    return { state: 'online', device: present };
+  }
+
+  return { state: 'offline', device: [...devices].sort((a, b) => storedLastSeen(b) - storedLastSeen(a))[0] };
+}
+
+/** The stored last-seen (or, never seen, the pairing time) as epoch ms; unparseable → 0. */
+function storedLastSeen(device: BridgeDeviceRow): number {
+  const seen = Date.parse(device.lastSeenAt ?? device.createdAt);
+
+  return Number.isFinite(seen) ? seen : 0;
 }
 
 /** Up to 10 rows with finishedAt && !reportedAt from listJobs(projectId, 25); stamps reportedAt on each. */

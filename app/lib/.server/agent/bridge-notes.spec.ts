@@ -7,10 +7,15 @@ import type { BridgeHello } from '~/lib/bridge/protocol';
 import { bridgeTurnNotes } from './bridge-notes';
 
 const hello = (overrides: Partial<BridgeHello> = {}): BridgeHello => ({
-  protocol: 1,
+  protocol: 2,
   helperVersion: '1.0.0',
   os: 'darwin',
-  unityProjects: [{ key: 'k1', name: 'Racer', unityVersion: '6000.0.30f1', toolkitVersion: '9.28.0' }],
+  projectsDir: 'Unity',
+  unityProjects: [
+    { key: 'k1', name: 'Racer', unityVersion: '6000.0.30f1', toolkitVersion: '9.28.0' },
+    { key: 'k2', name: 'Kart', unityVersion: '6000.0.30f1', toolkitVersion: '9.29.0' },
+  ],
+  unityCli: { path: '/u', version: '1.4.0' },
   scriptsDisabledLocally: false,
   ...overrides,
 });
@@ -24,7 +29,7 @@ describe('bridgeTurnNotes', () => {
 
     expect(notes).toHaveLength(1);
     expect(notes[0]).toBe(
-      'The Unity Bridge is linked to "Studio Mac" but the helper is not running. If the user asks for Unity or Blender work, tell them to run the helper (the cube icon shows the command). Never claim to have run a Unity or Blender command.',
+      'Your computer "Studio Mac" is paired but the helper is not running. If the user asks for Unity or Blender work, tell them to run the helper (the cube icon shows the command). Never claim to have run a Unity or Blender command.',
     );
   });
 
@@ -33,20 +38,48 @@ describe('bridgeTurnNotes', () => {
     expect(bridgeTurnNotes({ bridgeTurn: { state: 'disabled' }, finishedJobs: [] })).toEqual([]);
   });
 
-  it('online → names the device, the Unity project, versions and Blender', () => {
+  it('online → names the device, the projects folder, its projects, the current one and versions', () => {
     const [note] = bridgeTurnNotes({
       bridgeTurn: {
         state: 'online',
         device: { name: 'Studio Mac' },
-        hello: hello({ blender: { path: '/b', version: '4.2.0' } }),
+        hello: hello({ currentProject: 'Kart', blender: { path: '/b', version: '4.2.0' } }),
       },
       finishedJobs: [],
-      linkName: 'Racer Linked',
     });
 
     expect(note).toBe(
-      '# Unity Bridge\n\nConnected to "Studio Mac" (Unity project "Racer Linked"). Unity 6000.0.30f1, Babylon Toolkit 9.28.0, Blender 4.2.0. Use the Unity Bridge tools; paths are relative to the Unity project.',
+      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: "Kart". Unity CLI 1.4.0, Toolkit 9.29.0, Blender 4.2.0. Paths are relative to the current Unity project.',
     );
+  });
+
+  it('online with no current project → tells the model to open or create one', () => {
+    const [note] = bridgeTurnNotes({
+      bridgeTurn: { state: 'online', device: { name: 'Studio Mac' }, hello: hello({ unityCli: undefined }) },
+      finishedJobs: [],
+    });
+
+    expect(note).toBe(
+      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: none — open or create one with unity_project. Unity CLI not found, Toolkit ?, Blender not found. Paths are relative to the current Unity project.',
+    );
+  });
+
+  it('online → at most 20 project names, the rest counted; an empty folder says so', () => {
+    const many = Array.from({ length: 23 }, (_, i) => ({ key: `k${i}`, name: `P${i}` }));
+    const [note] = bridgeTurnNotes({
+      bridgeTurn: { state: 'online', device: { name: 'Mac' }, hello: hello({ unityProjects: many }) },
+      finishedJobs: [],
+    });
+
+    expect(note).toContain('P19 (and 3 more).');
+    expect(note).not.toContain('P20');
+
+    const [empty] = bridgeTurnNotes({
+      bridgeTurn: { state: 'online', device: { name: 'Mac' }, hello: hello({ unityProjects: [] }) },
+      finishedJobs: [],
+    });
+
+    expect(empty).toContain('Projects folder "Unity": no Unity projects yet.');
   });
 
   it('online with the helper dev server running → the local scene note carries its origin', () => {

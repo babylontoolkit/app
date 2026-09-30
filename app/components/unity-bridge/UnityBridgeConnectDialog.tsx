@@ -2,8 +2,9 @@
  * The Unity Connect dialog (SPEC §4.17, D7, D42, D43, D52).
  *
  * Its FIRST section is always the shared Local scenes section — local scenes never wait on the bridge
- * (D52). With the bridge disabled (D43) that is the only section. Otherwise the four bridge sections
- * follow: run the helper, approve its pairing code, manage devices, link this project.
+ * (D52). With the bridge disabled (D43) that is the only section. Otherwise the three bridge sections
+ * follow: run the helper, approve its pairing code, manage devices. There is no "link this project"
+ * (D54): pairing a computer is the only setup, and the agent opens or creates the Unity project itself.
  *
  * The helper command is printed with `window.location.origin` — no app URL is hardcoded anywhere (D42,
  * the branding rule).
@@ -16,7 +17,6 @@ import { ConfirmationDialog, Dialog, DialogButton, DialogClose, DialogRoot, Dial
 import {
   approvePairingCode,
   bridgeDialogStore,
-  bridgeProjectAction,
   bridgeStatusStore,
   refreshBridgeStatus,
   revokeDevice,
@@ -57,13 +57,11 @@ export function UnityBridgeConnectDialog({ projectId }: { projectId: string }) {
   const [approving, setApproving] = useState(false);
   const [approveError, setApproveError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<Device | null>(null);
-  const [linkError, setLinkError] = useState<string | null>(null);
 
   const open = dialog === 'connect';
   const enabled = status?.enabled ?? true;
   const devices = status?.devices ?? [];
-  const onlineDevices = devices.filter((device) => device.online);
-  const onlineHelperDevServer = onlineDevices.find((device) => device.hello?.devServer)?.hello?.devServer;
+  const onlineHelperDevServer = devices.find((device) => device.online && device.hello?.devServer)?.hello?.devServer;
 
   const origin = pageOrigin();
   const command = `npx @babylonjs-toolkit/agent bridge --server ${origin}`;
@@ -112,19 +110,6 @@ export function UnityBridgeConnectDialog({ projectId }: { projectId: string }) {
     await refreshBridgeStatus(projectId);
   };
 
-  const link = async (deviceId: string, unityProjectKey: string) => {
-    setLinkError(null);
-
-    const result = await bridgeProjectAction(projectId, { action: 'link', deviceId, unityProjectKey });
-
-    if (!result.ok) {
-      setLinkError(result.message ?? 'Could not link that project.');
-      return;
-    }
-
-    await refreshBridgeStatus(projectId);
-  };
-
   return (
     <DialogRoot open={open} onOpenChange={(next) => !next && bridgeDialogStore.set(null)}>
       <Dialog className="max-w-[520px] p-6 max-h-[85vh] overflow-y-auto">
@@ -157,7 +142,7 @@ export function UnityBridgeConnectDialog({ projectId }: { projectId: string }) {
                   Already have the Desktop Agent? <code>{`bt-agent bridge --server ${origin}`}</code>
                 </div>
                 <div className="text-xs text-bolt-elements-textSecondary">
-                  Run it inside your Unity project folder, or add --unity &lt;path&gt;.
+                  Run it in your Unity projects folder (or add --projects &lt;folder&gt;).
                 </div>
               </section>
 
@@ -209,38 +194,6 @@ export function UnityBridgeConnectDialog({ projectId }: { projectId: string }) {
                     ))}
                   </div>
                 )}
-              </section>
-
-              <section className="space-y-2">
-                <div className={SECTION_HEADING}>Link this project</div>
-                {onlineDevices.length === 0 ? (
-                  <div className="text-xs text-bolt-elements-textSecondary">
-                    Start the helper on a paired computer to see its Unity projects here.
-                  </div>
-                ) : (
-                  onlineDevices.map((device) => (
-                    <div key={device.id} className="space-y-1">
-                      <div className="flex flex-wrap gap-2">
-                        {(device.hello?.unityProjects ?? []).map((project) => (
-                          <button
-                            key={project.key}
-                            type="button"
-                            className={SMALL_BUTTON}
-                            onClick={() => void link(device.id, project.key)}
-                          >
-                            {`Link ${project.name} on ${device.name}`}
-                          </button>
-                        ))}
-                      </div>
-                      <div className="text-xs text-bolt-elements-textTertiary">
-                        {device.hello?.blender
-                          ? `Blender ${device.hello.blender.version} found`
-                          : 'Blender not found — add --blender <path> if you use it'}
-                      </div>
-                    </div>
-                  ))
-                )}
-                {linkError && <div className="text-xs text-bolt-elements-icon-error">{linkError}</div>}
               </section>
             </>
           )}

@@ -3,8 +3,12 @@
  *
  * ONE component, rendered in both the Unity Connect dialog (first section) and the Status panel, so the
  * controls are one click away in every bridge state — including no bridge at all. It therefore imports
- * nothing from the bridge store: the origin helpers live in `~/lib/local-scenes/origin`, and the scene
- * list (only ever known from an online helper's report) arrives as a prop.
+ * nothing from the bridge store: the origin helpers live in `~/lib/local-scenes/origin`, and an online
+ * helper's dev-server origin (the only thing taken from it) arrives as a prop.
+ *
+ * Minimal on purpose (D54): origin + Save + Check, and ONE scene-URL input + Import. There is no scene
+ * list — browsing scenes was part of the project-linking flow the owner removed; the agent imports the
+ * scenes it exports with `import_local_scene`, and a person pastes a URL.
  */
 import { useState } from 'react';
 import { toast } from 'react-toastify';
@@ -27,7 +31,9 @@ const RUNNING_TEXT = 'The scene server is running and this site can read from it
 
 export interface LocalScenesSectionProps {
   projectId: string;
-  helperDevServer?: { origin?: string; scenes?: string[] };
+
+  /** An online helper's dev server — only its origin is used, as the initial address. */
+  helperDevServer?: { origin?: string };
 }
 
 const trimOrigin = (value: string) => value.trim().replace(/\/+$/, '');
@@ -43,7 +49,6 @@ export function LocalScenesSection({ projectId, helperDevServer }: LocalScenesSe
   const [pendingOverwrite, setPendingOverwrite] = useState<string | null>(null);
 
   const base = trimOrigin(origin) || DEFAULT_ORIGIN;
-  const scenes = helperDevServer?.scenes ?? [];
 
   const save = () => {
     saveLocalSceneServer(projectId, trimOrigin(origin));
@@ -121,36 +126,10 @@ export function LocalScenesSection({ projectId, helperDevServer }: LocalScenesSe
         )}
       </div>
 
-      {scenes.length > 0 ? (
-        <div className="flex flex-col gap-1">
-          {scenes.map((scene) => {
-            const url = `${base}/scenes/${scene}`;
-
-            return (
-              <div
-                key={scene}
-                className="flex items-center gap-2 px-2 py-1.5 rounded-md border border-bolt-elements-borderColor text-xs"
-              >
-                <span className="i-ph:cube-duotone text-bolt-elements-textSecondary" />
-                <span className="flex-1 min-w-0 truncate text-bolt-elements-textPrimary">{scene}</span>
-                <button
-                  type="button"
-                  className={SMALL_BUTTON}
-                  disabled={busyUrl !== null}
-                  onClick={() => void runImport(url, false)}
-                >
-                  {busyUrl === url ? 'Importing…' : 'Import to project'}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <p className="text-xs text-bolt-elements-textSecondary">
-          Paste a scene URL from your Unity dev server, e.g. <code>{`${base}/scenes/Level01.gltf`}</code>. No bridge
-          needed.
-        </p>
-      )}
+      <p className="text-xs text-bolt-elements-textSecondary">
+        Paste a scene URL from your Unity dev server, e.g. <code>{`${base}/scenes/Level01.gltf`}</code>. No bridge
+        needed.
+      </p>
 
       <div className="flex gap-2 items-center">
         <input
@@ -165,7 +144,7 @@ export function LocalScenesSection({ projectId, helperDevServer }: LocalScenesSe
           disabled={!freeUrl.trim() || busyUrl !== null}
           onClick={() => void runImport(freeUrl.trim(), false)}
         >
-          Import
+          {busyUrl !== null ? 'Importing…' : 'Import'}
         </DialogButton>
       </div>
 

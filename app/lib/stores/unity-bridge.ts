@@ -18,11 +18,25 @@ import { atom } from 'nanostores';
 import type { BridgeHello, BridgeJobStatus } from '~/lib/bridge/protocol';
 
 /** Mirrors the JSON of `GET /api/projects/:projectId/bridge` (the route declares the same shape). */
+export interface BridgeDeviceView {
+  id: string;
+  name: string;
+  os: string;
+  online: boolean;
+  lastSeenAt?: string;
+
+  /** "Allow scripts" is per DEVICE (D54) — there is no project link. */
+  allowScripts: boolean;
+  hello?: BridgeHello;
+}
+
 export interface BridgeStatusView {
   enabled: boolean;
-  state: 'unpaired' | 'unlinked' | 'offline' | 'online';
-  link: { deviceId: string; deviceName: string; unityProjectName: string; allowScripts: boolean } | null;
-  devices: Array<{ id: string; name: string; os: string; online: boolean; lastSeenAt?: string; hello?: BridgeHello }>;
+  state: 'unpaired' | 'offline' | 'online';
+
+  /** The device the agent would drive: the most recently seen present one, else the last seen (D54). */
+  device: BridgeDeviceView | null;
+  devices: BridgeDeviceView[];
   jobs: Array<{
     id: string;
     operation: string;

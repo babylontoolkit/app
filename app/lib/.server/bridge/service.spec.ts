@@ -17,11 +17,17 @@ import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from '~/lib/.server/billing/generations';
 import { deliverClientToolResult } from '~/lib/.server/agent/mcp-relay';
 import { BRIDGE_PICKUP_TIMEOUT_MS, BRIDGE_SYNC_WAIT_MS, type BridgeOperation } from '~/lib/bridge/protocol';
-import type { BridgeLink } from '~/lib/.server/projects/types';
-import { cancelGenerationBridgeJobs, deliverBridgeEvent, pollBridgeJobs, resetBridgeRelayForTests } from './relay';
-import { FsBridgeStore, setBridgeStore } from './store';
+import {
+  cancelGenerationBridgeJobs,
+  deliverBridgeEvent,
+  pollBridgeJobs,
+  resetBridgeRelayForTests,
+  touchDevice,
+} from './relay';
+import { FsBridgeStore, setBridgeStore, type BridgeDeviceRow } from './store';
 import {
   jobControl,
+  resolveBridgeTurn,
   runBridgeOperation,
   settleDropped,
   type BridgeRunContext,
@@ -43,12 +49,14 @@ let store: FsBridgeStore;
 let upserts: GenerationUpsert[];
 let events: BridgeUiEvent[];
 
-const link = (overrides: Partial<BridgeLink> = {}): BridgeLink => ({
-  deviceId: DEVICE,
-  unityProjectKey: 'key_1',
-  unityProjectName: 'My Level',
-  allowScripts: false,
-  linkedAt: '2026-09-29T00:00:00.000Z',
+/** A paired device row. D54: "Allow scripts" lives HERE, on the device — never on a builder project. */
+const device = (overrides: Partial<BridgeDeviceRow> = {}): BridgeDeviceRow => ({
+  id: DEVICE,
+  userId: USER,
+  name: 'Studio Mac',
+  os: 'darwin',
+  tokenHash: `hash_${overrides.id ?? DEVICE}`,
+  createdAt: '2026-09-29T00:00:00.000Z',
   ...overrides,
 });
 
@@ -58,8 +66,8 @@ function ctx(overrides: Partial<BridgeRunContext> = {}): BridgeRunContext {
     projectId: PROJECT,
     generationId: GEN,
     toolCallId: 'call_1',
-    link: link(),
     deviceId: DEVICE,
+    deviceName: 'Studio Mac',
     context: {},
     emit: (event) => void events.push(event),
     ...overrides,
@@ -212,7 +220,9 @@ describe('runBridgeOperation', () => {
     );
 
     await until(() => events.some((e) => e.type === 'bridge-consent'));
-    expect(events[0]).toMatchObject({ type: 'bridge-consent', toolCallId: 'call_1', target: 'My Level' });
+
+    // No hello with a current project → the consent names the device.
+    expect(events[0]).toMatchObject({ type: 'bridge-consent', toolCallId: 'call_1', target: 'Studio Mac' });
     expect(
       deliverClientToolResult({
         generationId: GEN,
@@ -264,15 +274,79 @@ describe('runBridgeOperation', () => {
     await expectNothingBilled();
   });
 
-  it('a script (Allow scripts on) runs with zero ledger rows', async () => {
-    const { outcome } = await runToFinal(
+  it("a script with the DEVICE's Allow scripts on runs, the dispatch carries it, with zero ledger rows", async () => {
+    await store.putDevice(device({ allowScripts: true }));
+
+    const pending = runBridgeOperation(
       { kind: 'unity.script', source: 'public static class B { public static void Run() {} }', entry: 'B.Run' },
-      { ok: true, text: 'script ok' },
-      ctx({ link: link({ allowScripts: true }) }),
+      'unity_run_script B.Run',
+      ctx(),
+    );
+    const jobId = await waitQueued();
+    const poll = await pickUp();
+
+    expect(poll.jobs[0].allowScripts).toBe(true);
+    expect(poll.jobs[0]).not.toHaveProperty('unityProjectKey');
+
+    deliverBridgeEvent(DEVICE, { jobId, type: 'started' });
+    deliverBridgeEvent(DEVICE, { jobId, type: 'final', result: { ok: true, text: 'script ok' } });
+
+    expect(await pending).toBe('script ok');
+    await until(async () => (await store.getJob(jobId))?.status === 'succeeded');
+    await expectNothingBilled();
+  });
+
+  it("an ordinary dispatch carries the device's allowScripts value (false when switched off)", async () => {
+    await store.putDevice(device({ allowScripts: false }));
+
+    const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
+    const jobId = await waitQueued();
+    const poll = await pickUp();
+
+    expect(poll.jobs[0].allowScripts).toBe(false);
+    deliverBridgeEvent(DEVICE, { jobId, type: 'started' });
+    deliverBridgeEvent(DEVICE, { jobId, type: 'final', result: { ok: true, text: 'ok' } });
+    await pending;
+    await until(async () => (await store.getJob(jobId))?.status === 'succeeded');
+  });
+
+  it("Allow scripts on ANOTHER user's or a revoked device row never lets a script through", async () => {
+    const script: BridgeOperation = { kind: 'unity.script', source: 'class A {}', entry: 'A.Run' };
+
+    await store.putDevice(device({ allowScripts: true, userId: 'someone_else' }));
+    expect(await runBridgeOperation(script, 'unity_run_script A.Run', ctx())).toMatch(/Allow scripts/);
+
+    await store.putDevice(device({ allowScripts: true, revokedAt: '2026-09-29T01:00:00.000Z' }));
+    expect(await runBridgeOperation(script, 'unity_run_script A.Run', ctx())).toMatch(/Allow scripts/);
+    expect(events).toHaveLength(0);
+  });
+
+  it("consent names the helper's current Unity project when it reports one", async () => {
+    touchDevice(DEVICE, {
+      protocol: 2,
+      helperVersion: '1.0.0',
+      os: 'darwin',
+      projectsDir: 'Unity',
+      unityProjects: [{ key: 'k1', name: 'Racer' }],
+      currentProject: 'Racer',
+      scriptsDisabledLocally: false,
+    });
+
+    const pending = runBridgeOperation(
+      { kind: 'unity.command', name: 'delete_gameobject', params: {} },
+      'unity_command delete_gameobject',
+      ctx(),
     );
 
-    expect(outcome).toBe('script ok');
-    await expectNothingBilled();
+    await until(() => events.some((e) => e.type === 'bridge-consent'));
+    expect(events[0]).toMatchObject({ type: 'bridge-consent', target: 'Racer' });
+    deliverClientToolResult({
+      generationId: GEN,
+      toolCallId: 'consent:call_1',
+      userId: USER,
+      result: { approved: false },
+    });
+    await pending;
   });
 
   it('a long job (bt_export_level) runs with zero ledger rows', async () => {
@@ -414,5 +488,88 @@ describe('jobControl', () => {
     expect(await jobControl('status', jobId, 0, { userId: 'someone_else', context: {} })).toMatch(
       /No Unity Bridge job/,
     );
+  });
+});
+
+describe('resolveBridgeTurn (D54 — no project link)', () => {
+  const turn = (overrides: { projectId?: string } = {}) =>
+    resolveBridgeTurn({
+      user: { id: USER },
+      projectId: 'projectId' in overrides ? overrides.projectId : PROJECT,
+      context: {},
+    });
+
+  it('no devices → none', async () => {
+    expect(await turn()).toEqual({ state: 'none' });
+  });
+
+  it('no project → none, even with a present device', async () => {
+    await store.putDevice(device());
+    touchDevice(DEVICE, undefined);
+
+    expect(await turn({ projectId: undefined })).toEqual({ state: 'none' });
+  });
+
+  it('UNITY_BRIDGE_ENABLED=false → disabled', async () => {
+    vi.stubEnv('UNITY_BRIDGE_ENABLED', 'false');
+    await store.putDevice(device());
+    touchDevice(DEVICE, undefined);
+
+    expect((await turn()).state).toBe('disabled');
+  });
+
+  it('devices but none present → offline, naming the most recently seen one', async () => {
+    await store.putDevice(device({ id: 'dev_old', name: 'Old', lastSeenAt: '2026-09-28T00:00:00.000Z' }));
+    await store.putDevice(device({ id: 'dev_new', name: 'New', lastSeenAt: '2026-09-29T00:00:00.000Z' }));
+
+    const result = await turn();
+    expect(result.state).toBe('offline');
+    expect(result.device?.id).toBe('dev_new');
+  });
+
+  it('a present device → online, with its hello', async () => {
+    await store.putDevice(device());
+    touchDevice(DEVICE, {
+      protocol: 2,
+      helperVersion: '1.0.0',
+      os: 'darwin',
+      projectsDir: 'Unity',
+      unityProjects: [],
+      scriptsDisabledLocally: false,
+    });
+
+    const result = await turn();
+    expect(result.state).toBe('online');
+    expect(result.device?.id).toBe(DEVICE);
+    expect(result.hello?.projectsDir).toBe('Unity');
+  });
+
+  it('two present devices → the most recently seen wins', async () => {
+    await store.putDevice(device({ id: 'dev_a', name: 'A' }));
+    await store.putDevice(device({ id: 'dev_b', name: 'B' }));
+
+    const now = Date.now();
+    touchDevice('dev_b', undefined, now - 1000);
+    touchDevice('dev_a', undefined, now);
+
+    expect((await turn()).device?.id).toBe('dev_a');
+
+    touchDevice('dev_b', undefined, now + 1);
+    expect((await turn()).device?.id).toBe('dev_b');
+  });
+
+  it("a revoked device is ignored even when present; another user's device is never offered", async () => {
+    await store.putDevice(device({ id: 'dev_revoked', revokedAt: '2026-09-29T01:00:00.000Z' }));
+    touchDevice('dev_revoked', undefined);
+    await store.putDevice(device({ id: 'dev_theirs', userId: 'someone_else' }));
+    touchDevice('dev_theirs', undefined);
+
+    expect(await turn()).toEqual({ state: 'none' });
+
+    await store.putDevice(device({ id: 'dev_mine' }));
+
+    const result = await turn();
+    expect(result.state).toBe('offline');
+    expect(result.device?.id).toBe('dev_mine');
   });
 });

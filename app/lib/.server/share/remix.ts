@@ -78,6 +78,5 @@ export function deriveRemix(source: Project, ctx: RemixContext): NewProject {
     // Not a preference worth carrying, but harmless either way: with no link, auto-push is inert.
     autoPush: true,
     gameBackendRef: undefined,
-    bridgeLink: undefined, // a Unity link is a fact about the author's machine — never carried (D44)
   };
 }

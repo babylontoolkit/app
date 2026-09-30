@@ -7,7 +7,10 @@
 --   * bridge_pairings — the short-lived device-code pairing handshake (10 minutes). Only the secret's hash.
 --   * bridge_jobs     — the durable record of each bridge operation (queues and parked polls live in
 --                       memory on the one server instance; only durable facts land here).
---   * projects.bridge_link — which device + Unity project a builder project is linked to.
+--
+-- There is NO project link (D54, owner 2026-09-29): a builder project is never tied to a device or a Unity
+-- project. The model opens or creates the Unity project it works on through the helper, and the "Allow
+-- scripts" switch is a fact about the DEVICE (bridge_devices.allow_scripts), not about a builder project.
 --
 -- All three tables have RLS ENABLED with NO POLICY, deliberately: service-role only, the git_tokens rule
 -- (migration 0006). A user has no legitimate reason to read a token hash through the anon key.
@@ -22,6 +25,7 @@ create table if not exists public.bridge_devices (
   os            text not null,
   token_hash    text not null unique,
   capabilities  jsonb,
+  allow_scripts boolean not null default false,
   created_at    timestamptz not null default now(),
   last_seen_at  timestamptz,
   revoked_at    timestamptz
@@ -63,5 +67,3 @@ create table if not exists public.bridge_jobs (
 create index if not exists bridge_jobs_project_idx on public.bridge_jobs (project_id, created_at desc);
 alter table public.bridge_jobs enable row level security;
 -- NO POLICY, deliberately.
-
-alter table public.projects add column if not exists bridge_link jsonb;

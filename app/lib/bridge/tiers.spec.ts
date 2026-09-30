@@ -95,4 +95,16 @@ describe('classifyOperation', () => {
   it('unity.editor close → allowed', () => {
     expect(classifyOperation({ kind: 'unity.editor', action: 'close' }).tier).toBe('allowed');
   });
+
+  it('unity.project list → allowed', () => {
+    expect(classifyOperation({ kind: 'unity.project', action: 'list' }).tier).toBe('allowed');
+  });
+
+  it('unity.project open → allowed', () => {
+    expect(classifyOperation({ kind: 'unity.project', action: 'open', name: 'My Game' }).tier).toBe('allowed');
+  });
+
+  it('unity.project create → allowed', () => {
+    expect(classifyOperation({ kind: 'unity.project', action: 'create', name: 'My Game' }).tier).toBe('allowed');
+  });
 });

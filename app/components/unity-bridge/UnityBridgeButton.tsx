@@ -3,9 +3,10 @@
  *
  * Renders for every open project — including when the bridge is disabled, when it is then titled
  * "Unity scenes" and opens the Connect dialog showing only the Local scenes section (local scenes never
- * wait on the bridge, D52). A click opens the Status panel only when the project is linked and the
- * bridge is enabled; every other state (including a status that has not loaded, or a 404) opens the
- * Connect dialog, so the Local scenes section is never behind a slow or failed status request.
+ * wait on the bridge, D52). A click opens the Status panel only when a device is paired and the bridge
+ * is enabled; every other state (including a status that has not loaded, or a 404) opens the Connect
+ * dialog, so the Local scenes section is never behind a slow or failed status request. There is no
+ * project link (D54) — the agent drives the most recently seen paired device.
  *
  * There is no header toolbar button — this icon is the only entry point.
  */
@@ -44,13 +45,13 @@ function titleFor(status: BridgeStatusView | null): string {
     return status && !status.enabled ? 'Unity scenes' : 'Connect Unity';
   }
 
-  const deviceName = status.link?.deviceName ?? 'your computer';
+  const deviceName = status.device?.name ?? 'your computer';
 
   switch (status.state) {
-    case 'online':
-      return `Unity Bridge: ${deviceName} · ${status.link?.unityProjectName ?? ''}${
-        status.link?.allowScripts ? ' · scripts allowed' : ''
-      }`;
+    case 'online': {
+      const current = status.device?.hello?.currentProject;
+      return `Unity Bridge: ${deviceName}${current ? ` · ${current}` : ''}`;
+    }
     case 'offline':
       return `Unity Bridge offline — run the helper on ${deviceName}`;
     default:

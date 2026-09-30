@@ -177,6 +177,7 @@ export function classifyOperation(op: BridgeOperation): TierDecision {
     case 'unity.editor':
     case 'devserver.start':
     case 'devserver.status':
+    case 'unity.project':
       return { tier: 'allowed' };
     default:
       return { tier: 'consent', reason: 'unrecognised operation — asking first' };

@@ -29,23 +29,34 @@ const { streamingState } = await import('~/lib/stores/streaming');
 
 type StatusBody = Record<string, unknown>;
 
-const unpaired: StatusBody = { enabled: true, state: 'unpaired', link: null, devices: [], jobs: [] };
+const unpaired: StatusBody = { enabled: true, state: 'unpaired', device: null, devices: [], jobs: [] };
 
-const online: StatusBody = {
+const studioMac = (currentProject?: string) => ({
+  id: 'dev_1',
+  name: 'Studio Mac',
+  os: 'darwin',
+  online: true,
+  allowScripts: false,
+  hello: {
+    protocol: 2,
+    helperVersion: '2.0.0',
+    os: 'darwin',
+    projectsDir: 'Unity',
+    unityProjects: [{ key: 'k1', name: 'Racer' }],
+    ...(currentProject ? { currentProject } : {}),
+    scriptsDisabledLocally: false,
+  },
+});
+
+const onlineWith = (currentProject?: string): StatusBody => ({
   enabled: true,
   state: 'online',
-  link: { deviceId: 'dev_1', deviceName: 'Studio Mac', unityProjectName: 'Racer', allowScripts: false },
-  devices: [
-    {
-      id: 'dev_1',
-      name: 'Studio Mac',
-      os: 'darwin',
-      online: true,
-      hello: { protocol: 1, helperVersion: '1.0.0', os: 'darwin', unityProjects: [], scriptsDisabledLocally: false },
-    },
-  ],
+  device: studioMac(currentProject),
+  devices: [studioMac(currentProject)],
   jobs: [],
-};
+});
+
+const online = onlineWith();
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -101,7 +112,7 @@ describe('UnityBridgeButton', () => {
   });
 
   it('a disabled bridge still renders the icon, and it opens only the Local scenes section', async () => {
-    answerStatusWith({ enabled: false, state: 'unpaired', link: null, devices: [], jobs: [] });
+    answerStatusWith({ enabled: false, state: 'unpaired', device: null, devices: [], jobs: [] });
     render(<UnityBridgeButton />);
 
     await waitFor(() => expect(iconButton().getAttribute('title')).toBe('Unity scenes'));
@@ -136,15 +147,35 @@ describe('UnityBridgeButton', () => {
     expect(screen.getByText(/npx @babylonjs-toolkit\/agent bridge --server http:\/\/localhost/)).toBeTruthy();
   });
 
-  it('online → success colour and a title naming the device', async () => {
+  it('online → success colour and the title "Unity Bridge: <device>"', async () => {
     answerStatusWith(online);
     render(<UnityBridgeButton />);
 
     await waitFor(() => expect(iconButton().className).toContain('text-bolt-elements-icon-success'));
-    expect(iconButton().getAttribute('title')).toContain('Studio Mac');
+    expect(iconButton().getAttribute('title')).toBe('Unity Bridge: Studio Mac');
 
     fireEvent.click(iconButton());
     expect(bridgeDialogStore.get()).toBe('status');
+  });
+
+  it('online with a current Unity project → the title adds " · <project>"', async () => {
+    answerStatusWith(onlineWith('Racer'));
+    render(<UnityBridgeButton />);
+
+    await waitFor(() => expect(iconButton().getAttribute('title')).toBe('Unity Bridge: Studio Mac · Racer'));
+  });
+
+  it('the Connect dialog has NO link section (D54) and tells the user to run it in the projects folder', async () => {
+    answerStatusWith(online);
+    render(<UnityBridgeButton />);
+
+    await waitFor(() => expect(iconButton().className).toContain('text-bolt-elements-icon-success'));
+    act(() => bridgeDialogStore.set('connect'));
+
+    expect(await screen.findByText('Your devices')).toBeTruthy();
+    expect(screen.getByText('Run it in your Unity projects folder (or add --projects <folder>).')).toBeTruthy();
+    expect(screen.queryByText(/Link this project/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Link / })).toBeNull();
   });
 
   it("Approve posts {action:'approve', code}", async () => {

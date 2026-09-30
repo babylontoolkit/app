@@ -3,7 +3,7 @@
  * Agent's `tests/bridge-policy.test.js` (D3) — change both together.
  */
 import { describe, expect, it } from 'vitest';
-import { capText } from './protocol';
+import { capText, type BridgeOperation } from './protocol';
 import { isUnsafePath, validateOperation } from './validate';
 
 describe('isUnsafePath', () => {
@@ -74,6 +74,88 @@ describe('validateOperation', () => {
 
   it("unity.script entry 'Build' (no dot) → sentence", () => {
     expect(typeof validateOperation({ kind: 'unity.script', source: 'class A {}', entry: 'Build' })).toBe('string');
+  });
+
+  it('unity.project open with no name → sentence', () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'open' } as BridgeOperation)).toBe('string');
+  });
+
+  it('unity.project create with no name → sentence', () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'create' } as BridgeOperation)).toBe('string');
+  });
+
+  it("unity.project open '../x' → sentence", () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'open', name: '../x' } as BridgeOperation)).toBe(
+      'string',
+    );
+  });
+
+  it("unity.project create '../x' → sentence", () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'create', name: '../x' } as BridgeOperation)).toBe(
+      'string',
+    );
+  });
+
+  it("unity.project create 'a..b' → sentence", () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'create', name: 'a..b' } as BridgeOperation)).toBe(
+      'string',
+    );
+  });
+
+  it("unity.project create 'x.' (trailing dot) → sentence", () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'create', name: 'x.' } as BridgeOperation)).toBe(
+      'string',
+    );
+  });
+
+  it("unity.project create 'Real ' (trailing space) → sentence", () => {
+    expect(
+      typeof validateOperation({ kind: 'unity.project', action: 'create', name: 'Real ' } as BridgeOperation),
+    ).toBe('string');
+  });
+
+  it("unity.project open 'My Game' → null", () => {
+    expect(validateOperation({ kind: 'unity.project', action: 'open', name: 'My Game' } as BridgeOperation)).toBeNull();
+  });
+
+  it("unity.project create 'My Game' → null", () => {
+    expect(
+      validateOperation({ kind: 'unity.project', action: 'create', name: 'My Game' } as BridgeOperation),
+    ).toBeNull();
+  });
+
+  it("unity.project create 'Level_01-v2.0a' → null", () => {
+    expect(
+      validateOperation({ kind: 'unity.project', action: 'create', name: 'Level_01-v2.0a' } as BridgeOperation),
+    ).toBeNull();
+  });
+
+  it('unity.project list → null', () => {
+    expect(validateOperation({ kind: 'unity.project', action: 'list' } as BridgeOperation)).toBeNull();
+  });
+
+  it("unity.project list with name '../ignored' → null", () => {
+    expect(
+      validateOperation({ kind: 'unity.project', action: 'list', name: '../ignored' } as BridgeOperation),
+    ).toBeNull();
+  });
+
+  it("unity.project action 'delete' → sentence", () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'delete' } as unknown as BridgeOperation)).toBe(
+      'string',
+    );
+  });
+
+  it('unity.project refusal sentences are exact (the helper carries the same three)', () => {
+    expect(validateOperation({ kind: 'unity.project', action: 'delete' } as unknown as BridgeOperation)).toBe(
+      'unity_project action must be list, open or create.',
+    );
+    expect(validateOperation({ kind: 'unity.project', action: 'create' })).toBe(
+      'unity_project needs a project name for create.',
+    );
+    expect(validateOperation({ kind: 'unity.project', action: 'open', name: 'a/b' })).toBe(
+      'The Unity project name "a/b" is not valid — use letters, numbers, spaces, dots, dashes or underscores.',
+    );
   });
 });
 

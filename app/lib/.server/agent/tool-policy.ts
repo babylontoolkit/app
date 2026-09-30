@@ -192,7 +192,7 @@ export interface ToolPolicyInput {
   /** The platform can render media this turn (§4.16: a KIE key + a project for the bytes to land in). */
   hasMediaTools: boolean;
 
-  /** Unity Bridge tools are offered this turn (§4.17 — a linked, present, owned device). */
+  /** Unity Bridge tools are offered this turn (§4.17 — one of the user's paired devices is present, D54). */
   hasBridgeTools?: boolean;
 
   /** Skills already routed into the cached prefix — their presence closes the loop (nothing to fetch). */

@@ -29,6 +29,9 @@ export interface BridgeDeviceRow {
   lastSeenAt?: string;
   revokedAt?: string;
   capabilities?: BridgeHello;
+
+  /** "Allow scripts" is per DEVICE (D54) — the user's own machine decides whether scripts may run on it. */
+  allowScripts?: boolean;
 }
 
 export interface BridgePairingRow {
@@ -165,6 +168,7 @@ function deviceFromRow(row: Row): BridgeDeviceRow {
     os: row.os as string,
     tokenHash: row.token_hash as string,
     capabilities: (row.capabilities as BridgeHello | null) ?? undefined,
+    allowScripts: Boolean(row.allow_scripts),
     createdAt: row.created_at as string,
     lastSeenAt: optionalString(row.last_seen_at),
     revokedAt: optionalString(row.revoked_at),
@@ -179,6 +183,7 @@ function deviceToRow(row: BridgeDeviceRow): Row {
     os: row.os,
     token_hash: row.tokenHash,
     capabilities: row.capabilities ?? null,
+    allow_scripts: row.allowScripts ?? false,
     created_at: row.createdAt,
     last_seen_at: row.lastSeenAt ?? null,
     revoked_at: row.revokedAt ?? null,

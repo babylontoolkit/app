@@ -21,7 +21,12 @@ export const BRIDGE_MAX_RESULT_CHARS = 20_000;
 export const BRIDGE_MAX_IMAGE_BASE64 = 400_000;
 export const BRIDGE_MAX_CAPTURE_PX = 1024;
 export const BRIDGE_TOOLKIT_MIN_VERSION = '9.25.1';
-export const BRIDGE_PROTOCOL_VERSION = 1;
+
+/**
+ * 2 = D54: no project linking. The helper advertises a projects folder and the project it is working on;
+ * the model opens or creates one with `unity.project`, and `BridgeDispatch` carries no project key.
+ */
+export const BRIDGE_PROTOCOL_VERSION = 2;
 
 export type BridgeOperation =
   | { kind: 'unity.list'; query?: string }
@@ -32,7 +37,8 @@ export type BridgeOperation =
   | { kind: 'unity.editor'; action: 'status' | 'open' | 'close' }
   | { kind: 'devserver.start'; port?: number; auto?: boolean }
   | { kind: 'devserver.status' }
-  | { kind: 'blender.script'; source: string; inputs: string[]; outputs: string[]; timeoutSeconds: number };
+  | { kind: 'blender.script'; source: string; inputs: string[]; outputs: string[]; timeoutSeconds: number }
+  | { kind: 'unity.project'; action: 'list' | 'open' | 'create'; name?: string };
 
 export interface BridgeUnityProject {
   key: string;
@@ -57,17 +63,18 @@ export interface BridgeHello {
   helperVersion: string;
   os: 'darwin' | 'win32' | 'linux';
   unityCli?: { path: string; version: string };
-  blender?: { path: string; version: string };
-  unityProjects: BridgeUnityProject[];
-  devServer?: BridgeDevServerInfo; // for the FIRST unity project only
+  blender?: { path: string; version: string }; // version is the number, e.g. "5.1.2"
+  projectsDir: string; // BASENAME only of the projects folder — never a full path
+  unityProjects: BridgeUnityProject[]; // projects directly inside the projects folder (+ any --unity paths)
+  currentProject?: string; // name of the project Unity ops run against (last opened/created), if any
+  devServer?: BridgeDevServerInfo; // for the CURRENT project
   scriptsDisabledLocally: boolean; // --no-scripts
 }
 
 export interface BridgeDispatch {
   jobId: string;
   op: BridgeOperation;
-  unityProjectKey: string;
-  allowScripts: boolean;
+  allowScripts: boolean; // from the DEVICE row (D54)
   consentGranted: boolean;
 }
 

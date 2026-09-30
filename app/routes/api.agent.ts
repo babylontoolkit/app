@@ -281,12 +281,6 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       gameBackend: sanitizeGameBackend(body.gameBackend, context),
       assetNotes: body.assetNotes,
       mcpLiveTools: body.mcpTools,
-
-      /*
-       * The Unity Bridge link comes from the project ROW, never the body (§4.17): it names the paired
-       * device a paid operation is dispatched to, and a caller who could name their own would pick one.
-       */
-      bridgeLink: project?.bridgeLink,
       localSceneServer: sanitizeLocalSceneServer(body.localSceneServer),
       apiKeys,
       providerSettings,

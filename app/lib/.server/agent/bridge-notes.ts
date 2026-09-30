@@ -1,7 +1,9 @@
 /**
  * Per-turn Unity Bridge notes (SPEC §4.17, D37) — what the model is told about the user's machine this
- * turn: the linked device is online (and what it runs) or offline, which bridge jobs finished since the
- * last turn, and which local scene server serves exported scenes.
+ * turn: the paired device is online (its projects folder, the Unity projects in it, which one is current,
+ * and what it runs) or offline, which bridge jobs finished since the last turn, and which local scene
+ * server serves exported scenes. There is no project link (D54) — the model opens or creates the Unity
+ * project with `unity_project`.
  *
  * 🔴 PLACEMENT: the proxy pushes these AFTER the last cache breakpoint (immediately after the discuss
  * note). They change turn to turn — presence, job rows — so anywhere ahead of a breakpoint would
@@ -16,28 +18,46 @@ export interface BridgeTurnNotesInput {
   bridgeTurn: { state: 'none' | 'disabled' | 'offline' | 'online'; device?: { name: string }; hello?: BridgeHello };
   finishedJobs: Array<{ id: string; operation: string; status: string; resultText?: string; error?: string }>;
   localSceneServer?: { origin: string; scenes?: string[] };
-  linkName?: string;
+}
+
+/** At most this many project names ride in the note; the rest are counted. */
+const MAX_PROJECT_NAMES = 20;
+
+function projectNames(hello: BridgeHello | undefined): string {
+  const names = (hello?.unityProjects ?? []).map((project) => project.name);
+
+  if (names.length === 0) {
+    return 'no Unity projects yet';
+  }
+
+  const shown = names.slice(0, MAX_PROJECT_NAMES).join(', ');
+  const more = names.length - MAX_PROJECT_NAMES;
+
+  return more > 0 ? `${shown} (and ${more} more)` : shown;
 }
 
 export function bridgeTurnNotes(input: BridgeTurnNotesInput): string[] {
-  const { bridgeTurn, finishedJobs, localSceneServer, linkName } = input;
+  const { bridgeTurn, finishedJobs, localSceneServer } = input;
   const notes: string[] = [];
   const deviceName = bridgeTurn.device?.name ?? 'your computer';
 
   if (bridgeTurn.state === 'offline') {
     notes.push(
-      `The Unity Bridge is linked to "${deviceName}" but the helper is not running. If the user asks for Unity or Blender work, tell them to run the helper (the cube icon shows the command). Never claim to have run a Unity or Blender command.`,
+      `Your computer "${deviceName}" is paired but the helper is not running. If the user asks for Unity or Blender work, tell them to run the helper (the cube icon shows the command). Never claim to have run a Unity or Blender command.`,
     );
   }
 
   if (bridgeTurn.state === 'online') {
     const hello = bridgeTurn.hello;
-    const first = hello?.unityProjects[0];
-    const toolkitVersion = first?.toolkitVersion;
+    const current = hello?.currentProject;
+    const currentInfo = current ? hello?.unityProjects.find((project) => project.name === current) : undefined;
+    const currentText = current
+      ? `Current project: "${current}".`
+      : 'Current project: none — open or create one with unity_project.';
     const blender = hello?.blender;
 
     notes.push(
-      `# Unity Bridge\n\nConnected to "${deviceName}" (Unity project "${linkName ?? first?.name ?? '?'}"). Unity ${first?.unityVersion ?? '?'}, Babylon Toolkit ${toolkitVersion ?? '?'}${blender ? `, Blender ${blender.version}` : ', Blender not found'}. Use the Unity Bridge tools; paths are relative to the Unity project.`,
+      `# Unity Bridge\n\nConnected to "${deviceName}". Projects folder "${hello?.projectsDir ?? '?'}": ${projectNames(hello)}. ${currentText} Unity CLI ${hello?.unityCli?.version ?? 'not found'}, Toolkit ${currentInfo?.toolkitVersion ?? '?'}, Blender ${blender ? blender.version : 'not found'}. Paths are relative to the current Unity project.`,
     );
   }
 

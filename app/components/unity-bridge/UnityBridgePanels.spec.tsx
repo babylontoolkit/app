@@ -32,25 +32,31 @@ const posted = () =>
     .filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
     .map(([url, init]) => ({ url: String(url), body: JSON.parse(String((init as RequestInit).body)) }));
 
-const status = (toolkitVersion: string, jobs: unknown[] = []) => ({
+const device = (toolkitVersion: string, allowScripts = false) => ({
+  id: 'dev_1',
+  name: 'Studio Mac',
+  os: 'darwin',
+  online: true,
+  allowScripts,
+  hello: {
+    protocol: 2,
+    helperVersion: '2.0.0',
+    os: 'darwin' as const,
+    projectsDir: 'Unity',
+    unityProjects: [
+      { key: 'k1', name: 'Racer', toolkitVersion, unityVersion: '6000.1.0f1' },
+      { key: 'k2', name: 'Kart', toolkitVersion: '9.30.0' },
+    ],
+    currentProject: 'Racer',
+    scriptsDisabledLocally: false,
+  },
+});
+
+const status = (toolkitVersion: string, jobs: unknown[] = [], allowScripts = false) => ({
   enabled: true,
   state: 'online' as const,
-  link: { deviceId: 'dev_1', deviceName: 'Studio Mac', unityProjectName: 'Racer', allowScripts: false },
-  devices: [
-    {
-      id: 'dev_1',
-      name: 'Studio Mac',
-      os: 'darwin',
-      online: true,
-      hello: {
-        protocol: 1,
-        helperVersion: '1.0.0',
-        os: 'darwin' as const,
-        unityProjects: [{ key: 'k1', name: 'Racer', toolkitVersion, unityVersion: '6000.1.0f1' }],
-        scriptsDisabledLocally: false,
-      },
-    },
-  ],
+  device: device(toolkitVersion, allowScripts),
+  devices: [device(toolkitVersion, allowScripts)],
   jobs: jobs as never,
 });
 
@@ -136,7 +142,7 @@ describe('UnityBridgeStatusPanel', () => {
     expect(screen.queryByText(/is older than/)).toBeNull();
   });
 
-  it('the scripts checkbox posts allowScripts', async () => {
+  it('the scripts checkbox posts allowScripts WITH the device id (D54 — per device)', async () => {
     bridgeStatusStore.set(status('9.25.1'));
     bridgeDialogStore.set('status');
     render(<UnityBridgeStatusPanel projectId="prj_1" />);
@@ -146,9 +152,37 @@ describe('UnityBridgeStatusPanel', () => {
     await waitFor(() =>
       expect(posted()).toContainEqual({
         url: '/api/projects/prj_1/bridge',
-        body: { action: 'allowScripts', value: true },
+        body: { action: 'allowScripts', deviceId: 'dev_1', value: true },
       }),
     );
+  });
+
+  it("the checkbox reflects the DEVICE's switch", () => {
+    bridgeStatusStore.set(status('9.25.1', [], true));
+    bridgeDialogStore.set('status');
+    render(<UnityBridgeStatusPanel projectId="prj_1" />);
+
+    expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('lists the projects folder and its Unity projects read-only, marking the current one; no Unlink', () => {
+    bridgeStatusStore.set(status('9.25.1'));
+    bridgeDialogStore.set('status');
+    render(<UnityBridgeStatusPanel projectId="prj_1" />);
+
+    expect(screen.getByText('Unity', { selector: '.font-mono' })).toBeTruthy();
+
+    const list = screen.getByRole('list', { name: 'Unity projects' });
+    expect(list.textContent).toContain('Racer');
+    expect(list.textContent).toContain('Kart');
+    expect(screen.getAllByTestId('current-project')).toHaveLength(1);
+    expect(screen.getByTestId('current-project').parentElement?.textContent).toContain('Racer');
+
+    expect(screen.queryByRole('button', { name: 'Unlink' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Link / })).toBeNull();
+    expect(screen.getByRole('button', { name: 'View jobs' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Manage devices' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeTruthy();
   });
 });
 

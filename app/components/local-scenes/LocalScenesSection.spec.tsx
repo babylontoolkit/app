@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
- * The shared Local scenes section (D22, D52). It must work with NO bridge: no helper → no scene list,
- * the "No bridge needed" caption, and a free-text Import that still runs. It must never silently
+ * The shared Local scenes section (D22, D52, D54). It must work with NO bridge: the "No bridge needed"
+ * caption and a free-text Import. D54 made it minimal — ONE scene-URL input, never a list of scene rows,
+ * even when an online helper reports scenes. It must never silently
  * overwrite (D22) — the user confirms first, and cancelling makes no second call.
  */
 import { readFileSync } from 'node:fs';
@@ -70,20 +71,24 @@ describe('LocalScenesSection', () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Imported 1 file(s).'));
   });
 
-  it('with helper scenes: one Import to project row per scene, using <origin>/scenes/<scene>', async () => {
+  it('an online helper with scenes: still NO scene rows (D54) — its origin only seeds the address', async () => {
     importMock.mockResolvedValue(okResult);
     render(
       <LocalScenesSection
         projectId="prj_1"
-        helperDevServer={{ origin: 'http://localhost:9999', scenes: ['Level01.gltf'] }}
+        helperDevServer={{ origin: 'http://localhost:9999', scenes: ['Level01.gltf'] } as { origin: string }}
       />,
     );
 
-    const rows = screen.getAllByRole('button', { name: 'Import to project' });
-    expect(rows).toHaveLength(1);
-    expect(screen.queryByText(/No bridge needed\./)).toBeNull();
+    expect(screen.queryByText('Import to project')).toBeNull();
+    expect(screen.queryByText('Level01.gltf')).toBeNull();
+    expect((screen.getByLabelText('Dev server address') as HTMLInputElement).value).toBe('http://localhost:9999');
+    expect(screen.getAllByLabelText('Scene URL')).toHaveLength(1);
 
-    fireEvent.click(rows[0]);
+    fireEvent.change(screen.getByLabelText('Scene URL'), {
+      target: { value: 'http://localhost:9999/scenes/Level01.gltf' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await waitFor(() =>
       expect(importMock).toHaveBeenCalledWith({ url: 'http://localhost:9999/scenes/Level01.gltf', overwrite: false }),
     );
@@ -91,9 +96,12 @@ describe('LocalScenesSection', () => {
 
   it('asks before overwriting; confirming imports again with overwrite:true', async () => {
     importMock.mockResolvedValueOnce(existsResult).mockResolvedValueOnce(okResult);
-    render(<LocalScenesSection projectId="prj_1" helperDevServer={{ scenes: ['Level01.gltf'] }} />);
+    render(<LocalScenesSection projectId="prj_1" />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import to project' }));
+    fireEvent.change(screen.getByLabelText('Scene URL'), {
+      target: { value: 'http://localhost:8888/scenes/Level01.gltf' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await screen.findByText('Replace the existing files in public/scenes/Level01/?');
 
     fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
@@ -104,9 +112,12 @@ describe('LocalScenesSection', () => {
 
   it('cancelling the overwrite confirmation makes no second call', async () => {
     importMock.mockResolvedValueOnce(existsResult);
-    render(<LocalScenesSection projectId="prj_1" helperDevServer={{ scenes: ['Level01.gltf'] }} />);
+    render(<LocalScenesSection projectId="prj_1" />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import to project' }));
+    fireEvent.change(screen.getByLabelText('Scene URL'), {
+      target: { value: 'http://localhost:8888/scenes/Level01.gltf' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Import' }));
     await screen.findByText('Replace the existing files in public/scenes/Level01/?');
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));

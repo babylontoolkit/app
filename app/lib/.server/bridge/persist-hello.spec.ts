@@ -3,9 +3,10 @@ import { BRIDGE_LAST_SEEN_WRITE_MS, type BridgeHello } from '~/lib/bridge/protoc
 import { canonicalJson, shouldPersistHello } from './persist-hello';
 
 const hello: BridgeHello = {
-  protocol: 1,
+  protocol: 2,
   helperVersion: '1.2.0',
   os: 'darwin',
+  projectsDir: 'Unity',
   unityProjects: [
     { key: 'k1', name: 'Kart', unityVersion: '6000.0.1f1' },
     { key: 'k2', name: 'Maze' },
@@ -24,7 +25,8 @@ const reordered = {
   devServer: { scenes: ['a', 'b'], origin: 'http://localhost:8888', running: true },
   os: 'darwin',
   helperVersion: '1.2.0',
-  protocol: 1,
+  projectsDir: 'Unity',
+  protocol: 2,
 } as BridgeHello;
 
 const NOW = Date.parse('2026-09-29T12:00:00.000Z');

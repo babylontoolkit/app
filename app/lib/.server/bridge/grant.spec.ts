@@ -40,9 +40,10 @@ function ctx(vars: Record<string, string> = {}) {
 
 function hello(productGuid: string) {
   touchDevice('dev_1', {
-    protocol: 1,
+    protocol: 2,
     helperVersion: '1.0.0',
     os: 'darwin',
+    projectsDir: 'Unity',
     scriptsDisabledLocally: false,
     unityProjects: [{ key: 'k1', name: 'BabylonToolkit-2024', productGuid }],
   });

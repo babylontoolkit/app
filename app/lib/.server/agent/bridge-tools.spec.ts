@@ -22,8 +22,8 @@ const tools = createBridgeTools({
   userId: 'u1',
   projectId: 'p1',
   generationId: 'g1',
-  link: { deviceId: 'd1', unityProjectKey: 'k1', unityProjectName: 'Level', allowScripts: false, linkedAt: '' },
   deviceId: 'd1',
+  deviceName: 'Studio Mac',
   context: {},
   emit: () => undefined,
 });
@@ -37,7 +37,7 @@ beforeEach(() => {
 });
 
 describe('createBridgeTools', () => {
-  it('offers the nine bridge tools', () => {
+  it('offers the ten bridge tools', () => {
     expect(Object.keys(tools).sort()).toEqual(
       [
         'blender_run_script',
@@ -48,6 +48,7 @@ describe('createBridgeTools', () => {
         'unity_dev_server',
         'unity_editor',
         'unity_list_commands',
+        'unity_project',
         'unity_run_script',
       ].sort(),
     );
@@ -131,6 +132,7 @@ describe('createBridgeTools', () => {
     expect(schema('unity_dev_server').safeParse({ action: 'START', port: '8888', auto: 'yes' }).success).toBe(true);
     expect(schema('bridge_job').safeParse({ action: 'Wait', jobId: 'x', maxSeconds: '30' }).success).toBe(true);
     expect(schema('blender_run_script').safeParse({ source: 'x', timeoutSeconds: '600' }).success).toBe(true);
+    expect(schema('unity_project').safeParse({ action: 'DELETE', name: '../x' }).success).toBe(true);
   });
 
   it('unity_command params as a JSON string is parsed; a non-object is a sentence', async () => {
@@ -145,6 +147,42 @@ describe('createBridgeTools', () => {
       /params must be a JSON object/,
     );
     expect(runBridgeOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it('unity_project defaults to list and carries no name', async () => {
+    expect(await call('unity_project', {})).toBe('ran');
+
+    const [op, label] = runBridgeOperation.mock.calls[0] as [unknown, string];
+    expect(op).toEqual({ kind: 'unity.project', action: 'list' });
+    expect(label).toBe('unity_project list');
+  });
+
+  it('unity_project "Create" with a name → the normalised operation and label', async () => {
+    await call('unity_project', { action: 'Create', name: ' My Game ' });
+
+    const [op, label] = runBridgeOperation.mock.calls[0] as [unknown, string];
+    expect(op).toEqual({ kind: 'unity.project', action: 'create', name: 'My Game' });
+    expect(label).toBe('unity_project create My Game');
+  });
+
+  it.each(['open', 'create'])('unity_project %s without a name → a sentence, and no call', async (action) => {
+    expect(await call('unity_project', { action })).toMatch(/^unity_project needs name — /);
+    expect(runBridgeOperation).not.toHaveBeenCalled();
+  });
+
+  it.each(['../x', '/Users/me/Game', 'a/b', '.hidden'])(
+    'unity_project open "%s" (not a plain folder name) → a sentence, and no call',
+    async (name) => {
+      expect(await call('unity_project', { action: 'open', name })).toMatch(/is not allowed/);
+      expect(runBridgeOperation).not.toHaveBeenCalled();
+    },
+  );
+
+  it('unity_project action "delete" → a sentence naming the choices, and no call', async () => {
+    expect(await call('unity_project', { action: 'delete', name: 'Game' })).toBe(
+      'unity_project action must be one of: list, open, create.',
+    );
+    expect(runBridgeOperation).not.toHaveBeenCalled();
   });
 
   it('unity_cli args as a plain string is split into words', async () => {

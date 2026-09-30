@@ -60,6 +60,24 @@ describe('FsBridgeStore', () => {
     expect(await store.listDevices('u2')).toEqual([]);
   });
 
+  it('a device row keeps its own allowScripts switch (D54 — per device, never per project)', async () => {
+    const row = {
+      id: 'dev_2',
+      userId: 'u1',
+      name: 'desk',
+      os: 'win32',
+      tokenHash: 'def456',
+      createdAt: '2026-09-29T12:00:00.000Z',
+      allowScripts: true,
+    };
+
+    await store.putDevice(row);
+    expect((await store.getDevice('dev_2'))?.allowScripts).toBe(true);
+
+    await store.putDevice({ ...row, allowScripts: false });
+    expect((await store.getDevice('dev_2'))?.allowScripts).toBe(false);
+  });
+
   it('findPendingPairingByCode ignores expired and consumed rows', async () => {
     const now = '2026-09-29T12:05:00.000Z';
 

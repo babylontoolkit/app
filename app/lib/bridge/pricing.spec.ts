@@ -52,6 +52,12 @@ describe('bridge long-operation classification', () => {
     expect(isLongOperation(blender(600))).toBe(true);
   });
 
+  it('unity.project open/create are long; list is not', () => {
+    expect(isLongOperation({ kind: 'unity.project', action: 'open', name: 'A' })).toBe(true);
+    expect(isLongOperation({ kind: 'unity.project', action: 'create', name: 'A' })).toBe(true);
+    expect(isLongOperation({ kind: 'unity.project', action: 'list' })).toBe(false);
+  });
+
   it('carries no per-operation price (D53 — bridge operations are not billed separately)', () => {
     expect(Object.keys(pricing).sort()).toEqual(['LONG_CLI', 'LONG_COMMANDS', 'isLongOperation']);
   });

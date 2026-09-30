@@ -151,6 +151,43 @@ describe('the migrations', () => {
   });
 
   /**
+   * The Unity Bridge (§4.17, migration 0025, D54): there is NO project link — a builder project is never
+   * tied to a device or a Unity project — and "Allow scripts" is a column on the DEVICE, defaulting OFF.
+   * 0025 was edited in place (never deployed), so these assert the one-pass schema a first deploy gets.
+   */
+  describe('the Unity Bridge (0025)', () => {
+    const columns = async (table: string) =>
+      (
+        await db.query<{ column_name: string; is_nullable: string; column_default: string | null }>(
+          `select column_name, is_nullable, column_default from information_schema.columns
+            where table_schema = 'public' and table_name = $1`,
+          [table],
+        )
+      ).rows;
+
+    it('projects has NO bridge_link column', async () => {
+      expect((await columns('projects')).map((c) => c.column_name)).not.toContain('bridge_link');
+    });
+
+    it('bridge_devices.allow_scripts is NOT NULL and defaults to false', async () => {
+      const column = (await columns('bridge_devices')).find((c) => c.column_name === 'allow_scripts');
+
+      expect(column?.is_nullable).toBe('NO');
+      expect(column?.column_default).toBe('false');
+    });
+
+    it('bridge_devices, bridge_pairings and bridge_jobs all have RLS enabled', async () => {
+      const { rows } = await db.query<{ relname: string; relrowsecurity: boolean }>(
+        `select relname, relrowsecurity from pg_class
+          where relnamespace = 'public'::regnamespace and relname in ('bridge_devices', 'bridge_pairings', 'bridge_jobs')`,
+      );
+
+      expect(rows).toHaveLength(3);
+      expect(rows.every((r) => r.relrowsecurity)).toBe(true);
+    });
+  });
+
+  /**
    * The chat index (§4.5.6, migration 0008) — what makes the sidebar follow the user.
    *
    * Asserted against the REAL schema because every property here is one the TypeScript store cannot

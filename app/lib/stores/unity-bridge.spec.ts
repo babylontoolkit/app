@@ -120,7 +120,7 @@ describe('unity-bridge store', () => {
   });
 
   it('refreshBridgeStatus sets null on a 404 (not your project)', async () => {
-    bridgeStatusStore.set({ enabled: true, state: 'unpaired', link: null, devices: [], jobs: [] });
+    bridgeStatusStore.set({ enabled: true, state: 'unpaired', device: null, devices: [], jobs: [] });
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => jsonResponse({ error: true, message: 'Not found' }, 404)),

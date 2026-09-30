@@ -223,6 +223,11 @@ export function isDevicePresent(deviceId: string, now: number = Date.now()): boo
   return Boolean(state && state.lastSeen > 0 && now - state.lastSeen < BRIDGE_PRESENCE_MS);
 }
 
+/** When the device last polled this instance (epoch ms), or 0 if never — orders present devices (D54). */
+export function deviceLastSeen(deviceId: string): number {
+  return devices.get(deviceId)?.lastSeen ?? 0;
+}
+
 export function deviceHello(deviceId: string): BridgeHello | undefined {
   return devices.get(deviceId)?.hello;
 }

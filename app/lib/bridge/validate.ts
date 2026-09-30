@@ -36,6 +36,18 @@ const COMMAND_NAME = /^[a-z][a-z0-9_]{1,63}$/;
 const PARAM_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const SCRIPT_ENTRY = /^[A-Za-z_][\w.]*\.[A-Za-z_]\w*$/;
 
+/**
+ * A Unity project folder name inside the helper's projects folder (D54). Never a path; never contains '..';
+ * never ends in a dot or a space (Windows silently rewrites those, so the folder would not be the one named).
+ */
+export const PROJECT_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9 _.-]{0,62}[A-Za-z0-9_-])?$/;
+
+const PROJECT_ACTIONS = new Set(['list', 'open', 'create']);
+
+export function isValidProjectName(name: unknown): boolean {
+  return typeof name === 'string' && PROJECT_NAME.test(name) && !name.includes('..');
+}
+
 /** true for '/x', '\\x', '~/x', 'C:\\x', 'C:/x', or any value with a '..' path segment. */
 export function isUnsafePath(value: string): boolean {
   if (value.startsWith('/') || value.startsWith('\\') || value.startsWith('~')) {
@@ -192,6 +204,26 @@ export function validateOperation(op: BridgeOperation): string | null {
     case 'devserver.start': {
       if (op.port !== undefined && !isIntegerIn(op.port, 1025, 65535)) {
         return 'The dev server port must be a whole number between 1025 and 65535.';
+      }
+
+      return null;
+    }
+
+    case 'unity.project': {
+      if (typeof op.action !== 'string' || !PROJECT_ACTIONS.has(op.action)) {
+        return 'unity_project action must be list, open or create.';
+      }
+
+      if (op.action === 'list') {
+        return null;
+      }
+
+      if (op.name === undefined || op.name === null || op.name === '') {
+        return `unity_project needs a project name for ${op.action}.`;
+      }
+
+      if (!isValidProjectName(op.name)) {
+        return `The Unity project name "${op.name}" is not valid — use letters, numbers, spaces, dots, dashes or underscores.`;
       }
 
       return null;

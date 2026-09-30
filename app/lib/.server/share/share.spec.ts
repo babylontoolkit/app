@@ -530,27 +530,6 @@ describe('remix — what travels and what must not', () => {
     expect([source.provider, source.linkedRepo, source.linkedBranch].every((field) => field !== undefined)).toBe(true);
   });
 
-  it('deriveRemix does not carry bridgeLink', () => {
-    const linked: Project = {
-      ...source,
-      bridgeLink: {
-        deviceId: 'dev_a',
-        unityProjectKey: 'k1',
-        unityProjectName: 'Kart',
-        allowScripts: true,
-        linkedAt: '2026-09-01T00:00:00.000Z',
-      },
-    };
-
-    const remix = deriveRemix(linked, { newOwnerId: 'visitor_B' });
-
-    expect(remix.bridgeLink).toBeUndefined();
-
-    // The fixture really was linked, and the key is present-and-undefined (an explicit reset).
-    expect(linked.bridgeLink).toBeDefined();
-    expect('bridgeLink' in remix).toBe(true);
-  });
-
   it('names a stranger remix "(remix)" and a self-remix "(copy)"', () => {
     expect(deriveRemix(source, { newOwnerId: 'B' }).name).toBe('Kart Racer (remix)');
     expect(deriveRemix(source, { newOwnerId: 'owner_A', isSelfRemix: true }).name).toBe('Kart Racer (copy)');
