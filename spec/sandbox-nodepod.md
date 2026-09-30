@@ -274,6 +274,9 @@ is unknown until the page re-tells it, and forwarding is what keeps previews wor
 **Owner step:** publish the fork (with this `static/__sw__.js`), bump `@babylonjs-toolkit/nodepod` to that
 release, delete the patch file and the `pnpm.patchedDependencies` entry, then run `pnpm sync:nodepod`.
 Bump the pin the way §"We run a FORK" describes, never with a bare `pnpm install`.
+`pnpm.patchedDependencies` in `package.json` is honoured by the pinned pnpm 9.14.4, but pnpm ≥ 10 ignores it
+(with only a warning), so the SW fix would silently disappear on install — move it to `pnpm-workspace.yaml` when
+pnpm is upgraded, or publish the fork first.
 
 The preview iframes also need the browser's permission to reach the loopback network: the three builder
 preview surfaces carry `allow="… loopback-network; local-network-access"`; the share wrapper does not

@@ -3616,7 +3616,7 @@ only, never commit.
 
 ### Phase 9 — Documentation
 
-- [ ] **T26** — Update SPEC.md (and the related spec docs) to match what was built
+- [x] **T26** — Update SPEC.md (and the related spec docs) to match what was built
   - Depends on: T1–T25, T27, T28
   - Files: `SPEC.md`, `CLAUDE.md`, `spec/sandbox-nodepod.md`, `spec/billing.md`
   - Details: Update the sections named in the spec's Project Spec Alignment, recording the product only.
