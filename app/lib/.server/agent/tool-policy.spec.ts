@@ -13,6 +13,7 @@ import {
   CREATION_FILE_READ_ROUNDS,
   CREATION_MEDIA_STEPS,
   CREATION_TOOL_ROUNDS,
+  BRIDGE_TOOL_ROUNDS,
   MEDIA_IMAGE_ROUNDS,
   toolPolicyForTurn,
 } from './tool-policy';
@@ -246,13 +247,12 @@ describe('toolPolicyForTurn — ordinary turns: the skill tools are ALWAYS offer
 });
 
 /*
- * Unity Editor bridge tools (§4.17) reach the policy as ORDINARY MCP tools — they arrive on the same
- * `hasMcpTools` flag, and the policy has no notion of where an MCP tool came from. These cases exist to
- * pin that ABSENCE: a Unity tool drives the user's local Editor (slow, mutating, off-machine), which is
- * exactly the kind of thing someone later special-cases "just this once". The inherited rules are the
- * right ones, and each is load-bearing for Unity specifically.
+ * Unity Bridge tools (§4.17, D18) mutate the user's local Editor (slow, mutating, off-machine) — exactly
+ * the kind of thing someone later special-cases "just this once". They are offered only in toolset
+ * `'all'`: the first-build and discuss branches never offer them, whatever `hasMcpTools` or
+ * `hasBridgeTools` says. The MCP cases below pin the same walls for MCP tools.
  */
-describe('toolPolicyForTurn — Unity bridge tools inherit MCP policy exactly (§4.17)', () => {
+describe('toolPolicyForTurn — Unity Bridge tools are never offered on first-build or discuss turns (§4.17)', () => {
   /*
    * Creation is the one-shot that writes the whole game (§4.2.8). Offering editor tools there re-opens
    * the six-round pathology AND points the model at a Unity project it was not asked to touch.
@@ -489,5 +489,35 @@ describe('the creation toolset earns every step it spends', () => {
    */
   it('CONTROL — ordinary turns still get them', () => {
     expect(proxy).toContain('previewTools');
+  });
+});
+
+describe('toolPolicyForTurn — Unity Bridge rounds (§4.17, D18)', () => {
+  it('an ordinary turn with bridge tools gets BRIDGE_TOOL_ROUNDS extra steps plus the answer step', () => {
+    expect(BRIDGE_TOOL_ROUNDS).toBe(8);
+    expect(toolPolicyForTurn({ ...base, hasBridgeTools: true })).toEqual({
+      allowTools: true,
+      toolset: 'all',
+      allowsMedia: false,
+      maxSteps: MAX_TOOL_ROUNDS + 8 + 1,
+    });
+    expect(toolPolicyForTurn({ ...base, hasBridgeTools: true, hasMediaTools: true }).maxSteps).toBe(
+      MAX_TOOL_ROUNDS + MEDIA_IMAGE_ROUNDS + BRIDGE_TOOL_ROUNDS + 1,
+    );
+  });
+
+  it('a discuss turn is unchanged by bridge tools — skills-only', () => {
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, hasBridgeTools: true })).toEqual(
+      toolPolicyForTurn({ ...base, isDiscussTurn: true }),
+    );
+    expect(toolPolicyForTurn({ ...base, isDiscussTurn: true, hasBridgeTools: true }).toolset).toBe('skills-only');
+  });
+
+  it('a first build turn is unchanged by bridge tools — creation steps', () => {
+    const plain = toolPolicyForTurn({ ...base, isFirstBuildTurn: true });
+
+    expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasBridgeTools: true })).toEqual(plain);
+    expect(plain.toolset).toBe('creation');
+    expect(plain.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
   });
 });

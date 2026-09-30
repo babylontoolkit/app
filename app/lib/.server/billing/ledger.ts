@@ -125,13 +125,20 @@ export class DuplicateRefundError extends Error {
 }
 
 /**
- * Notes whose refund may happen at most once, matching migration 0015's partial index predicate.
+ * Notes whose refund may happen at most once, matching the partial unique index predicates of
+ * migration 0015 (`project_create:<projectId>`) and migration 0025 (`bridge:<jobId>`, D13 latch 2 —
+ * a Unity Bridge job that never started is refunded exactly once).
  *
  * Narrow on purpose: every other refund note repeats legitimately (one user sees "Generation failed"
- * many times), so widening this rejects refunds users are owed.
+ * many times), so widening this rejects refunds users are owed. Add a prefix here only together with
+ * the migration that indexes it — the local `FsLedger` mirrors exactly what Postgres enforces.
  */
 export function isSingleRefundNote(reason: LedgerReason, note?: string): boolean {
-  return reason === 'refund' && typeof note === 'string' && note.startsWith('project_create:');
+  return (
+    reason === 'refund' &&
+    typeof note === 'string' &&
+    (note.startsWith('project_create:') || note.startsWith('bridge:'))
+  );
 }
 
 export interface Ledger {

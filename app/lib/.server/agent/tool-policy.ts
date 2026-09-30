@@ -175,6 +175,13 @@ export const CREATION_TOOL_ROUNDS = DEFAULT_AGENT_BUDGETS.creationToolRounds;
  */
 export const MEDIA_IMAGE_ROUNDS = 8;
 
+/**
+ * Extra steps when Unity Bridge tools are offered (§4.17, D18) — a Unity loop needs several calls
+ * (list commands, run, capture, check). Mirrors `MEDIA_IMAGE_ROUNDS`; bridge tools are offered only in
+ * toolset `'all'`, never on a discuss (Plan) turn or the first build turn.
+ */
+export const BRIDGE_TOOL_ROUNDS = 8;
+
 export interface ToolPolicyInput {
   /** The turn carries `CREATION_BRIEF_MARKER` — the expensive one-shot that writes the whole game. */
   isFirstBuildTurn: boolean;
@@ -184,6 +191,9 @@ export interface ToolPolicyInput {
 
   /** The platform can render media this turn (§4.16: a KIE key + a project for the bytes to land in). */
   hasMediaTools: boolean;
+
+  /** Unity Bridge tools are offered this turn (§4.17 — a linked, present, owned device). */
+  hasBridgeTools?: boolean;
 
   /** Skills already routed into the cached prefix — their presence closes the loop (nothing to fetch). */
   preloadedCount: number;
@@ -394,6 +404,10 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
     allowTools: true,
     toolset: 'all',
     allowsMedia: input.hasMediaTools,
-    maxSteps: maxToolRounds + (input.hasMediaTools ? MEDIA_IMAGE_ROUNDS : 0) + 1,
+    maxSteps:
+      maxToolRounds +
+      (input.hasMediaTools ? MEDIA_IMAGE_ROUNDS : 0) +
+      (input.hasBridgeTools ? BRIDGE_TOOL_ROUNDS : 0) +
+      1,
   };
 }

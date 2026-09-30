@@ -367,3 +367,28 @@ describe('an EXCLUDED document explains itself instead of looking broken', () =>
     expect(result).toContain('ui-design-system');
   });
 });
+
+describe('load_reference — the read budget in characters (§4.17, D36)', () => {
+  it('refuses a body over maxChars, naming it, and the refusal does not spend the load budget', async () => {
+    bodies.set('unity-editor-commands', 'X'.repeat(500));
+
+    const context = ctx({ maxChars: 100, maxLoads: 1 });
+    const load = run(context);
+    const refused = await load('unity-editor-commands');
+
+    expect(refused).toBe(
+      `The reference "unity-editor-commands" is 500 characters, over this turn's 100-character read budget, so it was not loaded. Ask the user to re-sync the prompt after the Agent Reference split, or work from the documents you have.`,
+    );
+    expect(context.loaded.has('unity-editor-commands')).toBe(false);
+    expect(context.loadedThisTurn.size).toBe(0);
+
+    // With a budget of ONE load, a small document still loads: the refusal consumed nothing.
+    expect(await load('racing-system')).toContain('RACING BODY');
+
+    bodies.delete('unity-editor-commands');
+  });
+
+  it('returns a body under maxChars', async () => {
+    expect(await run(ctx({ maxChars: 100 }))('racing-system')).toContain('RACING BODY');
+  });
+});

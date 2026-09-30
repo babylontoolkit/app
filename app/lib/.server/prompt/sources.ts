@@ -474,6 +474,52 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
       'Worked example: a complete drivable scene — async load, physics and a working vehicle ' +
       'controller. The reference shape for a racing or driving game mode.',
   },
+
+  /*
+   * Unity / Blender (§4.17, D36) — the commands the Unity Bridge tools run. Useful ONLY on a turn that
+   * offers those tools; several are large, so `load_reference` refuses one over the turn's read budget
+   * (naming the size and the cap) rather than spending the whole budget on it.
+   */
+  {
+    id: 'unity-exporter',
+    title: 'Unity Exporter Instructions',
+    path: 'references/unity-exporter-cli.md',
+    url: RAW(AGENT_REPO, 'references/unity-exporter-cli.md'),
+    description:
+      'How a Unity project is driven to author and export Babylon Toolkit levels (bt_* commands, the dev server, export rules). Load only when Unity Bridge tools are offered this turn and you are about to use them.',
+  },
+  {
+    id: 'unity-editor-commands',
+    title: 'Unity Editor Commands',
+    path: 'references/unity-editor-commands.md',
+    url: RAW(AGENT_REPO, 'references/unity-editor-commands.md'),
+    description:
+      "The unity command catalog: calling conventions, handles, safety rules, async polling, run_script/eval. Load only when Unity Bridge tools are offered and you need a command's details.",
+  },
+  {
+    id: 'unity-cli',
+    title: 'Unity CLI Reference',
+    path: 'references/unity-cli-reference.md',
+    url: RAW(AGENT_REPO, 'references/unity-cli-reference.md'),
+    description:
+      'The top-level unity binary (status, editors, projects, logs, tests, licences). Load only when Unity Bridge tools are offered and you will call unity_cli.',
+  },
+  {
+    id: 'unity-authoring-recipes',
+    title: 'Unity Authoring Recipes',
+    path: 'references/unity-authoring-recipes.md',
+    url: RAW(AGENT_REPO, 'references/unity-authoring-recipes.md'),
+    description:
+      'How each Unity feature (materials, lights, bakes, probes, terrain, physics, navmesh, animation) survives the export to BabylonJS. Load only when Unity Bridge tools are offered and you are authoring a level.',
+  },
+  {
+    id: 'blender-cli',
+    title: 'Blender Headless CLI Instructions',
+    path: 'references/unity-blender-cli.md',
+    url: RAW(AGENT_REPO, 'references/unity-blender-cli.md'),
+    description:
+      'Driving headless Blender with bpy: import/export, rigging and weights, LODs, baking, rendering, the Unity round trip. Load only when Unity Bridge tools are offered and you will call blender_run_script.',
+  },
 ];
 
 /**

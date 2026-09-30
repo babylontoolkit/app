@@ -150,4 +150,12 @@ interface Env {
   BILLING_ENFORCED: string;
   PRO_FEATURES_ENABLED: string;
   HISTORY_WINDOW_TURNS: string;
+
+  /** Unity Bridge (SPEC §4.17). */
+  UNITY_BRIDGE_ENABLED: string;
+  BRIDGE_COMMAND_CREDITS: string;
+  BRIDGE_SCRIPT_CREDITS: string;
+  BRIDGE_JOB_CREDITS: string;
+  BRIDGE_GRANT_PRIVATE_KEY: string;
+  BRIDGE_GRANT_TTL_HOURS: string;
 }

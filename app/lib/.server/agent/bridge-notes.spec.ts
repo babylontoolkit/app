@@ -1,0 +1,103 @@
+/**
+ * Per-turn Unity Bridge notes (§4.17, D37) — pure. The placement (after the last cache breakpoint) is
+ * the proxy's; `cache-breakpoints.spec.ts` covers the breakpoint budget.
+ */
+import { describe, expect, it } from 'vitest';
+import type { BridgeHello } from '~/lib/bridge/protocol';
+import { bridgeTurnNotes } from './bridge-notes';
+
+const hello = (overrides: Partial<BridgeHello> = {}): BridgeHello => ({
+  protocol: 1,
+  helperVersion: '1.0.0',
+  os: 'darwin',
+  unityProjects: [{ key: 'k1', name: 'Racer', unityVersion: '6000.0.30f1', toolkitVersion: '9.28.0' }],
+  scriptsDisabledLocally: false,
+  ...overrides,
+});
+
+describe('bridgeTurnNotes', () => {
+  it('offline → the one-line note naming the device', () => {
+    const notes = bridgeTurnNotes({
+      bridgeTurn: { state: 'offline', device: { name: 'Studio Mac' } },
+      finishedJobs: [],
+    });
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toBe(
+      'The Unity Bridge is linked to "Studio Mac" but the helper is not running. If the user asks for Unity or Blender work, tell them to run the helper (the cube icon shows the command). Never claim to have run a Unity or Blender command.',
+    );
+  });
+
+  it('none and no local scene server → no notes', () => {
+    expect(bridgeTurnNotes({ bridgeTurn: { state: 'none' }, finishedJobs: [] })).toEqual([]);
+    expect(bridgeTurnNotes({ bridgeTurn: { state: 'disabled' }, finishedJobs: [] })).toEqual([]);
+  });
+
+  it('online → names the device, the Unity project, versions and Blender', () => {
+    const [note] = bridgeTurnNotes({
+      bridgeTurn: {
+        state: 'online',
+        device: { name: 'Studio Mac' },
+        hello: hello({ blender: { path: '/b', version: '4.2.0' } }),
+      },
+      finishedJobs: [],
+      linkName: 'Racer Linked',
+    });
+
+    expect(note).toBe(
+      '# Unity Bridge\n\nConnected to "Studio Mac" (Unity project "Racer Linked"). Unity 6000.0.30f1, Babylon Toolkit 9.28.0, Blender 4.2.0. Use the Unity Bridge tools; paths are relative to the Unity project.',
+    );
+  });
+
+  it('online with the helper dev server running → the local scene note carries its origin', () => {
+    const notes = bridgeTurnNotes({
+      bridgeTurn: {
+        state: 'online',
+        device: { name: 'Studio Mac' },
+        hello: hello({ devServer: { running: true, origin: 'http://localhost:8888', scenes: ['Level.gltf'] } }),
+      },
+      finishedJobs: [],
+      localSceneServer: { origin: 'http://localhost:9999' },
+    });
+
+    const scene = notes.find((n) => n.startsWith('# Local scene server'));
+    expect(scene).toContain('http://localhost:8888 serves exported scenes');
+    expect(scene).toContain('Scenes: Level.gltf.');
+    expect(scene).not.toContain('9999');
+    expect(notes[0]).toContain('Blender not found');
+  });
+
+  it('no bridge but a client scene server → the local scene note with unknown scenes', () => {
+    const notes = bridgeTurnNotes({
+      bridgeTurn: { state: 'none' },
+      finishedJobs: [],
+      localSceneServer: { origin: 'http://localhost:9999' },
+    });
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('Scenes: unknown.');
+  });
+
+  it('finished jobs are listed by id', () => {
+    const notes = bridgeTurnNotes({
+      bridgeTurn: { state: 'offline', device: { name: 'Studio Mac' } },
+      finishedJobs: [
+        { id: 'brg_1', operation: 'unity_command bt_export_level', status: 'succeeded', resultText: 'Exported.' },
+        { id: 'brg_2', operation: 'unity_command save_all', status: 'cancelled', error: 'not picked up' },
+      ],
+    });
+
+    const jobs = notes.find((n) => n.startsWith('# Unity Bridge jobs finished since your last turn'))!;
+    expect(jobs).toContain('- brg_1 unity_command bt_export_level: succeeded\n  Exported.');
+    expect(jobs).toContain('- brg_2 unity_command save_all: cancelled — not picked up');
+  });
+
+  it('a 1000-char resultText is truncated to 400', () => {
+    const [note] = bridgeTurnNotes({
+      bridgeTurn: { state: 'none' },
+      finishedJobs: [{ id: 'brg_1', operation: 'op', status: 'succeeded', resultText: 'y'.repeat(1000) }],
+    });
+
+    expect(note).toBe(`# Unity Bridge jobs finished since your last turn\n- brg_1 op: succeeded\n  ${'y'.repeat(400)}`);
+  });
+});

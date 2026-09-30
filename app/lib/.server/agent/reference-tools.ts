@@ -93,6 +93,13 @@ export interface ReferenceToolContext {
    * predates config behaves identically — production resolves it at the proxy doorway.
    */
   maxLoads?: number;
+
+  /**
+   * The turn's read budget in characters (`budgets.maxReadChars`, §4.17 D36). A body longer than this
+   * is REFUSED — naming the document, its size and the cap — and does not count against `maxLoads`,
+   * because a load that returned nothing must not spend the budget. Optional: unset means no cap.
+   */
+  maxChars?: number;
 }
 
 export function createReferenceTools(context: ReferenceToolContext) {
@@ -214,6 +221,12 @@ export function createReferenceTools(context: ReferenceToolContext) {
             `No reference named "${id}" exists in this prompt version. ` +
             `Available references: ${(await availableIds()).join(', ') || '(none)'}.`
           );
+        }
+
+        if (context.maxChars && body.length > context.maxChars) {
+          logger.warn(`load_reference: ${id} refused (${body.length} chars > ${context.maxChars})`);
+
+          return `The reference "${id}" is ${body.length} characters, over this turn's ${context.maxChars}-character read budget, so it was not loaded. Ask the user to re-sync the prompt after the Agent Reference split, or work from the documents you have.`;
         }
 
         context.loaded.add(id);

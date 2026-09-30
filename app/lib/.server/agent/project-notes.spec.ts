@@ -74,15 +74,15 @@ describe('the MCP note (§4.14)', () => {
   });
 });
 
-describe('`unity` is an ordinary server name now (the Unity Editor bridge was removed)', () => {
+describe('`unity` is an ordinary MCP server name, and buildProjectNotes never speaks for the Unity Bridge', () => {
   /*
-   * §4.17 reserved `unity` as a routing label: a declared server wearing it was refused at launch and
-   * filtered out of this note, and live `unity` tools got their own Unity Exporter frame appended.
-   * All three are gone with the bridge. Asserted so the special-casing cannot creep back in silently —
-   * a filtered-out server is described to the model as absent while its tools are offered, or vice
-   * versa, and neither direction throws.
+   * The old §4.17 Editor bridge reserved `unity` as a routing label: a declared server wearing it was
+   * refused at launch and filtered out of this note. That is gone — `unity` is an ordinary MCP server
+   * name. The Unity Bridge (§4.17, D37) has its own per-turn notes in `bridge-notes.ts`, pushed by the
+   * proxy AFTER the last cache breakpoint because they need server state (presence, job rows) this
+   * module's pure inputs do not carry. Asserted so neither half creeps back in here silently.
    */
-  it('describes a declared `unity` server like any other, with no Unity frame', () => {
+  it('describes a declared `unity` server like any other', () => {
     const note = mcpNote(
       files({
         '.mcp.json': JSON.stringify({ mcpServers: { unity: { command: 'node_modules/.bin/unity-mcp' } } }),
@@ -90,19 +90,21 @@ describe('`unity` is an ordinary server name now (the Unity Editor bridge was re
     );
 
     expect(note).toContain('unity');
-    expect(note).not.toMatch(/Unity Exporter/i);
     expect(note).not.toMatch(/GUIDED EXPORT|bridge has no file channel/i);
   });
 
-  it('adds no Unity frame when a live tool is tagged `unity`', () => {
-    const note = mcpNote(files({ 'src/x.ts': 'x' }), [
-      { name: 'unity_open_scene', description: 'Open a scene', server: 'unity' },
-    ]);
+  it('never emits a Unity Bridge note, even for a `unity`-tagged live tool', () => {
+    const notes = buildProjectNotes({
+      files: files({ '.mcp.json': JSON.stringify({ mcpServers: { unity: { command: 'x' } } }), 'src/x.ts': 'x' }),
+      mcpLiveTools: [{ name: 'unity_open_scene', description: 'Open a scene', server: 'unity' }],
+    });
 
-    expect(note).not.toMatch(/Unity Exporter/i);
+    for (const note of notes) {
+      expect(note).not.toMatch(/# Unity Bridge|Unity Exporter|helper is not running|Local scene server/i);
+    }
 
-    // Control: the live tool still reaches the note at all, so the absence above is about the FRAME.
-    expect(note).toContain('unity_open_scene');
+    // Control: the live tool still reaches the notes at all, so the absence above is about the FRAME.
+    expect(notes.join('\n')).toContain('unity_open_scene');
   });
 });
 

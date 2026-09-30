@@ -26,11 +26,35 @@ import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { IProviderSetting } from '~/types/model';
+import { isLocalDevUrl } from '~/lib/local-scenes/url';
 
 const logger = createScopedLogger('api.agent');
 
 export async function action(args: ActionFunctionArgs) {
   return agentAction(args);
+}
+
+/**
+ * The client's remembered local scene server (§4.17, D38) — a hint that reaches the model's context, so
+ * it is bounded here: the origin survives only if it is a loopback http(s) origin, and at most 20 scene
+ * names of at most 200 characters ride with it.
+ */
+function sanitizeLocalSceneServer(raw: unknown): { origin: string; scenes?: string[] } | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+
+  const { origin, scenes } = raw as { origin?: unknown; scenes?: unknown };
+
+  if (typeof origin !== 'string' || !isLocalDevUrl(origin + '/')) {
+    return undefined;
+  }
+
+  const clean = Array.isArray(scenes)
+    ? scenes.filter((scene): scene is string => typeof scene === 'string' && scene.length <= 200).slice(0, 20)
+    : undefined;
+
+  return { origin: new URL(origin).origin, ...(clean ? { scenes: clean } : {}) };
 }
 
 function parseCookies(header: string | null): Record<string, string> {
@@ -138,6 +162,7 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
      * prompt, and the sandbox's own server is the real validator of any call.
      */
     mcpTools?: Array<{ name: string; description?: string; server: string; inputSchema?: unknown }>;
+    localSceneServer?: { origin?: string; scenes?: string[] };
   }>();
 
   const cookies = parseCookies(request.headers.get('Cookie'));
@@ -256,6 +281,13 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       gameBackend: sanitizeGameBackend(body.gameBackend, context),
       assetNotes: body.assetNotes,
       mcpLiveTools: body.mcpTools,
+
+      /*
+       * The Unity Bridge link comes from the project ROW, never the body (§4.17): it names the paired
+       * device a paid operation is dispatched to, and a caller who could name their own would pick one.
+       */
+      bridgeLink: project?.bridgeLink,
+      localSceneServer: sanitizeLocalSceneServer(body.localSceneServer),
       apiKeys,
       providerSettings,
       context,
@@ -386,6 +418,23 @@ async function streamGeneration(
    * taken and the KIE task is running — the client's only job is to poll the task route and write
    * the bytes into the WebContainer at `destPath` when the render lands.
    */
+  /*
+   * Unity Bridge consent requests and job status (§4.17), and `import_local_scene` calls (D22) — the
+   * client answers a consent / import through `/api/agent/tool-result`, like the MCP relay.
+   */
+  generation.onBridgeEvent((event) => {
+    stream.writeData({ ...event, generationId: generation.generationId } as any);
+  });
+  generation.onLocalSceneCall((event) => {
+    stream.writeData({
+      type: 'local-scene-call',
+      generationId: generation.generationId,
+      toolCallId: event.toolCallId,
+      url: event.url,
+      overwrite: event.overwrite,
+    });
+  });
+
   generation.onMediaTask((event) => {
     stream.writeData({
       type: 'media-task',

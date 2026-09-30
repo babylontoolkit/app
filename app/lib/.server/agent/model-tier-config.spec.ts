@@ -750,6 +750,10 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
     /* Preview dev-tools relay — the route subscribes before draining, so the double must offer it. */
     onPreviewToolCall: vi.fn(),
     onMediaTask: vi.fn(),
+
+    /* Unity Bridge events + local scene import relay (§4.17) — subscribed before draining, like the rest. */
+    onBridgeEvent: vi.fn(),
+    onLocalSceneCall: vi.fn(),
     ...overrides,
 
     /*

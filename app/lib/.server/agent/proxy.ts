@@ -93,6 +93,17 @@ import { createWebFetchTool } from './web-fetch-tool';
 import { createWebSearchTool } from './web-search-tool';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { createMediaTools, type MediaTaskEvent } from './media-tools';
+import { createBridgeTools } from './bridge-tools';
+import { createLocalSceneTools, type LocalSceneCallEvent } from './local-scene-tools';
+import {
+  resolveBridgeTurn,
+  settleDropped,
+  takeFinishedJobsForNote,
+  type BridgeUiEvent,
+} from '~/lib/.server/bridge/service';
+import { bridgeTurnNotes } from './bridge-notes';
+import { cancelGenerationBridgeJobs } from '~/lib/.server/bridge/relay';
+import type { BridgeLink } from '~/lib/.server/projects/types';
 import { resolveMediaProvider } from '~/lib/.server/media/provider';
 import { getObjectStore } from '~/lib/.server/storage';
 import { buildProjectInstructions, MAX_INSTRUCTIONS_CHARS } from './project-instructions';
@@ -391,6 +402,15 @@ export interface AgentRequest {
    * client-side in the sandbox; the server never runs these.
    */
   mcpLiveTools?: Array<{ name: string; description?: string; server: string; inputSchema?: unknown }>;
+
+  /**
+   * The project's Unity Bridge link (§4.17). Derived by the ROUTE from the project row — never taken
+   * from the browser body, because it decides which paired device a paid operation is dispatched to.
+   */
+  bridgeLink?: BridgeLink;
+
+  /** The local scene dev server the client remembered for this project (§4.17, D38) — a hint, never trusted. */
+  localSceneServer?: { origin: string; scenes?: string[] };
 }
 
 /** The skill tool set, as `streamText` sees it — keeps the result's tool types concrete. */
@@ -554,6 +574,12 @@ export interface AgentGeneration {
    * job is to poll the task and write the bytes into the project when they land.
    */
   onMediaTask(listener: (event: MediaTaskEvent) => void): void;
+
+  /** Unity Bridge consent requests and job status (§4.17) — forwarded to the client as data parts. */
+  onBridgeEvent(listener: (event: BridgeUiEvent) => void): void;
+
+  /** `import_local_scene` calls (§4.17, D22) — same relay shape as MCP: the client runs it and posts back. */
+  onLocalSceneCall(listener: (event: { toolCallId: string; url: string; overwrite: boolean }) => void): void;
 }
 
 /** Re-exported so callers keep importing it from the proxy; the math lives in `step-usage`. */
@@ -1504,6 +1530,62 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       : {};
 
   /*
+   * Unity Bridge tools (§4.17, D17–D19) — offered only when the project is linked to a paired device of
+   * THIS user that is present right now, and never on a discuss (Plan) or first build turn (D18). A
+   * linked-but-absent device yields no tools, only the one-line offline note further down.
+   * `import_local_scene` needs no bridge: it runs in the user's browser (D22).
+   */
+  const bridgeListeners: Array<(event: BridgeUiEvent) => void> = [];
+  const emitBridgeEvent = (event: BridgeUiEvent) => {
+    for (const listener of bridgeListeners) {
+      listener(event);
+    }
+  };
+  const localSceneListeners: Array<(event: LocalSceneCallEvent) => void> = [];
+  const emitLocalSceneCall = (event: LocalSceneCallEvent) => {
+    for (const listener of localSceneListeners) {
+      listener(event);
+    }
+  };
+
+  const bridgeTurn = await resolveBridgeTurn({
+    user,
+    projectId: request.projectId,
+    link: request.bridgeLink,
+    context: request.context,
+  });
+  const isDiscussTurn = discussNote !== null;
+
+  const bridgeTools =
+    bridgeTurn.state === 'online' &&
+    bridgeTurn.device &&
+    request.projectId &&
+    request.bridgeLink &&
+    !isDiscussTurn &&
+    !isFirstBuildTurn
+      ? createBridgeTools({
+          userId: user.id,
+          projectId: request.projectId,
+          generationId,
+          link: request.bridgeLink,
+          deviceId: bridgeTurn.device.id,
+          abortSignal: request.abortSignal,
+          context: request.context,
+          emit: emitBridgeEvent,
+        })
+      : {};
+
+  const localSceneTools =
+    request.projectId && !isDiscussTurn && !isFirstBuildTurn
+      ? createLocalSceneTools({
+          generationId,
+          userId: user.id,
+          abortSignal: request.abortSignal,
+          emit: emitLocalSceneCall,
+        })
+      : {};
+
+  /*
    * When the project has MCP tools, the tool loop MUST be on — otherwise the model cannot call them.
    * That re-enables the loop the skill-preload path deliberately disables (see the note above), which is
    * the correct trade: a project with running MCP servers wants those tools reachable, and MCP is a
@@ -1535,6 +1617,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     creationPhase,
     hasMcpTools,
     hasMediaTools: Object.keys(mediaTools).length > 0,
+    hasBridgeTools: Object.keys(bridgeTools).length > 0,
     preloadedCount: preloaded.length,
     isSlash: Boolean(slash),
     isDiscussTurn: discussNote !== null,
@@ -1587,6 +1670,24 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   if (discussNote) {
     system.push({ role: 'system', content: discussNote });
+  }
+
+  /*
+   * Unity Bridge + local scene server notes (§4.17, D37) — the same placement rule as `discussNote`:
+   * presence and job rows change turn to turn, so these ride past the last breakpoint.
+   */
+  const finishedJobs =
+    request.projectId && (bridgeTurn.state === 'online' || bridgeTurn.state === 'offline')
+      ? await takeFinishedJobsForNote(request.projectId, request.context)
+      : [];
+
+  for (const note of bridgeTurnNotes({
+    bridgeTurn,
+    finishedJobs,
+    localSceneServer: request.localSceneServer,
+    linkName: request.bridgeLink?.unityProjectName,
+  })) {
+    system.push({ role: 'system', content: note });
   }
 
   /*
@@ -1704,6 +1805,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     loaded: new Set(carriedReferences.map((r) => r.id)),
     loadedThisTurn: new Set<string>(),
     maxLoads: budgets.maxReferenceLoads,
+    maxChars: budgets.maxReadChars,
   };
 
   /*
@@ -1836,6 +1938,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
             ...referenceTools,
             ...mcpRelayTools,
             ...mediaTools,
+            ...bridgeTools,
+            ...localSceneTools,
             ...researchTools,
             ...createRepairTool(),
           }
@@ -3216,6 +3320,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * unblocks it with an error rather than leaking a promise that never resolves.
        */
       cancelGenerationToolCalls(generationId);
+
+      // Bridge jobs still QUEUED when the generation ends never ran — refund them (D13). Started ones continue.
+      void settleDropped(cancelGenerationBridgeJobs(generationId), request.context).catch(() => undefined);
     }
   }
 
@@ -3275,5 +3382,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     onMcpToolCall: (listener) => mcpListeners.push(listener),
     onPreviewToolCall: (listener) => previewListeners.push(listener),
     onMediaTask: (listener) => mediaListeners.push(listener),
+    onBridgeEvent: (listener) => bridgeListeners.push(listener),
+    onLocalSceneCall: (listener) => localSceneListeners.push(listener),
   };
 }

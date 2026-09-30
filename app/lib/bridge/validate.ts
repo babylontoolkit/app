@@ -13,10 +13,27 @@ import { BRIDGE_MAX_CAPTURE_PX, type BridgeOperation } from './protocol';
 
 export const PATH_PARAMS = new Set(['output', 'folder', 'save_path', 'file', 'outputPath']);
 
+/**
+ * Param keys a `unity.command` may never carry (D41): they name the Unity CLI's own options, so a model
+ * could otherwise turn a parameter into `--yes` or re-point `--project-path`. The helper also passes
+ * every param after `--`, where the CLI stops reading options. `timeout` and `format` are NOT here: real
+ * commands declare them (`eval`, `run_tests`, `get_serialized_fields`), and after `--` they reach the
+ * command, never the CLI.
+ */
+export const RESERVED_PARAM_KEYS = new Set([
+  'yes',
+  'project-path',
+  'non-interactive',
+  'result-only',
+  'detach',
+  'project',
+]);
+
 const MAX_SOURCE_CHARS = 200_000;
 const MAX_CLI_ARG_CHARS = 512;
 const MAX_BLENDER_PATHS = 32;
 const COMMAND_NAME = /^[a-z][a-z0-9_]{1,63}$/;
+const PARAM_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const SCRIPT_ENTRY = /^[A-Za-z_][\w.]*\.[A-Za-z_]\w*$/;
 
 /** true for '/x', '\\x', '~/x', 'C:\\x', 'C:/x', or any value with a '..' path segment. */
@@ -86,6 +103,14 @@ export function validateOperation(op: BridgeOperation): string | null {
       }
 
       for (const [key, value] of Object.entries(op.params)) {
+        if (!PARAM_KEY.test(key)) {
+          return `The command parameter name "${key}" is not valid — use the parameter names unity_list_commands shows.`;
+        }
+
+        if (RESERVED_PARAM_KEYS.has(key)) {
+          return `The command parameter "${key}" is not allowed — it is reserved for the Unity Bridge itself.`;
+        }
+
         if (PATH_PARAMS.has(key) && typeof value === 'string' && isUnsafePath(value)) {
           return `The "${key}" path "${value}" is not allowed — use a Unity-project-relative path (for scratch output, .bridge/out/…).`;
         }

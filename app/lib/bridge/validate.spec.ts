@@ -43,6 +43,31 @@ describe('validateOperation', () => {
     ).toBeNull();
   });
 
+  it.each(['yes', 'project-path', 'non-interactive', 'result-only', 'detach', 'project'])(
+    'reserved param key %s → sentence',
+    (key) => {
+      expect(typeof validateOperation({ kind: 'unity.command', name: 'set_transform', params: { [key]: true } })).toBe(
+        'string',
+      );
+    },
+  );
+
+  it.each(['--yes', '1abc', 'a b', 'x'.repeat(65)])('invalid param key %s → sentence', (key) => {
+    expect(typeof validateOperation({ kind: 'unity.command', name: 'set_transform', params: { [key]: 1 } })).toBe(
+      'string',
+    );
+  });
+
+  it("{format:'yaml', timeout:5} (real command params) → null", () => {
+    expect(
+      validateOperation({
+        kind: 'unity.command',
+        name: 'get_serialized_fields',
+        params: { format: 'yaml', timeout: 5 },
+      }),
+    ).toBeNull();
+  });
+
   it('unity.capture 2048 → sentence', () => {
     expect(typeof validateOperation({ kind: 'unity.capture', view: 'game', width: 2048, height: 512 })).toBe('string');
   });
