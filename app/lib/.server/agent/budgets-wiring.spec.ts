@@ -31,7 +31,9 @@ const proxy = () => codeOnly(read('app/lib/.server/agent/proxy.ts'));
 
 describe('the proxy resolves the budgets and passes them to every seam', () => {
   it('resolves them once, from the request context', () => {
-    expect(proxy()).toMatch(/const budgets = resolveAgentBudgets\(request\.context\)/);
+    expect(proxy()).toMatch(
+      /const budgets = resolveAgentBudgets\(request\.context, toolLoop \? TOOL_LOOP_BUDGET_DEFAULTS : undefined\)/,
+    );
   });
 
   /*

@@ -433,6 +433,8 @@ describe('the scalars round-trip', () => {
     'forced-continuation',
     'unproductive-rescue',
     'creation-completeness',
+    'tool-loop-continue',
+    'tool-loop-gate',
   ];
 
   it.each(kinds)('carries kind %s through unchanged', (kind) => {

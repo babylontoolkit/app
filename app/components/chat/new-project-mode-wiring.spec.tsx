@@ -564,7 +564,7 @@ describe('the first build turn is an ordinary turn — no hidden brief', () => {
    * 🔴 EVERY PHASE IS ITS OWN TURN, AND EVERY ONE OF THEM SAYS WHICH PHASE IT IS.
    *
    * The `creationPhase` field is what makes a phase a phase server-side: it selects the tool set (only
-   * `art` gets the media tools) and the step ceiling derived from it. A phase turn that forgot it
+   * `design` gets the media tools) and the step ceiling derived from it. A phase turn that forgot it
    * would run with the ordinary policy — which is the monolithic creation this feature replaced.
    */
   it('runs a turn per phase, each naming its phase in the body', async () => {
@@ -577,7 +577,7 @@ describe('the first build turn is an ordinary turn — no hidden brief', () => {
 
     const phases = posted.map((body) => (body as { creationPhase?: string }).creationPhase);
 
-    expect(phases[0]).toBe('frontend');
+    expect(phases[0]).toBe('design');
     expect(phases.filter(Boolean).length).toBe(posted.length);
 
     // No phase runs twice — the latch and the monotonic merge exist to make this impossible.

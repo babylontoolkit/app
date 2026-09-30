@@ -19,6 +19,7 @@ import {
   describeCreationPlan,
   describeCreationPlanOutcome,
   isCreationPlanComplete,
+  isTurnOutcomeState,
   mergeCreationPlan,
   newCreationPlan,
   parseCreationPhaseId,
@@ -30,8 +31,9 @@ import {
 const record = (id: any, state: any = 'finished') => ({ id, generationId: 'gen_1', at: '2026-08-08T00:00:00Z', state });
 
 describe('the phase table', () => {
-  it('DECLARES Frontend -> Art -> Game -> Game systems -> Verify, in that order', () => {
-    expect(CREATION_PHASES.map((p) => p.id)).toEqual(['frontend', 'art', 'game', 'game-systems', 'verify']);
+  /* D18 — `design` declared FIRST; `art` stays declared (unscheduled) so stored plans still parse. */
+  it('DECLARES Design -> Frontend -> Art -> Game -> Game systems -> Verify, in that order', () => {
+    expect(CREATION_PHASES.map((p) => p.id)).toEqual(['design', 'frontend', 'art', 'game', 'game-systems', 'verify']);
   });
 
   /**
@@ -73,23 +75,20 @@ describe('the phase table', () => {
   });
 
   /*
-   * Owner decision 2026-08-08, reversing `game → frontend`. The order is decided by which body of
-   * work is BOUNDED, not by what survives a failure: the front end is one page plus three chrome
-   * files whatever the game is, while the game scales with the request unpredictably. Whatever runs
-   * LAST is what a length-truncated response mangles, so the fixed cost goes first.
+   * D18 (tool loop, 2026-09-30). With tool writes and a done-gate nothing is cut off, so the order
+   * follows risk and dependency: design + enqueue renders first, the game while context is freshest,
+   * the front end last over art that has already landed. If anything stops early the user has a
+   * playable game behind the stock page, not a pretty page over a broken game.
    */
-  it('puts the front end before the game', () => {
+  it('puts art direction first and the game before the front end', () => {
     const ids = DEFAULT_CREATION_PHASES;
-    expect(ids.indexOf('frontend')).toBeLessThan(ids.indexOf('game'));
+    expect(ids.indexOf('design')).toBe(0);
+    expect(ids.indexOf('game')).toBeLessThan(ids.indexOf('frontend'));
   });
 
-  /*
-   * `art` renders the list `frontend` wrote into DESIGN.md and wires the returned paths into the
-   * files `frontend` just created. Putting the game between them would break that hand-off.
-   */
-  it('keeps art immediately after the front end', () => {
-    const ids = DEFAULT_CREATION_PHASES;
-    expect(ids.indexOf('art')).toBe(ids.indexOf('frontend') + 1);
+  /* `art` is superseded by `design` (which renders the art up front) and is no longer scheduled. */
+  it('does not schedule the legacy art phase', () => {
+    expect(DEFAULT_CREATION_PHASES).not.toContain('art');
   });
 
   /* The repair pass can only run once there is something to repair. */
@@ -97,12 +96,18 @@ describe('the phase table', () => {
     expect(CREATION_PHASES[CREATION_PHASES.length - 1].id).toBe('verify');
   });
 
-  it('gives media to EXACTLY ONE phase, and it is the art phase', () => {
+  /*
+   * Media goes to `design` (scheduled) and `art` (legacy, kept only so a stored plan naming it can
+   * still render). Among the SCHEDULED phases exactly one spends credits on renders.
+   */
+  it('gives media only to design and the legacy art phase — exactly one SCHEDULED phase', () => {
     const withMedia = CREATION_PHASES.filter((p) => p.allowsMedia).map((p) => p.id);
-    expect(withMedia).toEqual(['art']);
+    expect(withMedia).toEqual(['design', 'art']);
+    expect(DEFAULT_CREATION_PHASES.filter((id) => phaseById(id).allowsMedia)).toEqual(['design']);
   });
 
-  it('phaseAllowsMedia is false for every non-art phase and for no phase at all', () => {
+  it('phaseAllowsMedia is false for every other phase and for no phase at all', () => {
+    expect(phaseAllowsMedia('design')).toBe(true);
     expect(phaseAllowsMedia('art')).toBe(true);
     expect(phaseAllowsMedia(null)).toBe(false);
 
@@ -112,7 +117,7 @@ describe('the phase table', () => {
      * hand-written list of the OTHER phases cannot notice one.
      */
     for (const phase of CREATION_PHASES) {
-      expect(phaseAllowsMedia(phase.id)).toBe(phase.id === 'art');
+      expect(phaseAllowsMedia(phase.id)).toBe(phase.id === 'art' || phase.id === 'design');
     }
   });
 
@@ -129,8 +134,8 @@ describe('the phase table', () => {
    */
   it('a phase that may legitimately do nothing says so', () => {
     for (const phase of CREATION_PHASES) {
-      if (phase.id === 'verify' || phase.id === 'frontend') {
-        continue; // `verify` only runs when there is something to repair; `frontend` is never optional
+      if (phase.id === 'verify' || phase.owesFiles) {
+        continue; // `verify` only runs when there is something to repair; `design`/`frontend` are never optional
       }
 
       expect(phase.task.toLowerCase()).toMatch(/say so in one line/);
@@ -159,9 +164,21 @@ describe('the phase table', () => {
    * the game has NOT been written when this phase runs, so the fence has to point the other way or
    * the front-end step quietly becomes the monolithic turn the phases exist to prevent.
    */
-  it('the front-end phase is told NOT to write gameplay code', () => {
+  /* D18 — the front end now runs LAST, over a game and art that already exist. */
+  it('the front-end phase builds on DESIGN.md and the art already rendered', () => {
     const frontend = CREATION_PHASES.find((p) => p.id === 'frontend')!;
-    expect(frontend.task).toMatch(/do NOT write gameplay code/i);
+    expect(frontend.task).toContain('`DESIGN.md` as your design brief');
+    expect(frontend.task).toContain('public/assets/generated/');
+  });
+
+  /* The design step writes the spec and the art list and enqueues renders — no game, page or chrome. */
+  it('the design phase writes SPEC.md and DESIGN.md, generates the art, and builds nothing', () => {
+    const design = phaseById('design');
+    expect(design.task).toContain('`SPEC.md`');
+    expect(design.task).toContain('`DESIGN.md`');
+    expect(design.task).toMatch(/one generate call per image/);
+    expect(design.task).toMatch(/Do not write game code, the landing page, or the chrome/);
+    expect(design.owesFiles).toBe(true);
   });
 
   /*
@@ -169,10 +186,16 @@ describe('the phase table', () => {
    * §4.4b scaffolded at creation. Without this the step has no correct class name to navigate to and
    * the single sanctioned response is to invent one.
    */
-  it('the front-end phase points at the scaffolded GameMode rather than an invented name', () => {
+  it('the front-end phase points at the real GameMode rather than an invented name', () => {
     const frontend = CREATION_PHASES.find((p) => p.id === 'frontend')!;
-    expect(frontend.task).toMatch(/scaffolded into `src\/scripts\/`/i);
+    expect(frontend.task).toMatch(/read its real class name off `src\/scripts\/`/i);
     expect(frontend.task).toMatch(/never invent one/i);
+  });
+
+  /* Both building steps verify against the running game before they may finish (done-gate). */
+  it('the game and front-end phases verify with check_game', () => {
+    expect(phaseById('game').task).toMatch(/Verify with `check_game`/);
+    expect(phaseById('frontend').task).toMatch(/Verify with `check_game`/);
   });
 
   it('the art phase forbids inventing an asset path', () => {
@@ -279,6 +302,19 @@ describe('parseCreationPlan', () => {
     expect(parsed.done).toEqual([{ id: 'game', generationId: '', at: '', state: 'finished' }]);
   });
 
+  /*
+   * The tool-loop outcomes (D22). Rejecting them would store a paused or failing-check phase as
+   * `finished` — the plan card would then read a broken step as healthy.
+   */
+  it('accepts the tool-loop outcome states paused and unverified', () => {
+    expect(isTurnOutcomeState('unverified')).toBe(true);
+    expect(isTurnOutcomeState('paused')).toBe(true);
+    expect(isTurnOutcomeState('nonsense')).toBe(false);
+
+    const parsed = parseCreationPlan({ ...valid, done: [record('game', 'unverified'), record('frontend', 'paused')] })!;
+    expect(parsed.done.map((d) => d.state)).toEqual(['unverified', 'paused']);
+  });
+
   it('drops a done entry whose phase id is unknown', () => {
     expect(parseCreationPlan({ ...valid, done: [record('nope')] })!.done).toEqual([]);
   });
@@ -353,7 +389,7 @@ describe('advance / complete', () => {
   });
 
   it('currentCreationPhase points at the next phase, and is null when complete', () => {
-    expect(currentCreationPhase(newCreationPlan())?.id).toBe('frontend');
+    expect(currentCreationPhase(newCreationPlan())?.id).toBe('design');
     expect(currentCreationPhase({ ...newCreationPlan(['game']), next: 1 })).toBeNull();
     expect(currentCreationPhase(undefined)).toBeNull();
   });
@@ -363,12 +399,12 @@ describe('creationPhaseMessage — the VISIBLE line', () => {
   const plan = newCreationPlan();
 
   it('names the step and what it is', () => {
-    expect(creationPhaseMessage(plan, 0)).toBe('Step 1 — front end.');
-    expect(creationPhaseMessage(plan, 2)).toBe('Step 3 — game code.');
+    expect(creationPhaseMessage(plan, 0)).toBe('Step 1 — art direction.');
+    expect(creationPhaseMessage(plan, 2)).toBe('Step 3 — front end.');
   });
 
   it("defaults to the plan's own next phase", () => {
-    expect(creationPhaseMessage({ ...plan, next: 1 })).toBe('Step 2 — art work.');
+    expect(creationPhaseMessage({ ...plan, next: 1 })).toBe('Step 2 — game code.');
   });
 
   /**
@@ -379,7 +415,7 @@ describe('creationPhaseMessage — the VISIBLE line', () => {
    * two messages in one transcript could honestly disagree about how long the build is.
    */
   it('carries the ordinal only — never a total', () => {
-    const short = newCreationPlan(['frontend', 'art', 'game']);
+    const short = newCreationPlan(['design', 'game']);
 
     for (const p of [plan, short]) {
       for (let n = 0; n < p.phases.length; n++) {
@@ -467,14 +503,24 @@ describe('creationPhaseNote — what the step owes', () => {
   it('the game step owes the whole game, deferring nothing to a retired step', () => {
     const note = creationPhaseNote('game') ?? '';
 
-    expect(note).toMatch(/Write the GAME/);
-    expect(note).toContain('SPEC.md');
-    expect(note).not.toMatch(/NEXT step/i);
+    expect(note).toMatch(/Build the GAME described in `SPEC.md`/);
+    expect(note).not.toMatch(/Core mechanics|game-systems/i);
     expect(note).not.toMatch(/PLAYABLE CORE/);
+
+    /* "the next step" it defers the page and chrome to is the front end — which IS scheduled after it. */
+    expect(DEFAULT_CREATION_PHASES[DEFAULT_CREATION_PHASES.indexOf('game') + 1]).toBe('frontend');
   });
 
-  it('tells a phase not to rewrite what is already correct', () => {
-    expect(creationPhaseNote('art')).toMatch(/Do NOT rewrite files that are already correct/i);
+  /*
+   * 🔴 The tool loop has no small fixed round-trip budget, so the "READ IN BATCHES, THEN WRITE" advice
+   * (and its "limited tool round trips" sentence) is gone and must not come back (T8 Do-not).
+   */
+  it('carries no "limited tool round trips" budget advice on any phase', () => {
+    for (const phase of CREATION_PHASES) {
+      const note = creationPhaseNote(phase.id) ?? '';
+      expect(note).not.toContain('limited number of tool round trips');
+      expect(note).not.toMatch(/ONE parallel batch of `read_file`/);
+    }
   });
 
   it('says the project already exists, so a phase never re-creates it', () => {
@@ -513,7 +559,7 @@ describe('describeCreationPlan', () => {
   });
 
   it("carries each completed phase's own outcome", () => {
-    const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('frontend', 'rescued')] });
+    const view = describeCreationPlan({ ...newCreationPlan(), next: 1, done: [record('design', 'rescued')] });
     expect(view.rows[0].outcome).toBe('rescued');
     expect(view.rows[1].outcome).toBeUndefined();
   });
@@ -533,7 +579,7 @@ describe('describeCreationPlanOutcome — the plan-level verdict', () => {
    */
   it('is INCOMPLETE while phases remain, naming how many and which is next', () => {
     const plan = newCreationPlan();
-    const outcome = describeCreationPlanOutcome({ ...plan, next: 1, done: [record('frontend')] });
+    const outcome = describeCreationPlanOutcome({ ...plan, next: 1, done: [record('design')] });
     expect(outcome.state).toBe('incomplete');
 
     /*
@@ -542,7 +588,7 @@ describe('describeCreationPlanOutcome — the plan-level verdict', () => {
      * work is outstanding in the one message whose job is to say what is left.
      */
     expect(outcome.detail).toContain(`${plan.phases.length - 1} of ${plan.phases.length} steps`);
-    expect(outcome.detail).toContain('art work');
+    expect(outcome.detail).toContain('game code');
   });
 
   it('is FINISHED when every phase completed cleanly', () => {
@@ -586,8 +632,9 @@ describe('describeCreationPlanOutcome — the plan-level verdict', () => {
  * with an error message.
  */
 describe('phaseOwesFiles', () => {
-  it('the front end always owes files — it is the mandatory step', () => {
+  it('the front end and the design step always owe files', () => {
     expect(phaseOwesFiles('frontend')).toBe(true);
+    expect(phaseOwesFiles('design')).toBe(true);
   });
 
   it('a phase that may legitimately do nothing does not owe files', () => {
@@ -643,7 +690,21 @@ describe('phaseOwesFiles', () => {
  */
 describe('the default plan', () => {
   it('schedules the three building phases, in order', () => {
-    expect(DEFAULT_CREATION_PHASES).toEqual(['frontend', 'art', 'game']);
+    expect(DEFAULT_CREATION_PHASES).toEqual(['design', 'game', 'frontend']);
+  });
+
+  /* D18 — a plan stored under the OLD default keeps its own shape and position. */
+  it('a stored frontend -> art -> game plan parses unchanged', () => {
+    const stored = {
+      v: CREATION_PLAN_VERSION,
+      phases: ['frontend', 'art', 'game'],
+      next: 1,
+      done: [record('frontend')],
+    };
+    const parsed = parseCreationPlan(stored)!;
+    expect(parsed.phases).toEqual(['frontend', 'art', 'game']);
+    expect(parsed.next).toBe(1);
+    expect(currentCreationPhase(parsed)?.id).toBe('art');
   });
 
   /**

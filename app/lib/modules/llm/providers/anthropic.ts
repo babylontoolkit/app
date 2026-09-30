@@ -16,6 +16,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 import { refusalFallbackFetch } from '~/lib/modules/llm/refusal-fallback';
 import { tapStopReasons } from '~/lib/modules/llm/stop-reason-tap';
+import { withTailCache } from '~/lib/modules/llm/tail-cache';
 
 export default class AnthropicProvider extends BaseProvider {
   name = 'Anthropic';
@@ -161,6 +162,12 @@ export default class AnthropicProvider extends BaseProvider {
      * Omitted on every ordinary generation, which keeps the operator's `THINKING_MODE` authoritative.
      */
     thinkingMode?: ThinkingMode;
+
+    /**
+     * The tool loop is on for this request (tool-loop plan D13) — adds the rolling tail cache
+     * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
+     */
+    toolLoop?: boolean;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
     const { apiKey } = this.getProviderBaseUrlAndKey({
@@ -227,7 +234,10 @@ export default class AnthropicProvider extends BaseProvider {
         thinkingMode,
         effort,
         model,
-        refusalFallbackFetch(model, tapStopReasons(rateLimitFetch({ provider: this.name }))),
+        withTailCache(
+          refusalFallbackFetch(model, tapStopReasons(rateLimitFetch({ provider: this.name }))),
+          options.toolLoop,
+        ),
       ),
     });
 

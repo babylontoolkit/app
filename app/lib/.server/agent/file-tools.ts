@@ -42,6 +42,7 @@ import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 import { isOpaqueToModel } from '~/lib/context/opaque-files';
 import { createScopedLogger } from '~/utils/logger';
 import { type AgentBudgets, DEFAULT_AGENT_BUDGETS, DEFAULT_MAX_FILE_READS, DEFAULT_MAX_READ_CHARS } from './budgets';
+import type { WorkspaceOverlay } from './workspace-tools';
 
 const logger = createScopedLogger('file-tools');
 
@@ -86,6 +87,21 @@ export interface FileToolContext {
    * behaves exactly as before — but production resolves them from env at the proxy doorway.
    */
   budgets?: Pick<AgentBudgets, 'maxFileReads' | 'maxReadChars' | 'maxPlanReadChars'>;
+
+  /**
+   * The tool loop's text view of the project (tool-loop plan D4) — this turn's writes over `files`.
+   *
+   * 🔴 Without it `read_file` answers from the map the request ARRIVED with, i.e. it shows the model
+   * the file as it was before the model's own write — and the next `edit_file` is computed against
+   * text that no longer exists on disk. Absent (tool loop off) = today's behaviour exactly.
+   */
+  overlay?: WorkspaceOverlay;
+
+  /**
+   * The tool loop's once-per-turn checklist nudge (T9 fix loop 3): returns the line to append, or ''.
+   * Absent with the loop off.
+   */
+  todoNudge?: () => string;
 }
 
 /** Exported for testing: the lookup the tool performs, minus the AI SDK wrapper. */
@@ -140,7 +156,7 @@ export function createFileTools(context: FileToolContext) {
   const planChars = context.planCharsThisTurn;
   const budgets = context.budgets ?? DEFAULT_AGENT_BUDGETS;
 
-  return {
+  const tools = {
     read_file: tool({
       description:
         "Read one file from the project by its path, exactly as listed in the project's file manifest. " +
@@ -155,17 +171,42 @@ export function createFileTools(context: FileToolContext) {
          * the generation after the tokens are spent.
          */
         path: z.string().optional().describe('Project-relative path from the manifest, e.g. src/pages/Home.tsx'),
+
+        /* Claude Code's spelling of the same argument (tool-loop plan D3) — `path` wins when both are sent. */
+        file_path: z.string().optional().describe('Alias of `path`.'),
       }),
 
-      execute: async ({ path }) => {
+      execute: async ({ path: pathArg, file_path: filePathArg }) => {
+        const path = pathArg && pathArg.trim() ? pathArg : filePathArg;
+
         if (!path || !path.trim()) {
           return 'read_file needs a "path" — a project-relative path from the file manifest, e.g. src/pages/Home.tsx.';
         }
 
         const relative = toProjectRelativePath(path.trim());
+        const overlay = context.overlay;
+
+        /*
+         * Read-your-writes (D4): a file the agent wrote THIS turn comes back from the overlay, free — the
+         * model already paid to write those bytes, and charging it to read them back would make "re-read
+         * before you edit" (the loop's own instruction) the way a turn spends its budget.
+         */
+        if (overlay?.wrote(relative)) {
+          const written = overlay.read(relative);
+
+          if (written !== undefined) {
+            return written;
+          }
+        }
 
         /* Re-reading is free and must stay free: it is how a model recovers after a long tool loop. */
         if (context.readThisTurn.has(relative)) {
+          const fresh = overlay?.read(relative);
+
+          if (fresh !== undefined) {
+            return fresh;
+          }
+
           const hit = resolveFile(context.files, relative);
 
           if (hit && !hit.dirent.isBinary) {
@@ -267,4 +308,26 @@ export function createFileTools(context: FileToolContext) {
       },
     }),
   };
+
+  /*
+   * The checklist nudge rides on the turn's FIRST tool result — usually a read, because the model plans
+   * its edits right after reading (T9 fix loop 3). Marked as not part of the file, so it is never
+   * copied into an `old_string`.
+   */
+  if (context.todoNudge) {
+    const nudge = context.todoNudge;
+    const read = tools.read_file as unknown as { execute: (...args: unknown[]) => Promise<unknown> };
+    const inner = read.execute;
+
+    read.execute = async (...args: unknown[]) => {
+      const result = await inner(...args);
+      const line = nudge();
+
+      return line && typeof result === 'string'
+        ? `${result}\n\n[Workspace note — not part of the file] ${line}`
+        : result;
+    };
+  }
+
+  return tools;
 }

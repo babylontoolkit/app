@@ -234,6 +234,14 @@ export interface ToolPolicyInput {
    * in `budgets.ts`; this input is how it reaches the decision.
    */
   budgets?: Pick<AgentBudgets, 'maxToolRounds' | 'creationToolRounds'>;
+
+  /**
+   * `AGENT_TOOL_LOOP` is on (tool-loop plan D15). File changes are then TOOL CALLS, so a Plan turn
+   * must keep its tools even with a skill preloaded or on a `/slash` turn — otherwise `/bt-plan` has
+   * no way to write its `_specs/` file. Absent/false = today's policy, byte for byte. A build turn's
+   * `maxSteps` is overridden by the proxy with the segment size.
+   */
+  toolLoop?: boolean;
 }
 
 export interface ToolPolicy {
@@ -293,7 +301,11 @@ export function toolPolicyForTurn(input: ToolPolicyInput): ToolPolicy {
    * not a build; this file and `preloadSkills` were the two that did not, and both are money paths.
    */
   if (input.isDiscussTurn) {
-    return input.preloadedCount === 0 && !input.isSlash
+    /*
+     * Under the tool loop the Plan wall's one write door (`_specs/**`) IS a tool (`write_file`,
+     * `planOnly`), so closing the loop on a preloaded/slash turn would close the door with it.
+     */
+    return input.toolLoop || (input.preloadedCount === 0 && !input.isSlash)
       ? { allowTools: true, toolset: 'skills-only', allowsMedia: false, maxSteps: maxToolRounds + 1 }
       : { allowTools: false, toolset: 'skills-only', allowsMedia: false, maxSteps: 1 };
   }

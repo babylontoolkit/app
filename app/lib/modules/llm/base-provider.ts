@@ -190,6 +190,12 @@ export abstract class BaseProvider implements ProviderInfo {
      * subject was siblings drifting apart. Every wrong version of this rule was a count.
      */
     thinkingMode?: ThinkingMode;
+
+    /**
+     * The tool loop is on for this request (tool-loop plan D13) — adds the rolling tail cache
+     * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
+     */
+    toolLoop?: boolean;
   }): LanguageModelV1;
 }
 

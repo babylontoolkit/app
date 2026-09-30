@@ -355,6 +355,8 @@ export const Messages = forwardRef<HTMLDivElement, MessagesProps>(
                         provider={props.provider}
                         parts={parts}
                         addToolResult={props.addToolResult}
+                        isLast={index === messages.length - 1}
+                        isStreaming={isStreaming}
                       />
                     )}
                   </div>

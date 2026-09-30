@@ -77,6 +77,7 @@ import { cometEnvModel, cometGeminiBaseUrl, COMET_DEFAULT_BASE_URL, COMET_MODELS
 import { requireFamily } from '~/lib/modules/llm/model-families';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 import { tapStopReasons } from '~/lib/modules/llm/stop-reason-tap';
+import { withTailCache } from '~/lib/modules/llm/tail-cache';
 
 export default class CometApiProvider extends BaseProvider {
   name = 'Comet';
@@ -120,6 +121,12 @@ export default class CometApiProvider extends BaseProvider {
 
     /** Force thinking off for THIS request — the proxy's last-resort retry (`retry-policy.ts`). */
     thinkingMode?: ThinkingMode;
+
+    /**
+     * The tool loop is on for this request (tool-loop plan D13) — adds the rolling tail cache
+     * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
+     */
+    toolLoop?: boolean;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
 
@@ -233,7 +240,12 @@ export default class CometApiProvider extends BaseProvider {
        */
       headers,
 
-      fetch: thinkingFetch(thinkingMode, effort, model, tapStopReasons(rateLimitFetch({ provider: this.name }))),
+      fetch: thinkingFetch(
+        thinkingMode,
+        effort,
+        model,
+        withTailCache(tapStopReasons(rateLimitFetch({ provider: this.name })), options.toolLoop),
+      ),
     });
 
     const instance = supportsSamplingParams(model) ? comet(model) : stripSamplingParams(comet(model));

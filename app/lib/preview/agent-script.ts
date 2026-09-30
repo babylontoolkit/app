@@ -387,7 +387,20 @@ function previewAgentBody(tag: string, version: number, limits: any, ring: numbe
       };
 
       try {
-        scene.onAfterRenderObservable.addOnce(() => {
+        /*
+         * 🔴 WebGPU: after `endFrame`, not after `scene.render()` (measured live 2026-09-30). Babylon's
+         * WebGPU engine submits the frame's command buffers in `endFrame`, so at `onAfterRender` the
+         * canvas texture holds nothing yet and the read comes back blank on a game that is plainly
+         * rendering. `onEndFrameObservable` still fires inside the same task, before the browser
+         * presents, so the texture is readable there. WebGL keeps the original hook.
+         */
+        const engine = scene.getEngine ? scene.getEngine() : null;
+        const observable =
+          engine && engine.isWebGPU && engine.onEndFrameObservable
+            ? engine.onEndFrameObservable
+            : scene.onAfterRenderObservable;
+
+        observable.addOnce(() => {
           try {
             done(encodeCanvas(canvas));
           } catch {
@@ -405,6 +418,41 @@ function previewAgentBody(tag: string, version: number, limits: any, ring: numbe
 
   /** The running scene, via Vite's module graph — the project is ESM, so nothing is on `window`. */
   const findScene = async () => {
+    /*
+     * 🔴 Babylon core FIRST, by the EXACT URL this document already loaded (measured live 2026-09-30):
+     * the starter's `GameManager` has no `GetScene`, so the branch below returned null on a game
+     * rendering 1,440 meshes, and the screenshot fell back to a direct read — which is blank on
+     * WebGPU. Importing the loaded URL returns the SAME module instance (no second evaluation); the
+     * scene with the most meshes wins, since a toolkit game may keep a small utility scene beside it.
+     */
+    try {
+      const urls: string[] = performance.getEntriesByType('resource').map((entry: any) => entry.name);
+      const coreUrl =
+        urls.find((name) => name.includes('/@babylonjs/core/index.js')) ||
+        urls.find((name) => name.includes('@babylonjs_core.js'));
+
+      if (coreUrl) {
+        // eslint-disable-next-line no-eval
+        const core: any = await (0, eval)(`import(${JSON.stringify(coreUrl)})`);
+        const engines: any[] = (core && core.EngineStore && core.EngineStore.Instances) || [];
+        let best: any = null;
+
+        for (const engine of engines) {
+          for (const candidate of (engine && engine.scenes) || []) {
+            if (!candidate.isDisposed && (!best || candidate.meshes.length > best.meshes.length)) {
+              best = candidate;
+            }
+          }
+        }
+
+        if (best) {
+          return best;
+        }
+      }
+    } catch {
+      // Fall through to the GameManager route.
+    }
+
     try {
       /*
        * Built as a variable so TypeScript does not try to resolve it (this path exists in the USER's

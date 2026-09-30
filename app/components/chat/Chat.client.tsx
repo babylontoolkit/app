@@ -7,6 +7,16 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { useMessageParser, usePromptEnhancer, useShortcuts } from '~/lib/hooks';
 import { runPreviewToolCall } from '~/lib/preview/bridge';
+import { runWorkspaceToolCall } from '~/lib/agent-workspace/executor';
+import type { AgentTodosPart, TodoItem, WorkspaceToolCallPart } from '~/lib/agent/workspace-protocol-types';
+import {
+  clearCurrentGeneration,
+  dispatchActivity,
+  finishRow,
+  outcomeFromResult,
+  setTodos,
+  startRow,
+} from '~/lib/agent-workspace/activity';
 import { chatMetadata, description, projectId, repoStatus, useChatHistory } from '~/lib/persistence';
 import { CREATION_CHECKPOINT_LABEL } from '~/lib/persistence/local-snapshots';
 import { ensureFolderForProject, requireProjectsFolderForWorkspace } from '~/lib/local-project';
@@ -23,7 +33,7 @@ import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { isCreationTurn } from '~/lib/chat/creation-turn';
 import { liveTurnIdentity } from '~/lib/chat/live-turn-identity';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { describeTurnOutcome, type TurnOutcome } from '~/lib/agent/turn-outcome';
+import { describeTurnOutcome, KEEP_BUILDING_MESSAGE, type TurnOutcome } from '~/lib/agent/turn-outcome';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
 import { applySettlement, canUseTier, sessionStore } from '~/lib/stores/session';
 import { modelTierStore } from '~/lib/stores/settings';
@@ -80,6 +90,7 @@ import {
   creationPlanActive,
   decideCreationPhaseRetry,
   decideNextCreationTurn,
+  decidePhaseOutcomeAction,
   type CreationPauseReason,
 } from '~/lib/chat/creation-plan-runner';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
@@ -252,7 +263,7 @@ interface ChatProps {
   storeMessageHistory: (messages: Message[]) => Promise<void>;
 
   /** Snapshot the project to the server once a generation has finished (§4.5.5). */
-  checkpointProject: (messageId: string, options?: { label?: string }) => Promise<void>;
+  checkpointProject: (messageId: string, options?: { label?: string; finalMessage?: Message }) => Promise<void>;
   importChat: (description: string, messages: Message[]) => Promise<void>;
   exportChat: () => void;
   description?: string;
@@ -611,6 +622,12 @@ export const ChatImpl = memo(
      */
     const [phasePause, setPhasePause] = useState<CreationPauseReason | null>(null);
 
+    /** D19 — automatic continues spent on the phase at `index`; reset whenever a different phase runs. */
+    const autoContinueRef = useRef<{ index: number; used: number }>({ index: -1, used: 0 });
+
+    /** D19 — the message the next armed phase run posts instead of its step line (one-shot). */
+    const continueMessageRef = useRef<string | null>(null);
+
     /**
      * 🔴 THE AUTOMATIC RETRY OF A FAILED PHASE (owner, 2026-08-14 — *"just please make it finish"*).
      *
@@ -872,9 +889,27 @@ export const ChatImpl = memo(
            * go — and `creationCompleteRef` stays armed, so the celebration is still owed to whichever
            * turn eventually completes the plan.
            */
-          if (outcome && outcome.state === 'incomplete') {
-            setPhasePause('incomplete');
-            setTurnOutcomeAlert(outcome);
+          /*
+           * D19 — `decidePhaseOutcomeAction` (pure, tested) turns the verdict into one action. An
+           * unfinished phase re-runs ONCE with `KEEP_BUILDING_MESSAGE`; a budget stop is never continued.
+           */
+          const used = autoContinueRef.current.index === livePlan.next ? autoContinueRef.current.used : 0;
+          const action = decidePhaseOutcomeAction(outcome?.state, used);
+
+          if (action === 'auto-continue') {
+            autoContinueRef.current = { index: livePlan.next, used: used + 1 };
+            continueMessageRef.current = KEEP_BUILDING_MESSAGE;
+            armedPhaseRef.current = livePlan.next;
+            setArmedPhase(livePlan.next);
+          } else if (action === 'pause-incomplete' || action === 'pause-budget') {
+            /*
+             * A pause hands the decision to the user, so no continue may be left pending, and their
+             * resume (the alert's action) is a fresh decision that earns this phase one new continue.
+             */
+            continueMessageRef.current = null;
+            autoContinueRef.current = { index: -1, used: 0 };
+            setPhasePause(action === 'pause-budget' ? 'budget' : 'incomplete');
+            setTurnOutcomeAlert(outcome ?? undefined);
           } else {
             /*
              * The stream ending is not the phase finishing, for the reason written in `celebrateBuild`
@@ -990,7 +1025,8 @@ export const ChatImpl = memo(
          * produced 160 checkpoints for a single message and visibly starved the stream the user was
          * waiting on.
          */
-        checkpointProject(message.id).catch(() => {
+        // `message` is the FINISHED one — the sampled copy lags it (`final-message.ts`).
+        checkpointProject(message.id, { finalMessage: message }).catch(() => {
           /*
            * Already handled inside: every failure branch logs AND toasts (T17c) — this catch only
            * keeps an unexpected rejection out of onFinish. The silent `.catch(() => {})` here used to
@@ -1079,9 +1115,20 @@ export const ChatImpl = memo(
     useEffect(() => {
       resetAgentStatus();
       resetActiveSkills();
+
+      /*
+       * Rising edge: the streaming message must not show the previous turn's activity rows until
+       * this request's first workspace part arrives (tool-loop plan D20 keying).
+       */
+      if (isLoading) {
+        clearCurrentGeneration();
+      }
     }, [isLoading]);
 
     const handledToolCalls = useRef<Set<string>>(new Set());
+
+    /* `agent-todos` parts already applied — the data array is re-presented every chunk (D20b). */
+    const handledTodoParts = useRef<Set<string>>(new Set());
     useEffect(() => {
       if (!chatData) {
         return;
@@ -1184,6 +1231,73 @@ export const ChatImpl = memo(
               body: JSON.stringify({
                 generationId: previewCall.generationId,
                 toolCallId: previewCall.toolCallId,
+                result,
+                error,
+              }),
+            }).catch(() => undefined);
+          })();
+
+          continue;
+        }
+
+        /*
+         * The agent's todo list (D20b). Last write wins; a re-presented part is skipped by its
+         * content key so an OLD request's list can never re-take the current generation.
+         */
+        const todosPart = part as Partial<AgentTodosPart> & { type?: string };
+
+        if (todosPart.type === 'agent-todos' && todosPart.generationId && Array.isArray(todosPart.items)) {
+          const key = `${todosPart.generationId}:${JSON.stringify(todosPart.items)}`;
+
+          if (!handledTodoParts.current.has(key)) {
+            handledTodoParts.current.add(key);
+            dispatchActivity((store) =>
+              setTodos(store, todosPart.generationId as string, todosPart.items as TodoItem[]),
+            );
+          }
+
+          continue;
+        }
+
+        /*
+         * Workspace tool calls (tool-loop plan D5): the agent writing a file, running an allow-listed
+         * command, or checking the game — executed HERE, in the user's sandbox. The result is POSTed
+         * only after the operation completes (for a write: after the bytes are on the sandbox FS and in
+         * the file map), because the server's tool loop blocks on it and the end-of-turn checkpoint
+         * must see every write. Same dedupe set as the preview relay.
+         */
+        const workspaceCall = part as Partial<WorkspaceToolCallPart> & { type?: string };
+
+        if (
+          workspaceCall.type === 'workspace-tool-call' &&
+          workspaceCall.toolCallId &&
+          workspaceCall.generationId &&
+          workspaceCall.op
+        ) {
+          if (handledToolCalls.current.has(workspaceCall.toolCallId)) {
+            continue;
+          }
+
+          handledToolCalls.current.add(workspaceCall.toolCallId);
+
+          const wsCall = workspaceCall as WorkspaceToolCallPart;
+
+          // D20a: the row appears the moment the call arrives, and resolves when the sandbox is done.
+          dispatchActivity((store) => startRow(store, wsCall.generationId, wsCall));
+
+          void (async () => {
+            const { result, error } = await runWorkspaceToolCall(wsCall);
+
+            dispatchActivity((store) =>
+              finishRow(store, wsCall.generationId, wsCall.toolCallId, outcomeFromResult(wsCall.op, result, error)),
+            );
+
+            await fetch('/api/agent/tool-result', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                generationId: workspaceCall.generationId,
+                toolCallId: workspaceCall.toolCallId,
                 result,
                 error,
               }),
@@ -1346,11 +1460,15 @@ export const ChatImpl = memo(
       // This turn IS a phase; `onFinish` reads and clears it before deciding whether to advance.
       phaseTurnRef.current = true;
 
+      // D19 — an auto-continue re-runs the SAME phase with `KEEP_BUILDING_MESSAGE`; one-shot.
+      const content = continueMessageRef.current ?? creationPhaseMessage(plan, decision.index);
+      continueMessageRef.current = null;
+
       append(
-        { role: 'user', content: creationPhaseMessage(plan, decision.index) },
+        { role: 'user', content },
 
         /*
-         * `creationPhase` tells the server which phase this is: it decides the tool set (only `art`
+         * `creationPhase` tells the server which phase this is: it decides the tool set (only `design`
          * gets the media tools) and the step ceiling derived from it. The server ignores it on any turn
          * that is not a first build, so it can never widen an ordinary edit's tools.
          */
@@ -2578,6 +2696,8 @@ export const ChatImpl = memo(
       setArmedPhase(null);
       phaseTurnRef.current = false;
       setPhasePause(null);
+      continueMessageRef.current = null;
+      autoContinueRef.current = { index: -1, used: 0 };
 
       /*
        * ⚠️ Only a plan that has actually STARTED. A `/clear` on a freshly created project — an
@@ -2955,6 +3075,15 @@ export const ChatImpl = memo(
        * must never tick the plan forward, or a phase the user paid for is skipped and never runs.
        */
       phaseTurnRef.current = Boolean(phaseId);
+
+      /*
+       * 🔴 A phase send IS the user resuming a paused plan (the alert's action, or a typed message while
+       * a build is open), so the pause ends here — otherwise `decideNextCreationTurn` keeps returning
+       * `pause` and the plan never advances by itself again once this turn finishes.
+       */
+      if (phaseId) {
+        setPhasePause(null);
+      }
 
       /*
        * A build send: a phase, or the unregistered path's single turn (which has no plan at all).

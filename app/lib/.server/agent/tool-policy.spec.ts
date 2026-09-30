@@ -25,10 +25,13 @@ const base = { isFirstBuildTurn: false, hasMcpTools: false, hasMediaTools: false
 
 /**
  * Every phase that must NOT get the media tools — DERIVED, so a phase added to the table is covered
- * the day it is added rather than the day someone remembers this file. `art` is the single exception
- * and is asserted positively on its own below, so an empty list here cannot pass silently.
+ * the day it is added rather than the day someone remembers this file. The exceptions are `design`
+ * (the scheduled media phase, D18) and `art` (its legacy predecessor, kept so stored plans still run);
+ * both are asserted positively below, so an empty list here cannot pass silently. A NEW phase that
+ * arrives with `allowsMedia: true` is still in this list and fails.
  */
-const NON_ART_PHASES = CREATION_PHASES.filter((p) => p.id !== 'art').map((p) => p.id);
+const MEDIA_PHASES = ['design', 'art'];
+const NON_ART_PHASES = CREATION_PHASES.filter((p) => !MEDIA_PHASES.includes(p.id)).map((p) => p.id);
 
 describe('toolPolicyForTurn — first build turns', () => {
   it('opens the CREATION loop with a derived cap PLUS a reserved answer step (§4.16, Phase 2)', () => {
@@ -135,6 +138,15 @@ describe('toolPolicyForTurn — first build turns', () => {
     expect(art.allowsMedia).toBe(true);
     expect(art.toolset).toBe('creation');
     expect(art.maxSteps).toBe(CREATION_TOOL_ROUNDS + MEDIA_IMAGE_ROUNDS + 1);
+  });
+
+  /* D18 — `design` succeeds `art` as the scheduled media phase and gets the same treatment. */
+  it('gives the DESIGN phase media, and the same headroom', () => {
+    const design = toolPolicyForTurn({ ...base, isFirstBuildTurn: true, creationPhase: 'design', hasMediaTools: true });
+
+    expect(design.allowsMedia).toBe(true);
+    expect(design.toolset).toBe('creation');
+    expect(design.maxSteps).toBe(CREATION_TOOL_ROUNDS + MEDIA_IMAGE_ROUNDS + 1);
   });
 
   /*
@@ -456,22 +468,36 @@ describe('the creation toolset earns every step it spends', () => {
     '',
   );
 
-  /** The `toolset === 'creation'` branch's object literal, brace-matched. */
-  const creationBranch = (() => {
-    const at = proxy.indexOf("toolPolicy.toolset === 'creation'");
-    const open = proxy.indexOf('{', at);
+  /** The brace-matched object literal starting at the first `{` at or after `from`. */
+  const objectAt = (from: number): { body: string; end: number } => {
+    const open = proxy.indexOf('{', from);
     let depth = 0;
 
     for (let i = open; i < proxy.length; i++) {
       if (proxy[i] === '{') {
         depth++;
       } else if (proxy[i] === '}' && --depth === 0) {
-        return proxy.slice(open, i + 1);
+        return { body: proxy.slice(open, i + 1), end: i + 1 };
       }
     }
 
-    return '';
-  })();
+    return { body: '', end: proxy.length };
+  };
+
+  /*
+   * The `toolset === 'creation'` branch is `toolLoop ? {LOOP} : {LEGACY}` (tool-loop plan D15). The
+   * legacy set is the one this block has always pinned; the loop set deliberately adds the preview
+   * tools, because its done-gate verifies the running game.
+   */
+  const creationAt = proxy.indexOf("toolPolicy.toolset === 'creation'");
+  const loopCreation = objectAt(creationAt);
+  const creationBranch = objectAt(loopCreation.end).body;
+
+  it('the tool-loop creation set carries the workspace and preview tools (D15)', () => {
+    expect(proxy.slice(creationAt, loopCreation.end)).toMatch(/toolLoop\s*\?\s*\{/);
+    expect(loopCreation.body).toContain('workspaceTools');
+    expect(loopCreation.body).toContain('previewTools');
+  });
 
   /* CONTROLS — the scan found the real branch, so the assertion below can fail. */
   it('finds the creation branch and it really is the tool set', () => {
@@ -519,5 +545,49 @@ describe('toolPolicyForTurn — Unity Bridge rounds (§4.17, D18)', () => {
     expect(toolPolicyForTurn({ ...base, isFirstBuildTurn: true, hasBridgeTools: true })).toEqual(plain);
     expect(plain.toolset).toBe('creation');
     expect(plain.maxSteps).toBe(CREATION_TOOL_ROUNDS + 1);
+  });
+});
+
+describe('toolPolicyForTurn — the tool loop (tool-loop plan D15)', () => {
+  const loop = { ...base, toolLoop: true };
+
+  it('a Plan turn keeps its tools even with skills preloaded — `/bt-plan` must be able to write its _specs file', () => {
+    const expected = { allowTools: true, toolset: 'skills-only', allowsMedia: false, maxSteps: MAX_TOOL_ROUNDS + 1 };
+
+    expect(toolPolicyForTurn({ ...loop, isDiscussTurn: true })).toEqual(expected);
+    expect(toolPolicyForTurn({ ...loop, isDiscussTurn: true, preloadedCount: 2 })).toEqual(expected);
+    expect(toolPolicyForTurn({ ...loop, isDiscussTurn: true, isSlash: true })).toEqual(expected);
+    expect(toolPolicyForTurn({ ...loop, isDiscussTurn: true, isSlash: true, hasMediaTools: true })).toEqual(expected);
+  });
+
+  it('CONTROL: without the loop the preloaded Plan turn is still closed', () => {
+    expect(toolPolicyForTurn({ ...base, toolLoop: false, isDiscussTurn: true, preloadedCount: 2 }).allowTools).toBe(
+      false,
+    );
+  });
+
+  it("a first build keeps the creation toolset and today's maxSteps formula", () => {
+    for (const creationPhase of [null, ...CREATION_PHASES.map((p) => p.id)]) {
+      for (const hasMediaTools of [false, true]) {
+        const input = { ...base, isFirstBuildTurn: true, creationPhase, hasMediaTools };
+
+        expect(toolPolicyForTurn({ ...input, toolLoop: true })).toEqual(toolPolicyForTurn(input));
+        expect(toolPolicyForTurn({ ...input, toolLoop: true })).toMatchObject({
+          allowTools: true,
+          toolset: 'creation',
+        });
+      }
+    }
+  });
+
+  it('an ordinary turn gets the full set with tools on', () => {
+    for (const preloadedCount of [0, 2]) {
+      for (const isSlash of [false, true]) {
+        const input = { ...base, preloadedCount, isSlash };
+
+        expect(toolPolicyForTurn({ ...input, toolLoop: true })).toEqual(toolPolicyForTurn(input));
+        expect(toolPolicyForTurn({ ...input, toolLoop: true })).toMatchObject({ allowTools: true, toolset: 'all' });
+      }
+    }
   });
 });

@@ -9,8 +9,10 @@
 import { describe, expect, it } from 'vitest';
 import { advanceCreationPlan, newCreationPlan, type CreationPlan } from '~/lib/agent/creation-plan';
 import {
+  MAX_AUTO_CONTINUES,
   MAX_CREATION_PHASE_RETRIES,
   creationPlanActive,
+  decidePhaseOutcomeAction,
   decideCreationPhaseRetry,
   decideNextCreationTurn,
   type CreationRetryInput,
@@ -266,5 +268,64 @@ describe('creationPlanActive — the auto-repair disarm (trap 2)', () => {
     expect(creationPlanActive(planAt(newCreationPlan().phases.length))).toBe(false);
     expect(creationPlanActive(null)).toBe(false);
     expect(creationPlanActive(undefined)).toBe(false);
+  });
+});
+
+/**
+ * 🔴 D19 — an `auto-continue` starts a PAID generation with no user action. The branches that do NOT
+ * continue are the subject: a budget stop is the cap working, and the cap on continues is what stops
+ * an unfinishable phase billing forever.
+ */
+describe('decidePhaseOutcomeAction', () => {
+  it.each([
+    ['finished', 0, 'advance'],
+    ['rescued', 0, 'advance'],
+    [undefined, 0, 'advance'],
+    ['incomplete', 0, 'auto-continue'],
+    ['unverified', 0, 'auto-continue'],
+    ['incomplete', 1, 'pause-incomplete'],
+    ['unverified', 1, 'pause-incomplete'],
+    ['paused', 0, 'pause-budget'],
+  ] as const)('(%s, %s) → %s', (state, used, expected) => {
+    expect(decidePhaseOutcomeAction(state, used)).toBe(expected);
+  });
+
+  /* A budget stop is NEVER continued automatically — not on the first turn, not ever. */
+  it('never auto-continues a paused (budget) turn, whatever the count', () => {
+    for (let used = 0; used <= MAX_AUTO_CONTINUES + 2; used++) {
+      expect(decidePhaseOutcomeAction('paused', used)).toBe('pause-budget');
+    }
+  });
+
+  /* The cap is the literal one continue the plan decided on; past it, never another. */
+  it('continues exactly MAX_AUTO_CONTINUES times, then pauses', () => {
+    expect(MAX_AUTO_CONTINUES).toBe(1);
+
+    for (let used = MAX_AUTO_CONTINUES; used <= MAX_AUTO_CONTINUES + 3; used++) {
+      expect(decidePhaseOutcomeAction('incomplete', used)).toBe('pause-incomplete');
+      expect(decidePhaseOutcomeAction('unverified', used)).toBe('pause-incomplete');
+    }
+  });
+
+  /* CONTROL — a clean turn advances even with continues already spent on this phase. */
+  it('CONTROL — a finished turn advances regardless of continues used', () => {
+    expect(decidePhaseOutcomeAction('finished', MAX_AUTO_CONTINUES)).toBe('advance');
+  });
+});
+
+/**
+ * The resume contract with `Chat.client.tsx` (pinned there by `phase-pause-wiring.spec.ts`): the
+ * user's phase send clears the pause, and only then may the next armed phase run by itself.
+ */
+describe('decideNextCreationTurn — resuming a paused plan', () => {
+  it.each(['incomplete', 'budget', 'error', 'unsettled'] as const)(
+    'while paused (%s), an armed phase never runs',
+    (paused) => {
+      expect(decideNextCreationTurn(ready({ paused }))).toEqual({ kind: 'pause', reason: paused });
+    },
+  );
+
+  it('once the resume send clears the pause, the armed next phase runs by itself', () => {
+    expect(decideNextCreationTurn(ready({ paused: null }))).toEqual({ kind: 'run', index: 1 });
   });
 });

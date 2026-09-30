@@ -93,11 +93,11 @@ describe('CreationPlanCard', () => {
 
   it('names the step actually running, in the present tense', () => {
     mount(planAt(0));
-    expect(screen.getByText('Designing your front end')).toBeTruthy();
+    expect(screen.getByText('Designing your game and its art')).toBeTruthy();
 
     cleanup();
     mount(planAt(1));
-    expect(screen.getByText('Generating your artwork')).toBeTruthy();
+    expect(screen.getByText('Writing your game code')).toBeTruthy();
   });
 
   /** The list keeps its shape as the build advances — done stays visible, pending stays visible. */

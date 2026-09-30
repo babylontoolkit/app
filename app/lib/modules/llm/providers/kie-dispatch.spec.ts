@@ -525,7 +525,13 @@ describe('kie.ts really wires the branches this spec reproduces', () => {
     expect(code).toContain('geminiFetch(geminiThinkingLevel(thinkingMode, effort)');
     expect(code).toContain('baseURL: KIE_GEMINI_BASE_URL');
 
-    expect(code).toContain('thinkingFetch(thinkingMode, effort, model, kieFetch(');
+    /*
+     * Whitespace-collapsed: the chain now carries the tool loop's tail-cache wrapper (tool-loop plan D13),
+     * which Prettier wraps across lines. `withTailCache` is the identity when the loop is off.
+     */
+    const flat = code.replace(/\(\s+/g, '(').replace(/\s+/g, ' ');
+    expect(flat).toContain('thinkingFetch(thinkingMode, effort, model, withTailCache(kieFetch(');
+    expect(flat).toContain('options.toolLoop)');
   });
 
   /*

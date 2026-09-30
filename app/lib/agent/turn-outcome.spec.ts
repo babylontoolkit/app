@@ -7,7 +7,13 @@
  * a warning that fires on healthy builds is one the user learns to ignore.
  */
 import { describe, expect, it } from 'vitest';
-import { describeTurnOutcome, FINISH_BUILD_MESSAGE, type TurnOutcomeFacts } from './turn-outcome';
+import {
+  describeTurnOutcome,
+  FINISH_BUILD_MESSAGE,
+  FIX_CHECK_MESSAGE,
+  KEEP_BUILDING_MESSAGE,
+  type TurnOutcomeFacts,
+} from './turn-outcome';
 
 const clean: TurnOutcomeFacts = {
   isFirstBuildTurn: true,
@@ -149,5 +155,108 @@ describe('the action message', () => {
     expect(FINISH_BUILD_MESSAGE).toMatch(/continue from exactly where you stopped/i);
     expect(FINISH_BUILD_MESSAGE).toMatch(/do not start over/i);
     expect(FINISH_BUILD_MESSAGE).toMatch(/do not rewrite files that are already correct/i);
+  });
+});
+
+describe('tool-loop stops (D22)', () => {
+  it('budget → paused, with a Keep building action', () => {
+    const outcome = describeTurnOutcome({ ...clean, stopReason: 'budget' });
+
+    expect(outcome).toEqual({
+      state: 'paused',
+      headline: 'Paused at your credit limit for this turn',
+      detail: 'Everything built so far is saved in your project. Continue to keep building.',
+      action: KEEP_BUILDING_MESSAGE,
+      actionLabel: 'Keep building',
+    });
+  });
+
+  it('breaker → unverified, with a Fix the errors action', () => {
+    const outcome = describeTurnOutcome({ ...clean, stopReason: 'breaker' });
+
+    expect(outcome).toEqual({
+      state: 'unverified',
+      headline: 'Built, but the game check is still failing',
+      detail: 'The last check reported errors. The agent can keep fixing them.',
+      action: FIX_CHECK_MESSAGE,
+      actionLabel: 'Fix the errors',
+    });
+  });
+
+  it('wrote files + a failed last check → unverified', () => {
+    const outcome = describeTurnOutcome({ ...clean, stopReason: 'none', lastCheckOk: false });
+
+    expect(outcome.state).toBe('unverified');
+    expect(outcome.action).toBe(FIX_CHECK_MESSAGE);
+  });
+
+  /*
+   * CONTROLS for the check rule: a failed check with NO writes is not "built, but failing", and a
+   * check that never ran (null) or passed is not a failure.
+   */
+  it('CONTROL: a failed check without writes is not unverified', () => {
+    expect(describeTurnOutcome({ ...clean, wroteFiles: false, lastCheckOk: false }).state).not.toBe('unverified');
+  });
+
+  it('CONTROL: a passed or never-run check stays finished', () => {
+    expect(describeTurnOutcome({ ...clean, stopReason: 'none', lastCheckOk: true }).state).toBe('finished');
+    expect(describeTurnOutcome({ ...clean, stopReason: 'none', lastCheckOk: null }).state).toBe('finished');
+  });
+
+  it('segments → incomplete, with KEEP_BUILDING', () => {
+    const outcome = describeTurnOutcome({ ...clean, stopReason: 'segments' });
+
+    expect(outcome).toEqual({
+      state: 'incomplete',
+      headline: 'This step ran long and stopped before finishing',
+      detail: 'Files written so far are saved.',
+      action: KEEP_BUILDING_MESSAGE,
+      actionLabel: 'Keep building',
+    });
+  });
+
+  it('a Stop still outranks budget', () => {
+    expect(describeTurnOutcome({ ...clean, aborted: true, stopReason: 'budget' }).state).toBe('finished');
+  });
+
+  /*
+   * Inserted BEFORE the first-build scope: the loop can cut short any turn, not only the first build.
+   */
+  it('reports tool-loop stops on ordinary turns too', () => {
+    const ordinary = { ...clean, isFirstBuildTurn: false };
+
+    expect(describeTurnOutcome({ ...ordinary, stopReason: 'budget' }).state).toBe('paused');
+    expect(describeTurnOutcome({ ...ordinary, stopReason: 'breaker' }).state).toBe('unverified');
+    expect(describeTurnOutcome({ ...ordinary, stopReason: 'segments' }).state).toBe('incomplete');
+  });
+
+  /*
+   * Budget outranks the check rule: a paused turn may also have a failing check, and "continue"
+   * is the right next step for both.
+   */
+  it('budget outranks a failed check', () => {
+    expect(describeTurnOutcome({ ...clean, stopReason: 'budget', lastCheckOk: false }).state).toBe('paused');
+  });
+
+  it('the messages are verbatim', () => {
+    expect(KEEP_BUILDING_MESSAGE).toBe(
+      'Continue building from where you stopped. Re-read the files you already wrote with read_file, finish the remaining work on your todo list, then run check_game until it passes.',
+    );
+    expect(FIX_CHECK_MESSAGE).toBe(
+      'Run check_game, read every error it reports, and fix them. Keep going until check_game passes.',
+    );
+  });
+});
+
+describe('actionLabel', () => {
+  it('legacy incomplete → Finish the build', () => {
+    expect(describeTurnOutcome({ ...clean, finishReason: 'length' }).actionLabel).toBe('Finish the build');
+    expect(describeTurnOutcome({ ...clean, wroteFiles: false }).actionLabel).toBe('Finish the build');
+  });
+
+  it('finished and rescued carry no label', () => {
+    expect(describeTurnOutcome(clean).actionLabel).toBeNull();
+    expect(describeTurnOutcome({ ...clean, completionPassWroteFiles: true }).actionLabel).toBeNull();
+    expect(describeTurnOutcome({ ...clean, forcedContinuation: true }).actionLabel).toBeNull();
   });
 });

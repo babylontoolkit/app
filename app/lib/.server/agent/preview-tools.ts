@@ -184,13 +184,17 @@ export function createPreviewTools(ctx: PreviewToolContext): Record<string, Retu
         'This is how you verify that something actually works, rather than inferring it from the code — ' +
         'use it to CHECK acceptance criteria before claiming a task is done. ' +
         '`await` is supported. ' +
-        'IMPORTANT: the project is ESM, so there are no game globals — `GameManager` is a module ' +
-        'export, not a `window` property. Reach the live module through the dev server instead: ' +
-        "`(await import('/src/babylon/globals')).default` is GameManager, with the running game's " +
-        'state. Examples: ' +
-        "`(await import('/src/babylon/globals')).default.GetScene().meshes.length`; " +
-        "`(await import('/src/babylon/globals')).default.GetScene().getMeshByName('kart') !== null`; " +
-        '`document.querySelector("canvas") !== null`. ' +
+        'IMPORTANT: the project is ESM, so there are no game globals (nothing is on `window`). Reach the ' +
+        'running scene through the Babylon core module the page ALREADY loaded — import it by its exact ' +
+        'loaded URL (a different specifier such as an extension-less path loads a SECOND copy of the module ' +
+        'with no scene in it): ' +
+        "`const core = await import(performance.getEntriesByType('resource').map(e => e.name)" +
+        ".find(n => n.includes('/@babylonjs/core/index.js') || n.includes('@babylonjs_core.js'))); " +
+        'const scene = core.EngineStore.LastCreatedScene; return scene.meshes.length;` ' +
+        '(several statements need an explicit `return`, like a browser console). Each call is a fresh ' +
+        'evaluation, so repeat those two lines and end with ONE narrow `return`, e.g. ' +
+        '`return scene.getMeshByName("kart") !== null;`. ' +
+        'Also: `document.querySelector("canvas") !== null`. ' +
         'Large objects are truncated, so ask one narrow question rather than dumping a scene.',
       parameters: z.object({
         /* Optional + validated in `execute`: a schema rejection kills the generation after it has paid. */

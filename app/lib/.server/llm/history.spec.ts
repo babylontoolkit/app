@@ -23,6 +23,7 @@ import {
   IMAGE_TOKENS_UPPER_BOUND,
   MAX_HISTORY_CHARS,
   stripReplayedReasoning,
+  WORKSPACE_SUMMARY_MARKER,
 } from './history';
 
 const bigFile = 'const x = 1;\n'.repeat(400); // ~5KB, the size of a real generated source file
@@ -103,10 +104,10 @@ describe('what compaction MUST KEEP', () => {
   });
 
   /* And it must be told where the real content is, or it will assume the file is empty. */
-  it('points the model at the file-context block instead of the omitted body', () => {
+  it('points the model at read_file instead of the omitted body', () => {
     const compacted = compactHistory([userTurn('go'), assistantTurn('a.ts', bigFile)]);
 
-    expect(compacted[1].content).toContain('Current Project Files');
+    expect(compacted[1].content).toContain('read_file');
   });
 
   /* A shell command IS the information — one line, nothing to strip. */
@@ -145,7 +146,7 @@ describe('the modified-files artifact in a USER message', () => {
     const [out] = compactHistory([userWithEdits('now add a boost pad')]);
 
     expect(out.content).not.toContain('export const speed = 42;');
-    expect(out.content).toContain('Current Project Files');
+    expect(out.content).toContain('read_file');
   });
 
   it('keeps every word the user DID type, and the path they edited', () => {
@@ -828,5 +829,104 @@ describe('compactHistory — a turn that was ONLY thinking is dropped, never sen
     const out = compactHistory([userTurn('build my game'), tooled]);
 
     expect(out.map((m) => m.id)).toContain('a-tool');
+  });
+});
+
+describe('agentWorkspace summary (tool-loop plan D20c)', () => {
+  const summary = {
+    writes: ['src/pages/Pause.tsx', 'src/pages/Pause.css'],
+    commands: [{ command: 'npm install zod', exitCode: 0 }],
+    todos: [
+      { content: 'a', status: 'completed' },
+      { content: 'b', status: 'pending' },
+    ],
+    lastCheck: { ok: true, errors: [] },
+  };
+  const toolTurn = (over: Partial<Message> = {}): Message =>
+    ({
+      id: 'a-ws',
+      role: 'assistant',
+      content: 'Adding a pause menu.',
+      parts: [{ type: 'step-start' }, { type: 'text', text: 'Adding a pause menu.' }],
+      annotations: [
+        { type: 'agentMeta', value: { generationId: 'g1' } },
+        { type: 'agentWorkspace', value: summary },
+      ],
+      ...over,
+    }) as unknown as Message;
+  const expected =
+    '[Workspace: wrote 2 file(s) (src/pages/Pause.tsx, src/pages/Pause.css); todos 1/2; last check passed]';
+
+  it('summarises into BOTH content and the text part — and it reaches the wire', () => {
+    const [, out] = compactHistory([userTurn('add a pause menu'), toolTurn()]);
+
+    expect(out.content).toBe(`Adding a pause menu.\n\n${expected}`);
+    expect((out.parts as any[]).find((p) => p.type === 'text').text).toBe(`Adding a pause menu.\n\n${expected}`);
+
+    const wire = JSON.stringify(convertToCoreMessages([out]));
+    expect(wire).toContain('[Workspace: wrote 2 file(s)');
+    expect(wire.split(WORKSPACE_SUMMARY_MARKER)).toHaveLength(2);
+  });
+
+  it('is idempotent', () => {
+    const once = compactHistory([userTurn('x'), toolTurn()]);
+    const twice = compactHistory(once);
+
+    expect(twice[1].content).toBe(once[1].content);
+    expect(twice[1].parts).toEqual(once[1].parts);
+    expect((twice[1].content as string).split(WORKSPACE_SUMMARY_MARKER)).toHaveLength(2);
+  });
+
+  it('appends to the LAST text part only, and adds one when there is none', () => {
+    const [, many] = compactHistory([
+      userTurn('x'),
+      toolTurn({
+        parts: [
+          { type: 'text', text: 'one' },
+          { type: 'text', text: 'two' },
+        ],
+      } as any),
+    ]);
+    const texts = (many.parts as any[]).map((p) => p.text);
+    expect(texts[0]).toBe('one');
+    expect(texts[1]).toContain(WORKSPACE_SUMMARY_MARKER);
+
+    // A turn that streamed only thinking (reasoning stripped) still keeps its record of what it wrote.
+    const [, bare] = compactHistory([
+      userTurn('x'),
+      toolTurn({ content: '', parts: [{ type: 'reasoning', reasoning: 'hmm', details: [] }] } as any),
+    ]);
+    expect(bare).toBeDefined();
+    expect((bare.parts as any[]).filter((p) => p.type === 'text')).toEqual([{ type: 'text', text: expected }]);
+  });
+
+  it('no annotation → unchanged; a user message is never touched', () => {
+    const plain = toolTurn({ annotations: [] });
+    const [, out] = compactHistory([userTurn('x'), plain]);
+    expect(out).toBe(plain);
+
+    const user = { ...userTurn('hello'), annotations: [{ type: 'agentWorkspace', value: summary }] } as Message;
+    expect(compactHistory([user])[0].content).toBe('hello');
+  });
+
+  it('names at most 20 paths, and says "not run" / "failed" for the check', () => {
+    const writes = Array.from({ length: 25 }, (_, i) => `src/f${i}.ts`);
+    const [, out] = compactHistory([
+      userTurn('x'),
+      toolTurn({
+        annotations: [{ type: 'agentWorkspace', value: { writes, commands: [], todos: [], lastCheck: null } }],
+      } as any),
+    ]);
+    expect(out.content).toContain('wrote 25 file(s) (src/f0.ts');
+    expect(out.content).toContain('src/f19.ts, +5 more); todos 0/0; last check not run]');
+    expect(out.content).not.toContain('src/f20.ts');
+
+    const [, failed] = compactHistory([
+      userTurn('x'),
+      toolTurn({
+        annotations: [{ type: 'agentWorkspace', value: { ...summary, lastCheck: { ok: false, errors: ['e'] } } }],
+      } as any),
+    ]);
+    expect(failed.content).toContain('last check failed]');
   });
 });

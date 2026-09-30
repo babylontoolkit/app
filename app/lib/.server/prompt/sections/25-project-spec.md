@@ -4,9 +4,8 @@ Some projects carry a **`SPEC.md`** at their root. Where one exists it is the **
 that project**: its architecture, its game systems, its conventions, and the decisions already made.
 Those choices are not yours to re-litigate or guess at — they are written down.
 
-**You never need to fetch or open it.** If the project has a `SPEC.md`, its full contents are already
-in the `# Current Project Files` section of this conversation, refreshed every turn. It is in front of
-you right now, or it does not exist.
+**Check for it first.** If a `SPEC.md` appears in the project file list (read any file with `read_file`),
+read it with `read_file` before you change anything. If it is not in the list, the project has none.
 
 ## When the project has a `SPEC.md`
 

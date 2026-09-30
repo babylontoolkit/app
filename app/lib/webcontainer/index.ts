@@ -1,6 +1,7 @@
 import { WebContainer } from '@webcontainer/api';
 import { WORK_DIR_NAME } from '~/utils/constants';
 import { cleanStackTrace } from '~/utils/stacktrace';
+import { suppressesPreviewAlert } from '~/lib/agent-workspace/check-window';
 
 interface WebContainerContext {
   loaded: boolean;
@@ -43,7 +44,10 @@ if (!import.meta.env.SSR) {
           console.log('WebContainer preview message:', message);
 
           // Handle both uncaught exceptions and unhandled promise rejections
-          if (message.type === 'PREVIEW_UNCAUGHT_EXCEPTION' || message.type === 'PREVIEW_UNHANDLED_REJECTION') {
+          if (
+            (message.type === 'PREVIEW_UNCAUGHT_EXCEPTION' || message.type === 'PREVIEW_UNHANDLED_REJECTION') &&
+            !suppressesPreviewAlert(Date.now()) // a game check's own navigation (`check-window.ts`)
+          ) {
             const isPromise = message.type === 'PREVIEW_UNHANDLED_REJECTION';
             const title = isPromise ? 'Unhandled Promise Rejection' : 'Uncaught Exception';
             workbenchStore.actionAlert.set({

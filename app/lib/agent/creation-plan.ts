@@ -54,7 +54,7 @@
  */
 import type { TurnOutcomeState } from './turn-outcome';
 
-export type CreationPhaseId = 'game' | 'game-systems' | 'frontend' | 'art' | 'verify';
+export type CreationPhaseId = 'design' | 'game' | 'game-systems' | 'frontend' | 'art' | 'verify';
 
 export interface CreationPhase {
   id: CreationPhaseId;
@@ -112,55 +112,37 @@ export interface CreationPhase {
 }
 
 /**
- * 🔴 ORDERED FRONT END FIRST, GAME LAST — reversed by owner decision, 2026-08-08.
+ * 🔴 ORDER: ART DIRECTION → GAME CODE → FRONT END (D18, tool loop 2026-09-30).
  *
- * The original order was `game → frontend → art`, argued as "what survives a failure": fail after
- * the game and you have a playable project with a stock page, where the reverse buys a pretty page
- * in front of no game. That reasoning treated a cut-off run as a terminal state. It is not one — a
- * plan RESUMES, and a single-turn build is one prompt from finished whichever way round it went.
- *
- * What actually decides the order is which body of work is BOUNDED. The front end is a known
- * quantity: one page and three chrome files, much the same size whatever the game is (33% of the
- * monolithic run's characters). The game is open-ended — 45% on that same run, and it scales with
- * the request in a way nothing can predict before the turn starts. Whatever runs LAST is what a
- * length-truncated response mangles, so the fixed cost goes first, where it is certain to fit, and
- * the unbounded work takes the room that is left.
- *
- * 🔴 **WHICH IS WHY THE GAME IS TWO STEPS (owner, 2026-08-14).** *"I think we should split the game
- * code phase, so in general it handle your BRIEF better."* Splitting the front end off the monolith
- * left `game` as the only step still carrying an unbounded amount of work — the largest slice of the
- * original run, and the one that grows with the request — so it inherited the failure the phases were
- * built to remove. Measured on `gen_mstgbuqo_pkhkhi`: 34,192 output tokens across a 5.4-minute silent
- * step, then nothing; and on the run that DID complete, 46,963 output tokens and 38,610 characters of
- * artifact from one reply, i.e. comfortably the biggest response in the build even after the split.
- *
- * The seam is the same one that decides the phase order, applied one level down: `game` writes the
- * BOUNDED part — the GameMode, its scene, its camera and its controls, the smallest thing that
- * actually runs — and `game-systems` writes the part that scales with the brief. A truncated response
- * then costs the systems step, on top of a project that already runs, rather than costing the whole
- * game on top of a project that does nothing.
- *
- * ⚠️ It is a fourth turn, so it pays one more warm-prefix read and one more history re-send. That is
- * the standing cost of a phase and it is the trade being made deliberately: input caches, output
- * decodes serially, and the step this splits was the one that could not finish.
- *
- * `verify` stays last because it is the repair pass. `art` stays adjacent to `frontend` because it
- * renders the list `frontend` wrote into `DESIGN.md` and wires the returned paths into the files
- * `frontend` just created — separating that pair would be a real regression.
- *
- * ⚠️ The same rule is stated to the model in the baked prompt's "BUILD ORDER" section
- * (`prompt/sections/20-hard-constraints.md`), which covers a build that runs as a single turn (an
- * older project, or the unregistered-project fallback). The two must never disagree about which way
- * round a build goes.
- *
- * ⚠️ **This comment said "the LIVE path while this plan is inert" until 2026-08-14, and it was true.**
- * The whole phase system shipped on 2026-08-08 with no client caller — `creationPhaseMessage` was
- * referenced by nothing outside its own spec — so it was built, tested, green and unreachable, while
- * every creation kept running as the monolithic turn documented at the top of this file. The runner
- * (`~/lib/chat/creation-plan-runner`) is that caller. A feature whose own source comment says it is
- * inert is not a note for later; it is a bug report nobody filed.
+ * The old front-end-first order was a truncation hedge that a tool loop with a done-gate no longer
+ * needs. The order now follows risk and dependency: design + enqueue every render first, build the
+ * game while context is freshest, then the front end over art that has already landed. The full
+ * rationale is `_specs/tool-loop_plan.md` §Codebase Analysis ("is frontend → art → game the best order?").
  */
 export const CREATION_PHASES: readonly CreationPhase[] = [
+  {
+    /*
+     * 🔴 THE FIRST STEP (D18). Declared FIRST in the table: it designs the game and the art, and
+     * enqueues every render so they land while the game is being coded. The only SCHEDULED phase with
+     * media; `art` keeps its media flag only so a stored plan naming it can still run.
+     */
+    id: 'design',
+    label: 'Art direction',
+    activeLabel: 'Designing your game and its art',
+    allowsMedia: true,
+    owesFiles: true,
+    task:
+      'Design the game before anything is built. Write your todo list for this step first.\n' +
+      '1. Write `SPEC.md`: what this game is, how it plays (controls, rules, scoring, win and lose), its ' +
+      'modes, and the GameMode that runs it (read its real class name off `src/scripts/`).\n' +
+      '2. Write `DESIGN.md`: the visual direction (palette, type, mood), and the list of art the game and ' +
+      'its front end need — landing hero, backgrounds, chrome art, and any in-game textures or sprites — ' +
+      'each with subject, aspect ratio, and whether it needs a transparent background.\n' +
+      '3. Generate every piece of art on that list now, one generate call per image. Do not wait for ' +
+      'them — they render in the background and will be ready for the later steps. Record each returned ' +
+      'path in `DESIGN.md`.\n' +
+      'Do not write game code, the landing page, or the chrome in this step.',
+  },
   {
     id: 'frontend',
     label: 'Front end',
@@ -168,25 +150,16 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     allowsMedia: false,
     owesFiles: true,
     task:
-      'Design the complete frontend shell FIRST, following the **bt-landing skill** (pre-loaded in ' +
-      'your Skills) EXACTLY, using the project facts in the brief above as its Step-0 inputs.\n\n' +
-      'That is the landing page (`src/pages/Home.tsx` + `Home.css`, rewritten completely, ' +
-      'full-page-width per the Layout law) AND the game chrome in `src/chrome/**` (preloader, ' +
-      'splash, overlay — redesigned to the same theme, never derived from the default splash, ' +
-      'lightweight, wiring preserved). If the bt-landing skill is absent from your Skills, follow ' +
-      'the same rules from the system prompt\'s "Layout law" and "Chrome rewrites" sections.\n\n' +
-      'Wire the play contract now: a registered GameMode was scaffolded into `src/scripts/` when the ' +
-      'project was created, so read its real class name off that file and navigate to it — never ' +
-      'invent one. Do NOT write gameplay code in this step; the game is a later step, and what this ' +
-      'design promises is what it will have to deliver.\n\n' +
-      'Then write `DESIGN.md`, and in it name the two or three pieces of art this design would ' +
-      'benefit from — the next step renders exactly that list, so be specific about subject, ' +
-      'aspect ratio and whether each needs a transparent background.\n\n' +
-      '🔴 THIS STEP IS NOT OPTIONAL. This is a brand-new project whose landing page and chrome are ' +
-      'the STOCK STARTER — generic, unthemed, and carrying none of this game. Redesign both, every ' +
-      'time, whatever the request says. A request for "just an empty project", or for the front end ' +
-      'only, or for one specific feature, still gets the full landing-page and chrome redesign: it is ' +
-      'the shell every later step builds inside, and there is nothing here yet to leave alone.',
+      'Design the complete front end, following the bt-landing skill (pre-loaded in your Skills), using ' +
+      '`DESIGN.md` as your design brief and the art already rendered into `public/assets/generated/` ' +
+      '(the paths are recorded in `DESIGN.md`). That is the landing page (`src/pages/Home.tsx` + ' +
+      '`Home.css`, rewritten completely, full page width per the Layout law) AND the game chrome in ' +
+      '`src/chrome/**` (preloader, splash, overlay) in the same theme. Wire the play contract to the ' +
+      'GameMode from `SPEC.md` — read its real class name off `src/scripts/`, never invent one. Write ' +
+      'your todo list first.\n' +
+      "Verify with `check_game` (pass the GameMode's class name) and keep fixing until it passes. " +
+      '🔴 THIS STEP IS NOT OPTIONAL on a first build: redesign both the landing page and the chrome, ' +
+      'every time.',
   },
   {
     id: 'art',
@@ -241,18 +214,14 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
     allowsMedia: false,
     owesFiles: false,
     task:
-      'Write the GAME. This step owes the playable project and nothing else — do NOT touch the ' +
-      'landing page or the game chrome, which were designed in the earlier steps and are already ' +
-      'correct.\n\n' +
-      'Build what the request asks for in `src/scripts/**`: the GameMode named above plus whatever ' +
-      'Script Components, systems and helpers it needs. Keep the play contract exactly as described, ' +
-      'and deliver what the front end promises — its modes, tracks, pickups and scoring are the ' +
-      'specification for this step. Then write `SPEC.md` — a short statement of what this game is ' +
-      'and how it plays.\n\n' +
-      'Put new behaviour in its own Script Component rather than growing the GameMode: more files of ' +
-      'a readable size is both better code and a reply that is less likely to be cut off.\n\n' +
-      'If the request was a single narrow change that does not call for game code, do only what was ' +
-      'asked and say so in one line.',
+      'Build the GAME described in `SPEC.md` — the playable project in `src/scripts/**`: the GameMode ' +
+      'named there plus whatever Script Components, systems and helpers it needs. Write your todo list ' +
+      'first. Keep the play contract exactly as described. Use the in-game art listed in `DESIGN.md` ' +
+      'where it fits (the files are in `public/assets/generated/`). Do NOT touch the landing page or the ' +
+      'game chrome — that is the next step.\n' +
+      "Verify with `check_game` (pass the GameMode's class name) and keep fixing until it passes. If the " +
+      'request was a single narrow change that does not call for game code, do only what was asked and ' +
+      'say so in one line.',
   },
   {
     /*
@@ -308,7 +277,7 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
  * The phase stays in `CREATION_PHASES` so a stored plan naming it still resolves (and so an operator
  * or a future flow can schedule it deliberately); it is simply not scheduled by default.
  */
-export const DEFAULT_CREATION_PHASES: readonly CreationPhaseId[] = ['frontend', 'art', 'game'];
+export const DEFAULT_CREATION_PHASES: readonly CreationPhaseId[] = ['design', 'game', 'frontend'];
 
 /**
  * Bumped only when the stored shape changes incompatibly. An unrecognised version is treated as NO
@@ -484,8 +453,18 @@ export function parseCreationPlan(value: unknown): CreationPlan | undefined {
   return { v: CREATION_PLAN_VERSION, phases: declaredPhases, next: parsedNext, done: parsedDone };
 }
 
-function isTurnOutcomeState(value: unknown): value is TurnOutcomeState {
-  return value === 'finished' || value === 'rescued' || value === 'incomplete';
+/**
+ * Exported for its spec. `paused` and `unverified` (tool-loop outcomes, D22) must be accepted, or a
+ * stored plan's phase verdict silently reads back as `finished` on the next parse.
+ */
+export function isTurnOutcomeState(value: unknown): value is TurnOutcomeState {
+  return (
+    value === 'finished' ||
+    value === 'rescued' ||
+    value === 'incomplete' ||
+    value === 'paused' ||
+    value === 'unverified'
+  );
 }
 
 /**
@@ -691,26 +670,10 @@ export function creationPhaseNote(phase: CreationPhaseId | null): string | null 
 
   const { label, task } = phaseById(phase);
 
-  /*
-   * 🔴 READ IN BATCHES, THEN WRITE (live-measured 2026-08-14, `gen_mst2b7sd_vi0z91`).
-   *
-   * This turn has a bounded number of round trips and every tool call spends one. The failing run
-   * batched ten reads into its first step — the model parallelises perfectly well when it decides to
-   * — and then took FIVE more steps at one read each, discovering files as it went, until there were
-   * no steps left to write with. It never emitted a single file.
-   *
-   * Prose alone does not stop a model (the `protocol-strip` lesson), which is why
-   * `CREATION_FILE_READ_ROUNDS` moved with it. This is the half that costs nothing and addresses the
-   * actual observed behaviour: the model did not need more information, it needed to ask at once.
-   */
   return (
     `# This step of the build: ${label}\n\n` +
     `The project already exists and is installed — do not re-create it.\n\n` +
-    `${task}\n\n` +
-    'Do NOT rewrite files that are already correct — emit only what this step owes.\n\n' +
-    'You have a limited number of tool round trips this step. Request every file you need in ONE ' +
-    'parallel batch of `read_file` calls, then write. Do not read one file at a time: each round trip ' +
-    'is a step you can no longer write code with, and a step that runs out mid-plan delivers nothing.'
+    task
   );
 }
 

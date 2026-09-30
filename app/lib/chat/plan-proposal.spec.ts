@@ -205,3 +205,52 @@ describe('decidePlanFollowUp', () => {
     expect(decidePlanFollowUp(undefined, planWrite)).toBeNull();
   });
 });
+
+describe('tool mode (tool-loop plan D20c — writes live in the agentWorkspace annotation)', () => {
+  const ws = (writes: string[]) => ({
+    type: 'agentWorkspace',
+    value: { writes, commands: [], todos: [], lastCheck: null },
+  });
+  const prose = 'I will add a pause overlay and wire Escape to it.';
+
+  it('a plan message that wrote _specs/x_plan.md → "Build this plan" with that path', () => {
+    const annotations = [PLAN_MODE, NO_REPLAY, ws(['_specs/high-score_plan.md'])];
+
+    expect(planArtifactToExecute(prose, annotations)).toBe('_specs/high-score_plan.md');
+    expect(shouldOfferBuildAndApply(annotations, prose)).toBe(false);
+    expect(decidePlanFollowUp(annotations, prose)).toEqual({ kind: 'execute', planPath: '_specs/high-score_plan.md' });
+  });
+
+  it('a plan message with no planning write → Build & Apply', () => {
+    const annotations = [PLAN_MODE, NO_REPLAY, ws([])];
+
+    expect(shouldOfferBuildAndApply(annotations, prose)).toBe(true);
+    expect(decidePlanFollowUp(annotations, prose)).toEqual({ kind: 'apply' });
+  });
+
+  it('a spec write is neither applied nor executed (its next step is bt-plan)', () => {
+    const annotations = [PLAN_MODE, NO_REPLAY, ws(['_specs/high-score_spec.md'])];
+
+    expect(decidePlanFollowUp(annotations, prose)).toBeNull();
+  });
+
+  it('a BUILD message with the annotation offers nothing', () => {
+    expect(decidePlanFollowUp([ws(['_specs/x_plan.md'])], prose)).toBeNull();
+    expect(decidePlanFollowUp([ws([])], prose)).toBeNull();
+  });
+
+  it('the content plan path still wins over the annotation, and apply still wins over execute', () => {
+    const annotations = [PLAN_MODE, ws(['_specs/other_plan.md'])];
+
+    expect(
+      planArtifactToExecute('<boltAction type="file" filePath="_specs/a_plan.md">x</boltAction>', annotations),
+    ).toBe('_specs/a_plan.md');
+    expect(decidePlanFollowUp(annotations, '<boltAction type="file" filePath="src/x.ts">x</boltAction>')).toEqual({
+      kind: 'apply',
+    });
+  });
+
+  it('a legacy plan message with no annotation is unchanged (prose alone offers nothing)', () => {
+    expect(decidePlanFollowUp([PLAN_MODE], prose)).toBeNull();
+  });
+});

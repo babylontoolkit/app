@@ -45,9 +45,45 @@ import type { TurnOutcomeState } from '~/lib/agent/turn-outcome';
  * `incomplete` — the server judged the turn unfinished (§4.4e `describeTurnOutcome`); the persistent
  * alert carries it. `error` — the stream failed or the user stopped it; their move next, not ours.
  * `unsettled` — actions never reached a terminal state, so the next phase would read a half-written
- * tree.
+ * tree. `budget` — the tool loop stopped on its step/segment budget (`paused`, D19); it is NEVER
+ * auto-continued, because that is the cap working, and the user resumes it exactly like `incomplete`.
  */
-export type CreationPauseReason = 'incomplete' | 'error' | 'unsettled';
+export type CreationPauseReason = 'incomplete' | 'error' | 'unsettled' | 'budget';
+
+/**
+ * 🔴 HOW MANY TIMES AN UNFINISHED PHASE RE-RUNS WITHOUT ASKING (D19). Once: a phase still unfinished
+ * after one `KEEP_BUILDING_MESSAGE` turn is not transient, and paying again to learn that is the
+ * "spends credits per render" failure this runner is shaped to prevent.
+ */
+export const MAX_AUTO_CONTINUES = 1;
+
+export type PhaseOutcomeAction = 'advance' | 'auto-continue' | 'pause-incomplete' | 'pause-budget';
+
+/**
+ * 🔴 WHAT A FINISHED PHASE TURN'S VERDICT MEANS FOR THE PLAN (D19). An `auto-continue` starts a paid
+ * generation with no user action, so this is pure and exhaustively tested (CLAUDE.md rule).
+ *
+ *   - `finished` / `rescued` / no verdict at all → `advance` (the pre-tool-loop behaviour for a turn
+ *     that reported nothing);
+ *   - `incomplete` / `unverified`, under `MAX_AUTO_CONTINUES` → `auto-continue` the SAME phase;
+ *   - `incomplete` / `unverified`, at the cap → `pause-incomplete`, with the alert;
+ *   - `paused` → `pause-budget`, ALWAYS. The budget stopping a turn is the cap doing its job; an
+ *     automatic continue would spend straight through the one limit that bounds a turn's cost.
+ */
+export function decidePhaseOutcomeAction(
+  state: TurnOutcomeState | undefined,
+  autoContinuesUsed: number,
+): PhaseOutcomeAction {
+  if (state === 'paused') {
+    return 'pause-budget';
+  }
+
+  if (state === 'incomplete' || state === 'unverified') {
+    return autoContinuesUsed < MAX_AUTO_CONTINUES ? 'auto-continue' : 'pause-incomplete';
+  }
+
+  return 'advance';
+}
 
 export type CreationTurnDecision =
   | { kind: 'run'; index: number }
@@ -205,7 +241,9 @@ export function decideNextCreationTurn(input: CreationTurnInput): CreationTurnDe
 
   /*
    * A pause is a decision that has already been made, and re-deriving it every render is how a paused
-   * plan starts running again on its own. The user resumes it explicitly (the card's Continue).
+   * plan starts running again on its own. The user resumes it explicitly: the turn-outcome alert's
+   * action (or any message they send while the build is open) posts a PHASE turn, and that send clears
+   * the pause in `Chat.client.tsx`, so the plan advances by itself once that turn finishes.
    */
   if (paused) {
     return { kind: 'pause', reason: paused };

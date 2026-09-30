@@ -24,7 +24,7 @@
  * machine half shipped; the user half did not. "Completed with nothing to show" is not a state, and
  * neither is "completed with half a project".
  *
- * ## The three states
+ * ## The states
  *
  * PURE and shared by the server (which decides) and the client (which renders), so the two can never
  * disagree about what "finished" means — the two-writers drift this codebase keeps rediscovering.
@@ -33,7 +33,12 @@
  *  - `rescued`    — the turn needed an automatic second pass and got there. Say so quietly; the
  *                   project is fine, but the user should know a fallback ran on their bill.
  *  - `incomplete` — we cut it off. `length` on the final stream means the last thing written ends
- *                   mid-token. LOUD, persistent, with an action.
+ *                   mid-token. LOUD, persistent, with an action. The tool loop's segment cap lands
+ *                   here too ("Keep building").
+ *  - `paused`     — the tool loop reached the turn's credit ceiling (D22). Work so far is saved;
+ *                   "Keep building" continues it.
+ *  - `unverified` — files were written but the last `check_game` failed, or the fix breaker tripped
+ *                   (D22). "Fix the errors" asks the agent to keep fixing.
  *
  * ## Never regress
  *
@@ -49,7 +54,7 @@
  *    this one has to outlive the moment the user walks away from a broken build.
  */
 
-export type TurnOutcomeState = 'finished' | 'rescued' | 'incomplete';
+export type TurnOutcomeState = 'finished' | 'rescued' | 'incomplete' | 'paused' | 'unverified';
 
 export interface TurnOutcomeFacts {
   /** This was the expensive first build turn — the only one that owes a whole project. */
@@ -72,6 +77,18 @@ export interface TurnOutcomeFacts {
 
   /** The user pressed Stop. Their decision — never a failure (`fail-loud.md` state 4). */
   aborted: boolean;
+
+  /**
+   * Why the tool loop stopped (D22). Absent on the legacy text-artifact path, where it reads as `'none'`.
+   *  - `budget`   — the turn reached its credit ceiling;
+   *  - `segments` — the turn used every stream segment it was allowed;
+   *  - `breaker`  — the check-and-fix circuit breaker tripped;
+   *  - `aborted`  — the user pressed Stop.
+   */
+  stopReason?: 'none' | 'budget' | 'segments' | 'breaker' | 'aborted';
+
+  /** The last `check_game` result on this turn: `true` passed, `false` failed, `null`/absent never ran. */
+  lastCheckOk?: boolean | null;
 }
 
 export interface TurnOutcome {
@@ -85,6 +102,13 @@ export interface TurnOutcome {
 
   /** The message the action button posts, or null when there is nothing to do. */
   action: string | null;
+
+  /**
+   * The action button's label (D22), or null when there is no action. ⚠️ An outcome persisted in
+   * `agentMeta` before this field existed reads back WITHOUT it (the client casts the annotation), so
+   * the alert falls back to "Finish the build" — the only label those outcomes ever had.
+   */
+  actionLabel: string | null;
 }
 
 /**
@@ -98,12 +122,28 @@ export const FINISH_BUILD_MESSAGE =
   'landing page, the game chrome, and any remaining game code. Do not rewrite files that are already ' +
   'correct, and do not start over.';
 
+/**
+ * What "Keep building" posts — a paused or segment-capped tool-loop turn. An instruction to CONTINUE
+ * from the files already on disk, never to start over.
+ */
+export const KEEP_BUILDING_MESSAGE =
+  'Continue building from where you stopped. Re-read the files you already wrote with read_file, finish the remaining work on your todo list, then run check_game until it passes.';
+
+/** What "Fix the errors" posts — the files were written but the last game check failed. */
+export const FIX_CHECK_MESSAGE =
+  'Run check_game, read every error it reports, and fix them. Keep going until check_game passes.';
+
+const FINISH_BUILD_LABEL = 'Finish the build';
+
+const KEEP_BUILDING_LABEL = 'Keep building';
+
 export function describeTurnOutcome(facts: TurnOutcomeFacts): TurnOutcome {
   const finished: TurnOutcome = {
     state: 'finished',
     headline: '',
     detail: '',
     action: null,
+    actionLabel: null,
   };
 
   /*
@@ -112,6 +152,42 @@ export function describeTurnOutcome(facts: TurnOutcomeFacts): TurnOutcome {
    */
   if (facts.aborted) {
     return finished;
+  }
+
+  /*
+   * 🔴 TOOL-LOOP STOPS (D22) — checked BEFORE the first-build scope, because every one of these is a
+   * turn the loop itself cut short, on ANY turn: the credit ceiling, the stream-segment cap, or the
+   * check-and-fix breaker. A Stop (above) still outranks them — the user's own decision is never
+   * reported as a failure.
+   */
+  if (facts.stopReason === 'budget') {
+    return {
+      state: 'paused',
+      headline: 'Paused at your credit limit for this turn',
+      detail: 'Everything built so far is saved in your project. Continue to keep building.',
+      action: KEEP_BUILDING_MESSAGE,
+      actionLabel: KEEP_BUILDING_LABEL,
+    };
+  }
+
+  if (facts.stopReason === 'breaker' || (facts.wroteFiles && facts.lastCheckOk === false)) {
+    return {
+      state: 'unverified',
+      headline: 'Built, but the game check is still failing',
+      detail: 'The last check reported errors. The agent can keep fixing them.',
+      action: FIX_CHECK_MESSAGE,
+      actionLabel: 'Fix the errors',
+    };
+  }
+
+  if (facts.stopReason === 'segments') {
+    return {
+      state: 'incomplete',
+      headline: 'This step ran long and stopped before finishing',
+      detail: 'Files written so far are saved.',
+      action: KEEP_BUILDING_MESSAGE,
+      actionLabel: KEEP_BUILDING_LABEL,
+    };
   }
 
   /*
@@ -137,6 +213,7 @@ export function describeTurnOutcome(facts: TurnOutcomeFacts): TurnOutcome {
         '— the last file is likely incomplete, and the landing page or game chrome may be missing ' +
         'entirely. Nothing is lost: continue the build and it will pick up where it stopped.',
       action: FINISH_BUILD_MESSAGE,
+      actionLabel: FINISH_BUILD_LABEL,
     };
   }
 
@@ -153,6 +230,7 @@ export function describeTurnOutcome(facts: TurnOutcomeFacts): TurnOutcome {
         'The turn finished without creating any project files, so your project is still the stock ' +
         'starter template. Continue the build to have it written.',
       action: FINISH_BUILD_MESSAGE,
+      actionLabel: FINISH_BUILD_LABEL,
     };
   }
 
@@ -170,6 +248,7 @@ export function describeTurnOutcome(facts: TurnOutcomeFacts): TurnOutcome {
         'The first attempt stopped before writing everything, so the build was automatically ' +
         'continued and finished. Worth a look over the landing page and the game chrome.',
       action: null,
+      actionLabel: null,
     };
   }
 
@@ -181,6 +260,7 @@ export function describeTurnOutcome(facts: TurnOutcomeFacts): TurnOutcome {
         'The build ran out of tool steps and was automatically continued to finish the answer. The ' +
         'project is complete, but it cost more than a clean run.',
       action: null,
+      actionLabel: null,
     };
   }
 

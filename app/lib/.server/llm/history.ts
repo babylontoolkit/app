@@ -80,7 +80,7 @@ export const HISTORY_WINDOW_TURNS = 30;
 const FILE_ACTION = /(<boltAction[^>]*type="(?:file|edit)"[^>]*>)([\s\S]*?)(<\/boltAction>)/g;
 
 /** What the model reads instead of the body. It must be told WHERE the real content is. */
-const OMITTED = '\n[body omitted — this file\'s CURRENT contents are in the "Current Project Files" section]\n';
+const OMITTED = '\n[body omitted — read the file with read_file for its current contents]\n';
 
 function compactContent(content: string): string {
   return content.replace(FILE_ACTION, (_match, open: string, body: string, close: string) =>
@@ -115,6 +115,94 @@ function compactTextParts(message: Message): Message {
   });
 
   return parts.some((part, i) => part !== message.parts![i]) ? { ...message, parts } : message;
+}
+
+/** The idempotency marker — a message already carrying it is never summarised twice. */
+export const WORKSPACE_SUMMARY_MARKER = '[Workspace:';
+
+/** How many written paths the one-line summary names. The rest are counted, not listed. */
+export const WORKSPACE_SUMMARY_MAX_PATHS = 20;
+
+/**
+ * The one-line record of what a tool-loop turn DID (tool-loop plan D20c), built from the persisted
+ * `agentWorkspace` annotation. A tool-loop turn's writes happen in tool calls, which never enter the
+ * saved conversation — without this the next turn's history says the agent talked and did nothing.
+ * Paths and verdicts only, never a body: this rides the UNCACHED history on every later turn.
+ */
+export function workspaceSummaryLine(message: Message): string | null {
+  const annotation = (message.annotations as unknown[] | undefined)?.find(
+    (a): a is { type: string; value?: any } =>
+      Boolean(a) && typeof a === 'object' && (a as { type?: unknown }).type === 'agentWorkspace',
+  );
+  const value = annotation?.value;
+
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const writes: string[] = Array.isArray(value.writes)
+    ? value.writes.filter((w: unknown) => typeof w === 'string')
+    : [];
+  const todos: Array<{ status?: unknown }> = Array.isArray(value.todos) ? value.todos : [];
+  const done = todos.filter((t) => t && t.status === 'completed').length;
+  const check =
+    value.lastCheck && typeof value.lastCheck.ok === 'boolean' ? (value.lastCheck.ok ? 'passed' : 'failed') : 'not run';
+  const listed = writes.slice(0, WORKSPACE_SUMMARY_MAX_PATHS).join(', ');
+  const more =
+    writes.length > WORKSPACE_SUMMARY_MAX_PATHS ? `, +${writes.length - WORKSPACE_SUMMARY_MAX_PATHS} more` : '';
+  const wrote = writes.length > 0 ? `wrote ${writes.length} file(s) (${listed}${more})` : 'wrote 0 file(s)';
+
+  return `\n\n${WORKSPACE_SUMMARY_MARKER} ${wrote}; todos ${done}/${todos.length}; last check ${check}]`;
+}
+
+/**
+ * Append the workspace summary to an assistant message — to `content` AND to the text the parts carry
+ * (🔴 `convertToCoreMessages` prefers `parts`; a content-only append changes nothing on the wire). The
+ * line goes on the LAST text part only, so a message with several text parts does not repeat it; a
+ * message with no text part gets one. Idempotent on the marker, per field.
+ */
+function appendWorkspaceSummary(message: Message): Message {
+  if (message.role !== 'assistant') {
+    return message;
+  }
+
+  const line = workspaceSummaryLine(message);
+
+  if (!line) {
+    return message;
+  }
+
+  let next = message;
+
+  if (typeof message.content === 'string' && !message.content.includes(WORKSPACE_SUMMARY_MARKER)) {
+    next = { ...next, content: message.content + line };
+  }
+
+  if (Array.isArray(message.parts)) {
+    const parts = message.parts;
+    const hasMarker = parts.some(
+      (p) => p.type === 'text' && typeof p.text === 'string' && p.text.includes(WORKSPACE_SUMMARY_MARKER),
+    );
+
+    if (!hasMarker) {
+      let lastText = -1;
+
+      parts.forEach((p, i) => {
+        if (p.type === 'text' && typeof p.text === 'string') {
+          lastText = i;
+        }
+      });
+
+      const nextParts =
+        lastText >= 0
+          ? parts.map((p, i) => (i === lastText && p.type === 'text' ? { ...p, text: p.text + line } : p))
+          : [...parts, { type: 'text' as const, text: line.trimStart() }];
+
+      next = { ...next, parts: nextParts };
+    }
+  }
+
+  return next;
 }
 
 /**
@@ -240,7 +328,7 @@ export function compactHistory(messages: Message[], options: { maxTurns?: number
       }
 
       // Thinking first: it must go whether or not the content is a plain string (see `stripReasoning`).
-      const stripped = message.role === 'assistant' ? stripReasoning(message) : message;
+      const stripped = message.role === 'assistant' ? appendWorkspaceSummary(stripReasoning(message)) : message;
       const withParts = compactTextParts(stripped);
 
       if (typeof withParts.content !== 'string') {

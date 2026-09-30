@@ -27,6 +27,7 @@ import {
   DEFAULT_MAX_READ_CHARS,
   DEFAULT_MAX_REFERENCE_LOADS,
   resolveAgentBudgets,
+  TOOL_LOOP_BUDGET_DEFAULTS,
 } from './budgets';
 
 /**
@@ -171,5 +172,39 @@ describe('floors — a typo must not disable a tool', () => {
 
   it('truncates a fractional value rather than passing it through', () => {
     expect(resolveAgentBudgets(ctx({ AGENT_MAX_FILE_READS: '7.9' })).maxFileReads).toBe(7);
+  });
+});
+
+describe("resolveAgentBudgets — the tool loop's base defaults (tool-loop plan D15)", () => {
+  it('the parameter replaces the shipped defaults', () => {
+    const budgets = resolveAgentBudgets(ctx(), TOOL_LOOP_BUDGET_DEFAULTS);
+
+    expect(budgets).toMatchObject({ maxFileReads: 200, maxReadChars: 2_000_000, maxReferenceLoads: 12 });
+    expect(budgets.maxPlanReadChars).toBe(DEFAULT_MAX_PLAN_READ_CHARS);
+  });
+
+  it('env still overrides the parameter', () => {
+    const budgets = resolveAgentBudgets(
+      ctx({ AGENT_MAX_FILE_READS: '50', AGENT_MAX_READ_CHARS: '300000', AGENT_MAX_REFERENCE_LOADS: '4' }),
+      TOOL_LOOP_BUDGET_DEFAULTS,
+    );
+
+    expect(budgets).toMatchObject({ maxFileReads: 50, maxReadChars: 300_000, maxReferenceLoads: 4 });
+  });
+
+  it('the derived round ceilings recompute from the parameter and keep the invariant', () => {
+    const budgets = resolveAgentBudgets(ctx(), TOOL_LOOP_BUDGET_DEFAULTS);
+
+    expect(budgets.creationToolRounds).toBe(12 + CREATION_FILE_READ_ROUNDS);
+    expect(budgets.creationToolRounds).toBeLessThanOrEqual(budgets.maxToolRounds);
+    expect(budgets.maxToolRounds).toBeGreaterThan(6);
+  });
+
+  it('a partial parameter changes only what it names', () => {
+    expect(resolveAgentBudgets(ctx(), { maxFileReads: 99 })).toEqual({ ...DEFAULT_AGENT_BUDGETS, maxFileReads: 99 });
+  });
+
+  it('CONTROL: absent, nothing changes', () => {
+    expect(resolveAgentBudgets(ctx(), undefined)).toEqual(DEFAULT_AGENT_BUDGETS);
   });
 });

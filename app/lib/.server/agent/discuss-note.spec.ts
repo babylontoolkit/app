@@ -43,4 +43,26 @@ describe('discussModeNote', () => {
     expect(discussModeNote({ chatMode: 'discuss', isFirstBuildTurn: true } as any)).toContain('PLAN mode');
     expect(discussModeNote({ chatMode: 'discuss', creationPhase: 'game' } as any)).toContain('PLAN mode');
   });
+
+  it('under the tool loop, names write_file and _specs/ as the one door (tool-loop plan D15)', () => {
+    const note = discussModeNote({ chatMode: 'discuss', toolLoop: true })!;
+
+    expect(note).toContain(
+      '- ONE exception — planning artifacts: write files inside `_specs/` (for example\n  `_specs/<name>_spec.md` or `_plan.md`) with the `write_file` tool. Writes anywhere\n  else are refused.',
+    );
+    expect(note, 'the tool-loop wording must not tell the model to use artifact markup').not.toContain(
+      '<boltAction type="file">',
+    );
+    expect(note).toContain('# Plan Mode (this turn only)');
+  });
+
+  it('CONTROL: the legacy wording is unchanged without the loop', () => {
+    expect(discussModeNote({ chatMode: 'discuss', toolLoop: false })).toBe(discussModeNote({ chatMode: 'discuss' }));
+    expect(discussModeNote({ chatMode: 'discuss' })).toContain('<boltAction type="file">');
+    expect(discussModeNote({ chatMode: 'discuss' })).not.toContain('`write_file` tool');
+  });
+
+  it('build mode stays silent under the loop', () => {
+    expect(discussModeNote({ chatMode: 'build', toolLoop: true })).toBeNull();
+  });
 });

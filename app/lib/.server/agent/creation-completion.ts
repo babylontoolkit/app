@@ -136,7 +136,5 @@ export const CREATION_COMPLETION_PROMPT = [
   '',
   'Do NOT rewrite files that are already correct — emit only what is missing or wrong.',
   '',
-  'If the project is genuinely complete, write no files at all. Close the turn as the brief asks: two or',
-  'three concrete next steps the user could take, plus the specific pieces of art this design would',
-  'benefit from, so they know what to ask for next.',
+  'If the project is genuinely complete, write no files at all.',
 ].join('\n');

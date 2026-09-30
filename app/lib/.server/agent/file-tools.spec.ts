@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { createFileTools, MAX_FILE_READS, MAX_READ_CHARS, resolveFile, suggestPaths } from './file-tools';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { type AgentBudgets, DEFAULT_AGENT_BUDGETS } from './budgets';
+import { newWorkspaceTurnState, TODO_NUDGE, todoNudgeFor, WorkspaceOverlay } from './workspace-tools';
 
 const text = (content: string) => ({ type: 'file' as const, content, isBinary: false });
 const binary = (size: number) => ({ type: 'file' as const, content: '', isBinary: true, size });
@@ -304,5 +305,94 @@ describe('read_file — configured budgets', () => {
     c.readThisTurn = new Set(['src/other.ts']);
 
     expect(await run(c as never, 'src/main.ts')).toMatch(/REFUSED/);
+  });
+});
+
+describe('read_file — the tool loop overlay (read-your-writes, D4)', () => {
+  const withOverlay = (files: Record<string, unknown>) => {
+    const c = ctx(files);
+    const overlay = new WorkspaceOverlay(c.files);
+
+    return { c: { ...c, overlay }, overlay };
+  };
+
+  const runWith = async (context: ReturnType<typeof withOverlay>['c'], args: Record<string, unknown>) => {
+    const tools = createFileTools(context);
+    return (await tools.read_file.execute!(args as { path?: string }, {} as never)) as string;
+  };
+
+  it('prefers the overlay over the stale request map', async () => {
+    const { c, overlay } = withOverlay({ '/home/project/src/a.ts': text('old') });
+    overlay.write('src/a.ts', 'new');
+
+    expect(await runWith(c, { path: 'src/a.ts' })).toBe('new');
+  });
+
+  it('returns a file the agent created this turn (absent from the map)', async () => {
+    const { c, overlay } = withOverlay({});
+    overlay.write('src/scripts/Kart.ts', 'export class Kart {}');
+
+    expect(await runWith(c, { path: 'src/scripts/Kart.ts' })).toBe('export class Kart {}');
+  });
+
+  it('an own write is free — it spends no budget', async () => {
+    const { c, overlay } = withOverlay({});
+    overlay.write('a.ts', 'x'.repeat(50));
+    await runWith(c, { path: 'a.ts' });
+
+    expect(c.readThisTurn.size).toBe(0);
+    expect(c.charsThisTurn.total).toBe(0);
+  });
+
+  it('a re-read after an earlier read returns the NEW content', async () => {
+    const { c, overlay } = withOverlay({ 'a.ts': text('v1') });
+    expect(await runWith(c, { path: 'a.ts' })).toBe('v1');
+
+    overlay.write('a.ts', 'v2');
+    expect(await runWith(c, { path: 'a.ts' })).toBe('v2');
+  });
+
+  it('accepts file_path as an alias of path', async () => {
+    const { c } = withOverlay({ 'src/main.ts': text('body') });
+    expect(await runWith(c, { file_path: 'src/main.ts' })).toBe('body');
+  });
+
+  it('CONTROL: without an overlay, file_path still works and the map is read', async () => {
+    const c = ctx({ 'src/main.ts': text('body') });
+    const tools = createFileTools(c);
+    expect(await tools.read_file.execute!({ file_path: 'src/main.ts' } as never, {} as never)).toBe('body');
+  });
+});
+
+describe('read_file carries the once-per-turn checklist nudge (T9 fix loop 3)', () => {
+  it('the FIRST read of the turn gets it, marked as not part of the file; the next read does not', async () => {
+    const state = newWorkspaceTurnState();
+    const c = {
+      ...ctx({ 'src/a.ts': text('const a = 1;'), 'src/b.ts': text('const b = 2;') }),
+      todoNudge: () => todoNudgeFor(state, false),
+    };
+    const tools = createFileTools(c);
+    const read = (path: string) =>
+      tools.read_file.execute!({ path } as { path?: string }, {} as never) as Promise<string>;
+
+    expect(await read('src/a.ts')).toBe(`const a = 1;\n\n[Workspace note — not part of the file] ${TODO_NUDGE}`);
+    expect(await read('src/b.ts')).toBe('const b = 2;');
+  });
+
+  it('no nudge once a list exists, in plan mode, or with the loop off', async () => {
+    const withList = newWorkspaceTurnState();
+    withList.todos = [{ content: 'x', status: 'pending' }];
+
+    const planState = newWorkspaceTurnState();
+
+    for (const todoNudge of [() => todoNudgeFor(withList, false), () => todoNudgeFor(planState, true), undefined]) {
+      const c = { ...ctx({ 'src/a.ts': text('const a = 1;') }), ...(todoNudge ? { todoNudge } : {}) };
+      const out = (await createFileTools(c).read_file.execute!(
+        { path: 'src/a.ts' } as { path?: string },
+        {} as never,
+      )) as string;
+
+      expect(out).toBe('const a = 1;');
+    }
   });
 });

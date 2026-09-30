@@ -55,7 +55,7 @@ import { IMAGE_TOKENS_UPPER_BOUND } from '~/lib/.server/llm/history';
 
 /**
  * WHICH REQUEST THIS IS. A turn makes one request and can then RE-ISSUE for five distinct reasons, so
- * `RequestKind` has six values — `first` plus the five. The re-issues are not interchangeable — the tool-free retry drops the tool DEFINITIONS and splices a synthetic system block, the
+ * `RequestKind` has eight values — `first` plus the seven. The re-issues are not interchangeable — the tool-free retry drops the tool DEFINITIONS and splices a synthetic system block, the
  * forced continuation forbids tool calls, the rescue and the completeness pass each append a
  * synthetic user message. **No persisted record has ever mentioned any of them.** Collapsing them
  * into one loses precisely the fact this feature exists to expose.
@@ -66,6 +66,8 @@ import { IMAGE_TOKENS_UPPER_BOUND } from '~/lib/.server/llm/history';
  *   - `forced-continuation`       `shouldForceContinuation` — the model stopped mid-tool-loop and must answer.
  *   - `unproductive-rescue`       the unproductive-turn rescue (`unproductive.ts`).
  *   - `creation-completeness`     the creation-completeness pass (`creation-completion.ts`).
+ *   - `tool-loop-continue`        a tool-loop segment after a step cap (`tool-loop.ts` CONTINUE_PROMPT).
+ *   - `tool-loop-gate`            a tool-loop done-gate segment (`tool-loop.ts` GATE_PROMPT).
  */
 export type RequestKind =
   | 'first'
@@ -73,7 +75,9 @@ export type RequestKind =
   | 'provider-retry-tool-free'
   | 'forced-continuation'
   | 'unproductive-rescue'
-  | 'creation-completeness';
+  | 'creation-completeness'
+  | 'tool-loop-continue'
+  | 'tool-loop-gate';
 
 export interface SystemBlockFingerprint {
   role: string;

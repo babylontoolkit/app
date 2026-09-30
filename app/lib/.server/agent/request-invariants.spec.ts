@@ -49,7 +49,7 @@ const binary = (size: number): FileMap[string] => ({ type: 'file' as const, cont
  * because the "realistic post-compaction body" control is worthless if it is testing a marker the
  * compactor no longer emits.
  */
-const OMITTED = '\n[body omitted — this file\'s CURRENT contents are in the "Current Project Files" section]\n';
+const OMITTED = '\n[body omitted — read the file with read_file for its current contents]\n';
 
 const userText = (text: string): CoreMessage => ({ role: 'user', content: text });
 const assistantText = (text: string): CoreMessage => ({ role: 'assistant', content: text });

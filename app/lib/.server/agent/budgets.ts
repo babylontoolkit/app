@@ -142,17 +142,39 @@ export const DEFAULT_AGENT_BUDGETS: AgentBudgets = resolveFrom({
 });
 
 /**
+ * The base read budgets under the tool loop (tool-loop plan D15). The loop reads the files it edits
+ * (read-your-writes, re-read before every edit), so the artifact-era ceilings would refuse a normal
+ * build halfway through. Passed as `defaults` below: env still overrides them, and the derived round
+ * ceilings recompute from whatever wins — `creationToolRounds <= maxToolRounds` still holds (12 + 6 = 18).
+ */
+export const TOOL_LOOP_BUDGET_DEFAULTS = {
+  maxFileReads: 200,
+  maxReadChars: 2_000_000,
+  maxReferenceLoads: 12,
+} as const satisfies Pick<AgentBudgets, 'maxFileReads' | 'maxReadChars' | 'maxReferenceLoads'>;
+
+/**
  * Resolve the turn's budgets from config.
  *
  * Every variable is optional and every one falls back to the shipped default, so an operator who has
  * set nothing gets byte-identical behaviour to before this module existed — asserted, not assumed.
+ *
+ * `defaults` replaces the shipped defaults BEFORE the env overrides and before the round ceilings are
+ * derived (the tool loop passes `TOOL_LOOP_BUDGET_DEFAULTS`); absent, nothing changes.
  */
-export function resolveAgentBudgets(context: unknown): AgentBudgets {
+export function resolveAgentBudgets(
+  context: unknown,
+  defaults?: Partial<Pick<AgentBudgets, 'maxFileReads' | 'maxReadChars' | 'maxReferenceLoads'>>,
+): AgentBudgets {
   return resolveFrom({
-    maxFileReads: envNumber(context, 'AGENT_MAX_FILE_READS', DEFAULT_MAX_FILE_READS),
-    maxReadChars: envNumber(context, 'AGENT_MAX_READ_CHARS', DEFAULT_MAX_READ_CHARS),
+    maxFileReads: envNumber(context, 'AGENT_MAX_FILE_READS', defaults?.maxFileReads ?? DEFAULT_MAX_FILE_READS),
+    maxReadChars: envNumber(context, 'AGENT_MAX_READ_CHARS', defaults?.maxReadChars ?? DEFAULT_MAX_READ_CHARS),
     maxPlanReadChars: envNumber(context, 'AGENT_MAX_PLAN_READ_CHARS', DEFAULT_MAX_PLAN_READ_CHARS),
-    maxReferenceLoads: envNumber(context, 'AGENT_MAX_REFERENCE_LOADS', DEFAULT_MAX_REFERENCE_LOADS),
+    maxReferenceLoads: envNumber(
+      context,
+      'AGENT_MAX_REFERENCE_LOADS',
+      defaults?.maxReferenceLoads ?? DEFAULT_MAX_REFERENCE_LOADS,
+    ),
   });
 }
 

@@ -20,11 +20,6 @@ Rules:
 - **A description that merely SOUNDS related is not a match.** Most requests touch design, planning and
   code in some sense; that does not mean the design, planning and code skills all apply. Ask whether
   the skill's _workflow_ is the one the user is asking you to perform. If not, skip it.
-- **At most ONE skill per generation.** Loading is not free: it costs a tool round and a large amount
-  of context, and you have a limited number of rounds. Every round spent loading a skill you didn't
-  need is a round you no longer have to write the code — which is what the user actually asked for.
-- **Never load a skill on a first-build turn.** When you are given a fresh project and a brief,
-  that brief IS the workflow. Build the landing page and the requested feature; do not go shopping.
 - **Do not load skills irrelevant to the request.** Loading everything defeats the purpose and wastes
   the user's credits.
 - **A skill that names other skills as later steps is describing the USER's workflow, not yours.**

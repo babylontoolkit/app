@@ -363,6 +363,26 @@ async function streamGeneration(
   });
 
   /*
+   * The tool loop's workspace relay (tool-loop plan D5) — writes, commands and the game check, run by
+   * the browser in the user's sandbox and answered via `/api/agent/tool-result`. Subscribed before the
+   * drain for the same reason as the two relays above. Never fires with `AGENT_TOOL_LOOP` off.
+   */
+  generation.onWorkspaceToolCall((event) => {
+    stream.writeData({
+      type: 'workspace-tool-call',
+      generationId: generation.generationId,
+      toolCallId: event.toolCallId,
+      op: event.op,
+      params: event.params as any,
+    });
+  });
+
+  /* The agent's live todo checklist (D20b) — the whole list, each time `update_todos` replaces it. */
+  generation.onAgentTodos((items) => {
+    stream.writeData({ type: 'agent-todos', generationId: generation.generationId, items: items as any });
+  });
+
+  /*
    * WHICH SKILLS THIS TURN IS RUNNING — emitted BEFORE the model writes a token (§4.11).
    *
    * The server already knows: `/slash` invocations are resolved and skills pre-loaded while building
@@ -594,6 +614,17 @@ async function streamGeneration(
       outcome: { ...describeTurnOutcome(await generation.outcome) },
     },
   });
+
+  /*
+   * WHAT THE TOOL LOOP DID (tool-loop plan D20c) — paths, commands, todos and the last check, never a
+   * file body (§4.2.8). Persisted with the message so the activity list survives a reload, and read by
+   * `history.ts` into a one-line summary for the next turn. Absent with the loop off.
+   */
+  const workspaceSummary = await generation.workspaceSummary;
+
+  if (workspaceSummary) {
+    stream.writeMessageAnnotation({ type: 'agentWorkspace', value: workspaceSummary as any });
+  }
 
   /*
    * What this generation actually cost the user, and their new balance (§4.6). Sent AFTER the text so

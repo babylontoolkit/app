@@ -15,6 +15,7 @@
  * It is left in place rather than deleted per §2.1a hide-don't-delete, and because deleting it is a
  * change to a provider nobody currently builds.
  */
+import { suppressesPreviewAlert } from '~/lib/agent-workspace/check-window';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { createScopedLogger } from '~/utils/logger';
 import { buildPreviewAgentScript } from './agent-script';
@@ -91,7 +92,8 @@ function watchForErrors() {
     /* Advance past EVERY unseen entry, including the ones that raise nothing. */
     lastSeen = unseen[unseen.length - 1].at;
 
-    const fresh = unseen.filter(raisesPreviewAlert);
+    /* A game check's own navigation is not the user's problem — its errors go to the check result. */
+    const fresh = unseen.filter((entry) => raisesPreviewAlert(entry) && !suppressesPreviewAlert(entry.at));
 
     if (fresh.length === 0) {
       return;

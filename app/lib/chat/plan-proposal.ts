@@ -67,11 +67,55 @@ export function messageProposesWrite(content: string): boolean {
 }
 
 /**
+ * The paths a TOOL-LOOP turn wrote (tool-loop plan D20c) — from the persisted `agentWorkspace`
+ * annotation. `null` when the message has no such annotation, i.e. it was a legacy (artifact) turn.
+ *
+ * Tool writes never appear in the message text, so the `<boltAction>` scans above cannot see them.
+ */
+export function toolModeWrites(annotations: unknown): string[] | null {
+  if (!Array.isArray(annotations)) {
+    return null;
+  }
+
+  const found = annotations.find(
+    (a): a is { type: string; value?: { writes?: unknown } } =>
+      Boolean(a) && typeof a === 'object' && (a as { type?: unknown }).type === 'agentWorkspace',
+  );
+
+  if (!found) {
+    return null;
+  }
+
+  const writes = found.value?.writes;
+
+  return Array.isArray(writes) ? writes.filter((w): w is string => typeof w === 'string') : [];
+}
+
+function isPlanFile(path: string | undefined): boolean {
+  return isPlanArtifactPath(path) && path!.trim().toLowerCase().endsWith('_plan.md');
+}
+
+/**
  * Should the "Build & Apply" button be offered under this message? True only for a plan turn that
- * proposed a concrete change — never a discussion-only plan turn, never a build message.
+ * proposed a concrete change — never a build message.
+ *
+ * Tool mode (the message carries an `agentWorkspace` annotation): plan mode refuses every write outside
+ * `_specs/`, so a proposal lives in prose the text scan cannot read. The offer is made when the turn
+ * wrote NO planning artifact — a `_plan.md` has its own button, and a `_spec.md`'s next step is
+ * `bt-plan`, never a build. The legacy content rule is unchanged.
  */
 export function shouldOfferBuildAndApply(annotations: unknown, content: string): boolean {
-  return isPlanModeMessage(annotations) && messageProposesWrite(content);
+  if (!isPlanModeMessage(annotations)) {
+    return false;
+  }
+
+  if (messageProposesWrite(content)) {
+    return true;
+  }
+
+  const writes = toolModeWrites(annotations);
+
+  return writes !== null && !writes.some((w) => isPlanArtifactPath(w));
 }
 
 /**
@@ -90,23 +134,25 @@ export function shouldOfferBuildAndApply(annotations: unknown, content: string):
  * The LAST match wins: a turn that writes a spec and then a plan ends on the plan, and that is the
  * artifact the user just watched appear.
  */
-export function planArtifactToExecute(content: string): string | undefined {
+export function planArtifactToExecute(content: string, annotations?: unknown): string | undefined {
   let found: string | undefined;
 
   for (const match of content.matchAll(BOLT_ACTION_TAG)) {
     const tag = match[0];
     const filePath = tagAttribute(tag, 'filePath');
 
-    if (
-      tagAttribute(tag, 'type')?.toLowerCase() === 'file' &&
-      isPlanArtifactPath(filePath) &&
-      filePath!.trim().toLowerCase().endsWith('_plan.md')
-    ) {
+    if (tagAttribute(tag, 'type')?.toLowerCase() === 'file' && isPlanFile(filePath)) {
       found = filePath!.trim();
     }
   }
 
-  return found;
+  // Tool mode: the plan was written by `write_file`, so only the annotation knows (D20c).
+  return (
+    found ??
+    toolModeWrites(annotations)
+      ?.find((w) => isPlanFile(w))
+      ?.trim()
+  );
 }
 
 /**
@@ -148,11 +194,11 @@ export function decidePlanFollowUp(annotations: unknown, content: string): PlanF
     return null;
   }
 
-  if (messageProposesWrite(content)) {
+  if (shouldOfferBuildAndApply(annotations, content)) {
     return { kind: 'apply' };
   }
 
-  const planPath = planArtifactToExecute(content);
+  const planPath = planArtifactToExecute(content, annotations);
 
   return planPath ? { kind: 'execute', planPath } : null;
 }

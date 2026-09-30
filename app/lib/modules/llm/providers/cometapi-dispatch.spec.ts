@@ -625,7 +625,13 @@ describe('cometapi.ts really wires the branches this spec reproduces', () => {
     expect(code).toContain("if (wire === 'gemini')");
     expect(code).toContain('cometGeminiBaseUrl(base)');
 
-    expect(code).toContain('thinkingFetch(thinkingMode, effort, model, tapStopReasons(rateLimitFetch(');
+    /*
+     * Whitespace-collapsed: the chain now carries the tool loop's tail-cache wrapper (tool-loop plan D13),
+     * which Prettier wraps across lines. `withTailCache` is the identity when the loop is off.
+     */
+    const flat = code.replace(/\(\s+/g, '(').replace(/\s+/g, ' ');
+    expect(flat).toContain('thinkingFetch(thinkingMode, effort, model, withTailCache(tapStopReasons(rateLimitFetch(');
+    expect(flat).toContain('options.toolLoop)');
   });
 
   /*

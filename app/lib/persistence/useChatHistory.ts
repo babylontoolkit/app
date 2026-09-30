@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { atom } from 'nanostores';
 import { useStore } from '@nanostores/react';
 import { generateId, type JSONValue, type Message } from 'ai';
+import { withFinalMessage } from './final-message';
 import { toast } from 'react-toastify';
 import { notifyRecoveryCopySkipped } from '~/lib/persistence/recovery-copy-notice';
 import { workbenchStore } from '~/lib/stores/workbench';
@@ -2102,7 +2103,13 @@ ${value.content}
 
   /** Upload THIS conversation to its own object (§4.5.6) — one chat among the project's many. */
   const saveCurrentChat = useCallback(
-    async (pid: string) => {
+    async (pid: string, finalMessage?: Message) => {
+      /*
+       * The finished message from `onFinish`, laid over the sampled copy — which is taken mid-stream
+       * and misses the last step's text and every annotation (`final-message.ts`).
+       */
+      latestMessages.current = withFinalMessage(latestMessages.current, finalMessage);
+
       const serverChatId = await ensureServerChatId();
 
       if (!serverChatId) {
@@ -2131,93 +2138,211 @@ ${value.content}
    *
    * Idempotent on `messageId`: a re-render, a retry, or a double `onFinish` cannot mint a duplicate.
    */
-  const checkpointProject = useCallback(async (messageId: string, options?: { label?: string }) => {
-    const pid = projectId.get();
+  const checkpointProject = useCallback(
+    async (messageId: string, options?: { label?: string; finalMessage?: Message }) => {
+      const pid = projectId.get();
 
-    if (!pid || !db || lastCheckpointedMessage.current === messageId) {
-      /*
-       * T17c: a skipped checkpoint says WHY. The `already checkpointed` case is the idempotency
-       * guard doing its job; the other two mean the safety net is OFF for this turn, and a silent
-       * `return` here is exactly how "checkpoints stopped on CSB" went undiagnosed for a day.
-       */
-      if (lastCheckpointedMessage.current !== messageId) {
-        logger.warn(`Checkpoint skipped for message ${messageId}: ${!db ? 'no local database' : 'no project id'}`);
-
+      if (!pid || !db || lastCheckpointedMessage.current === messageId) {
         /*
-         * 🔴 LOUD, like every other way this function can fail (§4.5.4b: a failed save is never
-         * silent). The two branches above are not "nothing to do" — they mean no checkpoint was
-         * written, i.e. undo and crash recovery do not cover this change. That was `logger.warn`
-         * only, which is invisible to the person whose work it is, and it is the SAME shape as the
-         * console-only `.catch(() => {})` that T17c already had to fix one screen below.
-         *
-         * `pid` may be absent here, so the guard is keyed on a sentinel rather than the project id.
-         * Once per session either way — the alternative is a toast on every generation of a session
-         * whose database never opened, which is nagging that gets dismissed unread.
+         * T17c: a skipped checkpoint says WHY. The `already checkpointed` case is the idempotency
+         * guard doing its job; the other two mean the safety net is OFF for this turn, and a silent
+         * `return` here is exactly how "checkpoints stopped on CSB" went undiagnosed for a day.
          */
-        const guardKey = pid ?? '<no-project>';
+        if (lastCheckpointedMessage.current !== messageId) {
+          logger.warn(`Checkpoint skipped for message ${messageId}: ${!db ? 'no local database' : 'no project id'}`);
 
-        if (!warnedCheckpointFailure.has(guardKey)) {
-          warnedCheckpointFailure.add(guardKey);
-          toast.error(
-            'A checkpoint could not be saved — Undo and crash recovery will not cover this change. ' +
-              'It will retry after your next change.',
-            { autoClose: 12000 },
-          );
+          /*
+           * 🔴 LOUD, like every other way this function can fail (§4.5.4b: a failed save is never
+           * silent). The two branches above are not "nothing to do" — they mean no checkpoint was
+           * written, i.e. undo and crash recovery do not cover this change. That was `logger.warn`
+           * only, which is invisible to the person whose work it is, and it is the SAME shape as the
+           * console-only `.catch(() => {})` that T17c already had to fix one screen below.
+           *
+           * `pid` may be absent here, so the guard is keyed on a sentinel rather than the project id.
+           * Once per session either way — the alternative is a toast on every generation of a session
+           * whose database never opened, which is nagging that gets dismissed unread.
+           */
+          const guardKey = pid ?? '<no-project>';
+
+          if (!warnedCheckpointFailure.has(guardKey)) {
+            warnedCheckpointFailure.add(guardKey);
+            toast.error(
+              'A checkpoint could not be saved — Undo and crash recovery will not cover this change. ' +
+                'It will retry after your next change.',
+              { autoClose: 12000 },
+            );
+          }
         }
+
+        return;
       }
 
-      return;
-    }
+      lastCheckpointedMessage.current = messageId;
+      lastSummary = summarizeRequest(latestMessages.current);
 
-    lastCheckpointedMessage.current = messageId;
-    lastSummary = summarizeRequest(latestMessages.current);
-
-    /*
-     * The CONVERSATION save no longer rides on the file serialize (T17c). It needs no file bytes,
-     * and coupling the two (the old `Promise.all`) meant a sandbox read failure also silently lost
-     * the server transcript for the turn — a chat is recoverable on another device only if this
-     * upload happened.
-     */
-    const chatSaved = saveCurrentChat(pid).catch((error) => {
-      logger.error(`Failed to save conversation for ${pid}: ${(error as Error).message}`);
-    });
-
-    try {
       /*
-       * 🔴 STRICT. This map becomes the LOCAL CHECKPOINT, and a checkpoint restores with
-       * `protectNothing` — "this map is the whole truth", so anything missing from it is DELETED on
-       * undo (§4.12, `restore-plan.ts`). Serializing while `havok.wasm` was unreadable therefore does
-       * not write a slightly-smaller checkpoint; it writes one that destroys the physics engine the
-       * moment the user presses undo. Better to have no checkpoint than a poisoned one.
-       *
-       * 🔴 And STRICT runs through the T17c policy, never bare: `onFinish` fires when the model stops
-       * TALKING, while the `<boltAction>` writes are still landing over RTT on a server sandbox — so
-       * the serialize must wait for the turn's actions to SETTLE first (photographing the race is the
-       * same poisoned checkpoint, made of not-yet-written files instead of unreadable ones). A dead
-       * sandbox connection makes `fs` calls hang FOREVER rather than error (measured), so each
-       * attempt is time-boxed; transient reads racing the write-queue tail get spaced retries.
+       * The CONVERSATION save no longer rides on the file serialize (T17c). It needs no file bytes,
+       * and coupling the two (the old `Promise.all`) meant a sandbox read failure also silently lost
+       * the server transcript for the turn — a chat is recoverable on another device only if this
+       * upload happened.
        */
-      const outcome = await runCheckpointSerialize({
-        serialize: () => workbenchStore.serializeFiles({ strict: true }),
-
-        // One reader, shared with `applyBranchTree`'s strict before-checkpoint (`workbench-settle.ts`).
-        waitForWrites: waitForWorkbenchActionsSettled,
+      const chatSaved = saveCurrentChat(pid, options?.finalMessage).catch((error) => {
+        logger.error(`Failed to save conversation for ${pid}: ${(error as Error).message}`);
       });
 
-      if (outcome.kind !== 'ok') {
+      try {
         /*
-         * LOUD (§4.5.4b: a failed save is never silent). This is the user's undo net and the §4.5.4c
-         * recovery copy both going dark for this turn — the exact failure that shipped as a
-         * console-only `.catch(() => {})` and cost a 500-credit creation on kill-recovery. The guard
-         * resets so the NEXT generation retries, and `workingCopySafe` flips pessimistic so the
-         * beforeunload warning tells the truth.
+         * 🔴 STRICT. This map becomes the LOCAL CHECKPOINT, and a checkpoint restores with
+         * `protectNothing` — "this map is the whole truth", so anything missing from it is DELETED on
+         * undo (§4.12, `restore-plan.ts`). Serializing while `havok.wasm` was unreadable therefore does
+         * not write a slightly-smaller checkpoint; it writes one that destroys the physics engine the
+         * moment the user presses undo. Better to have no checkpoint than a poisoned one.
+         *
+         * 🔴 And STRICT runs through the T17c policy, never bare: `onFinish` fires when the model stops
+         * TALKING, while the `<boltAction>` writes are still landing over RTT on a server sandbox — so
+         * the serialize must wait for the turn's actions to SETTLE first (photographing the race is the
+         * same poisoned checkpoint, made of not-yet-written files instead of unreadable ones). A dead
+         * sandbox connection makes `fs` calls hang FOREVER rather than error (measured), so each
+         * attempt is time-boxed; transient reads racing the write-queue tail get spaced retries.
+         */
+        const outcome = await runCheckpointSerialize({
+          serialize: () => workbenchStore.serializeFiles({ strict: true }),
+
+          // One reader, shared with `applyBranchTree`'s strict before-checkpoint (`workbench-settle.ts`).
+          waitForWrites: waitForWorkbenchActionsSettled,
+        });
+
+        if (outcome.kind !== 'ok') {
+          /*
+           * LOUD (§4.5.4b: a failed save is never silent). This is the user's undo net and the §4.5.4c
+           * recovery copy both going dark for this turn — the exact failure that shipped as a
+           * console-only `.catch(() => {})` and cost a 500-credit creation on kill-recovery. The guard
+           * resets so the NEXT generation retries, and `workingCopySafe` flips pessimistic so the
+           * beforeunload warning tells the truth.
+           */
+          lastCheckpointedMessage.current = undefined;
+          workingCopySafe.set(false);
+          logger.error(
+            `Checkpoint failed for ${pid} at message ${messageId} ` +
+              `(${outcome.reason}, ${outcome.attempts} attempt(s)): ${outcome.detail}`,
+          );
+
+          if (!warnedCheckpointFailure.has(pid)) {
+            warnedCheckpointFailure.add(pid);
+            toast.error(
+              'A checkpoint could not be saved — Undo and crash recovery will not cover this change. ' +
+                'It will retry after your next change.',
+              { autoClose: 12000 },
+            );
+          }
+
+          await chatSaved;
+
+          return;
+        }
+
+        const files = outcome.files;
+
+        /*
+         * ⚠️ **AMENDED (§4.5.4c).** This comment used to say the files stay in this browser, full stop —
+         * that a server-side copy "is not a backup, it is the old model under a new name". That was true
+         * of what it replaced (`createSnapshot` per generation: an unbounded, caller-addressed HISTORY),
+         * and it is why none of what follows reintroduces one.
+         *
+         * What it missed is that the browser was then the ONLY copy. Measured: a `/bt-landing` run
+         * finished, settled 427 credits, the tab died, and the work — plus every trace that it had
+         * happened — was gone. §4.12 sells checkpoints as the safety net for non-developers, i.e. the
+         * users least likely to have a git remote, and that net lived only in IndexedDB.
+         *
+         * So there are now THREE writes here, and each degrades ALONE:
+         *
+         *   1. the LOCAL checkpoint — the copy the user is about to rely on for undo, written first;
+         *   2. the CONVERSATION — §4.5.4b has always kept this (resume on another machine, §4.5) —
+         *      started BEFORE the serialize (T17c), because it needs no file bytes and must survive a
+         *      serialize failure;
+         *   3. the server WORKING COPY — ONE object per project, overwritten, keyed on the project id.
+         *
+         * The working copy is deliberately sequenced after the checkpoint: a failed upload must degrade
+         * to "no recovery copy", never to "no checkpoint".
+         */
+        /*
+         * `label` is optional and only creation passes one (`CREATION_CHECKPOINT_LABEL`). An ordinary
+         * post-generation checkpoint stays unlabelled deliberately — §4.12's restore UI names those from
+         * the MESSAGE they follow, so a label here would be a second, competing description of the same
+         * row. Creation has no message to name it by, which is exactly why it needs one.
+         */
+        const snapshot = await createLocalSnapshot(db, { projectId: pid, files, messageId, label: options?.label });
+
+        await chatSaved;
+
+        /*
+         * Best-effort, and it shares the local checkpoint's `seq` rather than minting its own — resume
+         * compares the two, and one monotonic counter is what makes that comparison mean anything. A
+         * second counter, or a timestamp, is migration 0003's ledger bug in a third place.
+         */
+        try {
+          /*
+           * Size gate (§4.16): above the client budget, do not stringify + upload the whole base64 map —
+           * that synchronous pass is what froze the tab on media-heavy projects. The LOCAL checkpoint
+           * above is the durable copy; the server copy is best-effort and simply absent until the project
+           * shrinks. Treated exactly like a failed upload (the warning below explains it and is actionable).
+           */
+          if (!withinWorkingCopyBudget(workbenchStore.files.get())) {
+            throw new Error('project exceeds the client working-copy budget');
+          }
+
+          await saveWorkingCopy(pid, snapshot.seq, files, messageId);
+          workingCopySafe.set(true);
+        } catch (error) {
+          /*
+           * The local checkpoint is intact, but this browser now holds the only copy — which is exactly
+           * the state the beforeunload warning exists for.
+           */
+          workingCopySafe.set(false);
+          logger.warn(`Working copy not saved for ${pid} (local checkpoint is intact): ${(error as Error)?.message}`);
+
+          /*
+           * LOUD (§4.5.4b: failed saves are never silent).
+           *
+           * This used to be a console warn only, which is the worst possible shape: the user believes
+           * the platform is protecting them and it is not. The most likely cause is a project past
+           * `WORKING_COPY_MAX_MB` — large generated PNGs — and that is actionable, so say it.
+           *
+           * Once per project per session: the checkpoint fires on every generation, and a toast on each
+           * one would be nagging that gets dismissed unread.
+           */
+          notifyRecoveryCopySkipped(pid);
+        }
+
+        /*
+         * A generation just produced work that exists in this browser and nowhere else. Everything that
+         * warns the user — the indicator, the nudges, the beforeunload prompt — reads this atom, and it
+         * is only honest if it is set HERE, at the moment the work becomes unsaved. Auto-push (§4.5.4b)
+         * clears it again when it lands.
+         */
+        unsavedWork.set(true);
+        generationCount.set(generationCount.get() + 1);
+
+        logger.info(`Checkpointed project ${pid} at message ${messageId}`);
+
+        /*
+         * Refresh the link state so the chip can say "Changes not synced" (§4.5.4b). This used to PUSH;
+         * it does not any more (owner decision — see `refreshRepoStatus`). Nothing reaches the user's
+         * repository without them pressing Commit changes.
+         */
+        void refreshRepoStatus(pid);
+      } catch (error) {
+        /*
+         * Reset the guard so the next turn retries — and be LOUD (T17c). The old reasoning ("the files
+         * are still live on screen, nothing is lost yet") was written for WebContainer, where the
+         * browser held the runtime; on a server sandbox a dead tab or a killed VM makes THIS checkpoint
+         * the difference between undo working and the project reverting to its last photograph. This
+         * branch now mostly covers the IndexedDB write itself — as fatal to the safety net as a
+         * serialize failure, so it gets the same telling.
          */
         lastCheckpointedMessage.current = undefined;
         workingCopySafe.set(false);
-        logger.error(
-          `Checkpoint failed for ${pid} at message ${messageId} ` +
-            `(${outcome.reason}, ${outcome.attempts} attempt(s)): ${outcome.detail}`,
-        );
+        logger.error(`Failed to checkpoint project ${pid}: ${(error as Error).message}`);
 
         if (!warnedCheckpointFailure.has(pid)) {
           warnedCheckpointFailure.add(pid);
@@ -2227,125 +2352,10 @@ ${value.content}
             { autoClose: 12000 },
           );
         }
-
-        await chatSaved;
-
-        return;
       }
-
-      const files = outcome.files;
-
-      /*
-       * ⚠️ **AMENDED (§4.5.4c).** This comment used to say the files stay in this browser, full stop —
-       * that a server-side copy "is not a backup, it is the old model under a new name". That was true
-       * of what it replaced (`createSnapshot` per generation: an unbounded, caller-addressed HISTORY),
-       * and it is why none of what follows reintroduces one.
-       *
-       * What it missed is that the browser was then the ONLY copy. Measured: a `/bt-landing` run
-       * finished, settled 427 credits, the tab died, and the work — plus every trace that it had
-       * happened — was gone. §4.12 sells checkpoints as the safety net for non-developers, i.e. the
-       * users least likely to have a git remote, and that net lived only in IndexedDB.
-       *
-       * So there are now THREE writes here, and each degrades ALONE:
-       *
-       *   1. the LOCAL checkpoint — the copy the user is about to rely on for undo, written first;
-       *   2. the CONVERSATION — §4.5.4b has always kept this (resume on another machine, §4.5) —
-       *      started BEFORE the serialize (T17c), because it needs no file bytes and must survive a
-       *      serialize failure;
-       *   3. the server WORKING COPY — ONE object per project, overwritten, keyed on the project id.
-       *
-       * The working copy is deliberately sequenced after the checkpoint: a failed upload must degrade
-       * to "no recovery copy", never to "no checkpoint".
-       */
-      /*
-       * `label` is optional and only creation passes one (`CREATION_CHECKPOINT_LABEL`). An ordinary
-       * post-generation checkpoint stays unlabelled deliberately — §4.12's restore UI names those from
-       * the MESSAGE they follow, so a label here would be a second, competing description of the same
-       * row. Creation has no message to name it by, which is exactly why it needs one.
-       */
-      const snapshot = await createLocalSnapshot(db, { projectId: pid, files, messageId, label: options?.label });
-
-      await chatSaved;
-
-      /*
-       * Best-effort, and it shares the local checkpoint's `seq` rather than minting its own — resume
-       * compares the two, and one monotonic counter is what makes that comparison mean anything. A
-       * second counter, or a timestamp, is migration 0003's ledger bug in a third place.
-       */
-      try {
-        /*
-         * Size gate (§4.16): above the client budget, do not stringify + upload the whole base64 map —
-         * that synchronous pass is what froze the tab on media-heavy projects. The LOCAL checkpoint
-         * above is the durable copy; the server copy is best-effort and simply absent until the project
-         * shrinks. Treated exactly like a failed upload (the warning below explains it and is actionable).
-         */
-        if (!withinWorkingCopyBudget(workbenchStore.files.get())) {
-          throw new Error('project exceeds the client working-copy budget');
-        }
-
-        await saveWorkingCopy(pid, snapshot.seq, files, messageId);
-        workingCopySafe.set(true);
-      } catch (error) {
-        /*
-         * The local checkpoint is intact, but this browser now holds the only copy — which is exactly
-         * the state the beforeunload warning exists for.
-         */
-        workingCopySafe.set(false);
-        logger.warn(`Working copy not saved for ${pid} (local checkpoint is intact): ${(error as Error)?.message}`);
-
-        /*
-         * LOUD (§4.5.4b: failed saves are never silent).
-         *
-         * This used to be a console warn only, which is the worst possible shape: the user believes
-         * the platform is protecting them and it is not. The most likely cause is a project past
-         * `WORKING_COPY_MAX_MB` — large generated PNGs — and that is actionable, so say it.
-         *
-         * Once per project per session: the checkpoint fires on every generation, and a toast on each
-         * one would be nagging that gets dismissed unread.
-         */
-        notifyRecoveryCopySkipped(pid);
-      }
-
-      /*
-       * A generation just produced work that exists in this browser and nowhere else. Everything that
-       * warns the user — the indicator, the nudges, the beforeunload prompt — reads this atom, and it
-       * is only honest if it is set HERE, at the moment the work becomes unsaved. Auto-push (§4.5.4b)
-       * clears it again when it lands.
-       */
-      unsavedWork.set(true);
-      generationCount.set(generationCount.get() + 1);
-
-      logger.info(`Checkpointed project ${pid} at message ${messageId}`);
-
-      /*
-       * Refresh the link state so the chip can say "Changes not synced" (§4.5.4b). This used to PUSH;
-       * it does not any more (owner decision — see `refreshRepoStatus`). Nothing reaches the user's
-       * repository without them pressing Commit changes.
-       */
-      void refreshRepoStatus(pid);
-    } catch (error) {
-      /*
-       * Reset the guard so the next turn retries — and be LOUD (T17c). The old reasoning ("the files
-       * are still live on screen, nothing is lost yet") was written for WebContainer, where the
-       * browser held the runtime; on a server sandbox a dead tab or a killed VM makes THIS checkpoint
-       * the difference between undo working and the project reverting to its last photograph. This
-       * branch now mostly covers the IndexedDB write itself — as fatal to the safety net as a
-       * serialize failure, so it gets the same telling.
-       */
-      lastCheckpointedMessage.current = undefined;
-      workingCopySafe.set(false);
-      logger.error(`Failed to checkpoint project ${pid}: ${(error as Error).message}`);
-
-      if (!warnedCheckpointFailure.has(pid)) {
-        warnedCheckpointFailure.add(pid);
-        toast.error(
-          'A checkpoint could not be saved — Undo and crash recovery will not cover this change. ' +
-            'It will retry after your next change.',
-          { autoClose: 12000 },
-        );
-      }
-    }
-  }, []);
+    },
+    [],
+  );
 
   const restoreSnapshot = useCallback(async (_id: string, snapshot?: Snapshot) => {
     const validSnapshot = snapshot || { chatIndex: '', files: {} };

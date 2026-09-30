@@ -26,6 +26,8 @@ import { bytesToBase64, type SerializedFileMap } from '~/lib/binary/binary-files
 import { createScopedLogger } from '~/utils/logger';
 import { toast } from 'react-toastify';
 import { createExecutionQueue } from './execution-queue';
+import { toProjectRelativePath, toSandboxStoreKey } from '~/lib/common/sandbox-paths';
+import { WORK_DIR } from '~/utils/constants';
 
 const logger = createScopedLogger('WorkbenchStore');
 
@@ -386,6 +388,44 @@ export class WorkbenchStore {
     this.unsavedFiles.set(newUnsavedFiles);
 
     return true;
+  }
+
+  /**
+   * Write one TEXT file on the agent's behalf — the tool loop's `write_file` / `edit_file` (tool-loop
+   * plan D6).
+   *
+   * 🔴 **An agent write must NOT trigger a persistence top-up.** Never `createFile`/`saveFile`/
+   * `refreshSavedCopiesSoon` here: the generation checkpoints both saved copies itself when it finishes.
+   * The sandbox FS write is followed by `recordAgentWrite` (write-through into the file map, keyed via
+   * `toSandboxStoreKey`), so anything that serializes the map right after the turn sees these bytes.
+   *
+   * No `setSelectedFile` and no switch to the code view: the preview stays in front. An editor
+   * document that is already open is updated so it does not show stale text.
+   *
+   * Text only — binaries come from the media tools and never travel through this path.
+   */
+  async writeAgentFile(projectRelativePath: string, content: string): Promise<void> {
+    const rel = toProjectRelativePath(projectRelativePath);
+
+    if (!rel || rel.split('/').some((segment) => segment === '..' || segment === '')) {
+      throw new Error(`Invalid project path: ${projectRelativePath}`);
+    }
+
+    const sb = await sandbox;
+    const dir = path.dirname(rel);
+
+    if (dir && dir !== '.') {
+      await sb.fs.mkdir(dir, { recursive: true });
+    }
+
+    await sb.fs.writeFile(rel, content);
+    this.#filesStore.recordAgentWrite(rel, content);
+
+    const key = toSandboxStoreKey(rel, WORK_DIR);
+
+    if (this.#editorStore.documents.get()[key]) {
+      this.#editorStore.updateFile(key, content);
+    }
   }
 
   async saveFile(filePath: string) {

@@ -618,7 +618,10 @@ describe('project SPEC.md workflow', () => {
 
     // `\s+` because markdown wraps this line — do not tighten it back to a literal space.
     [/never scaffold a `SPEC\.md`\s+unasked/i, 'no spec is invented for projects that never wanted one'],
-    [/Current Project Files/, 'it tells the model the file is already in context, not fetchable'],
+    [
+      /the project file list \(read any file with `read_file`\)/,
+      'it tells the model where the file is and how to read it',
+    ],
   ])('states %s — %s', (pattern) => {
     expect(section).toMatch(pattern);
   });

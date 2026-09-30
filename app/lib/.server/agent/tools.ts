@@ -191,8 +191,8 @@ export function createSkillTools(context: SkillToolContext) {
         "Paths come from that skill's own instructions — do not guess at them. " +
         'ALWAYS request every resource you need in ONE call by passing them all in `paths` — each call is a ' +
         'slow round trip, and there is a hard cap on how many you get. ' +
-        "This is NOT a filesystem: it cannot read the user's project files. The project's files are already " +
-        'in your context under "Current Project Files"; there is no tool to read more of them.',
+        "This is NOT a filesystem: it cannot read the user's project files. The project's files are " +
+        'listed in your context (the project file list); use read_file to read any of them.',
 
       /*
        * ---- Every field here is optional, and every one is validated in `execute`. ----

@@ -9,8 +9,10 @@
  * from believing it worked; the warning has to still be on screen when they come back. It is fed from
  * the persisted `agentMeta` annotation, so it survives a reload.
  *
- * Two tones, because the two states are genuinely different news:
- *  - `incomplete` — we cut the build off. Loud, and carries the action that finishes it.
+ * Two tones, because the states are genuinely different news:
+ *  - `incomplete` / `paused` / `unverified` — the turn stopped short (cut off, at the credit limit,
+ *    or with the game check still failing). Loud, and carries the action that continues it, labelled
+ *    by the outcome ("Finish the build", "Keep building", "Fix the errors").
  *  - `rescued` — an automatic pass had to save it. The project is fine; the user should simply know
  *    a fallback ran on their bill. Quiet, no action, because there is nothing to do.
  */
@@ -24,7 +26,11 @@ interface Props {
 }
 
 export function TurnOutcomeAlert({ outcome, clearAlert, postMessage }: Props) {
-  const incomplete = outcome.state === 'incomplete';
+  /*
+   * Every state that stops short is loud. `paused` and `unverified` (D22) share `incomplete`'s styling
+   * and `role="alert"`; only `rescued` (and a stray `finished`) are quiet.
+   */
+  const incomplete = outcome.state === 'incomplete' || outcome.state === 'paused' || outcome.state === 'unverified';
 
   return (
     <div
@@ -52,9 +58,10 @@ export function TurnOutcomeAlert({ outcome, clearAlert, postMessage }: Props) {
 
           <div className="mt-3 flex gap-2">
             {/*
-             * Only an incomplete build gets an action. A rescued one is already finished, and a button
-             * that spends a turn to re-do completed work is worse than no button (§4.1a: a permanently
-             * dead affordance is a dead end, not a roadmap).
+             * Only an outcome with an action gets a button. A rescued one is already finished, and a
+             * button that spends a turn to re-do completed work is worse than no button (§4.1a: a
+             * permanently dead affordance is a dead end, not a roadmap). The label falls back to
+             * "Finish the build" for outcomes persisted before `actionLabel` existed.
              */}
             {outcome.action && (
               <button
@@ -68,7 +75,7 @@ export function TurnOutcomeAlert({ outcome, clearAlert, postMessage }: Props) {
                   'hover:bg-bolt-elements-button-primary-backgroundHover transition-colors',
                 )}
               >
-                Finish the build
+                {outcome.actionLabel ?? 'Finish the build'}
               </button>
             )}
 

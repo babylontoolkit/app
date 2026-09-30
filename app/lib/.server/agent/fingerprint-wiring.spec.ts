@@ -78,8 +78,10 @@ describe('the proxy fingerprints every request it starts', () => {
      * never sent — true, self-consistent, and about nothing.
      */
     expect(body).toMatch(/const toolChoice = allowTools \? 'auto'/);
-    expect(body).toMatch(/const maxSteps = allowTools \? toolPolicy\.maxSteps : 1/);
-    expect(body).toMatch(/const maxTokens = 64_000;/);
+    expect(body).toMatch(
+      /const maxSteps = allowTools \? \(toolLoop && !discussNote \? loopCfg\.segmentSteps : toolPolicy\.maxSteps\) : 1/,
+    );
+    expect(body).toMatch(/const maxTokens = resolveMaxOutputTokens\(/);
     expect(body).toMatch(/toolNames: Object\.keys\(activeTools\)/);
     expect(body).toMatch(/messages: history/);
 
@@ -96,21 +98,26 @@ describe('the proxy fingerprints every request it starts', () => {
      * second literal that happens to agree today. `maxTokens` was a duplicated `64_000` on both
      * sides: changing the wire value alone made the fingerprint lie about the request while all 39
      * tests stayed green, in the one module whose entire purpose is that the two agree. So this
-     * asserts the ABSENCE of a second literal, which is the half that can actually catch it.
+     * asserts the ABSENCE of a second resolution, which is the half that can actually catch it. Since
+     * D14 the cap is the model's real one (`resolveMaxOutputTokens`), resolved exactly once.
      */
     const source = proxy();
 
-    expect(source.match(/64_000/g), 'the token cap must exist exactly once, as a binding').toHaveLength(1);
+    expect(
+      source.match(/resolveMaxOutputTokens\(/g),
+      'the token cap must be resolved exactly once, as a binding',
+    ).toHaveLength(1);
+    expect(source, 'no hardcoded output cap may come back beside it').not.toMatch(/64_000/);
     expect(
       source,
       'maxTokens must be passed as the shared binding (`maxTokens,`), never re-specified with a value',
     ).not.toMatch(/maxTokens:\s*\S/);
   });
 
-  it('has six call sites and every one of them is labelled', () => {
+  it('has eight call sites and every one of them is labelled', () => {
     const sites = callSites();
 
-    expect(sites).toHaveLength(6);
+    expect(sites).toHaveLength(8);
 
     for (const site of sites) {
       expect(site[1], `an unlabelled startStream call: ${site[0]}`).toBeTruthy();
@@ -123,7 +130,7 @@ describe('the proxy fingerprints every request it starts', () => {
    * conversation. Giving them one label would merge the two requests a mismatch report most needs to
    * tell apart, which is the collapse this record exists to prevent.
    */
-  it('labels the six call sites distinctly', () => {
+  it('labels the eight call sites distinctly', () => {
     const labels = callSites().map((m) => m[1]);
 
     expect(new Set(labels).size).toBe(labels.length);
@@ -133,6 +140,8 @@ describe('the proxy fingerprints every request it starts', () => {
       'forced-continuation',
       'provider-retry',
       'provider-retry-tool-free',
+      'tool-loop-continue',
+      'tool-loop-gate',
       'unproductive-rescue',
     ]);
   });
@@ -146,6 +155,8 @@ describe('the proxy fingerprints every request it starts', () => {
       'forced-continuation',
       'unproductive-rescue',
       'creation-completeness',
+      'tool-loop-continue',
+      'tool-loop-gate',
     ];
 
     for (const label of callSites().map((m) => m[1])) {

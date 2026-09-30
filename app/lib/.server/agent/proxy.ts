@@ -43,7 +43,28 @@ import { CREATION_COMPLETION_PROMPT, shouldVerifyCreationCompleteness } from './
 import type { TurnOutcomeFacts } from '~/lib/agent/turn-outcome';
 import { createFileTools } from './file-tools';
 import { createPreviewTools, type PreviewToolCallEvent } from './preview-tools';
-import { resolveAgentBudgets } from './budgets';
+import {
+  createTurnMeter,
+  decideTurnEndVerdict,
+  isDeliberateLoopStop,
+  resolveMaxOutputTokens,
+  resolveToolLoopConfig,
+  resolveTurnCeiling,
+  runToolLoopSegments,
+  type ToolLoopTurnState,
+} from './tool-loop';
+import {
+  createWorkspaceTools,
+  checkBreakerTripped,
+  newWorkspaceTurnState,
+  summarizeWorkspace,
+  todoNudgeFor,
+  WorkspaceOverlay,
+  type WorkspaceToolCallEvent,
+} from './workspace-tools';
+import type { AgentWorkspaceSummary, TodoItem } from '~/lib/agent/workspace-protocol-types';
+import { createStepTextSeparator } from './step-text-separator';
+import { resolveAgentBudgets, TOOL_LOOP_BUDGET_DEFAULTS } from './budgets';
 import { buildFileManifestWithCollapses, renderFileManifest } from '~/lib/context/file-manifest';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
@@ -51,7 +72,7 @@ import type { IProviderSetting } from '~/types/model';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { resolveByok } from '~/lib/.server/licensing/entitlements';
 import { checkCreditGate, refundGeneration, settleGeneration } from '~/lib/.server/billing/gate';
-import { getModelTiers } from '~/lib/.server/billing/rates';
+import { creditsForRawCost, getBillingConfigSafe, getModelTiers, rawCostUsd } from '~/lib/.server/billing/rates';
 import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
@@ -149,6 +170,7 @@ import { extractStepCacheTokens, shouldWarnMissingUsageNamespace, usageNamespace
 import { familyOf } from '~/lib/modules/llm/model-families';
 import { drainStopReasons, peekStopReasons } from '~/lib/modules/llm/stop-reason-tap';
 import { describeRefusal, drainFallbackHandoffs } from '~/lib/modules/llm/refusal-fallback';
+import { workspaceProtocolFor } from './workspace-protocol';
 
 const logger = createScopedLogger('agent-proxy');
 
@@ -545,6 +567,14 @@ export interface AgentGeneration {
   /** Resolves with what we charged, once settled. Drives the client's credit badge (§4.6). */
   settlement: Promise<AgentSettlement | null>;
 
+  /**
+   * What the tool loop did this turn — paths written, commands run, the todo list, the last check
+   * (D20c). Persisted by the route as the `agentWorkspace` annotation so the activity list survives a
+   * reload and the next turn's history can say what happened. Paths and verdicts only — never a file
+   * body (§4.2.8). `null` with `AGENT_TOOL_LOOP` off.
+   */
+  workspaceSummary: Promise<AgentWorkspaceSummary | null>;
+
   /** e.g. "your Pro subscription lapsed, so this build used credits" (§4.6.1). Never an error. */
   notice?: string;
 
@@ -557,6 +587,15 @@ export interface AgentGeneration {
 
   /** Preview dev-tools calls (`lib/preview/protocol.ts`) — same relay shape as MCP. */
   onPreviewToolCall(listener: (event: PreviewToolCallEvent) => void): void;
+
+  /**
+   * Workspace tool calls (tool-loop plan D5) — writes, commands and the game check the browser runs in
+   * the user's sandbox. Same relay shape as MCP/preview. Never fires with `AGENT_TOOL_LOOP` off.
+   */
+  onWorkspaceToolCall(listener: (event: WorkspaceToolCallEvent) => void): void;
+
+  /** The agent's todo list, each time `update_todos` replaces it (D20b). Never fires with the loop off. */
+  onAgentTodos(listener: (items: TodoItem[]) => void): void;
 
   /**
    * Subscribe to media renders the model STARTED during this generation (§4.16). Fire-and-forget,
@@ -942,6 +981,35 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     throw error;
   }
 
+  /*
+   * 🔴 THE TOOL LOOP (tool-loop plan D2) — resolved ONCE, here, and read everywhere below. A platform
+   * kill switch (`AGENT_TOOL_LOOP`), off unless exactly `'true'`: with it off this request runs today's
+   * code path byte for byte.
+   */
+  const loopCfg = resolveToolLoopConfig(request.context);
+  const toolLoop = loopCfg.enabled;
+
+  /*
+   * The turn's own abort (D9): a USER Stop forwards into it as `'user'`, and the credit ceiling aborts
+   * it as `'budget'`. Every tool context and every segment's stream listens to `turnSignal` — with the
+   * loop off that IS `request.abortSignal`, so nothing changes. `request.abortSignal` stays the one
+   * source of truth for "the user stopped": a budget abort is not a Stop and is never classified as one.
+   */
+  const loopController = new AbortController();
+
+  if (toolLoop && request.abortSignal) {
+    if (request.abortSignal.aborted) {
+      loopController.abort('user');
+    } else {
+      request.abortSignal.addEventListener('abort', () => loopController.abort('user'), { once: true });
+    }
+  }
+
+  const turnSignal = toolLoop ? loopController.signal : request.abortSignal;
+
+  /* `null` = no ceiling (BYOK). Only read with the loop on. */
+  const turnCeiling = toolLoop ? resolveTurnCeiling(gate, loopCfg) : null;
+
   // Funnel: the generation cleared the gate and is about to run (§5A). Outcome is tracked at settle.
   monitor.track(FUNNEL_EVENTS.GENERATION_STARTED, {
     userId: user.id,
@@ -1164,7 +1232,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * turn apart from a build was not yet in scope at the moment the decision was made. A fact needed by
    * four seams is resolved before the first of them, not before the third.
    */
-  const discussNote = discussModeNote({ chatMode: request.chatMode });
+  const discussNote = discussModeNote({ chatMode: request.chatMode, toolLoop });
 
   const preloaded = await preloadSkills(slash?.skillName, isFirstBuildTurn, discussNote !== null);
 
@@ -1240,6 +1308,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   ];
 
   const system: CoreMessage[] = [{ role: 'system', content: promptVersion.content, providerOptions: CACHE_CONTROL }];
+
+  /*
+   * The Workspace Protocol (tool-loop D17): HOW the model changes files — the tools variant when the
+   * loop is on, the legacy <boltArtifact> text when it is off. Constant per variant, so it caches inside
+   * the next breakpoint's prefix. 🔴 NO `providerOptions`: a breakpoint here breaks the 4-breakpoint
+   * budget (`workspace-protocol.spec.ts`).
+   */
+  system.push({ role: 'system', content: workspaceProtocolFor(toolLoop) });
 
   /*
    * 🔴 THE FILE MANIFEST — the model reads files, it is not shown them (Inversion 3, `FRESH-START.md`).
@@ -1414,7 +1490,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       ? createMcpRelayTools(request.mcpLiveTools, {
           generationId,
           userId: user.id,
-          abortSignal: request.abortSignal,
+          abortSignal: turnSignal,
           emit: emitMcpCall,
         })
       : {};
@@ -1461,7 +1537,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     ? createPreviewTools({
         generationId,
         userId: user.id,
-        abortSignal: request.abortSignal,
+        abortSignal: turnSignal,
         emit: emitPreviewCall,
       })
     : {};
@@ -1547,7 +1623,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           generationId,
           deviceId: bridgeTurn.device.id,
           deviceName: bridgeTurn.device.name,
-          abortSignal: request.abortSignal,
+          abortSignal: turnSignal,
           context: request.context,
           emit: emitBridgeEvent,
         })
@@ -1578,7 +1654,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * more rounds than an ordinary turn — the one relationship `tool-policy.spec.ts` pins — with nothing
    * throwing. Resolved HERE rather than beside the tool contexts because the policy is decided first.
    */
-  const budgets = resolveAgentBudgets(request.context);
+  /* Under the tool loop the BASE defaults are the loop's (D15); env still overrides, and the rounds re-derive. */
+  const budgets = resolveAgentBudgets(request.context, toolLoop ? TOOL_LOOP_BUDGET_DEFAULTS : undefined);
 
   const toolPolicy = toolPolicyForTurn({
     isFirstBuildTurn,
@@ -1590,6 +1667,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     isSlash: Boolean(slash),
     isDiscussTurn: discussNote !== null,
     budgets,
+    toolLoop,
   });
   const allowTools = toolPolicy.allowTools;
 
@@ -1781,13 +1859,59 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * project source means the harder the turn looks at the code, the less able it is to check its own
    * work. Separate ceiling, never an exemption — see `budgets.ts`.
    */
+  /*
+   * The tool loop's text view of the project (D4): this turn's writes over the map the request arrived
+   * with, so `read_file` reads the agent's own writes and `edit_file` resolves against the disk's text.
+   * Absent with the loop off — `read_file` then behaves exactly as before.
+   */
+  const overlay = toolLoop ? new WorkspaceOverlay(projectFiles) : undefined;
+  const wsState = newWorkspaceTurnState();
+
   const fileToolContext = {
     files: projectFiles,
     readThisTurn: new Set<string>(),
     charsThisTurn: { total: 0 },
     planCharsThisTurn: { total: 0 },
     budgets,
+    overlay,
+
+    /* The once-per-turn checklist nudge rides on a read too — usually the turn's first result (D20b). */
+    ...(overlay ? { todoNudge: () => todoNudgeFor(wsState, discussNote !== null) } : {}),
   };
+
+  const workspaceListeners: Array<(event: WorkspaceToolCallEvent) => void> = [];
+  const todoListeners: Array<(items: TodoItem[]) => void> = [];
+
+  /*
+   * The workspace tools (D1). Built only with the loop on (empty otherwise), and spread into every
+   * toolset below (D15).
+   * Plan mode gets the `planOnly` pair — `write_file` restricted to `_specs/` on the server, because a
+   * tool write bypasses the client-side render-only wall.
+   */
+  const workspaceTools = overlay
+    ? createWorkspaceTools({
+        generationId,
+        userId: user.id,
+        abortSignal: turnSignal,
+        emit: (event) => {
+          for (const listener of workspaceListeners) {
+            listener(event);
+          }
+        },
+        emitTodos: (items) => {
+          for (const listener of todoListeners) {
+            listener(items);
+          }
+        },
+        overlay,
+        state: wsState,
+        planOnly: discussNote !== null,
+      })
+    : {};
+
+  if (toolLoop) {
+    logger.debug(`Tool loop on: ${Object.keys(workspaceTools).join(', ')} built for ${generationId}`);
+  }
 
   const toolContext: SkillToolContext = {
     loaded: new Set([
@@ -1879,12 +2003,26 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          * ⚠️ A step is the scarcest thing a creation has. Every tool in this set has to earn its place
          * against "could the model have written a file instead".
          */
-        {
-          ...fileTools,
-          ...referenceTools,
-          ...createRepairTool(),
-          ...(toolPolicy.allowsMedia ? mediaTools : {}),
-        }
+        /*
+         * ⚠️ Under the TOOL LOOP (D15) the creation set gains the workspace tools AND the preview tools:
+         * the loop's done-gate verifies the running game, which is exactly the subject the note above
+         * says a legacy creation lacks. With the loop off this is the set above, unchanged.
+         */
+        toolLoop
+        ? {
+            ...fileTools,
+            ...workspaceTools,
+            ...previewTools,
+            ...referenceTools,
+            ...createRepairTool(),
+            ...(toolPolicy.allowsMedia ? mediaTools : {}),
+          }
+        : {
+            ...fileTools,
+            ...referenceTools,
+            ...createRepairTool(),
+            ...(toolPolicy.allowsMedia ? mediaTools : {}),
+          }
       : toolPolicy.toolset === 'skills-only'
         ? {
             ...fileTools,
@@ -1893,6 +2031,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
             ...referenceTools,
             ...researchTools,
             ...createRepairTool(),
+
+            /* Tool loop only: the `planOnly` pair — `write_file` restricted to `_specs/`, `update_todos`. */
+            ...workspaceTools,
           }
         : {
             ...fileTools,
@@ -1904,6 +2045,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
             ...bridgeTools,
             ...researchTools,
             ...createRepairTool(),
+
+            /* Tool loop only (D1): write_file / edit_file / run_command / check_game / update_todos. */
+            ...workspaceTools,
           }
   ) as SkillTools;
 
@@ -1932,6 +2076,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     apiKeys: useByok ? request.apiKeys : undefined,
     providerSettings: useByok ? request.providerSettings : undefined,
     effort,
+
+    /* The rolling tail cache breakpoint (D13). Spread, so the loop-off call is exactly today's. */
+    ...(toolLoop ? { toolLoop } : {}),
   });
 
   /*
@@ -1985,6 +2132,26 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const coreMessages = convertToCoreMessages(compacted as any);
 
   const totals: GenerationUsage = emptyUsage();
+
+  /*
+   * 🔴 TOOL LOOP: `totals` IS THE LOOP'S RUNNING TOTAL (D9). The meter folds every finished step in
+   * from `onStepFinish` and `drain` skips its post-loop accumulation, so a segment aborted at the
+   * ceiling still settles for every step it ran — the legacy drain accumulated only after a stream
+   * ENDED, and an aborted one settled for nothing. `undefined` with the loop off.
+   */
+  const ceilingBilling = toolLoop ? getBillingConfigSafe(request.context) : null;
+  const turnMeter = toolLoop
+    ? createTurnMeter({
+        totals,
+        family: modelFamily,
+        ceiling: turnCeiling,
+        creditsFor: (usage) =>
+          ceilingBilling
+            ? creditsForRawCost(rawCostUsd(usage, model, config.provider, request.context), ceilingBilling)
+            : null,
+        controller: loopController,
+      })
+    : undefined;
   let toolRounds = 0;
   let finishReason = 'unknown';
 
@@ -2040,6 +2207,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * for reports success. If retries start being common, this column is how anyone finds out.
    */
   let retried = false;
+
+  /*
+   * The tool loop's segment count, gate nudges and why it stopped (D10, D22). Mutated in place by
+   * `runToolLoopSegments` so the `finally` reads it even when a segment throws. Untouched with the
+   * loop off.
+   */
+  const loopState: ToolLoopTurnState = { segmentsRun: 0, nudgesUsed: 0, stopReason: 'none' };
 
   /**
    * The live provider-level activity, for the liveness panel only (`agent/heartbeat.ts`).
@@ -2120,7 +2294,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * right after a tool loop, which is exactly when the model wants a tool. Re-probe before changing.
      */
     const toolChoice = allowTools ? 'auto' : Object.keys(activeTools).length > 0 ? 'none' : undefined;
-    const maxSteps = allowTools ? toolPolicy.maxSteps : 1;
+
+    /* Tool loop (D10, D15): a BUILD turn's segment is `segmentSteps`; a Plan turn keeps its policy's cap. */
+    const maxSteps = allowTools ? (toolLoop && !discussNote ? loopCfg.segmentSteps : toolPolicy.maxSteps) : 1;
 
     /*
      * ⚠️ HOISTED, like `toolChoice` and `maxSteps` above, and for the same reason: a literal repeated
@@ -2128,7 +2304,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      * describes a request that was never sent — true, self-consistent, and about nothing — with
      * nothing turning red, in the one module whose entire purpose is that the two agree.
      */
-    const maxTokens = 64_000;
+    const maxTokens = resolveMaxOutputTokens(provider.staticModels, provider.name, model);
 
     /*
      * 🔴 THE RECORD OF WHAT WE ACTUALLY SENT (§4.2 step 2a, `request-fingerprint.ts`).
@@ -2264,6 +2440,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         });
 
         /*
+         * Tool loop only (D9): bill this step NOW and check the turn's credit ceiling. After the
+         * bookkeeping above so the step log is complete even for the step that crosses it.
+         */
+        turnMeter?.onStep(step);
+
+        /*
          * The two numbers that diagnose a slow/expensive step, and they are different questions:
          *
          *   tok/s   — HOW FAST the tokens came out. Low = the provider/model was slow.
@@ -2288,8 +2470,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       /*
        * Stop (§4.12). The signal aborts the provider request, so we stop paying for tokens the moment
        * the user says stop — but the tokens already generated are still billed, in the `finally` below.
+       * With the tool loop on this is the turn's signal, which the credit ceiling can also abort.
        */
-      abortSignal: request.abortSignal,
+      abortSignal: turnSignal,
 
       /*
        * An unknown-tool call becomes a corrective bounce instead of a dead generation — the model is
@@ -2326,12 +2509,63 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * the cache columns too, or it will systematically under-count input.
    */
   async function* drain(result: StreamTextResult<SkillTools, never>): AsyncGenerator<AgentChunk> {
+    try {
+      yield* forward(result);
+    } catch (error) {
+      /*
+       * A BUDGET abort is the tool loop ending the turn on purpose (D9), not a failure and not a Stop:
+       * swallow it here so the segment runner can decide `stop 'budget'`. Anything else — including a
+       * user Stop, which forwards into the same controller as `'user'` — rethrows exactly as before.
+       */
+      if (turnMeter?.budgetHit && loopController.signal.aborted) {
+        return;
+      }
+
+      throw error;
+    }
+
+    /* The stream may also END quietly on an abort; its steps promise is then not worth waiting on. */
+    if (turnMeter?.budgetHit && loopController.signal.aborted) {
+      return;
+    }
+
+    /*
+     * Bill from `steps`, NOT from `result.usage` + `result.providerMetadata`.
+     *
+     * Those two have different scopes: `usage` is combined across every step, while
+     * `providerMetadata` is — per its own JSDoc — "from the LAST step". Anthropic reports cache
+     * reads/writes ONLY in provider metadata, so the obvious pairing bills six rounds of input
+     * against one round of cache. `steps` is the only surface where both are per-step (§4.6).
+     *
+     * With the tool loop on the meter has already billed every step (see `turnMeter`), so the
+     * post-loop accumulation is skipped — doing both would bill each step twice.
+     */
+    const steps = await result.steps;
+
+    if (!toolLoop) {
+      accumulateStepUsage(totals, steps as unknown as UsageStep[], modelFamily);
+    }
+
+    finishReason = await result.finishReason;
+    lastStepToolCalls = steps?.[steps.length - 1]?.toolCalls?.length ?? 0;
+    toolRounds += Math.max(0, (steps?.length ?? 1) - 1);
+  }
+
+  /** The streaming half of `drain`: forward text and reasoning, sniff the action tags. */
+  async function* forward(result: StreamTextResult<SkillTools, never>): AsyncGenerator<AgentChunk> {
     for await (const part of result.fullStream) {
       /* Liveness ticks on ANY part — a stream emitting tool events is alive even with no text yet. */
       lastChunkAt = Date.now();
       chunkCount += 1;
 
       if (part.type === 'text-delta') {
+        const separator = stepSeparator?.beforeText(part.textDelta) ?? '';
+
+        if (separator) {
+          assistantText += separator;
+          yield { type: 'text', value: separator };
+        }
+
         if (part.textDelta.length > 0) {
           producedText = true;
         }
@@ -2370,25 +2604,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          * thought and never wrote an artifact is still a failed generation, and must still refund.
          */
         yield { type: 'reasoning', value: part.textDelta };
+      } else if (part.type === 'step-finish') {
+        stepSeparator?.stepFinished();
       } else if (part.type === 'error') {
         throw part.error;
       }
     }
-
-    /*
-     * Bill from `steps`, NOT from `result.usage` + `result.providerMetadata`.
-     *
-     * Those two have different scopes: `usage` is combined across every step, while
-     * `providerMetadata` is — per its own JSDoc — "from the LAST step". Anthropic reports cache
-     * reads/writes ONLY in provider metadata, so the obvious pairing bills six rounds of input
-     * against one round of cache. `steps` is the only surface where both are per-step (§4.6).
-     */
-    const steps = await result.steps;
-    accumulateStepUsage(totals, steps as unknown as UsageStep[], modelFamily);
-
-    finishReason = await result.finishReason;
-    lastStepToolCalls = steps?.[steps.length - 1]?.toolCalls?.length ?? 0;
-    toolRounds += Math.max(0, (steps?.length ?? 1) - 1);
   }
 
   /*
@@ -2403,6 +2624,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   let resolveOutcome: (facts: TurnOutcomeFacts) => void;
   const outcomePromise = new Promise<TurnOutcomeFacts>((resolve) => {
     resolveOutcome = resolve;
+  });
+
+  let resolveWorkspaceSummary: (summary: AgentWorkspaceSummary | null) => void;
+  const workspaceSummaryPromise = new Promise<AgentWorkspaceSummary | null>((resolve) => {
+    resolveWorkspaceSummary = resolve;
   });
 
   let resolveUsage: (usage: GenerationUsage) => void;
@@ -2448,6 +2674,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   let chunkCount = 0;
   let streamedChars = 0;
 
+  /* Tool loop: each step's narration is its own paragraph, never glued to the last (D20). */
+  const stepSeparator = toolLoop ? createStepTextSeparator() : null;
+
   /*
    * The assistant text, kept so a settled generation can leave a record even if the browser never
    * gets to save one (`transcript-recovery.ts`). TEXT ONLY — reasoning is not part of the transcript
@@ -2471,6 +2700,13 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    */
   let emittedAction = false;
   let actionScanTail = '';
+
+  /*
+   * Did this turn write files BY EITHER ROUTE (D22)? An artifact action, or a tool-loop `write_file` /
+   * `edit_file` that landed in the overlay. With the loop off the overlay does not exist and this is
+   * exactly `emittedAction`.
+   */
+  const turnWroteFiles = () => emittedAction || (overlay?.writes.size ?? 0) > 0;
 
   /*
    * 🔴 AND DID EVERY ACTION IT OPENED ACTUALLY CLOSE?
@@ -2688,6 +2924,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
                   providerSettings: useByok ? request.providerSettings : undefined,
                   effort,
                   thinkingMode: 'disabled',
+                  ...(toolLoop ? { toolLoop } : {}),
                 })
               : undefined;
 
@@ -2731,7 +2968,56 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * continuation exactly when it is needed and restore the silent truncation this exists to fix.
        * The question is not "did it say anything", it is "was it interrupted mid-tool-loop".
        */
-      if (shouldForceContinuation({ finishReason, lastStepToolCalls })) {
+      if (toolLoop) {
+        /*
+         * 🔴 THE TOOL LOOP (D10, D11): segments 2..N inside this ONE generation — one stream, one
+         * settlement. `decideNextSegment` chooses done / continue (the step cap cut it off) / gate (it
+         * wrote files no passing `check_game` has seen) / stop (Stop, ceiling, segments, breaker). This
+         * REPLACES the three tools-off rescues below: none of them runs with the loop on.
+         */
+        yield* runToolLoopSegments({
+          cfg: loopCfg,
+          base: [...system, ...coreMessages],
+          first,
+          state: loopState,
+          readFacts: () => {
+            const last = stepLog[stepLog.length - 1];
+
+            return {
+              aborted: Boolean(request.abortSignal?.aborted),
+              budgetHit: turnMeter?.budgetHit ?? false,
+              finishReason,
+              lastStepToolCalls,
+
+              /*
+               * A Plan turn's only writes are `_specs/` planning artifacts (`planOnly`), which no game
+               * check can verify — gating them would nudge for a `check_game` the turn does not have.
+               */
+              wroteThisTurn: !discussNote && (overlay?.writes.size ?? 0) > 0,
+              lastCheck: wsState.lastCheck,
+              lastWriteSeq: overlay?.lastWriteSeq ?? 0,
+              breakerTripped: checkBreakerTripped(wsState),
+              lastStepInputTokens: last ? last.inTokens + last.cacheRead + last.cacheWrite : 0,
+            };
+          },
+          summary: () => summarizeWorkspace(overlay as WorkspaceOverlay, wsState),
+
+          /* Two literal call sites, so every request this turn starts carries a distinct label. */
+          start: (kind, next) =>
+            kind === 'tool-loop-gate'
+              ? startStream('tool-loop-gate', next, true)
+              : startStream('tool-loop-continue', next, true),
+          drain,
+          prepareCarried: stripReplayedReasoning,
+          onDecision: (decision, state) => {
+            logger.info(
+              `Tool loop ${generationId}: after segment ${state.segmentsRun} → ${decision.kind}` +
+                ('reason' in decision ? ` (${decision.reason})` : '') +
+                ('compact' in decision && decision.compact ? ' (compact carry)' : ''),
+            );
+          },
+        });
+      } else if (shouldForceContinuation({ finishReason, lastStepToolCalls })) {
         forcedContinuation = true;
         logger.warn(`Tool-round cap (${toolPolicy.maxSteps - 1}) reached — forcing a final answer with tools disabled`);
 
@@ -2797,6 +3083,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       const owesFiles = isFirstBuildTurn && !discussNote && phaseOwesFiles(creationPhase);
 
       if (
+        !toolLoop &&
         shouldRescueUnproductiveTurn({
           aborted: Boolean(request.abortSignal?.aborted),
           alreadyContinued: forcedContinuation,
@@ -2855,6 +3142,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * above, so no turn can ever run three streams.
        */
       if (
+        !toolLoop &&
         shouldVerifyCreationCompleteness({
           isFirstBuildTurn,
           isDiscussTurn: Boolean(discussNote),
@@ -2898,7 +3186,43 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * So: no text, no charge. `failed` routes it to the §4.6 auto-refund, and the error gives the
        * user something to react to (and Retry, §4.12) instead of silence.
        */
-      if (!producedText) {
+      /*
+       * With the tool loop on, a turn whose work was TOOL CALLS is not an empty response even if it
+       * narrated nothing — its writes, commands and checks are the output (D1). With it off this is
+       * exactly `!producedText`.
+       */
+      /*
+       * 🔴 ONE VERDICT, from a pure function (`decideTurnEndVerdict`, tool-loop.ts). With the tool loop on,
+       * a turn the LOOP ended on purpose — the credit ceiling, the segment cap, the check breaker — is
+       * never a failure and never refunds: it consumed real tokens and produced a real outcome (paused /
+       * incomplete / unverified). Refunding a ceiling stop would let a low-balance user stop on step
+       * one, get the credits back and repeat for free. With the loop off this is exactly the two
+       * checks below, in the same order.
+       */
+      const failedBuild = isFailedBuildTurn({
+        aborted: Boolean(request.abortSignal?.aborted),
+        requiresAction: owesFiles,
+        emittedAction: turnWroteFiles(),
+
+        /*
+         * Positive evidence the model was BUILDING rather than answering (`unproductive.ts`). The
+         * brief rides on whatever the user types first, so their first message can legitimately be a
+         * question — and without this that gets a "the build wrote no files" error over a good answer.
+         *
+         * `unproductiveRescue` is excluded on purpose: it fires on any first-turn prose, so counting
+         * it would let our own reaction manufacture the evidence it is supposed to test for.
+         */
+        attemptedBuild: emittedArtifact || toolCallCount > 0 || forcedContinuation,
+      });
+      const turnVerdict = decideTurnEndVerdict({
+        toolLoop,
+        stopReason: loopState.stopReason,
+        producedText,
+        toolCallCount,
+        failedBuild,
+      });
+
+      if (turnVerdict === 'empty-response') {
         failed = true;
 
         /*
@@ -2923,23 +3247,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * auto-refund exactly like the empty-response case, and the error gives them something to Retry
        * (§4.12) instead of a chat that claims success over an empty project.
        */
-      if (
-        isFailedBuildTurn({
-          aborted: Boolean(request.abortSignal?.aborted),
-          requiresAction: owesFiles,
-          emittedAction,
-
-          /*
-           * Positive evidence the model was BUILDING rather than answering (`unproductive.ts`). The
-           * brief rides on whatever the user types first, so their first message can legitimately be a
-           * question — and without this that gets a "the build wrote no files" error over a good answer.
-           *
-           * `unproductiveRescue` is excluded on purpose: it fires on any first-turn prose, so counting
-           * it would let our own reaction manufacture the evidence it is supposed to test for.
-           */
-          attemptedBuild: emittedArtifact || toolCallCount > 0 || forcedContinuation,
-        })
-      ) {
+      if (turnVerdict === 'no-files-written') {
         failed = true;
 
         logger.warn(
@@ -2977,7 +3285,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * A user abort arrives here too (the abort signal rejects the stream), so exclude it — the
        * tokens a stopped generation burned are genuinely owed (§4.12).
        */
-      failed = !request.abortSignal?.aborted;
+      failed = !request.abortSignal?.aborted && !(toolLoop && isDeliberateLoopStop(loopState.stopReason));
       throw error;
     } finally {
       resolveUsage(totals);
@@ -3003,9 +3311,15 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         forcedContinuation,
         unproductiveRescue,
         completionPassWroteFiles: creationCompletionPass && emittedAction,
-        wroteFiles: emittedAction,
+        wroteFiles: turnWroteFiles(),
         aborted: Boolean(request.abortSignal?.aborted),
+
+        /* Tool loop only (D22): why the loop stopped, and the last check's verdict. */
+        ...(toolLoop ? { stopReason: loopState.stopReason, lastCheckOk: wsState.lastCheck?.ok ?? null } : {}),
       });
+
+      /* D20c — resolved in the same `finally`, so a failed or stopped turn still reports what it wrote. */
+      resolveWorkspaceSummary(toolLoop && overlay ? summarizeWorkspace(overlay, wsState) : null);
 
       /*
        * Settle, then record — and do BOTH even when the generation threw or was stopped (§4.12).
@@ -3172,7 +3486,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           (failed ? 'error' : forcedContinuation ? `${finishReason}+forced-continuation` : finishReason) +
           (unproductiveRescue ? '+unproductive-rescue' : '') +
           (creationCompletionPass ? '+creation-completeness' : '') +
-          (retried ? '+provider-retry' : ''),
+          (retried ? '+provider-retry' : '') +
+          (toolLoop
+            ? `+segments:${loopState.segmentsRun}` +
+              (loopState.stopReason !== 'none' ? `+${loopState.stopReason}` : '') +
+              (loopState.nudgesUsed ? `+gate:${loopState.nudgesUsed}` : '')
+            : ''),
         status: failed ? 'failed' : 'completed',
 
         /*
@@ -3376,9 +3695,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     usage: usagePromise,
     outcome: outcomePromise,
     settlement: settlementPromise,
+    workspaceSummary: workspaceSummaryPromise,
     notice: byok.notice ?? tierNotice,
     onMcpToolCall: (listener) => mcpListeners.push(listener),
     onPreviewToolCall: (listener) => previewListeners.push(listener),
+    onWorkspaceToolCall: (listener) => workspaceListeners.push(listener),
+    onAgentTodos: (listener) => todoListeners.push(listener),
     onMediaTask: (listener) => mediaListeners.push(listener),
     onBridgeEvent: (listener) => bridgeListeners.push(listener),
   };

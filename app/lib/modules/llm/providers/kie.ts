@@ -79,6 +79,7 @@ import { codexFetch, KIE_CODEX_BASE_URL } from './kie-codex-wire';
 import { geminiFetch, KIE_GEMINI_BASE_URL } from './kie-gemini-wire';
 import { codexEffort, geminiThinkingLevel, requireFamily } from '~/lib/modules/llm/model-families';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
+import { withTailCache } from '~/lib/modules/llm/tail-cache';
 
 export default class KieProvider extends BaseProvider {
   name = 'KIE';
@@ -134,6 +135,12 @@ export default class KieProvider extends BaseProvider {
      * generation that had already burned two 30-second timeouts re-rolled the same coin a third time.
      */
     thinkingMode?: ThinkingMode;
+
+    /**
+     * The tool loop is on for this request (tool-loop plan D13) — adds the rolling tail cache
+     * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
+     */
+    toolLoop?: boolean;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
 
@@ -245,7 +252,12 @@ export default class KieProvider extends BaseProvider {
        * 349ms -> 7,474ms. **KIE soft-throttles by QUEUEING rather than rejecting**, which no retry can
        * see and no header reports. `onThrottled` is what makes the 429 case visible if it ever starts.
        */
-      fetch: thinkingFetch(thinkingMode, effort, model, kieFetch(rateLimitFetch({ provider: this.name }))),
+      fetch: thinkingFetch(
+        thinkingMode,
+        effort,
+        model,
+        withTailCache(kieFetch(rateLimitFetch({ provider: this.name })), options.toolLoop),
+      ),
     });
 
     const instance = supportsSamplingParams(model) ? kie(model) : stripSamplingParams(kie(model));

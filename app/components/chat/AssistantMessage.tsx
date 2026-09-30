@@ -20,6 +20,15 @@ import { ToolInvocations } from './ToolInvocations';
 import { ThinkingPanel } from './ThinkingPanel';
 import type { ToolCallAnnotation } from '~/types/context';
 import { decidePlanFollowUp } from '~/lib/chat/plan-proposal';
+import { useStore } from '@nanostores/react';
+import {
+  hasActivity,
+  readMessageGenerationId,
+  readWorkspaceSummary,
+  resolveActivityState,
+  workspaceActivityStore,
+} from '~/lib/agent-workspace/activity';
+import { WorkspaceActivity } from './WorkspaceActivity';
 
 interface AssistantMessageProps {
   content: string;
@@ -57,6 +66,10 @@ interface AssistantMessageProps {
     | (TextUIPart | ReasoningUIPart | ToolInvocationUIPart | SourceUIPart | FileUIPart | StepStartUIPart)[]
     | undefined;
   addToolResult: ({ toolCallId, result }: { toolCallId: string; result: any }) => void;
+
+  /** The last message in the list, while a generation streams — it shows the CURRENT activity (D20). */
+  isLast?: boolean;
+  isStreaming?: boolean;
 }
 
 function openArtifactInWorkbench(filePath: string) {
@@ -101,7 +114,22 @@ export const AssistantMessage = memo(
     provider,
     parts,
     addToolResult,
+    isLast = false,
+    isStreaming = false,
   }: AssistantMessageProps) => {
+    /*
+     * The tool loop's activity list (tool-loop plan D20): live while this is the streaming message,
+     * then this generation's live state, then the persisted `agentWorkspace` annotation after a reload.
+     */
+    const activityStore = useStore(workspaceActivityStore);
+    const activity = resolveActivityState({
+      store: activityStore,
+      isLast,
+      isStreaming,
+      generationId: readMessageGenerationId(annotations as unknown[] | undefined),
+      summary: readWorkspaceSummary(annotations as unknown[] | undefined),
+    });
+
     /*
      * ONE follow-up per reply, chosen by the pure decision rather than by two independent conditions
      * here — see `decidePlanFollowUp`. `null` for every ordinary build message, so this costs a normal
@@ -286,6 +314,7 @@ export const AssistantMessage = memo(
             </div>
           </div>
         </>
+        {hasActivity(activity) && <WorkspaceActivity state={activity} />}
         <Markdown append={append} chatMode={chatMode} setChatMode={setChatMode} model={model} provider={provider} html>
           {content}
         </Markdown>

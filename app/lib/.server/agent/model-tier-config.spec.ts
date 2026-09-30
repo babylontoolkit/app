@@ -730,6 +730,7 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
       cacheCreationTokens: 0,
     }),
     settlement: Promise.resolve({ creditsCharged: 0, balanceAfter: 0 }),
+    workspaceSummary: Promise.resolve(null),
 
     /*
      * The route AWAITS this before writing `agentMeta` (§fail-loud: how the turn ended, for the user).
@@ -749,6 +750,10 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
 
     /* Preview dev-tools relay — the route subscribes before draining, so the double must offer it. */
     onPreviewToolCall: vi.fn(),
+
+    /* Tool-loop workspace relay + todo checklist — subscribed before draining, like the rest. */
+    onWorkspaceToolCall: vi.fn(),
+    onAgentTodos: vi.fn(),
     onMediaTask: vi.fn(),
 
     /* Unity Bridge events (§4.17) — subscribed before draining, like the rest. */

@@ -19,6 +19,12 @@ vi.mock('./bridge', async (importOriginal) => {
 
 import { previewErrorsStore } from './bridge';
 import { installPreviewDevTools, raisesPreviewAlert } from './install';
+import {
+  beginWorkspaceCheck,
+  CHECK_WINDOW_GRACE_MS,
+  endWorkspaceCheck,
+  resetWorkspaceCheckWindow,
+} from '~/lib/agent-workspace/check-window';
 import type { PreviewErrorEntry } from './protocol';
 
 const entry = (over: Partial<PreviewErrorEntry>): PreviewErrorEntry => ({
@@ -73,5 +79,39 @@ describe('watchForErrors — which preview errors raise the alert', () => {
     expect(raisesPreviewAlert(entry({ type: 'rejection' }))).toBe(true);
     expect(raisesPreviewAlert(entry({ type: 'network' }))).toBe(false);
     expect(raisesPreviewAlert(entry({ type: 'resource' }))).toBe(false);
+  });
+});
+
+describe("a game check's own navigation never raises the alert (T9 fix loop)", () => {
+  beforeEach(() => resetWorkspaceCheckWindow());
+
+  it('an error while check_game drives the preview stays out of the alert (and in the store)', () => {
+    beginWorkspaceCheck();
+
+    const during = entry({
+      type: 'error',
+      message: "Cannot read properties of null (reading 'focus')",
+      at: Date.now(),
+    });
+    previewErrorsStore.set([during]);
+
+    expect(alertSet).not.toHaveBeenCalled();
+    expect(previewErrorsStore.get()).toContainEqual(during);
+
+    endWorkspaceCheck();
+  });
+
+  it('CONTROL: the same error well after the check ends raises it', () => {
+    // `at` must be newer than anything the watcher has seen (the spec above stamps Date.now()).
+    const endedAt = Date.now() + 60_000;
+    beginWorkspaceCheck();
+    endWorkspaceCheck(endedAt);
+
+    previewErrorsStore.set([
+      entry({ type: 'error', message: 'real bug', at: endedAt + CHECK_WINDOW_GRACE_MS + 5_000 }),
+    ]);
+
+    expect(alertSet).toHaveBeenCalledTimes(1);
+    expect(alertSet.mock.calls[0][0]).toMatchObject({ description: 'real bug' });
   });
 });
