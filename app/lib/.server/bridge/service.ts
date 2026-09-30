@@ -13,13 +13,16 @@
  *     terminal row or a started one (the latch);
  *   - every row write goes through one rule: never overwrite a terminal row;
  *   - nothing on a tool path throws: every outcome is a sentence for the model;
- *   - the server does NOT gate scripts (D55): every dispatch says `allowScripts: true`, and the helper's
- *     own `--no-scripts` is the only switch — the user's computer decides, and the helper refuses there.
+ *   - every dispatch carries the device's own Allow scripts switch (D58, on by default), read from the
+ *     store AT DISPATCH so a switch the user just turned applies to the next call of the same turn; a
+ *     failed read says `false` (never absent-means-on). The helper refuses a model-supplied script when
+ *     it is off, and its own `--no-scripts` still wins on that computer.
  *
  * All writes for one job are serialised through an in-process chain (`withJobLock`). The relay lives on
  * ONE server instance (D5), so this makes the latch a real guarantee there rather than a read-then-write
  * check two settlers (a cancel and a pickup timeout) could both pass.
  */
+import { describeOperation } from '~/lib/bridge/describe';
 import { createScopedLogger } from '~/utils/logger';
 import {
   BRIDGE_CONSENT_TIMEOUT_MS,
@@ -39,7 +42,7 @@ import { validateOperation } from '~/lib/bridge/validate';
 import { awaitClientToolResult } from '~/lib/.server/agent/mcp-relay';
 import { isBridgeEnabled, mintId } from './auth';
 import { cancelBridgeJob, deviceHello, deviceLastSeen, enqueueBridgeJob, getJobHandle, isDevicePresent } from './relay';
-import { getBridgeStore, type BridgeDeviceRow, type BridgeJobRow } from './store';
+import { getBridgeStore, isScriptsAllowed, type BridgeDeviceRow, type BridgeJobRow } from './store';
 
 const logger = createScopedLogger('bridge.service');
 
@@ -361,7 +364,9 @@ export async function runBridgeOperation(
       safeEmit(ctx.emit, {
         type: 'bridge-consent',
         toolCallId: ctx.toolCallId,
-        operation: label,
+
+        // The exact operation, not the tool label — the person deciding must see what will run (T25 step 4).
+        operation: describeOperation(op) || label,
         tier: 'consent',
         target: deviceHello(ctx.deviceId)?.currentProject ?? ctx.deviceName,
       });
@@ -395,6 +400,8 @@ export async function runBridgeOperation(
       }
     }
 
+    // Read before the job is recorded, so `queued` is only ever announced for a job already in the queue.
+    const allowScripts = await readAllowScripts(ctx.deviceId, ctx.context);
     const jobId = mintId('brg');
     const store = getBridgeStore(ctx.context);
 
@@ -418,7 +425,7 @@ export async function runBridgeOperation(
       dispatch: {
         jobId,
         op,
-        allowScripts: true, // D55 — the helper's --no-scripts is the only switch
+        allowScripts, // D58 — the device's switch; the helper refuses a model-supplied script when false
         consentGranted: tier === 'consent',
       },
       onEvent: makeOnEvent({ jobId, label, context: ctx.context, emit: ctx.emit }),
@@ -534,6 +541,18 @@ export async function jobControl(
   } catch (error) {
     logger.error(`bridge_job ${action} ${jobId} failed: ${error instanceof Error ? error.message : String(error)}`);
     return `The Unity Bridge could not ${action} job ${jobId}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/** The device's Allow scripts switch (D58). A store failure is OFF — a script never runs on a guess. */
+async function readAllowScripts(deviceId: string, context: unknown): Promise<boolean> {
+  try {
+    return isScriptsAllowed(await getBridgeStore(context).getDevice(deviceId));
+  } catch (error) {
+    logger.warn(
+      `Could not read Allow scripts for ${deviceId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
   }
 }
 

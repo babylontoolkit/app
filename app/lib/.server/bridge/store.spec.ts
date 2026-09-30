@@ -2,7 +2,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { FsBridgeStore, type BridgeJobRow, type BridgePairingRow } from './store';
+import {
+  FsBridgeStore,
+  isScriptsAllowed,
+  type BridgeDeviceRow,
+  type BridgeJobRow,
+  type BridgePairingRow,
+} from './store';
 
 let tmp: string;
 let store: FsBridgeStore;
@@ -56,6 +62,57 @@ describe('FsBridgeStore', () => {
     expect(await store.getDeviceByTokenHash('nope')).toBeNull();
     expect((await store.listDevices('u1')).map((d) => d.id)).toEqual(['dev_1']);
     expect(await store.listDevices('u2')).toEqual([]);
+  });
+
+  describe('the Allow scripts switch (D58)', () => {
+    const dev = (over: Partial<BridgeDeviceRow> = {}): BridgeDeviceRow => ({
+      id: 'dev_s',
+      userId: 'u1',
+      name: 'laptop',
+      os: 'darwin',
+      tokenHash: 'h_s',
+      createdAt: '2026-09-29T12:00:00.000Z',
+      ...over,
+    });
+
+    it('a new device starts ON, a record with no field reads as on, only an explicit false is off, and a missing device is off', async () => {
+      await store.putDevice(dev());
+
+      const row = await store.getDevice('dev_s');
+
+      expect(row?.allowScripts).toBeUndefined();
+      expect(isScriptsAllowed(row)).toBe(true);
+      expect(isScriptsAllowed({ allowScripts: false })).toBe(false);
+      expect(isScriptsAllowed(null)).toBe(false);
+      expect(isScriptsAllowed(undefined)).toBe(false);
+    });
+
+    it('setDeviceAllowScripts flips it both ways and returns the row; an unknown id is null', async () => {
+      await store.putDevice(dev());
+
+      expect((await store.setDeviceAllowScripts('dev_s', true))?.allowScripts).toBe(true);
+      expect(isScriptsAllowed(await store.getDevice('dev_s'))).toBe(true);
+      expect((await store.setDeviceAllowScripts('dev_s', false))?.allowScripts).toBe(false);
+      expect(isScriptsAllowed(await store.getDevice('dev_s'))).toBe(false);
+      expect(await store.setDeviceAllowScripts('nope', true)).toBeNull();
+    });
+
+    it('putDevice never writes the switch: a stale read-then-write keeps it OFF, and an insert cannot turn it off', async () => {
+      await store.putDevice(dev());
+
+      const stale = await store.getDevice('dev_s'); // read before the user turns it off
+
+      await store.setDeviceAllowScripts('dev_s', false);
+      await store.putDevice({ ...stale!, lastSeenAt: '2026-09-29T12:05:00.000Z' }); // e.g. the poll's hello persist
+
+      const after = await store.getDevice('dev_s');
+
+      expect(after?.lastSeenAt).toBe('2026-09-29T12:05:00.000Z'); // CONTROL — the write landed
+      expect(isScriptsAllowed(after)).toBe(false);
+
+      await store.putDevice(dev({ id: 'dev_new', tokenHash: 'h_new', allowScripts: false }));
+      expect(isScriptsAllowed(await store.getDevice('dev_new'))).toBe(true);
+    });
   });
 
   it('getPairingBySecretHash finds a row by the hash of its code only', async () => {

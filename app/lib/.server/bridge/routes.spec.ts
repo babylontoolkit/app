@@ -3,9 +3,12 @@
  *
  * D54 (owner, 2026-09-29): there is NO project link. D55: the dialog's GET reports only the device the
  * agent would drive (the most recently seen present one) and the production origin; the dialog mints a
- * single-use install code (`invite`) and the helper claims it (`claim`) — the only pairing flow. There is
- * no per-device scripts switch. The helper's poll speaks protocol 2 — a protocol-1 helper is told to
- * update (426), because it would still expect a `unityProjectKey` on every dispatch.
+ * single-use install code (`invite`) and the helper claims it (`claim`) — the only pairing flow. The
+ * helper's poll speaks protocol 2 — a protocol-1 helper is told to update (426), because it would still
+ * expect a `unityProjectKey` on every dispatch.
+ *
+ * D58 (owner, 2026-09-29): the per-computer Allow scripts switch is back — on by default, turned in the
+ * dialog through `POST /api/bridge/devices {action:'allowScripts'}`, own device only (404 otherwise).
  *
  * ⚠️ Lives here, not in `app/routes/` — Remix compiles a spec in that folder as a route and the
  * manifest then imports `vitest` at runtime, which 500s every request (§4.5.6).
@@ -151,7 +154,7 @@ describe('GET /api/projects/:projectId/bridge', () => {
     expect(((await (await getStatus(mine.id)).json()) as { productionOrigin: unknown }).productionOrigin).toBeNull();
   });
 
-  it('a paired device that is not polling → offline, naming it; no id, token hash or scripts field', async () => {
+  it('a paired device that is not polling → offline, naming it; its id and Allow scripts (on — the D58 default), never a token hash', async () => {
     await store.putDevice(device());
 
     const view = (await (await getStatus(mine.id)).json()) as {
@@ -160,8 +163,17 @@ describe('GET /api/projects/:projectId/bridge', () => {
     };
 
     expect(view.state).toBe('offline');
-    expect(view.device).toMatchObject({ name: 'Studio Mac', online: false });
-    expect(Object.keys(view.device).sort()).toEqual(['name', 'online']);
+    expect(view.device).toMatchObject({ id: 'dev_1', name: 'Studio Mac', online: false, allowScripts: true });
+    expect(Object.keys(view.device).sort()).toEqual(['allowScripts', 'id', 'name', 'online']);
+  });
+
+  it('the device view reports the Allow scripts switch once the user turns it off (D58)', async () => {
+    await store.putDevice(device());
+    await store.setDeviceAllowScripts('dev_1', false);
+
+    const view = (await (await getStatus(mine.id)).json()) as { device: { allowScripts: boolean } };
+
+    expect(view.device.allowScripts).toBe(false);
   });
 
   it('a present device → online, with the helper hello (projects folder, projects, current)', async () => {
@@ -191,7 +203,7 @@ describe('GET /api/projects/:projectId/bridge', () => {
     expect((await getStatus(theirs.id)).status).toBe(404);
   });
 
-  it('the route has no POST action any more (D55 — no scripts switch, no jobs panel)', async () => {
+  it('the route has no POST action (the Allow scripts switch posts to /api/bridge/devices, D58)', async () => {
     const mod = (await import('~/routes/api.projects.$projectId.bridge')) as Record<string, unknown>;
 
     expect(mod.action).toBeUndefined();
@@ -256,6 +268,63 @@ describe('install codes: POST /api/bridge/devices {invite} → POST /api/bridge/
     expect((await postJson('api.bridge.pair', { action: 'start', deviceName: 'x', os: 'darwin' })).status).toBe(400);
     expect((await postJson('api.bridge.pair', { action: 'redeem', pairingId: 'p', secret: 's' })).status).toBe(400);
     expect((await postJson('api.bridge.devices', { action: 'approve', code })).status).toBe(400);
+  });
+});
+
+describe("POST /api/bridge/devices {action:'allowScripts'} (D58)", () => {
+  const toggle = (deviceId: unknown, value: unknown) =>
+    postJson('api.bridge.devices', { action: 'allowScripts', deviceId, value });
+
+  it('the caller turns their own device on and off; the response and the store agree', async () => {
+    await store.putDevice(device());
+
+    const on = await toggle('dev_1', true);
+
+    expect(on.status).toBe(200);
+    expect(on.headers.get('Cache-Control')).toBe('no-store');
+    expect(await on.json()).toEqual({ device: { id: 'dev_1', allowScripts: true } });
+    expect((await store.getDevice('dev_1'))?.allowScripts).toBe(true);
+
+    const off = await toggle('dev_1', false);
+
+    expect(await off.json()).toEqual({ device: { id: 'dev_1', allowScripts: false } });
+    expect((await store.getDevice('dev_1'))?.allowScripts).toBe(false);
+  });
+
+  it("someone else's device, an unknown id and a removed device → 404 (never 403), and nothing changes", async () => {
+    await store.putDevice(device({ id: 'dev_other', userId: 'someone-else' }));
+    await store.putDevice(device({ id: 'dev_gone', revokedAt: '2026-09-29T01:00:00.000Z' }));
+
+    expect((await toggle('dev_other', true)).status).toBe(404);
+    expect((await toggle('dev_missing', true)).status).toBe(404);
+    expect((await toggle('dev_gone', true)).status).toBe(404);
+    expect((await store.getDevice('dev_other'))?.allowScripts).toBeUndefined();
+    expect((await store.getDevice('dev_gone'))?.allowScripts).toBeUndefined();
+  });
+
+  it('a value that is not a boolean → 400 (never coerced: "false" is truthy), and the switch stays off', async () => {
+    await store.putDevice(device());
+
+    for (const value of ['true', 'false', 1, null, undefined]) {
+      expect((await toggle('dev_1', value)).status).toBe(400);
+    }
+
+    expect((await store.getDevice('dev_1'))?.allowScripts).toBeUndefined();
+  });
+
+  it('GET /api/bridge/devices lists allowScripts per device', async () => {
+    await store.putDevice(device());
+    await store.setDeviceAllowScripts('dev_1', true);
+
+    const { loader } = await import('~/routes/api.bridge.devices');
+    const response = await loader({
+      request: new Request('http://localhost/api/bridge/devices'),
+      params: {},
+      context: {},
+    } as never);
+    const body = (await response.json()) as { devices: Array<{ id: string; allowScripts: boolean }> };
+
+    expect(body.devices).toEqual([expect.objectContaining({ id: 'dev_1', allowScripts: true })]);
   });
 });
 

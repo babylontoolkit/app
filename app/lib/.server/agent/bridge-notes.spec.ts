@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { BridgeHello } from '~/lib/bridge/protocol';
-import { bridgeTurnNotes } from './bridge-notes';
+import { bridgeTurnNotes, scriptsStateLine } from './bridge-notes';
 
 const hello = (overrides: Partial<BridgeHello> = {}): BridgeHello => ({
   protocol: 2,
@@ -18,6 +18,56 @@ const hello = (overrides: Partial<BridgeHello> = {}): BridgeHello => ({
   unityCli: { path: '/u', version: '1.4.0' },
   scriptsDisabledLocally: false,
   ...overrides,
+});
+
+describe('the scripts state (D58)', () => {
+  const online = (allowScripts: boolean | undefined, scriptsDisabledLocally = false) =>
+    bridgeTurnNotes({
+      bridgeTurn: {
+        state: 'online',
+        device: { name: 'Studio Mac', allowScripts },
+        hello: hello({ scriptsDisabledLocally }),
+      },
+      finishedJobs: [],
+    })[0];
+
+  it('switch on → "Scripts: on."', () => {
+    expect(online(true)).toContain(' Scripts: on. ');
+  });
+
+  it('switch off (or absent) → off, naming the dialog switch — never a command', () => {
+    const off = 'Scripts: off — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon).';
+
+    expect(online(false)).toContain(off);
+    expect(online(undefined)).toContain(off);
+    expect(online(false)).not.toMatch(/npx|bt-agent|--/);
+  });
+
+  it('--no-scripts on the helper → disabled on this computer, and it wins over an ON switch', () => {
+    const disabled =
+      'Scripts are disabled on this computer (--no-scripts) — the Allow scripts switch has no effect; the user must re-run the install command from the Unity Bridge dialog without --no-scripts.';
+
+    expect(online(true, true)).toContain(disabled);
+    expect(online(false, true)).toContain(disabled);
+    expect(online(true, true)).not.toContain('Scripts: on.');
+
+    // the D58 slip: under --no-scripts the model must never be steered to the (already on, disabled) switch
+    expect(online(true, true)).not.toMatch(/can turn on Allow scripts/);
+  });
+
+  it('online note tells the model to speak in plain words — no tool names or job ids (verifier item 10)', () => {
+    expect(online(true)).toContain(
+      'Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.',
+    );
+  });
+
+  it('scriptsStateLine is the one wording (three states)', () => {
+    expect(scriptsStateLine({ allowScripts: true }, { scriptsDisabledLocally: false })).toBe('Scripts: on.');
+    expect(scriptsStateLine({ allowScripts: false }, undefined)).toMatch(/^Scripts: off — /);
+    expect(scriptsStateLine(undefined, { scriptsDisabledLocally: true })).toBe(
+      'Scripts are disabled on this computer (--no-scripts) — the Allow scripts switch has no effect; the user must re-run the install command from the Unity Bridge dialog without --no-scripts.',
+    );
+  });
 });
 
 describe('bridgeTurnNotes', () => {
@@ -49,7 +99,7 @@ describe('bridgeTurnNotes', () => {
     });
 
     expect(note).toBe(
-      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: "Kart". Unity CLI 1.4.0, Toolkit 9.29.0, Blender 4.2.0. Paths are relative to the current Unity project.',
+      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: "Kart". Unity CLI 1.4.0, Toolkit 9.29.0, Blender 4.2.0. Scripts: off — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon). Paths are relative to the current Unity project. Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.',
     );
   });
 
@@ -60,7 +110,7 @@ describe('bridgeTurnNotes', () => {
     });
 
     expect(note).toBe(
-      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: none — open or create one with unity_project. Unity CLI not found, Toolkit ?, Blender not found. Paths are relative to the current Unity project.',
+      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: none — open or create one with unity_project. Unity CLI not found, Toolkit ?, Blender not found. Scripts: off — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon). Paths are relative to the current Unity project. Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.',
     );
   });
 

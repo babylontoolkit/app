@@ -1,7 +1,7 @@
 /**
  * Per-turn Unity Bridge notes (SPEC §4.17, D37) — what the model is told about the user's machine this
  * turn: the paired device is online (its projects folder, the Unity projects in it, which one is current,
- * and what it runs) or offline, which bridge jobs finished since the last turn, and — from the helper's
+ * what it runs, and whether scripts may run — D58) or offline, which bridge jobs finished since the last turn, and — from the helper's
  * own report only (D55; the browser no longer saves a dev-server origin) — which local scene server
  * serves exported scenes. There is no project link (D54) — the model opens or creates the Unity
  * project with `unity_project`.
@@ -16,7 +16,11 @@
 import type { BridgeHello } from '~/lib/bridge/protocol';
 
 export interface BridgeTurnNotesInput {
-  bridgeTurn: { state: 'none' | 'disabled' | 'offline' | 'online'; device?: { name: string }; hello?: BridgeHello };
+  bridgeTurn: {
+    state: 'none' | 'disabled' | 'offline' | 'online';
+    device?: { name: string; allowScripts?: boolean };
+    hello?: BridgeHello;
+  };
   finishedJobs: Array<{ id: string; operation: string; status: string; resultText?: string; error?: string }>;
 }
 
@@ -34,6 +38,37 @@ function projectNames(hello: BridgeHello | undefined): string {
   const more = names.length - MAX_PROJECT_NAMES;
 
   return more > 0 ? `${shown} (and ${more} more)` : shown;
+}
+
+/**
+ * The `--no-scripts` sentence (D58) — word for word the helper's refusal. It names the switch as having no effect
+ * so the model never tells the user to turn on a switch that is already on (verifier, 2026-09-29).
+ */
+export const SCRIPTS_DISABLED_LOCALLY_NOTE =
+  'Scripts are disabled on this computer (--no-scripts) — the Allow scripts switch has no effect; the user must re-run the install command from the Unity Bridge dialog without --no-scripts.';
+
+/** Replies are for the user: plain words, never a tool name or a job id (verifier, 2026-09-29). */
+export const PLAIN_WORDS_NOTE =
+  'Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.';
+
+/**
+ * The scripts state in one line (D58). The helper's `--no-scripts` wins over the switch (it refuses on the
+ * computer whatever the dispatch says); only an explicit `true` is on. The model is told where the switch
+ * is so it can tell the user — never to run a command.
+ */
+export function scriptsStateLine(
+  device: { allowScripts?: boolean } | undefined,
+  hello: Pick<BridgeHello, 'scriptsDisabledLocally'> | undefined,
+): string {
+  if (hello?.scriptsDisabledLocally) {
+    return SCRIPTS_DISABLED_LOCALLY_NOTE;
+  }
+
+  if (device?.allowScripts === true) {
+    return 'Scripts: on.';
+  }
+
+  return 'Scripts: off — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon).';
 }
 
 export function bridgeTurnNotes(input: BridgeTurnNotesInput): string[] {
@@ -57,7 +92,7 @@ export function bridgeTurnNotes(input: BridgeTurnNotesInput): string[] {
     const blender = hello?.blender;
 
     notes.push(
-      `# Unity Bridge\n\nConnected to "${deviceName}". Projects folder "${hello?.projectsDir ?? '?'}": ${projectNames(hello)}. ${currentText} Unity CLI ${hello?.unityCli?.version ?? 'not found'}, Toolkit ${currentInfo?.toolkitVersion ?? '?'}, Blender ${blender ? blender.version : 'not found'}. Paths are relative to the current Unity project.`,
+      `# Unity Bridge\n\nConnected to "${deviceName}". Projects folder "${hello?.projectsDir ?? '?'}": ${projectNames(hello)}. ${currentText} Unity CLI ${hello?.unityCli?.version ?? 'not found'}, Toolkit ${currentInfo?.toolkitVersion ?? '?'}, Blender ${blender ? blender.version : 'not found'}. ${scriptsStateLine(bridgeTurn.device, hello)} Paths are relative to the current Unity project. ${PLAIN_WORDS_NOTE}`,
     );
   }
 

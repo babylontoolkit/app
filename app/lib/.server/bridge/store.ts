@@ -30,6 +30,21 @@ export interface BridgeDeviceRow {
   lastSeenAt?: string;
   revokedAt?: string;
   capabilities?: BridgeHello;
+
+  /**
+   * The per-computer "Allow scripts" switch (D58), ON by default (owner, 2026-09-29). Every dispatch carries
+   * it; the helper refuses a model-supplied script when it is false. Only an explicit `false` turns it off,
+   * so a record with no field (an FS record written before D58, or a new device) reads as on.
+   */
+  allowScripts?: boolean;
+}
+
+/**
+ * The one reading of the switch: on unless explicitly `false`. A MISSING device (a failed read) is off —
+ * the service cannot vouch for a switch it could not read.
+ */
+export function isScriptsAllowed(device: Pick<BridgeDeviceRow, 'allowScripts'> | null | undefined): boolean {
+  return device ? device.allowScripts !== false : false;
 }
 
 /**
@@ -62,10 +77,18 @@ export interface BridgeJobRow {
 }
 
 export interface BridgeStore {
+  /**
+   * Insert or update a device row. It NEVER writes the Allow scripts switch (D58): an update keeps the
+   * stored value and an insert starts OFF. Only `setDeviceAllowScripts` changes it — so a read-then-write
+   * elsewhere (the poll's hello persist, a revoke) can never flip a switch the user just turned.
+   */
   putDevice(row: BridgeDeviceRow): Promise<void>;
   getDevice(id: string): Promise<BridgeDeviceRow | null>;
   getDeviceByTokenHash(hash: string): Promise<BridgeDeviceRow | null>;
   listDevices(userId: string): Promise<BridgeDeviceRow[]>;
+
+  /** Flip the device's Allow scripts switch (D58). Returns the updated row, or null for an unknown id. */
+  setDeviceAllowScripts(id: string, value: boolean): Promise<BridgeDeviceRow | null>;
   putPairing(row: BridgePairingRow): Promise<void>;
   getPairingBySecretHash(hash: string): Promise<BridgePairingRow | null>;
 
@@ -101,7 +124,16 @@ export class FsBridgeStore implements BridgeStore {
   }
 
   async putDevice(row: BridgeDeviceRow): Promise<void> {
-    await this._devices.put(row);
+    const existing = await this._devices.get(row.id);
+    const next: BridgeDeviceRow = { ...row };
+
+    delete next.allowScripts;
+
+    if (existing && existing.allowScripts === false) {
+      next.allowScripts = false;
+    }
+
+    await this._devices.put(next);
   }
 
   async getDevice(id: string): Promise<BridgeDeviceRow | null> {
@@ -116,6 +148,19 @@ export class FsBridgeStore implements BridgeStore {
     return (await this._devices.all())
       .filter((row) => row.userId === userId)
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  }
+
+  async setDeviceAllowScripts(id: string, value: boolean): Promise<BridgeDeviceRow | null> {
+    const row = await this._devices.get(id);
+
+    if (!row) {
+      return null;
+    }
+
+    const updated = { ...row, allowScripts: value };
+    await this._devices.put(updated);
+
+    return updated;
   }
 
   async putPairing(row: BridgePairingRow): Promise<void> {
@@ -176,6 +221,7 @@ function deviceFromRow(row: Row): BridgeDeviceRow {
     createdAt: row.created_at as string,
     lastSeenAt: optionalString(row.last_seen_at),
     revokedAt: optionalString(row.revoked_at),
+    allowScripts: row.allow_scripts !== false,
   };
 }
 
@@ -190,6 +236,11 @@ function deviceToRow(row: BridgeDeviceRow): Row {
     created_at: row.createdAt,
     last_seen_at: row.lastSeenAt ?? null,
     revoked_at: row.revokedAt ?? null,
+
+    /*
+     * allow_scripts is deliberately absent (D58): an upsert keeps the stored switch, an insert gets the
+     * column default (true). Only `setDeviceAllowScripts` writes it.
+     */
   };
 }
 
@@ -301,6 +352,23 @@ export class SupabaseBridgeStore implements BridgeStore {
     }
 
     return ((data as Row[] | null) ?? []).map(deviceFromRow);
+  }
+
+  /** A column update, so a concurrent `putDevice` (hello, last seen) can never flip the switch back. */
+  async setDeviceAllowScripts(id: string, value: boolean): Promise<BridgeDeviceRow | null> {
+    const client = await createAdminClient(this._context);
+    const { data, error } = await client
+      .from('bridge_devices')
+      .update({ allow_scripts: value })
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(`Failed to write bridge_devices: ${error.message}`);
+    }
+
+    return data ? deviceFromRow(data as Row) : null;
   }
 
   async putPairing(row: BridgePairingRow): Promise<void> {

@@ -12,6 +12,23 @@ import { useStore } from '@nanostores/react';
 import { Dialog, DialogButton, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
 import { bridgeCaptureStore } from '~/lib/stores/unity-bridge';
 
+/**
+ * The popup's subtitle: the view in plain words, never the tool label (verifier, 2026-09-29) —
+ * `unity_capture game 1024x576` → "Game view · 1024×576", `unity_capture scene` → "Scene view". Any other label
+ * is shown as it is.
+ */
+export function captureSubtitle(label: string): string {
+  const match = /^unity_capture (game|scene)(?: (\d+)x(\d+))?$/.exec(label.trim());
+
+  if (!match) {
+    return label;
+  }
+
+  const view = match[1] === 'scene' ? 'Scene view' : 'Game view';
+
+  return match[2] ? `${view} · ${match[2]}×${match[3]}` : view;
+}
+
 export function UnityCapturePopup() {
   const capture = useStore(bridgeCaptureStore);
   const [full, setFull] = useState(false);
@@ -30,7 +47,9 @@ export function UnityCapturePopup() {
     <DialogRoot open onOpenChange={(next) => !next && close()}>
       <Dialog className={full ? '!w-[95vw] p-6' : '!w-[640px] max-w-[95vw] p-6'} onClose={close}>
         <DialogTitle>Unity capture</DialogTitle>
-        {capture.label && <div className="text-xs text-bolt-elements-textTertiary mt-1">{capture.label}</div>}
+        {capture.label && (
+          <div className="text-xs text-bolt-elements-textTertiary mt-1">{captureSubtitle(capture.label)}</div>
+        )}
 
         <button
           type="button"
@@ -41,7 +60,7 @@ export function UnityCapturePopup() {
         >
           <img
             src={src}
-            alt={capture.label || 'Unity capture'}
+            alt={capture.label ? captureSubtitle(capture.label) : 'Unity capture'}
             className={full ? 'max-w-none' : 'max-w-full max-h-[60vh] rounded-md'}
           />
         </button>

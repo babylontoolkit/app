@@ -54,6 +54,16 @@ describe('createBridgeTools', () => {
     );
   });
 
+  it('the two script tools say they are refused when scripts are off and point at the dialog switch, never a command (D58)', () => {
+    for (const name of ['unity_run_script', 'blender_run_script']) {
+      const description = (tools[name] as unknown as { description: string }).description;
+
+      expect(description).toContain('Refused when scripts are off for this computer');
+      expect(description).toContain('turn on Allow scripts in the Unity Bridge dialog');
+      expect(description).toContain('never ask them to type a command');
+    }
+  });
+
   it('unity_command without a name → a sentence, and the pipeline is never called', async () => {
     expect(await call('unity_command', {})).toMatch(/^unity_command needs name — /);
     expect(runBridgeOperation).not.toHaveBeenCalled();
@@ -69,12 +79,24 @@ describe('createBridgeTools', () => {
     expect(runCtx.toolCallId).toBe('call_1');
   });
 
+  it('tool descriptions steer the model: create does the full Toolkit setup, narrow lists carry parameters, scripts are the last resort (T24-1..3)', () => {
+    const text = (name: string) => (tools[name] as unknown as { description: string }).description;
+
+    expect(text('unity_project')).toContain('Create runs the full Babylon Toolkit setup');
+    expect(text('unity_project')).toContain('Open does not add the Toolkit packages');
+    expect(text('unity_project')).not.toContain('package_add afterwards');
+    expect(text('unity_list_commands')).toContain("also returns each command's parameters");
+    expect(text('unity_run_script')).toContain(
+      'Prefer unity_command when a typed Editor command covers the change; use a script only when none does.',
+    );
+  });
+
   it('unity_capture defaults to the game view at 1024x576', async () => {
     await call('unity_capture', {});
 
     const [op, label] = runBridgeOperation.mock.calls[0] as [unknown, string];
     expect(op).toEqual({ kind: 'unity.capture', view: 'game', width: 1024, height: 576 });
-    expect(label).toBe('unity_capture game');
+    expect(label).toBe('unity_capture game 1024x576');
   });
 
   it('bridge_job without a jobId → a sentence, and jobControl is never called', async () => {
@@ -98,7 +120,7 @@ describe('createBridgeTools', () => {
 
     const [op, label] = runBridgeOperation.mock.calls[0] as [unknown, string];
     expect(op).toEqual({ kind: 'unity.capture', view: 'game', width: 800, height: 576 });
-    expect(label).toBe('unity_capture game');
+    expect(label).toBe('unity_capture game 800x576');
   });
 
   it('unity_editor action "restart" → a sentence naming the choices, and no call', async () => {

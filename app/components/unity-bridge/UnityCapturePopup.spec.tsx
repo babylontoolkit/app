@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 
 vi.mock('react-toastify', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
-const { UnityCapturePopup } = await import('./UnityCapturePopup');
+const { UnityCapturePopup, captureSubtitle } = await import('./UnityCapturePopup');
 const { bridgeCaptureStore, bridgeConsentStore, resetUnityBridgeStoresForTests, updateBridgeFromPart } = await import(
   '~/lib/stores/unity-bridge'
 );
@@ -31,6 +31,14 @@ afterEach(() => {
   resetUnityBridgeStoresForTests();
 });
 
+describe('captureSubtitle', () => {
+  it('names the view in plain words, with the size when the label carries it; other labels pass through (control)', () => {
+    expect(captureSubtitle('unity_capture game')).toBe('Game view');
+    expect(captureSubtitle('unity_capture scene 800x600')).toBe('Scene view · 800×600');
+    expect(captureSubtitle('set_transform')).toBe('set_transform');
+  });
+});
+
 describe('UnityCapturePopup', () => {
   it('renders nothing without a capture', () => {
     const { container } = render(<UnityCapturePopup />);
@@ -45,7 +53,10 @@ describe('UnityCapturePopup', () => {
     act(() => updateBridgeFromPart(capturePart()));
 
     expect(screen.getByText('Unity capture')).toBeTruthy();
-    expect(screen.getByText('unity_capture game')).toBeTruthy();
+
+    // the view in plain words, never the tool label
+    expect(screen.getByText('Game view')).toBeTruthy();
+    expect(screen.queryByText('unity_capture game')).toBeNull();
     expect(screen.getByRole('img').getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=');
   });
 

@@ -56,7 +56,7 @@ let store: FsBridgeStore;
 let upserts: GenerationUpsert[];
 let events: BridgeUiEvent[];
 
-/** A paired device row. D55: there is no per-device scripts switch — the helper's --no-scripts decides. */
+/** A paired device row. D58: its Allow scripts switch starts OFF (`store.setDeviceAllowScripts` turns it). */
 const device = (overrides: Partial<BridgeDeviceRow> = {}): BridgeDeviceRow => ({
   id: DEVICE,
   userId: USER,
@@ -230,6 +230,9 @@ describe('runBridgeOperation', () => {
 
     // No hello with a current project → the consent names the device.
     expect(events[0]).toMatchObject({ type: 'bridge-consent', toolCallId: 'call_1', target: 'Studio Mac' });
+
+    // The prompt shows the exact operation, not the tool label (T25 step 4).
+    expect(events[0]).toMatchObject({ operation: 'unity command delete_gameobject' });
     expect(
       deliverClientToolResult({
         generationId: GEN,
@@ -317,8 +320,9 @@ describe('runBridgeOperation', () => {
     await expectNothingBilled();
   });
 
-  it('a script is dispatched without any server-side switch (D55), allowScripts true, zero ledger rows', async () => {
+  it("a script dispatch carries the device's switch when ON (D58): allowScripts true, zero ledger rows", async () => {
     await store.putDevice(device());
+    await store.setDeviceAllowScripts(DEVICE, true);
 
     const pending = runBridgeOperation(
       { kind: 'unity.script', source: 'public static class B { public static void Run() {} }', entry: 'B.Run' },
@@ -339,14 +343,61 @@ describe('runBridgeOperation', () => {
     await expectNothingBilled();
   });
 
-  it('an ordinary dispatch also says allowScripts:true — the server never gates scripts (D55)', async () => {
+  it("a script dispatch carries the device's switch when the user turned it OFF (D58): allowScripts false, the helper's refusal is reported", async () => {
     await store.putDevice(device());
+    await store.setDeviceAllowScripts(DEVICE, false);
 
-    const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
+    const pending = runBridgeOperation(
+      { kind: 'unity.script', source: 'class A {}', entry: 'A.Run' },
+      'unity_run_script A.Run',
+      ctx(),
+    );
     const jobId = await waitQueued();
     const poll = await pickUp();
 
-    expect(poll.jobs[0].allowScripts).toBe(true);
+    expect(poll.jobs[0].allowScripts).toBe(false);
+
+    const refusal =
+      'Scripts are off for this computer — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon in the App Builder).';
+
+    deliverBridgeEvent(DEVICE, { jobId, type: 'refused', reason: refusal });
+    expect(String(await pending)).toContain('turn on Allow scripts in the Unity Bridge dialog');
+    await until(async () => (await store.getJob(jobId))?.status === 'refused');
+    await expectNothingBilled();
+  });
+
+  it('the switch is read AT DISPATCH: turning it on mid-turn applies to the next call of the same turn', async () => {
+    await store.putDevice(device());
+    await store.setDeviceAllowScripts(DEVICE, false);
+
+    const first = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
+    const firstId = await waitQueued();
+
+    expect((await pickUp()).jobs[0].allowScripts).toBe(false);
+    deliverBridgeEvent(DEVICE, { jobId: firstId, type: 'started' });
+    deliverBridgeEvent(DEVICE, { jobId: firstId, type: 'final', result: { ok: true, text: 'ok' } });
+    await first;
+    await until(async () => (await store.getJob(firstId))?.status === 'succeeded');
+
+    await store.setDeviceAllowScripts(DEVICE, true);
+    events = [];
+
+    const second = runBridgeOperation(SET_TRANSFORM, 'label', ctx({ toolCallId: 'call_2' }));
+    const secondId = await waitQueued();
+
+    expect((await pickUp()).jobs[0].allowScripts).toBe(true);
+    deliverBridgeEvent(DEVICE, { jobId: secondId, type: 'started' });
+    deliverBridgeEvent(DEVICE, { jobId: secondId, type: 'final', result: { ok: true, text: 'ok' } });
+    await second;
+    await until(async () => (await store.getJob(secondId))?.status === 'succeeded');
+  });
+
+  it('a device row that cannot be read dispatches allowScripts:false — never absent-means-on', async () => {
+    // No device row at all (e.g. removed between the turn start and this call).
+    const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
+    const jobId = await waitQueued();
+
+    expect((await pickUp()).jobs[0].allowScripts).toBe(false);
     deliverBridgeEvent(DEVICE, { jobId, type: 'started' });
     deliverBridgeEvent(DEVICE, { jobId, type: 'final', result: { ok: true, text: 'ok' } });
     await pending;
@@ -367,7 +418,8 @@ describe('runBridgeOperation', () => {
     deliverBridgeEvent(DEVICE, {
       jobId,
       type: 'refused',
-      reason: 'Scripts are disabled on this computer (--no-scripts).',
+      reason:
+        'Scripts are disabled on this computer (--no-scripts) — the Allow scripts switch has no effect; the user must re-run the install command from the Unity Bridge dialog without --no-scripts.',
     });
 
     expect(await pending).toMatch(/--no-scripts/);

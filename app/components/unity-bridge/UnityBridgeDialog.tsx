@@ -12,14 +12,16 @@
  *     when the install view shows and re-minted ~30 s before it expires; while open, the status is polled
  *     every 3 s and the dialog switches to the running view when the helper comes online.
  *   - Online → what the helper reports: Unity CLI, Blender, Babylon Toolkit, projects folder, current
- *     project, computer. A "Show install command" link reveals the install view (another computer, or a
- *     re-pair).
+ *     project, computer — and the per-computer **Allow scripts** checkbox (D58, on by default). Toggling
+ *     posts `/api/bridge/devices {action:'allowScripts'}`; a failure toasts the server's sentence and the box
+ *     goes back. With `--no-scripts` on the helper the box is disabled beside the muted line (that
+ *     computer's own switch wins). A "Show install command" link reveals the install view (another
+ *     computer, or a re-pair).
  *   - Offline (paired, not running) → the install view, prefixed with what is wrong.
  *   - Disabled → one sentence.
  *
- * Removed on purpose (D55): the devices list, the Allow-scripts switch (the helper's `--no-scripts` is the
- * only switch), the Jobs panel (captures open `UnityCapturePopup`), and the Local scenes section (import
- * goes through the agent). The consent prompt is a separate dialog and is unchanged.
+ * Removed on purpose (D55): the devices list, the Jobs panel (captures open `UnityCapturePopup`), and the
+ * Local scenes section (import goes through the agent). The consent prompt is a separate dialog and is unchanged.
  */
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@nanostores/react';
@@ -31,6 +33,7 @@ import {
   bridgeStatusStore,
   mintInstallCode,
   refreshBridgeStatus,
+  setBridgeAllowScripts,
   type BridgeStatusView,
 } from '~/lib/stores/unity-bridge';
 
@@ -211,7 +214,65 @@ function StatusRow({ label, value, ok }: { label: string; value: string; ok: boo
   );
 }
 
-function OnlineView({ status }: { status: BridgeStatusView }) {
+/**
+ * The per-computer Allow scripts switch (D58). The box shows the user's choice at once; a refusal from the
+ * server puts it back and toasts the server's own sentence.
+ */
+function AllowScriptsToggle({
+  projectId,
+  deviceId,
+  allowScripts,
+  disabledLocally,
+}: {
+  projectId: string;
+  deviceId: string;
+  allowScripts: boolean;
+  disabledLocally: boolean;
+}) {
+  const [pending, setPending] = useState<boolean | null>(null);
+  const checked = pending ?? allowScripts;
+
+  const change = async (value: boolean) => {
+    setPending(value);
+
+    const result = await setBridgeAllowScripts(deviceId, value);
+
+    if (result.ok) {
+      // Show the saved value now; the refresh then confirms it from the server.
+      const current = bridgeStatusStore.get();
+
+      if (current?.device?.id === deviceId) {
+        bridgeStatusStore.set({ ...current, device: { ...current.device, allowScripts: value } });
+      }
+
+      void refreshBridgeStatus(projectId);
+    } else {
+      toast.error(result.message ?? 'Could not change Allow scripts.');
+    }
+
+    setPending(null);
+  };
+
+  return (
+    <label className="flex items-start gap-2 text-sm text-bolt-elements-textPrimary">
+      <input
+        type="checkbox"
+        className="mt-0.5"
+        checked={checked}
+        disabled={disabledLocally || pending !== null}
+        onChange={(event) => void change(event.target.checked)}
+      />
+      <span>
+        Allow scripts
+        <span className="block text-xs text-bolt-elements-textTertiary">
+          Lets the AI run C# in Unity and Python in Blender on this computer.
+        </span>
+      </span>
+    </label>
+  );
+}
+
+function OnlineView({ status, projectId }: { status: BridgeStatusView; projectId: string }) {
   const device = status.device;
   const hello = device?.hello;
   const current = hello?.currentProject;
@@ -246,6 +307,15 @@ function OnlineView({ status }: { status: BridgeStatusView }) {
         <div className="text-xs px-3 py-2 rounded-md bg-amber-500/10 text-amber-600">
           {`Babylon Toolkit ${toolkitVersion} is older than ${BRIDGE_TOOLKIT_MIN_VERSION} — export commands will be refused until you update it.`}
         </div>
+      )}
+
+      {device?.id && (
+        <AllowScriptsToggle
+          projectId={projectId}
+          deviceId={device.id}
+          allowScripts={device.allowScripts !== false}
+          disabledLocally={hello?.scriptsDisabledLocally === true}
+        />
       )}
 
       {hello?.scriptsDisabledLocally && (
@@ -317,7 +387,7 @@ export function UnityBridgeDialog({ projectId }: { projectId: string }) {
             <p className="text-sm text-bolt-elements-textSecondary">The Unity Bridge is turned off on this server.</p>
           ) : (
             <>
-              {online && status && <OnlineView status={status} />}
+              {online && status && <OnlineView status={status} projectId={projectId} />}
 
               {online && !showInstall && (
                 <button type="button" className={LINK_BUTTON} onClick={() => setShowInstall(true)}>

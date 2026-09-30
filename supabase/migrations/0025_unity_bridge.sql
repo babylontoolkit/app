@@ -11,9 +11,12 @@
 --                       memory on the one server instance; only durable facts land here).
 --
 -- There is NO project link (D54, owner 2026-09-29): a builder project is never tied to a device or a Unity
--- project. The model opens or creates the Unity project it works on through the helper. There is no
--- per-device "Allow scripts" column either (D55): scripts are allowed unless the helper runs with
--- `--no-scripts`, which only the user's own computer decides.
+-- project. The model opens or creates the Unity project it works on through the helper.
+--
+-- `bridge_devices.allow_scripts` is the per-computer "Allow scripts" switch (D58), ON by default: the
+-- user can turn it off in the Unity Bridge dialog, every dispatch carries it, and the helper refuses a
+-- model-supplied C#/Python script when it is off. The helper's own `--no-scripts` still wins on that
+-- computer.
 --
 -- All three tables have RLS ENABLED with NO POLICY, deliberately: service-role only, the git_tokens rule
 -- (migration 0006). A user has no legitimate reason to read a token hash through the anon key.
@@ -28,6 +31,7 @@ create table if not exists public.bridge_devices (
   os            text not null,
   token_hash    text not null unique,
   capabilities  jsonb,
+  allow_scripts boolean not null default true,
   created_at    timestamptz not null default now(),
   last_seen_at  timestamptz,
   revoked_at    timestamptz

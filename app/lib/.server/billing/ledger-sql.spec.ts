@@ -151,9 +151,9 @@ describe('the migrations', () => {
   });
 
   /**
-   * The Unity Bridge (§4.17, migration 0025, D54/D55): there is NO project link — a builder project is
-   * never tied to a device or a Unity project — and NO per-device "Allow scripts" column (D55: the helper's
-   * `--no-scripts` is the only switch). A pairing row is a single-use install code stored as its HASH only.
+   * The Unity Bridge (§4.17, migration 0025, D54/D55/D58): there is NO project link — a builder project is
+   * never tied to a device or a Unity project — and a per-device "Allow scripts" switch that is OFF by
+   * default (D58: a computer never runs a model-supplied script until the user turns it on). A pairing row is a single-use install code stored as its HASH only.
    * 0025 was edited in place (never deployed), so these assert the one-pass schema a first deploy gets.
    */
   describe('the Unity Bridge (0025)', () => {
@@ -170,11 +170,25 @@ describe('the migrations', () => {
       expect((await columns('projects')).map((c) => c.column_name)).not.toContain('bridge_link');
     });
 
-    it('bridge_devices has NO allow_scripts column (D55)', async () => {
-      const names = (await columns('bridge_devices')).map((c) => c.column_name);
+    it('bridge_devices.allow_scripts is NOT NULL and defaults to true (D58 — on until the user turns it off)', async () => {
+      const cols = await columns('bridge_devices');
+      const allow = cols.find((c) => c.column_name === 'allow_scripts');
 
-      expect(names).toContain('token_hash'); // CONTROL — the table is there and the query reads it
-      expect(names).not.toContain('allow_scripts');
+      expect(cols.map((c) => c.column_name)).toContain('token_hash'); // CONTROL — the table is there
+      expect(allow?.is_nullable).toBe('NO');
+      expect(allow?.column_default).toBe('true');
+
+      // A row written without the column gets true — the default is what a freshly paired device sees.
+      await db.query(
+        `insert into public.bridge_devices (id, user_id, name, os, token_hash) values ('dev_d58', $1, 'Mac', 'darwin', 'h_d58')`,
+        [USER],
+      );
+
+      const row = await db.query<{ allow_scripts: boolean }>(
+        `select allow_scripts from public.bridge_devices where id = 'dev_d58'`,
+      );
+
+      expect(row.rows[0].allow_scripts).toBe(true);
     });
 
     it('bridge_pairings stores only the code hash: no plaintext code, device name or os; user and hash required', async () => {

@@ -497,7 +497,7 @@ fork, exporter, Agent Reference, and the Desktop Agent), and each repository's w
   - **New op/tool:** `{ kind: 'unity.project', action: 'list' | 'open' | 'create', name?: string }` → tool `unity_project`. `create` runs `unity projects new <name> --path <projectsFolder>` then opens it; `open` runs `unity open <path>`. `name` is a plain folder name (`/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/`, no `..`), resolved inside the projects folder only. Tier: allowed. Every other Unity op runs against the helper's CURRENT project (last opened/created). `BridgeDispatch.unityProjectKey` is replaced by the helper's current project; hello gains `projectsDir` (basename only) and `currentProject`.
   - **Allow scripts** is per device (`bridge_devices.allow_scripts`, default false), toggled in the Status panel; `--no-scripts` still wins.
   - **UI:** Connect = command + pairing code + devices. Status = device + versions + project names + Allow scripts + Jobs + Remove device. The Local scenes section keeps only the dev-server origin, Check, and one scene-URL Import box (publishing still needs local scenes copied into the project).
-  - `BRIDGE_PROTOCOL_VERSION` 1 → 2 (hello and dispatch changed). Migration 0025 is edited in place (never deployed): no `projects.bridge_link`; `bridge_devices.allow_scripts boolean not null default false`.
+  - `BRIDGE_PROTOCOL_VERSION` 1 → 2 (hello and dispatch changed). Migration 0025 is edited in place (never deployed): no `projects.bridge_link`; `bridge_devices.allow_scripts boolean not null default true` (**on by default** — owner, 2026-09-29: "Default Allow Scripts to true"; only an explicit false turns it off, a missing device reads off).
   Binds: T14–T25 (rework), T26.
 
 - **D55 — Start-at-login service and a one-screen Unity Bridge dialog (owner, 2026-09-29; supersedes D45's "no service" and the Connect/Status/Jobs/Local-scenes UI of T21/T22/D52).**
@@ -514,12 +514,14 @@ fork, exporter, Agent Reference, and the Desktop Agent), and each repository's w
     - `--pair <code>` works for a foreground run too. **It is the ONLY pairing flow (owner: "I like this mode better")**: the helper-prints-a-code flow is removed (helper `start`/`redeem` polling, the dialog's code box and `approve` action, and the pair route's `start`/`redeem` actions all go). A plain `bt-agent bridge` with no stored pairing for that server prints `Not paired with <server> — copy the install command from the Unity Bridge dialog in the App Builder.` and exits 1.
     - An unpaired service (device removed) logs `This computer is not paired with <server> — copy the install command from the Unity Bridge dialog again.` and exits its loop for that server; it does not spin.
   - **Several App Builders, one service (owner, 2026-09-29):** end users have one App Builder (production, the default). A developer may run several (localhost dev + production + staging): `--server` may be repeated; the helper pairs with each once (credentials stored per server in `bridge.json` as `servers: [{server, deviceId, token}]`) and runs one poll loop per server, sharing ONE job queue and ONE current project so two App Builders can never drive Unity concurrently. `status`/`logout` take `--server` to pick one (default: all).
-  - **Many Unity projects, one service:** the service is not tied to a Unity project or an App Builder project; it serves the projects folder(s). `--projects` may be repeated (projects are listed across all folders; a name must be unique across them or the tool asks for the folder). Running `--install-service` again rewrites the stored settings (`~/.babylon-toolkit/bridge.json`: server, projects folders, no-scripts) and restarts the service — no uninstall needed to change them.
+  - **Many Unity projects, one service:** the service is not tied to a Unity project or an App Builder project; it serves the projects folder(s). `--projects` may be repeated (projects are listed across all folders; a name must be unique across them or the tool asks for the folder). Running `--install-service` again rewrites the stored settings (`~/.babylon-toolkit/bridge.json`: server, projects folders, no-scripts) and restarts the service — no uninstall needed to change them. A supplied `--pair` code ALWAYS re-pairs: it is claimed even when a credential is stored, and on success replaces it (a rejected code keeps the stored credential and is reported), so the dialog's command pairs on its first run after a revoke.
   Binds: T21–T25, T26.
 
 - **D56 — `unity_project create` runs the Agent Reference's full Babylon Toolkit scaffold (owner, 2026-09-29: "make sure to add the Babylon Toolkit and UnityGLTF packages as well as make sure it has the Unity CLI installed in that project… check the agent reference").** Source of truth: `references/unity-exporter-cli.md` §4 ("installing the Unity Pipeline means installing THREE packages, always") and §4B.4 (the scaffold steps). `create` = `projects new` (wait for exit) → `pipeline install` → launch the Editor (detached) + wait ready → `package_add https://github.com/babylontoolkit/unitygltf.git` + poll `package_status` → `package_add https://github.com/babylontoolkit/professionaledition.git` + poll → poll until `CanvasTools.CanvasToolsExporter` is compiled into the domain → `run_script` the bootstrap (`bt-bootstrap.cs`) → `npm install` in the project root when `package.json` exists → `run_script` the starter scene (`bt-newscene.cs` → `Assets/Scenes/Level01.unity` + LightingSettings) → verify. `git` must be on PATH (checked first). Progress lines per step; the whole create is a long operation (≤ 30 min). The licence step is skipped — bridge exports run under the automation grant (D47–D51). Fallback when `package_add` is absent: `Client.Add` via `eval` (§4.1). The two `.cs` scripts are embedded in the Desktop Agent, copied verbatim from AgentReference `references/scripts/` (not yet pushed), with a header naming the source to keep in sync. `open` of an existing project still only ensures the Pipeline package and reports when the Toolkit packages are missing. Binds: T24, T25, T26.
 
 - **D57 — the Unity Bridge never touches the user's Unity licence or Unity sign-in (owner, 2026-09-29: "TAKE OUT ANY THING DEALING WITH UNITY LICENSE AT ALL… NEVER DO THAT").** `unity license …` and `unity auth …` are REFUSED in both policy copies (no consent path, `--help` included), no test or live run may issue one, and no doc or tool text offers them. "Licence" in an owner request about the bridge means the **Babylon Toolkit licence file the Unity Exporter generates**, never Unity's. Binds: T12, T24, T25, T26.
+
+- **D58 — the per-computer Allow scripts switch comes back (owner, 2026-09-29: "we still need the Allow Scripts options as well").** Supersedes D55's "scripts are gated only by `--no-scripts`". `bridge_devices.allow_scripts boolean not null default false` (0025, edited in place — never deployed); a checkbox **Allow scripts** in the dialog's connected view ("Lets the AI run C# in Unity and Python in Blender on this computer."), posted as `POST /api/bridge/devices { action: 'allowScripts', deviceId, value }` (verified user, own device only, 404 otherwise); every dispatch carries `allowScripts: device.allowScripts`; the helper refuses a model-supplied script when the dispatch says false OR `--no-scripts` is set, with two different sentences (switch off → "Scripts are off for this computer — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon in the App Builder)."; `--no-scripts` → "Scripts are disabled on this computer (--no-scripts) — the Allow scripts switch has no effect; the user must re-run the install command from the Unity Bridge dialog without --no-scripts."). The Unity Bridge note tells the model the current state. The helper's OWN scaffold steps (`unity_project create`'s `eval_file` of the embedded bootstrap/new-scene scripts) are not model-supplied scripts and run whatever the switch says. Binds: T22, T24, T25, T26.
 
 ## Design Reference
 
@@ -3183,7 +3185,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/components/unity-bridge app/components/local-scenes app/lib/stores/unity-bridge.spec.ts` → pass.
   - Verify level: live
 
-- [ ] **T22** — Status panel, Consent dialog, Jobs panel, and chat data-part handling
+- [ ] **T22** — Status panel, Consent dialog, Jobs panel, and chat data-part handling ⏭️ DEFERRED (auto-pilot): all live checks PASS (consent Allow/Deny, capture popup, D58 switch) except import-via-the-AI, which needs a model turn — the model provider (CometAPI → Bedrock) is out of quota; re-run that one step once the quota is topped up or `LLM_PROVIDER=Anthropic`
   - Depends on: T21, T19, T6, T5
   - Files: `app/components/unity-bridge/UnityBridgeStatusPanel.tsx`, `UnityBridgeConsentDialog.tsx`,
     `UnityBridgeJobsPanel.tsx` (create) + `UnityBridgePanels.spec.tsx`; `UnityBridgeButton.tsx`,
@@ -3404,7 +3406,7 @@ only, never commit.
   - Verify: `cd /Users/mackey/Documents/Repos/Babylon/Repositories/UniversalSkills && npm test` → all pass.
   - Verify level: live
 
-- [ ] **T24** — Unity runner, and the Desktop Agent's own copy of the policy
+- [x] **T24** — Unity runner, and the Desktop Agent's own copy of the policy
   - Depends on: T23, T9, T14, T28
   - Files: `lib/bridge/policy.js`, `lib/bridge/unity/discover.js`, `run.js`, `ops.js`, `guard.js`,
     `automation.js` (create);
@@ -3535,7 +3537,7 @@ only, never commit.
   - Verify: `cd /Users/mackey/Documents/Repos/Babylon/Repositories/UniversalSkills && npm test` → all pass.
   - Verify level: live
 
-- [ ] **T25** — Blender runner, and the whole feature end to end
+- [ ] **T25** — Blender runner, and the whole feature end to end ⏭️ DEFERRED (auto-pilot): steps 1, 1b, 2, 2a, 2b, 3, 4, 8, 10, 11, 12 PASS live; steps 5 (Blender), 6 (unsaved guard), 7 (import) and 9's reply are blocked by the model provider's quota ("Quota exceeded … remaining $0.12 need $0.15") — re-run them once the quota is topped up or `LLM_PROVIDER=Anthropic`
   - Depends on: T24, T22, T20, T13
   - Files: `lib/bridge/blender/discover.js`, `run.js` (create); `lib/bridge/cli.js` (modify);
     `tests/bridge-blender.test.js` (create)
@@ -3572,46 +3574,63 @@ only, never commit.
     - no Blender → `refused` with the `--blender` hint.
   - Acceptance — **end-to-end live check of the whole feature** (one session; Chrome on `http://localhost:5173`;
     PROJ from T8; Blender 5.1.2):
-    1. **Pairing:** in PROJ, run
-       `node /Users/mackey/Documents/Repos/Babylon/Repositories/UniversalSkills/bin/bt-agent.js bridge --server http://localhost:5173`.
-       Pair via the cube icon in under a minute; link the project; the icon turns green.
-    2. **Export and load:** in a Build turn, ask "export Level01 and load it in the game". The agent exports
-       via `bt_export_level`; the game's `sceneUrl` is `http://localhost:<port>/scenes/Level01.gltf`; the
-       preview shows the scene with textures; the console is clean; the reply includes a Unity capture. The
-       Credits panel shows `Unity Bridge` rows only for charged calls.
-    2b. **Automation grant:** after that export, `unity command bt_status --project-path "$PROJ"` shows
-        `automation : on until …` (about 12 h ahead), and the helper's terminal never printed the grant.
-    3. **Scripts switch:** with **Allow scripts** off, a `unity_run_script` request is refused naming the
-       switch. With it on, it runs and a 2-credit row appears.
+    *(Rewritten 2026-09-29 to match D53–D57; the pre-D53 steps named a project link, an Allow-scripts switch,
+    credit rows and panel-driven imports that no longer exist.)*
+    1. **Install + pairing (D55):** open the cube icon → the dialog shows ONE command
+       `npx @babylonjs-toolkit/agent bridge --install-service --pair <code> --server http://localhost:5173`; run it
+       with `node …/UniversalSkills/bin/bt-agent.js` in place of `npx @babylonjs-toolkit/agent` (unpublished) and
+       `--projects <scratch unity-projects folder>`. The service registers, the dialog switches to "Unity Bridge
+       connected" listing Unity CLI / Blender / Babylon Toolkit / Projects folder / Current project, and the icon
+       turns green.
+    1b. **Create (D56):** in a Build turn ask the AI to create a Unity project. `unity_project create` runs the
+        whole scaffold (Pipeline + UnityGLTF + Babylon Toolkit git packages, exporter compiled, bootstrap,
+        `npm install`, `Assets/Scenes/Level01.unity`); the project becomes current; the Unity console shows no
+        `No command named 'bt_devserver_status'` spam.
+    2. **Edit, export and load:** ask the AI to add something to Level01, export it and load it in the game. It
+       uses `unity_command` (`create_gameobject`, `save_all`, `bt_export_level`), `unity_dev_server start`
+       and `unity_capture`; the game's `sceneUrl` is `http://localhost:<port>/scenes/<file>.gltf`; the preview
+       shows the scene; the console is clean; the capture opens in the popup (never over a consent dialog).
+       Only `generation` ledger rows are written (D53 — no bridge rows).
+    2a. **Scene Exporter window (owner, 2026-09-29):** export the same scene twice — once with the Babylon
+        Toolkit Scene Exporter window closed, once with it open/docked — and compare the results (files in
+        `Export/scenes`, components/script present in the glTF extras, `BuildWebProject` in
+        `Assets/[Config]/settings.json`, the scene loading with components in the preview). A full export must
+        not depend on the window being open; if it does, that is a defect.
+    2b. **Automation grant:** the scaffolded project uses the PUBLISHED Toolkit from git, which does not carry the
+        uncommitted T28 exporter code (D33), so this step runs against PROJ = BabylonToolkit-2024 (install with a
+        second `--projects /Users/mackey/Documents/Repos/Projects/BabylonToolkit/ProfessionalEdition/Project`):
+        the AI opens it with `unity_project open` and exports one scene; then
+        `unity command bt_status --project-path "$PROJ"` shows `automation : on until …` (about 12 h ahead), and
+        neither the helper log nor any output printed the grant.
+    3. **Scripts (D55):** a `unity_run_script` request runs; reinstall the service with `--no-scripts` → the
+       same request is refused naming `--no-scripts`, and the dialog shows the muted line; reinstall without it.
     4. **Consent:** ask for `unity projects clean` on the scratch project. The Consent dialog shows the exact
-       command; **Deny** → nothing runs and no ledger row. Also ask for `unity license status` and
-       `unity auth status` — both are refused outright (no dialog, nothing runs). 🔴 Never run any
-       `unity license …` or `unity auth …` command in this or any test — the bridge never touches the
-       user's Unity licence or sign-in (owner, 2026-09-29).
+       command; **Deny** → nothing runs and no ledger row; an **Allow once** on a harmless consent-tier call runs
+       it. Also ask for `unity license status` and `unity auth status` — both are refused outright (no dialog,
+       nothing runs). 🔴 Never run any `unity license …` or `unity auth …` command in this or any test — the
+       bridge never touches the user's Unity licence or sign-in (owner, 2026-09-29, D57).
     5. **Blender:** copy `/Users/mackey/Desktop/Assets HD/Lousberg/The Complete KayKit Collection v6.1/KayKit Adventurers 2.0/Characters/fbx/Knight.fbx`
        to `$PROJ/Assets/_BridgeTest/Knight.fbx` and let Unity import it. Ask the agent to re-weight it in place
        with the T11 `reweight.py` body via `blender_run_script` (inputs/outputs `Assets/_BridgeTest/Knight.fbx`).
-       Expect:
-       - nine `bounds-shift=0.000000` lines in the result;
-       - `Assets/_BridgeTest/Knight.fbx~` on disk with no `.meta` beside it;
-       - Unity re-importing the FBX.
-
-       Then a script declaring an unwritten `Assets/_BridgeTest/none.obj` → `Blender finished but did not write`.
-       Delete `Assets/_BridgeTest` afterwards.
-    6. **Unsaved work:** with a dirty scene in a GUI Editor, the agent's `bt_export_level --scene …` is
-       refused naming the scene, and the edit survives.
-    7. **Import:** Import Level01 from the Status panel into `public/scenes/Level01/`. Also, with the helper
-       stopped and the device removed (unpaired), import the same scene from the Connect dialog's Local scenes
-       section by pasting its URL — it must work with no bridge at all (D52). The bytes equal the
-       server's (sha256 of one `.bin` on both sides). Switching the game to the relative URL still loads.
-       Publish shows no `localhost-url` warning afterwards (it did before).
+       Expect nine `bounds-shift=0.000000` lines, `Assets/_BridgeTest/Knight.fbx~` with no `.meta` beside it,
+       and Unity re-importing the FBX. Then a script declaring an unwritten `Assets/_BridgeTest/none.obj` →
+       `Blender finished but did not write`. Delete `Assets/_BridgeTest` afterwards.
+    6. **Unsaved work:** with a dirty scene in the GUI Editor, `bt_export_level` is refused naming the scene, and
+       the edit survives.
+    7. **Import (D55):** ask the AI to import the exported scene; `import_local_scene` copies it (and its
+       Toolkit sidecars: `.bin`, env map, probe `.bin`, script bundle) into `public/scenes/<name>/`; the bytes
+       equal the server's (sha256 of one `.bin` on both sides); switching the game to the relative URL still
+       loads; Publish shows no `localhost-url` warning afterwards (it did before).
     8. **Not running:** stop the dev server. The "isn't running" explainer appears once.
-    9. **No helper:** stop `bt-agent bridge`; a new turn asking "open Unity and bake the lighting" gets a reply
-       saying Unity isn't connected and pointing at the cube icon.
-    10. **Doctor:** `node bin/bt-agent.js doctor` still reports the install result, plus
-        `bridge paired with http://localhost:5173`.
+    9. **No helper:** `--uninstall-service`; a new turn asking "open Unity and bake the lighting" gets a reply
+       saying Unity isn't connected and pointing at the cube icon; the dialog shows the offline view.
+    10. **Doctor:** `node bin/bt-agent.js doctor` still reports the install result, plus the bridge section
+        (paired server, `service: installed|not installed`).
     11. **Gates:** app `pnpm typecheck && pnpm lint:fix && pnpm lint && pnpm test` green, and the Desktop
         Agent's `npm test` green.
+    12. **Clean up:** uninstall the service, `logout`, revoke the test device, close and delete every scratch
+        Unity project this run created (and its Unity Hub list entry). Never touch BabylonToolkit-2024 beyond
+        the steps above, never touch the owner's other projects.
 
     A step whose external prerequisite is missing is reported, with what would settle it, and never skipped
     silently.

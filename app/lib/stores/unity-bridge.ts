@@ -17,10 +17,14 @@ import { BRIDGE_MAX_IMAGE_BASE64, type BridgeHello, type BridgeJobStatus } from 
 
 /** Mirrors the JSON of `GET /api/projects/:projectId/bridge` (the route declares the same shape). */
 export interface BridgeDeviceView {
+  id: string;
   name: string;
   online: boolean;
   lastSeenAt?: string;
   hello?: BridgeHello;
+
+  /** The per-computer Allow scripts switch (D58), off by default. */
+  allowScripts: boolean;
 }
 
 export interface BridgeStatusView {
@@ -194,6 +198,20 @@ export async function mintInstallCode(): Promise<InstallCodeResult> {
   }
 
   return { ok: true, code: data.code, expiresAt: data.expiresAt };
+}
+
+/**
+ * Turn the device's Allow scripts switch on or off (D58). A failure carries the server's own sentence so
+ * the dialog can show it and put the checkbox back.
+ */
+export async function setBridgeAllowScripts(deviceId: string, value: boolean): Promise<ActionResult> {
+  const result = await postJson('/api/bridge/devices', { action: 'allowScripts', deviceId, value });
+
+  if (!result.ok) {
+    return { ok: false, message: result.message ?? 'Could not change Allow scripts.' };
+  }
+
+  return { ok: true };
 }
 
 /**

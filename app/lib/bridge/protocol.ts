@@ -74,7 +74,7 @@ export interface BridgeHello {
 export interface BridgeDispatch {
   jobId: string;
   op: BridgeOperation;
-  allowScripts: boolean; // always true from the server (D55) — the helper's --no-scripts is the only switch
+  allowScripts: boolean; // the device's Allow scripts switch (D58, off by default); --no-scripts still wins on the helper
   consentGranted: boolean;
 }
 

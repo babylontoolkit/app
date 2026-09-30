@@ -3,7 +3,7 @@
  * D54, D55).
  *
  *   GET /api/projects/:projectId/bridge → BridgeStatusView
- *       { enabled, state: 'unpaired'|'offline'|'online', device?: {name, online, lastSeenAt, hello},
+ *       { enabled, state: 'unpaired'|'offline'|'online', device?: {id, name, online, lastSeenAt, hello, allowScripts},
  *         productionOrigin: string | null }
  *
  * There is NO project link (D54): the bridge drives whichever paired device is present (the most recently
@@ -11,8 +11,9 @@
  * `APP_URL` (null when unset): the helper defaults to the production App Builder, so the dialog's install
  * command adds `--server <this origin>` only when the page is somewhere else (D55).
  *
- * There is no POST (D55): the dialog shows no devices, scripts switch or jobs. Jobs stay server-side for
- * the model's `bridge_job` tool; devices can still be listed / revoked at `/api/bridge/devices`.
+ * There is no POST here: the dialog's Allow scripts checkbox (D58) posts to `/api/bridge/devices`
+ * `{action:'allowScripts', deviceId, value}` with this device's `id` (the caller's own device — never a token
+ * hash). Jobs stay server-side for the model's `bridge_job` tool.
  *
  * Both walls: a verified session AND ownership of the project (404, not 403). A disabled bridge answers
  * with `{enabled:false, …}` (200), so the icon still renders and the dialog can say it is turned off.
@@ -22,16 +23,20 @@ import type { BridgeHello } from '~/lib/bridge/protocol';
 import { bridgeProductionOrigin, isBridgeEnabled } from '~/lib/.server/bridge/auth';
 import { deviceHello, isDevicePresent } from '~/lib/.server/bridge/relay';
 import { pickBridgeDevice } from '~/lib/.server/bridge/service';
-import { getBridgeStore } from '~/lib/.server/bridge/store';
+import { getBridgeStore, isScriptsAllowed } from '~/lib/.server/bridge/store';
 import { errorResponse } from '~/lib/.server/http';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 
 interface BridgeDeviceView {
+  id: string;
   name: string;
   online: boolean;
   lastSeenAt?: string;
   hello?: BridgeHello;
+
+  /** The per-computer Allow scripts switch (D58), off by default. */
+  allowScripts: boolean;
 }
 
 /** Mirrors `BridgeStatusView` in `app/lib/stores/unity-bridge.ts` (the client store). */
@@ -66,10 +71,12 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
       const row = picked.device;
 
       view.device = {
+        id: row.id,
         name: row.name,
         online: isDevicePresent(row.id),
         lastSeenAt: row.lastSeenAt,
         hello: deviceHello(row.id) ?? row.capabilities,
+        allowScripts: isScriptsAllowed(row),
       };
     }
 

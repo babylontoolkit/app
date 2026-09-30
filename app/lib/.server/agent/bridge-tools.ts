@@ -144,7 +144,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
   const tools = {
     unity_project: tool({
       description:
-        "List, open or create the Unity project on the user's computer (inside the helper's projects folder). Every other Unity tool works on the project opened or created last. Create makes an empty Unity project — add the Babylon Toolkit package with unity_command package_add afterwards. open accepts <folder>/<name> when a name exists in more than one projects folder.",
+        "List, open or create the Unity project on the user's computer (inside the helper's projects folder). Every other Unity tool works on the project opened or created last. Create runs the full Babylon Toolkit setup (Unity Pipeline, UnityGLTF and Babylon Toolkit packages, the exporter, npm install and a starter scene Assets/Scenes/Level01.unity) and takes a few minutes — wait on the job. Open does not add the Toolkit packages. open accepts <folder>/<name> when a name exists in more than one projects folder.",
       parameters: z.object({
         action: z.string().optional().describe('"list" (default), "open" or "create".'),
         name: z
@@ -194,7 +194,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_list_commands: tool({
       description:
-        'List the Unity Editor commands available on the current Unity project (filter with query). Use before unity_command — never guess a command name.',
+        "List the Unity Editor commands available on the current Unity project (filter with query). Use before unity_command — never guess a command name. A narrow query (5 matches or fewer) also returns each command's parameters: name, type, required or optional, and description.",
       parameters: z.object({
         query: z.string().optional().describe('Filter the command list, e.g. "transform".'),
       }),
@@ -260,7 +260,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_run_script: tool({
       description:
-        'Run a C# script in the Unity Editor of the current project (run_script). entry is "Class.Method". Refused if the user started the helper with --no-scripts.',
+        'Run a C# script in the Unity Editor of the current project (run_script). entry is "Class.Method". Prefer unity_command when a typed Editor command covers the change; use a script only when none does. Refused when scripts are off for this computer — then tell the user to turn on Allow scripts in the Unity Bridge dialog (the cube icon in the chat box); never ask them to type a command.',
       parameters: z.object({
         source: z.string().optional().describe('The C# source of the script.'),
         entry: z.string().optional().describe('The static method to call, as "Class.Method".'),
@@ -280,7 +280,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     blender_run_script: tool({
       description:
-        "Run a Python (bpy) script in headless Blender on the user's machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. Refused if the user started the helper with --no-scripts.",
+        "Run a Python (bpy) script in headless Blender on the user's machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. Refused when scripts are off for this computer — then tell the user to turn on Allow scripts in the Unity Bridge dialog (the cube icon in the chat box); never ask them to type a command.",
       parameters: z.object({
         source: z.string().optional().describe('The Python (bpy) source of the script.'),
         inputs: stringListish().describe('Input files (a list), relative to the Unity project.'),
@@ -354,7 +354,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
           return notANumber('unity_capture', 'height');
         }
 
-        return run({ kind: 'unity.capture', view: v, width: w, height: h }, `unity_capture ${v}`, options);
+        return run({ kind: 'unity.capture', view: v, width: w, height: h }, `unity_capture ${v} ${w}x${h}`, options);
       },
 
       // The picture reaches the model as a real vision part, the text alongside it (preview-tools' pattern).

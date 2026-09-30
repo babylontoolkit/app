@@ -5,13 +5,17 @@
  * Not online → exactly ONE command, `npx @babylonjs-toolkit/agent bridge --install-service --pair <code>`,
  * with `--server <origin>` only off the production origin; the code is minted on open and re-minted before
  * it expires; the dialog polls and switches to the running view when the helper comes online. Online → the
- * helper's status. Gone for good: the devices list, the scripts switch, the jobs, the local-scene inputs.
+ * helper's status and the per-computer Allow scripts checkbox (D58). Gone for good: the devices list, the
+ * jobs, the local-scene inputs.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const toastSuccess = vi.fn();
-vi.mock('react-toastify', () => ({ toast: { success: (...a: unknown[]) => toastSuccess(...a), error: vi.fn() } }));
+const toastError = vi.fn();
+vi.mock('react-toastify', () => ({
+  toast: { success: (...a: unknown[]) => toastSuccess(...a), error: (...a: unknown[]) => toastError(...a) },
+}));
 
 const { UnityBridgeDialog, installCommand } = await import('./UnityBridgeDialog');
 const { bridgeDialogStore, bridgeStatusStore, resetUnityBridgeStoresForTests } = await import(
@@ -40,19 +44,21 @@ const online = (h = hello()): Status => ({
   enabled: true,
   state: 'online',
   productionOrigin: null,
-  device: { name: 'Studio Mac', online: true, hello: h },
+  device: { id: 'dev_1', name: 'Studio Mac', online: true, hello: h, allowScripts: false },
 });
 const offline: Status = {
   enabled: true,
   state: 'offline',
   productionOrigin: null,
-  device: { name: 'Studio Mac', online: false },
+  device: { id: 'dev_1', name: 'Studio Mac', online: false, allowScripts: false },
 };
 
 let serverStatus: Status;
 let codes: string[];
 let invites: number;
 let inviteFailure: string | null;
+let toggleFailure: string | null;
+let toggles: Array<Record<string, unknown>>;
 
 beforeEach(() => {
   resetUnityBridgeStoresForTests();
@@ -60,12 +66,30 @@ beforeEach(() => {
   codes = ['K7QM-2XWD', 'AB23-CD45', 'EF67-GH89'];
   invites = 0;
   inviteFailure = null;
+  toggleFailure = null;
+  toggles = [];
+  toastError.mockReset();
   serverStatus = unpaired(null);
 
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       if (String(url) === '/api/bridge/devices' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+
+        if (body.action === 'allowScripts') {
+          toggles.push(body);
+
+          if (toggleFailure) {
+            return new Response(JSON.stringify({ error: true, message: toggleFailure }), { status: 404 });
+          }
+
+          const device = serverStatus.device as Record<string, unknown>;
+          serverStatus = { ...serverStatus, device: { ...device, allowScripts: body.value } };
+
+          return new Response(JSON.stringify({ device: { id: body.deviceId, allowScripts: body.value } }));
+        }
+
         if (inviteFailure) {
           return new Response(JSON.stringify({ error: true, message: inviteFailure }), { status: 429 });
         }
@@ -129,6 +153,7 @@ describe('UnityBridgeDialog — not online', () => {
         'Run this once in a terminal on the computer that has Unity. It installs a small helper that starts with your computer, so the AI can open, edit and export your Unity projects.',
       ),
     ).toBeTruthy();
+    expect(screen.queryByRole('checkbox')).toBeNull(); // D58: no Allow scripts before a computer is connected
   });
 
   it('off production (or production unknown): the command adds --server <this origin>', async () => {
@@ -208,6 +233,7 @@ describe('UnityBridgeDialog — not online', () => {
     );
     await waitFor(() => expect(commands()).toHaveLength(1));
     expect(commands()[0]).toContain('--install-service --pair');
+    expect(screen.queryByRole('checkbox')).toBeNull(); // D58: the switch lives in the connected view only
   });
 });
 
@@ -227,9 +253,9 @@ describe('UnityBridgeDialog — online', () => {
       'ComputerStudio Mac',
     ]);
 
-    // D55: no devices list, no scripts switch, no jobs, no local-scene inputs, no minted code.
-    expect(screen.queryByRole('checkbox')).toBeNull();
-    expect(screen.queryByText(/Your devices|Remove|Allow scripts|Jobs|View jobs/)).toBeNull();
+    // D55: no devices list, no jobs, no local-scene inputs, no minted code. D58: ONE checkbox, Allow scripts.
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.queryByText(/Your devices|Remove|Jobs|View jobs/)).toBeNull();
     expect(screen.queryByLabelText('Dev server address')).toBeNull();
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(commands()).toEqual([]);
@@ -246,13 +272,46 @@ describe('UnityBridgeDialog — online', () => {
     expect(rows).toContain('Current projectnone — ask the AI to open or create one');
   });
 
-  it('--no-scripts on the helper shows one muted line (control: absent otherwise)', () => {
+  it('--no-scripts on the helper shows one muted line and DISABLES the checkbox (control: absent/enabled otherwise)', () => {
     openWith(online(hello({ scriptsDisabledLocally: true })));
     expect(screen.getByText('Scripts are disabled on this computer (--no-scripts).')).toBeTruthy();
+    expect((screen.getByRole('checkbox', { name: /Allow scripts/ }) as HTMLInputElement).disabled).toBe(true);
 
     cleanup();
     openWith(online());
     expect(screen.queryByText(/--no-scripts/)).toBeNull();
+    expect((screen.getByRole('checkbox', { name: /Allow scripts/ }) as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it('Allow scripts (D58): a device switched off shows unticked with its helper text; ticking posts the device action and shows ON', async () => {
+    openWith(online());
+
+    const box = screen.getByRole('checkbox', { name: /Allow scripts/ }) as HTMLInputElement;
+
+    expect(box.checked).toBe(false);
+    expect(screen.getByText('Lets the AI run C# in Unity and Python in Blender on this computer.')).toBeTruthy();
+
+    fireEvent.click(box);
+
+    await waitFor(() => expect(toggles).toEqual([{ action: 'allowScripts', deviceId: 'dev_1', value: true }]));
+    await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true));
+    await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).disabled).toBe(false));
+    expect(toastError).not.toHaveBeenCalled();
+
+    // …and unticking posts false.
+    fireEvent.click(screen.getByRole('checkbox'));
+    await waitFor(() => expect(toggles.at(-1)).toEqual({ action: 'allowScripts', deviceId: 'dev_1', value: false }));
+    await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false));
+  });
+
+  it("a refused toggle toasts the server's message and the box goes back", async () => {
+    toggleFailure = 'That device does not exist.';
+    openWith(online());
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /Allow scripts/ }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith('That device does not exist.'));
+    await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(false));
   });
 
   it("warns when the current project's Toolkit is older than the minimum", () => {
