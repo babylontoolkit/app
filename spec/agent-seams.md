@@ -139,7 +139,7 @@ believed.
 | `app/lib/.server/billing/rates.ts` | `getModelTiers` | `proxy.ts:993` (`getModelTiers`) |
 | `app/lib/.server/game-backend/separation.ts` | `sanitizeGameBackend` | `api.agent.ts:281` (`sanitizeGameBackend`) |
 | `app/lib/.server/agent/bridge-notes.ts` | `bridgeTurnNotes` — the Unity Bridge + local scene server notes, pushed after the last cache breakpoint (§4.17, D37) | `proxy.ts:1684` (`bridgeTurnNotes`) |
-| `app/lib/.server/bridge/service.ts` | `resolveBridgeTurn`, `takeFinishedJobsForNote` — ⚠️ **ASSEMBLE + STREAM**: `settleDropped` runs in the generation's `finally`, refunding bridge jobs still queued when the turn ends (§4.17, D13). Filed here because the turn decision is the entry point | `proxy.ts:1551` (`resolveBridgeTurn`) |
+| `app/lib/.server/bridge/service.ts` | `resolveBridgeTurn`, `takeFinishedJobsForNote` — ⚠️ **ASSEMBLE + STREAM**: `settleDropped` runs in the generation's `finally`, marking bridge jobs still queued when the turn ends cancelled (§4.17; no ledger row — D53). Filed here because the turn decision is the entry point | `proxy.ts:1551` (`resolveBridgeTurn`) |
 | `app/lib/local-scenes/url.ts` | `isLocalDevUrl` — the route keeps a client-sent local scene server origin only if it is loopback (§4.17, D38) | `api.agent.ts:49` (`isLocalDevUrl`) |
 | `app/lib/.server/licensing/entitlements.ts` | `resolveByok` | `proxy.ts:830` (`resolveByok`) |
 | `app/lib/.server/media/provider.ts` | `resolveMediaProvider` | `proxy.ts:1514` (`resolveMediaProvider`) |
@@ -192,7 +192,7 @@ and a straddler for `stripReplayedReasoning` — see above.
 | Module | Entry point | Invoked at |
 |---|---|---|
 | `app/lib/.server/agent/mcp-relay.ts` | `cancelGenerationToolCalls` | `proxy.ts:3322` (`cancelGenerationToolCalls`) |
-| `app/lib/.server/bridge/relay.ts` | `cancelGenerationBridgeJobs` — drops the generation's still-queued Unity Bridge jobs in the `finally`, so `settleDropped` refunds them (§4.17, D13) | `proxy.ts:3325` (`cancelGenerationBridgeJobs`) |
+| `app/lib/.server/bridge/relay.ts` | `cancelGenerationBridgeJobs` — drops the generation's still-queued Unity Bridge jobs in the `finally`, so `settleDropped` marks them cancelled (§4.17) | `proxy.ts:3325` (`cancelGenerationBridgeJobs`) |
 
 ### ASSEMBLE + TOOL — built during assembly, enforced inside `execute`
 
@@ -201,7 +201,7 @@ and a straddler for `stripReplayedReasoning` — see above.
 | `app/lib/.server/agent/file-tools.ts` | `createFileTools` | `proxy.ts:1892` (`createFileTools`) |
 | `app/lib/.server/agent/mcp-tools.ts` | `createMcpRelayTools` | `proxy.ts:1427` (`createMcpRelayTools`) |
 | `app/lib/.server/agent/media-tools.ts` | `createMediaTools` | `proxy.ts:1518` (`createMediaTools`) |
-| `app/lib/.server/agent/bridge-tools.ts` | `createBridgeTools` — Unity Bridge tools; consent, debit and dispatch happen inside `execute` via `bridge/service.ts` (§4.17) | `proxy.ts:1566` (`createBridgeTools`) |
+| `app/lib/.server/agent/bridge-tools.ts` | `createBridgeTools` — Unity Bridge tools; consent and dispatch happen inside `execute` via `bridge/service.ts` (§4.17) | `proxy.ts:1566` (`createBridgeTools`) |
 | `app/lib/.server/agent/local-scene-tools.ts` | `createLocalSceneTools` — `import_local_scene`, a client relay like the preview tools (§4.17, D22) | `proxy.ts:1580` (`createLocalSceneTools`) |
 | `app/lib/.server/agent/preview-tools.ts` | `createPreviewTools` | `proxy.ts:1474` (`createPreviewTools`) |
 | `app/lib/.server/agent/reference-tools.ts` | `createReferenceTools` (TOOL), `carriedReferenceIds` (ASSEMBLE) | `proxy.ts:1109` (`carriedReferenceIds`) |

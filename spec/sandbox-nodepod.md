@@ -250,6 +250,35 @@ the server is down is stock Vite reconnect behaviour, dev-only (a production bui
 client), and stops the moment the server is back. Pinned in the fork by
 `sw-host-passthrough.test.ts` (no bare `return fetch(request)` may return to the fetch handler).
 
+### A localhost URL on another port belongs to the network, not the pod (2026-09-29, SPEC §4.17, §8 log #8)
+
+A game may load a scene from the Unity exporter's dev server while developing
+(`http://localhost:8888/scenes/Level01.gltf`). The service worker's rule 2 counted every
+`localhost` / `127.0.0.1` / `0.0.0.0` request as same-origin and handed it to the pod, so the request
+never left the browser and came back as the pod's `index.html` — a glTF loader choking on HTML, with
+nothing naming the cause.
+
+**The rule now:** a localhost-alias URL is routed into the pod **only when its port is the app's own port
+or a port a live virtual server registered** (`instanceServers`); any other port passes through to the
+real network, like any other cross-origin request, and a missing file there surfaces as that server's own
+404. **An empty registry keeps the old forwarding**, because after a service-worker restart the registry
+is unknown until the page re-tells it, and forwarding is what keeps previews working in that window.
+`SW_VERSION` 14 → 15 so open tabs take the new worker.
+
+**How it ships:** the fix is in the fork's `static/__sw__.js` (with a test), and the app carries it as a
+**pnpm patch of the installed `1.9.18-btk.7`** (`patches/@babylonjs-toolkit__nodepod@1.9.18-btk.7.patch`,
+`package.json#pnpm.patchedDependencies`). The patch also carries `btk.8`'s host-passthrough
+`Response.error()` change, so the patched `dist/__sw__.js` is byte-identical to the fork's. A hand-edited
+`public/__sw__.js` is not an option — `nodepod-assets.spec.ts` compares it to the installed package.
+
+**Owner step:** publish the fork (with this `static/__sw__.js`), bump `@babylonjs-toolkit/nodepod` to that
+release, delete the patch file and the `pnpm.patchedDependencies` entry, then run `pnpm sync:nodepod`.
+Bump the pin the way §"We run a FORK" describes, never with a bare `pnpm install`.
+
+The preview iframes also need the browser's permission to reach the loopback network: the three builder
+preview surfaces carry `allow="… loopback-network; local-network-access"`; the share wrapper does not
+(a published game has no business reaching the viewer's machine).
+
 ## Gaps to close in the adapter — each of these fails silently if skipped
 
 1. **`readdir` returns `string[]`, but `refresh-walk.ts:15-18` requires

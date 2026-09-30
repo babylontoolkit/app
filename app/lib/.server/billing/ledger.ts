@@ -46,9 +46,6 @@ const logger = createScopedLogger('ledger');
  * `mayGoNegative` below. Not anchored to a generations row (creation runs no generation at all).
  */
 /**
- * 'bridge' — a Unity Bridge operation, debited BEFORE dispatch and refunded if it never ran (§4.17). Never negative.
- */
-/**
  * The runtime inventory. The union is DERIVED from it rather than declared beside it, so a reason cannot
  * exist in the type and be invisible to the tests that check the type against the SQL `CHECK` constraint
  * (`ledger-sql.spec.ts`) — the three lockstep places (union, `mayGoNegative`, SQL) drifting apart is a
@@ -61,7 +58,6 @@ export const LEDGER_REASONS = [
   'media',
   'search',
   'project_create',
-  'bridge',
   'refund',
   'promo',
   'adjustment',
@@ -125,20 +121,13 @@ export class DuplicateRefundError extends Error {
 }
 
 /**
- * Notes whose refund may happen at most once, matching the partial unique index predicates of
- * migration 0015 (`project_create:<projectId>`) and migration 0025 (`bridge:<jobId>`, D13 latch 2 —
- * a Unity Bridge job that never started is refunded exactly once).
+ * Notes whose refund may happen at most once, matching migration 0015's partial index predicate.
  *
  * Narrow on purpose: every other refund note repeats legitimately (one user sees "Generation failed"
- * many times), so widening this rejects refunds users are owed. Add a prefix here only together with
- * the migration that indexes it — the local `FsLedger` mirrors exactly what Postgres enforces.
+ * many times), so widening this rejects refunds users are owed.
  */
 export function isSingleRefundNote(reason: LedgerReason, note?: string): boolean {
-  return (
-    reason === 'refund' &&
-    typeof note === 'string' &&
-    (note.startsWith('project_create:') || note.startsWith('bridge:'))
-  );
+  return reason === 'refund' && typeof note === 'string' && note.startsWith('project_create:');
 }
 
 export interface Ledger {
@@ -201,7 +190,7 @@ function mayGoNegative(reason: LedgerReason): boolean {
    * 'search' joins them: it is debited mid-generation after the vendor was already paid, so it cannot
    * be refused without eating the cost AND losing the audit trail (migration 0010).
    *
-   * 🔴 'media', 'project_create' and 'bridge' are deliberately ABSENT: each debits BEFORE the spend it pays for,
+   * 🔴 'media' and 'project_create' are deliberately ABSENT: each debits BEFORE the spend it pays for,
    * so each must refuse rather than overdraw. Adding one here silently converts a refusal into free
    * work on the platform's bill.
    */

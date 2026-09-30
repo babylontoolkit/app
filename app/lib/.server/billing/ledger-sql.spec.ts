@@ -651,35 +651,15 @@ describe('credit_ledger.generation_id → generations(id)', () => {
   });
 
   /*
-   * The 'bridge' reason (migration 0025): a Unity Bridge operation, the 'media' shape — debited BEFORE
-   * dispatch and anchored to a generations row (the job id), so it must REFUSE rather than overdraw.
+   * D53 (owner, 2026-09-29): Unity Bridge operations are NOT billed separately — the model turn that
+   * drives Unity/Blender is billed like any generation. There is no 'bridge' ledger reason, and the CHECK
+   * refuses one, so a per-operation charge cannot silently come back through a ledger write.
    */
-  it('accepts a bridge debit anchored to a generations row', async () => {
+  it("REFUSES the retired 'bridge' reason at the CHECK constraint", async () => {
     await append({ delta: 10, reason: 'grant' });
-    await createGeneration('brg_t');
 
-    const row = await append({ delta: -2, reason: 'bridge', generationId: 'brg_t' });
-
-    expect(row.balance_after).toBe(8);
-  });
-
-  it('REFUSES a bridge debit that would overdraw', async () => {
-    await append({ delta: 1, reason: 'grant' });
-    await createGeneration('brg_t');
-
-    await expect(append({ delta: -2, reason: 'bridge', generationId: 'brg_t' })).rejects.toThrow(
-      /insufficient|balance|negative/i,
-    );
-  });
-
-  /*
-   * D13 latch 2: a bridge job is refunded exactly once, enforced by the partial unique index on the
-   * refund's note `bridge:<jobId>` — never by a read-then-write check two racing settlers can both pass.
-   */
-  it('REFUSES a second bridge refund for the same job', async () => {
-    await append({ delta: 10, reason: 'refund', note: 'bridge:brg_x' });
-
-    await expect(append({ delta: 10, reason: 'refund', note: 'bridge:brg_x' })).rejects.toThrow(/duplicate|unique/i);
+    await expect(append({ delta: -2, reason: 'bridge' })).rejects.toThrow(/check|constraint/i);
+    await expect(append({ delta: 2, reason: 'bridge', allowNegative: true })).rejects.toThrow(/check|constraint/i);
     expect(await balance()).toBe(10);
   });
 });

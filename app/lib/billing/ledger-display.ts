@@ -80,7 +80,6 @@ const LABELS: Record<string, string> = {
   media: 'Media render',
   search: 'Web search',
   project_create: 'New project',
-  bridge: 'Unity Bridge',
   refund: 'Refund',
   promo: 'Promo',
   adjustment: 'Adjustment',

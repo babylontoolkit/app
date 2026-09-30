@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { creditsFor, DEFAULT_BRIDGE_PRICES, priceClassOf } from './pricing';
+import * as pricing from './pricing';
+import { isLongOperation } from './pricing';
 import type { BridgeOperation } from './protocol';
 
-const P = DEFAULT_BRIDGE_PRICES;
 const blender = (timeoutSeconds: number): BridgeOperation => ({
   kind: 'blender.script',
   source: 'x',
@@ -11,47 +11,48 @@ const blender = (timeoutSeconds: number): BridgeOperation => ({
   timeoutSeconds,
 });
 
-describe('bridge pricing', () => {
-  it('list / devserver.status / editor status → free (0)', () => {
-    expect(creditsFor({ kind: 'unity.list' }, P)).toBe(0);
-    expect(creditsFor({ kind: 'devserver.status' }, P)).toBe(0);
-    expect(creditsFor({ kind: 'unity.editor', action: 'status' }, P)).toBe(0);
-    expect(priceClassOf({ kind: 'unity.list' })).toBe('free');
+describe('bridge long-operation classification', () => {
+  it('list / devserver.status / editor status are not long', () => {
+    expect(isLongOperation({ kind: 'unity.list' })).toBe(false);
+    expect(isLongOperation({ kind: 'devserver.status' })).toBe(false);
+    expect(isLongOperation({ kind: 'unity.editor', action: 'status' })).toBe(false);
   });
 
-  it('unity.command set_transform → 1', () => {
-    expect(creditsFor({ kind: 'unity.command', name: 'set_transform', params: {} }, P)).toBe(1);
+  it('unity.command set_transform is not long', () => {
+    expect(isLongOperation({ kind: 'unity.command', name: 'set_transform', params: {} })).toBe(false);
   });
 
-  it('unity.script → 2', () => {
-    expect(creditsFor({ kind: 'unity.script', source: 'x', entry: 'A.B' }, P)).toBe(2);
+  it('unity.script is not long', () => {
+    expect(isLongOperation({ kind: 'unity.script', source: 'x', entry: 'A.B' })).toBe(false);
   });
 
-  it('bt_export_level → 4', () => {
-    expect(creditsFor({ kind: 'unity.command', name: 'bt_export_level', params: {} }, P)).toBe(4);
+  it('bt_export_level is long', () => {
+    expect(isLongOperation({ kind: 'unity.command', name: 'bt_export_level', params: {} })).toBe(true);
   });
 
-  it('batch containing bake_lighting → 4', () => {
+  it('batch containing bake_lighting is long; a batch of short commands is not', () => {
     const op: BridgeOperation = {
       kind: 'unity.command',
       name: 'batch',
       params: { commands: [{ name: 'set_transform' }, { name: 'bake_lighting' }] },
     };
-    expect(creditsFor(op, P)).toBe(4);
-  });
-
-  it("unity.cli ['test'] → 4", () => {
-    expect(creditsFor({ kind: 'unity.cli', args: ['test'] }, P)).toBe(4);
-  });
-
-  it('blender.script timeout 60 → 2, timeout 600 → 4', () => {
-    expect(creditsFor(blender(60), P)).toBe(2);
-    expect(creditsFor(blender(600), P)).toBe(4);
-  });
-
-  it('prices {command:0,…} → 0', () => {
+    expect(isLongOperation(op)).toBe(true);
     expect(
-      creditsFor({ kind: 'unity.command', name: 'set_transform', params: {} }, { command: 0, script: 2, job: 4 }),
-    ).toBe(0);
+      isLongOperation({ kind: 'unity.command', name: 'batch', params: { commands: [{ name: 'set_transform' }] } }),
+    ).toBe(false);
+  });
+
+  it("unity.cli ['test'] is long; ['status'] is not", () => {
+    expect(isLongOperation({ kind: 'unity.cli', args: ['test'] })).toBe(true);
+    expect(isLongOperation({ kind: 'unity.cli', args: ['status'] })).toBe(false);
+  });
+
+  it('blender.script timeout 60 is not long, timeout 600 is', () => {
+    expect(isLongOperation(blender(60))).toBe(false);
+    expect(isLongOperation(blender(600))).toBe(true);
+  });
+
+  it('carries no per-operation price (D53 — bridge operations are not billed separately)', () => {
+    expect(Object.keys(pricing).sort()).toEqual(['LONG_CLI', 'LONG_COMMANDS', 'isLongOperation']);
   });
 });

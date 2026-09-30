@@ -3321,7 +3321,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        */
       cancelGenerationToolCalls(generationId);
 
-      // Bridge jobs still QUEUED when the generation ends never ran — refund them (D13). Started ones continue.
+      // Bridge jobs still QUEUED when the generation ends never ran — mark them cancelled. Started ones continue.
       void settleDropped(cancelGenerationBridgeJobs(generationId), request.context).catch(() => undefined);
     }
   }

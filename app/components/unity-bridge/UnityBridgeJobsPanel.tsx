@@ -1,8 +1,9 @@
 /**
- * The project's Unity Bridge jobs (SPEC §4.17, D13). Opens when `bridgeDialogStore === 'jobs'`.
+ * The project's Unity Bridge jobs (SPEC §4.17). Opens when `bridgeDialogStore === 'jobs'`.
  *
  * Live rows (streamed by the current generation) come first, then the recent rows from the status
- * route, deduped by job id. Rows mirror the Media panel's list rows.
+ * route, deduped by job id. Rows mirror the Media panel's list rows. No credits on a row: bridge
+ * operations are not billed separately — the model turn that drives them is (D53).
  */
 import { useState } from 'react';
 import { useStore } from '@nanostores/react';
@@ -21,12 +22,10 @@ interface JobRow {
   id: string;
   operation: string;
   status: BridgeJobStatus;
-  credits: number;
   lastLine?: string;
   resultText?: string;
 }
 
-const REFUNDED: ReadonlySet<BridgeJobStatus> = new Set(['cancelled', 'refused']);
 const ACTIVE: ReadonlySet<BridgeJobStatus> = new Set(['queued', 'running']);
 
 function statusIcon(status: BridgeJobStatus): string {
@@ -52,7 +51,7 @@ export function UnityBridgeJobsPanel({ projectId }: { projectId: string }) {
 
   for (const [id, job] of Object.entries(live)) {
     seen.add(id);
-    rows.push({ id, operation: job.label, status: job.status, credits: job.credits, lastLine: job.lines.at(-1) });
+    rows.push({ id, operation: job.label, status: job.status, lastLine: job.lines.at(-1) });
   }
 
   for (const job of status?.jobs ?? []) {
@@ -65,7 +64,6 @@ export function UnityBridgeJobsPanel({ projectId }: { projectId: string }) {
       id: job.id,
       operation: job.operation,
       status: job.status,
-      credits: job.credits,
       lastLine: job.error,
       resultText: job.resultText,
     });
@@ -99,8 +97,7 @@ export function UnityBridgeJobsPanel({ projectId }: { projectId: string }) {
                 <div className="flex-1 min-w-0">
                   <div className="text-bolt-elements-textPrimary truncate">{row.operation}</div>
                   <div className="text-bolt-elements-textTertiary truncate">
-                    {row.credits} credits
-                    {REFUNDED.has(row.status) && ' · refunded'}
+                    {row.status}
                     {row.lastLine ? ` · ${row.lastLine}` : ''}
                   </div>
                 </div>

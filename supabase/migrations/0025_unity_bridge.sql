@@ -1,4 +1,4 @@
--- 0025 — the Unity Bridge (SPEC §4.17, spec/billing.md).
+-- 0025 — the Unity Bridge (SPEC §4.17).
 --
 -- The Unity Bridge lets the agent drive the user's LOCAL Unity Editor (and Blender) through the Babylon
 -- Toolkit Desktop Agent (`bt-agent bridge`), which long-polls this server over HTTPS. This migration adds:
@@ -12,11 +12,9 @@
 -- All three tables have RLS ENABLED with NO POLICY, deliberately: service-role only, the git_tokens rule
 -- (migration 0006). A user has no legitimate reason to read a token hash through the anon key.
 --
--- Money (spec/billing.md): 'bridge' is a new ledger reason, the 'media' shape — debited BEFORE dispatch, so
--- an insufficient balance REFUSES rather than overdrawing (absent from `mayGoNegative`). A job the helper
--- never reported `started` is refunded exactly once; that "once" is enforced HERE by a partial unique index
--- on the refund's note `bridge:<jobId>` (the project_create precedent, migration 0015), never by a
--- read-then-write check in TypeScript.
+-- Money: NONE. Bridge operations are not billed separately; the model turn that drives Unity/Blender is
+-- billed like any generation (owner, 2026-09-29, D53). This migration deliberately does NOT touch
+-- credit_ledger — there is no 'bridge' ledger reason and no credits column on a job.
 create table if not exists public.bridge_devices (
   id            text primary key,
   user_id       uuid not null references auth.users(id) on delete cascade,
@@ -55,7 +53,6 @@ create table if not exists public.bridge_jobs (
   operation    text not null,
   tier         text not null check (tier in ('allowed', 'scripts', 'consent')),
   status       text not null check (status in ('queued', 'running', 'succeeded', 'failed', 'refused', 'cancelled')),
-  credits      integer not null default 0,
   started      boolean not null default false,
   result_text  text,
   error        text,
@@ -68,12 +65,3 @@ alter table public.bridge_jobs enable row level security;
 -- NO POLICY, deliberately.
 
 alter table public.projects add column if not exists bridge_link jsonb;
-
-alter table public.credit_ledger drop constraint if exists credit_ledger_reason_check;
-alter table public.credit_ledger add constraint credit_ledger_reason_check
-  check (reason in ('grant', 'purchase', 'generation', 'media', 'search', 'project_create', 'bridge', 'refund', 'promo', 'adjustment'));
-
--- Exactly one refund per bridge job, enforced by the database (D13; the project_create precedent, 0015).
-create unique index if not exists credit_ledger_bridge_refund_idx
-  on public.credit_ledger (user_id, note)
-  where reason = 'refund' and note like 'bridge:%';

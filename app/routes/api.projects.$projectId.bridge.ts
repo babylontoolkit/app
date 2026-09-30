@@ -32,7 +32,6 @@ interface BridgeStatusView {
     id: string;
     operation: string;
     status: BridgeJobStatus;
-    credits: number;
     createdAt: string;
     finishedAt?: string;
     resultText?: string;
@@ -86,7 +85,6 @@ export async function loader({ request, context, params }: LoaderFunctionArgs) {
       id: row.id,
       operation: row.operation,
       status: row.status,
-      credits: row.credits,
       createdAt: row.createdAt,
       finishedAt: row.finishedAt,
       resultText: row.resultText,

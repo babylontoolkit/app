@@ -7,11 +7,11 @@
  *
  * ONE server instance holds all of this (D5): presence, per-device queues, parked polls and job
  * handles. Nothing here is persisted — durable facts (the job rows) are the service's business. A
- * restart loses queued jobs; their pickup timeout refunds them (D13).
+ * restart loses queued jobs; their pickup timeout marks them cancelled.
  *
- * The one rule that protects money (D13): an entry marked `dropped` (cancelled before it started — it
- * is being REFUNDED) never accepts another event. A late `started` returns `false` and `onEvent` is
- * never called, so a refunded job can never be turned back into a charged one.
+ * The one latch: an entry marked `dropped` (cancelled before it started) never accepts another event.
+ * A late `started` returns `false` and `onEvent` is never called, so a cancelled job can never be turned
+ * back into a running one. (Bridge operations are not billed separately — D53.)
  */
 import {
   BRIDGE_JOB_RETENTION_MS,
@@ -368,7 +368,7 @@ export function deliverBridgeEvent(deviceId: string, event: BridgeJobEvent): boo
       removeFromQueue(entry);
       entry.state = 'refused';
 
-      // Picked up but not charged: the service tells the two apart through waitFinal.
+      // Picked up but refused before running: the started waiters are released and waitFinal reports the refusal.
       for (const resolve of entry.startedWaiters.splice(0)) {
         resolve(true);
       }
@@ -402,7 +402,7 @@ export function cancelBridgeJob(jobId: string, userId: string): 'dropped' | 'sig
     }
 
     case 'dispatched': {
-      // It never started, so it is refundable — AND the helper holds it, so tell the helper too.
+      // It never started, so it is cancellable — AND the helper holds it, so tell the helper too.
       settleDroppedEntry(entry);
 
       const state = deviceState(entry.deviceId);
@@ -413,7 +413,7 @@ export function cancelBridgeJob(jobId: string, userId: string): 'dropped' | 'sig
     }
 
     case 'started': {
-      // Still charged: the run began. Only the cancel signal goes out.
+      // The run began: only the cancel signal goes out.
       const state = deviceState(entry.deviceId);
       state.cancels.push({ jobId, cancel: true });
       flush(state);

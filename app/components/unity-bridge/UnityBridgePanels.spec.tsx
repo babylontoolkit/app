@@ -153,21 +153,20 @@ describe('UnityBridgeStatusPanel', () => {
 });
 
 describe('UnityBridgeJobsPanel', () => {
-  it('a cancelled job shows refunded; live rows come first and dedupe by id', () => {
+  it('a cancelled job shows its status and no credits; live rows come first and dedupe by id', () => {
     bridgeStatusStore.set(
       status('9.25.1', [
         {
           id: 'brg_old',
           operation: 'Export Racer',
           status: 'cancelled',
-          credits: 5,
           createdAt: '2026-09-29T00:00:00Z',
         },
-        { id: 'brg_live', operation: 'Stale copy', status: 'queued', credits: 5, createdAt: '2026-09-29T00:00:00Z' },
+        { id: 'brg_live', operation: 'Stale copy', status: 'queued', createdAt: '2026-09-29T00:00:00Z' },
       ]),
     );
     bridgeLiveJobsStore.set({
-      brg_live: { generationId: 'gen_1', status: 'running', label: 'Export level', lines: ['50%'], credits: 8 },
+      brg_live: { generationId: 'gen_1', status: 'running', label: 'Export level', lines: ['50%'] },
     });
     bridgeDialogStore.set('jobs');
     render(<UnityBridgeJobsPanel projectId="prj_1" />);
@@ -176,9 +175,14 @@ describe('UnityBridgeJobsPanel', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain('Export level');
     expect(rows[0].textContent).toContain('50%');
-    expect(rows[0].textContent).not.toContain('refunded');
+    expect(rows[0].textContent).toContain('running');
     expect(rows[1].textContent).toContain('Export Racer');
-    expect(rows[1].textContent).toContain('refunded');
+    expect(rows[1].textContent).toContain('cancelled');
+
+    // D53: bridge operations are not billed separately — no row speaks of credits or refunds.
+    for (const row of rows) {
+      expect(row.textContent).not.toMatch(/credit|refund/i);
+    }
     expect(screen.queryByText('Stale copy')).toBeNull();
     expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1);
   });

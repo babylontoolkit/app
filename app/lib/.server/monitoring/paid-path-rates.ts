@@ -94,7 +94,7 @@ export function recordRescueMarkers(monitor: Monitor, outcome: RescueMarkerOutco
 }
 
 /** The ledger reasons whose work can end in a refund (`spec/fail-loud.md` §Scope). */
-export type RefundableReason = 'generation' | 'media' | 'bridge';
+export type RefundableReason = 'generation' | 'media';
 
 /**
  * Record whether one unit of paid work ended in a refund, alerting when a reason's rate crosses.

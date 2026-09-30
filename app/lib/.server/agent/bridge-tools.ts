@@ -140,7 +140,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
   const tools = {
     unity_list_commands: tool({
       description:
-        "List the Unity Editor commands available on the user's linked Unity project (filter with query). Use before unity_command — never guess a command name. Free.",
+        "List the Unity Editor commands available on the user's linked Unity project (filter with query). Use before unity_command — never guess a command name.",
       parameters: z.object({
         query: z.string().optional().describe('Filter the command list, e.g. "transform".'),
       }),
@@ -152,7 +152,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_command: tool({
       description:
-        "Run one Unity Editor command (unity command <name>) on the user's linked Unity project, e.g. create_gameobject, set_component_properties, save_all, bt_export_level. params are the command's parameters. Paths are relative to the Unity project. Costs credits; destructive commands ask the user first.",
+        "Run one Unity Editor command (unity command <name>) on the user's linked Unity project, e.g. create_gameobject, set_component_properties, save_all, bt_export_level. params are the command's parameters. Paths are relative to the Unity project. Destructive commands ask the user first.",
       parameters: z.object({
         name: z.string().optional().describe('The command name, e.g. "set_transform".'),
         params: z
@@ -185,7 +185,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_cli: tool({
       description:
-        'Run a top-level unity CLI operation (args after "unity", e.g. ["status"] or ["projects","info"]). Account, licence and install operations ask the user first. Costs credits.',
+        'Run a top-level unity CLI operation (args after "unity", e.g. ["status"] or ["projects","info"]). Account, licence and install operations ask the user first.',
       parameters: z.object({
         args: stringListish().describe('The arguments after "unity" as a list of strings, e.g. ["status"].'),
       }),
@@ -206,7 +206,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_run_script: tool({
       description:
-        'Run a C# script in the linked Unity Editor (run_script). entry is "Class.Method". Needs the user\'s "Allow scripts" switch. Costs credits.',
+        'Run a C# script in the linked Unity Editor (run_script). entry is "Class.Method". Needs the user\'s "Allow scripts" switch.',
       parameters: z.object({
         source: z.string().optional().describe('The C# source of the script.'),
         entry: z.string().optional().describe('The static method to call, as "Class.Method".'),
@@ -226,7 +226,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     blender_run_script: tool({
       description:
-        'Run a Python (bpy) script in headless Blender on the user\'s machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. Needs "Allow scripts". Costs credits.',
+        'Run a Python (bpy) script in headless Blender on the user\'s machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. Needs "Allow scripts".',
       parameters: z.object({
         source: z.string().optional().describe('The Python (bpy) source of the script.'),
         inputs: stringListish().describe('Input files (a list), relative to the Unity project.'),
@@ -276,7 +276,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
     }),
 
     unity_capture: tool({
-      description: 'Capture the Unity Game or Scene view and see it (max 1024 px). Costs credits.',
+      description: 'Capture the Unity Game or Scene view and see it (max 1024 px).',
       parameters: z.object({
         view: z.string().optional().describe('Which view to capture: "game" (default) or "scene".'),
         width: numberish().describe('Width in pixels (default 1024, max 1024).'),
@@ -314,7 +314,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
     }),
 
     unity_dev_server: tool({
-      description: 'Start or check the Babylon Toolkit dev server in the linked Unity Editor. status is free.',
+      description: 'Start or check the Babylon Toolkit dev server in the linked Unity Editor.',
       parameters: z.object({
         action: z.string().optional().describe('"status" (default) or "start".'),
         port: numberish().describe('Port for start (optional).'),
@@ -353,7 +353,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_editor: tool({
       description:
-        'Check, open or close the Unity Editor for the linked project. status is free; close refuses if there are unsaved changes.',
+        'Check, open or close the Unity Editor for the linked project. close refuses if there are unsaved changes.',
       parameters: z.object({
         action: z.string().optional().describe('"status" (default), "open" or "close".'),
       }),
@@ -369,7 +369,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
     }),
 
     bridge_job: tool({
-      description: 'Check, wait for (up to 90 s per call) or cancel a Unity Bridge job by id. Free.',
+      description: 'Check, wait for (up to 90 s per call) or cancel a Unity Bridge job by id.',
       parameters: z.object({
         action: z.string().optional().describe('"status" (default), "wait" or "cancel".'),
         jobId: z.string().optional().describe('The job id, e.g. "brg_…".'),

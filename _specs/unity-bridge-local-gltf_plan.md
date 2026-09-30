@@ -489,6 +489,17 @@ fork, exporter, Agent Reference, and the Desktop Agent), and each repository's w
   section is less to build). Rejected: keeping the controls in the Status panel only — it opens only when a
   device is linked, which made the "no bridge needed" promise false in the UI. Binds: T6, T21, T22.
 
+- **D53 — Bridge operations are NOT billed per operation (owner, 2026-09-29; supersedes the per-operation billing in D10–D13, D16's "then quotes, debits", D11, T15's `bridge` ledger reason and T18's billing.ts).** "I do not want to charge credits for Unity CLI commands … charge like regular AI usage for the prompting and AI controlling Unity via the Unity CLI or Blender." The model turn that drives Unity/Blender is billed exactly like any generation (its tokens, including the extra tool rounds); running a command on the user's machine costs nothing extra. So: no `bridge` ledger reason, no refund-once index, no `BRIDGE_*_CREDITS`, no generations anchor per job, no credits on job rows/events/UI. Kept: tiers, consent (asked before dispatch), the scripts switch, jobs and their statuses, the relay. Migration 0025 is edited in place (never deployed — the pre-first-deploy rule). Binds: T15, T18, T19, T21, T22, T26.
+
+- **D54 — No project linking, no scene browsing; the AI opens or creates the Unity project (owner, 2026-09-29; supersedes D19's link conditions, D44, D52's helper scene list, `projects.bridge_link`, the Link/Unlink actions, and the per-link `allowScripts` of D15).** "I just want the App Builder to open or create a Unity project, edit a scene and export it … then we consume the scene via its dev server URL." Pairing a computer is the only setup.
+  - **Offered when:** the requesting user has a paired, non-revoked device that is present (the most recently seen one wins), `UNITY_BRIDGE_ENABLED` is not `"false"`, and the turn is an ordinary Build turn. No project link exists.
+  - **Projects folder:** `bt-agent bridge --server <url> [--projects <folder>]`. Default: the folder it runs in; if that folder is itself a Unity project, its parent is the projects folder and that project starts as current. Discovery lists the Unity projects directly inside the projects folder.
+  - **New op/tool:** `{ kind: 'unity.project', action: 'list' | 'open' | 'create', name?: string }` → tool `unity_project`. `create` runs `unity projects new <name> --path <projectsFolder>` then opens it; `open` runs `unity open <path>`. `name` is a plain folder name (`/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/`, no `..`), resolved inside the projects folder only. Tier: allowed. Every other Unity op runs against the helper's CURRENT project (last opened/created). `BridgeDispatch.unityProjectKey` is replaced by the helper's current project; hello gains `projectsDir` (basename only) and `currentProject`.
+  - **Allow scripts** is per device (`bridge_devices.allow_scripts`, default false), toggled in the Status panel; `--no-scripts` still wins.
+  - **UI:** Connect = command + pairing code + devices. Status = device + versions + project names + Allow scripts + Jobs + Remove device. The Local scenes section keeps only the dev-server origin, Check, and one scene-URL Import box (publishing still needs local scenes copied into the project).
+  - `BRIDGE_PROTOCOL_VERSION` 1 → 2 (hello and dispatch changed). Migration 0025 is edited in place (never deployed): no `projects.bridge_link`; `bridge_devices.allow_scripts boolean not null default false`.
+  Binds: T14–T25 (rework), T26.
+
 ## Design Reference
 
 ### File map

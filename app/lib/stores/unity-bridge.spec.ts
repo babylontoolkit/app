@@ -82,13 +82,12 @@ describe('unity-bridge store', () => {
 
   it('dedupes job lines by count across replayed scans and never moves a status backwards', () => {
     const parts = [
-      { type: 'bridge-job', jobId: 'brg_1', status: 'queued', label: 'Export', credits: 5, generationId: 'gen_1' },
+      { type: 'bridge-job', jobId: 'brg_1', status: 'queued', label: 'Export', generationId: 'gen_1' },
       {
         type: 'bridge-job',
         jobId: 'brg_1',
         status: 'running',
         label: 'Export',
-        credits: 5,
         line: 'a',
         generationId: 'gen_1',
       },
@@ -97,7 +96,6 @@ describe('unity-bridge store', () => {
         jobId: 'brg_1',
         status: 'running',
         label: 'Export',
-        credits: 5,
         line: 'a',
         generationId: 'gen_1',
       },

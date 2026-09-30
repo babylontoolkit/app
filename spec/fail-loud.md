@@ -50,9 +50,12 @@ remembers; it has to be a rule with a guard behind it, which is what this spec i
 Primary: **every request that reaches KIE** — LLM generations (`/api/agent`, incl. repairs, forced
 continuations, the unproductive rescue, paid model tiers), the enhancer (`/api/enhancer`), and media
 renders (§4.16, both stages of a cut-out). Binding equally: every other ledger debit — the full
-`LedgerReason` set is `grant | purchase | generation | media | search | license | project_create |
-refund | promo | adjustment` (`billing/ledger.ts`), and the debiting members (`generation`, `media`,
-`search`, `license`, `project_create`) all carry this contract. `search` debits AFTER the vendor
+`LedgerReason` set is `grant | purchase | generation | media | search | project_create |
+refund | promo | adjustment` (`billing/ledger.ts`; `license` was removed with §4.18 on 2026-08-30), and
+the debiting members (`generation`, `media`, `search`, `project_create`) all carry this
+contract. Unity Bridge operations (§4.17) are not billed separately; the model turn that drives
+Unity/Blender is billed like any generation (owner, 2026-09-29), so a bridge job has no ledger row
+and no refund path of its own. `search` debits AFTER the vendor
 returned and may go negative by design — that is a documented posture, not a silent failure.
 `project_create` (migration 0015) is the opposite posture: it debits BEFORE anything is provisioned,
 so it refuses rather than overdraws, and its refund path is the deletion of a project that never

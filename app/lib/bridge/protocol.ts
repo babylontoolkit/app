@@ -92,7 +92,7 @@ export type BridgeJobEvent =
   | { jobId: string; type: 'started' }
   | { jobId: string; type: 'progress'; line: string }
   | { jobId: string; type: 'final'; result: BridgeResultPayload }
-  | { jobId: string; type: 'refused'; reason: string }; // helper refused BEFORE running (tier/path/guard) → refund
+  | { jobId: string; type: 'refused'; reason: string }; // helper refused BEFORE running (tier/path/guard) → nothing ran
 
 export type BridgeJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'refused' | 'cancelled';
 

@@ -3,8 +3,7 @@
  *
  * Opens whenever `bridgeConsentStore` holds a request. There is deliberately NO "remember my choice"
  * control and no close button: every consent-tier call is answered by a person, once (spec B14). The
- * server quotes and debits only after an Allow, so a Deny — or no answer before the timeout — costs
- * nothing.
+ * server dispatches only after an Allow, so a Deny — or no answer before the timeout — runs nothing.
  */
 import { useStore } from '@nanostores/react';
 import { Dialog, DialogButton, DialogDescription, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
@@ -28,7 +27,7 @@ export function UnityBridgeConsentDialog() {
           </pre>
           <p className="text-sm text-bolt-elements-textSecondary">
             This can change your Unity account, licences, installed software or project history. It runs only if you
-            allow it, and nothing is charged if you don't.
+            allow it.
           </p>
           <div className="flex justify-end gap-2 mt-2">
             <DialogButton type="secondary" onClick={() => void answerConsent(false)}>

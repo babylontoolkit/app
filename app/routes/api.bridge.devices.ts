@@ -88,7 +88,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
         await store.putDevice({ ...device, revokedAt: new Date().toISOString() });
       }
 
-      // Every job the device held that never started is refunded (D13).
+      // Every job the device held that never started is marked cancelled.
       await settleDropped(dropDevice(device.id), context);
 
       return json({ ok: true }, { headers: NO_STORE });

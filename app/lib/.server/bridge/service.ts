@@ -1,19 +1,22 @@
 /**
- * Unity Bridge service (SPEC §4.17, §4.6, `spec/billing.md`) — the operation pipeline a bridge tool call
- * runs: validate → tier → (consent) → price → debit → dispatch → wait for `started` → wait for the result.
+ * Unity Bridge service (SPEC §4.17) — the operation pipeline a bridge tool call runs:
+ * validate → tier → (consent) → dispatch → wait for `started` → wait for the result.
  *
- * Money rules (D10–D13, D16), each failing silently when wrong:
- *   - consent comes FIRST: a consent-tier call is never debited before the user said yes (D16);
- *   - a charge stands once the helper reports `started`; everything else is refunded EXACTLY ONCE by
- *     ONE function, `settleNotStarted` (D13). It writes the terminal status BEFORE the refund, and it
- *     never touches a terminal row or a started one (latch 1). The ledger's partial unique index on the
- *     note `bridge:<jobId>` is latch 2 (`billing.ts`);
+ * 🔴 Bridge operations are NOT billed separately (D53, owner 2026-09-29): the model turn that drives
+ * Unity/Blender is billed like any generation (its tokens, including the extra tool rounds), and running
+ * a command on the user's machine costs nothing extra. This module writes NO ledger row, ever — pinned by
+ * `service.spec.ts`. Do not re-add a quote/debit/refund here.
+ *
+ * Rules, each failing silently when wrong:
+ *   - consent comes FIRST: a consent-tier call is never dispatched before the user said yes (D16);
+ *   - a job that never started is settled by ONE function, `markNotStarted`, which never touches a
+ *     terminal row or a started one (the latch);
  *   - every row write goes through one rule: never overwrite a terminal row;
  *   - nothing on a tool path throws: every outcome is a sentence for the model.
  *
  * All writes for one job are serialised through an in-process chain (`withJobLock`). The relay lives on
- * ONE server instance (D5), so this makes latch 1 a real guarantee there rather than a read-then-write
- * check two settlers (a cancel and a pickup timeout, D13's race) could both pass.
+ * ONE server instance (D5), so this makes the latch a real guarantee there rather than a read-then-write
+ * check two settlers (a cancel and a pickup timeout) could both pass.
  */
 import { createScopedLogger } from '~/utils/logger';
 import {
@@ -30,14 +33,9 @@ import {
 } from '~/lib/bridge/protocol';
 import { classifyOperation } from '~/lib/bridge/tiers';
 import { validateOperation } from '~/lib/bridge/validate';
-import { creditsFor } from '~/lib/bridge/pricing';
-import { getGenerationStore } from '~/lib/.server/billing/generations';
-import { getMonitor } from '~/lib/.server/monitoring';
-import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
 import { awaitClientToolResult } from '~/lib/.server/agent/mcp-relay';
 import type { BridgeLink } from '~/lib/.server/projects/types';
-import { BridgeRefusedError, isBridgeEnabled, mintId } from './auth';
-import { anchorAndDebit, bridgePrices, refundBridgeJob } from './billing';
+import { isBridgeEnabled, mintId } from './auth';
 import { cancelBridgeJob, deviceHello, enqueueBridgeJob, getJobHandle, isDevicePresent } from './relay';
 import { getBridgeStore, type BridgeDeviceRow, type BridgeJobRow } from './store';
 
@@ -57,7 +55,7 @@ export interface BridgeRunContext {
 
 export type BridgeUiEvent =
   | { type: 'bridge-consent'; toolCallId: string; operation: string; tier: 'consent'; target: string }
-  | { type: 'bridge-job'; jobId: string; status: BridgeJobStatus; label: string; line?: string; credits: number };
+  | { type: 'bridge-job'; jobId: string; status: BridgeJobStatus; label: string; line?: string };
 
 export type BridgeToolOutcome = string | { text: string; image: { base64: string; mimeType: 'image/png' } };
 
@@ -100,25 +98,14 @@ function safeEmit(emit: (event: BridgeUiEvent) => void, event: BridgeUiEvent): v
   }
 }
 
-/** Mark the generations anchor terminal. Only a priced job has one (`anchorAndDebit`). */
-async function settleAnchor(row: BridgeJobRow, status: 'completed' | 'failed', context: unknown): Promise<void> {
-  if (row.credits <= 0) {
-    return;
-  }
-
-  await getGenerationStore(context)
-    .upsert({ id: row.id, userId: row.userId, model: 'unity-bridge', status })
-    .catch((error) => logger.warn(`bridge anchor ${row.id} not updated: ${(error as Error).message}`));
-}
-
 /*
  * ---------------------------------------------------------------------------------------------
- * The ONE refund writer (D13)
+ * The ONE not-started writer
  * ---------------------------------------------------------------------------------------------
  */
 
-/** Caller holds the job lock. Returns true when this call settled (and refunded) the job. */
-async function settleNotStartedLocked(
+/** Caller holds the job lock. Returns true when this call settled the job. */
+async function markNotStartedLocked(
   jobId: string,
   status: 'cancelled' | 'refused',
   reason: string,
@@ -128,40 +115,35 @@ async function settleNotStartedLocked(
   const row = await store.getJob(jobId);
 
   if (!row) {
-    logger.warn(`settleNotStarted: no row for bridge job ${jobId}`);
+    logger.warn(`markNotStarted: no row for bridge job ${jobId}`);
     return false;
   }
 
-  // Latch 1: a terminal row is already settled; a started job's charge stands.
+  // The latch: a terminal row is already settled; a started job is the helper's to finish.
   if (isTerminal(row) || row.started) {
     return false;
   }
 
-  const settled: BridgeJobRow = { ...row, status, error: reason, finishedAt: new Date().toISOString() };
-
-  // The status FIRST, then the refund: a crash between the two leaves an un-refunded terminal row (an alertable, auditable state) rather than a refunded live one.
-  await store.putJob(settled);
-  await refundBridgeJob({ jobId, userId: row.userId, credits: row.credits, reason, context });
-  await settleAnchor(row, 'failed', context);
+  await store.putJob({ ...row, status, error: reason, finishedAt: new Date().toISOString() });
 
   return true;
 }
 
-/** THE refund writer (D13). Terminal row or started → no-op. Writes the status first, then refunds row.credits. */
-export async function settleNotStarted(
+/** THE not-started writer. Terminal row or started → no-op. Status only — no ledger row (D53). */
+export async function markNotStarted(
   jobId: string,
   status: 'cancelled' | 'refused',
   reason: string,
   context: unknown,
 ): Promise<void> {
-  await withJobLock(jobId, () => settleNotStartedLocked(jobId, status, reason, context));
+  await withJobLock(jobId, () => markNotStartedLocked(jobId, status, reason, context));
 }
 
-/** settleNotStarted(id, 'cancelled', 'cancelled before it started', context) for each id; never throws. */
+/** markNotStarted(id, 'cancelled', 'cancelled before it started', context) for each id; never throws. */
 export async function settleDropped(jobIds: string[], context: unknown): Promise<void> {
   for (const jobId of jobIds) {
     try {
-      await settleNotStarted(jobId, 'cancelled', 'cancelled before it started', context);
+      await markNotStarted(jobId, 'cancelled', 'cancelled before it started', context);
     } catch (error) {
       logger.error(`settleDropped failed for ${jobId}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -177,18 +159,16 @@ export async function settleDropped(jobIds: string[], context: unknown): Promise
 function makeOnEvent(input: {
   jobId: string;
   label: string;
-  credits: number;
   context: unknown;
   emit: (event: BridgeUiEvent) => void;
 }): (event: BridgeJobEvent) => Promise<void> {
-  const { jobId, label, credits, context, emit } = input;
+  const { jobId, label, context, emit } = input;
   const store = () => getBridgeStore(context);
   const job = (status: BridgeJobStatus, line?: string): BridgeUiEvent => ({
     type: 'bridge-job',
     jobId,
     status,
     label,
-    credits,
     ...(line === undefined ? {} : { line }),
   });
 
@@ -234,12 +214,6 @@ function makeOnEvent(input: {
               resultText: capText(event.result.text ?? ''),
               finishedAt: new Date().toISOString(),
             });
-            await settleAnchor(row, 'completed', context);
-
-            if (row.credits > 0) {
-              recordRefundOutcome(getMonitor(context), 'bridge', false);
-            }
-
             safeEmit(emit, job(status));
 
             return;
@@ -253,7 +227,7 @@ function makeOnEvent(input: {
             }
 
             if (row.started) {
-              // Refused after it began — the charge stands (D13); record the failure, refund nothing.
+              // Refused after it began: record the failure.
               await store().putJob({
                 ...row,
                 status: 'failed',
@@ -265,7 +239,7 @@ function makeOnEvent(input: {
               return;
             }
 
-            await settleNotStartedLocked(jobId, 'refused', event.reason, context);
+            await markNotStartedLocked(jobId, 'refused', event.reason, context);
             safeEmit(emit, job('refused'));
 
             return;
@@ -295,9 +269,7 @@ function formatFinal(final: BridgeResultPayload): BridgeToolOutcome {
 
 function formatRow(row: BridgeJobRow): string {
   const detail = row.status === 'succeeded' || row.status === 'failed' ? row.resultText : row.error;
-  const credits = row.credits === 1 ? '1 credit' : `${row.credits} credits`;
-
-  return `Job ${row.id} (${row.operation}): ${row.status}, ${credits}.${detail ? `\n${detail}` : ''}`;
+  return `Job ${row.id} (${row.operation}): ${row.status}.${detail ? `\n${detail}` : ''}`;
 }
 
 const notFound = (jobId: string) => `No Unity Bridge job "${jobId}" was found.`;
@@ -339,7 +311,7 @@ export async function runBridgeOperation(
       return 'Scripts are switched off for this Unity link. Ask the user to turn on "Allow scripts" in the Unity Bridge panel (the cube icon), then try again.';
     }
 
-    // D16: consent BEFORE any quote, debit or dispatch.
+    // D16: consent BEFORE dispatch.
     if (tier === 'consent') {
       safeEmit(ctx.emit, {
         type: 'bridge-consent',
@@ -358,33 +330,11 @@ export async function runBridgeOperation(
       });
 
       if (!(answer.result && (answer.result as { approved?: unknown }).approved === true)) {
-        return `The user did not allow this operation (${label}). Nothing ran and nothing was charged.`;
+        return `The user did not allow this operation (${label}). Nothing ran.`;
       }
     }
 
-    const credits = creditsFor(op, bridgePrices(ctx.context));
     const jobId = mintId('brg');
-    let debited = 0;
-
-    if (credits > 0) {
-      try {
-        ({ debited } = await anchorAndDebit({
-          jobId,
-          userId: ctx.userId,
-          projectId: ctx.projectId,
-          credits,
-          label,
-          context: ctx.context,
-        }));
-      } catch (error) {
-        if (error instanceof BridgeRefusedError && error.statusCode === 402) {
-          return `Not enough credits for this Unity operation (${credits} credits). The user can add credits and try again.`;
-        }
-
-        throw error;
-      }
-    }
-
     const store = getBridgeStore(ctx.context);
 
     await store.putJob({
@@ -395,11 +345,10 @@ export async function runBridgeOperation(
       operation: label,
       tier,
       status: 'queued',
-      credits: debited,
       started: false,
       createdAt: new Date().toISOString(),
     });
-    safeEmit(ctx.emit, { type: 'bridge-job', jobId, status: 'queued', label, credits: debited });
+    safeEmit(ctx.emit, { type: 'bridge-job', jobId, status: 'queued', label });
 
     const handle = enqueueBridgeJob({
       deviceId: ctx.deviceId,
@@ -412,7 +361,7 @@ export async function runBridgeOperation(
         allowScripts: ctx.link.allowScripts,
         consentGranted: tier === 'consent',
       },
-      onEvent: makeOnEvent({ jobId, label, credits: debited, context: ctx.context, emit: ctx.emit }),
+      onEvent: makeOnEvent({ jobId, label, context: ctx.context, emit: ctx.emit }),
     });
 
     const started = await handle.waitStarted(BRIDGE_PICKUP_TIMEOUT_MS, ctx.abortSignal);
@@ -420,12 +369,12 @@ export async function runBridgeOperation(
     if (!started) {
       const cancelled = cancelBridgeJob(jobId, ctx.userId);
 
-      // It started in the gap between the timer and this line: the charge stands, wait for the result.
+      // It started in the gap between the timer and this line: wait for the result.
       if (cancelled !== 'signalled') {
-        await settleNotStarted(jobId, 'cancelled', 'not picked up', ctx.context);
-        safeEmit(ctx.emit, { type: 'bridge-job', jobId, status: 'cancelled', label, credits: debited });
+        await markNotStarted(jobId, 'cancelled', 'not picked up', ctx.context);
+        safeEmit(ctx.emit, { type: 'bridge-job', jobId, status: 'cancelled', label });
 
-        return 'The Unity Bridge helper did not pick up the job within 30 s. Nothing ran and the credits were refunded. Ask the user to check the helper is running.';
+        return 'The Unity Bridge helper did not pick up the job within 30 s. Nothing ran. Ask the user to check the helper is running.';
       }
     }
 
@@ -434,7 +383,7 @@ export async function runBridgeOperation(
     if (final === 'refused') {
       const row = await settledRow(jobId, ctx.context);
 
-      return `The Unity Bridge helper refused to run this: ${row?.error ?? 'no reason given'}. Nothing ran and the credits were refunded.`;
+      return `The Unity Bridge helper refused to run this: ${row?.error ?? 'no reason given'}. Nothing ran.`;
     }
 
     if (final === null) {
@@ -496,12 +445,12 @@ export async function jobControl(
         const outcome = cancelBridgeJob(jobId, ctx.userId);
 
         if (outcome === 'dropped') {
-          await settleNotStarted(jobId, 'cancelled', 'cancelled by the agent', ctx.context);
-          return `Job ${jobId} was cancelled before it started. Nothing ran and the credits were refunded.`;
+          await markNotStarted(jobId, 'cancelled', 'cancelled by the agent', ctx.context);
+          return `Job ${jobId} was cancelled before it started. Nothing ran.`;
         }
 
         if (outcome === 'signalled') {
-          return `Job ${jobId} had already started on the user's machine; a cancel was sent to the helper. A started job stays charged.`;
+          return `Job ${jobId} had already started on the user's machine; a cancel was sent to the helper.`;
         }
 
         const row = await ownedRow(jobId, ctx.userId, ctx.context);
@@ -512,8 +461,8 @@ export async function jobControl(
 
         if (!isTerminal(row) && !row.started) {
           // The relay no longer holds it (e.g. a server restart): it can never run, so settle it.
-          await settleNotStarted(jobId, 'cancelled', 'cancelled by the agent', ctx.context);
-          return `Job ${jobId} was cancelled before it started. Nothing ran and the credits were refunded.`;
+          await markNotStarted(jobId, 'cancelled', 'cancelled by the agent', ctx.context);
+          return `Job ${jobId} was cancelled before it started. Nothing ran.`;
         }
 
         return `Job ${jobId} is already ${row.status}; there is nothing to cancel.`;

@@ -186,7 +186,7 @@ describe('bridge relay', () => {
     expect(cancelBridgeJob('brg_1', 'u1')).toBe('signalled');
     expect(await pollBridgeJobs('dev_1', 25_000)).toEqual({ jobs: [], cancels: [{ jobId: 'brg_1', cancel: true }] });
 
-    // Still charged — it began — and a final still lands.
+    // It began — the helper finishes it, and a final still lands.
     expect(deliverBridgeEvent('dev_1', { jobId: 'brg_1', type: 'final', result: RESULT })).toBe(true);
     expect(await handle.waitFinal(1)).toEqual(RESULT);
   });

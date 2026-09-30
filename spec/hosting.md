@@ -20,7 +20,7 @@
 
 ## AWS resources checklist
 
-- Lightsail Container Service per env (power: nano→small as needed; scale = bump power/node count).
+- Lightsail Container Service per env (power: nano→small as needed; scale = bump POWER; the node count stays **1** — the §4.14 MCP relay and the §4.17 Unity Bridge job registry live in process memory, so a second node would strand parked tool calls and helper polls on the wrong instance).
 - S3: `btk-snapshots-{env}` (private; server-only access) and `btk-play-builds-{env}` (private + CloudFront OAC — never public-listable).
 - CloudFront (optional, later): distribution per env over the play bucket, wildcard custom domain (separate registrable domain), origin path `/builds`. Host→path routing lives at the server entry (`functions/[[path]].ts` in production, `vite.config.ts`'s `shareHostPlugin` in dev), never in a route — a Remix route cannot decide it should have been a different route, and putting the check in the loader silently served the app's landing page on every vanity host (measured 2026-08-03).
 - IAM: one deploy user/role for CI (ECR-less Lightsail push permissions) and one runtime role/credentials for the app (scoped: put/get on the two buckets only). Long-term: least-privilege policies; never account-root keys.

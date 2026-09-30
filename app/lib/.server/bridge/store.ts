@@ -51,7 +51,6 @@ export interface BridgeJobRow {
   operation: string; // human label, e.g. "unity_command bt_export_level"
   tier: BridgeTier;
   status: BridgeJobStatus;
-  credits: number;
   started: boolean;
   resultText?: string;
   error?: string;
@@ -223,7 +222,6 @@ function jobFromRow(row: Row): BridgeJobRow {
     operation: row.operation as string,
     tier: row.tier as BridgeTier,
     status: row.status as BridgeJobStatus,
-    credits: Number(row.credits ?? 0),
     started: Boolean(row.started),
     resultText: optionalString(row.result_text),
     error: optionalString(row.error),
@@ -242,7 +240,6 @@ function jobToRow(row: BridgeJobRow): Row {
     operation: row.operation,
     tier: row.tier,
     status: row.status,
-    credits: row.credits,
     started: row.started,
     result_text: row.resultText ?? null,
     error: row.error ?? null,

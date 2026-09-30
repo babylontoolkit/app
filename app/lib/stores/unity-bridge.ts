@@ -27,7 +27,6 @@ export interface BridgeStatusView {
     id: string;
     operation: string;
     status: BridgeJobStatus;
-    credits: number;
     createdAt: string;
     finishedAt?: string;
     resultText?: string;
@@ -47,7 +46,6 @@ export interface BridgeLiveJob {
   status: BridgeJobStatus;
   label: string;
   lines: string[];
-  credits: number;
 }
 
 export type BridgeDialog = 'connect' | 'status' | 'jobs';
@@ -211,14 +209,12 @@ export function updateBridgeFromPart(part: unknown): void {
   const nextStatus =
     status && (!current || STATUS_RANK[status] >= STATUS_RANK[current.status]) ? status : (current?.status ?? 'queued');
   const nextLabel = (typeof p.label === 'string' && p.label) || current?.label || '';
-  const nextCredits = typeof p.credits === 'number' ? p.credits : (current?.credits ?? 0);
 
   if (
     current &&
     !appendLine &&
     current.status === nextStatus &&
     current.label === nextLabel &&
-    current.credits === nextCredits &&
     current.generationId === p.generationId
   ) {
     return; // a replay — nothing new
@@ -230,7 +226,6 @@ export function updateBridgeFromPart(part: unknown): void {
       generationId: p.generationId,
       status: nextStatus,
       label: nextLabel,
-      credits: nextCredits,
       lines: appendLine && line !== undefined ? [...(current?.lines ?? []), line] : (current?.lines ?? []),
     },
   });

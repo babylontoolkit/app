@@ -146,7 +146,7 @@ session → verified? → active Pro entitlement + BYOK enabled? use user's key,
 
 ## Entitlements (Pro Tools) — RETIRED 2026-07-20
 
-> **RETIRED.** The external ASMX license service (`licenser.asmx`) and its `ValidateSubscription` operation are no longer called: the SOAP client is deleted, `refreshEntitlement`/`linkSubscriberEmail` and the `/api/entitlement` route are removed, and `getEntitlement` returns the stored row without revalidating. BYOK/Pro is disabled by default (`PRO_FEATURES_ENABLED=false`) and is a **manual, testing-only** knob; the `entitlements` table and `resolveByok` remain but are inert. The only subscription signal the platform reads is the live **Stripe** plan, consumed solely by the Unity Editor subscription check (SPEC §4.18a) to answer whether a developer has paid. (It previously also picked a tier for the Unity Project Licenser, which was removed 2026-08-30.) See SPEC §4.6.1. The historical design below is kept for context only.
+> **RETIRED.** The external ASMX license service (`licenser.asmx`) and its `ValidateSubscription` operation are no longer called: the SOAP client is deleted, `refreshEntitlement`/`linkSubscriberEmail` and the `/api/entitlement` route are removed, and `getEntitlement` returns the stored row without revalidating. BYOK/Pro is disabled by default (`PRO_FEATURES_ENABLED=false`) and is a **manual, testing-only** knob; the `entitlements` table and `resolveByok` remain but are inert. The only subscription signal the platform reads is the live **Stripe** plan, consumed only by the Unity Editor subscription check (SPEC §4.18a) to answer whether a developer has paid, and by the same rule when a paired Unity Bridge device asks for an automation grant (SPEC §4.17, `POST /api/bridge/grant`). (It previously also picked a tier for the Unity Project Licenser, which was removed 2026-08-30.) See SPEC §4.6.1. The historical design below is kept for context only.
 
 - ~~`ValidateSubscription(email) → {active, tier: indie|small_business|enterprise, expiry}`~~ (retired); server-to-server (shared secret min., mTLS preferred); timeout 5s; response cached 24h per user.
 - Lifecycle: check on sign-in + daily job for active entitlements + freshness check when honoring BYOK. Fail-open grace: service unreachable ≤72h → status unchanged. Explicit `active:false` → `status='lapsed'` → BYOK no longer honored; fall back to credits with notice.
@@ -367,6 +367,16 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   because it refuses BEFORE anything is provisioned — a clean, described 402 leaves nothing half-made,
   which is categorically different from a mid-creation failure. Pinned by `project-create.spec.ts` +
   the route specs + `ledger-sql.spec.ts`.
+- **Unity Bridge operations are not billed separately (owner, 2026-09-29, §4.17).** The model turn
+  that drives Unity/Blender is billed like any generation — its tokens, including the extra
+  `BRIDGE_TOOL_ROUNDS` steps a bridge turn is offered; running a command on the user's machine costs
+  nothing extra. So there is no `'bridge'` ledger reason (the reason CHECK refuses it —
+  `ledger-sql.spec.ts`), no `BRIDGE_*_CREDITS` setting, no generations anchor per job, no refund
+  index, and no credits on a job row, UI event or panel. Migration 0025 was edited in place (never
+  deployed — the pre-first-deploy rule) so it no longer touches `credit_ledger`. Consent still comes
+  before dispatch, and a job that never started is marked `cancelled`/`refused` by one status-only
+  writer (`markNotStarted`). `bridge/service.spec.ts` pins the rule against a real `FsLedger`: an
+  executed call, a script, a long job and a refused or cancelled job all write zero ledger rows.
 - **The `'license'` ledger reason is GONE, and its schema was DELETED rather than migrated away
   (SPEC §4.18, 2026-08-30).** The Unity Project Licenser debited it as a flat per-tier charge before
   issuing a `license.json`. A first pass kept the reason readable "because the ledger is append-only"

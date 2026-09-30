@@ -1,9 +1,13 @@
 /**
- * The Unity Bridge operation pipeline — money-path tests (SPEC §4.17, §4.6, spec/billing.md, D10–D13, D16).
+ * The Unity Bridge operation pipeline (SPEC §4.17, D16, D53).
  *
  * Real relay with fake timers, a real FsLedger and FsBridgeStore in a tmp dir, the generations store
  * captured. The helper is simulated with `pollBridgeJobs` + `deliverBridgeEvent`, exactly the calls its
- * routes make. Every rule here spends or protects real money and fails silently when wrong.
+ * routes make.
+ *
+ * 🔴 D53 (owner, 2026-09-29): bridge operations are NOT billed separately — the model turn that drives
+ * Unity/Blender is billed like any generation. The ledger here is REAL precisely so that a per-operation
+ * charge coming back fails these tests: every path below asserts ZERO ledger rows and no generations anchor.
  */
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -31,16 +35,7 @@ const PROJECT = 'proj_1';
 const GEN = 'gen_1';
 
 /* The oauth.spec trap: `env()` falls back to process.env / .env.local. Every money and bridge var is stubbed. */
-const ENV = [
-  'BILLING_ENFORCED',
-  'CREDIT_UNIT_COST_USD',
-  'CREDIT_MARGIN',
-  'CREATION_FLAT_CREDITS',
-  'UNITY_BRIDGE_ENABLED',
-  'BRIDGE_COMMAND_CREDITS',
-  'BRIDGE_SCRIPT_CREDITS',
-  'BRIDGE_JOB_CREDITS',
-] as const;
+const ENV = ['BILLING_ENFORCED', 'CREDIT_UNIT_COST_USD', 'CREDIT_MARGIN', 'UNITY_BRIDGE_ENABLED'] as const;
 
 let tmp: string;
 let ledger: FsLedger;
@@ -101,13 +96,15 @@ async function pickUp() {
   return pollBridgeJobs(DEVICE, 0);
 }
 
-async function rows(reason?: string) {
-  const all = await ledger.list(USER, 100);
-  return reason ? all.filter((row) => row.reason === reason) : all;
+/** Every ledger row for the user. D53: the bridge must never write one. */
+async function rows() {
+  return ledger.list(USER, 100);
 }
 
-async function grant(credits = 100) {
-  await ledger.append({ userId: USER, delta: credits, reason: 'grant' });
+/** The owner's rule, pinned: no ledger row and no generations anchor for a bridge job. */
+async function expectNothingBilled() {
+  expect(await rows()).toHaveLength(0);
+  expect(upserts).toHaveLength(0);
 }
 
 /** Run one operation to completion as the helper would: pick up, started, final. */
@@ -155,80 +152,47 @@ afterEach(async () => {
 });
 
 describe('runBridgeOperation', () => {
-  it('an executed call is debited once, never refunded, and returns the result text', async () => {
-    await grant();
-
+  it('an executed call returns the result text and writes the row succeeded', async () => {
     const { jobId, outcome } = await runToFinal(SET_TRANSFORM, { ok: true, text: 'moved' });
 
     expect(outcome).toBe('moved');
 
-    const debits = await rows('bridge');
-    expect(debits).toHaveLength(1);
-    expect(debits[0].delta).toBe(-1);
-    expect(debits[0].generationId).toBe(jobId);
-    expect(await rows('refund')).toHaveLength(0);
-    expect(upserts[0]).toMatchObject({ id: jobId, model: 'unity-bridge', provider: 'bridge', status: 'running' });
-
     await until(async () => (await store.getJob(jobId))?.status === 'succeeded');
     expect((await store.getJob(jobId))?.started).toBe(true);
+    await expectNothingBilled();
   });
 
-  it('a free call (unity.list) writes no ledger rows and no generations anchor', async () => {
-    await grant();
-
-    const { outcome } = await runToFinal({ kind: 'unity.list', query: 'transform' });
-
-    expect(outcome).toBe('done');
-    expect(await rows('bridge')).toHaveLength(0);
-    expect(await rows('refund')).toHaveLength(0);
-    expect(upserts).toHaveLength(0);
-  });
-
-  it('a pickup timeout refunds exactly once and marks the row cancelled', async () => {
-    await grant();
-
+  it('a pickup timeout marks the row cancelled with a sentence', async () => {
     const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
     const jobId = await waitQueued();
     await vi.advanceTimersByTimeAsync(BRIDGE_PICKUP_TIMEOUT_MS + 1);
 
-    expect(await pending).toMatch(/did not pick up the job within 30 s/);
-    expect(await rows('bridge')).toHaveLength(1);
-
-    const refunds = await rows('refund');
-    expect(refunds).toHaveLength(1);
-    expect(refunds[0]).toMatchObject({ delta: 1, note: `bridge:${jobId}` });
+    expect(await pending).toBe(
+      'The Unity Bridge helper did not pick up the job within 30 s. Nothing ran. Ask the user to check the helper is running.',
+    );
     expect((await store.getJob(jobId))?.status).toBe('cancelled');
+    await expectNothingBilled();
   });
 
-  it('a helper `refused` refunds once and marks the row refused', async () => {
-    await grant();
-
+  it('a helper `refused` marks the row refused', async () => {
     const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
     const jobId = await waitQueued();
     await pickUp();
     expect(deliverBridgeEvent(DEVICE, { jobId, type: 'refused', reason: 'Toolkit too old' })).toBe(true);
 
-    expect(await pending).toBe(
-      'The Unity Bridge helper refused to run this: Toolkit too old. Nothing ran and the credits were refunded.',
-    );
-    expect(await rows('bridge')).toHaveLength(1);
-    expect(await rows('refund')).toHaveLength(1);
+    expect(await pending).toBe('The Unity Bridge helper refused to run this: Toolkit too old. Nothing ran.');
     expect((await store.getJob(jobId))?.status).toBe('refused');
+    await expectNothingBilled();
   });
 
-  it('a final ok:false is charged and reported as a failure', async () => {
-    await grant();
-
+  it('a final ok:false is reported as a failure', async () => {
     const { outcome } = await runToFinal(SET_TRANSFORM, { ok: false, text: 'no such object' });
 
     expect(outcome).toBe('The operation ran but reported a failure:\nno such object');
-    expect(await rows('bridge')).toHaveLength(1);
-    expect(await rows('refund')).toHaveLength(0);
+    await expectNothingBilled();
   });
 
-  it('a script with Allow scripts off is refused with a sentence and never debited', async () => {
-    await grant();
-
+  it('a script with Allow scripts off is refused with a sentence and never dispatched', async () => {
     const outcome = await runBridgeOperation(
       { kind: 'unity.script', source: 'public static class B { public static void Run() {} }', entry: 'B.Run' },
       'unity_run_script B.Run',
@@ -236,13 +200,11 @@ describe('runBridgeOperation', () => {
     );
 
     expect(outcome).toMatch(/Allow scripts/);
-    expect(await rows('bridge')).toHaveLength(0);
     expect(events).toHaveLength(0);
+    await expectNothingBilled();
   });
 
-  it('consent denied → nothing charged, nothing dispatched', async () => {
-    await grant();
-
+  it('consent denied → nothing dispatched', async () => {
     const pending = runBridgeOperation(
       { kind: 'unity.command', name: 'delete_gameobject', params: {} },
       'unity_command delete_gameobject',
@@ -260,14 +222,12 @@ describe('runBridgeOperation', () => {
       }),
     ).toBe(true);
 
-    expect(await pending).toMatch(/did not allow this operation/);
-    expect(await rows('bridge')).toHaveLength(0);
-    expect(upserts).toHaveLength(0);
+    expect(await pending).toBe('The user did not allow this operation (unity_command delete_gameobject). Nothing ran.');
+    expect(await store.listJobs(PROJECT, 10)).toHaveLength(0);
+    await expectNothingBilled();
   });
 
-  it('consent approved → the dispatch carries consentGranted: true, debited after the answer', async () => {
-    await grant();
-
+  it('consent approved → the dispatch carries consentGranted: true, queued only after the answer', async () => {
     const pending = runBridgeOperation(
       { kind: 'unity.command', name: 'delete_gameobject', params: {} },
       'unity_command delete_gameobject',
@@ -275,7 +235,7 @@ describe('runBridgeOperation', () => {
     );
 
     await until(() => events.some((e) => e.type === 'bridge-consent'));
-    expect(await rows('bridge')).toHaveLength(0);
+    expect(await store.listJobs(PROJECT, 10)).toHaveLength(0);
     deliverClientToolResult({
       generationId: GEN,
       toolCallId: 'consent:call_1',
@@ -292,24 +252,43 @@ describe('runBridgeOperation', () => {
     deliverBridgeEvent(DEVICE, { jobId, type: 'started' });
     deliverBridgeEvent(DEVICE, { jobId, type: 'final', result: { ok: true, text: 'deleted' } });
     expect(await pending).toBe('deleted');
-    expect(await rows('bridge')).toHaveLength(1);
+    await expectNothingBilled();
   });
 
-  it('insufficient balance with billing enforced → a sentence, no dispatch', async () => {
+  it('billing enforced with a ZERO balance still runs the operation — the bridge has no credit gate (D53)', async () => {
     vi.stubEnv('BILLING_ENFORCED', 'true');
 
-    const outcome = await runBridgeOperation(SET_TRANSFORM, 'unity_command set_transform', ctx());
+    const { outcome } = await runToFinal(SET_TRANSFORM, { ok: true, text: 'moved' });
 
-    expect(outcome).toBe(
-      'Not enough credits for this Unity operation (1 credits). The user can add credits and try again.',
+    expect(outcome).toBe('moved');
+    await expectNothingBilled();
+  });
+
+  it('a script (Allow scripts on) runs with zero ledger rows', async () => {
+    const { outcome } = await runToFinal(
+      { kind: 'unity.script', source: 'public static class B { public static void Run() {} }', entry: 'B.Run' },
+      { ok: true, text: 'script ok' },
+      ctx({ link: link({ allowScripts: true }) }),
     );
-    expect(events).toHaveLength(0);
-    expect(await store.listJobs(PROJECT, 10)).toHaveLength(0);
+
+    expect(outcome).toBe('script ok');
+    await expectNothingBilled();
+  });
+
+  it('a long job (bt_export_level) runs with zero ledger rows', async () => {
+    const { outcome } = await runToFinal(
+      { kind: 'unity.command', name: 'bt_export_level', params: {} },
+      {
+        ok: true,
+        text: 'exported',
+      },
+    );
+
+    expect(outcome).toBe('exported');
+    await expectNothingBilled();
   });
 
   it('still running at 60 s → a sentence naming the job; bridge_job wait then returns the final', async () => {
-    await grant();
-
     const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
     const jobId = await waitQueued();
     await pickUp();
@@ -324,12 +303,10 @@ describe('runBridgeOperation', () => {
     deliverBridgeEvent(DEVICE, { jobId, type: 'final', result: { ok: true, text: 'exported' } });
 
     expect(await waiting).toBe('exported');
-    expect(await rows('refund')).toHaveLength(0);
+    await expectNothingBilled();
   });
 
   it('a capture returns the image alongside the text', async () => {
-    await grant();
-
     const { outcome } = await runToFinal({ kind: 'unity.capture', view: 'game', width: 1024, height: 576 }, {
       ok: true,
       text: 'captured',
@@ -341,12 +318,21 @@ describe('runBridgeOperation', () => {
       image: { base64: 'AAAA', mimeType: 'image/png' },
     } satisfies BridgeToolOutcome);
   });
+
+  it('no bridge-job UI event carries a credits field', async () => {
+    await runToFinal(SET_TRANSFORM);
+
+    const jobEvents = events.filter((e) => e.type === 'bridge-job');
+    expect(jobEvents.length).toBeGreaterThan(0);
+
+    for (const event of jobEvents) {
+      expect(event).not.toHaveProperty('credits');
+    }
+  });
 });
 
-describe('settlement (D13)', () => {
-  it('settleDropped twice refunds once', async () => {
-    await grant();
-
+describe('not-started settlement (the latch)', () => {
+  it('settleDropped twice settles once and writes no ledger row', async () => {
     const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
     const jobId = await waitQueued();
     const ids = cancelGenerationBridgeJobs(GEN);
@@ -356,30 +342,28 @@ describe('settlement (D13)', () => {
     await settleDropped(ids, {});
     await pending;
 
-    const refunds = await rows('refund');
-    expect(refunds).toHaveLength(1);
-    expect(refunds[0].note).toBe(`bridge:${jobId}`);
+    expect((await store.getJob(jobId))?.status).toBe('cancelled');
+    expect((await store.getJob(jobId))?.error).toBe('cancelled before it started');
+    await expectNothingBilled();
   });
 
-  it('cancel then pickup timeout → exactly ONE refund row', async () => {
-    await grant();
-
+  it('cancel then pickup timeout → the first settler wins, the row stays cancelled by the agent', async () => {
     const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
     const jobId = await waitQueued();
 
-    expect(await jobControl('cancel', jobId, 0, { userId: USER, context: {} })).toMatch(/cancelled before it started/);
+    expect(await jobControl('cancel', jobId, 0, { userId: USER, context: {} })).toBe(
+      `Job ${jobId} was cancelled before it started. Nothing ran.`,
+    );
     await vi.advanceTimersByTimeAsync(BRIDGE_PICKUP_TIMEOUT_MS + 1);
     await pending;
 
-    const refunds = await rows('refund');
-    expect(refunds).toHaveLength(1);
-    expect(refunds[0].note).toBe(`bridge:${jobId}`);
-    expect((await store.getJob(jobId))?.status).toBe('cancelled');
+    const row = await store.getJob(jobId);
+    expect(row?.status).toBe('cancelled');
+    expect(row?.error).toBe('cancelled by the agent');
+    await expectNothingBilled();
   });
 
-  it('a late `started` after the pickup timeout changes nothing — no second refund, no charge revived', async () => {
-    await grant();
-
+  it('a late `started` after the pickup timeout changes nothing', async () => {
     const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
     const jobId = await waitQueued();
     await pickUp();
@@ -393,12 +377,10 @@ describe('settlement (D13)', () => {
     const row = await store.getJob(jobId);
     expect(row?.status).toBe('cancelled');
     expect(row?.started).toBe(false);
-    expect(await rows('refund')).toHaveLength(1);
+    await expectNothingBilled();
   });
 
-  it('a duplicate `started` is idempotent — never re-charges, never regresses a row', async () => {
-    await grant();
-
+  it('a duplicate `started` is idempotent — never regresses a row', async () => {
     const { jobId } = await runToFinal(SET_TRANSFORM);
     await until(async () => (await store.getJob(jobId))?.status === 'succeeded');
 
@@ -417,34 +399,17 @@ describe('settlement (D13)', () => {
     await pending;
     await until(async () => (await store.getJob(second))?.status === 'succeeded');
 
-    expect(await rows('bridge')).toHaveLength(2);
-    expect(await rows('refund')).toHaveLength(0);
-  });
-
-  it('unmetered and the debit fails → the row stores 0 credits and a cancel writes no refund', async () => {
-    // No grant: the 'bridge' append would overdraw and is refused; billing is not enforced.
-    const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
-    const jobId = await waitQueued();
-
-    expect((await store.getJob(jobId))?.credits).toBe(0);
-    await jobControl('cancel', jobId, 0, { userId: USER, context: {} });
-    await vi.advanceTimersByTimeAsync(BRIDGE_PICKUP_TIMEOUT_MS + 1);
-    await pending;
-
-    expect(await rows()).toHaveLength(0);
-    expect((await store.getJob(jobId))?.status).toBe('cancelled');
+    await expectNothingBilled();
   });
 });
 
 describe('jobControl', () => {
-  it('status formats the row; another user sees nothing', async () => {
-    await grant();
-
+  it('status formats the row (no credits); another user sees nothing', async () => {
     const { jobId } = await runToFinal(SET_TRANSFORM, { ok: true, text: 'moved' });
     await until(async () => (await store.getJob(jobId))?.status === 'succeeded');
 
     expect(await jobControl('status', jobId, 0, { userId: USER, context: {} })).toBe(
-      `Job ${jobId} (label): succeeded, 1 credit.\nmoved`,
+      `Job ${jobId} (label): succeeded.\nmoved`,
     );
     expect(await jobControl('status', jobId, 0, { userId: 'someone_else', context: {} })).toMatch(
       /No Unity Bridge job/,

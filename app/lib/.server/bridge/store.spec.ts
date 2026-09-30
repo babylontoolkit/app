@@ -36,7 +36,6 @@ const job = (id: string, createdAt: string, projectId = 'prj_1'): BridgeJobRow =
   operation: 'unity_command set_transform',
   tier: 'allowed',
   status: 'succeeded',
-  credits: 1,
   started: true,
   createdAt,
 });

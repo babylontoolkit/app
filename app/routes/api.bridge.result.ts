@@ -5,8 +5,8 @@
  *   POST /api/bridge/result {action:'logout'}          → {ok:true}
  *
  * Authenticated by the device token (`requireBridgeDevice`). An event is delivered only to a job that
- * belongs to THIS device (`deliverBridgeEvent` checks), and never to one that was dropped for a refund.
- * Logout revokes the device and refunds every job it held that never started.
+ * belongs to THIS device (`deliverBridgeEvent` checks), and never to one that was dropped.
+ * Logout revokes the device and cancels every job it held that never started.
  */
 import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { BRIDGE_MAX_IMAGE_BASE64, capText, type BridgeJobEvent, type BridgeResultPayload } from '~/lib/bridge/protocol';

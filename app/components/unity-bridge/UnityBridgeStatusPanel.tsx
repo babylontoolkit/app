@@ -120,7 +120,7 @@ export function UnityBridgeStatusPanel({ projectId }: { projectId: string }) {
               Allow scripts
             </label>
             <div className="text-xs text-bolt-elements-textSecondary">
-              Lets the agent run C# in Unity and Python in Blender on your machine. Each script costs credits.
+              Lets the agent run C# in Unity and Python in Blender on your machine.
             </div>
           </section>
 
