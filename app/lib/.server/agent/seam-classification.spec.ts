@@ -310,7 +310,9 @@ describe('CONTROLS — the scanner still reads the modules it thinks it does', (
 
     for (const known of [
       'app/lib/.server/agent/tool-policy.ts',
-      'app/lib/.server/agent/budgets.ts',
+
+      /* `budgets.ts` is reached through `tool-loop.ts`'s `resolveTurnBudgets` since the prompt refresh shares it. */
+      'app/lib/.server/agent/tool-loop.ts',
       'app/lib/.server/agent/delivery.ts',
       'app/lib/.server/llm/history.ts',
       'app/lib/.server/billing/gate.ts',

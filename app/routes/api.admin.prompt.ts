@@ -13,7 +13,7 @@
 import { type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { createScopedLogger } from '~/utils/logger';
 import { requireAdmin } from '~/lib/.server/supabase/auth';
-import { resolveAgentBudgets } from '~/lib/.server/agent/budgets';
+import { resolveTurnBudgets } from '~/lib/.server/agent/tool-loop';
 import { buildSystemPrompt } from '~/lib/.server/prompt/build';
 import { invalidateActivePrompt } from '~/lib/.server/prompt/active';
 import { warmAfterPromptChange } from '~/lib/.server/prompt/cache-warmer';
@@ -167,10 +167,11 @@ export async function action({ request, context }: ActionFunctionArgs) {
 
         /*
          * The number the index ADVERTISES must be the one `load_reference` enforces, or the prompt
-         * promises a budget the tool does not keep. Both come from `resolveAgentBudgets`, so a
-         * re-sync is what brings a changed `AGENT_MAX_REFERENCE_LOADS` into the baked prompt.
+         * promises a budget the tool does not keep. Both come from `resolveTurnBudgets` (which picks
+         * the tool loop's defaults when `AGENT_TOOL_LOOP` is on), so a re-sync is what brings a changed
+         * `AGENT_MAX_REFERENCE_LOADS` — or a flipped loop switch — into the baked prompt.
          */
-        maxReferenceLoads: resolveAgentBudgets(context).maxReferenceLoads,
+        maxReferenceLoads: resolveTurnBudgets(context).maxReferenceLoads,
       });
 
       invalidateActivePrompt();

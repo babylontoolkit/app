@@ -5,7 +5,7 @@ const order: string[] = [];
 
 const fakeSandbox = {
   spawn: vi.fn(),
-  fs: { readFile: vi.fn(), writeFile: vi.fn(), mkdir: vi.fn() },
+  fs: { readFile: vi.fn(), writeFile: vi.fn(), mkdir: vi.fn(), readdir: vi.fn(), rm: vi.fn() },
 };
 
 vi.mock('~/lib/sandbox', () => ({ sandbox: Promise.resolve(fakeSandbox) }));
@@ -128,6 +128,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(bridge.isPreviewBridgeReady).mockReturnValue(true);
   fakeSandbox.fs.readFile.mockResolvedValue('{"name":"game"}');
+  fakeSandbox.fs.readdir.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -369,6 +370,42 @@ describe('check op', () => {
     expect(result.home.errors).toEqual(['boom on home']);
   });
 
+  it('an error read that times out once is retried, not reported as a game error (T10 live)', async () => {
+    vi.useFakeTimers();
+    tscPasses();
+    healthyPreview();
+
+    const inner = readErrors.getMockImplementation()!;
+    let calls = 0;
+    readErrors.mockImplementation(async (since?: number) => {
+      calls++;
+
+      if (calls === 1) {
+        throw new Error('The preview did not answer within 10s.');
+      }
+
+      return inner(since);
+    });
+
+    const result = await settle(runGameCheck({ gameMode: 'KartMode' }));
+
+    expect(calls).toBeGreaterThanOrEqual(3); // home: fail + retry; play: one read
+    expect(result.home.errors).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  it('an error read that fails twice is still reported (never a silent clean bill)', async () => {
+    vi.useFakeTimers();
+    tscPasses();
+    healthyPreview();
+    readErrors.mockRejectedValue(new Error('The preview did not answer within 10s.'));
+
+    const result = await settle(runGameCheck({}));
+
+    expect(result.ok).toBe(false);
+    expect(result.home.errors).toEqual(["Could not read the preview's errors: The preview did not answer within 10s."]);
+  });
+
   it('ok matrix — a play error fails the check', async () => {
     vi.useFakeTimers();
     tscPasses();
@@ -582,5 +619,100 @@ describe('check op — /play is polled for the scene (T9 fix loop 2)', () => {
     expect(assigns()).toBe(2);
     expect(probes).toBeGreaterThan(0);
     expect(result.ok).toBe(true);
+  });
+});
+
+/*
+ * The typecheck is a READ of the project: `tsc -b` must not leave `*.tsbuildinfo` behind for the
+ * mirror to carry to the user's disk and repository, and must never delete one that was already there.
+ */
+describe('typecheck build-info litter', () => {
+  /** An in-memory project root the fake fs reads, and tsc (the fake spawn) writes into. */
+  function project(initial: Record<string, string>, tscWrites: Record<string, string>) {
+    const files = new Map(Object.entries(initial));
+
+    fakeSandbox.fs.readdir.mockImplementation(async () => [...files.keys()].filter((p) => !p.includes('/')));
+    fakeSandbox.fs.readFile.mockImplementation(async (path: string) => {
+      if (!files.has(path)) {
+        throw new Error(`ENOENT: ${path}`);
+      }
+
+      return files.get(path);
+    });
+    fakeSandbox.fs.writeFile.mockImplementation(async (path: string, data: string) => {
+      files.set(path, data);
+    });
+    fakeSandbox.fs.rm.mockImplementation(async (path: string) => {
+      files.delete(path);
+    });
+    fakeSandbox.spawn.mockImplementation(async () => {
+      for (const [path, data] of Object.entries(tscWrites)) {
+        files.set(path, data);
+      }
+
+      return proc(CLEAN_TSC, 0);
+    });
+
+    return files;
+  }
+
+  it('removes build-info files the typecheck created', async () => {
+    vi.useFakeTimers();
+    healthyPreview();
+
+    const files = project(
+      { 'package.json': '{}', 'tsconfig.json': '{}' },
+      { 'tsconfig.app.tsbuildinfo': 'new', 'tsconfig.node.tsbuildinfo': 'new' },
+    );
+
+    const result = await settle(runGameCheck({}));
+
+    expect(result.typecheck).toEqual({ ok: true, errors: [] });
+    expect([...files.keys()].sort()).toEqual(['package.json', 'tsconfig.json']);
+  });
+
+  it('never deletes a pre-existing one — it gets its original bytes back', async () => {
+    vi.useFakeTimers();
+    healthyPreview();
+
+    const files = project(
+      { 'tsconfig.json': '{}', 'tsconfig.app.tsbuildinfo': 'ORIGINAL' },
+      { 'tsconfig.app.tsbuildinfo': 'rewritten', 'tsconfig.node.tsbuildinfo': 'new' },
+    );
+
+    await settle(runGameCheck({}));
+
+    expect(files.get('tsconfig.app.tsbuildinfo')).toBe('ORIGINAL');
+    expect(files.has('tsconfig.node.tsbuildinfo')).toBe(false);
+  });
+
+  it('cleans a tsBuildInfoFile path a root tsconfig names', async () => {
+    vi.useFakeTimers();
+    healthyPreview();
+
+    const files = project(
+      {
+        'tsconfig.app.json':
+          '{ /* c */ "compilerOptions": { "tsBuildInfoFile": "./node_modules/.tmp/app.tsbuildinfo" } }',
+      },
+      { 'node_modules/.tmp/app.tsbuildinfo': 'new' },
+    );
+
+    await settle(runGameCheck({}));
+
+    expect(files.has('node_modules/.tmp/app.tsbuildinfo')).toBe(false);
+    expect(files.has('tsconfig.app.json')).toBe(true);
+  });
+
+  it('a project it cannot list is left alone, and the check still passes', async () => {
+    vi.useFakeTimers();
+    tscPasses();
+    healthyPreview();
+    fakeSandbox.fs.readdir.mockRejectedValue(new Error('EIO'));
+
+    const result = await settle(runGameCheck({}));
+
+    expect(result.typecheck).toEqual({ ok: true, errors: [] });
+    expect(fakeSandbox.fs.rm).not.toHaveBeenCalled();
   });
 });

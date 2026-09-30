@@ -1263,7 +1263,7 @@ let body; try { body = JSON.parse(init.body); } catch { return baseFetch(input, 
   - Verify: the gates are green and both live runs are reported.
   - Verify level: live
 
-- [ ] **T11** — Update SPEC.md and CLAUDE.md to match what was built
+- [x] **T11** — Update SPEC.md and CLAUDE.md to match what was built
   - Depends on: T10
   - Files: `SPEC.md`, `CLAUDE.md`
   - Applies: all D-numbers.

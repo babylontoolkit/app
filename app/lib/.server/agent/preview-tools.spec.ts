@@ -87,6 +87,19 @@ describe('evaluate_in_game', () => {
 
     expect(String(result)).toContain('truncated');
   });
+
+  /*
+   * Live: a model imported its own script extension-less from inside the running game and got a
+   * module-resolution error. The description must teach the served path WITH the extension.
+   */
+  it('teaches importing project modules by their served path WITH the .ts extension', () => {
+    const tools = createPreviewTools({ generationId: 'g', userId: 'u', emit: () => {} });
+    const description = (tools.evaluate_in_game as unknown as { description: string }).description;
+
+    expect(description).toContain("await import('/src/scripts/GemPickup.ts')");
+    expect(description).toMatch(/WITH the `\.ts`/);
+    expect(description).toMatch(/extension-less path/);
+  });
 });
 
 describe('capture_game_screenshot', () => {

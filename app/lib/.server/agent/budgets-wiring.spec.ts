@@ -31,9 +31,7 @@ const proxy = () => codeOnly(read('app/lib/.server/agent/proxy.ts'));
 
 describe('the proxy resolves the budgets and passes them to every seam', () => {
   it('resolves them once, from the request context', () => {
-    expect(proxy()).toMatch(
-      /const budgets = resolveAgentBudgets\(request\.context, toolLoop \? TOOL_LOOP_BUDGET_DEFAULTS : undefined\)/,
-    );
+    expect(proxy()).toMatch(/const budgets = resolveTurnBudgets\(request\.context, toolLoop\)/);
   });
 
   /*
@@ -41,7 +39,8 @@ describe('the proxy resolves the budgets and passes them to every seam', () => {
    * so two resolves is how the policy and the tools end up disagreeing about the same turn.
    */
   it('resolves them exactly once per generation', () => {
-    expect(proxy().match(/resolveAgentBudgets\(/g)).toHaveLength(1);
+    expect(proxy().match(/resolveTurnBudgets\(/g)).toHaveLength(1);
+    expect(proxy()).not.toMatch(/resolveAgentBudgets\(/);
   });
 
   it('passes them to the tool policy, which derives maxSteps from them', () => {
@@ -72,7 +71,7 @@ describe('the proxy resolves the budgets and passes them to every seam', () => {
    */
   it('builds the reference index with the resolved budget', () => {
     expect(codeOnly(read('app/routes/api.admin.prompt.ts'))).toMatch(
-      /maxReferenceLoads: resolveAgentBudgets\(context\)\.maxReferenceLoads/,
+      /maxReferenceLoads: resolveTurnBudgets\(context\)\.maxReferenceLoads/,
     );
   });
 });

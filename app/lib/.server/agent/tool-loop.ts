@@ -20,6 +20,7 @@ import type { AgentWorkspaceSummary } from '~/lib/agent/workspace-protocol-types
 import type { ModelFamily } from '~/lib/modules/llm/model-families';
 import { envModelInfo } from '~/lib/modules/llm/providers/env-models';
 import type { ModelInfo } from '~/lib/modules/llm/types';
+import { resolveAgentBudgets, TOOL_LOOP_BUDGET_DEFAULTS, type AgentBudgets } from './budgets';
 import { accumulateStepUsage, type GenerationUsage, type UsageStep } from './step-usage';
 
 export interface ToolLoopConfig {
@@ -75,6 +76,23 @@ export function resolveToolLoopConfig(context: unknown): ToolLoopConfig {
     checkMaxNudges: numberSetting(context, 'AGENT_CHECK_MAX_NUDGES', d.checkMaxNudges, FLOORS.checkMaxNudges),
     compactAtTokens: numberSetting(context, 'AGENT_COMPACT_AT_TOKENS', d.compactAtTokens, FLOORS.compactAtTokens),
   };
+}
+
+/**
+ * The turn's read budgets under whichever loop is ON — the ONE resolver for every seam that needs them.
+ *
+ * Under the tool loop the base defaults are `TOOL_LOOP_BUDGET_DEFAULTS` (D15); otherwise the shipped
+ * ones. Two callers must agree: the proxy (which ENFORCES `maxReferenceLoads` in `load_reference`) and
+ * the prompt refresh (which BAKES the same number into the cached reference index). Resolving them
+ * separately is how the prompt told the model "at most 3" while the tool allowed 12.
+ *
+ * `loopEnabled` lets the proxy pass the value it already resolved; absent, it is read from config.
+ */
+export function resolveTurnBudgets(
+  context: unknown,
+  loopEnabled: boolean = resolveToolLoopConfig(context).enabled,
+): AgentBudgets {
+  return resolveAgentBudgets(context, loopEnabled ? TOOL_LOOP_BUDGET_DEFAULTS : undefined);
 }
 
 /*

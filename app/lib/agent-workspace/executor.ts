@@ -273,12 +273,41 @@ export async function navigatePreview(path: string, navState?: Record<string, un
   throw new Error(`The preview did not come back after navigating to ${path}.`);
 }
 
+/**
+ * The errors the preview recorded since `since`.
+ *
+ * 🔴 A READ THAT TIMES OUT IS RETRIED ONCE BEFORE IT BECOMES A GAME ERROR (T10 live, 2026-09-30).
+ * Measured on `gen_muop93e1_r1yrx4`: the first check of a turn (a cold `/play` boot while four media
+ * renders were landing) reported "Game check found 1 problem" — the preview did not answer the error
+ * read within the bridge's 10s — and the model's immediate retry passed with no changes. A busy
+ * document is not a broken game, and reporting it as one arms the done-gate and buys a whole check
+ * round (~60s) for nothing. The retry waits for the bridge to be ready first; a second failure is still
+ * reported, because an error read that never succeeds must not read as a clean game.
+ */
 async function collectErrors(since: number): Promise<string[]> {
-  try {
-    return (await readPreviewErrors(since)).map((entry) => entry.message);
-  } catch (error) {
-    return [`Could not read the preview's errors: ${(error as Error).message}`];
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      const deadline = Date.now() + PREVIEW_NAV_READY_MS;
+
+      while (!isPreviewBridgeReady() && Date.now() < deadline) {
+        await sleep(NAV_POLL_MS);
+      }
+    }
+
+    try {
+      return (await readPreviewErrors(since)).map((entry) => entry.message);
+    } catch (error) {
+      lastError = error;
+
+      if (isNoPreviewError(error)) {
+        break;
+      }
+    }
   }
+
+  return [`Could not read the preview's errors: ${(lastError as Error).message}`];
 }
 
 /** The invocation `check_game` typechecks with. Forced, so an up-to-date build info cannot skip the check. */
@@ -331,7 +360,122 @@ export function parseTypecheckOutput(exitCode: number, output: string): Typechec
   return { value: { ok: false, errors: capErrors([lastLine]) } };
 }
 
+/*
+ * ─── tsbuildinfo litter ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `tsc -b` writes `<config>.tsbuildinfo` beside each tsconfig (or at a `tsBuildInfoFile` path), i.e.
+ * INTO the user's project — which the mirror then carries to their disk and their repository. The
+ * check is a READ of the project, so it must leave the tree as it found it: build-info files that did
+ * not exist before are removed, and ones that did (the starter ships two) get their bytes back.
+ * Never a pre-existing file deleted, and never a cleanup failure turned into a check failure.
+ */
+const BUILD_INFO = /\.tsbuildinfo$/i;
+const TSCONFIG = /^tsconfig(\.[\w-]+)?\.json$/i;
+const BUILD_INFO_OPTION = /"tsBuildInfoFile"\s*:\s*"([^"]+)"/g;
+
+type BuildInfoSnapshot = Map<string, string | undefined>;
+
+/** A `tsBuildInfoFile` value as a project-relative path, or `null` if it points outside the project. */
+function projectRelative(path: string): string | null {
+  const rel = path.trim().replace(/^\.\//, '');
+
+  if (!rel || rel.startsWith('/') || rel.split('/').includes('..')) {
+    return null;
+  }
+
+  return rel;
+}
+
+/** Every build-info path tsc may write: root `*.tsbuildinfo` plus any `tsBuildInfoFile` a root tsconfig names. */
+async function buildInfoCandidates(names: string[]): Promise<Set<string>> {
+  const sb = await sandbox;
+  const paths = new Set(names.filter((name) => BUILD_INFO.test(name)));
+
+  for (const name of names.filter((n) => TSCONFIG.test(n))) {
+    try {
+      const text = await sb.fs.readFile(name, 'utf-8');
+
+      for (const match of String(text).matchAll(BUILD_INFO_OPTION)) {
+        const rel = projectRelative(match[1]);
+
+        if (rel) {
+          paths.add(rel);
+        }
+      }
+    } catch {
+      // An unreadable tsconfig names nothing.
+    }
+  }
+
+  return paths;
+}
+
+/** What exists before the typecheck, with its bytes. `null` = could not look, so clean nothing. */
+async function snapshotBuildInfo(): Promise<{ snapshot: BuildInfoSnapshot; candidates: Set<string> } | null> {
+  try {
+    const sb = await sandbox;
+    const names = await sb.fs.readdir('.');
+    const candidates = await buildInfoCandidates(names);
+    const snapshot: BuildInfoSnapshot = new Map();
+
+    for (const path of candidates) {
+      try {
+        snapshot.set(path, await sb.fs.readFile(path, 'utf-8'));
+      } catch {
+        /*
+         * Listed but unreadable still EXISTED — record it so it is never deleted. Named only by a
+         * tsconfig and not readable = not there yet (tsc may create it).
+         */
+        if (names.includes(path)) {
+          snapshot.set(path, undefined);
+        }
+      }
+    }
+
+    return { snapshot, candidates };
+  } catch {
+    return null;
+  }
+}
+
+async function restoreBuildInfo(before: { snapshot: BuildInfoSnapshot; candidates: Set<string> } | null) {
+  if (!before) {
+    return;
+  }
+
+  try {
+    const sb = await sandbox;
+    const after = await buildInfoCandidates(await sb.fs.readdir('.'));
+
+    for (const path of new Set([...after, ...before.candidates])) {
+      const original = before.snapshot.get(path);
+
+      try {
+        if (!before.snapshot.has(path)) {
+          await sb.fs.rm(path, { force: true });
+        } else if (original !== undefined && (await sb.fs.readFile(path, 'utf-8')) !== original) {
+          await sb.fs.writeFile(path, original, 'utf-8');
+        }
+      } catch {
+        // Best effort per file; the check result never depends on it.
+      }
+    }
+  } catch {
+    // Could not list the project afterwards — leave it; never guess what to delete.
+  }
+}
+
 async function runTypecheck(): Promise<TypecheckVerdict> {
+  const before = await snapshotBuildInfo();
+
+  try {
+    return await runTypecheckOnce();
+  } finally {
+    await restoreBuildInfo(before);
+  }
+}
+
+async function runTypecheckOnce(): Promise<TypecheckVerdict> {
   try {
     const result = await runSegment([...TYPECHECK_ARGV], TYPECHECK_TIMEOUT_MS);
 

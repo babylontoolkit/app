@@ -49,6 +49,7 @@ import {
   isDeliberateLoopStop,
   resolveMaxOutputTokens,
   resolveToolLoopConfig,
+  resolveTurnBudgets,
   resolveTurnCeiling,
   runToolLoopSegments,
   type ToolLoopTurnState,
@@ -56,6 +57,7 @@ import {
 import {
   createWorkspaceTools,
   checkBreakerTripped,
+  doneGateWriteFacts,
   newWorkspaceTurnState,
   summarizeWorkspace,
   todoNudgeFor,
@@ -64,7 +66,6 @@ import {
 } from './workspace-tools';
 import type { AgentWorkspaceSummary, TodoItem } from '~/lib/agent/workspace-protocol-types';
 import { createStepTextSeparator } from './step-text-separator';
-import { resolveAgentBudgets, TOOL_LOOP_BUDGET_DEFAULTS } from './budgets';
 import { buildFileManifestWithCollapses, renderFileManifest } from '~/lib/context/file-manifest';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { PROVIDER_LIST } from '~/utils/constants';
@@ -1655,7 +1656,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * throwing. Resolved HERE rather than beside the tool contexts because the policy is decided first.
    */
   /* Under the tool loop the BASE defaults are the loop's (D15); env still overrides, and the rounds re-derive. */
-  const budgets = resolveAgentBudgets(request.context, toolLoop ? TOOL_LOOP_BUDGET_DEFAULTS : undefined);
+  const budgets = resolveTurnBudgets(request.context, toolLoop);
 
   const toolPolicy = toolPolicyForTurn({
     isFirstBuildTurn,
@@ -2990,12 +2991,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
               lastStepToolCalls,
 
               /*
-               * A Plan turn's only writes are `_specs/` planning artifacts (`planOnly`), which no game
-               * check can verify — gating them would nudge for a `check_game` the turn does not have.
+               * Only game-affecting writes arm the gate: a Plan turn's `_specs/` artifacts and any
+               * `*.md` (SPEC.md / DESIGN.md) cannot be verified by `check_game` (`doneGateWriteFacts`).
                */
-              wroteThisTurn: !discussNote && (overlay?.writes.size ?? 0) > 0,
+              ...doneGateWriteFacts(overlay, Boolean(discussNote)),
               lastCheck: wsState.lastCheck,
-              lastWriteSeq: overlay?.lastWriteSeq ?? 0,
               breakerTripped: checkBreakerTripped(wsState),
               lastStepInputTokens: last ? last.inTokens + last.cacheRead + last.cacheWrite : 0,
             };

@@ -195,6 +195,11 @@ export function createPreviewTools(ctx: PreviewToolContext): Record<string, Retu
         'evaluation, so repeat those two lines and end with ONE narrow `return`, e.g. ' +
         '`return scene.getMeshByName("kart") !== null;`. ' +
         'Also: `document.querySelector("canvas") !== null`. ' +
+        "Prefer reading state off the scene that way. If you must import one of the PROJECT's own modules, " +
+        'use its exact served path WITH the `.ts`/`.tsx` extension, e.g. ' +
+        "`await import('/src/scripts/GemPickup.ts')` — Vite serves source with the extension, and an " +
+        'extension-less path can fail to resolve or load a second copy of the module (with none of the ' +
+        "running game's state in it). " +
         'Large objects are truncated, so ask one narrow question rather than dumping a scene.',
       parameters: z.object({
         /* Optional + validated in `execute`: a schema rejection kills the generation after it has paid. */

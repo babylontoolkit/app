@@ -7,6 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { describeTurnOutcome } from '~/lib/agent/turn-outcome';
 import type { ModelInfo } from '~/lib/modules/llm/types';
+import { buildReferenceIndex } from '~/lib/.server/prompt/reference-index';
+import { ON_DEMAND_BLOCKS } from '~/lib/.server/prompt/sources';
 import { emptyUsage } from './step-usage';
 import {
   carrySummary,
@@ -19,6 +21,7 @@ import {
   GATE_PROMPT,
   resolveMaxOutputTokens,
   resolveToolLoopConfig,
+  resolveTurnBudgets,
   resolveTurnCeiling,
   type SegmentFacts,
 } from './tool-loop';
@@ -30,6 +33,9 @@ const KEYS = [
   'AGENT_TURN_MAX_CREDITS',
   'AGENT_CHECK_MAX_NUDGES',
   'AGENT_COMPACT_AT_TOKENS',
+  'AGENT_MAX_REFERENCE_LOADS',
+  'AGENT_MAX_FILE_READS',
+  'AGENT_MAX_READ_CHARS',
 ];
 
 const ctx = (vars: Record<string, string>) => ({ cloudflare: { env: vars } });
@@ -491,5 +497,38 @@ describe('decideTurnEndVerdict — a deliberate loop stop never fails and never 
 
     expect(outcome.state).toBe('paused');
     expect(outcome.actionLabel).toBe('Keep building');
+  });
+});
+
+/*
+ * The number the cached prompt TELLS the model must be the one `load_reference` enforces. The prompt
+ * refresh and the proxy both resolve through `resolveTurnBudgets`; before it the refresh baked the
+ * artifact-era 3 while the tool loop enforced 12.
+ */
+describe('resolveTurnBudgets — the reference budget the prompt bakes', () => {
+  const baked = (context: unknown) =>
+    buildReferenceIndex(ON_DEMAND_BLOCKS, resolveTurnBudgets(context).maxReferenceLoads);
+
+  it('loop ON → the baked index says 12', () => {
+    const index = baked(ctx({ AGENT_TOOL_LOOP: 'true' }));
+
+    expect(index).toContain('You may load at most 12 references');
+  });
+
+  it('loop OFF → the baked index says 3', () => {
+    const index = baked(ctx({}));
+
+    expect(index).toContain('You may load at most 3 references');
+  });
+
+  it('an explicit AGENT_MAX_REFERENCE_LOADS still wins under the loop', () => {
+    expect(resolveTurnBudgets(ctx({ AGENT_TOOL_LOOP: 'true', AGENT_MAX_REFERENCE_LOADS: '5' })).maxReferenceLoads).toBe(
+      5,
+    );
+  });
+
+  it('the proxy may pass the switch it already resolved', () => {
+    expect(resolveTurnBudgets(ctx({}), true).maxReferenceLoads).toBe(12);
+    expect(resolveTurnBudgets(ctx({ AGENT_TOOL_LOOP: 'true' }), false).maxReferenceLoads).toBe(3);
   });
 });

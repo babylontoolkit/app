@@ -66,9 +66,39 @@ export interface WorkspaceToolCallEvent {
  * Paths are normalised project-relative on the way in, so `src/a.ts` and `/home/project/src/a.ts`
  * are one file.
  */
+/**
+ * Whether a write can change the running game, and so arms the done-gate (D11). Markdown (`SPEC.md`,
+ * `DESIGN.md`, anything `*.md`) cannot — gating on it forces a `check_game` that verifies nothing
+ * (~90 s per build). Everything else arms it, including the `package.json` a `run_command` writes.
+ *
+ * Only the GATE uses this. Whether the turn produced files (the outcome and the no-files refund) still
+ * counts EVERY write — a markdown-only phase did produce files.
+ */
+export function writeArmsDoneGate(path: string): boolean {
+  return !/\.md$/i.test(path.trim());
+}
+
+/**
+ * The done-gate's write facts for a segment boundary — the one place `wroteThisTurn` is derived.
+ * A Plan turn's only writes are `_specs/` planning artifacts, which no game check can verify, so a
+ * Plan turn never arms the gate; otherwise only game-affecting writes (`writeArmsDoneGate`) do.
+ */
+export function doneGateWriteFacts(
+  overlay: Pick<WorkspaceOverlay, 'gateWriteSeq'> | undefined,
+  planTurn: boolean,
+): { wroteThisTurn: boolean; lastWriteSeq: number } {
+  const seq = overlay?.gateWriteSeq ?? 0;
+
+  return { wroteThisTurn: !planTurn && seq > 0, lastWriteSeq: seq };
+}
+
 export class WorkspaceOverlay {
+  /** EVERY path written this turn — the outcome's "did it produce files". */
   readonly writes = new Set<string>();
   lastWriteSeq = 0;
+
+  /** Counts only writes that arm the done-gate (`writeArmsDoneGate`); a check records this one. */
+  gateWriteSeq = 0;
 
   readonly #base: FileMap;
   readonly #written = new Map<string, string>();
@@ -104,6 +134,10 @@ export class WorkspaceOverlay {
     this.#written.set(rel, content);
     this.writes.add(rel);
     this.lastWriteSeq++;
+
+    if (writeArmsDoneGate(rel)) {
+      this.gateWriteSeq++;
+    }
   }
 }
 
@@ -645,7 +679,7 @@ export function createWorkspaceTools(ctx: WorkspaceToolContext): Record<string, 
 
       const capped = errors.slice(0, CHECK_MAX_ERRORS);
 
-      state.lastCheck = { ok: check.ok, errors: capped, afterWriteSeq: overlay.lastWriteSeq };
+      state.lastCheck = { ok: check.ok, errors: capped, afterWriteSeq: overlay.gateWriteSeq };
 
       if (!check.ok) {
         state.checkFailureSignatures.push(failureSignature(capped));
