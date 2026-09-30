@@ -15,7 +15,7 @@
  * never a throw into a click handler.
  */
 import { atom } from 'nanostores';
-import type { BridgeHello, BridgeJobStatus } from '~/lib/bridge/protocol';
+import { BRIDGE_MAX_IMAGE_BASE64, type BridgeHello, type BridgeJobStatus } from '~/lib/bridge/protocol';
 
 /** Mirrors the JSON of `GET /api/projects/:projectId/bridge` (the route declares the same shape). */
 export interface BridgeDeviceView {
@@ -60,6 +60,17 @@ export interface BridgeLiveJob {
   status: BridgeJobStatus;
   label: string;
   lines: string[];
+
+  /**
+   * The latest picture a finished capture sent (a `unity_capture` result). Memory only — never
+   * persisted, never re-fetched: it exists so the USER sees what the model was shown.
+   */
+  image?: BridgeJobImage;
+}
+
+export interface BridgeJobImage {
+  base64: string;
+  mimeType: 'image/png';
 }
 
 export type BridgeDialog = 'connect' | 'status' | 'jobs';
@@ -181,7 +192,25 @@ export function updateBridgeFromPart(part: unknown): void {
   const p = part as Record<string, unknown>;
 
   if (p.type === 'bridge-consent') {
-    if (typeof p.toolCallId !== 'string' || typeof p.generationId !== 'string' || seenConsents.has(p.toolCallId)) {
+    if (typeof p.toolCallId !== 'string') {
+      return;
+    }
+
+    /*
+     * The server ended the wait (answered, timed out, or the turn stopped): close the prompt for THAT
+     * call, and latch it so a replayed request part never re-opens it.
+     */
+    if (p.closed === true) {
+      seenConsents.add(p.toolCallId);
+
+      if (bridgeConsentStore.get()?.toolCallId === p.toolCallId) {
+        bridgeConsentStore.set(null);
+      }
+
+      return;
+    }
+
+    if (typeof p.generationId !== 'string' || seenConsents.has(p.toolCallId)) {
       return;
     }
 
@@ -223,10 +252,14 @@ export function updateBridgeFromPart(part: unknown): void {
   const nextStatus =
     status && (!current || STATUS_RANK[status] >= STATUS_RANK[current.status]) ? status : (current?.status ?? 'queued');
   const nextLabel = (typeof p.label === 'string' && p.label) || current?.label || '';
+  const incomingImage = readImage(p.image);
+  const newImage = incomingImage !== undefined && incomingImage.base64 !== current?.image?.base64;
+  const nextImage = incomingImage ?? current?.image;
 
   if (
     current &&
     !appendLine &&
+    !newImage &&
     current.status === nextStatus &&
     current.label === nextLabel &&
     current.generationId === p.generationId
@@ -241,8 +274,48 @@ export function updateBridgeFromPart(part: unknown): void {
       status: nextStatus,
       label: nextLabel,
       lines: appendLine && line !== undefined ? [...(current?.lines ?? []), line] : (current?.lines ?? []),
+      ...(nextImage ? { image: nextImage } : {}),
     },
   });
+
+  /*
+   * A capture just landed: show it. Only on the transition (a replay carries the same bytes and returned
+   * above), and never over a pending consent prompt or another bridge dialog the user has open — a second
+   * modal opened on top of the consent prompt would take its clicks.
+   */
+  if (newImage && bridgeConsentStore.get() === null && bridgeDialogStore.get() === null) {
+    bridgeDialogStore.set('jobs');
+  }
+}
+
+/** A capture image from a data part, or undefined — a PNG within the same cap the server applies. */
+function readImage(value: unknown): BridgeJobImage | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const { base64, mimeType } = value as { base64?: unknown; mimeType?: unknown };
+
+  if (
+    mimeType !== 'image/png' ||
+    typeof base64 !== 'string' ||
+    base64.length === 0 ||
+    base64.length > BRIDGE_MAX_IMAGE_BASE64
+  ) {
+    return undefined;
+  }
+
+  return { base64, mimeType };
+}
+
+/** Close any pending consent prompt (the turn ended — nothing is waiting for the answer any more). */
+export function clearBridgeConsent(): void {
+  const consent = bridgeConsentStore.get();
+
+  if (consent) {
+    seenConsents.add(consent.toolCallId);
+    bridgeConsentStore.set(null);
+  }
 }
 
 const STATUS_RANK: Record<BridgeJobStatus, number> = {

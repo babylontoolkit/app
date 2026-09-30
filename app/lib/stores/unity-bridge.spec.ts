@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { BRIDGE_MAX_IMAGE_BASE64 } from '~/lib/bridge/protocol';
 import {
   answerConsent,
   approvePairingCode,
   beginBridgeScan,
   bridgeConsentStore,
+  bridgeDialogStore,
   bridgeLiveJobsStore,
+  clearBridgeConsent,
   bridgeStatusStore,
   refreshBridgeStatus,
   resetUnityBridgeStoresForTests,
@@ -145,5 +148,80 @@ describe('unity-bridge store', () => {
       }),
     );
     await expect(approvePairingCode('ABCD-EFGH')).resolves.toEqual({ ok: false, message: 'offline' });
+  });
+
+  it('a closed consent part clears the prompt for THAT call only, and a replay never re-opens it', () => {
+    updateBridgeFromPart(consentPart);
+    updateBridgeFromPart({ type: 'bridge-consent', toolCallId: 'call_other', closed: true, generationId: 'gen_1' });
+    expect(bridgeConsentStore.get()?.toolCallId).toBe('call_1');
+
+    updateBridgeFromPart({ type: 'bridge-consent', toolCallId: 'call_1', closed: true, generationId: 'gen_1' });
+    expect(bridgeConsentStore.get()).toBeNull();
+
+    // useChat re-presents the whole data array: the request part comes round again.
+    updateBridgeFromPart(consentPart);
+    expect(bridgeConsentStore.get()).toBeNull();
+  });
+
+  it('clearBridgeConsent (the turn stopped streaming) closes an open prompt and latches it', () => {
+    updateBridgeFromPart(consentPart);
+    clearBridgeConsent();
+    expect(bridgeConsentStore.get()).toBeNull();
+
+    updateBridgeFromPart(consentPart);
+    expect(bridgeConsentStore.get()).toBeNull();
+  });
+
+  describe('capture images', () => {
+    const image = { base64: 'iVBORw0KGgo=', mimeType: 'image/png' };
+    const job = (extra: Record<string, unknown> = {}) => ({
+      type: 'bridge-job',
+      jobId: 'brg_cap',
+      generationId: 'gen_1',
+      label: 'unity_capture game',
+      ...extra,
+    });
+
+    it('keeps the latest image per job and opens the Jobs panel once, when the capture lands', () => {
+      updateBridgeFromPart(job({ status: 'running' }));
+      expect(bridgeDialogStore.get()).toBeNull();
+
+      updateBridgeFromPart(job({ status: 'succeeded', image }));
+      expect(bridgeLiveJobsStore.get().brg_cap.image).toEqual(image);
+      expect(bridgeDialogStore.get()).toBe('jobs');
+
+      // The user closes it; the replayed part (same bytes) must not re-open it.
+      bridgeDialogStore.set(null);
+      beginBridgeScan();
+      updateBridgeFromPart(job({ status: 'running' }));
+      updateBridgeFromPart(job({ status: 'succeeded', image }));
+      expect(bridgeDialogStore.get()).toBeNull();
+      expect(bridgeLiveJobsStore.get().brg_cap.image).toEqual(image);
+    });
+
+    it('never opens the Jobs panel over a pending consent prompt or another open bridge dialog', () => {
+      updateBridgeFromPart(consentPart);
+      updateBridgeFromPart(job({ status: 'succeeded', image }));
+      expect(bridgeDialogStore.get()).toBeNull();
+      expect(bridgeLiveJobsStore.get().brg_cap.image).toEqual(image);
+
+      clearBridgeConsent();
+      bridgeDialogStore.set('status');
+      updateBridgeFromPart(job({ jobId: 'brg_cap2', status: 'succeeded', image }));
+      expect(bridgeDialogStore.get()).toBe('status');
+    });
+
+    it('drops an image over the cap, or one that is not a PNG', () => {
+      updateBridgeFromPart(
+        job({ status: 'succeeded', image: { base64: 'A'.repeat(BRIDGE_MAX_IMAGE_BASE64 + 1), mimeType: 'image/png' } }),
+      );
+      updateBridgeFromPart(
+        job({ jobId: 'brg_svg', status: 'succeeded', image: { base64: 'PHN2Zz4=', mimeType: 'image/svg+xml' } }),
+      );
+
+      expect(bridgeLiveJobsStore.get().brg_cap.image).toBeUndefined();
+      expect(bridgeLiveJobsStore.get().brg_svg.image).toBeUndefined();
+      expect(bridgeDialogStore.get()).toBeNull();
+    });
   });
 });

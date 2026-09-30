@@ -62,6 +62,9 @@ export function UnityBridgeStatusPanel({ projectId }: { projectId: string }) {
   const toolkitVersion = unityProject?.toolkitVersion;
   const allowScripts = device?.allowScripts ?? false;
 
+  // An offline device's stored hello may predate the folder report — say so, rather than "—".
+  const missingProjectsDir = device?.online ? '—' : 'unknown until the helper reconnects';
+
   const act = async (body: Record<string, unknown>) => {
     setBusy(true);
 
@@ -120,8 +123,13 @@ export function UnityBridgeStatusPanel({ projectId }: { projectId: string }) {
             {hello ? (
               <>
                 <div className="text-xs text-bolt-elements-textSecondary">
-                  Projects folder <span className="font-mono">{hello.projectsDir || '—'}</span>. The agent opens or
-                  creates the Unity project it works on.
+                  Projects folder{' '}
+                  {hello.projectsDir ? (
+                    <span className="font-mono">{hello.projectsDir}</span>
+                  ) : (
+                    <span data-testid="projects-dir-unknown">{missingProjectsDir}</span>
+                  )}
+                  . The agent opens or creates the Unity project it works on.
                 </div>
                 {projects.length === 0 ? (
                   <div className="text-xs text-bolt-elements-textTertiary">No Unity projects in this folder yet.</div>

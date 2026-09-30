@@ -142,4 +142,39 @@ describe('importLocalScene', () => {
     expect(result.ok).toBe(true);
     expect([...writes.keys()]).toEqual([`${WORK_DIR}/public/scenes/Level-01/Level 01.glb`]);
   });
+
+  it('a file named only in extras that the server does not have → skipped with a reason, import still ok', async () => {
+    const { write } = recorder();
+    const gltf = new TextEncoder().encode(
+      JSON.stringify({
+        buffers: [{ uri: 'Level01.bin' }],
+        scenes: [{ extras: { metadata: { project: 'game.js', skybox: { url: 'assets/sky.env' } } } }],
+      }),
+    );
+    const JS = new Uint8Array([47, 47, 10]);
+    const result = await importLocalScene(
+      { url: SCENE, overwrite: false },
+      {
+        fetch: server({
+          [SCENE]: gltf,
+          'http://localhost:8888/scenes/Level01.bin': BIN,
+          'http://localhost:8888/scenes/game.js': JS,
+          'http://localhost:8888/scenes/assets/sky.env': 404,
+        }),
+        exists: () => false,
+        write,
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.written).toEqual([
+      'public/scenes/Level01/Level01.gltf',
+      'public/scenes/Level01/Level01.bin',
+      'public/scenes/Level01/game.js',
+    ]);
+    expect(result.skipped).toEqual([
+      { uri: 'assets/sky.env', reason: 'named in the scene metadata, but the server answered 404' },
+    ]);
+    expect(result.message).toContain('assets/sky.env');
+  });
 });

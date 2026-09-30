@@ -85,6 +85,17 @@ function iconButton(): HTMLElement {
   return button as HTMLElement;
 }
 
+/** The icon inside the button — the element that carries the online colour. */
+function bridgeIcon(): HTMLElement {
+  const icon = iconButton().querySelector('[data-testid="unity-bridge-icon"]');
+
+  if (!icon) {
+    throw new Error('no bridge icon');
+  }
+
+  return icon as HTMLElement;
+}
+
 beforeEach(() => {
   resetUnityBridgeStoresForTests();
   resetUnityBridgeButtonForTests();
@@ -140,6 +151,7 @@ describe('UnityBridgeButton', () => {
 
     await waitFor(() => expect(iconButton().getAttribute('title')).toBe('Connect Unity'));
     await waitFor(() => expect(iconButton().querySelector('.i-ph\\:cube-duotone')).not.toBeNull());
+    expect(bridgeIcon().className).not.toContain('text-bolt-elements-icon-success');
     fireEvent.click(iconButton());
 
     expect(bridgeDialogStore.get()).toBe('connect');
@@ -151,7 +163,9 @@ describe('UnityBridgeButton', () => {
     answerStatusWith(online);
     render(<UnityBridgeButton />);
 
-    await waitFor(() => expect(iconButton().className).toContain('text-bolt-elements-icon-success'));
+    // Asserted on the ICON: a colour class on the button loses to IconButton's base colour.
+    await waitFor(() => expect(bridgeIcon().className).toContain('text-bolt-elements-icon-success'));
+    expect(iconButton().className).not.toContain('text-bolt-elements-icon-success');
     expect(iconButton().getAttribute('title')).toBe('Unity Bridge: Studio Mac');
 
     fireEvent.click(iconButton());
@@ -169,7 +183,7 @@ describe('UnityBridgeButton', () => {
     answerStatusWith(online);
     render(<UnityBridgeButton />);
 
-    await waitFor(() => expect(iconButton().className).toContain('text-bolt-elements-icon-success'));
+    await waitFor(() => expect(bridgeIcon().className).toContain('text-bolt-elements-icon-success'));
     act(() => bridgeDialogStore.set('connect'));
 
     expect(await screen.findByText('Your devices')).toBeTruthy();
@@ -214,5 +228,20 @@ describe('UnityBridgeButton', () => {
 
     expect(bridgeConsentStore.get()).toBeNull();
     expect(bridgeDialogStore.get()).toBeNull();
+  });
+
+  it('a pending consent prompt closes when the turn stops streaming — nothing is waiting for it', async () => {
+    answerStatusWith(unpaired);
+    render(<UnityBridgeButton />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const { bridgeConsentStore } = await import('~/lib/stores/unity-bridge');
+    act(() => streamingState.set(true));
+    act(() => bridgeConsentStore.set({ generationId: 'g', toolCallId: 't', operation: 'op', target: 'x' }));
+    expect(bridgeConsentStore.get()).not.toBeNull();
+
+    act(() => streamingState.set(false));
+
+    await waitFor(() => expect(bridgeConsentStore.get()).toBeNull());
   });
 });

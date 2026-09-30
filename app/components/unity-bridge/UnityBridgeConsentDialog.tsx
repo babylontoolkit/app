@@ -16,9 +16,14 @@ export function UnityBridgeConsentDialog() {
     return null;
   }
 
+  /*
+   * `!z-[10000]`: above every other bridge dialog (they sit at the shared Dialog's `z-[9999]`). Important,
+   * because two utilities setting one property are ordered by the generated stylesheet, not the class
+   * string. The store also never auto-opens another bridge dialog over a pending prompt.
+   */
   return (
     <DialogRoot open>
-      <Dialog showCloseButton={false}>
+      <Dialog showCloseButton={false} className="!z-[10000]">
         <div className="p-6 flex flex-col gap-3">
           <DialogTitle>Allow this Unity operation?</DialogTitle>
           <DialogDescription>{`The agent wants to run this on "${consent.target}":`}</DialogDescription>

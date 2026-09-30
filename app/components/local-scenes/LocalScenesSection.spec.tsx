@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 vi.mock('react-toastify', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 
@@ -68,7 +68,30 @@ describe('LocalScenesSection', () => {
     await waitFor(() =>
       expect(importMock).toHaveBeenCalledWith({ url: 'http://localhost:8888/scenes/A.glb', overwrite: false }),
     );
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Imported 1 file(s).'));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith('Imported 1 file(s).', {
+        toastId: 'local-scene-import:http://localhost:8888/scenes/A.glb',
+      }),
+    );
+  });
+
+  it('a double click imports ONCE and toasts once', async () => {
+    let finish: (value: typeof okResult) => void = () => undefined;
+    importMock.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
+    render(<LocalScenesSection projectId="prj_1" />);
+
+    fireEvent.change(screen.getByLabelText('Scene URL'), { target: { value: 'http://localhost:8888/scenes/A.glb' } });
+
+    // Two clicks in ONE frame: inside a single act() React has not re-rendered the disabled button yet.
+    const button = screen.getByRole('button', { name: 'Import' });
+    act(() => {
+      button.click();
+      button.click();
+    });
+    finish(okResult);
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(importMock).toHaveBeenCalledTimes(1);
   });
 
   it('an online helper with scenes: still NO scene rows (D54) — its origin only seeds the address', async () => {

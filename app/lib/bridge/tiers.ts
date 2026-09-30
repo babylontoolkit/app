@@ -148,10 +148,16 @@ function classifyCli(args: string[]): TierDecision {
     return { tier: 'refused', reason: REFUSED_CLI[first] };
   }
 
+  // Printing help changes nothing, whatever command it is asked of (a refused command stays refused above).
+  if (args.some((arg) => arg === '--help' || arg === '-h')) {
+    return { tier: 'allowed' };
+  }
+
   if (hasOwn(ALLOWED_CLI, first)) {
     const allowed = ALLOWED_CLI[first];
 
-    if (allowed === '*' || (typeof second === 'string' && allowed.includes(second))) {
+    // A bare command group (no subcommand) only prints its help/list.
+    if (allowed === '*' || second === undefined || allowed.includes(second)) {
       return { tier: 'allowed' };
     }
   }

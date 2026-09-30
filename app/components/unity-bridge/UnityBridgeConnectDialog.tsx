@@ -210,7 +210,7 @@ export function UnityBridgeConnectDialog({ projectId }: { projectId: string }) {
           onClose={() => setRemoving(null)}
           onConfirm={() => void confirmRemove()}
           title={`Remove ${removing?.name ?? 'this device'}?`}
-          description={`Remove ${removing?.name ?? 'this device'}? The helper on that computer will stop working until it is paired again.`}
+          description="The helper on that computer will stop working until it is paired again."
           confirmLabel="Remove"
           variant="destructive"
         />

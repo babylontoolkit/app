@@ -24,6 +24,7 @@ import { createScopedLogger } from '~/utils/logger';
 import {
   BRIDGE_CONSENT_TIMEOUT_MS,
   BRIDGE_JOB_WAIT_MAX_S,
+  BRIDGE_MAX_IMAGE_BASE64,
   BRIDGE_PICKUP_TIMEOUT_MS,
   BRIDGE_SYNC_WAIT_MS,
   capText,
@@ -58,13 +59,49 @@ export interface BridgeRunContext {
 
 export type BridgeUiEvent =
   | { type: 'bridge-consent'; toolCallId: string; operation: string; tier: 'consent'; target: string }
-  | { type: 'bridge-job'; jobId: string; status: BridgeJobStatus; label: string; line?: string };
+
+  /** The consent wait ended — answered, timed out, or the turn stopped. The client closes the prompt. */
+  | { type: 'bridge-consent'; toolCallId: string; closed: true }
+  | {
+      type: 'bridge-job';
+      jobId: string;
+      status: BridgeJobStatus;
+      label: string;
+      line?: string;
+
+      /** A finished capture's picture, so the USER sees it too (the Jobs panel) — never over the cap. */
+      image?: { base64: string; mimeType: 'image/png' };
+    };
 
 export type BridgeToolOutcome = string | { text: string; image: { base64: string; mimeType: 'image/png' } };
 
 const TERMINAL: ReadonlySet<BridgeJobStatus> = new Set(['succeeded', 'failed', 'refused', 'cancelled']);
 
 const isTerminal = (row: BridgeJobRow) => TERMINAL.has(row.status);
+
+/**
+ * The capture a final result may be shown to the user with: a PNG within `BRIDGE_MAX_IMAGE_BASE64`, else
+ * nothing. The result route already drops a larger one; this is the backstop on the way to the browser
+ * (the data part rides every stream chunk the rest of the turn).
+ */
+export function displayableImage(
+  image: BridgeResultPayload['image'] | undefined,
+): { base64: string; mimeType: 'image/png' } | undefined {
+  if (
+    !image ||
+    image.mimeType !== 'image/png' ||
+    typeof image.base64 !== 'string' ||
+    image.base64.length === 0 ||
+    image.base64.length > BRIDGE_MAX_IMAGE_BASE64
+  ) {
+    return undefined;
+  }
+
+  return { base64: image.base64, mimeType: 'image/png' };
+}
+
+/** Appended to a capture's tool-result text, so the model never refers to "the capture above". */
+export const CAPTURE_SHOWN_NOTE = '(The user sees this capture in the Unity Bridge Jobs panel, not in the chat.)';
 
 /*
  * ---------------------------------------------------------------------------------------------
@@ -167,7 +204,7 @@ function makeOnEvent(input: {
 }): (event: BridgeJobEvent) => Promise<void> {
   const { jobId, label, context, emit } = input;
   const store = () => getBridgeStore(context);
-  const job = (status: BridgeJobStatus, line?: string): BridgeUiEvent => ({
+  const job = (status: BridgeJobStatus, line?: string): Extract<BridgeUiEvent, { type: 'bridge-job' }> => ({
     type: 'bridge-job',
     jobId,
     status,
@@ -217,7 +254,9 @@ function makeOnEvent(input: {
               resultText: capText(event.result.text ?? ''),
               finishedAt: new Date().toISOString(),
             });
-            safeEmit(emit, job(status));
+
+            const image = event.result.ok ? displayableImage(event.result.image) : undefined;
+            safeEmit(emit, image ? { ...job(status), image } : job(status));
 
             return;
           }
@@ -267,7 +306,14 @@ function formatFinal(final: BridgeResultPayload): BridgeToolOutcome {
   const header = final.ok ? '' : 'The operation ran but reported a failure:\n';
   const text = header + (final.text ?? '');
 
-  return final.image ? { text, image: final.image } : text;
+  if (!final.image) {
+    return text;
+  }
+
+  // Only a picture the Jobs panel actually received is claimed as shown to the user.
+  const shown = final.ok && displayableImage(final.image) !== undefined;
+
+  return { text: shown ? `${text}\n${CAPTURE_SHOWN_NOTE}` : text, image: final.image };
 }
 
 function formatRow(row: BridgeJobRow): string {
@@ -333,15 +379,31 @@ export async function runBridgeOperation(
         target: deviceHello(ctx.deviceId)?.currentProject ?? ctx.deviceName,
       });
 
-      const answer = await awaitClientToolResult({
-        generationId: ctx.generationId,
-        toolCallId: 'consent:' + ctx.toolCallId,
-        userId: ctx.userId,
-        abortSignal: ctx.abortSignal,
-        timeoutMs: BRIDGE_CONSENT_TIMEOUT_MS,
-      });
+      let answer: Awaited<ReturnType<typeof awaitClientToolResult>>;
 
-      if (!(answer.result && (answer.result as { approved?: unknown }).approved === true)) {
+      try {
+        answer = await awaitClientToolResult({
+          generationId: ctx.generationId,
+          toolCallId: 'consent:' + ctx.toolCallId,
+          userId: ctx.userId,
+          abortSignal: ctx.abortSignal,
+          timeoutMs: BRIDGE_CONSENT_TIMEOUT_MS,
+        });
+      } finally {
+        // However the wait ended, the prompt must not stay on the user's screen asking about nothing.
+        safeEmit(ctx.emit, { type: 'bridge-consent', toolCallId: ctx.toolCallId, closed: true });
+      }
+
+      /*
+       * An unanswered prompt (timeout, Stop, the turn ending) is NOT a refusal: the relay settles it with
+       * an `error` and no `result`. Telling the model "the user did not allow this" would be false — the
+       * user never saw it long enough to decide.
+       */
+      if (answer.result === undefined) {
+        return `The user did not answer the consent prompt in time (${label}); nothing ran. Ask them again if it's still needed.`;
+      }
+
+      if ((answer.result as { approved?: unknown } | null)?.approved !== true) {
         return `The user did not allow this operation (${label}). Nothing ran.`;
       }
     }

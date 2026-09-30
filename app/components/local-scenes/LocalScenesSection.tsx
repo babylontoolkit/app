@@ -10,7 +10,7 @@
  * list — browsing scenes was part of the project-linking flow the owner removed; the agent imports the
  * scenes it exports with `import_local_scene`, and a person pastes a URL.
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { ConfirmationDialog, DialogButton } from '~/components/ui/Dialog';
 import { checkDevServer, type DevServerState } from '~/lib/local-scenes/devserver';
@@ -65,8 +65,23 @@ export function LocalScenesSection({ projectId, helperDevServer }: LocalScenesSe
     }
   };
 
+  /*
+   * ONE import at a time, decided synchronously. `busyUrl` disables the button only after a re-render, so a
+   * second trigger in the same frame (a double click, a double-fired confirm) used to run a second import
+   * — and toast its success a second time. The toast id is per scene for the same reason: however it is
+   * reached, one import outcome is one toast.
+   */
+  const importing = useRef(false);
+
   const runImport = async (url: string, overwrite: boolean) => {
+    if (importing.current) {
+      return;
+    }
+
+    importing.current = true;
     setBusyUrl(url);
+
+    const toastId = `local-scene-import:${url}`;
 
     try {
       const result = await importLocalScene({ url, overwrite });
@@ -77,13 +92,14 @@ export function LocalScenesSection({ projectId, helperDevServer }: LocalScenesSe
       }
 
       if (result.ok) {
-        toast.success(result.message);
+        toast.success(result.message, { toastId });
       } else {
-        toast.error(result.message);
+        toast.error(result.message, { toastId });
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
+      toast.error(error instanceof Error ? error.message : String(error), { toastId });
     } finally {
+      importing.current = false;
       setBusyUrl(null);
     }
   };

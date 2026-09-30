@@ -16,7 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from '~/lib/.server/billing/generations';
 import { deliverClientToolResult } from '~/lib/.server/agent/mcp-relay';
-import { BRIDGE_PICKUP_TIMEOUT_MS, BRIDGE_SYNC_WAIT_MS, type BridgeOperation } from '~/lib/bridge/protocol';
+import {
+  BRIDGE_CONSENT_TIMEOUT_MS,
+  BRIDGE_MAX_IMAGE_BASE64,
+  BRIDGE_PICKUP_TIMEOUT_MS,
+  BRIDGE_SYNC_WAIT_MS,
+  type BridgeOperation,
+} from '~/lib/bridge/protocol';
 import {
   cancelGenerationBridgeJobs,
   deliverBridgeEvent,
@@ -26,6 +32,7 @@ import {
 } from './relay';
 import { FsBridgeStore, setBridgeStore, type BridgeDeviceRow } from './store';
 import {
+  CAPTURE_SHOWN_NOTE,
   jobControl,
   resolveBridgeTurn,
   runBridgeOperation,
@@ -123,7 +130,19 @@ async function runToFinal(op: BridgeOperation, result = { ok: true, text: 'done'
   expect(deliverBridgeEvent(DEVICE, { jobId, type: 'started' })).toBe(true);
   expect(deliverBridgeEvent(DEVICE, { jobId, type: 'final', result })).toBe(true);
 
-  return { jobId, outcome: await pending };
+  const outcome = await pending;
+
+  /*
+   * The row write + UI event for `final` run under the job lock AFTER the waiter resolves. Wait for them,
+   * or they land in the NEXT test's `events` array (a cross-test leak that made assertions flaky).
+   */
+  await until(() =>
+    events.some(
+      (e) => e.type === 'bridge-job' && e.jobId === jobId && (e.status === 'succeeded' || e.status === 'failed'),
+    ),
+  );
+
+  return { jobId, outcome };
 }
 
 beforeEach(async () => {
@@ -234,7 +253,43 @@ describe('runBridgeOperation', () => {
 
     expect(await pending).toBe('The user did not allow this operation (unity_command delete_gameobject). Nothing ran.');
     expect(await store.listJobs(PROJECT, 10)).toHaveLength(0);
+    expect(events.at(-1)).toEqual({ type: 'bridge-consent', toolCallId: 'call_1', closed: true });
     await expectNothingBilled();
+  });
+
+  it('an UNANSWERED consent (timeout) is not a refusal: its own sentence, the prompt closed, nothing ran', async () => {
+    const pending = runBridgeOperation(
+      { kind: 'unity.command', name: 'delete_gameobject', params: {} },
+      'unity_command delete_gameobject',
+      ctx(),
+    );
+
+    await until(() => events.some((e) => e.type === 'bridge-consent'));
+    await vi.advanceTimersByTimeAsync(BRIDGE_CONSENT_TIMEOUT_MS + 1);
+
+    const outcome = await pending;
+    expect(outcome).toBe(
+      "The user did not answer the consent prompt in time (unity_command delete_gameobject); nothing ran. Ask them again if it's still needed.",
+    );
+    expect(outcome).not.toMatch(/did not allow/);
+    expect(events.at(-1)).toEqual({ type: 'bridge-consent', toolCallId: 'call_1', closed: true });
+    expect(await store.listJobs(PROJECT, 10)).toHaveLength(0);
+    await expectNothingBilled();
+  });
+
+  it('a Stop while the consent is open → the unanswered sentence and a closed part', async () => {
+    const abort = new AbortController();
+    const pending = runBridgeOperation(
+      { kind: 'unity.command', name: 'delete_gameobject', params: {} },
+      'unity_command delete_gameobject',
+      ctx({ abortSignal: abort.signal }),
+    );
+
+    await until(() => events.some((e) => e.type === 'bridge-consent'));
+    abort.abort();
+
+    expect(await pending).toMatch(/^The user did not answer the consent prompt in time/);
+    expect(events.filter((e) => e.type === 'bridge-consent' && 'closed' in e)).toHaveLength(1);
   });
 
   it('consent approved → the dispatch carries consentGranted: true, queued only after the answer', async () => {
@@ -388,9 +443,43 @@ describe('runBridgeOperation', () => {
     } as never);
 
     expect(outcome).toEqual({
-      text: 'captured',
+      text: `captured\n${CAPTURE_SHOWN_NOTE}`,
       image: { base64: 'AAAA', mimeType: 'image/png' },
     } satisfies BridgeToolOutcome);
+    expect(CAPTURE_SHOWN_NOTE).toBe('(The user sees this capture in the Unity Bridge Jobs panel, not in the chat.)');
+  });
+
+  it("a finished capture's bridge-job part carries the image to the user; other parts never do", async () => {
+    const { jobId } = await runToFinal({ kind: 'unity.capture', view: 'game', width: 1024, height: 576 }, {
+      ok: true,
+      text: 'captured',
+      image: { base64: 'AAAA', mimeType: 'image/png' },
+    } as never);
+
+    const jobEvents = events.filter((e) => e.type === 'bridge-job' && e.jobId === jobId);
+    const withImage = jobEvents.filter((e) => 'image' in e && e.image);
+
+    expect(withImage).toEqual([
+      {
+        type: 'bridge-job',
+        jobId,
+        status: 'succeeded',
+        label: 'label',
+        image: { base64: 'AAAA', mimeType: 'image/png' },
+      },
+    ]);
+  });
+
+  it('an image over BRIDGE_MAX_IMAGE_BASE64 never reaches the client, and the text does not claim it was shown', async () => {
+    const big = 'A'.repeat(BRIDGE_MAX_IMAGE_BASE64 + 1);
+    const { outcome } = await runToFinal({ kind: 'unity.capture', view: 'game', width: 1024, height: 576 }, {
+      ok: true,
+      text: 'captured',
+      image: { base64: big, mimeType: 'image/png' },
+    } as never);
+
+    expect(events.some((e) => e.type === 'bridge-job' && 'image' in e && e.image)).toBe(false);
+    expect(typeof outcome === 'string' ? outcome : outcome.text).toBe('captured');
   });
 
   it('no bridge-job UI event carries a credits field', async () => {

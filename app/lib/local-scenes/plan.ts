@@ -10,7 +10,13 @@ import { lastPathSegment, sceneNameFromUrl } from './url';
 
 export interface SceneImportPlan {
   name: string;
-  files: Array<{ url: string; dest: string }>;
+
+  /**
+   * `optional` marks a file found in an `extras` string rather than in `buffers`/`images`: the exporter's
+   * metadata can name a file it never wrote (a skybox that was not baked), so a 404 on one is reported as
+   * skipped instead of failing the whole import. Absent on every core file.
+   */
+  files: Array<{ url: string; dest: string; optional?: boolean }>;
   skipped: Array<{ uri: string; reason: string }>;
 
   /**
@@ -55,6 +61,103 @@ function containedPath(decoded: string): string | null {
 const MAX_REPORTED_URI = 120;
 const reportUri = (uri: string) => (uri.length > MAX_REPORTED_URI ? uri.slice(0, MAX_REPORTED_URI) + '…' : uri);
 
+/**
+ * The file types a Babylon Toolkit scene names in its `extras` metadata (environment maps, light-probe
+ * and nav-mesh sidecars, the project script bundle, textures, audio, gzip sidecars, wasm). A string must
+ * END in one of these to count as a file — `TOOLKIT.LightProbeNetwork`, a GUID, `"birp"` or a class name
+ * never does, so an unknown field is never fetched.
+ */
+const EXTRAS_FILE_EXTENSIONS = [
+  'env',
+  'bin',
+  'js',
+  'json',
+  'ktx',
+  'ktx2',
+  'dds',
+  'hdr',
+  'png',
+  'jpg',
+  'jpeg',
+  'webp',
+  'basis',
+  'gz',
+  'wasm',
+  'mp3',
+  'ogg',
+  'wav',
+  'glb',
+  'gltf',
+];
+const EXTRAS_FILE_PATTERN = new RegExp(`^[^\\s?#]+\\.(?:${EXTRAS_FILE_EXTENSIONS.join('|')})$`, 'i');
+const MAX_EXTRAS_REFERENCE = 512;
+
+/**
+ * Keys whose string value is a LABEL, not a location. A Toolkit skybox carries
+ * `environment.info.name = "procedural_skybox_ibl.env"` beside the real `environment.url =
+ * "assets/procedural_skybox_ibl.env"`; the name is not a path from the scene folder.
+ */
+const EXTRAS_LABEL_KEYS = new Set(['name']);
+
+function collectExtrasStrings(value: unknown, key: string | null, out: string[]): void {
+  if (typeof value === 'string') {
+    if (
+      key !== null &&
+      !EXTRAS_LABEL_KEYS.has(key) &&
+      value.length <= MAX_EXTRAS_REFERENCE &&
+      EXTRAS_FILE_PATTERN.test(value)
+    ) {
+      out.push(value);
+    }
+
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    // An array element inherits its array's key (`files: ["a.bin", "b.bin"]`).
+    for (const item of value) {
+      collectExtrasStrings(item, key, out);
+    }
+
+    return;
+  }
+
+  if (value && typeof value === 'object') {
+    for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
+      collectExtrasStrings(child, childKey, out);
+    }
+  }
+}
+
+/**
+ * Every file-like string under every `extras` object in the document (asset, scenes, nodes, materials,
+ * textures, …). This is how a Toolkit scene names its sidecars — and its project script bundle:
+ * `scenes[0].extras.metadata.project = "<project>.js"`, which the runtime loads from
+ * `rootUrl + project` (`SceneManager.getScriptBundleUrl`), i.e. from the scene's own folder. It is
+ * REFERENCED, not loaded by convention, so it travels through the same rules as any other URI.
+ */
+function extrasReferences(value: unknown, out: string[]): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      extrasReferences(item, out);
+    }
+
+    return;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'extras') {
+      collectExtrasStrings(child, null, out);
+    } else {
+      extrasReferences(child, out);
+    }
+  }
+}
+
 function referencedUris(gltfJson: unknown): string[] {
   const json = gltfJson as { buffers?: unknown; images?: unknown } | null;
   const uris: string[] = [];
@@ -97,7 +200,16 @@ export function planSceneImport(sceneUrl: string, gltfJson: unknown | null): Sce
   const skipped: SceneImportPlan['skipped'] = [];
 
   if (gltfJson !== null) {
-    for (const uri of referencedUris(gltfJson)) {
+    const core = referencedUris(gltfJson);
+    const extras: string[] = [];
+    extrasReferences(gltfJson, extras);
+
+    const candidates = [
+      ...core.map((uri) => ({ uri, optional: false })),
+      ...extras.map((uri) => ({ uri, optional: true })),
+    ];
+
+    for (const { uri, optional } of candidates) {
       if (uri.startsWith('data:')) {
         skipped.push({ uri: reportUri(uri), reason: 'embedded data URI' });
         continue;
@@ -134,7 +246,7 @@ export function planSceneImport(sceneUrl: string, gltfJson: unknown | null): Sce
         continue;
       }
 
-      files.push({ url, dest: base + inside });
+      files.push(optional ? { url, dest: base + inside, optional: true } : { url, dest: base + inside });
     }
   }
 

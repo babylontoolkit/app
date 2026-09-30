@@ -21,6 +21,7 @@ import {
   bridgeLiveJobsStore,
   bridgeStatusLoadingStore,
   bridgeStatusStore,
+  clearBridgeConsent,
   refreshBridgeStatus,
   type BridgeStatusView,
 } from '~/lib/stores/unity-bridge';
@@ -102,6 +103,9 @@ export function UnityBridgeButton() {
       return;
     }
 
+    // Nothing is waiting for a consent answer once the turn has ended — the prompt would ask about nothing.
+    clearBridgeConsent();
+
     for (const job of Object.values(liveJobs)) {
       if ((job.status === 'queued' || job.status === 'running') && !autoOpenedGenerations.has(job.generationId)) {
         autoOpenedGenerations.add(job.generationId);
@@ -130,17 +134,21 @@ export function UnityBridgeButton() {
     );
   };
 
+  /*
+   * The online colour sits on the ICON, not the button: IconButton's base
+   * `text-bolt-elements-item-contentDefault` is emitted after the success utility in the generated
+   * stylesheet, so a colour class on the button loses (rule order, not class-string order). The icon's own
+   * colour cannot be overridden by the button's.
+   */
+  const iconClass = classNames('i-ph:cube-duotone text-xl', online ? 'text-bolt-elements-icon-success' : '');
+
   return (
     <>
-      <IconButton
-        title={titleFor(status)}
-        className={classNames('transition-all', online ? 'text-bolt-elements-icon-success' : '')}
-        onClick={open}
-      >
+      <IconButton title={titleFor(status)} className="transition-all" onClick={open}>
         {showSpinner ? (
           <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-xl animate-spin" />
         ) : (
-          <div className="i-ph:cube-duotone text-xl" />
+          <div data-testid="unity-bridge-icon" className={iconClass} />
         )}
       </IconButton>
 

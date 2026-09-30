@@ -59,6 +59,22 @@ describe('classifyOperation', () => {
     expect(classifyOperation(cli('license', 'return')).tier).toBe('consent');
   });
 
+  it("unity.cli ['editors'] → allowed", () => {
+    expect(classifyOperation(cli('editors')).tier).toBe('allowed');
+  });
+
+  it("unity.cli ['projects','new','--help'] → allowed", () => {
+    expect(classifyOperation(cli('projects', 'new', '--help')).tier).toBe('allowed');
+  });
+
+  it("unity.cli ['license','return','-h'] → allowed", () => {
+    expect(classifyOperation(cli('license', 'return', '-h')).tier).toBe('allowed');
+  });
+
+  it("unity.cli ['shell','--help'] → refused", () => {
+    expect(classifyOperation(cli('shell', '--help')).tier).toBe('refused');
+  });
+
   it("['status'] → allowed", () => {
     expect(classifyOperation(cli('status')).tier).toBe('allowed');
   });

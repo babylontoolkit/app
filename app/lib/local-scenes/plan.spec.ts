@@ -113,4 +113,133 @@ describe('planSceneImport', () => {
       expect(new URL(file.url).origin).toBe('http://localhost:8888');
     }
   });
+
+  /*
+   * A trimmed REAL Babylon Toolkit export (`lightprobeshowcase.gltf`, generator "Babylon Toolkit
+   * (6000.5.10f1)"): only the fields that name files, plus a few that must NOT be read as files.
+   */
+  const TOOLKIT_SCENE = 'http://localhost:8888/scenes/lightprobeshowcase.gltf';
+  const toolkitGltf = () => ({
+    asset: { generator: 'Babylon Toolkit (6000.5.10f1)', version: '2.0' },
+    buffers: [{ uri: 'lightprobeshowcase.bin', byteLength: 240392 }],
+    images: [
+      {
+        uri: 'assets/lightprobeshowcase_lightmap-0_comp_light_rgbd_547bd04f6ba4741f1b99a9f6d6772f7c.png',
+        name: 'LightProbeShowcase_Lightmap-0_comp_light',
+      },
+    ],
+    nodes: [
+      {
+        name: 'Light Probe Group',
+        extras: {
+          metadata: {
+            components: [
+              {
+                alias: 'script',
+                klass: 'TOOLKIT.LightProbeNetwork',
+                properties: { url: 'lightprobeshowcase.probe.bin', probecount: 449, space: 'unity-world' },
+              },
+            ],
+          },
+        },
+      },
+    ],
+    scenes: [
+      {
+        extras: {
+          metadata: {
+            filename: 'LightProbeShowcase',
+            script: 'babylontoolkit-2024',
+            project: 'babylontoolkit-2024.js',
+            renderpipeline: 'birp',
+            mainlight: '08cbf77f-035a-49c4-906a-f43b3ba95516',
+            skybox: {
+              environment: {
+                url: 'assets/procedural_skybox_ibl.env',
+                info: { name: 'procedural_skybox_ibl.env' },
+              },
+            },
+            lightprobes: { url: 'lightprobeshowcase.probe.bin', probecount: 449 },
+          },
+        },
+      },
+    ],
+  });
+
+  it('a real Toolkit scene: plans the env map, the light-probe .bin and the project script bundle from extras', () => {
+    const plan = planSceneImport(TOOLKIT_SCENE, toolkitGltf());
+    const base = 'public/scenes/lightprobeshowcase/';
+
+    expect(plan.error).toBeUndefined();
+    expect(plan.files).toEqual([
+      { url: TOOLKIT_SCENE, dest: `${base}lightprobeshowcase.gltf` },
+      { url: 'http://localhost:8888/scenes/lightprobeshowcase.bin', dest: `${base}lightprobeshowcase.bin` },
+      {
+        url: 'http://localhost:8888/scenes/assets/lightprobeshowcase_lightmap-0_comp_light_rgbd_547bd04f6ba4741f1b99a9f6d6772f7c.png',
+        dest: `${base}assets/lightprobeshowcase_lightmap-0_comp_light_rgbd_547bd04f6ba4741f1b99a9f6d6772f7c.png`,
+      },
+      {
+        url: 'http://localhost:8888/scenes/lightprobeshowcase.probe.bin',
+        dest: `${base}lightprobeshowcase.probe.bin`,
+        optional: true,
+      },
+      {
+        url: 'http://localhost:8888/scenes/babylontoolkit-2024.js',
+        dest: `${base}babylontoolkit-2024.js`,
+        optional: true,
+      },
+      {
+        url: 'http://localhost:8888/scenes/assets/procedural_skybox_ibl.env',
+        dest: `${base}assets/procedural_skybox_ibl.env`,
+        optional: true,
+      },
+    ]);
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it('a non-file extras string is never fetched: class names, GUIDs, labels, bare names', () => {
+    const plan = planSceneImport(TOOLKIT_SCENE, toolkitGltf());
+    const urls = plan.files.map((f) => f.url);
+
+    for (const notAFile of [
+      'TOOLKIT.LightProbeNetwork',
+      'babylontoolkit-2024',
+      'birp',
+      '08cbf77f',
+      'LightProbeShowcase',
+    ]) {
+      expect(urls.some((url) => url.endsWith(`/${notAFile}`) || url.includes(notAFile + '?'))).toBe(false);
+    }
+
+    // The skybox's `info.name` is a LABEL — the real file is `assets/…`, not the scene folder root.
+    expect(urls).not.toContain('http://localhost:8888/scenes/procedural_skybox_ibl.env');
+  });
+
+  it('extras references follow the same skip rules as buffers/images', () => {
+    const plan = planSceneImport(SCENE, {
+      scenes: [
+        {
+          extras: {
+            metadata: {
+              a: '../outside.env',
+              b: '/rooted.bin',
+              c: 'https://cdn.example.com/sky.env',
+              d: 'ok/probe.bin',
+              e: 'not a file at all',
+            },
+          },
+        },
+      ],
+    });
+
+    expect(plan.files.map((f) => f.dest)).toEqual([
+      'public/scenes/Level01/Level01.gltf',
+      'public/scenes/Level01/ok/probe.bin',
+    ]);
+    expect(plan.skipped.map((s) => s.reason)).toEqual([
+      'outside the scene folder',
+      'outside the scene folder',
+      'absolute URL — not copied',
+    ]);
+  });
 });

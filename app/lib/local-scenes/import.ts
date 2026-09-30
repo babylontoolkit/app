@@ -110,6 +110,7 @@ export async function importLocalScene(
   /* ---- write: the scene first, then everything it references ---- */
 
   const base = `public/scenes/${plan.name}/`;
+  const skipped: SceneImportPlan['skipped'] = [...plan.skipped];
 
   for (const [index, file] of plan.files.entries()) {
     let bytes: Uint8Array;
@@ -123,19 +124,30 @@ export async function importLocalScene(
         const response = await doFetch(file.url, { cache: 'no-store' });
 
         if (!response.ok) {
-          return fail(`Could not fetch ${uri}: ${response.status}`, plan.skipped);
+          /* A file named only in `extras` metadata may never have been written by the exporter. */
+          if (file.optional) {
+            skipped.push({ uri, reason: `named in the scene metadata, but the server answered ${response.status}` });
+            continue;
+          }
+
+          return fail(`Could not fetch ${uri}: ${response.status}`, skipped);
         }
 
         bytes = new Uint8Array(await response.arrayBuffer());
       } catch (error) {
-        return fail(`Could not fetch ${uri}: ${describeError(error)}`, plan.skipped);
+        if (file.optional) {
+          skipped.push({ uri, reason: `named in the scene metadata, but could not be fetched` });
+          continue;
+        }
+
+        return fail(`Could not fetch ${uri}: ${describeError(error)}`, skipped);
       }
     }
 
     const ok = await write(`${WORK_DIR}/${file.dest}`, bytes);
 
     if (!ok) {
-      return fail(`Could not write ${file.dest} into the project.`, plan.skipped);
+      return fail(`Could not write ${file.dest} into the project.`, skipped);
     }
 
     written.push(file.dest);
@@ -146,11 +158,11 @@ export async function importLocalScene(
   const sceneBasename = plan.files[0].dest.slice(base.length);
   let message = `Imported ${written.length} file(s) into public/scenes/${plan.name}/. Point the game at "scenes/${plan.name}/${sceneBasename}".`;
 
-  if (plan.skipped.length > 0) {
-    message += ` Skipped: ${plan.skipped.map((entry) => `${entry.uri} (${entry.reason})`).join('; ')}.`;
+  if (skipped.length > 0) {
+    message += ` Skipped: ${skipped.map((entry) => `${entry.uri} (${entry.reason})`).join('; ')}.`;
   }
 
-  return { ok: true, written, skipped: plan.skipped, message };
+  return { ok: true, written, skipped, message };
 }
 
 /**

@@ -4,6 +4,9 @@
  * Live rows (streamed by the current generation) come first, then the recent rows from the status
  * route, deduped by job id. Rows mirror the Media panel's list rows. No credits on a row: bridge
  * operations are not billed separately — the model turn that drives them is (D53).
+ *
+ * A finished `unity_capture` shows its picture as a thumbnail (click → full size), so the user sees what
+ * the model was shown. The image lives only in the live store (memory) — a reload shows the row without it.
  */
 import { useState } from 'react';
 import { useStore } from '@nanostores/react';
@@ -13,6 +16,7 @@ import type { BridgeJobStatus } from '~/lib/bridge/protocol';
 import {
   bridgeDialogStore,
   bridgeLiveJobsStore,
+  type BridgeJobImage,
   bridgeProjectAction,
   bridgeStatusStore,
   refreshBridgeStatus,
@@ -24,7 +28,10 @@ interface JobRow {
   status: BridgeJobStatus;
   lastLine?: string;
   resultText?: string;
+  image?: BridgeJobImage;
 }
+
+const imageSrc = (image: BridgeJobImage) => `data:${image.mimeType};base64,${image.base64}`;
 
 const ACTIVE: ReadonlySet<BridgeJobStatus> = new Set(['queued', 'running']);
 
@@ -45,13 +52,14 @@ export function UnityBridgeJobsPanel({ projectId }: { projectId: string }) {
   const live = useStore(bridgeLiveJobsStore);
   const status = useStore(bridgeStatusStore);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [zoomed, setZoomed] = useState<string | null>(null);
 
   const rows: JobRow[] = [];
   const seen = new Set<string>();
 
   for (const [id, job] of Object.entries(live)) {
     seen.add(id);
-    rows.push({ id, operation: job.label, status: job.status, lastLine: job.lines.at(-1) });
+    rows.push({ id, operation: job.label, status: job.status, lastLine: job.lines.at(-1), image: job.image });
   }
 
   for (const job of status?.jobs ?? []) {
@@ -79,10 +87,39 @@ export function UnityBridgeJobsPanel({ projectId }: { projectId: string }) {
     await refreshBridgeStatus(projectId);
   };
 
+  const zoomedImage = zoomed ? rows.find((row) => row.id === zoomed)?.image : undefined;
+
   return (
-    <DialogRoot open={dialog === 'jobs'} onOpenChange={(next) => !next && bridgeDialogStore.set(null)}>
-      <Dialog className="max-w-[520px] p-6 max-h-[85vh] overflow-y-auto">
+    <DialogRoot
+      open={dialog === 'jobs'}
+      onOpenChange={(next) => {
+        if (!next) {
+          setZoomed(null);
+          bridgeDialogStore.set(null);
+        }
+      }}
+    >
+      <Dialog
+        className={
+          zoomedImage
+            ? // `!`: the shared Dialog sets `w-[520px]`, and stylesheet order — not class order — decides a tie.
+              '!w-[1080px] max-w-[calc(100vw-32px)] p-6 max-h-[90vh] overflow-y-auto'
+            : 'max-w-[520px] p-6 max-h-[85vh] overflow-y-auto'
+        }
+      >
         <DialogTitle>Unity jobs</DialogTitle>
+
+        {zoomedImage && (
+          <button
+            type="button"
+            data-testid="bridge-job-image-full"
+            title="Back to the list"
+            className="mt-4 block w-full overflow-auto rounded-md border border-bolt-elements-borderColor bg-transparent p-0 cursor-zoom-out"
+            onClick={() => setZoomed(null)}
+          >
+            <img src={imageSrc(zoomedImage)} alt="Unity capture, full size" className="block max-w-none mx-auto" />
+          </button>
+        )}
 
         <div className="flex flex-col gap-1 mt-4">
           {rows.length === 0 && <div className="text-sm text-bolt-elements-textSecondary">No Unity jobs yet.</div>}
@@ -120,6 +157,17 @@ export function UnityBridgeJobsPanel({ projectId }: { projectId: string }) {
                   </button>
                 )}
               </div>
+              {row.image && (
+                <button
+                  type="button"
+                  data-testid="bridge-job-thumbnail"
+                  title="Show full size"
+                  className="self-start p-0 bg-transparent rounded border border-bolt-elements-borderColor overflow-hidden cursor-zoom-in"
+                  onClick={() => setZoomed(row.id)}
+                >
+                  <img src={imageSrc(row.image)} alt={`${row.operation} capture`} className="block h-24 w-auto" />
+                </button>
+              )}
               {expanded === row.id && row.resultText && (
                 <pre className="text-xs bg-bolt-elements-background-depth-3 text-bolt-elements-textPrimary rounded-md p-2 overflow-x-auto whitespace-pre-wrap max-h-60">
                   {row.resultText}

@@ -16,6 +16,7 @@ vi.mock('~/lib/stores/workbench', () => ({
 const { UnityBridgeConsentDialog } = await import('./UnityBridgeConsentDialog');
 const { UnityBridgeStatusPanel } = await import('./UnityBridgeStatusPanel');
 const { UnityBridgeJobsPanel } = await import('./UnityBridgeJobsPanel');
+const { UnityBridgeConnectDialog } = await import('./UnityBridgeConnectDialog');
 const {
   bridgeConsentStore,
   bridgeDialogStore,
@@ -108,6 +109,24 @@ describe('UnityBridgeConsentDialog', () => {
     expect(bridgeConsentStore.get()).toBeNull();
   });
 
+  it('sits above every other bridge dialog (important z-index — the shared Dialog is z-[9999])', () => {
+    raise();
+    render(<UnityBridgeConsentDialog />);
+
+    expect(screen.getByRole('dialog').className).toContain('!z-[10000]');
+  });
+
+  it('closes when the server ends the wait (closed part for the same call)', async () => {
+    raise();
+    render(<UnityBridgeConsentDialog />);
+    expect(screen.getByText('Allow this Unity operation?')).toBeTruthy();
+
+    updateBridgeFromPart({ type: 'bridge-consent', toolCallId: 'call_9', closed: true, generationId: 'gen_9' });
+
+    await waitFor(() => expect(screen.queryByText('Allow this Unity operation?')).toBeNull());
+    expect(posted()).toEqual([]);
+  });
+
   it('Deny posts approved:false', async () => {
     raise();
     render(<UnityBridgeConsentDialog />);
@@ -186,7 +205,76 @@ describe('UnityBridgeStatusPanel', () => {
   });
 });
 
+describe('UnityBridgeStatusPanel — an offline device', () => {
+  it('a stale hello with no projects folder says "unknown until the helper reconnects", not "—"', () => {
+    const stale = status('9.25.1');
+    const offline = {
+      ...stale,
+      state: 'offline' as const,
+      device: { ...stale.device, online: false, hello: { ...stale.device.hello, projectsDir: '' } },
+    };
+    bridgeStatusStore.set(offline);
+    bridgeDialogStore.set('status');
+    render(<UnityBridgeStatusPanel projectId="prj_1" />);
+
+    expect(screen.getByTestId('projects-dir-unknown').textContent).toBe('unknown until the helper reconnects');
+    expect(screen.queryByText('—', { selector: '.font-mono' })).toBeNull();
+  });
+});
+
+describe('UnityBridgeConnectDialog — remove a device', () => {
+  it('the confirmation does not repeat its title in the body', () => {
+    bridgeStatusStore.set(status('9.25.1'));
+    bridgeDialogStore.set('connect');
+    render(<UnityBridgeConnectDialog projectId="prj_1" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+    expect(screen.getByRole('heading', { name: 'Remove Studio Mac?' })).toBeTruthy();
+    expect(screen.getByText('The helper on that computer will stop working until it is paired again.')).toBeTruthy();
+    expect(screen.getAllByText(/Remove Studio Mac\?/)).toHaveLength(1);
+  });
+});
+
 describe('UnityBridgeJobsPanel', () => {
+  it('a finished capture shows a thumbnail; clicking it shows the picture full size', () => {
+    bridgeStatusStore.set(status('9.25.1'));
+    bridgeLiveJobsStore.set({
+      brg_cap: {
+        generationId: 'gen_1',
+        status: 'succeeded',
+        label: 'unity_capture game',
+        lines: [],
+        image: { base64: 'iVBORw0KGgo=', mimeType: 'image/png' },
+      },
+    });
+    bridgeDialogStore.set('jobs');
+    render(<UnityBridgeJobsPanel projectId="prj_1" />);
+
+    const thumb = screen.getByTestId('bridge-job-thumbnail');
+    expect(thumb.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(screen.queryByTestId('bridge-job-image-full')).toBeNull();
+
+    fireEvent.click(thumb);
+
+    const full = screen.getByTestId('bridge-job-image-full');
+    expect(full.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(full.querySelector('img')?.className).toContain('max-w-none');
+
+    fireEvent.click(full);
+    expect(screen.queryByTestId('bridge-job-image-full')).toBeNull();
+  });
+
+  it('a job without an image has no thumbnail (control)', () => {
+    bridgeLiveJobsStore.set({
+      brg_x: { generationId: 'gen_1', status: 'succeeded', label: 'set_transform', lines: [] },
+    });
+    bridgeDialogStore.set('jobs');
+    render(<UnityBridgeJobsPanel projectId="prj_1" />);
+
+    expect(screen.queryByTestId('bridge-job-thumbnail')).toBeNull();
+  });
+
   it('a cancelled job shows its status and no credits; live rows come first and dedupe by id', () => {
     bridgeStatusStore.set(
       status('9.25.1', [
