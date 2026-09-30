@@ -3189,7 +3189,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/components/unity-bridge app/components/local-scenes app/lib/stores/unity-bridge.spec.ts` → pass.
   - Verify level: live
 
-- [ ] **T22** — Status panel, Consent dialog, Jobs panel, and chat data-part handling ⏭️ DEFERRED (auto-pilot): all live checks PASS (consent Allow/Deny, capture popup, D58 switch) except import-via-the-AI, which needs a model turn — the model provider (CometAPI → Bedrock) is out of quota; re-run that one step once the quota is topped up or `LLM_PROVIDER=Anthropic`
+- [x] **T22** — Status panel, Consent dialog, Jobs panel, and chat data-part handling
   - Depends on: T21, T19, T6, T5
   - Files: `app/components/unity-bridge/UnityBridgeStatusPanel.tsx`, `UnityBridgeConsentDialog.tsx`,
     `UnityBridgeJobsPanel.tsx` (create) + `UnityBridgePanels.spec.tsx`; `UnityBridgeButton.tsx`,
@@ -3541,7 +3541,7 @@ only, never commit.
   - Verify: `cd /Users/mackey/Documents/Repos/Babylon/Repositories/UniversalSkills && npm test` → all pass.
   - Verify level: live
 
-- [ ] **T25** — Blender runner, and the whole feature end to end ⏭️ DEFERRED (auto-pilot): steps 1, 1b, 2, 2a, 2b, 3, 4, 8, 10, 11, 12 PASS live; steps 5 (Blender), 6 (unsaved guard), 7 (import) and 9's reply are blocked by the model provider's quota ("Quota exceeded … remaining $0.12 need $0.15") — re-run them once the quota is topped up or `LLM_PROVIDER=Anthropic`
+- [ ] **T25** — Blender runner, and the whole feature end to end ⏭️ DEFERRED (auto-pilot): every step PASSES live (Blender 5, unsaved guard 6, consent/licence 4, create 1b, export+load 2, grant 2b, scripts 3, doctor 10, cleanup 12; step 7's import is superseded by D60) EXCEPT step 9's reply ("open Unity and bake the lighting" with no helper → the not-connected answer) — the page now shows the App Builder's projects-folder gate, which the owner must answer by picking their real folder; then re-run that one turn
   - Depends on: T24, T22, T20, T13
   - Files: `lib/bridge/blender/discover.js`, `run.js` (create); `lib/bridge/cli.js` (modify);
     `tests/bridge-blender.test.js` (create)
