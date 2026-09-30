@@ -520,6 +520,22 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
     description:
       'Driving headless Blender with bpy: import/export, rigging and weights, LODs, baking, rendering, the Unity round trip. Load only when Unity Bridge tools are offered and you will call blender_run_script.',
   },
+  {
+    id: 'unity-exporter-licensing',
+    title: 'Unity Exporter Licensing',
+    path: 'references/unity-exporter-licensing.md',
+    url: RAW(AGENT_REPO, 'references/unity-exporter-licensing.md'),
+    description:
+      'Which Babylon Toolkit licence makes an export interactive, and how licence.json and companyName are checked. Load only when Unity Bridge tools are offered and an export is missing its components.',
+  },
+  {
+    id: 'unity-exporter-internals',
+    title: 'Unity Exporter Internals',
+    path: 'references/unity-exporter-internals.md',
+    url: RAW(AGENT_REPO, 'references/unity-exporter-internals.md'),
+    description:
+      'CanvasToolsExporter.BuildProject, EditorBuildType, DefaultProjectFolder, exporter settings, and game levels versus asset containers. Load only when Unity Bridge tools are offered and a bt_* export behaves unexpectedly.',
+  },
 ];
 
 /**

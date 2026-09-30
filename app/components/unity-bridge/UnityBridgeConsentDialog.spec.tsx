@@ -36,7 +36,7 @@ describe('UnityBridgeConsentDialog', () => {
     updateBridgeFromPart({
       type: 'bridge-consent',
       toolCallId: 'call_9',
-      operation: 'unity.cli license return',
+      operation: 'unity.cli uninstall 6000.0.0f1',
       target: 'Racer',
       tier: 'consent',
       generationId: 'gen_9',
@@ -47,7 +47,7 @@ describe('UnityBridgeConsentDialog', () => {
     render(<UnityBridgeConsentDialog />);
 
     expect(screen.getByText('Allow this Unity operation?')).toBeTruthy();
-    expect(screen.getByText('unity.cli license return')).toBeTruthy();
+    expect(screen.getByText('unity.cli uninstall 6000.0.0f1')).toBeTruthy();
     expect(screen.queryByText(/remember/i)).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Allow once' }));

@@ -517,6 +517,10 @@ fork, exporter, Agent Reference, and the Desktop Agent), and each repository's w
   - **Many Unity projects, one service:** the service is not tied to a Unity project or an App Builder project; it serves the projects folder(s). `--projects` may be repeated (projects are listed across all folders; a name must be unique across them or the tool asks for the folder). Running `--install-service` again rewrites the stored settings (`~/.babylon-toolkit/bridge.json`: server, projects folders, no-scripts) and restarts the service — no uninstall needed to change them.
   Binds: T21–T25, T26.
 
+- **D56 — `unity_project create` runs the Agent Reference's full Babylon Toolkit scaffold (owner, 2026-09-29: "make sure to add the Babylon Toolkit and UnityGLTF packages as well as make sure it has the Unity CLI installed in that project… check the agent reference").** Source of truth: `references/unity-exporter-cli.md` §4 ("installing the Unity Pipeline means installing THREE packages, always") and §4B.4 (the scaffold steps). `create` = `projects new` (wait for exit) → `pipeline install` → launch the Editor (detached) + wait ready → `package_add https://github.com/babylontoolkit/unitygltf.git` + poll `package_status` → `package_add https://github.com/babylontoolkit/professionaledition.git` + poll → poll until `CanvasTools.CanvasToolsExporter` is compiled into the domain → `run_script` the bootstrap (`bt-bootstrap.cs`) → `npm install` in the project root when `package.json` exists → `run_script` the starter scene (`bt-newscene.cs` → `Assets/Scenes/Level01.unity` + LightingSettings) → verify. `git` must be on PATH (checked first). Progress lines per step; the whole create is a long operation (≤ 30 min). The licence step is skipped — bridge exports run under the automation grant (D47–D51). Fallback when `package_add` is absent: `Client.Add` via `eval` (§4.1). The two `.cs` scripts are embedded in the Desktop Agent, copied verbatim from AgentReference `references/scripts/` (not yet pushed), with a header naming the source to keep in sync. `open` of an existing project still only ensures the Pipeline package and reports when the Toolkit packages are missing. Binds: T24, T25, T26.
+
+- **D57 — the Unity Bridge never touches the user's Unity licence or Unity sign-in (owner, 2026-09-29: "TAKE OUT ANY THING DEALING WITH UNITY LICENSE AT ALL… NEVER DO THAT").** `unity license …` and `unity auth …` are REFUSED in both policy copies (no consent path, `--help` included), no test or live run may issue one, and no doc or tool text offers them. "Licence" in an owner request about the bridge means the **Babylon Toolkit licence file the Unity Exporter generates**, never Unity's. Binds: T12, T24, T25, T26.
+
 ## Design Reference
 
 ### File map
@@ -2271,15 +2275,13 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
        (unsaved changes are lost)."
     9. Line 133 (`recompile` row): "`unity recompile` (§8)" → "`unity recompile` (`unity-cli-reference.md` §7.1)".
     10. `unity-cli-reference.md` line 65: `| \`--non-interactive\` (+ \`--yes\`) | No prompts. Use both in CI and in agent shells |`
-        → `| \`--non-interactive\` | No prompts. Add \`--yes\` only where that subcommand offers it (install, uninstall, projects clean/upgrade, license return, skill install/refresh, mcp configure, self-update) — \`projects new\` and \`open\` reject it |`.
-    11. §3: after line 116 (`unity license return --yes        # release the seat`), change the comment to
-        `# returns ALL of this machine's seats — ask the user first`, and append a new subsection at the end of §3:
+        → `| \`--non-interactive\` | No prompts. Add \`--yes\` only where that subcommand offers it (install, uninstall, projects clean/upgrade, skill install/refresh, mcp configure, self-update) — \`projects new\` and \`open\` reject it |`.
+    11. §3: leave the licence lines as they are (the bridge never runs them — D57), and append a new subsection at the end of §3:
         ```
         ### Ask the user first
 
         | Command | Why |
         |---|---|
-        | `unity license return` | returns every seat on this machine |
         | `unity projects upgrade --to` | one-way migration of the project |
         | `unity uninstall` | removes an Editor |
         | `unity vcs resolve --ours\|--theirs` | discards the other side of a conflict |
@@ -2574,7 +2576,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/.server/bridge app/lib/.server/security` → pass.
   - Verify level: live
 
-- [ ] **T17** — The relay, device poll/result routes, and the project bridge route
+- [x] **T17** — The relay, device poll/result routes, and the project bridge route
   - Depends on: T16
   - Files: `app/lib/.server/bridge/relay.ts` (replace the T16 stub) + `relay.spec.ts`;
     `app/routes/api.bridge.poll.ts`, `api.bridge.result.ts`, `api.projects.$projectId.bridge.ts` (create)
@@ -3581,8 +3583,11 @@ only, never commit.
         `automation : on until …` (about 12 h ahead), and the helper's terminal never printed the grant.
     3. **Scripts switch:** with **Allow scripts** off, a `unity_run_script` request is refused naming the
        switch. With it on, it runs and a 2-credit row appears.
-    4. **Consent:** ask for `unity license return`. The Consent dialog shows the exact command; **Deny** →
-       nothing runs and no ledger row.
+    4. **Consent:** ask for `unity projects clean` on the scratch project. The Consent dialog shows the exact
+       command; **Deny** → nothing runs and no ledger row. Also ask for `unity license status` and
+       `unity auth status` — both are refused outright (no dialog, nothing runs). 🔴 Never run any
+       `unity license …` or `unity auth …` command in this or any test — the bridge never touches the
+       user's Unity licence or sign-in (owner, 2026-09-29).
     5. **Blender:** copy `/Users/mackey/Desktop/Assets HD/Lousberg/The Complete KayKit Collection v6.1/KayKit Adventurers 2.0/Characters/fbx/Knight.fbx`
        to `$PROJ/Assets/_BridgeTest/Knight.fbx` and let Unity import it. Ask the agent to re-weight it in place
        with the T11 `reweight.py` body via `blender_run_script` (inputs/outputs `Assets/_BridgeTest/Knight.fbx`).

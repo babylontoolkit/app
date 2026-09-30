@@ -239,7 +239,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_cli: tool({
       description:
-        'Run a top-level unity CLI operation (args after "unity", e.g. ["status"] or ["projects","info"]). Account, licence and install operations ask the user first.',
+        'Run a top-level unity CLI operation (args after "unity", e.g. ["status"] or ["projects","info"]). Install and project-history operations ask the user first. Unity licences and sign-in are never available.',
       parameters: z.object({
         args: stringListish().describe('The arguments after "unity" as a list of strings, e.g. ["status"].'),
       }),

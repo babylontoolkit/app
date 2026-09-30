@@ -31,8 +31,7 @@ export function UnityBridgeConsentDialog() {
             {consent.operation}
           </pre>
           <p className="text-sm text-bolt-elements-textSecondary">
-            This can change your Unity account, licences, installed software or project history. It runs only if you
-            allow it.
+            This can change installed software or your project's history. It runs only if you allow it.
           </p>
           <div className="flex justify-end gap-2 mt-2">
             <DialogButton type="secondary" onClick={() => void answerConsent(false)}>

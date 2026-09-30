@@ -55,8 +55,8 @@ describe('classifyOperation', () => {
     expect(classifyOperation(command('batch', { commands: [{ nope: 1 }] })).tier).toBe('consent');
   });
 
-  it("unity.cli ['license','return'] → consent", () => {
-    expect(classifyOperation(cli('license', 'return')).tier).toBe('consent');
+  it("unity.cli ['license','return'] → refused", () => {
+    expect(classifyOperation(cli('license', 'return')).tier).toBe('refused');
   });
 
   it("unity.cli ['editors'] → allowed", () => {
@@ -67,8 +67,16 @@ describe('classifyOperation', () => {
     expect(classifyOperation(cli('projects', 'new', '--help')).tier).toBe('allowed');
   });
 
-  it("unity.cli ['license','return','-h'] → allowed", () => {
-    expect(classifyOperation(cli('license', 'return', '-h')).tier).toBe('allowed');
+  it("unity.cli ['license','return','-h'] → refused", () => {
+    expect(classifyOperation(cli('license', 'return', '-h')).tier).toBe('refused');
+  });
+
+  it("unity.cli ['license','status'] → refused", () => {
+    expect(classifyOperation(cli('license', 'status')).tier).toBe('refused');
+  });
+
+  it("unity.cli ['auth','logout'] → refused", () => {
+    expect(classifyOperation(cli('auth', 'logout')).tier).toBe('refused');
   });
 
   it("unity.cli ['shell','--help'] → refused", () => {

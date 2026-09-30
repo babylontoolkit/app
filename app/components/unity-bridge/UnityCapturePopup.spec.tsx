@@ -82,7 +82,7 @@ describe('UnityCapturePopup', () => {
       updateBridgeFromPart({
         type: 'bridge-consent',
         toolCallId: 'call_1',
-        operation: 'unity.cli license return',
+        operation: 'unity.cli uninstall 6000.0.0f1',
         target: 'Racer',
         tier: 'consent',
         generationId: 'gen_1',

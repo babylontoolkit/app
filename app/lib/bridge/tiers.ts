@@ -46,6 +46,8 @@ export const REFUSED_CLI: Record<string, string> = {
   close: 'use the unity_editor tool',
   run: 'not available through the Unity Bridge',
   shell: 'not available through the Unity Bridge',
+  license: 'Unity licences are never touched by the Unity Bridge',
+  auth: 'Unity sign-in is never touched by the Unity Bridge',
   mcp: 'not available through the Unity Bridge',
   skill: 'not available through the Unity Bridge',
   job: 'use the bridge_job tool',
@@ -70,8 +72,6 @@ export const ALLOWED_CLI: Record<string, string[] | '*'> = {
 };
 
 export const CONSENT_CLI = new Set([
-  'license',
-  'auth',
   'install',
   'uninstall',
   'install-modules',
