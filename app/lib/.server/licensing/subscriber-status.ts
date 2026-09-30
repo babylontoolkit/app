@@ -89,10 +89,22 @@ export async function checkSubscriptionByEmail(email: string, context?: unknown)
     return { email, active: false, reason: 'none' };
   }
 
+  return { email, ...(await checkAccessForUser(userId, context)) };
+}
+
+/**
+ * The entitlement decision for one platform user id (§4.18a: an active Stripe subscription OR credits
+ * `> 0`). Shared by the email check above and the Unity Bridge automation grant (§4.17, D50), so the two
+ * doors can never disagree about who is entitled.
+ *
+ * Same failure policy as the email check: a Stripe failure degrades to the credits branch; a ledger
+ * failure throws (an unanswered question must not read as "no").
+ */
+export async function checkAccessForUser(userId: string, context?: unknown): Promise<SubscriptionAccess> {
   const [subscriptionStatus, creditBalance] = await Promise.all([
     subscriptionStatusFor(userId, context),
     getLedger(context).balance(userId),
   ]);
 
-  return { email, ...decideSubscriptionAccess({ subscriptionStatus, creditBalance }) };
+  return decideSubscriptionAccess({ subscriptionStatus, creditBalance });
 }

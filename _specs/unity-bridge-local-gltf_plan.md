@@ -2626,7 +2626,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 > T27 and T28 are numbered after T26 because they were added after the plan was first written, but they sit
 > here and run here — bt-execute works top to bottom through unchecked boxes.
 
-- [ ] **T27** — App Builder side of automation mode: key tool, grant signing, grant route, entitlement
+- [x] **T27** — App Builder side of automation mode: key tool, grant signing, grant route, entitlement
   - Depends on: T17
   - Files (app repo): `scripts/bridge-grant-key.mjs` (create), `app/lib/.server/bridge/grant.ts` (create) +
     `grant.spec.ts`, `app/routes/api.bridge.grant.ts` (create),

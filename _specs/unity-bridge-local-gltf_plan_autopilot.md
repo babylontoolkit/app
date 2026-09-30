@@ -28,3 +28,8 @@ Tasks:
 - T17 ✗ verifier FAIL (attempt 1): poll-route persistence throttle compares JSON.stringify of stored vs incoming hello — jsonb reorders keys, so production would write bridge_devices on every poll. Fix sent back.
 - T11 ✅ verified (fresh verifier, attempt 2) · reweight.py live on Knight (9 meshes, bounds-shift 0, exit 0; .obj → exit 1); §9 quick-ref recipe replaced and run live (max shift 3.6e-15) · AgentReference (uncommitted per D33). Leftover for the owner: a few non-re-paint bpy.ops examples (import/export/select_all) still don't assert FINISHED.
 - Phase 4 complete.
+- T17 ✅ verified (fresh verifier, attempt 2) · persist-hello canonical compare (6 tests) + isUnsafePath drive rule tightened (`t:Texture` allowed) · live poll 401 without token
+- Phase 5 complete → commit dd0a5081.
+- T27 ✅ verified (independent) · 1 attempt · grant.spec 19/19; live grant 200 (12 h), unadvertised 403, 'xyz' 400; C# public constants proven to match the private key · BRIDGE_GRANT_PRIVATE_KEY in .env.local only (gitignored). Public constants: scratchpad automation-public-key.txt (also in T28's C#).
+- T23 implemented (verification pending) — the live helper paired and polled; UI approval deferred to Phase 7.
+- Environment blocker found (Phase 1 verifier): the pinned AppTemplate snapshot (3efa7061…) depends on `@babylonjs-toolkit/next@9.28.0`, which is not on npm (latest 9.25.1) → every NEW project fails `npm install`. T2's "a normal project preview still loads" could not be observed on a fresh project.
