@@ -751,9 +751,8 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
     onPreviewToolCall: vi.fn(),
     onMediaTask: vi.fn(),
 
-    /* Unity Bridge events + local scene import relay (§4.17) — subscribed before draining, like the rest. */
+    /* Unity Bridge events (§4.17) — subscribed before draining, like the rest. */
     onBridgeEvent: vi.fn(),
-    onLocalSceneCall: vi.fn(),
     ...overrides,
 
     /*

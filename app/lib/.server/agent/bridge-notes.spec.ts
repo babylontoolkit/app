@@ -35,11 +35,12 @@ describe('the scripts state (D58)', () => {
     expect(online(true)).toContain(' Scripts: on. ');
   });
 
-  it('switch off (or absent) → off, naming the dialog switch — never a command', () => {
+  it('switch off → off, naming the dialog switch — never a command; ABSENT is on (the D58 default, as dispatched)', () => {
     const off = 'Scripts: off — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon).';
 
     expect(online(false)).toContain(off);
-    expect(online(undefined)).toContain(off);
+    expect(online(undefined)).toContain(' Scripts: on. ');
+    expect(online(undefined)).not.toContain(off);
     expect(online(false)).not.toMatch(/npx|bt-agent|--/);
   });
 
@@ -57,12 +58,16 @@ describe('the scripts state (D58)', () => {
 
   it('online note tells the model to speak in plain words — no tool names or job ids (verifier item 10)', () => {
     expect(online(true)).toContain(
-      'Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.',
+      'Speak to the user in plain words — never name these tools (unity_command, unity_project, …) or internal job ids in replies.',
     );
   });
 
   it('scriptsStateLine is the one wording (three states)', () => {
     expect(scriptsStateLine({ allowScripts: true }, { scriptsDisabledLocally: false })).toBe('Scripts: on.');
+
+    // A device that never touched the switch is ON — the same reading the dispatch uses (D58 default).
+    expect(scriptsStateLine({}, undefined)).toBe('Scripts: on.');
+    expect(scriptsStateLine({ allowScripts: undefined }, undefined)).toBe('Scripts: on.');
     expect(scriptsStateLine({ allowScripts: false }, undefined)).toMatch(/^Scripts: off — /);
     expect(scriptsStateLine(undefined, { scriptsDisabledLocally: true })).toBe(
       'Scripts are disabled on this computer (--no-scripts) — the Allow scripts switch has no effect; the user must re-run the install command from the Unity Bridge dialog without --no-scripts.',
@@ -99,7 +104,7 @@ describe('bridgeTurnNotes', () => {
     });
 
     expect(note).toBe(
-      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: "Kart". Unity CLI 1.4.0, Toolkit 9.29.0, Blender 4.2.0. Scripts: off — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon). Paths are relative to the current Unity project. Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.',
+      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: "Kart". Unity CLI 1.4.0, Toolkit 9.29.0, Blender 4.2.0. Scripts: on. Paths are relative to the current Unity project. Speak to the user in plain words — never name these tools (unity_command, unity_project, …) or internal job ids in replies.',
     );
   });
 
@@ -110,7 +115,7 @@ describe('bridgeTurnNotes', () => {
     });
 
     expect(note).toBe(
-      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: none — open or create one with unity_project. Unity CLI not found, Toolkit ?, Blender not found. Scripts: off — the user can turn on Allow scripts in the Unity Bridge dialog (the cube icon). Paths are relative to the current Unity project. Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.',
+      '# Unity Bridge\n\nConnected to "Studio Mac". Projects folder "Unity": Racer, Kart. Current project: none — open or create one with unity_project. Unity CLI not found, Toolkit ?, Blender not found. Scripts: on. Paths are relative to the current Unity project. Speak to the user in plain words — never name these tools (unity_command, unity_project, …) or internal job ids in replies.',
     );
   });
 
@@ -145,6 +150,11 @@ describe('bridgeTurnNotes', () => {
     const scene = notes.find((n) => n.startsWith('# Local scene server'));
     expect(scene).toContain('http://localhost:8888 serves exported scenes');
     expect(scene).toContain('Scenes: Level.gltf.');
+
+    // D60 — scenes stay on the dev server / the user's hosting; never copied into the web project.
+    expect(scene).toContain('NEVER copy exported scene files into the web project');
+    expect(scene).toContain('ask for the URL where they host the exported scene folder');
+    expect(scene).not.toContain('import_local_scene');
     expect(notes[0]).toContain('Blender not found');
   });
 

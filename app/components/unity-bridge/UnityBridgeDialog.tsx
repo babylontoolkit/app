@@ -5,10 +5,12 @@
  * tell how to install the bridge service if it's not already running; if running, some status info like
  * Unity CLI ready and Blender CLI ready."
  *
- *   - Not online → ONE command with a freshly minted single-use install code built in:
- *       npx @babylonjs-toolkit/agent bridge --install-service --pair XXXX-XXXX [--server <this origin>]
- *     `--server` is added only when this page is not the production origin the server reports — the
- *     helper defaults to production (no app URL is hardcoded here, the branding rule). The code is minted
+ *   - Not online → a required **Unity projects folder** field (D59; the last typed path is remembered per
+ *     browser), then ONE command with a freshly minted single-use install code built in:
+ *       npx @babylonjs-toolkit/agent bridge --install-service --pair XXXX-XXXX --projects "<folder>" [--server <this origin>]
+ *     No command (and no Copy) until the folder is filled. `--server` is added only when this page is not the
+ *     production origin the server reports — the helper defaults to production (no app URL is hardcoded here,
+ *     the branding rule). The command is composed by `~/lib/bridge/install-command`. The code is minted
  *     when the install view shows and re-minted ~30 s before it expires; while open, the status is polled
  *     every 3 s and the dialog switches to the running view when the helper comes online.
  *   - Online → what the helper reports: Unity CLI, Blender, Babylon Toolkit, projects folder, current
@@ -21,12 +23,18 @@
  *   - Disabled → one sentence.
  *
  * Removed on purpose (D55): the devices list, the Jobs panel (captures open `UnityCapturePopup`), and the
- * Local scenes section (import goes through the agent). The consent prompt is a separate dialog and is unchanged.
+ * Local scenes section (scenes are served from the Unity dev server, never copied — D60). The consent prompt is a separate dialog and is unchanged.
  */
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { Dialog, DialogButton, DialogClose, DialogRoot, DialogTitle } from '~/components/ui/Dialog';
+import {
+  installCommand,
+  PROJECTS_FOLDER_STORAGE_KEY,
+  projectsFolderPlaceholder,
+  serverOriginFor,
+} from '~/lib/bridge/install-command';
 import { BRIDGE_TOOLKIT_MIN_VERSION } from '~/lib/bridge/protocol';
 import {
   bridgeDialogStore,
@@ -71,17 +79,32 @@ export function isVersionBelow(version: string, minimum: string): boolean {
   return false;
 }
 
-/**
- * The one install command. `--server` only when this page is not the production origin (the helper's
- * default); an unknown production origin (null) always names the server.
- */
-export function installCommand(code: string, pageOrigin: string, productionOrigin: string | null): string {
-  const base = `npx @babylonjs-toolkit/agent bridge --install-service --pair ${code}`;
+const pageOrigin = () => (typeof window === 'undefined' ? '' : window.location.origin);
 
-  return productionOrigin === pageOrigin ? base : `${base} --server ${pageOrigin}`;
+/** The last typed projects folder in this browser; storage may be absent or throw, which reads as empty. */
+function readStoredFolder(): string {
+  try {
+    return window.localStorage.getItem(PROJECTS_FOLDER_STORAGE_KEY) ?? '';
+  } catch {
+    return '';
+  }
 }
 
-const pageOrigin = () => (typeof window === 'undefined' ? '' : window.location.origin);
+function storeFolder(value: string): void {
+  try {
+    window.localStorage.setItem(PROJECTS_FOLDER_STORAGE_KEY, value);
+  } catch {
+    // A convenience only — the dialog works without it.
+  }
+}
+
+function placeholderForThisComputer(): string {
+  if (typeof navigator === 'undefined') {
+    return projectsFolderPlaceholder('', '');
+  }
+
+  return projectsFolderPlaceholder(navigator.userAgent ?? '', navigator.platform ?? '');
+}
 
 type Invite = { code: string; expiresAt: string } | { error: string } | null;
 
@@ -96,6 +119,7 @@ function InstallView({
 }) {
   const [invite, setInvite] = useState<Invite>(null);
   const [attempt, setAttempt] = useState(0);
+  const [projectsFolder, setProjectsFolder] = useState(readStoredFolder);
 
   // Mint when the view shows, and again whenever a retry is asked for.
   useEffect(() => {
@@ -141,8 +165,19 @@ function InstallView({
     }
   }, [active, status?.state]);
 
-  const command =
-    invite && 'code' in invite ? installCommand(invite.code, pageOrigin(), status?.productionOrigin ?? null) : null;
+  const composed = installCommand({
+    code: invite && 'code' in invite ? invite.code : '',
+    projectsFolder,
+    serverOrigin: serverOriginFor(pageOrigin(), status?.productionOrigin ?? null),
+  });
+  const folderError = composed && 'error' in composed ? composed.error : null;
+  const folderFilled = composed !== null;
+  const command = invite && 'code' in invite && composed && 'command' in composed ? composed.command : null;
+
+  const changeFolder = (value: string) => {
+    setProjectsFolder(value);
+    storeFolder(value);
+  };
 
   const copyCommand = async () => {
     if (!command) {
@@ -169,6 +204,33 @@ function InstallView({
         computer, so the AI can open, edit and export your Unity projects.
       </p>
 
+      <div className="space-y-1">
+        <label htmlFor="bridge-projects-folder" className="block text-sm text-bolt-elements-textPrimary">
+          Unity projects folder
+        </label>
+        <input
+          id="bridge-projects-folder"
+          type="text"
+          required
+          spellCheck={false}
+          autoComplete="off"
+          value={projectsFolder}
+          placeholder={placeholderForThisComputer()}
+          aria-describedby="bridge-projects-folder-help"
+          aria-invalid={folderError ? true : undefined}
+          onChange={(event) => changeFolder(event.target.value)}
+          className="w-full text-sm px-3 py-2 rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary placeholder-bolt-elements-textTertiary"
+        />
+        <p id="bridge-projects-folder-help" className="text-xs text-bolt-elements-textTertiary">
+          The folder on this computer where your Unity projects live (it is created if it doesn't exist).
+        </p>
+        {folderError && (
+          <p className="text-xs text-bolt-elements-icon-error" data-testid="bridge-projects-folder-error">
+            {folderError}
+          </p>
+        )}
+      </div>
+
       {invite && 'error' in invite ? (
         <div className="flex gap-2 items-start">
           <div className="flex-1 text-xs text-bolt-elements-icon-error" data-testid="bridge-invite-error">
@@ -178,7 +240,11 @@ function InstallView({
             Try again
           </button>
         </div>
-      ) : (
+      ) : !folderFilled ? (
+        <p className="text-xs text-bolt-elements-textTertiary" data-testid="bridge-folder-needed">
+          Enter your Unity projects folder to get the install command.
+        </p>
+      ) : folderError ? null : (
         <div className="flex gap-2 items-start">
           <pre
             data-testid="bridge-install-command"
@@ -191,10 +257,6 @@ function InstallView({
           </button>
         </div>
       )}
-
-      <p className="text-xs text-bolt-elements-textTertiary">
-        Run it inside your Unity projects folder, or add --projects &lt;folder&gt;.
-      </p>
     </div>
   );
 }

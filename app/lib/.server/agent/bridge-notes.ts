@@ -14,6 +14,7 @@
  * and the job rows) that `buildProjectNotes`'s pure inputs do not carry. Pure: no I/O.
  */
 import type { BridgeHello } from '~/lib/bridge/protocol';
+import { isScriptsAllowed } from '~/lib/.server/bridge/store';
 
 export interface BridgeTurnNotesInput {
   bridgeTurn: {
@@ -49,11 +50,12 @@ export const SCRIPTS_DISABLED_LOCALLY_NOTE =
 
 /** Replies are for the user: plain words, never a tool name or a job id (verifier, 2026-09-29). */
 export const PLAIN_WORDS_NOTE =
-  'Speak to the user in plain words — never name these tools (unity_command, import_local_scene, …) or internal job ids in replies.';
+  'Speak to the user in plain words — never name these tools (unity_command, unity_project, …) or internal job ids in replies.';
 
 /**
  * The scripts state in one line (D58). The helper's `--no-scripts` wins over the switch (it refuses on the
- * computer whatever the dispatch says); only an explicit `true` is on. The model is told where the switch
+ * computer whatever the dispatch says); otherwise it reads the switch exactly as the dispatch does
+ * (`isScriptsAllowed` — ON unless explicitly `false`), or the note would tell the model the opposite of what runs. The model is told where the switch
  * is so it can tell the user — never to run a command.
  */
 export function scriptsStateLine(
@@ -64,7 +66,7 @@ export function scriptsStateLine(
     return SCRIPTS_DISABLED_LOCALLY_NOTE;
   }
 
-  if (device?.allowScripts === true) {
+  if (isScriptsAllowed(device)) {
     return 'Scripts: on.';
   }
 
@@ -117,7 +119,7 @@ export function bridgeTurnNotes(input: BridgeTurnNotesInput): string[] {
     const scenes = server.scenes ?? [];
 
     notes.push(
-      `# Local scene server\n\n${origin} serves exported scenes (e.g. ${origin}/scenes/<Name>.gltf). Scenes: ${scenes.slice(0, 20).join(', ') || 'unknown'}. Local URLs work only while developing — import a scene with import_local_scene before the user publishes.`,
+      `# Local scene server\n\n${origin} serves exported scenes (e.g. ${origin}/scenes/<Name>.gltf). Scenes: ${scenes.slice(0, 20).join(', ') || 'unknown'}. Scenes are served from here while developing — NEVER copy exported scene files into the web project. Before the user publishes, ask for the URL where they host the exported scene folder (S3 bucket, CDN or FTP) and point sceneUrl at it.`,
     );
   }
 

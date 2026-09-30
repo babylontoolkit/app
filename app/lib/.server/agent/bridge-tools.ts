@@ -280,7 +280,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     blender_run_script: tool({
       description:
-        "Run a Python (bpy) script in headless Blender on the user's machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. Refused when scripts are off for this computer — then tell the user to turn on Allow scripts in the Unity Bridge dialog (the cube icon in the chat box); never ask them to type a command.",
+        "Run a Python (bpy) script in headless Blender on the user's machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. An existing output inside Assets/ is backed up to <file>~ by the bridge itself — never declare or write the ~ file. Refused when scripts are off for this computer — then tell the user to turn on Allow scripts in the Unity Bridge dialog (the cube icon in the chat box); never ask them to type a command.",
       parameters: z.object({
         source: z.string().optional().describe('The Python (bpy) source of the script.'),
         inputs: stringListish().describe('Input files (a list), relative to the Unity project.'),
@@ -368,7 +368,8 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
     }),
 
     unity_dev_server: tool({
-      description: 'Start or check the Babylon Toolkit dev server for the current Unity project.',
+      description:
+        'Start or check the Babylon Toolkit dev server for the current Unity project. The game loads its scenes straight from this server while developing (sceneUrl = http(s)://localhost:<port>/scenes/<file>) — never copy exported scene files into the web project; before publishing, ask the user for the URL where they host the export (their own domain, e.g. an S3 bucket) and point sceneUrl there.',
       parameters: z.object({
         action: z.string().optional().describe('"status" (default) or "start".'),
         port: numberish().describe('Port for start (optional).'),

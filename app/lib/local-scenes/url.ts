@@ -1,5 +1,5 @@
 /**
- * Local-scene URL rules (D22, D27) — shared by the explainer, the planner and the import tool.
+ * Local-scene URL rules (D22, D27). Scenes are served from the exporter dev server, never copied into the project (D60).
  *
  * "Local" means the user's own machine: a Unity dev server on `localhost`/loopback, on an origin that
  * is NOT the page's own (the preview itself is served from somewhere, and its own requests are not a

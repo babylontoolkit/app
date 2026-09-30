@@ -4,6 +4,8 @@
  * Every parameter is optional in zod and validated in `execute`: a missing value is a sentence and the
  * pipeline is never reached (so nothing can be debited).
  */
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const runBridgeOperation = vi.fn(async (..._args: unknown[]) => 'ran');
@@ -222,5 +224,42 @@ describe('createBridgeTools', () => {
   it('unity_cli args as a plain string is split into words', async () => {
     await call('unity_cli', { args: 'projects info' });
     expect(runBridgeOperation.mock.calls[0][0]).toEqual({ kind: 'unity.cli', args: ['projects', 'info'] });
+  });
+});
+
+/**
+ * D60 — exported scenes are NEVER copied into the web project (they can be gigabytes); they are served from
+ * the Unity Exporter dev server while developing and from the user's own hosting once published. The
+ * `import_local_scene` tool, its `local-scene-call` relay and the client import were DELETED, not hidden —
+ * dead code that copies gigabytes into a repo is how it comes back.
+ */
+describe('import_local_scene is gone (D60)', () => {
+  const read = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
+
+  it('the tool set never contains import_local_scene', () => {
+    expect(Object.keys(tools)).not.toContain('import_local_scene');
+
+    const proxy = read('app/lib/.server/agent/proxy.ts');
+
+    // Control: the scan reads the real tool assembly.
+    expect(proxy).toContain('...bridgeTools,');
+    expect(proxy).not.toMatch(/import_local_scene|local-scene-tools|LocalScene/);
+    expect(read('app/routes/api.agent.ts')).not.toContain('local-scene-call');
+    expect(read('app/components/chat/Chat.client.tsx')).not.toMatch(/local-scene-call|local-scenes\/import/);
+  });
+
+  it('the tool and the client import are deleted, while the explainer and dev-server check stay', () => {
+    for (const gone of [
+      'app/lib/.server/agent/local-scene-tools.ts',
+      'app/lib/local-scenes/import.ts',
+      'app/lib/local-scenes/plan.ts',
+    ]) {
+      expect(existsSync(join(process.cwd(), gone)), gone).toBe(false);
+    }
+
+    // Control: the kept local-scene modules are still there.
+    for (const kept of ['app/lib/local-scenes/explainer.ts', 'app/lib/local-scenes/devserver.ts']) {
+      expect(existsSync(join(process.cwd(), kept)), kept).toBe(true);
+    }
   });
 });

@@ -49,7 +49,6 @@ import { chatResetRequest } from '~/lib/stores/chat-reset';
 import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
 import { resetActiveSkills, updateActiveSkills } from '~/lib/stores/active-skills';
 import { beginBridgeScan, updateBridgeFromPart } from '~/lib/stores/unity-bridge';
-import { handleLocalSceneCall } from '~/lib/local-scenes/import';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
 import { requestSignIn } from '~/lib/stores/auth-gate';
@@ -1200,34 +1199,6 @@ export const ChatImpl = memo(
          */
         if (call.type === 'bridge-consent' || call.type === 'bridge-job') {
           updateBridgeFromPart(part);
-          continue;
-        }
-
-        /*
-         * `import_local_scene` (D22) — the browser fetches the scene from the user's local dev server and
-         * writes it into the project, then posts the outcome back. Same dedupe latch as the preview relay.
-         */
-        const sceneCall = part as {
-          type?: string;
-          generationId?: string;
-          toolCallId?: string;
-          url?: string;
-          overwrite?: boolean;
-        };
-
-        if (sceneCall.type === 'local-scene-call' && sceneCall.toolCallId && sceneCall.generationId && sceneCall.url) {
-          if (handledToolCalls.current.has(sceneCall.toolCallId)) {
-            continue;
-          }
-
-          handledToolCalls.current.add(sceneCall.toolCallId);
-          void handleLocalSceneCall({
-            generationId: sceneCall.generationId,
-            toolCallId: sceneCall.toolCallId,
-            url: sceneCall.url,
-            overwrite: sceneCall.overwrite === true,
-          });
-
           continue;
         }
 

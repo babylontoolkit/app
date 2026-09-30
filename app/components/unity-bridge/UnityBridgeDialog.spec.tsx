@@ -2,8 +2,9 @@
 /**
  * THE Unity Bridge dialog (SPEC §4.17, D55) — one screen.
  *
- * Not online → exactly ONE command, `npx @babylonjs-toolkit/agent bridge --install-service --pair <code>`,
- * with `--server <origin>` only off the production origin; the code is minted on open and re-minted before
+ * Not online → a required Unity projects folder field (D59), then exactly ONE command,
+ * `npx @babylonjs-toolkit/agent bridge --install-service --pair <code> --projects "<folder>"`, with
+ * `--server <origin>` only off the production origin (no command at all while the folder is blank); the code is minted on open and re-minted before
  * it expires; the dialog polls and switches to the running view when the helper comes online. Online → the
  * helper's status and the per-computer Allow scripts checkbox (D58). Gone for good: the devices list, the
  * jobs, the local-scene inputs.
@@ -17,7 +18,7 @@ vi.mock('react-toastify', () => ({
   toast: { success: (...a: unknown[]) => toastSuccess(...a), error: (...a: unknown[]) => toastError(...a) },
 }));
 
-const { UnityBridgeDialog, installCommand } = await import('./UnityBridgeDialog');
+const { UnityBridgeDialog } = await import('./UnityBridgeDialog');
 const { bridgeDialogStore, bridgeStatusStore, resetUnityBridgeStoresForTests } = await import(
   '~/lib/stores/unity-bridge'
 );
@@ -60,7 +61,11 @@ let inviteFailure: string | null;
 let toggleFailure: string | null;
 let toggles: Array<Record<string, unknown>>;
 
+const FOLDER = '/Users/me/Unity Projects';
+const FOLDER_KEY = 'btk.unityBridge.projectsFolder';
+
 beforeEach(() => {
+  window.localStorage.clear();
   resetUnityBridgeStoresForTests();
   toastSuccess.mockReset();
   codes = ['K7QM-2XWD', 'AB23-CD45', 'EF67-GH89'];
@@ -126,28 +131,102 @@ function openWith(status: Status) {
 
 const commands = () => screen.queryAllByTestId('bridge-install-command').map((el) => el.textContent ?? '');
 
-describe('installCommand', () => {
-  it('omits --server only on the production origin', () => {
-    expect(installCommand('K7QM-2XWD', 'https://app.x.com', 'https://app.x.com')).toBe(
-      'npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD',
+const folderField = () => screen.getByLabelText('Unity projects folder') as HTMLInputElement;
+
+function fillFolder(value = FOLDER) {
+  fireEvent.change(folderField(), { target: { value } });
+}
+
+describe('UnityBridgeDialog — projects folder (D59)', () => {
+  it('while the folder is blank: NO command and no Copy button, just the muted line', async () => {
+    openWith(unpaired(ORIGIN()));
+
+    expect(folderField().required).toBe(true);
+    expect(
+      screen.getByText(
+        "The folder on this computer where your Unity projects live (it is created if it doesn't exist).",
+      ),
+    ).toBeTruthy();
+    await waitFor(() => expect(invites).toBe(1)); // the code is minted anyway, ready for when the folder is typed
+    expect(screen.getByText('Enter your Unity projects folder to get the install command.')).toBeTruthy();
+    expect(commands()).toEqual([]);
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+
+    fillFolder('   ');
+    expect(commands()).toEqual([]);
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+
+    // Control: filling it shows the command.
+    fillFolder();
+    await waitFor(() => expect(commands()).toHaveLength(1));
+    expect(screen.queryByText('Enter your Unity projects folder to get the install command.')).toBeNull();
+  });
+
+  it('remembers the last typed folder in this browser and restores it', async () => {
+    openWith(unpaired(ORIGIN()));
+    fillFolder('/Users/me/Games');
+    expect(window.localStorage.getItem(FOLDER_KEY)).toBe('/Users/me/Games');
+
+    cleanup();
+    openWith(unpaired(ORIGIN()));
+
+    expect(folderField().value).toBe('/Users/me/Games');
+    await waitFor(() =>
+      expect(commands()).toEqual([
+        'npx @babylonjs-toolkit/agent bridge --install-service --pair AB23-CD45 --projects "/Users/me/Games"',
+      ]),
     );
-    expect(installCommand('K7QM-2XWD', 'http://localhost:5173', 'https://app.x.com')).toBe(
-      'npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --server http://localhost:5173',
+  });
+
+  it('renders without storage (reads and writes throw)', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('denied');
+    });
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('denied');
+    });
+
+    try {
+      openWith(unpaired(ORIGIN()));
+      expect(folderField().value).toBe('');
+      fillFolder();
+      await waitFor(() => expect(commands()).toHaveLength(1));
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
+  });
+
+  it('a path with a quote or a line break: the inline error and no command', async () => {
+    openWith(unpaired(ORIGIN()));
+    await waitFor(() => expect(invites).toBe(1));
+
+    fillFolder('/Users/me/"Unity"');
+
+    expect(screen.getByTestId('bridge-projects-folder-error').textContent).toBe(
+      "That folder path can't contain quotes, $, backticks or line breaks.",
     );
-    expect(installCommand('K7QM-2XWD', 'http://localhost:5173', null)).toContain('--server http://localhost:5173');
+    expect(commands()).toEqual([]);
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+
+    fillFolder(FOLDER);
+    await waitFor(() => expect(commands()).toHaveLength(1));
+    expect(screen.queryByTestId('bridge-projects-folder-error')).toBeNull();
   });
 });
 
 describe('UnityBridgeDialog — not online', () => {
   it('on the production origin: exactly one command, with the minted code and NO --server', async () => {
     openWith(unpaired(ORIGIN()));
+    fillFolder();
 
     expect(screen.getByText('Connect Unity and Blender')).toBeTruthy();
     await waitFor(() =>
-      expect(commands()).toEqual(['npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD']),
+      expect(commands()).toEqual([
+        `npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --projects "${FOLDER}"`,
+      ]),
     );
     expect(commands()[0]).not.toContain('--server');
-    expect(screen.getByText('Run it inside your Unity projects folder, or add --projects <folder>.')).toBeTruthy();
     expect(
       screen.getByText(
         'Run this once in a terminal on the computer that has Unity. It installs a small helper that starts with your computer, so the AI can open, edit and export your Unity projects.',
@@ -158,16 +237,18 @@ describe('UnityBridgeDialog — not online', () => {
 
   it('off production (or production unknown): the command adds --server <this origin>', async () => {
     openWith(unpaired('https://app.example.com'));
+    fillFolder();
 
     await waitFor(() =>
       expect(commands()).toEqual([
-        `npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --server ${ORIGIN()}`,
+        `npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --projects "${FOLDER}" --server ${ORIGIN()}`,
       ]),
     );
   });
 
   it('Copy copies exactly the command and toasts "Copied"', async () => {
     openWith(unpaired(null));
+    fillFolder();
     await waitFor(() => expect(commands()[0]).toContain('K7QM-2XWD'));
 
     fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
@@ -187,6 +268,7 @@ describe('UnityBridgeDialog — not online', () => {
   it('re-mints the code ~30 s before it expires', async () => {
     vi.useFakeTimers();
     openWith(unpaired(ORIGIN()));
+    fillFolder();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10);
@@ -227,6 +309,7 @@ describe('UnityBridgeDialog — not online', () => {
 
   it('offline: names the computer, then the same one command', async () => {
     openWith(offline);
+    fillFolder();
 
     expect(screen.getByTestId('bridge-offline-line').textContent).toBe(
       '"Studio Mac" is paired but the helper isn\'t running. Start it again with the command below (it also re-installs the service).',
@@ -328,6 +411,7 @@ describe('UnityBridgeDialog — online', () => {
     openWith(online());
 
     fireEvent.click(screen.getByRole('button', { name: 'Show install command' }));
+    fillFolder();
 
     await waitFor(() => expect(commands()).toHaveLength(1));
     expect(commands()[0]).toContain('--install-service --pair K7QM-2XWD');

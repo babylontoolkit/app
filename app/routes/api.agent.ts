@@ -387,22 +387,12 @@ async function streamGeneration(
    * the bytes into the WebContainer at `destPath` when the render lands.
    */
   /*
-   * Unity Bridge consent requests and job status (§4.17), and `import_local_scene` calls (D22) — the
-   * client answers a consent / import through `/api/agent/tool-result`, like the MCP relay.
+   * Unity Bridge consent requests and job status (§4.17) — the client answers a consent through
+   * `/api/agent/tool-result`, like the MCP relay.
    */
   generation.onBridgeEvent((event) => {
     stream.writeData({ ...event, generationId: generation.generationId } as any);
   });
-  generation.onLocalSceneCall((event) => {
-    stream.writeData({
-      type: 'local-scene-call',
-      generationId: generation.generationId,
-      toolCallId: event.toolCallId,
-      url: event.url,
-      overwrite: event.overwrite,
-    });
-  });
-
   generation.onMediaTask((event) => {
     stream.writeData({
       type: 'media-task',

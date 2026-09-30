@@ -115,11 +115,11 @@ describe('localhost-url warning', () => {
     expect(hits[0].level).toBe('warning');
     expect(hits[0].path).toBe('src/scripts/Mode.ts');
 
-    // D55: the fix is asking the AI — there is no Import button in a dialog any more.
-    expect(hits[0].message).toContain(
-      'Ask the AI to import the scene into the project, then point the game at the imported copy.',
+    // D60: the fix is hosting the exported scene and pointing sceneUrl at it — never importing it.
+    expect(hits[0].message).toBe(
+      "Your game loads a scene from a local development server (http://localhost…), which a published game cannot reach. Upload the exported scene folder to your own hosting (for example an S3 bucket, a CDN or FTP) and point the game's sceneUrl at that address before publishing. Found in src/scripts/Mode.ts.",
     );
-    expect(hits[0].message).not.toMatch(/Unity icon|→ Import/);
+    expect(hits[0].message).not.toMatch(/import|Unity icon|→ Import/i);
   });
 
   it('"https://repo.babylontoolkit.com/x.gltf" is not warned (control)', () => {

@@ -6,6 +6,15 @@ spec_impact: yes
 size: large
 proof: functional
 
+> ⛔ **LATER OWNER DECISIONS OVERRIDE THIS SPEC (2026-09-29) — read the plan's D53–D60 first.** In
+> particular: **no scene is ever copied into the web project** (A7's import is DELETED — D60: scenes are
+> served from the Unity Exporter dev server while developing and from the user's own S3/CDN/FTP in
+> production); **the bridge never touches the user's Unity licence or sign-in** (`license *`/`auth *` are
+> REFUSED, never consent — D57); no per-operation credits (D53); no project link, no scene browsing (D54);
+> one-screen dialog + install-code pairing + start-at-login service (D55); `create` runs the full Toolkit
+> scaffold (D56); per-computer Allow scripts, on by default (D58); the Unity projects folder is required
+> at install (D59). Where this spec disagrees, the decision wins.
+
 > 🔴 **SUPERSEDES SPEC.md §4.17's tombstone by OWNER DECISION (2026-09-27).** Verbatim: *"Please add
 > full support for loading local gltf files and please make the local `Bridge` piece as
 > `@babylonjs-toolkit-bridge` to full support the whole Unity CLI… Use the previous Unity ICON and for
@@ -35,8 +44,8 @@ Two capabilities and a cleanup, all of which have to land together to be true:
 1. **Local glTF.** A game running in the Nodepod preview can load a glTF/GLB scene — and its buffers
    and textures — from a dev server on the user's own machine (the Toolkit exporter's server,
    `http://localhost:8888/scenes/Level01.gltf`), as well as from public URLs, in local development
-   AND on the hosted app. A local scene can be **imported into the project** in one action, so a
-   game built against the user's live Unity export can still be published. Today this fails for a
+   AND on the hosted app. ⛔ *(D60: a local scene is NEVER imported into the project — before publishing, the user hosts the
+   exported scene on their own S3/CDN/FTP and the game points at that URL.)* Today this fails for a
    reason no one had written down: Nodepod's service worker treats *every* `localhost` URL as the
    pod itself, ignoring the port, so the request never leaves the browser.
 2. **Unity Bridge.** The Desktop Agent's bridge service, `bt-agent bridge` (or
@@ -137,7 +146,7 @@ Two capabilities and a cleanup, all of which have to land together to be true:
       Chrome site settings.
     - **Refused:** "the server refused the request" — upgrade the Toolkit exporter.
   - The same failures reach the agent through `get_game_errors`.
-- **A7. Import a local scene into the project.** One action copies a local scene into the project's
+- ⛔ **A7 — DELETED by D60 (never copy exported scenes into the web project).** ~~Import a local scene into the project.~~ One action copies a local scene into the project's
   `public/scenes/<name>/`, byte-faithfully:
   - the `.gltf` plus every buffer and image its JSON references, or a single `.glb`;
   - relative URIs are preserved;
@@ -152,13 +161,13 @@ Two capabilities and a cleanup, all of which have to land together to be true:
 - **A8. Publishing refuses to ship a game that points at the author's computer — as a warning.**
   - The share checklist adds a `localhost-url` warning on source and built files. It must be
     acknowledged, and it names the file.
-  - Its text says a published game cannot reach anyone's local server, and points at "Import to
-    project".
+  - Its text says a published game cannot reach anyone's local server, and tells the user to host the exported scene
+    (S3/CDN/FTP) and point the game at that URL (D60).
   - The published-game iframe grants no local-network permission, so a stranger's browser never shows
     them a prompt on the author's behalf.
 - **A9. The model knows the rule.**
   - One stable line in the hard-constraints prompt section: local scene URLs are for development only,
-    and a scene must be imported before publishing.
+    and before publishing the scene must be hosted by the user (S3/CDN/FTP) — never copied into the project (D60).
   - When a dev server is known for this project, a volatile context note gives its origin and up to 20
     exported scene names. The note is placed **after the last cache breakpoint** (see Research Notes
     about the existing misplaced notes).
@@ -205,7 +214,7 @@ Two capabilities and a cleanup, all of which have to land together to be true:
   - **run a Blender Python script** — with declared input and output files;
   - **capture a Unity view** — Game or Scene view, returned to the model as a downscaled image;
   - **job control** — status, bounded wait, cancel;
-  - **import a local scene** (A7) and **start / check the dev server**.
+  - **start / check the dev server** (the A7 import is deleted — D60).
 - **B5. When tools are offered.** Only on a **Build** turn whose project is linked to a device that is
   present. Never in Plan mode, and never on the first build turn — both already pinned by
   `tool-policy.spec.ts`.
@@ -219,7 +228,7 @@ Two capabilities and a cleanup, all of which have to land together to be true:
   |---|---|---|
   | **Allowed** | Read-only and status queries; typed editor authoring commands; `bt_*`; captures; dev server; `unity status/editors/logs/recompile/test/projects info\|verify/templates/releases`; opening or closing the linked project's Editor | Runs |
   | **Scripts** | `run_script`, `eval`/`eval_file`, and Blender Python | Needs the per-link **Allow scripts** switch. It is visible in the panel and icon tooltip, persists for that link, and can be revoked at any time |
-  | **Consent** | Anything account-, seat-, machine- or history-level: `license *`, `auth *`, `install`/`uninstall`/`install-modules`, `self-update`, `projects new\|create\|clean\|upgrade`, `vcs resolve\|doctor --fix`, `unity build`; any editor command the catalog marks destructive (deletes, moves, renames, re-imports) | Per call: a Consent dialog shows the exact operation, and the user approves or denies. No answer in 120 s counts as a denial |
+  | **Consent** | ⛔ `license *` and `auth *` are REFUSED, never consent (D57). Anything machine- or history-level: `install`/`uninstall`/`install-modules`, `self-update`, `projects new\|create\|clean\|upgrade`, `vcs resolve\|doctor --fix`, `unity build`; any editor command the catalog marks destructive (deletes, moves, renames, re-imports) | Per call: a Consent dialog shows the exact operation, and the user approves or denies. No answer in 120 s counts as a denial |
 
   - Paths in any parameter must resolve inside the linked Unity project, the helper's own output
     directory, or a Blender working directory the helper created for that job. Anything else is

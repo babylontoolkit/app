@@ -94,7 +94,6 @@ import { createWebSearchTool } from './web-search-tool';
 import { createMcpRelayTools, type McpToolCallEvent } from './mcp-tools';
 import { createMediaTools, type MediaTaskEvent } from './media-tools';
 import { createBridgeTools } from './bridge-tools';
-import { createLocalSceneTools, type LocalSceneCallEvent } from './local-scene-tools';
 import {
   resolveBridgeTurn,
   settleDropped,
@@ -567,9 +566,6 @@ export interface AgentGeneration {
 
   /** Unity Bridge consent requests and job status (§4.17) — forwarded to the client as data parts. */
   onBridgeEvent(listener: (event: BridgeUiEvent) => void): void;
-
-  /** `import_local_scene` calls (§4.17, D22) — same relay shape as MCP: the client runs it and posts back. */
-  onLocalSceneCall(listener: (event: { toolCallId: string; url: string; overwrite: boolean }) => void): void;
 }
 
 /** Re-exported so callers keep importing it from the proxy; the math lives in `step-usage`. */
@@ -1523,17 +1519,10 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * Unity Bridge tools (§4.17, D17–D19) — offered only when the project is linked to a paired device of
    * THIS user that is present right now, and never on a discuss (Plan) or first build turn (D18). A
    * linked-but-absent device yields no tools, only the one-line offline note further down.
-   * `import_local_scene` needs no bridge: it runs in the user's browser (D22).
    */
   const bridgeListeners: Array<(event: BridgeUiEvent) => void> = [];
   const emitBridgeEvent = (event: BridgeUiEvent) => {
     for (const listener of bridgeListeners) {
-      listener(event);
-    }
-  };
-  const localSceneListeners: Array<(event: LocalSceneCallEvent) => void> = [];
-  const emitLocalSceneCall = (event: LocalSceneCallEvent) => {
-    for (const listener of localSceneListeners) {
       listener(event);
     }
   };
@@ -1560,16 +1549,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           abortSignal: request.abortSignal,
           context: request.context,
           emit: emitBridgeEvent,
-        })
-      : {};
-
-  const localSceneTools =
-    request.projectId && !isDiscussTurn && !isFirstBuildTurn
-      ? createLocalSceneTools({
-          generationId,
-          userId: user.id,
-          abortSignal: request.abortSignal,
-          emit: emitLocalSceneCall,
         })
       : {};
 
@@ -1922,7 +1901,6 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
             ...mcpRelayTools,
             ...mediaTools,
             ...bridgeTools,
-            ...localSceneTools,
             ...researchTools,
             ...createRepairTool(),
           }
@@ -3366,6 +3344,5 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     onPreviewToolCall: (listener) => previewListeners.push(listener),
     onMediaTask: (listener) => mediaListeners.push(listener),
     onBridgeEvent: (listener) => bridgeListeners.push(listener),
-    onLocalSceneCall: (listener) => localSceneListeners.push(listener),
   };
 }

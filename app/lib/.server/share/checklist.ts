@@ -74,6 +74,13 @@ const DEBUG_OVERLAY_ON = /(showDebugLayer|showRenderStats|showPhysicsViewer|show
 /** Network-capable games must launch solo when shared, or they hang waiting for a peer (§4.8). */
 const NETWORK_CAPABLE = /\b(Colyseus|NetworkManager|createRoom|joinOrCreate|multiplayer\s*[:=]\s*true)\b/;
 
+/**
+ * D60 — exported scenes are never copied into the web project (they can be gigabytes); the user hosts
+ * them and the game's `sceneUrl` points there. The dialog shows only the message, so the path is appended.
+ */
+export const LOCALHOST_URL_WARNING =
+  "Your game loads a scene from a local development server (http://localhost…), which a published game cannot reach. Upload the exported scene folder to your own hosting (for example an S3 bucket, a CDN or FTP) and point the game's sceneUrl at that address before publishing.";
+
 /** A published game runs on strangers' machines — a local dev-server URL points at THEIR computer, not the author's (§4.8). */
 const LOCALHOST_URL = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?\//i;
 
@@ -171,7 +178,7 @@ export function runPublishingChecklist(files: SerializedFileMap): ChecklistResul
         level: 'warning',
         code: 'localhost-url',
         path,
-        message: `${path} loads something from a local server (localhost). A published game cannot reach anyone's computer, so that part will be missing for players. Ask the AI to import the scene into the project, then point the game at the imported copy.`,
+        message: `${LOCALHOST_URL_WARNING} Found in ${path}.`,
       });
     }
 
