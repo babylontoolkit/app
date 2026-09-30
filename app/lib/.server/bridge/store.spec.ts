@@ -18,10 +18,8 @@ afterEach(async () => {
 
 const pairing = (over: Partial<BridgePairingRow>): BridgePairingRow => ({
   id: 'pair_x',
-  code: 'ABCDEFGH',
+  userId: 'u1',
   secretHash: 'h',
-  deviceName: 'laptop',
-  os: 'darwin',
   status: 'pending',
   expiresAt: '2026-09-29T12:10:00.000Z',
   createdAt: '2026-09-29T12:00:00.000Z',
@@ -60,34 +58,22 @@ describe('FsBridgeStore', () => {
     expect(await store.listDevices('u2')).toEqual([]);
   });
 
-  it('a device row keeps its own allowScripts switch (D54 — per device, never per project)', async () => {
-    const row = {
-      id: 'dev_2',
-      userId: 'u1',
-      name: 'desk',
-      os: 'win32',
-      tokenHash: 'def456',
-      createdAt: '2026-09-29T12:00:00.000Z',
-      allowScripts: true,
-    };
+  it('getPairingBySecretHash finds a row by the hash of its code only', async () => {
+    await store.putPairing(pairing({ id: 'pair_a', secretHash: 'hash_a' }));
+    await store.putPairing(pairing({ id: 'pair_b', secretHash: 'hash_b', status: 'consumed' }));
 
-    await store.putDevice(row);
-    expect((await store.getDevice('dev_2'))?.allowScripts).toBe(true);
-
-    await store.putDevice({ ...row, allowScripts: false });
-    expect((await store.getDevice('dev_2'))?.allowScripts).toBe(false);
+    expect((await store.getPairingBySecretHash('hash_a'))?.id).toBe('pair_a');
+    expect((await store.getPairingBySecretHash('hash_b'))?.status).toBe('consumed');
+    expect(await store.getPairingBySecretHash('hash_none')).toBeNull();
   });
 
-  it('findPendingPairingByCode ignores expired and consumed rows', async () => {
-    const now = '2026-09-29T12:05:00.000Z';
+  it('consumePairing flips a pending row exactly once', async () => {
+    await store.putPairing(pairing({ id: 'pair_a', secretHash: 'hash_a' }));
 
-    await store.putPairing(pairing({ id: 'pair_expired', code: 'AAAAAAAA', expiresAt: '2026-09-29T12:04:00.000Z' }));
-    await store.putPairing(pairing({ id: 'pair_consumed', code: 'BBBBBBBB', status: 'consumed' }));
-    await store.putPairing(pairing({ id: 'pair_live', code: 'CCCCCCCC' }));
-
-    expect(await store.findPendingPairingByCode('AAAAAAAA', now)).toBeNull();
-    expect(await store.findPendingPairingByCode('BBBBBBBB', now)).toBeNull();
-    expect((await store.findPendingPairingByCode('CCCCCCCC', now))?.id).toBe('pair_live');
+    expect(await store.consumePairing('pair_a')).toBe(true);
+    expect(await store.consumePairing('pair_a')).toBe(false);
+    expect((await store.getPairingBySecretHash('hash_a'))?.status).toBe('consumed');
+    expect(await store.consumePairing('pair_missing')).toBe(false);
   });
 
   it('listJobs is newest first and respects the limit', async () => {

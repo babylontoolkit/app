@@ -1,16 +1,19 @@
 /**
- * The signed-in user's paired Unity Bridge devices (SPEC §4.17, D7).
+ * The signed-in user's paired Unity Bridge devices (SPEC §4.17, D7, D55).
  *
  *   GET  /api/bridge/devices                              → {devices:[{id,name,os,online,lastSeenAt,hello}]}
- *   POST /api/bridge/devices {action:'approve', code}     → {ok:true, deviceName}
+ *   POST /api/bridge/devices {action:'invite'}            → {code:'XXXX-XXXX', expiresAt}
  *   POST /api/bridge/devices {action:'revoke', deviceId}  → {ok:true}
+ *
+ * `invite` mints the single-use install code the Unity Bridge dialog builds its one command around (D55,
+ * the only pairing flow); the helper claims it at `POST /api/bridge/pair`. Rate-limited per user.
  *
  * Behind a verified session. Revoked devices are omitted. A device that is not the caller's is a 404,
  * never a 403 (a 403 confirms the id exists).
  */
 import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { BRIDGE_DISABLED_BODY, isBridgeEnabled } from '~/lib/.server/bridge/auth';
-import { approvePairing } from '~/lib/.server/bridge/pairing';
+import { createInstallCode } from '~/lib/.server/bridge/pairing';
 import { deviceHello, dropDevice, isDevicePresent } from '~/lib/.server/bridge/relay';
 import { settleDropped } from '~/lib/.server/bridge/service';
 import { getBridgeStore } from '~/lib/.server/bridge/store';
@@ -66,14 +69,10 @@ export async function action({ request, context }: ActionFunctionArgs) {
       body = {};
     }
 
-    if (body?.action === 'approve') {
-      if (typeof body.code !== 'string' || !body.code.trim()) {
-        return json({ error: true, message: 'code is required.' }, { status: 400, headers: NO_STORE });
-      }
+    if (body?.action === 'invite') {
+      const invite = await createInstallCode({ userId: user.id, context });
 
-      const { deviceName } = await approvePairing({ userId: user.id, code: body.code, context });
-
-      return json({ ok: true, deviceName }, { headers: NO_STORE });
+      return json({ code: invite.code, expiresAt: invite.expiresAt }, { headers: NO_STORE });
     }
 
     if (body?.action === 'revoke') {

@@ -2,13 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BRIDGE_MAX_IMAGE_BASE64 } from '~/lib/bridge/protocol';
 import {
   answerConsent,
-  approvePairingCode,
   beginBridgeScan,
+  bridgeCaptureStore,
   bridgeConsentStore,
   bridgeDialogStore,
   bridgeLiveJobsStore,
   clearBridgeConsent,
   bridgeStatusStore,
+  mintInstallCode,
   refreshBridgeStatus,
   resetUnityBridgeStoresForTests,
   updateBridgeFromPart,
@@ -123,7 +124,7 @@ describe('unity-bridge store', () => {
   });
 
   it('refreshBridgeStatus sets null on a 404 (not your project)', async () => {
-    bridgeStatusStore.set({ enabled: true, state: 'unpaired', device: null, devices: [], jobs: [] });
+    bridgeStatusStore.set({ enabled: true, state: 'unpaired', productionOrigin: null });
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => jsonResponse({ error: true, message: 'Not found' }, 404)),
@@ -132,22 +133,37 @@ describe('unity-bridge store', () => {
     expect(bridgeStatusStore.get()).toBeNull();
   });
 
-  it("returns the server's message when an action fails", async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => jsonResponse({ error: true, message: 'That code has expired.' }, 400)),
+  it("mintInstallCode posts {action:'invite'} and returns the code", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ code: 'K7QM-2XWD', expiresAt: '2026-09-29T12:10:00.000Z' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(mintInstallCode()).resolves.toEqual({
+      ok: true,
+      code: 'K7QM-2XWD',
+      expiresAt: '2026-09-29T12:10:00.000Z',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/bridge/devices',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ action: 'invite' }) }),
     );
-    await expect(approvePairingCode('ABCD-EFGH')).resolves.toEqual({ ok: false, message: 'That code has expired.' });
   });
 
-  it('returns {ok:false} rather than throwing when the network fails', async () => {
+  it("mintInstallCode returns the server's message when minting fails (e.g. the rate limit)", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ error: true, message: 'Too many bridge install codes.' }, 429)),
+    );
+    await expect(mintInstallCode()).resolves.toEqual({ ok: false, message: 'Too many bridge install codes.' });
+  });
+
+  it('mintInstallCode returns {ok:false} rather than throwing when the network fails', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
         throw new Error('offline');
       }),
     );
-    await expect(approvePairingCode('ABCD-EFGH')).resolves.toEqual({ ok: false, message: 'offline' });
+    await expect(mintInstallCode()).resolves.toEqual({ ok: false, message: 'offline' });
   });
 
   it('a closed consent part clears the prompt for THAT call only, and a replay never re-opens it', () => {
@@ -182,33 +198,49 @@ describe('unity-bridge store', () => {
       ...extra,
     });
 
-    it('keeps the latest image per job and opens the Jobs panel once, when the capture lands', () => {
+    it('keeps the latest image per job and opens the capture popup once, when the capture lands (D55)', () => {
       updateBridgeFromPart(job({ status: 'running' }));
-      expect(bridgeDialogStore.get()).toBeNull();
+      expect(bridgeCaptureStore.get()).toBeNull();
 
       updateBridgeFromPart(job({ status: 'succeeded', image }));
       expect(bridgeLiveJobsStore.get().brg_cap.image).toEqual(image);
-      expect(bridgeDialogStore.get()).toBe('jobs');
+      expect(bridgeCaptureStore.get()).toEqual({ jobId: 'brg_cap', label: 'unity_capture game', image });
+      expect(bridgeDialogStore.get()).toBeNull(); // no Jobs panel any more
 
       // The user closes it; the replayed part (same bytes) must not re-open it.
-      bridgeDialogStore.set(null);
+      bridgeCaptureStore.set(null);
       beginBridgeScan();
       updateBridgeFromPart(job({ status: 'running' }));
       updateBridgeFromPart(job({ status: 'succeeded', image }));
-      expect(bridgeDialogStore.get()).toBeNull();
+      expect(bridgeCaptureStore.get()).toBeNull();
       expect(bridgeLiveJobsStore.get().brg_cap.image).toEqual(image);
     });
 
-    it('never opens the Jobs panel over a pending consent prompt or another open bridge dialog', () => {
+    it('never opens over a pending consent prompt — the capture waits and opens when the prompt closes', () => {
       updateBridgeFromPart(consentPart);
       updateBridgeFromPart(job({ status: 'succeeded', image }));
-      expect(bridgeDialogStore.get()).toBeNull();
+      expect(bridgeCaptureStore.get()).toBeNull();
       expect(bridgeLiveJobsStore.get().brg_cap.image).toEqual(image);
 
-      clearBridgeConsent();
-      bridgeDialogStore.set('status');
-      updateBridgeFromPart(job({ jobId: 'brg_cap2', status: 'succeeded', image }));
-      expect(bridgeDialogStore.get()).toBe('status');
+      updateBridgeFromPart({ type: 'bridge-consent', toolCallId: 'call_1', closed: true, generationId: 'gen_1' });
+      expect(bridgeCaptureStore.get()?.jobId).toBe('brg_cap');
+    });
+
+    it('a consent prompt arriving over an open capture moves the capture aside, and it returns after', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => jsonResponse({ delivered: true })),
+      );
+
+      updateBridgeFromPart(job({ status: 'succeeded', image }));
+      expect(bridgeCaptureStore.get()).not.toBeNull();
+
+      updateBridgeFromPart(consentPart);
+      expect(bridgeCaptureStore.get()).toBeNull();
+      expect(bridgeConsentStore.get()).not.toBeNull();
+
+      await answerConsent(true);
+      expect(bridgeCaptureStore.get()?.jobId).toBe('brg_cap');
     });
 
     it('drops an image over the cap, or one that is not a PNG', () => {
@@ -221,7 +253,7 @@ describe('unity-bridge store', () => {
 
       expect(bridgeLiveJobsStore.get().brg_cap.image).toBeUndefined();
       expect(bridgeLiveJobsStore.get().brg_svg.image).toBeUndefined();
-      expect(bridgeDialogStore.get()).toBeNull();
+      expect(bridgeCaptureStore.get()).toBeNull();
     });
   });
 });

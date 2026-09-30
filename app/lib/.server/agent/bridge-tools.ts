@@ -144,13 +144,15 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
   const tools = {
     unity_project: tool({
       description:
-        "List, open or create the Unity project on the user's computer (inside the helper's projects folder). Every other Unity tool works on the project opened or created last. Create makes an empty Unity project — add the Babylon Toolkit package with unity_command package_add afterwards.",
+        "List, open or create the Unity project on the user's computer (inside the helper's projects folder). Every other Unity tool works on the project opened or created last. Create makes an empty Unity project — add the Babylon Toolkit package with unity_command package_add afterwards. open accepts <folder>/<name> when a name exists in more than one projects folder.",
       parameters: z.object({
         action: z.string().optional().describe('"list" (default), "open" or "create".'),
         name: z
           .string()
           .optional()
-          .describe('The Unity project folder name inside the projects folder (for open and create).'),
+          .describe(
+            'The Unity project folder name inside the projects folder (for open and create); open also accepts <folder>/<name>.',
+          ),
       }),
       execute: async ({ action, name }, options) => {
         const a = choice(action, PROJECT_ACTIONS, 'list');
@@ -173,8 +175,11 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
         const projectName = name.trim();
 
-        if (!isValidProjectName(projectName)) {
-          return `unity_project name "${projectName.slice(0, 80)}" is not allowed — use a plain folder name inside the projects folder (letters, digits, spaces, "_", "-" and "."; up to 64 characters; no "/" or "..").`;
+        // open may name the projects folder too — `<folder>/<name>` — the same rule as validate.ts (D55).
+        const parts = a === 'open' && projectName.split('/').length === 2 ? projectName.split('/') : [projectName];
+
+        if (!parts.every(isValidProjectName)) {
+          return `unity_project name "${projectName.slice(0, 80)}" is not allowed — use a plain folder name inside the projects folder (letters, digits, spaces, "_", "-" and "."; up to 64 characters; no ".."). For open only, "<folder>/<name>" picks the projects folder when a name exists in more than one.`;
         }
 
         return asText(
@@ -255,7 +260,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     unity_run_script: tool({
       description:
-        'Run a C# script in the Unity Editor of the current project (run_script). entry is "Class.Method". Needs the user\'s "Allow scripts" switch.',
+        'Run a C# script in the Unity Editor of the current project (run_script). entry is "Class.Method". Refused if the user started the helper with --no-scripts.',
       parameters: z.object({
         source: z.string().optional().describe('The C# source of the script.'),
         entry: z.string().optional().describe('The static method to call, as "Class.Method".'),
@@ -275,7 +280,7 @@ export function createBridgeTools(ctx: Omit<BridgeRunContext, 'toolCallId'>): Re
 
     blender_run_script: tool({
       description:
-        'Run a Python (bpy) script in headless Blender on the user\'s machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. Needs "Allow scripts".',
+        "Run a Python (bpy) script in headless Blender on the user's machine. BRIDGE_INPUTS/BRIDGE_OUTPUTS hold absolute paths for the declared inputs/outputs (relative to the Unity project). Every declared output must be written or the run fails. Refused if the user started the helper with --no-scripts.",
       parameters: z.object({
         source: z.string().optional().describe('The Python (bpy) source of the script.'),
         inputs: stringListish().describe('Input files (a list), relative to the Unity project.'),

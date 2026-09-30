@@ -1,11 +1,12 @@
 /**
- * Unity Bridge persistence (SPEC §4.17, migration 0025) — paired devices, pairing handshakes, and the
- * durable record of bridge jobs.
+ * Unity Bridge persistence (SPEC §4.17, migration 0025) — paired devices, single-use install codes (D55),
+ * and the durable record of bridge jobs.
  *
  * Only DURABLE facts live here. Presence, queues, parked polls and job handles are in-memory on the one
  * server instance (`relay.ts`, D5) — never persist a queue.
  *
- * Secrets: a device row holds only the SHA-256 hex of its token, a pairing only the hash of its secret.
+ * Secrets: a device row holds only the SHA-256 hex of its token, a pairing only the hash of its install
+ * code — the plaintext code is never stored.
  * Nothing in this module may log either. The tables have RLS enabled with NO policy (service-role only,
  * the `git_tokens` rule), so the Supabase twin uses the ADMIN client.
  *
@@ -29,19 +30,17 @@ export interface BridgeDeviceRow {
   lastSeenAt?: string;
   revokedAt?: string;
   capabilities?: BridgeHello;
-
-  /** "Allow scripts" is per DEVICE (D54) — the user's own machine decides whether scripts may run on it. */
-  allowScripts?: boolean;
 }
 
+/**
+ * A single-use install code (D55). Minted by a signed-in user in the Unity Bridge dialog, claimed once by
+ * the helper's `--pair <code>`. `secretHash` is the SHA-256 hex of the NORMALISED code.
+ */
 export interface BridgePairingRow {
   id: string;
-  code: string;
+  userId: string;
   secretHash: string;
-  deviceName: string;
-  os: string;
-  userId?: string;
-  status: 'pending' | 'approved' | 'consumed';
+  status: 'pending' | 'consumed';
   expiresAt: string;
   createdAt: string;
 }
@@ -68,15 +67,13 @@ export interface BridgeStore {
   getDeviceByTokenHash(hash: string): Promise<BridgeDeviceRow | null>;
   listDevices(userId: string): Promise<BridgeDeviceRow[]>;
   putPairing(row: BridgePairingRow): Promise<void>;
-  getPairing(id: string): Promise<BridgePairingRow | null>;
-  findPendingPairingByCode(code: string, nowIso: string): Promise<BridgePairingRow | null>;
+  getPairingBySecretHash(hash: string): Promise<BridgePairingRow | null>;
+
+  /** Flip a PENDING row to consumed. True only for the one caller that did the flip (single use). */
+  consumePairing(id: string): Promise<boolean>;
   putJob(row: BridgeJobRow): Promise<void>;
   getJob(id: string): Promise<BridgeJobRow | null>;
   listJobs(projectId: string, limit: number): Promise<BridgeJobRow[]>; // newest first
-}
-
-function isPendingAndLive(row: BridgePairingRow, code: string, nowIso: string): boolean {
-  return row.code === code && row.status === 'pending' && Date.parse(row.expiresAt) > Date.parse(nowIso);
 }
 
 function newestFirst(a: BridgeJobRow, b: BridgeJobRow): number {
@@ -125,12 +122,20 @@ export class FsBridgeStore implements BridgeStore {
     await this._pairings.put(row);
   }
 
-  async getPairing(id: string): Promise<BridgePairingRow | null> {
-    return this._pairings.get(id);
+  async getPairingBySecretHash(hash: string): Promise<BridgePairingRow | null> {
+    return (await this._pairings.all()).find((row) => row.secretHash === hash) ?? null;
   }
 
-  async findPendingPairingByCode(code: string, nowIso: string): Promise<BridgePairingRow | null> {
-    return (await this._pairings.all()).find((row) => isPendingAndLive(row, code, nowIso)) ?? null;
+  async consumePairing(id: string): Promise<boolean> {
+    const row = await this._pairings.get(id);
+
+    if (!row || row.status !== 'pending') {
+      return false;
+    }
+
+    await this._pairings.put({ ...row, status: 'consumed' });
+
+    return true;
   }
 
   async putJob(row: BridgeJobRow): Promise<void> {
@@ -168,7 +173,6 @@ function deviceFromRow(row: Row): BridgeDeviceRow {
     os: row.os as string,
     tokenHash: row.token_hash as string,
     capabilities: (row.capabilities as BridgeHello | null) ?? undefined,
-    allowScripts: Boolean(row.allow_scripts),
     createdAt: row.created_at as string,
     lastSeenAt: optionalString(row.last_seen_at),
     revokedAt: optionalString(row.revoked_at),
@@ -183,7 +187,6 @@ function deviceToRow(row: BridgeDeviceRow): Row {
     os: row.os,
     token_hash: row.tokenHash,
     capabilities: row.capabilities ?? null,
-    allow_scripts: row.allowScripts ?? false,
     created_at: row.createdAt,
     last_seen_at: row.lastSeenAt ?? null,
     revoked_at: row.revokedAt ?? null,
@@ -193,11 +196,8 @@ function deviceToRow(row: BridgeDeviceRow): Row {
 function pairingFromRow(row: Row): BridgePairingRow {
   return {
     id: row.id as string,
-    code: row.code as string,
+    userId: row.user_id as string,
     secretHash: row.secret_hash as string,
-    deviceName: row.device_name as string,
-    os: row.os as string,
-    userId: optionalString(row.user_id),
     status: row.status as BridgePairingRow['status'],
     expiresAt: row.expires_at as string,
     createdAt: row.created_at as string,
@@ -207,11 +207,8 @@ function pairingFromRow(row: Row): BridgePairingRow {
 function pairingToRow(row: BridgePairingRow): Row {
   return {
     id: row.id,
-    code: row.code,
+    user_id: row.userId,
     secret_hash: row.secretHash,
-    device_name: row.deviceName,
-    os: row.os,
-    user_id: row.userId ?? null,
     status: row.status,
     expires_at: row.expiresAt,
     created_at: row.createdAt,
@@ -310,29 +307,26 @@ export class SupabaseBridgeStore implements BridgeStore {
     await this._upsert('bridge_pairings', pairingToRow(row));
   }
 
-  async getPairing(id: string): Promise<BridgePairingRow | null> {
-    const row = await this._one('bridge_pairings', 'id', id);
+  async getPairingBySecretHash(hash: string): Promise<BridgePairingRow | null> {
+    const row = await this._one('bridge_pairings', 'secret_hash', hash);
     return row ? pairingFromRow(row) : null;
   }
 
-  async findPendingPairingByCode(code: string, nowIso: string): Promise<BridgePairingRow | null> {
+  /** A conditional update: only a row still `pending` flips, so two concurrent claims cannot both win. */
+  async consumePairing(id: string): Promise<boolean> {
     const client = await createAdminClient(this._context);
     const { data, error } = await client
       .from('bridge_pairings')
-      .select('*')
-      .eq('code', code)
+      .update({ status: 'consumed' })
+      .eq('id', id)
       .eq('status', 'pending')
-      .gt('expires_at', nowIso)
-      .order('created_at', { ascending: false })
-      .limit(1);
+      .select('id');
 
     if (error) {
-      throw new Error(`Failed to read bridge_pairings: ${error.message}`);
+      throw new Error(`Failed to write bridge_pairings: ${error.message}`);
     }
 
-    const row = ((data as Row[] | null) ?? [])[0];
-
-    return row ? pairingFromRow(row) : null;
+    return ((data as Row[] | null) ?? []).length === 1;
   }
 
   async putJob(row: BridgeJobRow): Promise<void> {

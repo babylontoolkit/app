@@ -1,9 +1,10 @@
 /**
- * The Unity Bridge routes a browser and a helper actually call (SPEC §4.17, D54).
+ * The Unity Bridge routes a browser and a helper actually call (SPEC §4.17, D54, D55).
  *
- * D54 (owner, 2026-09-29): there is NO project link. The panel's GET reports the user's devices and the
- * one the agent would drive (the most recently seen present device); "Allow scripts" is a switch on the
- * DEVICE, posted with its id; and the helper's poll speaks protocol 2 — a protocol-1 helper is told to
+ * D54 (owner, 2026-09-29): there is NO project link. D55: the dialog's GET reports only the device the
+ * agent would drive (the most recently seen present one) and the production origin; the dialog mints a
+ * single-use install code (`invite`) and the helper claims it (`claim`) — the only pairing flow. There is
+ * no per-device scripts switch. The helper's poll speaks protocol 2 — a protocol-1 helper is told to
  * update (426), because it would still expect a `unityProjectKey` on every dispatch.
  *
  * ⚠️ Lives here, not in `app/routes/` — Remix compiles a spec in that folder as a route and the
@@ -14,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsProjectStore, setProjectStore } from '~/lib/.server/projects/store';
+import { MemoryUserRateLimitStore, setUserRateLimitStore } from '~/lib/.server/security/user-rate-limit';
 import type { Project } from '~/lib/.server/projects/types';
 import { BRIDGE_PROTOCOL_VERSION, type BridgeHello } from '~/lib/bridge/protocol';
 import { hashSecret } from './auth';
@@ -59,6 +61,8 @@ const hello = (overrides: Partial<BridgeHello> = {}): BridgeHello => ({
 
 beforeEach(async () => {
   vi.stubEnv('UNITY_BRIDGE_ENABLED', undefined as unknown as string);
+  vi.stubEnv('APP_URL', undefined as unknown as string);
+  setUserRateLimitStore(new MemoryUserRateLimitStore());
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-routes-'));
   store = new FsBridgeStore(path.join(tmp, 'bridge'));
   setBridgeStore(store);
@@ -73,6 +77,7 @@ afterEach(async () => {
   resetBridgeRelayForTests();
   setBridgeStore(null);
   setProjectStore(undefined);
+  setUserRateLimitStore(undefined);
   vi.unstubAllEnvs();
   await fs.rm(tmp, { recursive: true, force: true });
 });
@@ -86,18 +91,28 @@ async function getStatus(projectId: string) {
   } as never);
 }
 
-async function post(projectId: string, body: unknown) {
-  const { action } = await import('~/routes/api.projects.$projectId.bridge');
-  return action({
-    request: new Request('http://localhost/api/projects/x/bridge', {
+async function postJson(route: 'api.bridge.devices' | 'api.bridge.pair', body: unknown, ip = '203.0.113.7') {
+  const mod = (await import(`~/routes/${route}.ts`)) as { action: (args: never) => Promise<Response> };
+
+  return mod.action({
+    request: new Request(`http://localhost/${route}`, {
       method: 'POST',
       body: JSON.stringify(body),
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-forwarded-for': ip },
     }),
-    params: { projectId },
+    params: {},
     context: {},
   } as never);
 }
+
+const invite = async () =>
+  (await (await postJson('api.bridge.devices', { action: 'invite' })).json()) as {
+    code: string;
+    expiresAt: string;
+  };
+
+const claim = (code: string, deviceName = 'Studio Mac', osName = 'darwin') =>
+  postJson('api.bridge.pair', { action: 'claim', code, deviceName, os: osName });
 
 async function poll(body: unknown, token = `${TOKEN}_dev_1`) {
   const { action } = await import('~/routes/api.bridge.poll');
@@ -120,23 +135,33 @@ async function poll(body: unknown, token = `${TOKEN}_dev_1`) {
 }
 
 describe('GET /api/projects/:projectId/bridge', () => {
-  it('no devices → unpaired, no device, and no link field at all', async () => {
+  it('no devices → exactly {enabled, state:unpaired, productionOrigin:null} — no devices, jobs or link', async () => {
     const view = (await (await getStatus(mine.id)).json()) as Record<string, unknown>;
 
-    expect(view).toMatchObject({ enabled: true, state: 'unpaired', device: null, devices: [], jobs: [] });
-    expect(view).not.toHaveProperty('link');
+    expect(view).toEqual({ enabled: true, state: 'unpaired', productionOrigin: null });
   });
 
-  it('a paired device that is not polling → offline, naming it with its allowScripts', async () => {
-    await store.putDevice(device({ allowScripts: true }));
+  it('productionOrigin is the ORIGIN of APP_URL (path and trailing slash dropped); garbage → null', async () => {
+    vi.stubEnv('APP_URL', 'https://app.example.com/some/path/');
+    expect(((await (await getStatus(mine.id)).json()) as { productionOrigin: unknown }).productionOrigin).toBe(
+      'https://app.example.com',
+    );
+
+    vi.stubEnv('APP_URL', 'not a url');
+    expect(((await (await getStatus(mine.id)).json()) as { productionOrigin: unknown }).productionOrigin).toBeNull();
+  });
+
+  it('a paired device that is not polling → offline, naming it; no id, token hash or scripts field', async () => {
+    await store.putDevice(device());
 
     const view = (await (await getStatus(mine.id)).json()) as {
       state: string;
-      device: { id: string; allowScripts: boolean; online: boolean };
+      device: Record<string, unknown>;
     };
 
     expect(view.state).toBe('offline');
-    expect(view.device).toMatchObject({ id: 'dev_1', allowScripts: true, online: false });
+    expect(view.device).toMatchObject({ name: 'Studio Mac', online: false });
+    expect(Object.keys(view.device).sort()).toEqual(['name', 'online']);
   });
 
   it('a present device → online, with the helper hello (projects folder, projects, current)', async () => {
@@ -145,54 +170,92 @@ describe('GET /api/projects/:projectId/bridge', () => {
 
     const view = (await (await getStatus(mine.id)).json()) as {
       state: string;
-      device: { id: string; hello: BridgeHello };
+      device: { online: boolean; hello: BridgeHello };
     };
 
     expect(view.state).toBe('online');
+    expect(view.device.online).toBe(true);
     expect(view.device.hello).toMatchObject({ projectsDir: 'Unity', currentProject: 'Racer' });
+  });
+
+  it('a disabled bridge still answers 200 with enabled:false', async () => {
+    vi.stubEnv('UNITY_BRIDGE_ENABLED', 'false');
+
+    const response = await getStatus(mine.id);
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { enabled: boolean }).enabled).toBe(false);
   });
 
   it("someone else's project → 404, not 403", async () => {
     expect((await getStatus(theirs.id)).status).toBe(404);
   });
+
+  it('the route has no POST action any more (D55 — no scripts switch, no jobs panel)', async () => {
+    const mod = (await import('~/routes/api.projects.$projectId.bridge')) as Record<string, unknown>;
+
+    expect(mod.action).toBeUndefined();
+    expect(typeof mod.loader).toBe('function'); // CONTROL
+  });
 });
 
-describe('POST /api/projects/:projectId/bridge', () => {
-  it('allowScripts {deviceId, value:true} writes the DEVICE row, and false switches it back off', async () => {
-    await store.putDevice(device());
+describe('install codes: POST /api/bridge/devices {invite} → POST /api/bridge/pair {claim}', () => {
+  it('invite → XXXX-XXXX; claim → {deviceId, token} once, for the inviting user', async () => {
+    const { code, expiresAt } = await invite();
 
-    expect((await post(mine.id, { action: 'allowScripts', deviceId: 'dev_1', value: true })).status).toBe(200);
-    expect((await store.getDevice('dev_1'))?.allowScripts).toBe(true);
+    expect(code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    expect(Date.parse(expiresAt)).toBeGreaterThan(Date.now());
 
-    expect((await post(mine.id, { action: 'allowScripts', deviceId: 'dev_1', value: false })).status).toBe(200);
-    expect((await store.getDevice('dev_1'))?.allowScripts).toBe(false);
+    const response = await claim(code);
+    const body = (await response.json()) as { deviceId: string; token: string };
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(body.token).toMatch(/^btkb_/);
+    expect((await store.getDevice(body.deviceId))?.userId).toBe(USER.id);
   });
 
-  it('allowScripts with a string "true" does not switch scripts on (only a real boolean does)', async () => {
-    await store.putDevice(device());
+  it('is single use: the same code again → 410 with the copy-a-fresh-command sentence', async () => {
+    const { code } = await invite();
+    await claim(code);
 
-    await post(mine.id, { action: 'allowScripts', deviceId: 'dev_1', value: 'true' });
-    expect((await store.getDevice('dev_1'))?.allowScripts).toBe(false);
+    const again = await claim(code, 'Other PC', 'win32');
+
+    expect(again.status).toBe(410);
+    expect(((await again.json()) as { message: string }).message).toBe(
+      'That install code is not valid or has expired. Copy a fresh command from the Unity Bridge dialog.',
+    );
   });
 
-  it("allowScripts on another user's, a revoked, or a missing device → 404 and nothing written", async () => {
-    await store.putDevice(device({ id: 'dev_theirs', userId: 'someone-else' }));
-    await store.putDevice(device({ id: 'dev_revoked', revokedAt: '2026-09-29T01:00:00.000Z' }));
+  it('an unknown code → 410; a 6th computer → 409', async () => {
+    expect((await claim('ZZZZ-ZZZZ')).status).toBe(410);
 
-    expect((await post(mine.id, { action: 'allowScripts', deviceId: 'dev_theirs', value: true })).status).toBe(404);
-    expect((await post(mine.id, { action: 'allowScripts', deviceId: 'dev_revoked', value: true })).status).toBe(404);
-    expect((await post(mine.id, { action: 'allowScripts', value: true })).status).toBe(404);
-    expect((await store.getDevice('dev_theirs'))?.allowScripts).toBeFalsy();
-    expect((await store.getDevice('dev_revoked'))?.allowScripts).toBeFalsy();
+    for (let i = 0; i < 5; i++) {
+      await store.putDevice(device({ id: `dev_${i}`, name: `pc${i}` }));
+    }
+
+    const { code } = await invite();
+    expect((await claim(code, 'sixth', 'linux')).status).toBe(409);
   });
 
-  it.each(['link', 'unlink'])('the removed %s action → 400 Unknown action', async (action) => {
-    await store.putDevice(device());
+  it('invite is rate-limited per user: the 11th in 10 minutes → 429', async () => {
+    for (let i = 0; i < 10; i++) {
+      expect((await postJson('api.bridge.devices', { action: 'invite' })).status).toBe(200);
+    }
 
-    const response = await post(mine.id, { action, deviceId: 'dev_1', unityProjectKey: 'k1' });
+    expect((await postJson('api.bridge.devices', { action: 'invite' })).status).toBe(429);
+  });
 
-    expect(response.status).toBe(400);
-    expect(((await response.json()) as { message: string }).message).toBe('Unknown action.');
+  it('claim validates its body (400) and refuses the removed start/redeem actions and approve', async () => {
+    const { code } = await invite();
+
+    expect((await postJson('api.bridge.pair', { action: 'claim', code, os: 'darwin' })).status).toBe(400);
+    expect((await postJson('api.bridge.pair', { action: 'claim', code, deviceName: 'x', os: 'beos' })).status).toBe(
+      400,
+    );
+    expect((await postJson('api.bridge.pair', { action: 'start', deviceName: 'x', os: 'darwin' })).status).toBe(400);
+    expect((await postJson('api.bridge.pair', { action: 'redeem', pairingId: 'p', secret: 's' })).status).toBe(400);
+    expect((await postJson('api.bridge.devices', { action: 'approve', code })).status).toBe(400);
   });
 });
 
@@ -206,8 +269,8 @@ describe('POST /api/bridge/poll', () => {
     expect(((await response.json()) as { message: string }).message).toMatch(/bt-agent update/);
   });
 
-  it("a protocol-2 hello is accepted and persisted without losing the device's allowScripts", async () => {
-    await store.putDevice(device({ allowScripts: true }));
+  it('a protocol-2 hello is accepted and persisted', async () => {
+    await store.putDevice(device());
 
     const response = await poll({ hello: hello() });
 
@@ -215,6 +278,6 @@ describe('POST /api/bridge/poll', () => {
 
     const row = await store.getDevice('dev_1');
     expect(row?.capabilities?.projectsDir).toBe('Unity');
-    expect(row?.allowScripts).toBe(true);
+    expect(row?.name).toBe('Studio Mac');
   });
 });

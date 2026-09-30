@@ -171,7 +171,7 @@ export function runPublishingChecklist(files: SerializedFileMap): ChecklistResul
         level: 'warning',
         code: 'localhost-url',
         path,
-        message: `${path} loads something from a local server (localhost). A published game cannot reach anyone's computer, so that part will be missing for players. Import the scene into the project first (the Unity icon in the chat box → Import), then point the game at it.`,
+        message: `${path} loads something from a local server (localhost). A published game cannot reach anyone's computer, so that part will be missing for players. Ask the AI to import the scene into the project, then point the game at the imported copy.`,
       });
     }
 

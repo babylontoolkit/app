@@ -60,7 +60,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
         try {
           const store = getBridgeStore(context);
 
-          // Re-read: the row may have changed since authentication (e.g. the user flipped "Allow scripts").
+          // Re-read: the row may have changed since authentication (e.g. revoked by a re-pair of this computer).
           const current = (await store.getDevice(device.id)) ?? device;
 
           await store.putDevice({

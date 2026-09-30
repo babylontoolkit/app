@@ -1,8 +1,9 @@
 /**
  * Per-turn Unity Bridge notes (SPEC §4.17, D37) — what the model is told about the user's machine this
  * turn: the paired device is online (its projects folder, the Unity projects in it, which one is current,
- * and what it runs) or offline, which bridge jobs finished since the last turn, and which local scene
- * server serves exported scenes. There is no project link (D54) — the model opens or creates the Unity
+ * and what it runs) or offline, which bridge jobs finished since the last turn, and — from the helper's
+ * own report only (D55; the browser no longer saves a dev-server origin) — which local scene server
+ * serves exported scenes. There is no project link (D54) — the model opens or creates the Unity
  * project with `unity_project`.
  *
  * 🔴 PLACEMENT: the proxy pushes these AFTER the last cache breakpoint (immediately after the discuss
@@ -17,7 +18,6 @@ import type { BridgeHello } from '~/lib/bridge/protocol';
 export interface BridgeTurnNotesInput {
   bridgeTurn: { state: 'none' | 'disabled' | 'offline' | 'online'; device?: { name: string }; hello?: BridgeHello };
   finishedJobs: Array<{ id: string; operation: string; status: string; resultText?: string; error?: string }>;
-  localSceneServer?: { origin: string; scenes?: string[] };
 }
 
 /** At most this many project names ride in the note; the rest are counted. */
@@ -37,13 +37,13 @@ function projectNames(hello: BridgeHello | undefined): string {
 }
 
 export function bridgeTurnNotes(input: BridgeTurnNotesInput): string[] {
-  const { bridgeTurn, finishedJobs, localSceneServer } = input;
+  const { bridgeTurn, finishedJobs } = input;
   const notes: string[] = [];
   const deviceName = bridgeTurn.device?.name ?? 'your computer';
 
   if (bridgeTurn.state === 'offline') {
     notes.push(
-      `Your computer "${deviceName}" is paired but the helper is not running. If the user asks for Unity or Blender work, tell them to run the helper (the cube icon shows the command). Never claim to have run a Unity or Blender command.`,
+      `Your computer "${deviceName}" is paired but the helper is not running. If the user asks for Unity or Blender work, tell them to open the Unity Bridge dialog (the cube icon in the chat box) and run the install command it shows. Never claim to have run a Unity or Blender command.`,
     );
   }
 
@@ -70,12 +70,12 @@ export function bridgeTurnNotes(input: BridgeTurnNotesInput): string[] {
     notes.push(`# Unity Bridge jobs finished since your last turn\n${lines.join('\n')}`);
   }
 
-  // The helper's own report wins while it is online and running (D38); otherwise the client's hint.
+  // Only the helper's own report, while it is online and its dev server is running (D55).
   const helperServer = bridgeTurn.state === 'online' ? bridgeTurn.hello?.devServer : undefined;
   const server =
     helperServer?.running && helperServer.origin
       ? { origin: helperServer.origin, scenes: helperServer.scenes }
-      : localSceneServer;
+      : undefined;
 
   if (server?.origin) {
     const { origin } = server;

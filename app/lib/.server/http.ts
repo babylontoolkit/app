@@ -64,8 +64,8 @@ export const SAFE_ERRORS: ReadonlySet<string> = new Set([
   'InvalidEmailError',
 
   /*
-   * The Unity Bridge refusals (§4.17): an expired pairing code, the device cap, a refused operation. The
-   * Desktop Agent and the Connect dialog both show the sentence verbatim.
+   * The Unity Bridge refusals (§4.17): an expired install code, the device cap, a refused operation. The
+   * Desktop Agent and the Unity Bridge dialog both show the sentence verbatim.
    */
   'BridgeRefusedError',
 ]);

@@ -1,23 +1,38 @@
 /**
- * Unity Bridge device-code pairing (SPEC §4.17, D7).
+ * Unity Bridge pairing by install code (SPEC §4.17, D55 — the ONLY pairing flow).
  *
- *   1. The helper `start`s a pairing → `{pairingId, secret, code}` (code shown as `XXXX-XXXX`).
- *   2. The user approves the code in the builder's Connect dialog (a verified session).
- *   3. The helper `redeem`s with `pairingId + secret` and receives its device token ONCE.
+ *   1. A signed-in user opens the Unity Bridge dialog, which mints an install code (`createInstallCode`).
+ *      The dialog shows ONE command with the code built in:
+ *        npx @babylonjs-toolkit/agent bridge --install-service --pair XXXX-XXXX
+ *   2. The helper claims it (`claimInstallCode`) and receives its device token ONCE.
  *
- * Only SHA-256 hashes of the secret and the token are stored. Codes expire in 10 minutes. Limits: 5
- * active devices per user; approve is rate-limited per user, start per caller fingerprint (in the route).
+ * The direction is deliberate (owner, 2026-09-29: "if we use a service, how would we see the code?"): a
+ * start-at-login service has no terminal for a human to read a code from, so the code is created where a
+ * person is looking — the dialog — and consumed where nobody is.
+ *
+ * Only SHA-256 hashes are stored: of the NORMALISED code, and of the device token. Codes are single use and
+ * expire in 10 minutes. Limits: 5 active devices per user (checked at claim time); minting is rate-limited
+ * per user; claiming per caller fingerprint (in the route).
+ *
+ * Re-pairing the SAME computer (same name and OS) replaces its earlier pairing rather than adding a
+ * device: the dialog no longer lists devices, so a computer that lost its credentials and re-ran the
+ * install command must not quietly fill the 5-device cap with copies of itself.
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { enforceUserRateLimit } from '~/lib/.server/security/user-rate-limit';
 import { BridgeRefusedError, hashSecret, mintDeviceToken, mintId } from './auth';
+import { dropDevice } from './relay';
+import { settleDropped } from './service';
 import { getBridgeStore } from './store';
 
 export const PAIRING_TTL_MS = 600_000;
 export const MAX_ACTIVE_DEVICES = 5;
-export const PAIR_APPROVE_RATE_LIMIT = { windowMs: 600_000, max: 10 };
-export const PAIR_START_RATE_LIMIT = { windowMs: 3_600_000, max: 20 };
+export const INVITE_RATE_LIMIT = { windowMs: 600_000, max: 10 };
+export const CLAIM_RATE_LIMIT = { windowMs: 3_600_000, max: 20 };
 export const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+export const INVALID_INSTALL_CODE =
+  'That install code is not valid or has expired. Copy a fresh command from the Unity Bridge dialog.';
 
 const CODE_LENGTH = 8;
 
@@ -57,109 +72,107 @@ function hashesMatch(presentedHash: string, storedHash: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export async function startPairing(input: {
-  deviceName: string;
-  os: string;
+/** Mint a single-use install code for a signed-in user. Rate-limited per user (10 / 10 min). */
+export async function createInstallCode(input: {
+  userId: string;
   context: unknown;
   now?: number;
-}): Promise<{ pairingId: string; secret: string; code: string; expiresAt: string }> {
+}): Promise<{ code: string; expiresAt: string }> {
   const now = input.now ?? Date.now();
-  const pairingId = mintId('pair');
-  const secret = randomBytes(32).toString('base64url');
+
+  await enforceUserRateLimit({
+    userId: input.userId,
+    bucket: 'bridge-invite',
+    rule: INVITE_RATE_LIMIT,
+    subject: 'bridge install codes',
+    now,
+  });
+
   const code = mintCode();
   const expiresAt = new Date(now + PAIRING_TTL_MS).toISOString();
 
   await getBridgeStore(input.context).putPairing({
-    id: pairingId,
-    code,
-    secretHash: hashSecret(secret),
-    deviceName: input.deviceName,
-    os: input.os,
+    id: mintId('pair'),
+    userId: input.userId,
+    secretHash: hashSecret(code),
     status: 'pending',
     expiresAt,
     createdAt: new Date(now).toISOString(),
   });
 
-  return { pairingId, secret, code: formatCode(code), expiresAt };
+  return { code: formatCode(code), expiresAt };
 }
 
-/** Throws BridgeRefusedError: unknown/expired code (404), device cap reached (409). */
-export async function approvePairing(input: {
-  userId: string;
+/*
+ * Claims in flight in THIS process, by pairing id. The store's `consumePairing` is the real single-use
+ * guarantee (a conditional update on Postgres); this closes the await gap in the filesystem store.
+ */
+const claiming = new Set<string>();
+
+/**
+ * Claim an install code for a helper → `{deviceId, token}` once.
+ * Throws BridgeRefusedError: unknown / used / expired code (410), device cap reached (409).
+ */
+export async function claimInstallCode(input: {
   code: string;
+  deviceName: string;
+  os: string;
   context: unknown;
   now?: number;
-}): Promise<{ deviceName: string }> {
+}): Promise<{ deviceId: string; token: string }> {
   const now = input.now ?? Date.now();
-
-  await enforceUserRateLimit({
-    userId: input.userId,
-    bucket: 'bridge-pair-approve',
-    rule: PAIR_APPROVE_RATE_LIMIT,
-    subject: 'pairing approvals',
-    now,
-  });
-
   const store = getBridgeStore(input.context);
   const code = normalizeCode(input.code);
-  const pairing =
-    code.length === CODE_LENGTH ? await store.findPendingPairingByCode(code, new Date(now).toISOString()) : null;
+  const presentedHash = hashSecret(code);
+  const pairing = code.length === CODE_LENGTH ? await store.getPairingBySecretHash(presentedHash) : null;
 
-  if (!pairing) {
-    throw new BridgeRefusedError(
-      'That pairing code is not valid or has expired. Run the helper again for a new code.',
-      404,
-    );
+  if (
+    !pairing ||
+    !hashesMatch(presentedHash, pairing.secretHash) ||
+    pairing.status !== 'pending' ||
+    Date.parse(pairing.expiresAt) <= now ||
+    claiming.has(pairing.id)
+  ) {
+    throw new BridgeRefusedError(INVALID_INSTALL_CODE, 410);
   }
 
-  const active = (await store.listDevices(input.userId)).filter((device) => !device.revokedAt);
+  claiming.add(pairing.id);
 
-  if (active.length >= MAX_ACTIVE_DEVICES) {
-    throw new BridgeRefusedError(
-      `You already have ${MAX_ACTIVE_DEVICES} Unity Bridge devices paired. Remove one in the Unity Bridge panel first.`,
-      409,
-    );
+  try {
+    const active = (await store.listDevices(pairing.userId)).filter((device) => !device.revokedAt);
+    const replaced = active.filter((device) => device.name === input.deviceName && device.os === input.os);
+
+    if (active.length - replaced.length >= MAX_ACTIVE_DEVICES) {
+      throw new BridgeRefusedError(
+        `This account already has ${MAX_ACTIVE_DEVICES} Unity Bridge computers paired, which is the limit.`,
+        409,
+      );
+    }
+
+    // Consume BEFORE creating the device: a claim that loses the race creates nothing.
+    if (!(await store.consumePairing(pairing.id))) {
+      throw new BridgeRefusedError(INVALID_INSTALL_CODE, 410);
+    }
+
+    for (const device of replaced) {
+      await store.putDevice({ ...device, revokedAt: new Date(now).toISOString() });
+      await settleDropped(dropDevice(device.id), input.context);
+    }
+
+    const token = mintDeviceToken();
+    const deviceId = mintId('dev');
+
+    await store.putDevice({
+      id: deviceId,
+      userId: pairing.userId,
+      name: input.deviceName,
+      os: input.os,
+      tokenHash: hashSecret(token),
+      createdAt: new Date(now).toISOString(),
+    });
+
+    return { deviceId, token };
+  } finally {
+    claiming.delete(pairing.id);
   }
-
-  await store.putPairing({ ...pairing, userId: input.userId, status: 'approved' });
-
-  return { deviceName: pairing.deviceName };
-}
-
-export async function redeemPairing(input: {
-  pairingId: string;
-  secret: string;
-  context: unknown;
-  now?: number;
-}): Promise<{ status: 'pending' } | { status: 'expired' } | { status: 'approved'; deviceId: string; token: string }> {
-  const now = input.now ?? Date.now();
-  const store = getBridgeStore(input.context);
-  const pairing = typeof input.pairingId === 'string' ? await store.getPairing(input.pairingId) : null;
-
-  if (!pairing || typeof input.secret !== 'string' || !hashesMatch(hashSecret(input.secret), pairing.secretHash)) {
-    return { status: 'expired' };
-  }
-
-  if (pairing.status === 'consumed' || Date.parse(pairing.expiresAt) <= now) {
-    return { status: 'expired' };
-  }
-
-  if (pairing.status === 'pending' || !pairing.userId) {
-    return { status: 'pending' };
-  }
-
-  const token = mintDeviceToken();
-  const deviceId = mintId('dev');
-
-  await store.putDevice({
-    id: deviceId,
-    userId: pairing.userId,
-    name: pairing.deviceName,
-    os: pairing.os,
-    tokenHash: hashSecret(token),
-    createdAt: new Date(now).toISOString(),
-  });
-  await store.putPairing({ ...pairing, status: 'consumed' });
-
-  return { status: 'approved', deviceId, token };
 }

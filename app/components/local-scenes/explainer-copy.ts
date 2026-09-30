@@ -1,6 +1,6 @@
 /**
  * The explainer copy for each local dev-server failure cause (D27). One place, read by the explainer
- * dialog and by the Local scenes section's **Check** result, so the two never drift apart.
+ * dialog (the Local scenes section that also read it was removed by D55).
  */
 import type { ExplainerCause } from '~/lib/local-scenes/explainer';
 

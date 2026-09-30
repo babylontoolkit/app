@@ -114,6 +114,12 @@ describe('localhost-url warning', () => {
     expect(hits).toHaveLength(1);
     expect(hits[0].level).toBe('warning');
     expect(hits[0].path).toBe('src/scripts/Mode.ts');
+
+    // D55: the fix is asking the AI — there is no Import button in a dialog any more.
+    expect(hits[0].message).toContain(
+      'Ask the AI to import the scene into the project, then point the game at the imported copy.',
+    );
+    expect(hits[0].message).not.toMatch(/Unity icon|→ Import/);
   });
 
   it('"https://repo.babylontoolkit.com/x.gltf" is not warned (control)', () => {

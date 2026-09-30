@@ -130,6 +130,30 @@ describe('validateOperation', () => {
     ).toBeNull();
   });
 
+  it("unity.project open 'Archive/Kart' → null", () => {
+    expect(
+      validateOperation({ kind: 'unity.project', action: 'open', name: 'Archive/Kart' } as BridgeOperation),
+    ).toBeNull();
+  });
+
+  it("unity.project create 'Archive/Kart' → sentence", () => {
+    expect(
+      typeof validateOperation({ kind: 'unity.project', action: 'create', name: 'Archive/Kart' } as BridgeOperation),
+    ).toBe('string');
+  });
+
+  it("unity.project open 'A/../Kart' → sentence", () => {
+    expect(
+      typeof validateOperation({ kind: 'unity.project', action: 'open', name: 'A/../Kart' } as BridgeOperation),
+    ).toBe('string');
+  });
+
+  it("unity.project open 'a/b/c' → sentence", () => {
+    expect(typeof validateOperation({ kind: 'unity.project', action: 'open', name: 'a/b/c' } as BridgeOperation)).toBe(
+      'string',
+    );
+  });
+
   it('unity.project list → null', () => {
     expect(validateOperation({ kind: 'unity.project', action: 'list' } as BridgeOperation)).toBeNull();
   });
@@ -153,8 +177,8 @@ describe('validateOperation', () => {
     expect(validateOperation({ kind: 'unity.project', action: 'create' })).toBe(
       'unity_project needs a project name for create.',
     );
-    expect(validateOperation({ kind: 'unity.project', action: 'open', name: 'a/b' })).toBe(
-      'The Unity project name "a/b" is not valid — use letters, numbers, spaces, dots, dashes or underscores.',
+    expect(validateOperation({ kind: 'unity.project', action: 'open', name: 'a/b/c' })).toBe(
+      'The Unity project name "a/b/c" is not valid — use letters, numbers, spaces, dots, dashes or underscores.',
     );
   });
 });

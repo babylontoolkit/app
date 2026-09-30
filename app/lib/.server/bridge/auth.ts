@@ -41,7 +41,8 @@ export interface BridgeDeviceAuth {
   device: BridgeDeviceRow;
 }
 
-const NOT_PAIRED = 'This Unity Bridge device is not paired. Run the helper again to pair it.';
+const NOT_PAIRED =
+  'This computer is not paired with this App Builder. Copy the install command from the Unity Bridge dialog again.';
 
 function presentedToken(request: Request): string | null {
   const authorization = request.headers.get('authorization');
@@ -75,6 +76,26 @@ export async function requireBridgeDevice(request: Request, context: unknown): P
 /** On unless `UNITY_BRIDGE_ENABLED` is exactly `"false"` (D43). */
 export function isBridgeEnabled(context: unknown): boolean {
   return env(context, 'UNITY_BRIDGE_ENABLED') !== 'false';
+}
+
+/**
+ * The production App Builder origin — the origin of `APP_URL`, or null when it is unset or not an http(s)
+ * URL (D55). The helper defaults to production, so the dialog's install command names a `--server` only
+ * when the page is not on this origin.
+ */
+export function bridgeProductionOrigin(context: unknown): string | null {
+  const appUrl = env(context, 'APP_URL');
+
+  if (!appUrl || !appUrl.trim()) {
+    return null;
+  }
+
+  try {
+    const url = new URL(appUrl.trim());
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The disabled answer every bridge route gives (except the project GET, which reports `enabled:false`). */

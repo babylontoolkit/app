@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * The Unity composer icon + Connect dialog (SPEC §4.17, D43, D52).
+ * The Unity composer icon (SPEC §4.17, D43, D55).
  *
- * The property that matters most: the Local scenes section is reachable in EVERY state — no status
- * yet, unpaired, and a disabled bridge — because local scenes never wait on the bridge (D52).
+ * The icon renders in EVERY state — no status yet, unpaired, offline, online, and a disabled bridge —
+ * and a click always opens the ONE Unity Bridge dialog (D55).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -16,27 +16,18 @@ vi.mock('~/lib/persistence', async () => {
   return { projectId: atom<string | undefined>(undefined) };
 });
 
-// The real importer reaches the workbench store (a sandbox boot) — not what this file is about.
-vi.mock('~/lib/local-scenes/import', () => ({
-  importLocalScene: vi.fn(),
-  FILES_EXIST_PREFIX: 'These files already exist',
-}));
-
 const { projectId: projectIdStore } = await import('~/lib/persistence');
-const { UnityBridgeButton, resetUnityBridgeButtonForTests } = await import('./UnityBridgeButton');
+const { UnityBridgeButton } = await import('./UnityBridgeButton');
 const { bridgeDialogStore, resetUnityBridgeStoresForTests } = await import('~/lib/stores/unity-bridge');
 const { streamingState } = await import('~/lib/stores/streaming');
 
 type StatusBody = Record<string, unknown>;
 
-const unpaired: StatusBody = { enabled: true, state: 'unpaired', device: null, devices: [], jobs: [] };
+const unpaired: StatusBody = { enabled: true, state: 'unpaired', productionOrigin: null };
 
 const studioMac = (currentProject?: string) => ({
-  id: 'dev_1',
   name: 'Studio Mac',
-  os: 'darwin',
   online: true,
-  allowScripts: false,
   hello: {
     protocol: 2,
     helperVersion: '2.0.0',
@@ -51,9 +42,8 @@ const studioMac = (currentProject?: string) => ({
 const onlineWith = (currentProject?: string): StatusBody => ({
   enabled: true,
   state: 'online',
+  productionOrigin: null,
   device: studioMac(currentProject),
-  devices: [studioMac(currentProject)],
-  jobs: [],
 });
 
 const online = onlineWith();
@@ -70,7 +60,12 @@ function answerStatusWith(body: StatusBody | 'pending') {
       return new Response(JSON.stringify(body), { status: 200 });
     }
 
-    return new Response(JSON.stringify({ ok: true, deviceName: 'Studio Mac' }), { status: 200 });
+    return new Response(
+      JSON.stringify({ code: 'K7QM-2XWD', expiresAt: new Date(Date.now() + 600_000).toISOString() }),
+      {
+        status: 200,
+      },
+    );
   });
   vi.stubGlobal('fetch', fetchMock);
 }
@@ -98,7 +93,6 @@ function bridgeIcon(): HTMLElement {
 
 beforeEach(() => {
   resetUnityBridgeStoresForTests();
-  resetUnityBridgeButtonForTests();
   streamingState.set(false);
   projectIdStore.set('prj_1');
   localStorage.clear();
@@ -107,7 +101,6 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   resetUnityBridgeStoresForTests();
-  resetUnityBridgeButtonForTests();
   projectIdStore.set(undefined);
   vi.unstubAllGlobals();
 });
@@ -122,30 +115,31 @@ describe('UnityBridgeButton', () => {
     expect(container.innerHTML).toBe('');
   });
 
-  it('a disabled bridge still renders the icon, and it opens only the Local scenes section', async () => {
-    answerStatusWith({ enabled: false, state: 'unpaired', device: null, devices: [], jobs: [] });
+  it('a disabled bridge still renders the icon; a click opens the dialog, which says it is turned off', async () => {
+    answerStatusWith({ enabled: false, state: 'unpaired', productionOrigin: null });
     render(<UnityBridgeButton />);
 
-    await waitFor(() => expect(iconButton().getAttribute('title')).toBe('Unity scenes'));
+    await waitFor(() => expect(iconButton().querySelector('.i-ph\\:cube-duotone')).not.toBeNull());
+    expect(iconButton().getAttribute('title')).toBe('Connect Unity');
     fireEvent.click(iconButton());
 
-    expect(bridgeDialogStore.get()).toBe('connect');
-    expect(await screen.findByLabelText('Dev server address')).toBeTruthy();
-    expect(screen.queryByText(/bridge --server/)).toBeNull();
+    expect(bridgeDialogStore.get()).toBe('bridge');
+    expect(await screen.findByText('The Unity Bridge is turned off on this server.')).toBeTruthy();
+    expect(screen.queryByText(/--install-service/)).toBeNull();
   });
 
-  it('opens Connect while the status is still loading (null)', async () => {
+  it('opens the dialog while the status is still loading (null)', async () => {
     answerStatusWith('pending');
     render(<UnityBridgeButton />);
 
     await waitFor(() => expect(iconButton().querySelector('.animate-spin')).not.toBeNull());
     fireEvent.click(iconButton());
 
-    expect(bridgeDialogStore.get()).toBe('connect');
-    expect(await screen.findByLabelText('Dev server address')).toBeTruthy();
+    expect(bridgeDialogStore.get()).toBe('bridge');
+    expect(await screen.findByText('Connect Unity and Blender')).toBeTruthy();
   });
 
-  it('unpaired → the Connect dialog shows the local scene origin input and the helper command', async () => {
+  it('unpaired → "Connect Unity", no success colour; the dialog shows the one install command', async () => {
     answerStatusWith(unpaired);
     render(<UnityBridgeButton />);
 
@@ -154,9 +148,29 @@ describe('UnityBridgeButton', () => {
     expect(bridgeIcon().className).not.toContain('text-bolt-elements-icon-success');
     fireEvent.click(iconButton());
 
-    expect(bridgeDialogStore.get()).toBe('connect');
-    expect(await screen.findByLabelText('Dev server address')).toBeTruthy();
-    expect(screen.getByText(/npx @babylonjs-toolkit\/agent bridge --server http:\/\/localhost/)).toBeTruthy();
+    expect(bridgeDialogStore.get()).toBe('bridge');
+    expect(
+      await screen.findByText(
+        /^npx @babylonjs-toolkit\/agent bridge --install-service --pair K7QM-2XWD --server http:\/\/localhost/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText('Pairing code')).toBeNull();
+    expect(screen.queryByLabelText('Dev server address')).toBeNull();
+  });
+
+  it('offline → "Connect Unity" and no success colour', async () => {
+    answerStatusWith({
+      enabled: true,
+      state: 'offline',
+      productionOrigin: null,
+      device: { name: 'Studio Mac', online: false },
+    });
+    render(<UnityBridgeButton />);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await waitFor(() => expect(iconButton().querySelector('.i-ph\\:cube-duotone')).not.toBeNull());
+    expect(iconButton().getAttribute('title')).toBe('Connect Unity');
+    expect(bridgeIcon().className).not.toContain('text-bolt-elements-icon-success');
   });
 
   it('online → success colour and the title "Unity Bridge: <device>"', async () => {
@@ -169,7 +183,8 @@ describe('UnityBridgeButton', () => {
     expect(iconButton().getAttribute('title')).toBe('Unity Bridge: Studio Mac');
 
     fireEvent.click(iconButton());
-    expect(bridgeDialogStore.get()).toBe('status');
+    expect(bridgeDialogStore.get()).toBe('bridge');
+    expect(await screen.findByText('Unity Bridge connected')).toBeTruthy();
   });
 
   it('online with a current Unity project → the title adds " · <project>"', async () => {
@@ -177,41 +192,6 @@ describe('UnityBridgeButton', () => {
     render(<UnityBridgeButton />);
 
     await waitFor(() => expect(iconButton().getAttribute('title')).toBe('Unity Bridge: Studio Mac · Racer'));
-  });
-
-  it('the Connect dialog has NO link section (D54) and tells the user to run it in the projects folder', async () => {
-    answerStatusWith(online);
-    render(<UnityBridgeButton />);
-
-    await waitFor(() => expect(bridgeIcon().className).toContain('text-bolt-elements-icon-success'));
-    act(() => bridgeDialogStore.set('connect'));
-
-    expect(await screen.findByText('Your devices')).toBeTruthy();
-    expect(screen.getByText('Run it in your Unity projects folder (or add --projects <folder>).')).toBeTruthy();
-    expect(screen.queryByText(/Link this project/)).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Link / })).toBeNull();
-  });
-
-  it("Approve posts {action:'approve', code}", async () => {
-    answerStatusWith(unpaired);
-    render(<UnityBridgeButton />);
-
-    await waitFor(() => expect(iconButton().getAttribute('title')).toBe('Connect Unity'));
-    fireEvent.click(iconButton());
-
-    fireEvent.change(await screen.findByLabelText('Pairing code'), { target: { value: 'ABCD-EFGH' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-
-    await waitFor(() =>
-      expect(
-        fetchMock.mock.calls.some(
-          ([url, init]) =>
-            url === '/api/bridge/devices' &&
-            JSON.stringify(JSON.parse(String((init as RequestInit).body))) ===
-              JSON.stringify({ action: 'approve', code: 'ABCD-EFGH' }),
-        ),
-      ).toBe(true),
-    );
   });
 
   it('a project switch clears a pending consent prompt and any open dialog', async () => {
@@ -222,7 +202,7 @@ describe('UnityBridgeButton', () => {
     const { bridgeConsentStore } = await import('~/lib/stores/unity-bridge');
     act(() => {
       bridgeConsentStore.set({ generationId: 'g', toolCallId: 't', operation: 'op', target: 'x' });
-      bridgeDialogStore.set('connect');
+      bridgeDialogStore.set('bridge');
     });
     act(() => projectIdStore.set('prj_2'));
 

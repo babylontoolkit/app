@@ -50,7 +50,6 @@ import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
 import { resetActiveSkills, updateActiveSkills } from '~/lib/stores/active-skills';
 import { beginBridgeScan, updateBridgeFromPart } from '~/lib/stores/unity-bridge';
 import { handleLocalSceneCall } from '~/lib/local-scenes/import';
-import { readLocalSceneServer } from '~/lib/local-scenes/origin';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
 import { requestSignIn } from '~/lib/stores/auth-gate';
@@ -686,17 +685,6 @@ export const ChatImpl = memo(
          * including a stale bundle that omits the field — pushes nothing and costs no tokens.
          */
         toolkitSystems,
-
-        /*
-         * The user's local Unity dev-server origin (D38), saved per project in the Local scenes section.
-         * The client knows no scene list — that only ever comes from the helper's own report.
-         */
-        localSceneServer: activeProjectId
-          ? (() => {
-              const o = readLocalSceneServer(activeProjectId);
-              return o ? { origin: o } : undefined;
-            })()
-          : undefined,
 
         /*
          * The whole file tree was replaced since the last turn (§4.13a — a branch switch, a discard,

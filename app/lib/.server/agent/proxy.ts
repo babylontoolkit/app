@@ -401,9 +401,6 @@ export interface AgentRequest {
    * client-side in the sandbox; the server never runs these.
    */
   mcpLiveTools?: Array<{ name: string; description?: string; server: string; inputSchema?: unknown }>;
-
-  /** The local scene dev server the client remembered for this project (§4.17, D38) — a hint, never trusted. */
-  localSceneServer?: { origin: string; scenes?: string[] };
 }
 
 /** The skill tool set, as `streamText` sees it — keeps the result's tool types concrete. */
@@ -1672,11 +1669,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       ? await takeFinishedJobsForNote(request.projectId, request.context)
       : [];
 
-  for (const note of bridgeTurnNotes({
-    bridgeTurn,
-    finishedJobs,
-    localSceneServer: request.localSceneServer,
-  })) {
+  for (const note of bridgeTurnNotes({ bridgeTurn, finishedJobs })) {
     system.push({ role: 'system', content: note });
   }
 

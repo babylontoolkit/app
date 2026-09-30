@@ -222,7 +222,13 @@ export function validateOperation(op: BridgeOperation): string | null {
         return `unity_project needs a project name for ${op.action}.`;
       }
 
-      if (!isValidProjectName(op.name)) {
+      // `open` may name the projects folder too — `<folder>/<name>` — when a name exists in more than one (D55).
+      const parts =
+        op.action === 'open' && typeof op.name === 'string' && op.name.split('/').length === 2
+          ? op.name.split('/')
+          : [op.name];
+
+      if (!parts.every(isValidProjectName)) {
         return `The Unity project name "${op.name}" is not valid — use letters, numbers, spaces, dots, dashes or underscores.`;
       }
 

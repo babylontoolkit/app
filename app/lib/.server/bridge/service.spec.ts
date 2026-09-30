@@ -56,7 +56,7 @@ let store: FsBridgeStore;
 let upserts: GenerationUpsert[];
 let events: BridgeUiEvent[];
 
-/** A paired device row. D54: "Allow scripts" lives HERE, on the device — never on a builder project. */
+/** A paired device row. D55: there is no per-device scripts switch — the helper's --no-scripts decides. */
 const device = (overrides: Partial<BridgeDeviceRow> = {}): BridgeDeviceRow => ({
   id: DEVICE,
   userId: USER,
@@ -219,18 +219,6 @@ describe('runBridgeOperation', () => {
     await expectNothingBilled();
   });
 
-  it('a script with Allow scripts off is refused with a sentence and never dispatched', async () => {
-    const outcome = await runBridgeOperation(
-      { kind: 'unity.script', source: 'public static class B { public static void Run() {} }', entry: 'B.Run' },
-      'unity_run_script B.Run',
-      ctx(),
-    );
-
-    expect(outcome).toMatch(/Allow scripts/);
-    expect(events).toHaveLength(0);
-    await expectNothingBilled();
-  });
-
   it('consent denied → nothing dispatched', async () => {
     const pending = runBridgeOperation(
       { kind: 'unity.command', name: 'delete_gameobject', params: {} },
@@ -329,8 +317,8 @@ describe('runBridgeOperation', () => {
     await expectNothingBilled();
   });
 
-  it("a script with the DEVICE's Allow scripts on runs, the dispatch carries it, with zero ledger rows", async () => {
-    await store.putDevice(device({ allowScripts: true }));
+  it('a script is dispatched without any server-side switch (D55), allowScripts true, zero ledger rows', async () => {
+    await store.putDevice(device());
 
     const pending = runBridgeOperation(
       { kind: 'unity.script', source: 'public static class B { public static void Run() {} }', entry: 'B.Run' },
@@ -351,29 +339,40 @@ describe('runBridgeOperation', () => {
     await expectNothingBilled();
   });
 
-  it("an ordinary dispatch carries the device's allowScripts value (false when switched off)", async () => {
-    await store.putDevice(device({ allowScripts: false }));
+  it('an ordinary dispatch also says allowScripts:true — the server never gates scripts (D55)', async () => {
+    await store.putDevice(device());
 
     const pending = runBridgeOperation(SET_TRANSFORM, 'label', ctx());
     const jobId = await waitQueued();
     const poll = await pickUp();
 
-    expect(poll.jobs[0].allowScripts).toBe(false);
+    expect(poll.jobs[0].allowScripts).toBe(true);
     deliverBridgeEvent(DEVICE, { jobId, type: 'started' });
     deliverBridgeEvent(DEVICE, { jobId, type: 'final', result: { ok: true, text: 'ok' } });
     await pending;
     await until(async () => (await store.getJob(jobId))?.status === 'succeeded');
   });
 
-  it("Allow scripts on ANOTHER user's or a revoked device row never lets a script through", async () => {
-    const script: BridgeOperation = { kind: 'unity.script', source: 'class A {}', entry: 'A.Run' };
+  it('a helper started with --no-scripts refuses a script itself; the server reports that and nothing ran', async () => {
+    await store.putDevice(device());
 
-    await store.putDevice(device({ allowScripts: true, userId: 'someone_else' }));
-    expect(await runBridgeOperation(script, 'unity_run_script A.Run', ctx())).toMatch(/Allow scripts/);
+    const pending = runBridgeOperation(
+      { kind: 'unity.script', source: 'class A {}', entry: 'A.Run' },
+      'unity_run_script A.Run',
+      ctx(),
+    );
+    const jobId = await waitQueued();
+    await pickUp();
 
-    await store.putDevice(device({ allowScripts: true, revokedAt: '2026-09-29T01:00:00.000Z' }));
-    expect(await runBridgeOperation(script, 'unity_run_script A.Run', ctx())).toMatch(/Allow scripts/);
-    expect(events).toHaveLength(0);
+    deliverBridgeEvent(DEVICE, {
+      jobId,
+      type: 'refused',
+      reason: 'Scripts are disabled on this computer (--no-scripts).',
+    });
+
+    expect(await pending).toMatch(/--no-scripts/);
+    await until(async () => (await store.getJob(jobId))?.status === 'refused');
+    await expectNothingBilled();
   });
 
   it("consent names the helper's current Unity project when it reports one", async () => {
@@ -446,7 +445,7 @@ describe('runBridgeOperation', () => {
       text: `captured\n${CAPTURE_SHOWN_NOTE}`,
       image: { base64: 'AAAA', mimeType: 'image/png' },
     } satisfies BridgeToolOutcome);
-    expect(CAPTURE_SHOWN_NOTE).toBe('(The user sees this capture in the Unity Bridge Jobs panel, not in the chat.)');
+    expect(CAPTURE_SHOWN_NOTE).toBe('(The user sees this capture in a popup, not in the chat.)');
   });
 
   it("a finished capture's bridge-job part carries the image to the user; other parts never do", async () => {

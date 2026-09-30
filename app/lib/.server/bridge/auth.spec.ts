@@ -48,7 +48,8 @@ describe('requireBridgeDevice', () => {
 
     await expect(requireBridgeDevice(req(`Bearer ${token}`), {})).rejects.toMatchObject({
       statusCode: 401,
-      message: 'This Unity Bridge device is not paired. Run the helper again to pair it.',
+      message:
+        'This computer is not paired with this App Builder. Copy the install command from the Unity Bridge dialog again.',
     });
   });
 

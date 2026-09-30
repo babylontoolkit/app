@@ -170,13 +170,25 @@ describe('createBridgeTools', () => {
     expect(runBridgeOperation).not.toHaveBeenCalled();
   });
 
-  it.each(['../x', '/Users/me/Game', 'a/b', '.hidden'])(
+  it.each(['../x', '/Users/me/Game', 'a/b/c', 'A/../Kart', '.hidden'])(
     'unity_project open "%s" (not a plain folder name) → a sentence, and no call',
     async (name) => {
       expect(await call('unity_project', { action: 'open', name })).toMatch(/is not allowed/);
       expect(runBridgeOperation).not.toHaveBeenCalled();
     },
   );
+
+  it('unity_project open "<folder>/<name>" picks the projects folder (D55) — open only', async () => {
+    expect(await call('unity_project', { action: 'open', name: 'Archive/Kart' })).toBe('ran');
+    expect(runBridgeOperation.mock.calls[0][0]).toEqual({
+      kind: 'unity.project',
+      action: 'open',
+      name: 'Archive/Kart',
+    });
+
+    expect(await call('unity_project', { action: 'create', name: 'Archive/Kart' })).toMatch(/is not allowed/);
+    expect(runBridgeOperation).toHaveBeenCalledTimes(1);
+  });
 
   it('unity_project action "delete" → a sentence naming the choices, and no call', async () => {
     expect(await call('unity_project', { action: 'delete', name: 'Game' })).toBe(

@@ -74,7 +74,7 @@ const PUBLIC_BY_DESIGN: Record<string, string> = {
   'api.update.ts':
     'Upstream self-update; refuses to auto-pull, and the Features toggle that drove it is hidden (§2.3).',
   'api.bridge.pair.ts':
-    'Device-code pairing: a CLI has no session; start is fingerprint-rate-limited and redeem needs the pairing secret.',
+    'Install-code claim: a CLI has no session; the single-use code was minted by a signed-in user and is fingerprint-rate-limited.',
 
   /*
    * ⚠️ NOT a blessing — these two run `execSync` on the host and return branch/commit/disk facts to an

@@ -11,7 +11,7 @@ vi.mock('~/lib/stores/workbench', () => ({
 }));
 
 import { WORK_DIR } from '~/utils/constants';
-import { importLocalScene } from './import';
+import { handleLocalSceneCall, importLocalScene } from './import';
 
 const SCENE = 'http://localhost:8888/scenes/Level01.gltf';
 const BIN = new Uint8Array([0, 1, 2, 255, 254, 128, 7]);
@@ -176,5 +176,40 @@ describe('importLocalScene', () => {
       { uri: 'assets/sky.env', reason: 'named in the scene metadata, but the server answered 404' },
     ]);
     expect(result.message).toContain('assets/sky.env');
+  });
+});
+
+describe('handleLocalSceneCall (the import_local_scene client half)', () => {
+  it('imports and posts {message, ok}', async () => {
+    const importScene = vi.fn(async () => ({ ok: true, written: ['a'], skipped: [], message: 'Imported 1 file(s).' }));
+    const post = vi.fn(async () => undefined);
+
+    await handleLocalSceneCall(
+      { generationId: 'gen_1', toolCallId: 'call_1', url: 'http://localhost:8888/scenes/A.gltf', overwrite: false },
+      { importScene, post },
+    );
+
+    expect(importScene).toHaveBeenCalledWith({ url: 'http://localhost:8888/scenes/A.gltf', overwrite: false });
+    expect(post).toHaveBeenCalledWith({
+      generationId: 'gen_1',
+      toolCallId: 'call_1',
+      result: { message: 'Imported 1 file(s).', ok: true },
+    });
+  });
+
+  it('posts error when the import throws', async () => {
+    const post = vi.fn(async () => undefined);
+
+    await handleLocalSceneCall(
+      { generationId: 'gen_1', toolCallId: 'call_2', url: 'http://localhost:8888/scenes/A.gltf', overwrite: true },
+      {
+        importScene: vi.fn(async () => {
+          throw new Error('boom');
+        }),
+        post,
+      },
+    );
+
+    expect(post).toHaveBeenCalledWith({ generationId: 'gen_1', toolCallId: 'call_2', error: 'boom' });
   });
 });

@@ -1,18 +1,18 @@
 /**
- * Unity Bridge device-code pairing (SPEC §4.17, D7).
+ * Unity Bridge install-code claim (SPEC §4.17, D55).
  *
- *   POST /api/bridge/pair {action:'start', deviceName, os}     → {pairingId, secret, code:'XXXX-XXXX', expiresAt}
- *   POST /api/bridge/pair {action:'redeem', pairingId, secret} → {status:'pending'} | 410 {status:'expired'}
- *                                                               | {status:'approved', deviceId, token}
+ *   POST /api/bridge/pair {action:'claim', code, deviceName, os} → {deviceId, token}
+ *                                                                 | 410 (unknown / used / expired code)
+ *                                                                 | 409 (device cap)
  *
- * PUBLIC BY DESIGN: the Desktop Agent is a CLI with no session. `start` is rate-limited per caller
- * fingerprint; `redeem` needs the pairing secret, which only the helper that started it holds, and it
- * returns a token only after a verified user approved the code in the builder. The token appears in
- * THIS response and nowhere else, ever — never logged.
+ * PUBLIC BY DESIGN: the Desktop Agent is a CLI with no session. The single-use code was minted by a
+ * signed-in user in the Unity Bridge dialog (`POST /api/bridge/devices {action:'invite'}`), and claiming is
+ * rate-limited per caller fingerprint. The token appears in THIS response and nowhere else, ever — never
+ * logged.
  */
 import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
 import { BRIDGE_DISABLED_BODY, isBridgeEnabled } from '~/lib/.server/bridge/auth';
-import { PAIR_START_RATE_LIMIT, redeemPairing, startPairing } from '~/lib/.server/bridge/pairing';
+import { CLAIM_RATE_LIMIT, claimInstallCode } from '~/lib/.server/bridge/pairing';
 import { errorResponse } from '~/lib/.server/http';
 import { callerFingerprint } from '~/lib/.server/licensing/unity-api-key';
 import { enforceUserRateLimit } from '~/lib/.server/security/user-rate-limit';
@@ -38,45 +38,37 @@ export async function action({ request, context }: ActionFunctionArgs) {
       body = {};
     }
 
-    if (body?.action === 'start') {
-      await enforceUserRateLimit({
-        userId: 'fp:' + callerFingerprint(request),
-        bucket: 'bridge-pair-start',
-        rule: PAIR_START_RATE_LIMIT,
-        subject: 'pairing attempts',
-      });
+    if (body?.action !== 'claim') {
+      return json({ error: true, message: 'Unknown action.' }, { status: 400, headers: NO_STORE });
+    }
 
-      const { deviceName, os } = body;
+    await enforceUserRateLimit({
+      userId: 'fp:' + callerFingerprint(request),
+      bucket: 'bridge-pair-claim',
+      rule: CLAIM_RATE_LIMIT,
+      subject: 'pairing attempts',
+    });
 
-      if (
-        typeof deviceName !== 'string' ||
-        deviceName.trim().length < 1 ||
-        deviceName.trim().length > 80 ||
-        typeof os !== 'string' ||
-        !OSES.has(os)
-      ) {
-        return json({ error: true, message: 'deviceName and os are required.' }, { status: 400, headers: NO_STORE });
-      }
+    const { code, deviceName, os } = body;
 
-      const started = await startPairing({ deviceName: deviceName.trim(), os, context });
-
+    if (
+      typeof code !== 'string' ||
+      !code.trim() ||
+      typeof deviceName !== 'string' ||
+      deviceName.trim().length < 1 ||
+      deviceName.trim().length > 80 ||
+      typeof os !== 'string' ||
+      !OSES.has(os)
+    ) {
       return json(
-        { pairingId: started.pairingId, secret: started.secret, code: started.code, expiresAt: started.expiresAt },
-        { headers: NO_STORE },
+        { error: true, message: 'code, deviceName and os are required.' },
+        { status: 400, headers: NO_STORE },
       );
     }
 
-    if (body?.action === 'redeem') {
-      if (typeof body.pairingId !== 'string' || typeof body.secret !== 'string') {
-        return json({ error: true, message: 'pairingId and secret are required.' }, { status: 400, headers: NO_STORE });
-      }
+    const claimed = await claimInstallCode({ code, deviceName: deviceName.trim(), os, context });
 
-      const result = await redeemPairing({ pairingId: body.pairingId, secret: body.secret, context });
-
-      return json(result, { status: result.status === 'expired' ? 410 : 200, headers: NO_STORE });
-    }
-
-    return json({ error: true, message: 'Unknown action.' }, { status: 400, headers: NO_STORE });
+    return json({ deviceId: claimed.deviceId, token: claimed.token }, { headers: NO_STORE });
   } catch (error) {
     return errorResponse(error);
   }

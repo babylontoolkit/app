@@ -151,8 +151,9 @@ describe('the migrations', () => {
   });
 
   /**
-   * The Unity Bridge (§4.17, migration 0025, D54): there is NO project link — a builder project is never
-   * tied to a device or a Unity project — and "Allow scripts" is a column on the DEVICE, defaulting OFF.
+   * The Unity Bridge (§4.17, migration 0025, D54/D55): there is NO project link — a builder project is
+   * never tied to a device or a Unity project — and NO per-device "Allow scripts" column (D55: the helper's
+   * `--no-scripts` is the only switch). A pairing row is a single-use install code stored as its HASH only.
    * 0025 was edited in place (never deployed), so these assert the one-pass schema a first deploy gets.
    */
   describe('the Unity Bridge (0025)', () => {
@@ -169,11 +170,37 @@ describe('the migrations', () => {
       expect((await columns('projects')).map((c) => c.column_name)).not.toContain('bridge_link');
     });
 
-    it('bridge_devices.allow_scripts is NOT NULL and defaults to false', async () => {
-      const column = (await columns('bridge_devices')).find((c) => c.column_name === 'allow_scripts');
+    it('bridge_devices has NO allow_scripts column (D55)', async () => {
+      const names = (await columns('bridge_devices')).map((c) => c.column_name);
 
-      expect(column?.is_nullable).toBe('NO');
-      expect(column?.column_default).toBe('false');
+      expect(names).toContain('token_hash'); // CONTROL — the table is there and the query reads it
+      expect(names).not.toContain('allow_scripts');
+    });
+
+    it('bridge_pairings stores only the code hash: no plaintext code, device name or os; user and hash required', async () => {
+      const cols = await columns('bridge_pairings');
+      const names = cols.map((c) => c.column_name).sort();
+
+      expect(names).toEqual(['created_at', 'expires_at', 'id', 'secret_hash', 'status', 'user_id']);
+      expect(cols.find((c) => c.column_name === 'user_id')?.is_nullable).toBe('NO');
+      expect(cols.find((c) => c.column_name === 'secret_hash')?.is_nullable).toBe('NO');
+    });
+
+    it("bridge_pairings.status accepts only 'pending' and 'consumed'", async () => {
+      await expect(
+        db.query(
+          `insert into public.bridge_pairings (id, user_id, secret_hash, status, expires_at)
+           values ('pair_ok', $1, 'h_ok', 'pending', now())`,
+          [USER],
+        ),
+      ).resolves.toBeTruthy();
+      await expect(
+        db.query(
+          `insert into public.bridge_pairings (id, user_id, secret_hash, status, expires_at)
+           values ('pair_bad', $1, 'h_bad', 'approved', now())`,
+          [USER],
+        ),
+      ).rejects.toThrow(/check|constraint/i);
     });
 
     it('bridge_devices, bridge_pairings and bridge_jobs all have RLS enabled', async () => {

@@ -13,8 +13,8 @@
  *     terminal row or a started one (the latch);
  *   - every row write goes through one rule: never overwrite a terminal row;
  *   - nothing on a tool path throws: every outcome is a sentence for the model;
- *   - "Allow scripts" is read from the DEVICE row at dispatch time (D54), never from a builder project and
- *     never cached for the turn — a user who flips it after a refusal gets the retry in the same turn.
+ *   - the server does NOT gate scripts (D55): every dispatch says `allowScripts: true`, and the helper's
+ *     own `--no-scripts` is the only switch — the user's computer decides, and the helper refuses there.
  *
  * All writes for one job are serialised through an in-process chain (`withJobLock`). The relay lives on
  * ONE server instance (D5), so this makes the latch a real guarantee there rather than a read-then-write
@@ -69,7 +69,7 @@ export type BridgeUiEvent =
       label: string;
       line?: string;
 
-      /** A finished capture's picture, so the USER sees it too (the Jobs panel) — never over the cap. */
+      /** A finished capture's picture, so the USER sees it too (the capture popup) — never over the cap. */
       image?: { base64: string; mimeType: 'image/png' };
     };
 
@@ -101,7 +101,7 @@ export function displayableImage(
 }
 
 /** Appended to a capture's tool-result text, so the model never refers to "the capture above". */
-export const CAPTURE_SHOWN_NOTE = '(The user sees this capture in the Unity Bridge Jobs panel, not in the chat.)';
+export const CAPTURE_SHOWN_NOTE = '(The user sees this capture in a popup, not in the chat.)';
 
 /*
  * ---------------------------------------------------------------------------------------------
@@ -310,7 +310,7 @@ function formatFinal(final: BridgeResultPayload): BridgeToolOutcome {
     return text;
   }
 
-  // Only a picture the Jobs panel actually received is claimed as shown to the user.
+  // Only a picture the capture popup actually received is claimed as shown to the user.
   const shown = final.ok && displayableImage(final.image) !== undefined;
 
   return { text: shown ? `${text}\n${CAPTURE_SHOWN_NOTE}` : text, image: final.image };
@@ -338,13 +338,6 @@ const settledRow = (jobId: string, context: unknown) => withJobLock(jobId, () =>
  * ---------------------------------------------------------------------------------------------
  */
 
-/** The device's own "Allow scripts" switch, read fresh. Missing / revoked / someone else's → false. */
-async function deviceAllowsScripts(ctx: Pick<BridgeRunContext, 'deviceId' | 'userId' | 'context'>): Promise<boolean> {
-  const device = await getBridgeStore(ctx.context).getDevice(ctx.deviceId);
-
-  return Boolean(device && device.userId === ctx.userId && !device.revokedAt && device.allowScripts === true);
-}
-
 export async function runBridgeOperation(
   op: BridgeOperation,
   label: string,
@@ -361,12 +354,6 @@ export async function runBridgeOperation(
 
     if (tier === 'refused') {
       return `The Unity Bridge does not run this: ${reason}`;
-    }
-
-    const allowScripts = await deviceAllowsScripts(ctx);
-
-    if (tier === 'scripts' && !allowScripts) {
-      return `Scripts are switched off on "${ctx.deviceName}". Ask the user to turn on "Allow scripts" in the Unity Bridge panel (the cube icon), then try again.`;
     }
 
     // D16: consent BEFORE dispatch.
@@ -431,7 +418,7 @@ export async function runBridgeOperation(
       dispatch: {
         jobId,
         op,
-        allowScripts,
+        allowScripts: true, // D55 — the helper's --no-scripts is the only switch
         consentGranted: tier === 'consent',
       },
       onEvent: makeOnEvent({ jobId, label, context: ctx.context, emit: ctx.emit }),

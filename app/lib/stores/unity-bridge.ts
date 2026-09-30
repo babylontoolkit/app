@@ -1,15 +1,13 @@
 /**
- * The Unity Bridge client store (SPEC §4.17, D7, D16, D43).
+ * The Unity Bridge client store (SPEC §4.17, D7, D16, D43, D55).
  *
- * Holds the project's bridge status (`GET /api/projects/:id/bridge`), which of the three bridge dialogs
- * is open, the one pending consent request, and the live job rows streamed by the current generation.
+ * Holds the project's bridge status (`GET /api/projects/:id/bridge`), whether the ONE Unity Bridge dialog
+ * is open, the one pending consent request, the live job rows streamed by the current generation, and the
+ * capture popup's picture (D55 — the Jobs panel is gone; a finished capture opens a small popup).
  *
  * ⚠️ THE REPLAY RULE (same as `active-skills.ts`): `useChat` re-presents its whole data array on every
  * stream chunk, so `updateBridgeFromPart` is idempotent — a consent part is keyed by its tool-call id
  * (and is never re-raised once answered), and a job's progress lines are deduped by count per scan.
- *
- * The per-project local-scene origin is NOT here: it lives in `~/lib/local-scenes/origin.ts` (D52), so
- * the local-scene UI imports nothing from the bridge.
  *
  * Every fetch is wrapped — a failure returns `{ok:false, message}` using the server's own `message`,
  * never a throw into a click handler.
@@ -19,14 +17,9 @@ import { BRIDGE_MAX_IMAGE_BASE64, type BridgeHello, type BridgeJobStatus } from 
 
 /** Mirrors the JSON of `GET /api/projects/:projectId/bridge` (the route declares the same shape). */
 export interface BridgeDeviceView {
-  id: string;
   name: string;
-  os: string;
   online: boolean;
   lastSeenAt?: string;
-
-  /** "Allow scripts" is per DEVICE (D54) — there is no project link. */
-  allowScripts: boolean;
   hello?: BridgeHello;
 }
 
@@ -35,17 +28,20 @@ export interface BridgeStatusView {
   state: 'unpaired' | 'offline' | 'online';
 
   /** The device the agent would drive: the most recently seen present one, else the last seen (D54). */
-  device: BridgeDeviceView | null;
-  devices: BridgeDeviceView[];
-  jobs: Array<{
-    id: string;
-    operation: string;
-    status: BridgeJobStatus;
-    createdAt: string;
-    finishedAt?: string;
-    resultText?: string;
-    error?: string;
-  }>;
+  device?: BridgeDeviceView;
+
+  /**
+   * The production App Builder origin (`APP_URL`), or null when the server has none. The install command
+   * carries `--server <origin>` only when this page is NOT that origin — the helper defaults to production.
+   */
+  productionOrigin: string | null;
+}
+
+/** A capture the popup is showing (D55). */
+export interface BridgeCapture {
+  jobId: string;
+  label: string;
+  image: BridgeJobImage;
 }
 
 export interface BridgeConsentRequest {
@@ -73,10 +69,12 @@ export interface BridgeJobImage {
   mimeType: 'image/png';
 }
 
-export type BridgeDialog = 'connect' | 'status' | 'jobs';
+/** D55: there is ONE Unity Bridge dialog. */
+export type BridgeDialog = 'bridge';
 
 export const bridgeStatusStore = atom<BridgeStatusView | null>(null);
 export const bridgeDialogStore = atom<BridgeDialog | null>(null);
+export const bridgeCaptureStore = atom<BridgeCapture | null>(null);
 export const bridgeConsentStore = atom<BridgeConsentRequest | null>(null);
 export const bridgeLiveJobsStore = atom<Record<string, BridgeLiveJob>>({});
 
@@ -88,6 +86,25 @@ export const bridgeStatusLoadingStore = atom<boolean>(false);
  * the dialog — answering clears the store, and the next chunk re-presents the same part.
  */
 const seenConsents = new Set<string>();
+
+/** A capture that landed while a consent prompt was open — shown once the prompt closes. */
+let deferredCapture: BridgeCapture | null = null;
+
+function showCapture(capture: BridgeCapture): void {
+  if (bridgeConsentStore.get() === null) {
+    bridgeCaptureStore.set(capture);
+  } else {
+    deferredCapture = capture;
+  }
+}
+
+/** The consent prompt just closed: a capture that waited behind it may now be shown. */
+function releaseDeferredCapture(): void {
+  if (deferredCapture && bridgeConsentStore.get() === null) {
+    bridgeCaptureStore.set(deferredCapture);
+    deferredCapture = null;
+  }
+}
 
 type ActionResult = { ok: boolean; message?: string };
 
@@ -151,33 +168,32 @@ export async function refreshBridgeStatus(projectId: string): Promise<void> {
 
     bridgeStatusStore.set((await response.json()) as BridgeStatusView);
   } catch {
-    /* A failed status read keeps the last known status; the icon still opens the Connect dialog. */
+    /* A failed status read keeps the last known status; the icon still opens the dialog. */
   } finally {
     bridgeStatusLoadingStore.set(false);
   }
 }
 
-export async function bridgeProjectAction(projectId: string, body: Record<string, unknown>): Promise<ActionResult> {
-  const { ok, message } = await postJson(`/api/projects/${encodeURIComponent(projectId)}/bridge`, body);
-  return ok ? { ok } : { ok, message };
-}
+export type InstallCodeResult = { ok: true; code: string; expiresAt: string } | { ok: false; message: string };
 
-/** Approve a helper's pairing code. On success `message` carries the paired device's name. */
-export async function approvePairingCode(code: string): Promise<ActionResult> {
-  const result = await postJson('/api/bridge/devices', { action: 'approve', code });
+/**
+ * Mint a single-use install code (D55) for the dialog's one command. A failure carries the server's own
+ * sentence (e.g. the rate limit) so the dialog can show it verbatim.
+ */
+export async function mintInstallCode(): Promise<InstallCodeResult> {
+  const result = await postJson('/api/bridge/devices', { action: 'invite' });
 
   if (!result.ok) {
-    return { ok: false, message: result.message };
+    return { ok: false, message: result.message ?? 'Could not create an install code.' };
   }
 
-  const deviceName = (result.data as { deviceName?: unknown } | undefined)?.deviceName;
+  const data = (result.data ?? {}) as { code?: unknown; expiresAt?: unknown };
 
-  return { ok: true, message: typeof deviceName === 'string' ? deviceName : undefined };
-}
+  if (typeof data.code !== 'string' || typeof data.expiresAt !== 'string') {
+    return { ok: false, message: 'The server did not return an install code.' };
+  }
 
-export async function revokeDevice(deviceId: string): Promise<ActionResult> {
-  const { ok, message } = await postJson('/api/bridge/devices', { action: 'revoke', deviceId });
-  return ok ? { ok } : { ok, message };
+  return { ok: true, code: data.code, expiresAt: data.expiresAt };
 }
 
 /**
@@ -205,6 +221,7 @@ export function updateBridgeFromPart(part: unknown): void {
 
       if (bridgeConsentStore.get()?.toolCallId === p.toolCallId) {
         bridgeConsentStore.set(null);
+        releaseDeferredCapture();
       }
 
       return;
@@ -215,6 +232,15 @@ export function updateBridgeFromPart(part: unknown): void {
     }
 
     seenConsents.add(p.toolCallId);
+
+    // A capture popup on screen steps aside for the prompt (it takes the clicks) and returns after it.
+    const onScreen = bridgeCaptureStore.get();
+
+    if (onScreen) {
+      deferredCapture = onScreen;
+      bridgeCaptureStore.set(null);
+    }
+
     bridgeConsentStore.set({
       generationId: p.generationId,
       toolCallId: p.toolCallId,
@@ -279,12 +305,12 @@ export function updateBridgeFromPart(part: unknown): void {
   });
 
   /*
-   * A capture just landed: show it. Only on the transition (a replay carries the same bytes and returned
-   * above), and never over a pending consent prompt or another bridge dialog the user has open — a second
-   * modal opened on top of the consent prompt would take its clicks.
+   * A capture just landed: show it in the capture popup (D55). Only on the transition (a replay carries
+   * the same bytes and returned above), and never over a pending consent prompt — a second modal on top of
+   * it would take its clicks; the capture waits and opens when the prompt closes.
    */
-  if (newImage && bridgeConsentStore.get() === null && bridgeDialogStore.get() === null) {
-    bridgeDialogStore.set('jobs');
+  if (newImage && incomingImage) {
+    showCapture({ jobId, label: nextLabel, image: incomingImage });
   }
 }
 
@@ -316,6 +342,8 @@ export function clearBridgeConsent(): void {
     seenConsents.add(consent.toolCallId);
     bridgeConsentStore.set(null);
   }
+
+  releaseDeferredCapture();
 }
 
 const STATUS_RANK: Record<BridgeJobStatus, number> = {
@@ -348,6 +376,7 @@ export async function answerConsent(approved: boolean): Promise<void> {
   }
 
   bridgeConsentStore.set(null);
+  releaseDeferredCapture();
 
   await postJson('/api/agent/tool-result', {
     generationId: consent.generationId,
@@ -360,8 +389,10 @@ export async function answerConsent(approved: boolean): Promise<void> {
 export function resetUnityBridgeStoresForTests(): void {
   seenConsents.clear();
   scanLineCounts.clear();
+  deferredCapture = null;
   bridgeStatusStore.set(null);
   bridgeDialogStore.set(null);
+  bridgeCaptureStore.set(null);
   bridgeConsentStore.set(null);
   bridgeLiveJobsStore.set({});
   bridgeStatusLoadingStore.set(false);

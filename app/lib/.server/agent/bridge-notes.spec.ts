@@ -29,7 +29,7 @@ describe('bridgeTurnNotes', () => {
 
     expect(notes).toHaveLength(1);
     expect(notes[0]).toBe(
-      'Your computer "Studio Mac" is paired but the helper is not running. If the user asks for Unity or Blender work, tell them to run the helper (the cube icon shows the command). Never claim to have run a Unity or Blender command.',
+      'Your computer "Studio Mac" is paired but the helper is not running. If the user asks for Unity or Blender work, tell them to open the Unity Bridge dialog (the cube icon in the chat box) and run the install command it shows. Never claim to have run a Unity or Blender command.',
     );
   });
 
@@ -90,25 +90,26 @@ describe('bridgeTurnNotes', () => {
         hello: hello({ devServer: { running: true, origin: 'http://localhost:8888', scenes: ['Level.gltf'] } }),
       },
       finishedJobs: [],
-      localSceneServer: { origin: 'http://localhost:9999' },
     });
 
     const scene = notes.find((n) => n.startsWith('# Local scene server'));
     expect(scene).toContain('http://localhost:8888 serves exported scenes');
     expect(scene).toContain('Scenes: Level.gltf.');
-    expect(scene).not.toContain('9999');
     expect(notes[0]).toContain('Blender not found');
   });
 
-  it('no bridge but a client scene server → the local scene note with unknown scenes', () => {
-    const notes = bridgeTurnNotes({
-      bridgeTurn: { state: 'none' },
-      finishedJobs: [],
-      localSceneServer: { origin: 'http://localhost:9999' },
-    });
+  it('no local scene note without a running helper dev server (D55 — the browser no longer supplies one)', () => {
+    expect(bridgeTurnNotes({ bridgeTurn: { state: 'none' }, finishedJobs: [] })).toEqual([]);
 
-    expect(notes).toHaveLength(1);
-    expect(notes[0]).toContain('Scenes: unknown.');
+    const stopped = bridgeTurnNotes({
+      bridgeTurn: {
+        state: 'online',
+        device: { name: 'Studio Mac' },
+        hello: hello({ devServer: { running: false, origin: 'http://localhost:8888' } }),
+      },
+      finishedJobs: [],
+    });
+    expect(stopped.some((n) => n.startsWith('# Local scene server'))).toBe(false);
   });
 
   it('finished jobs are listed by id', () => {

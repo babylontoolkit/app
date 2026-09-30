@@ -4,13 +4,16 @@
 -- Toolkit Desktop Agent (`bt-agent bridge`), which long-polls this server over HTTPS. This migration adds:
 --
 --   * bridge_devices  — a paired Desktop Agent. Only the SHA-256 hash of its device token is stored.
---   * bridge_pairings — the short-lived device-code pairing handshake (10 minutes). Only the secret's hash.
+--   * bridge_pairings — single-use install codes (10 minutes). A signed-in user mints one in the Unity Bridge
+--                       dialog; the helper claims it with `--pair <code>` (D55). Only the code's SHA-256
+--                       hash is stored — the plaintext code never is.
 --   * bridge_jobs     — the durable record of each bridge operation (queues and parked polls live in
 --                       memory on the one server instance; only durable facts land here).
 --
 -- There is NO project link (D54, owner 2026-09-29): a builder project is never tied to a device or a Unity
--- project. The model opens or creates the Unity project it works on through the helper, and the "Allow
--- scripts" switch is a fact about the DEVICE (bridge_devices.allow_scripts), not about a builder project.
+-- project. The model opens or creates the Unity project it works on through the helper. There is no
+-- per-device "Allow scripts" column either (D55): scripts are allowed unless the helper runs with
+-- `--no-scripts`, which only the user's own computer decides.
 --
 -- All three tables have RLS ENABLED with NO POLICY, deliberately: service-role only, the git_tokens rule
 -- (migration 0006). A user has no legitimate reason to read a token hash through the anon key.
@@ -25,7 +28,6 @@ create table if not exists public.bridge_devices (
   os            text not null,
   token_hash    text not null unique,
   capabilities  jsonb,
-  allow_scripts boolean not null default false,
   created_at    timestamptz not null default now(),
   last_seen_at  timestamptz,
   revoked_at    timestamptz
@@ -36,16 +38,12 @@ alter table public.bridge_devices enable row level security;
 
 create table if not exists public.bridge_pairings (
   id           text primary key,
-  code         text not null,
-  secret_hash  text not null,
-  device_name  text not null,
-  os           text not null,
-  user_id      uuid references auth.users(id) on delete cascade,
-  status       text not null check (status in ('pending', 'approved', 'consumed')),
+  user_id      uuid not null references auth.users(id) on delete cascade,
+  secret_hash  text not null unique,
+  status       text not null check (status in ('pending', 'consumed')),
   expires_at   timestamptz not null,
   created_at   timestamptz not null default now()
 );
-create index if not exists bridge_pairings_code_idx on public.bridge_pairings (code) where status = 'pending';
 alter table public.bridge_pairings enable row level security;
 -- NO POLICY, deliberately.
 

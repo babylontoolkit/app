@@ -1,12 +1,13 @@
 /**
- * The Unity icon in the chat composer (SPEC §4.17, D7, D43, D52).
+ * The Unity icon in the chat composer (SPEC §4.17, D7, D43, D55).
  *
- * Renders for every open project — including when the bridge is disabled, when it is then titled
- * "Unity scenes" and opens the Connect dialog showing only the Local scenes section (local scenes never
- * wait on the bridge, D52). A click opens the Status panel only when a device is paired and the bridge
- * is enabled; every other state (including a status that has not loaded, or a 404) opens the Connect
- * dialog, so the Local scenes section is never behind a slow or failed status request. There is no
+ * Renders for every open project — including when the bridge is disabled — and a click opens the ONE
+ * Unity Bridge dialog (D55), whatever the state: the dialog itself decides between the install command,
+ * the running status, and "turned off on this server". Green when the helper is online, titled
+ * `Unity Bridge: <computer>` (+ ` · <current Unity project>`); `Connect Unity` otherwise. There is no
  * project link (D54) — the agent drives the most recently seen paired device.
+ *
+ * Also mounts the two popups that stay: the consent prompt and the capture popup.
  *
  * There is no header toolbar button — this icon is the only entry point.
  */
@@ -16,9 +17,9 @@ import { IconButton } from '~/components/ui/IconButton';
 import { projectId as projectIdStore } from '~/lib/persistence';
 import { streamingState } from '~/lib/stores/streaming';
 import {
+  bridgeCaptureStore,
   bridgeConsentStore,
   bridgeDialogStore,
-  bridgeLiveJobsStore,
   bridgeStatusLoadingStore,
   bridgeStatusStore,
   clearBridgeConsent,
@@ -26,52 +27,35 @@ import {
   type BridgeStatusView,
 } from '~/lib/stores/unity-bridge';
 import { classNames } from '~/utils/classNames';
-import { UnityBridgeConnectDialog } from './UnityBridgeConnectDialog';
 import { UnityBridgeConsentDialog } from './UnityBridgeConsentDialog';
-import { UnityBridgeJobsPanel } from './UnityBridgeJobsPanel';
-import { UnityBridgeStatusPanel } from './UnityBridgeStatusPanel';
+import { UnityBridgeDialog } from './UnityBridgeDialog';
+import { UnityCapturePopup } from './UnityCapturePopup';
 
 const STATUS_POLL_MS = 20_000;
 
-/** Generations whose Jobs panel has already auto-opened (once per generation). */
-const autoOpenedGenerations = new Set<string>();
-
-/** Test seam. */
-export function resetUnityBridgeButtonForTests(): void {
-  autoOpenedGenerations.clear();
-}
-
-function titleFor(status: BridgeStatusView | null): string {
-  if (!status || !status.enabled) {
-    return status && !status.enabled ? 'Unity scenes' : 'Connect Unity';
+export function bridgeIconTitle(status: BridgeStatusView | null): string {
+  if (!status || !status.enabled || status.state !== 'online') {
+    return 'Connect Unity';
   }
 
   const deviceName = status.device?.name ?? 'your computer';
+  const current = status.device?.hello?.currentProject;
 
-  switch (status.state) {
-    case 'online': {
-      const current = status.device?.hello?.currentProject;
-      return `Unity Bridge: ${deviceName}${current ? ` · ${current}` : ''}`;
-    }
-    case 'offline':
-      return `Unity Bridge offline — run the helper on ${deviceName}`;
-    default:
-      return 'Connect Unity';
-  }
+  return `Unity Bridge: ${deviceName}${current ? ` · ${current}` : ''}`;
 }
 
 export function UnityBridgeButton() {
   const projectId = useStore(projectIdStore);
   const status = useStore(bridgeStatusStore);
   const loading = useStore(bridgeStatusLoadingStore);
-  const liveJobs = useStore(bridgeLiveJobsStore);
   const streaming = useStore(streamingState);
   const wasStreaming = useRef(streaming);
 
-  // A consent prompt or an open dialog never survives a project switch.
+  // A consent prompt, a capture or an open dialog never survives a project switch.
   useEffect(() => {
     bridgeConsentStore.set(null);
     bridgeDialogStore.set(null);
+    bridgeCaptureStore.set(null);
     bridgeStatusStore.set(null);
   }, [projectId]);
 
@@ -91,30 +75,15 @@ export function UnityBridgeButton() {
     return () => clearInterval(timer);
   }, [projectId]);
 
-  /*
-   * Auto-open the Jobs panel once per generation: when the turn stops streaming and a job it started
-   * is still queued or running, the user should see it progress rather than wonder where it went.
-   */
+  // Nothing is waiting for a consent answer once the turn has ended — the prompt would ask about nothing.
   useEffect(() => {
     const ended = wasStreaming.current && !streaming;
     wasStreaming.current = streaming;
 
-    if (!ended) {
-      return;
+    if (ended) {
+      clearBridgeConsent();
     }
-
-    // Nothing is waiting for a consent answer once the turn has ended — the prompt would ask about nothing.
-    clearBridgeConsent();
-
-    for (const job of Object.values(liveJobs)) {
-      if ((job.status === 'queued' || job.status === 'running') && !autoOpenedGenerations.has(job.generationId)) {
-        autoOpenedGenerations.add(job.generationId);
-        bridgeDialogStore.set('jobs');
-
-        return;
-      }
-    }
-  }, [streaming, liveJobs]);
+  }, [streaming]);
 
   if (!projectId) {
     return null;
@@ -129,9 +98,7 @@ export function UnityBridgeButton() {
       void refreshBridgeStatus(projectId);
     }
 
-    bridgeDialogStore.set(
-      enabled && (status?.state === 'online' || status?.state === 'offline') ? 'status' : 'connect',
-    );
+    bridgeDialogStore.set('bridge');
   };
 
   /*
@@ -144,7 +111,7 @@ export function UnityBridgeButton() {
 
   return (
     <>
-      <IconButton title={titleFor(status)} className="transition-all" onClick={open}>
+      <IconButton title={bridgeIconTitle(status)} className="transition-all" onClick={open}>
         {showSpinner ? (
           <div className="i-svg-spinners:90-ring-with-bg text-bolt-elements-loader-progress text-xl animate-spin" />
         ) : (
@@ -152,9 +119,8 @@ export function UnityBridgeButton() {
         )}
       </IconButton>
 
-      <UnityBridgeConnectDialog projectId={projectId} />
-      <UnityBridgeStatusPanel projectId={projectId} />
-      <UnityBridgeJobsPanel projectId={projectId} />
+      <UnityBridgeDialog projectId={projectId} />
+      <UnityCapturePopup />
       <UnityBridgeConsentDialog />
     </>
   );
