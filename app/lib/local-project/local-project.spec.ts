@@ -23,6 +23,7 @@ import { sameBytes, treeToSerializedFileMap } from './scan';
 import { LocalMirror } from './mirror';
 import { applyExternalChanges, diffDiskIndex } from './external-changes';
 import { PROJECT_MARKER_FILE } from './types';
+import { projectsRoot, UNITY_PROJECTS_FOLDER, WEB_PROJECTS_FOLDER } from './projects-root';
 import { ownerKeyFor } from './handles';
 
 const WORKDIR = '/home/project';
@@ -241,28 +242,73 @@ describe('folder names and markers', () => {
   });
 });
 
-describe('findProjectFolder / createProjectFolder — by MARKER, never by name', () => {
-  it('finds the slug folder when its marker names this project', async () => {
+describe('findProjectFolder / createProjectFolder — inside Web/, by MARKER, never by name (D61)', () => {
+  it('a new project lands in Web/<slug>/ with its marker, and Web/ and Unity/ both exist', async () => {
     const parent = new MemoryDirectory('projects');
     const created = await createProjectFolder(parent, 'p1', 'Kart Racer', OPTIONS);
 
     expect(created.name).toBe('kart-racer');
-    expect(parent.text(`kart-racer/${PROJECT_MARKER_FILE}`)).toContain('"projectId": "p1"');
+    expect(parent.text(`Web/kart-racer/${PROJECT_MARKER_FILE}`)).toContain('"projectId": "p1"');
+    expect([...parent.children.keys()].sort()).toEqual(['Unity', 'Web']);
+    expect(parent.children.get('Unity')).toBeInstanceOf(MemoryDirectory);
 
     const found = await findProjectFolder(parent, 'p1', 'Kart Racer', OPTIONS);
     expect(found?.name).toBe('kart-racer');
   });
 
+  it('projectsRoot creates Web/ and Unity/ and touches nothing else at the top level', async () => {
+    const parent = new MemoryDirectory('projects');
+    await parent.put('notes.txt', 'mine');
+
+    const { web, unity } = await projectsRoot(parent);
+
+    expect(web.name).toBe(WEB_PROJECTS_FOLDER);
+    expect(unity.name).toBe(UNITY_PROJECTS_FOLDER);
+    expect([...parent.children.keys()].sort()).toEqual(['Unity', 'Web', 'notes.txt']);
+    expect(parent.text('notes.txt')).toBe('mine');
+
+    // Idempotent: a second call returns the same folders, no duplicates.
+    await projectsRoot(parent);
+    expect([...parent.children.keys()].sort()).toEqual(['Unity', 'Web', 'notes.txt']);
+  });
+
+  it('finds an existing project inside Web/ by its marker (the mount door)', async () => {
+    const parent = new MemoryDirectory('projects');
+    await parent.put(`Web/renamed/${PROJECT_MARKER_FILE}`, JSON.stringify(buildProjectMarker('p1', 'Old')));
+
+    const found = await findProjectFolder(parent, 'p1', 'New Name', OPTIONS);
+
+    expect(found?.name).toBe('renamed');
+  });
+
+  it('CONTROL: a marked folder at the TOP level is never found, adopted or touched', async () => {
+    const parent = new MemoryDirectory('projects');
+    const marker = JSON.stringify(buildProjectMarker('p1', 'Kart Racer'));
+    const topLevel = await parent.put(`kart-racer/${PROJECT_MARKER_FILE}`, marker);
+    const writesBefore = topLevel.writes;
+
+    expect(await findProjectFolder(parent, 'p1', 'Kart Racer', OPTIONS)).toBeUndefined();
+
+    const created = await createProjectFolder(parent, 'p1', 'Kart Racer', OPTIONS);
+
+    expect(created.name).toBe('kart-racer');
+    expect(parent.text(`Web/kart-racer/${PROJECT_MARKER_FILE}`)).toContain('"projectId": "p1"');
+    expect(parent.text(`kart-racer/${PROJECT_MARKER_FILE}`)).toBe(marker);
+    expect(topLevel.writes).toBe(writesBefore);
+    expect((parent.children.get('kart-racer') as MemoryDirectory).paths()).toEqual([PROJECT_MARKER_FILE]);
+  });
+
   it('does NOT adopt a same-named folder belonging to another project, and does not adopt one with no marker', async () => {
     const parent = new MemoryDirectory('projects');
     await createProjectFolder(parent, 'other', 'Kart Racer', OPTIONS);
-    await parent.put('unmarked/package.json', '{}');
+    await parent.put('Web/unmarked/package.json', '{}');
 
     expect(await findProjectFolder(parent, 'p1', 'Kart Racer', OPTIONS)).toBeUndefined();
     expect(await findProjectFolder(parent, 'p1', 'Unmarked', OPTIONS)).toBeUndefined();
 
     const created = await createProjectFolder(parent, 'p1', 'Kart Racer', OPTIONS);
     expect(created.name).toBe('kart-racer-2');
+    expect(parent.text(`Web/kart-racer-2/${PROJECT_MARKER_FILE}`)).toContain('"projectId": "p1"');
   });
 
   it('finds a renamed project by scanning markers', async () => {
@@ -280,7 +326,8 @@ describe('findProjectFolder / createProjectFolder — by MARKER, never by name',
     const again = await createProjectFolder(parent, 'p1', 'Kart', OPTIONS);
 
     expect(again.name).toBe('kart');
-    expect([...parent.children.keys()]).toEqual(['kart']);
+    expect([...parent.children.keys()].sort()).toEqual(['Unity', 'Web']);
+    expect([...(parent.children.get('Web') as MemoryDirectory).children.keys()]).toEqual(['kart']);
   });
 });
 

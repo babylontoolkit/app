@@ -5,9 +5,10 @@
  * tell how to install the bridge service if it's not already running; if running, some status info like
  * Unity CLI ready and Blender CLI ready."
  *
- *   - Not online → a required **Unity projects folder** field (D59; the last typed path is remembered per
- *     browser), then ONE command with a freshly minted single-use install code built in:
- *       npx @babylonjs-toolkit/agent bridge --install-service --pair XXXX-XXXX --projects "<folder>" [--server <this origin>]
+ *   - Not online → a required **Your App Builder projects folder** field (D59 + D61: the folder picked in the
+ *     App Builder, which holds `Web/` and `Unity/`; the last typed path is remembered per browser), then ONE
+ *     command with a freshly minted single-use install code built in:
+ *       npx @babylonjs-toolkit/agent bridge --install-service --pair XXXX-XXXX --projects "<folder>/Unity" [--server <this origin>]
  *     No command (and no Copy) until the folder is filled. `--server` is added only when this page is not the
  *     production origin the server reports — the helper defaults to production (no app URL is hardcoded here,
  *     the branding rule). The command is composed by `~/lib/bridge/install-command`. The code is minted
@@ -206,7 +207,7 @@ function InstallView({
 
       <div className="space-y-1">
         <label htmlFor="bridge-projects-folder" className="block text-sm text-bolt-elements-textPrimary">
-          Unity projects folder
+          Your App Builder projects folder
         </label>
         <input
           id="bridge-projects-folder"
@@ -222,7 +223,8 @@ function InstallView({
           className="w-full text-sm px-3 py-2 rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary placeholder-bolt-elements-textTertiary"
         />
         <p id="bridge-projects-folder-help" className="text-xs text-bolt-elements-textTertiary">
-          The folder on this computer where your Unity projects live (it is created if it doesn't exist).
+          The folder you picked for your projects in the App Builder. Unity projects go in its Unity folder (it is
+          created if it doesn't exist).
         </p>
         {folderError && (
           <p className="text-xs text-bolt-elements-icon-error" data-testid="bridge-projects-folder-error">
@@ -242,7 +244,7 @@ function InstallView({
         </div>
       ) : !folderFilled ? (
         <p className="text-xs text-bolt-elements-textTertiary" data-testid="bridge-folder-needed">
-          Enter your Unity projects folder to get the install command.
+          Enter your App Builder projects folder to get the install command.
         </p>
       ) : folderError ? null : (
         <div className="flex gap-2 items-start">

@@ -1,10 +1,17 @@
 /**
- * The Unity Bridge install command (SPEC §4.17, D55 + D59): the projects folder is required, carried as
- * `--projects "<folder>"` after `--pair <code>` and before any `--server`; a path the quoted flag cannot carry
+ * The Unity Bridge install command (SPEC §4.17, D55 + D59 + D61): the App Builder projects folder is required,
+ * carried as `--projects "<folder>/Unity"` after `--pair <code>` and before any `--server`; a path the quoted flag cannot carry
  * is refused with a sentence, never turned into a broken command.
  */
 import { describe, expect, it } from 'vitest';
-import { installCommand, PROJECTS_FOLDER_ERROR, projectsFolderPlaceholder, serverOriginFor } from './install-command';
+import {
+  installCommand,
+  PROJECTS_FOLDER_ERROR,
+  PROJECTS_FOLDER_STORAGE_KEY,
+  projectsFolderPlaceholder,
+  serverOriginFor,
+  unityFolderIn,
+} from './install-command';
 
 const BASE = 'npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD';
 
@@ -29,37 +36,65 @@ describe('installCommand', () => {
     expect(PROJECTS_FOLDER_ERROR).toBe("That folder path can't contain quotes, $, backticks or line breaks.");
   });
 
-  it('a plain path, trimmed, quoted, after --pair', () => {
-    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: '  /Users/me/Unity  ', serverOrigin: null })).toEqual({
-      command: `${BASE} --projects "/Users/me/Unity"`,
-    });
+  it('a plain POSIX path, trimmed, quoted, after --pair, pointed at its Unity subfolder (D61)', () => {
+    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: '  /Users/me/Projects  ', serverOrigin: null })).toEqual(
+      {
+        command: `${BASE} --projects "/Users/me/Projects/Unity"`,
+      },
+    );
   });
 
   it('a path with spaces stays one quoted argument', () => {
-    expect(
-      installCommand({ code: 'K7QM-2XWD', projectsFolder: '/Users/me/Unity Projects', serverOrigin: null }),
-    ).toEqual({ command: `${BASE} --projects "/Users/me/Unity Projects"` });
-  });
-
-  it('a Windows path keeps its backslashes; a trailing one (which would escape the quote) is dropped', () => {
-    expect(
-      installCommand({ code: 'K7QM-2XWD', projectsFolder: 'C:\\Users\\me\\Unity Projects', serverOrigin: null }),
-    ).toEqual({ command: `${BASE} --projects "C:\\Users\\me\\Unity Projects"` });
-    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: 'C:\\Users\\me\\Unity\\', serverOrigin: null })).toEqual(
-      { command: `${BASE} --projects "C:\\Users\\me\\Unity"` },
-    );
-    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: 'D:\\', serverOrigin: null })).toEqual({
-      command: `${BASE} --projects "D:\\."`,
+    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: '/Users/me/My Projects', serverOrigin: null })).toEqual({
+      command: `${BASE} --projects "/Users/me/My Projects/Unity"`,
     });
   });
 
-  it('--server comes after --projects when present, and is absent otherwise', () => {
-    expect(
-      installCommand({ code: 'K7QM-2XWD', projectsFolder: '/Users/me/Unity', serverOrigin: 'http://localhost:5173' }),
-    ).toEqual({ command: `${BASE} --projects "/Users/me/Unity" --server http://localhost:5173` });
+  it('a trailing slash is trimmed before joining', () => {
+    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: '/Users/me/Projects/', serverOrigin: null })).toEqual({
+      command: `${BASE} --projects "/Users/me/Projects/Unity"`,
+    });
+    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: '/', serverOrigin: null })).toEqual({
+      command: `${BASE} --projects "/Unity"`,
+    });
+  });
 
-    const withoutServer = installCommand({ code: 'K7QM-2XWD', projectsFolder: '/Users/me/Unity', serverOrigin: null });
+  it('a Windows path joins with a backslash; a trailing one (which would escape the quote) is trimmed', () => {
+    expect(
+      installCommand({ code: 'K7QM-2XWD', projectsFolder: 'C:\\Users\\me\\My Projects', serverOrigin: null }),
+    ).toEqual({ command: `${BASE} --projects "C:\\Users\\me\\My Projects\\Unity"` });
+    expect(
+      installCommand({ code: 'K7QM-2XWD', projectsFolder: 'C:\\Users\\me\\Projects\\', serverOrigin: null }),
+    ).toEqual({ command: `${BASE} --projects "C:\\Users\\me\\Projects\\Unity"` });
+    expect(installCommand({ code: 'K7QM-2XWD', projectsFolder: 'D:\\', serverOrigin: null })).toEqual({
+      command: `${BASE} --projects "D:\\Unity"`,
+    });
+  });
+
+  it('a path mixing separators (any /) joins with a forward slash', () => {
+    expect(unityFolderIn('C:/Users/me/Projects')).toBe('C:/Users/me/Projects/Unity');
+    expect(unityFolderIn('C:\\Users/me\\Projects')).toBe('C:\\Users/me\\Projects/Unity');
+  });
+
+  it('--server comes last, after --projects, when present, and is absent otherwise', () => {
+    expect(
+      installCommand({
+        code: 'K7QM-2XWD',
+        projectsFolder: '/Users/me/Projects',
+        serverOrigin: 'http://localhost:5173',
+      }),
+    ).toEqual({ command: `${BASE} --projects "/Users/me/Projects/Unity" --server http://localhost:5173` });
+
+    const withoutServer = installCommand({
+      code: 'K7QM-2XWD',
+      projectsFolder: '/Users/me/Projects',
+      serverOrigin: null,
+    });
     expect(withoutServer && 'command' in withoutServer && withoutServer.command).not.toContain('--server');
+  });
+
+  it('keeps the pre-D61 storage key so a stored value carries over', () => {
+    expect(PROJECTS_FOLDER_STORAGE_KEY).toBe('btk.unityBridge.projectsFolder');
   });
 });
 
@@ -74,13 +109,11 @@ describe('serverOriginFor', () => {
 describe('projectsFolderPlaceholder', () => {
   it('per OS', () => {
     expect(projectsFolderPlaceholder('Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)', 'MacIntel')).toBe(
-      '/Users/you/Unity Projects',
+      '/Users/you/Projects',
     );
     expect(projectsFolderPlaceholder('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Win32')).toBe(
-      'C:\\Users\\you\\Unity Projects',
+      'C:\\Users\\you\\Projects',
     );
-    expect(projectsFolderPlaceholder('Mozilla/5.0 (X11; Linux x86_64)', 'Linux x86_64')).toBe(
-      '/home/you/Unity Projects',
-    );
+    expect(projectsFolderPlaceholder('Mozilla/5.0 (X11; Linux x86_64)', 'Linux x86_64')).toBe('/home/you/Projects');
   });
 });

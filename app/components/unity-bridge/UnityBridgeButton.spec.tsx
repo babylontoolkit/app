@@ -150,11 +150,13 @@ describe('UnityBridgeButton', () => {
 
     expect(bridgeDialogStore.get()).toBe('bridge');
 
-    // D59: the command appears once the Unity projects folder is filled.
-    fireEvent.change(await screen.findByLabelText('Unity projects folder'), { target: { value: '/Users/me/Unity' } });
+    // D59 + D61: the command appears once the App Builder projects folder is filled; it points at its Unity folder.
+    fireEvent.change(await screen.findByLabelText('Your App Builder projects folder'), {
+      target: { value: '/Users/me/Projects' },
+    });
     expect(
       await screen.findByText(
-        /^npx @babylonjs-toolkit\/agent bridge --install-service --pair K7QM-2XWD --projects "\/Users\/me\/Unity" --server http:\/\/localhost/,
+        /^npx @babylonjs-toolkit\/agent bridge --install-service --pair K7QM-2XWD --projects "\/Users\/me\/Projects\/Unity" --server http:\/\/localhost/,
       ),
     ).toBeTruthy();
     expect(screen.queryByLabelText('Pairing code')).toBeNull();

@@ -22,6 +22,7 @@ import { WORK_DIR } from '~/utils/constants';
 import { MAX_FILES } from '~/utils/fileUtils';
 import { createScopedLogger } from '~/utils/logger';
 import { createProjectFolder, findProjectFolder, ProjectFolder, type ProjectFolderOptions } from './fsa-store';
+import { projectsRoot } from './projects-root';
 import {
   clearParentHandle,
   isLocalFolderSupported,
@@ -220,6 +221,20 @@ export async function chooseProjectsFolder(): Promise<boolean> {
 
   await saveParentHandle(owner, picked);
   parentHandle = picked;
+
+  /*
+   * D61: the user sees `Web/` and `Unity/` the moment they choose the folder. Nothing else in it is
+   * touched. A failure is loud but does not un-choose the folder — the next project door retries the
+   * same helper, since `findProjectFolder` / `createProjectFolder` resolve `Web/` through it too.
+   */
+  try {
+    await projectsRoot(picked);
+  } catch (error) {
+    logger.error(`Could not create the Web and Unity folders in ${picked.name}`, error);
+    toast.error(
+      `Could not create the Web and Unity folders in ${picked.name}: ${(error as Error)?.message ?? 'unknown error'}`,
+    );
+  }
   localProjectState.set({ kind: 'connected', folderName: picked.name });
 
   /*

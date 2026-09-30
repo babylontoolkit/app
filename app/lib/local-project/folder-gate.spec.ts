@@ -113,6 +113,7 @@ describe('folderGateCopy — every string the gate shows', () => {
     expect(copy.primary).toBe('Choose a folder on this computer');
     expect(copy.detail).toMatch(/Settings/);
     expect(copy.detail).toMatch(/GitHub/);
+    expect(copy.detail).toContain('Web apps are kept in its Web folder and Unity projects in its Unity folder.');
     expect(copy.alternate).toBeUndefined();
   });
 

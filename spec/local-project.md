@@ -6,8 +6,13 @@
 
 ## What it is
 
-The user picks ONE parent folder on their computer (Settings → Features → *Where your projects live*). From
-then on every project they create or open here gets `<parent>/<slug>/` on disk, every change the agent, the
+The user picks ONE parent folder on their computer (Settings → Features → *Where your projects live*). The
+platform keeps two subfolders in it, created when the folder is chosen and whenever it is used: `Web/` (web
+apps) and `Unity/` (Unity projects, the Unity Bridge helper's `--projects` folder — the dialog puts
+`<folder>/Unity` in its command). Nothing else at the parent's top level is created, read or touched, and
+there is no lookup there. From then on every project they create or open here gets `<parent>/Web/<slug>/`
+on disk (found by its `.btk-project.json` marker; `projectsRoot` in `projects-root.ts` is the one helper that
+resolves `Web/` and `Unity/`), every change the agent, the
 editor, undo, a pull, a media render or an import makes is written through as it lands, and opening the
 project reads that folder FIRST — ahead of the browser checkpoint, the server recovery copy, the remix seed
 and the repo. Edits made in VS Code on the same folder flow back in while the tab is open.

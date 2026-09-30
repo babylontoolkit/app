@@ -14,6 +14,7 @@ import {
   type ProjectMarker,
 } from './types';
 import { buildProjectMarker, candidateDirNames, parseProjectMarker, slugForFolder } from './dir-name';
+import { projectsRoot } from './projects-root';
 
 export class LocalPathError extends Error {
   constructor(rel: string, reason: string) {
@@ -263,11 +264,25 @@ async function markerOf(dir: LocalDirectoryHandle, options: ProjectFolderOptions
 }
 
 /**
- * Find THIS project's folder under the parent, by MARKER — never by name. Tries the slug first (the
- * common case, one read), then every subfolder's marker (a rename, or a project created before the
- * slug rule changed). `undefined` = no folder on this disk belongs to the project.
+ * Find THIS project's folder in the projects folder's `Web/` subfolder (D61), by MARKER — never by
+ * name. `parent` is the folder the user picked; `Web/` and `Unity/` are created in it if missing, and
+ * nothing at its top level is ever looked at. Tries the slug first (the common case, one read), then
+ * every subfolder's marker (a rename, or a project created before the slug rule changed).
+ * `undefined` = no folder on this disk belongs to the project.
  */
 export async function findProjectFolder(
+  parent: LocalDirectoryHandle,
+  projectId: string,
+  name: string | undefined,
+  options: ProjectFolderOptions,
+): Promise<ProjectFolder | undefined> {
+  const { web } = await projectsRoot(parent);
+
+  return findProjectFolderIn(web, projectId, name, options);
+}
+
+/** The lookup itself, inside an already-resolved `Web/`. */
+async function findProjectFolderIn(
   parent: LocalDirectoryHandle,
   projectId: string,
   name: string | undefined,
@@ -304,17 +319,19 @@ export async function findProjectFolder(
 }
 
 /**
- * Create the project's folder under the parent: the slug, or `slug-2`, `slug-3`… when a folder of
- * that name already exists and is NOT this project's (a marker naming another project, or no marker at
- * all — a folder we did not make is never adopted, for the same reason Save never adopts a repo).
+ * Create the project's folder in the projects folder's `Web/` subfolder (D61): the slug, or `slug-2`,
+ * `slug-3`… when a folder of that name already exists there and is NOT this project's (a marker naming
+ * another project, or no marker at all — a folder we did not make is never adopted, for the same
+ * reason Save never adopts a repo). `pickedFolder` is the folder the user picked.
  */
 export async function createProjectFolder(
-  parent: LocalDirectoryHandle,
+  pickedFolder: LocalDirectoryHandle,
   projectId: string,
   name: string | undefined,
   options: ProjectFolderOptions,
 ): Promise<ProjectFolder> {
-  const existing = await findProjectFolder(parent, projectId, name, options);
+  const { web: parent } = await projectsRoot(pickedFolder);
+  const existing = await findProjectFolderIn(parent, projectId, name, options);
 
   if (existing) {
     return existing;
@@ -344,5 +361,5 @@ export async function createProjectFolder(
     return folder;
   }
 
-  throw new Error(`Could not find a free folder name for "${name}" in ${parent.name}.`);
+  throw new Error(`Could not find a free folder name for "${name}" in ${pickedFolder.name}/${parent.name}.`);
 }

@@ -2,8 +2,8 @@
 /**
  * THE Unity Bridge dialog (SPEC §4.17, D55) — one screen.
  *
- * Not online → a required Unity projects folder field (D59), then exactly ONE command,
- * `npx @babylonjs-toolkit/agent bridge --install-service --pair <code> --projects "<folder>"`, with
+ * Not online → a required App Builder projects folder field (D59 + D61), then exactly ONE command,
+ * `npx @babylonjs-toolkit/agent bridge --install-service --pair <code> --projects "<folder>/Unity"`, with
  * `--server <origin>` only off the production origin (no command at all while the folder is blank); the code is minted on open and re-minted before
  * it expires; the dialog polls and switches to the running view when the helper comes online. Online → the
  * helper's status and the per-computer Allow scripts checkbox (D58). Gone for good: the devices list, the
@@ -61,7 +61,7 @@ let inviteFailure: string | null;
 let toggleFailure: string | null;
 let toggles: Array<Record<string, unknown>>;
 
-const FOLDER = '/Users/me/Unity Projects';
+const FOLDER = '/Users/me/My Projects';
 const FOLDER_KEY = 'btk.unityBridge.projectsFolder';
 
 beforeEach(() => {
@@ -131,24 +131,24 @@ function openWith(status: Status) {
 
 const commands = () => screen.queryAllByTestId('bridge-install-command').map((el) => el.textContent ?? '');
 
-const folderField = () => screen.getByLabelText('Unity projects folder') as HTMLInputElement;
+const folderField = () => screen.getByLabelText('Your App Builder projects folder') as HTMLInputElement;
 
 function fillFolder(value = FOLDER) {
   fireEvent.change(folderField(), { target: { value } });
 }
 
-describe('UnityBridgeDialog — projects folder (D59)', () => {
+describe('UnityBridgeDialog — App Builder projects folder (D59 + D61)', () => {
   it('while the folder is blank: NO command and no Copy button, just the muted line', async () => {
     openWith(unpaired(ORIGIN()));
 
     expect(folderField().required).toBe(true);
     expect(
       screen.getByText(
-        "The folder on this computer where your Unity projects live (it is created if it doesn't exist).",
+        "The folder you picked for your projects in the App Builder. Unity projects go in its Unity folder (it is created if it doesn't exist).",
       ),
     ).toBeTruthy();
     await waitFor(() => expect(invites).toBe(1)); // the code is minted anyway, ready for when the folder is typed
-    expect(screen.getByText('Enter your Unity projects folder to get the install command.')).toBeTruthy();
+    expect(screen.getByText('Enter your App Builder projects folder to get the install command.')).toBeTruthy();
     expect(commands()).toEqual([]);
     expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
 
@@ -159,7 +159,7 @@ describe('UnityBridgeDialog — projects folder (D59)', () => {
     // Control: filling it shows the command.
     fillFolder();
     await waitFor(() => expect(commands()).toHaveLength(1));
-    expect(screen.queryByText('Enter your Unity projects folder to get the install command.')).toBeNull();
+    expect(screen.queryByText('Enter your App Builder projects folder to get the install command.')).toBeNull();
   });
 
   it('remembers the last typed folder in this browser and restores it', async () => {
@@ -173,7 +173,7 @@ describe('UnityBridgeDialog — projects folder (D59)', () => {
     expect(folderField().value).toBe('/Users/me/Games');
     await waitFor(() =>
       expect(commands()).toEqual([
-        'npx @babylonjs-toolkit/agent bridge --install-service --pair AB23-CD45 --projects "/Users/me/Games"',
+        'npx @babylonjs-toolkit/agent bridge --install-service --pair AB23-CD45 --projects "/Users/me/Games/Unity"',
       ]),
     );
   });
@@ -223,7 +223,7 @@ describe('UnityBridgeDialog — not online', () => {
     expect(screen.getByText('Connect Unity and Blender')).toBeTruthy();
     await waitFor(() =>
       expect(commands()).toEqual([
-        `npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --projects "${FOLDER}"`,
+        `npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --projects "${FOLDER}/Unity"`,
       ]),
     );
     expect(commands()[0]).not.toContain('--server');
@@ -241,7 +241,7 @@ describe('UnityBridgeDialog — not online', () => {
 
     await waitFor(() =>
       expect(commands()).toEqual([
-        `npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --projects "${FOLDER}" --server ${ORIGIN()}`,
+        `npx @babylonjs-toolkit/agent bridge --install-service --pair K7QM-2XWD --projects "${FOLDER}/Unity" --server ${ORIGIN()}`,
       ]),
     );
   });
