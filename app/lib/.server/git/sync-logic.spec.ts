@@ -16,6 +16,8 @@ import {
   buildCommitMessage,
   detectPushDivergence,
   divergenceBranchName,
+  findOversizedBlob,
+  GITHUB_MAX_FILE_BYTES,
   isSecretPath,
   isValidDivergenceChoice,
   mapToTreeBlobs,
@@ -225,5 +227,32 @@ describe('divergence resolution', () => {
 
   it('names the escape-hatch branch from the date', () => {
     expect(divergenceBranchName('2026-07-14T03:00:00Z')).toBe('platform/2026-07-14');
+  });
+});
+
+describe('findOversizedBlob', () => {
+  const MB = 1048576;
+
+  it('a base64 blob over 100 MB is found before any upload', () => {
+    const content = 'A'.repeat(Math.ceil((101 * MB * 4) / 3));
+    const found = findOversizedBlob([
+      { path: 'small.txt', content: 'hi', encoding: 'utf-8' },
+      { path: 'public/scenes/Big/Big.bin', content, encoding: 'base64' },
+    ]);
+
+    expect(found?.path).toBe('public/scenes/Big/Big.bin');
+    expect(found!.bytes).toBeGreaterThan(100 * MB);
+  });
+
+  /* CONTROL — without it, "always report the first blob" passes the case above. */
+  it('CONTROL: a 1 KB utf-8 blob → null', () => {
+    expect(findOversizedBlob([{ path: 'a.txt', content: 'x'.repeat(1024), encoding: 'utf-8' }])).toBeNull();
+  });
+
+  it('exactly 100 MB → null (the limit is inclusive)', () => {
+    const content = 'A'.repeat(Math.floor((100 * MB * 4) / 3));
+
+    expect(GITHUB_MAX_FILE_BYTES).toBe(100 * MB);
+    expect(findOversizedBlob([{ path: 'edge.bin', content, encoding: 'base64' }])).toBeNull();
   });
 });

@@ -1464,7 +1464,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 
 ### Phase 1 — Local scenes reach the preview
 
-- [ ] **T1** — Make Nodepod's service worker let other localhost ports reach the network
+- [x] **T1** — Make Nodepod's service worker let other localhost ports reach the network
   - Depends on: —
   - Files: `/Users/mackey/Documents/Repos/Nodepod/static/__sw__.js` (modify),
     `/Users/mackey/Documents/Repos/Nodepod/src/__tests__/sw-localhost-port.test.ts` (create)
@@ -1525,7 +1525,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/sandbox/nodepod-assets.spec.ts` → pass.
   - Verify level: live
 
-- [ ] **T3** — Delegate local-network permission to the builder preview, make `.gltf` opaque, and teach the dev-only rule
+- [x] **T3** — Delegate local-network permission to the builder preview, make `.gltf` opaque, and teach the dev-only rule
   - Depends on: —
   - Files: `app/components/workbench/Preview.tsx`, `app/lib/context/opaque-files.ts`,
     `app/lib/context/opaque-files.spec.ts`, `app/lib/.server/prompt/sections/20-hard-constraints.md` (modify)
@@ -1553,7 +1553,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
     `grep -n "loopback-network" app/components/workbench/Preview.tsx` → 3 lines.
   - Verify level: standard
 
-- [ ] **T4** — Warn at publish time when a game points at a local server
+- [x] **T4** — Warn at publish time when a game points at a local server
   - Depends on: —
   - Files: `app/lib/.server/share/checklist.ts`, `app/lib/.server/share/share.spec.ts` (modify — it already tests
     `runPublishingChecklist`; add a `describe('localhost-url warning')` block)
@@ -1588,7 +1588,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 
 ### Phase 2 — Local scenes: diagnosis, import, and storage notices
 
-- [ ] **T5** — Capture local-load failures in the preview and explain them
+- [x] **T5** — Capture local-load failures in the preview and explain them
   - Depends on: T3
   - Files: `app/lib/preview/protocol.ts`, `app/lib/preview/agent-script.ts` (modify);
     `app/lib/local-scenes/url.ts`, `devserver.ts`, `explainer.ts` (create) + specs;
@@ -1705,7 +1705,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/local-scenes app/lib/preview` → pass.
   - Verify level: live
 
-- [ ] **T6** — Import a local scene into the project (UI helper + agent tool path)
+- [x] **T6** — Import a local scene into the project (UI helper + agent tool path)
   - Depends on: T5
   - Files: `app/lib/local-scenes/plan.ts`, `import.ts`, `origin.ts` (create) + specs
   - Applies: D22, D52; Design Reference › `planSceneImport`, `importLocalScene`, `origin.ts`
@@ -1754,7 +1754,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/local-scenes` → pass.
   - Verify level: standard
 
-- [ ] **T7** — Make the storage limits loud: recovery-copy skip notice and GitHub 100 MB files
+- [x] **T7** — Make the storage limits loud: recovery-copy skip notice and GitHub 100 MB files
   - Depends on: —
   - Files: `app/lib/persistence/recovery-copy-notice.ts` (create) + spec;
     `app/lib/persistence/refresh-saved-copies.ts`, `app/lib/persistence/useChatHistory.ts`,
@@ -2688,7 +2688,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/.server/bridge app/lib/.server/licensing app/lib/.server/security` → pass.
   - Verify level: live
 
-- [ ] **T28** — Exporter side of automation mode: verify the grant; `bt_automation`
+- [x] **T28** — Exporter side of automation mode: verify the grant; `bt_automation`
   - Depends on: T27, T9, T10
   - Files: `PE/Core/Projects/UnityTools_HX.cs`, `PE/Core/System/BabylonLicense.cs` (step 4 only),
     `PE/Project/BabylonToolkit-2024/Packages/com.babylontoolkit.editor/Editor/CLI/BabylonToolkitCliCommands.cs`
@@ -2751,7 +2751,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 
 ### Phase 6 — Agent integration
 
-- [ ] **T18** — Bridge billing and the operation pipeline (consent → debit → dispatch → result/refund)
+- [x] **T18** — Bridge billing and the operation pipeline (consent → debit → dispatch → result/refund)
   - Depends on: T17
   - Files: `app/lib/.server/bridge/billing.ts` (create), `service.ts` (replace the T17 stub) + `billing.spec.ts`,
     `service.spec.ts`; `app/lib/.server/billing/ledger-sql.spec.ts` (one case);
@@ -2828,7 +2828,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/.server/bridge app/lib/.server/billing` → pass.
   - Verify level: standard
 
-- [ ] **T19** — Agent tools, tool policy, proxy and route wiring
+- [x] **T19** — Agent tools, tool policy, proxy and route wiring
   - Depends on: T18, T6
   - Files: `app/lib/.server/agent/bridge-tools.ts`, `local-scene-tools.ts` (create) + specs;
     `app/lib/.server/agent/tool-policy.ts` (+ spec), `app/lib/.server/agent/proxy.ts`, `app/routes/api.agent.ts` (modify)
@@ -2940,7 +2940,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
   - Verify: `pnpm vitest --run app/lib/.server/agent` → no new failures.
   - Verify level: standard
 
-- [ ] **T20** — Prompt truth: identity section, Unity/Blender reference blocks, the size refusal, and per-turn notes
+- [x] **T20** — Prompt truth: identity section, Unity/Blender reference blocks, the size refusal, and per-turn notes
   - Depends on: T19
   - Files: `app/lib/.server/prompt/sections/00-platform-identity.md`, `prompt/sources.ts`,
     `agent/reference-tools.ts` (+ spec), `agent/bridge-notes.ts` (create) + spec, `agent/proxy.ts`,

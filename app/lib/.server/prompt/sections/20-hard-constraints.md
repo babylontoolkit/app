@@ -214,6 +214,7 @@ navigate('/play', { gameMode: 'YourModeClassName', sceneUrl: 'optional/scene.glt
   module.** Importing Babylon from UI code drags the entire Babylon runtime into the main bundle and
   destroys load time. Babylon imports belong inside the lazy `/play` chunk only.
 - Game code in `src/scripts/` uses `GameManager.NavigateTo`.
+- A `sceneUrl` may point at a **local dev server** (e.g. `http://localhost:8888/scenes/Level01.gltf`, the Unity exporter's server) while developing. Local URLs never work in a published game — before the user publishes, import the scene into `public/scenes/` (the `import_local_scene` tool) and switch to the relative path.
 - The frontend around this is fully redesignable — a landing page, a track/car select screen, an
   options menu, a "Start Race" button that computes mode + scene from the user's choices, or even a
   landing page with no play button at all. **The `navigate('/play', …)` call itself is the one thing

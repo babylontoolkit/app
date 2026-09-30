@@ -74,6 +74,9 @@ const DEBUG_OVERLAY_ON = /(showDebugLayer|showRenderStats|showPhysicsViewer|show
 /** Network-capable games must launch solo when shared, or they hang waiting for a peer (§4.8). */
 const NETWORK_CAPABLE = /\b(Colyseus|NetworkManager|createRoom|joinOrCreate|multiplayer\s*[:=]\s*true)\b/;
 
+/** A published game runs on strangers' machines — a local dev-server URL points at THEIR computer, not the author's (§4.8). */
+const LOCALHOST_URL = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?\//i;
+
 function textFiles(files: SerializedFileMap): Array<[string, string]> {
   const out: Array<[string, string]> = [];
 
@@ -160,6 +163,15 @@ export function runPublishingChecklist(files: SerializedFileMap): ChecklistResul
         code: 'debug-overlay',
         path,
         message: `A debug overlay is switched on in ${path}. It will be visible to everyone who plays.`,
+      });
+    }
+
+    if (LOCALHOST_URL.test(content)) {
+      findings.push({
+        level: 'warning',
+        code: 'localhost-url',
+        path,
+        message: `${path} loads something from a local server (localhost). A published game cannot reach anyone's computer, so that part will be missing for players. Import the scene into the project first (the Unity icon in the chat box → Import), then point the game at it.`,
       });
     }
 

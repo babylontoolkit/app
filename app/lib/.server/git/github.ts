@@ -16,7 +16,7 @@
  */
 import { Octokit } from '@octokit/rest';
 import type { SerializedFileMap } from '~/lib/binary/binary-files';
-import { buildCommitMessage, detectPushDivergence, mapToTreeBlobs } from './sync-logic';
+import { buildCommitMessage, detectPushDivergence, findOversizedBlob, mapToTreeBlobs } from './sync-logic';
 import {
   GitProviderError,
   firstLine,
@@ -615,6 +615,15 @@ export class GitHubProvider implements GitProvider {
         `Dropped "${path}" from the push: the map calls it a file, but it has children (see mapToTreeBlobs).`,
       ),
     );
+
+    const oversized = findOversizedBlob(blobs);
+
+    if (oversized) {
+      throw new GitProviderError({
+        kind: 'invalid',
+        message: `${oversized.path} is ${Math.round(oversized.bytes / 1048576)} MB — GitHub refuses files over 100 MB, so nothing was pushed. Remove it or keep it out of the repository.`,
+      });
+    }
 
     const tree = await runBounded(
       blobs,

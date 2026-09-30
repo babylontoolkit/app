@@ -4,6 +4,7 @@ import { atom } from 'nanostores';
 import { useStore } from '@nanostores/react';
 import { generateId, type JSONValue, type Message } from 'ai';
 import { toast } from 'react-toastify';
+import { notifyRecoveryCopySkipped } from '~/lib/persistence/recovery-copy-notice';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { withRestoreInFlight } from '~/lib/stores/restore-flag';
 import { bootProgress, endBootPhase, importTailActive, reportBootFailure } from '~/lib/stores/boot-progress';
@@ -229,9 +230,6 @@ export const unappliedTurn = atom<{ projectId: string; message: Message } | unde
  * a question about data loss is the pessimistic one.
  */
 export const workingCopySafe = atom<boolean>(false);
-
-/** One "you are not protected" warning per project per session — see `checkpointProject`. */
-const warnedNoRecoveryCopy = new Set<string>();
 
 /**
  * One "checkpoints are failing" toast per project per session (T17c). The logger still records every
@@ -2305,13 +2303,7 @@ ${value.content}
          * Once per project per session: the checkpoint fires on every generation, and a toast on each
          * one would be nagging that gets dismissed unread.
          */
-        if (!warnedNoRecoveryCopy.has(pid)) {
-          warnedNoRecoveryCopy.add(pid);
-          toast.warn(
-            'This project is not being backed up for crash recovery — sync it to a repository to keep it safe.',
-            { autoClose: 8000 },
-          );
-        }
+        notifyRecoveryCopySkipped(pid);
       }
 
       /*

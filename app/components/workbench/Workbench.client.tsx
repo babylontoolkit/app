@@ -21,6 +21,8 @@ import { cubicEasingFn } from '~/utils/easings';
 import { renderLogger } from '~/utils/logger';
 import { EditorPanel } from './EditorPanel';
 import { Preview } from './Preview';
+import { LocalSceneExplainerDialog } from '~/components/local-scenes/LocalSceneExplainerDialog';
+import { startLocalSceneExplainer } from '~/lib/local-scenes/explainer';
 import useViewport from '~/lib/hooks';
 
 import { usePreviewStore } from '~/lib/stores/previews';
@@ -310,6 +312,9 @@ export const Workbench = memo(
       setFileHistory({});
     }, [treeRev]);
 
+    /* D27 — explain a failed load from the user's local Unity dev server, once per cause per session. */
+    useEffect(() => startLocalSceneExplainer(), []);
+
     // const modifiedFiles = Array.from(useStore(workbenchStore.unsavedFiles).keys());
 
     const hasPreview = useStore(computed(workbenchStore.previews, (previews) => previews.length > 0));
@@ -574,7 +579,11 @@ export const Workbench = memo(
                     <DiffView fileHistory={fileHistory} setFileHistory={setFileHistory} />
                   </View>
                   <View initial={{ x: '100%' }} animate={{ x: selectedView === 'preview' ? '0%' : '100%' }}>
-                    <Preview setSelectedElement={setSelectedElement} />
+                    <>
+                      <Preview setSelectedElement={setSelectedElement} />
+                      {/* D27 — a portal, so it overlays the page; mounted here so it lives and dies with the preview. */}
+                      <LocalSceneExplainerDialog />
+                    </>
                   </View>
                 </div>
               </div>

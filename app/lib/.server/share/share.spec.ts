@@ -100,6 +100,48 @@ describe('the publishing checklist', () => {
 });
 
 /**
+ * A published game runs on strangers' machines, so a local dev-server URL (the Unity exporter's
+ * `http://localhost:8888/…`) points at THEIR computer and that part of the game is simply missing.
+ * A WARNING, never a block — the author may be publishing a work-in-progress on purpose.
+ */
+describe('localhost-url warning', () => {
+  it('src/scripts/Mode.ts containing "http://localhost:8888/scenes/x.gltf" is warned', () => {
+    const result = runPublishingChecklist({
+      'src/scripts/Mode.ts': file('const sceneUrl = "http://localhost:8888/scenes/x.gltf";'),
+    });
+    const hits = result.findings.filter((f) => f.code === 'localhost-url');
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0].level).toBe('warning');
+    expect(hits[0].path).toBe('src/scripts/Mode.ts');
+  });
+
+  it('"https://repo.babylontoolkit.com/x.gltf" is not warned (control)', () => {
+    const result = runPublishingChecklist({
+      'src/scripts/Mode.ts': file('const sceneUrl = "https://repo.babylontoolkit.com/x.gltf";'),
+    });
+
+    expect(result.findings.filter((f) => f.code === 'localhost-url')).toHaveLength(0);
+  });
+
+  it('"http://127.0.0.1:8877/a.glb" is warned', () => {
+    const result = runPublishingChecklist({
+      'src/scripts/Mode.ts': file('load("http://127.0.0.1:8877/a.glb");'),
+    });
+
+    expect(result.findings.filter((f) => f.code === 'localhost-url')).toHaveLength(1);
+  });
+
+  it('result.ok stays true with only the warning', () => {
+    const result = runPublishingChecklist({
+      'src/scripts/Mode.ts': file('const sceneUrl = "http://localhost:8888/scenes/x.gltf";'),
+    });
+
+    expect(result.ok).toBe(true);
+  });
+});
+
+/**
  * THE CHECKLIST NORMALISES EVERY PROVIDER ROOT (T7b, SPEC §8).
  *
  * Its `relative()` helper was a `/^\/?(home\/project\/)?/` regex, so a map keyed under CodeSandbox's
@@ -486,6 +528,27 @@ describe('remix — what travels and what must not', () => {
 
     // And the fixture really was linked — otherwise the assertion above proves nothing.
     expect([source.provider, source.linkedRepo, source.linkedBranch].every((field) => field !== undefined)).toBe(true);
+  });
+
+  it('deriveRemix does not carry bridgeLink', () => {
+    const linked: Project = {
+      ...source,
+      bridgeLink: {
+        deviceId: 'dev_a',
+        unityProjectKey: 'k1',
+        unityProjectName: 'Kart',
+        allowScripts: true,
+        linkedAt: '2026-09-01T00:00:00.000Z',
+      },
+    };
+
+    const remix = deriveRemix(linked, { newOwnerId: 'visitor_B' });
+
+    expect(remix.bridgeLink).toBeUndefined();
+
+    // The fixture really was linked, and the key is present-and-undefined (an explicit reset).
+    expect(linked.bridgeLink).toBeDefined();
+    expect('bridgeLink' in remix).toBe(true);
   });
 
   it('names a stranger remix "(remix)" and a self-remix "(copy)"', () => {

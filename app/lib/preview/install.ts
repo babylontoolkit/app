@@ -66,17 +66,36 @@ export async function installPreviewDevTools(provider: InstallTarget): Promise<b
  * a paid "Ask the agent" button sitting next to a working preview. That exact false alarm cost the
  * owner ~300 credits once already.
  */
+/**
+ * 🔴 Does this entry raise the preview alert? NOT for a failed load from the user's local dev server
+ * (`resource`/`network`, D27). The local-scene explainer owns those — the fix is "start your Unity dev
+ * server", which no code change can make — and the alert is `source:'preview'`, which
+ * `decideAutoRepair` accepts inside the repair window: a stopped dev server right after a generation
+ * would otherwise auto-fire a BILLED repair turn the agent cannot fix. They stay in
+ * `previewErrorsStore`, so `get_game_errors` still reports them.
+ */
+export function raisesPreviewAlert(entry: PreviewErrorEntry): boolean {
+  return entry.type !== 'resource' && entry.type !== 'network';
+}
+
 function watchForErrors() {
   let lastSeen = 0;
 
   previewErrorsStore.subscribe((entries) => {
-    const fresh = entries.filter((entry) => entry.at > lastSeen);
+    const unseen = entries.filter((entry) => entry.at > lastSeen);
+
+    if (unseen.length === 0) {
+      return;
+    }
+
+    /* Advance past EVERY unseen entry, including the ones that raise nothing. */
+    lastSeen = unseen[unseen.length - 1].at;
+
+    const fresh = unseen.filter(raisesPreviewAlert);
 
     if (fresh.length === 0) {
       return;
     }
-
-    lastSeen = fresh[fresh.length - 1].at;
 
     /* The newest one is what the banner describes; the rest are already in the panel's history. */
     const error = fresh[fresh.length - 1];

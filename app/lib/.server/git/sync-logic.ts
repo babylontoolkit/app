@@ -114,6 +114,31 @@ export function mapToTreeBlobs(files: SerializedFileMap, onDropped?: (path: stri
   return dropDirectoryBlobs(blobs, onDropped).sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/** GitHub refuses any single file over 100 MB. Checked BEFORE the first blob upload, so a push is all-or-nothing. */
+export const GITHUB_MAX_FILE_BYTES = 100 * 1024 * 1024;
+
+export function blobByteSize(blob: TreeBlob): number {
+  return blob.encoding === 'base64'
+    ? Math.floor((blob.content.length * 3) / 4)
+    : new TextEncoder().encode(blob.content).length;
+}
+
+/** The first blob over the limit, or null. */
+export function findOversizedBlob(
+  blobs: TreeBlob[],
+  limit = GITHUB_MAX_FILE_BYTES,
+): { path: string; bytes: number } | null {
+  for (const blob of blobs) {
+    const bytes = blobByteSize(blob);
+
+    if (bytes > limit) {
+      return { path: blob.path, bytes };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Drop any blob whose path is also a DIRECTORY in the same push — the one tree git cannot represent.
  *

@@ -68,9 +68,9 @@ export interface PreviewConsoleEntry {
   at: number;
 }
 
-/** An uncaught exception or unhandled rejection from the game. */
+/** An uncaught exception or unhandled rejection from the game — or (D27) a failed load from a local, cross-origin dev server (`resource`/`network`). */
 export interface PreviewErrorEntry {
-  type: 'error' | 'rejection';
+  type: 'error' | 'rejection' | 'resource' | 'network';
   message: string;
   stack?: string;
   url?: string;

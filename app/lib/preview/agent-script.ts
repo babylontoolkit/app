@@ -95,6 +95,94 @@ function previewAgentBody(tag: string, version: number, limits: any, ring: numbe
     send('event', { event: 'error', data: entry });
   });
 
+  /* ---- local-network failures (D27) --------------------------------------------------------- */
+
+  /*
+   * A scene loaded from the user's own Unity dev server (`http://localhost:8888/...`) fails in ways the
+   * two listeners above never see: a failed `<img>`/`<script>` fires a non-bubbling `error` on the
+   * element, and a failed `fetch`/XHR rejects inside the loader with nothing uncaught. So capture both,
+   * but ONLY for a loopback URL on a different origin — the builder explains exactly that failure
+   * (server not running, Chrome's local-network prompt blocked, an exporter without CORS), and a
+   * generic network error is not ours to narrate. Self-contained on purpose: see the file header.
+   */
+  const isLocal = (raw: any) => {
+    try {
+      const u = new URL(String(raw), location.href);
+      const h = u.hostname;
+      const local = h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0' || h === '[::1]';
+
+      return local && u.origin !== location.origin ? u.href : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const recordLocal = (type: string, url: string, message: string) => {
+    const entry = { type, message, url, at: Date.now() };
+    push(errors, entry);
+    send('event', { event: 'error', data: entry });
+  };
+
+  addEventListener(
+    'error',
+    (event: any) => {
+      const target = event && event.target;
+
+      if (!target || target === window) {
+        return;
+      }
+
+      const src = target.src || target.href;
+      const url = src ? isLocal(src) : null;
+
+      if (url) {
+        recordLocal('resource', url, 'Failed to load ' + url);
+      }
+    },
+    true,
+  );
+
+  const originalFetch = window.fetch;
+
+  if (originalFetch) {
+    window.fetch = function (this: any, input: any, init?: any) {
+      const url = isLocal(input && input.url ? input.url : input);
+
+      return originalFetch.call(this, input, init).catch((error: any) => {
+        if (url) {
+          recordLocal('network', url, 'Network request failed: ' + url);
+        }
+
+        throw error;
+      });
+    } as any;
+  }
+
+  const XHR = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+
+  if (XHR) {
+    const open = XHR.open;
+    const sendXhr = XHR.send;
+
+    XHR.open = function (this: any, _method: any, url: any) {
+      this.__btLocalUrl = isLocal(url);
+
+      // eslint-disable-next-line prefer-rest-params
+      return (open as any).apply(this, arguments as any);
+    } as any;
+
+    XHR.send = function (this: any) {
+      const url = this.__btLocalUrl;
+
+      if (url) {
+        this.addEventListener('error', () => recordLocal('network', url, 'Network request failed: ' + url));
+      }
+
+      // eslint-disable-next-line prefer-rest-params
+      return (sendXhr as any).apply(this, arguments as any);
+    } as any;
+  }
+
   /* ---- console --------------------------------------------------------------------------- */
 
   const LEVELS = ['log', 'info', 'warn', 'error', 'debug'];

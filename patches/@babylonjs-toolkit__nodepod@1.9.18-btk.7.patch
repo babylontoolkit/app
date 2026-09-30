@@ -1,0 +1,96 @@
+diff --git a/dist/__sw__.js b/dist/__sw__.js
+index cc309cf67de7e22b63706376849c9eb569c9b3a4..6ba060586b564e9332edf2e24b56f3e05dd2b3c6 100644
+--- a/dist/__sw__.js
++++ b/dist/__sw__.js
+@@ -23,7 +23,7 @@
+  * tab's port and you'd get "No server on {instanceId}/{port}" 503s.
+  */
+ 
+-const SW_VERSION = 14;
++const SW_VERSION = 15;
+ const DEFAULT_INSTANCE = "default";
+ 
+ let nextId = 1;
+@@ -135,6 +135,21 @@ function untrackInstanceServer(instanceId, serverPort) {
+   if (set.size === 0) instanceServers.delete(instanceId);
+ }
+ 
++// A localhost-alias URL belongs to the pod only on the app's own port or a port a live
++// virtual server registered. When the registry is empty (service worker restarted and
++// not yet re-told), keep the old forwarding so previews never break.
++function isPodOrSelfPort(url) {
++  const defaultPort = (u) => (u.protocol === "https:" ? 443 : 80);
++  const port = Number(url.port || defaultPort(url));
++  const selfPort = Number(self.location.port || defaultPort(self.location));
++  if (url.hostname === self.location.hostname && port === selfPort) return true;
++  if (instanceServers.size === 0) return true;
++  for (const ports of instanceServers.values()) {
++    if (ports.has(port)) return true;
++  }
++  return false;
++}
++
+ // Last-resort pod for iframe document navigations when the SW has no claims
+ // (fresh SW state after an update). Only unambiguous cases resolve: a single
+ // live server, or the last pod a preview actually used.
+@@ -714,6 +729,21 @@ function onPortMessage(event, mp) {
+ //   5. iframe navigation via pathClaims, or recovery after SW update wiped state
+ // everything else passes through untouched — no synthetic errors on misses.
+ 
++// A host passthrough must fail exactly like the network fails — but QUIETLY.
++// These fetches run inside respondWith(), so a rejected fetch escapes as
++// "Uncaught (in promise) TypeError: Failed to fetch" attributed to this
++// worker. The common trigger is the HOST app's own dev server going down or
++// restarting while a tab is open: Vite's HMR client then polls the origin
++// once per second (waitForSuccessfulPing), and every poll dumped an uncaught
++// error + stack on top of the browser's own net::ERR_FAILED line — hundreds
++// of console errors for one ordinary restart. Response.error() surfaces the
++// identical network failure to the page without the unhandled rejection.
++// Never substitute a synthetic HTTP response here: Vite's ping treats ANY
++// response as "server is back" and reloads into a server that is still dead.
++function hostPassthrough(request) {
++  return fetch(request).catch(() => Response.error());
++}
++
+ self.addEventListener("fetch", (event) => {
+   const request = event.request;
+   const url = new URL(request.url);
+@@ -773,13 +803,16 @@ self.addEventListener("fetch", (event) => {
+   }
+ 
+   // 2. only same-origin (and localhost-alias) URLs can belong to a pod;
+-  //    cross-origin (fonts, CDNs) always passes through
+-  const sameOrigin =
++  //    cross-origin (fonts, CDNs) always passes through.
++  //    A localhost-alias URL on a port the pod does not serve is ANOTHER local server
++  //    (e.g. a Unity dev server on :8888) and must reach the real network.
++  const localAlias =
+     url.hostname === "localhost" ||
+     url.hostname === "127.0.0.1" ||
+-    url.hostname === "0.0.0.0" ||
+-    url.hostname === self.location.hostname;
++    url.hostname === "0.0.0.0";
++  const sameOrigin = localAlias || url.hostname === self.location.hostname;
+   if (!sameOrigin) return;
++  if (localAlias && !isPodOrSelfPort(url)) return;
+ 
+   // 3. known preview client — self-claim registered clientId before page code ran
+   if (clientId && previewClients.has(clientId)) {
+@@ -850,7 +883,7 @@ self.addEventListener("fetch", (event) => {
+             }
+           }
+           if (client && client.frameType === "top-level") {
+-            return fetch(request);
++            return hostPassthrough(request);
+           }
+           if (!pod && client && client.url) {
+             try {
+@@ -860,7 +893,7 @@ self.addEventListener("fetch", (event) => {
+               pod = null;
+             }
+           }
+-          if (!pod) return fetch(request);
++          if (!pod) return hostPassthrough(request);
+           adoptPreviewClient(clientId, pod);
+           const path = stripPreviewPrefix(url.pathname) + url.search;
+           return proxyToVirtualServer(request, pod.instanceId, pod.serverPort, path, request);

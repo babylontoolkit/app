@@ -55,6 +55,7 @@ import {
   listLocalSnapshots,
 } from '~/lib/persistence/local-snapshots';
 import { runCheckpointSerialize } from '~/lib/persistence/checkpoint-run';
+import { notifyRecoveryCopySkipped } from '~/lib/persistence/recovery-copy-notice';
 import { planTopUp, type TopUpCurrentSnapshot } from '~/lib/persistence/top-up-plan';
 import { writeWorkingCopyFromStore } from '~/lib/persistence/working-copy-writer';
 import { createScopedLogger } from '~/utils/logger';
@@ -267,6 +268,7 @@ async function push(reason: string): Promise<void> {
       logger.info(`Saved copies topped up for ${pid} at seq ${target.seq} (${reason})`);
     } else if (result === 'skipped-too-large') {
       logger.warn(`Working copy top-up skipped for ${pid}: project exceeds the client budget (${reason})`);
+      notifyRecoveryCopySkipped(pid!);
     } else if (result === 'failed') {
       logger.warn(`Working copy top-up failed for ${pid} (${reason})`);
     }

@@ -225,5 +225,10 @@
   "resolutions": {
     "@typescript-eslint/utils": "^8.0.0-alpha.30"
   },
-  "packageManager": "pnpm@9.14.4"
+  "packageManager": "pnpm@9.14.4",
+  "pnpm": {
+    "patchedDependencies": {
+      "@babylonjs-toolkit/nodepod@1.9.18-btk.7": "patches/@babylonjs-toolkit__nodepod@1.9.18-btk.7.patch"
+    }
+  }
 }

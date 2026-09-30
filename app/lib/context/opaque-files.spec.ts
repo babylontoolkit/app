@@ -43,6 +43,22 @@ describe('isOpaqueToModel', () => {
   });
 
   /*
+   * An exported glTF scene is generated JSON, often megabytes — no correct hand edit exists, and §4.9
+   * introspection already gives the model the component reference it needs.
+   */
+  it('public/scenes/Level01/Level01.gltf is opaque', () => {
+    expect(isOpaqueToModel('public/scenes/Level01/Level01.gltf')).toBe(true);
+  });
+
+  it('SCENE.GLTF upper-case is opaque', () => {
+    expect(isOpaqueToModel('SCENE.GLTF')).toBe(true);
+  });
+
+  it('src/game.ts stays visible (control)', () => {
+    expect(isOpaqueToModel('src/game.ts')).toBe(false);
+  });
+
+  /*
    * The other half of the contract, and the one that actually matters: everything the agent has to
    * READ to do its job must still reach it. Hiding `globals.ts` or `platform.tsx` would leave the
    * model guessing at the play contract — the exact failure §4.4c exists to prevent.

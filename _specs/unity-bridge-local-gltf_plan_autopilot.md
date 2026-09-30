@@ -33,3 +33,27 @@ Tasks:
 - T27 ✅ verified (independent) · 1 attempt · grant.spec 19/19; live grant 200 (12 h), unadvertised 403, 'xyz' 400; C# public constants proven to match the private key · BRIDGE_GRANT_PRIVATE_KEY in .env.local only (gitignored). Public constants: scratchpad automation-public-key.txt (also in T28's C#).
 - T23 implemented (verification pending) — the live helper paired and polled; UI approval deferred to Phase 7.
 - Environment blocker found (Phase 1 verifier): the pinned AppTemplate snapshot (3efa7061…) depends on `@babylonjs-toolkit/next@9.28.0`, which is not on npm (latest 9.25.1) → every NEW project fails `npm install`. T2's "a normal project preview still loads" could not be observed on a fresh project.
+- Decision (env blocker): live preview checks use a throwaway test project whose package.json `@babylonjs-toolkit/next` is edited to `9.25.1` inside the builder; the pinned template is NOT changed (owner step: publish 9.28.0 or roll the pin back).
+- Decision: T28 proceeds although T10 (a listed dependency) is deferred — T28 uses nothing T10 adds.
+- T1 ✅ verified (independent) · fork sw test 10/10; fork suite 1161 pass / 4 pre-existing nodepod-sab failures · Nodepod fork (uncommitted per D33)
+- T3 ✅ verified (independent) · 3 `allow` edits, wrapper untouched, opaque .gltf (55/55)
+- T4 ✅ verified (independent) · share.spec 73/73. Note: warning may false-positive if a starter README mentions http://localhost:5173/ — check at T25 publish step.
+- T2 static/tests PASS (patched sw byte-identical to fork, lockfile minimal, SW v15 live as controller); live "preview still loads" pending the 9.25.1 workaround.
+- T28 ✅ verified (independent) · 1 attempt · dotnet build 0 errors; live: malformed/tampered/wrong-project/expired refused, valid 1 h grant → on, parameterless overload a compile error, step-4 reset proven by reflection (wildcard licence dropped after DisableAutomation); automation left OFF · exporter repo (uncommitted per D33). Orchestrator restored one space the edit dropped in BabylonLicense.cs (`string lfile = Path.Combine`).
+- Decision (T28): the grant's project check compares against `AutomationProjectGuid()` (each ToByteArray() byte low-nibble-first = the text in ProjectSettings.asset), NOT `PlayerSettings.productGUID.ToString("N")` as the plan's Design Reference wrote — those differ (f435f3e6… vs 6e3f534f…) and the plan's form refused every valid grant. Discovery (T24) reads the .asset text, so all three sides agree.
+- Phase 5b complete.
+- T23 verified (independent, unit + live helper pairing, mutation-checked) — tick waits for its UI half (approve in the T21 dialog, cube icon shows the device) in the Phase 7 live session.
+- T7 ✅ verified (independent) · recovery-copy notice + GitHub 100 MB all-or-nothing refusal; persistence+git 1317 tests pass
+- T5 ✗ verifier FAIL (attempt 1): `app/lib/preview/install.ts` watchForErrors turns the new `resource`/`network` entries into a preview actionAlert → paid auto-repair could fire for a stopped local dev server (plan's file list missed install.ts). Explainer itself verified live (dialog once).
+- T6 ✗ verifier FAIL (attempt 1): scene URL basename decoded after splitting (`..%2F..%2Fsrc%2Fapp.tsx`) escapes public/scenes/<name>/.
+- Phase 6 implemented (T18–T20; prompt refreshed live, 5 new on-demand ids) — verification pending.
+- T18 ✅ verified (independent) · service.spec 17 (incl. the D13 cancel+timeout race → exactly one `bridge:<id>` refund), billing.spec 6, PGlite second-refund refusal
+- T19 ✅ verified (independent) · 9 bridge tools + import_local_scene; bridge tools only on 'all' toolset when online; bridgeLink from the project row
+- T20 ✅ verified (independent) · identity section verbatim; 5 on-demand docs live in the active prompt pv_20260930021930_93fb3836; notes after the last breakpoint (cache-breakpoints.spec unchanged)
+- Decision (T18): per-job in-process lock around row writes / onEvent / settleNotStarted (local FsLedger has no unique index; D5 = one instance).
+- Follow-ups taken after PASS: tool enum params → z.string() validated in execute (D17 over the plan's z.enum), and isSingleRefundNote widened to `bridge:` so the local ledger mirrors migration 0025.
+- T24/T25-code ✗ verifier FAIL (attempt 1): unvalidated server-supplied `jobId` flows into `.bridge/...` paths + recursive rm (scratch probe deleted `Assets/`). Fix sent back, together with a reserved-param-key rule (`--yes`/suffix-override injection) added to BOTH policy copies (D3 parity). Policy parity otherwise verified line-for-line; executors verified live (editor status, capture PNG, Blender output check).
+- T5 ✅ verified (fresh verifier, attempt 2) · explainer dialog shown once live; install.ts no longer turns resource/network entries into a paid preview alert (mutation-checked)
+- T6 ✅ verified (fresh verifier, attempt 2) · adversarial scene/URI set all contained under public/scenes/<name>/. Orchestrator follow-up: URIs with a scheme but no `://` (`https:evil.com/x`, `file:x`, `C:\x`) now skipped as absolute (+1 spec).
+- Phase 2 complete.
+- T24/T25-code fix in progress; Phase 7 implemented → live verifier running (also covers T23's UI half and T2's preview check).

@@ -23,7 +23,7 @@
  * tab's port and you'd get "No server on {instanceId}/{port}" 503s.
  */
 
-const SW_VERSION = 14;
+const SW_VERSION = 15;
 const DEFAULT_INSTANCE = "default";
 
 let nextId = 1;
@@ -133,6 +133,21 @@ function untrackInstanceServer(instanceId, serverPort) {
   if (!set) return;
   set.delete(serverPort);
   if (set.size === 0) instanceServers.delete(instanceId);
+}
+
+// A localhost-alias URL belongs to the pod only on the app's own port or a port a live
+// virtual server registered. When the registry is empty (service worker restarted and
+// not yet re-told), keep the old forwarding so previews never break.
+function isPodOrSelfPort(url) {
+  const defaultPort = (u) => (u.protocol === "https:" ? 443 : 80);
+  const port = Number(url.port || defaultPort(url));
+  const selfPort = Number(self.location.port || defaultPort(self.location));
+  if (url.hostname === self.location.hostname && port === selfPort) return true;
+  if (instanceServers.size === 0) return true;
+  for (const ports of instanceServers.values()) {
+    if (ports.has(port)) return true;
+  }
+  return false;
 }
 
 // Last-resort pod for iframe document navigations when the SW has no claims
@@ -788,13 +803,16 @@ self.addEventListener("fetch", (event) => {
   }
 
   // 2. only same-origin (and localhost-alias) URLs can belong to a pod;
-  //    cross-origin (fonts, CDNs) always passes through
-  const sameOrigin =
+  //    cross-origin (fonts, CDNs) always passes through.
+  //    A localhost-alias URL on a port the pod does not serve is ANOTHER local server
+  //    (e.g. a Unity dev server on :8888) and must reach the real network.
+  const localAlias =
     url.hostname === "localhost" ||
     url.hostname === "127.0.0.1" ||
-    url.hostname === "0.0.0.0" ||
-    url.hostname === self.location.hostname;
+    url.hostname === "0.0.0.0";
+  const sameOrigin = localAlias || url.hostname === self.location.hostname;
   if (!sameOrigin) return;
+  if (localAlias && !isPodOrSelfPort(url)) return;
 
   // 3. known preview client — self-claim registered clientId before page code ran
   if (clientId && previewClients.has(clientId)) {

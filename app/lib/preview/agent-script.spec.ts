@@ -418,3 +418,41 @@ describe('only the parent may drive the page', () => {
     expect(posted.slice(before).some((m) => (m as { id?: string }).id === 'evil')).toBe(false);
   });
 });
+
+/**
+ * 🔴 D27 — a scene loaded from the user's local Unity dev server fails as a REJECTED fetch inside the
+ * loader, which neither `error` nor `unhandledrejection` sees. The wrapper wraps whatever `window.fetch`
+ * is at eval time, so the failing fetch is installed BEFORE the script is evaluated.
+ */
+describe('local network failures', () => {
+  let savedFetch: typeof window.fetch;
+
+  beforeEach(() => {
+    savedFetch = window.fetch;
+    window.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch')) as unknown as typeof window.fetch;
+    runAgent();
+  });
+
+  afterEach(() => {
+    window.fetch = savedFetch;
+  });
+
+  it('a failed fetch to http://localhost:8888/x records a network entry', async () => {
+    await expect(window.fetch('http://localhost:8888/x')).rejects.toThrow('Failed to fetch');
+
+    const event = posted.find(
+      (m) => m.kind === 'event' && (m as { event?: string }).event === 'error' && (m as any).data?.type === 'network',
+    ) as any;
+
+    expect(event).toBeDefined();
+    expect(event.data.type).toBe('network');
+    expect(event.data.url).toBe('http://localhost:8888/x');
+  });
+
+  /* CONTROL — a non-local failure is not ours to explain, and must not be recorded as one. */
+  it('CONTROL: a failed fetch to a public host records nothing', async () => {
+    await expect(window.fetch('https://repo.babylontoolkit.com/x')).rejects.toThrow();
+
+    expect(posted.some((m) => (m as any).data?.type === 'network')).toBe(false);
+  });
+});

@@ -41,8 +41,8 @@ import type { FileMap } from '~/lib/stores/files';
  */
 const OPAQUE_DIRS = ['public/scripts/', '.codesandbox/'];
 
-/** Image assets that happen to be text. Their PNG/JPG siblings are already opaque by being binary. */
-const OPAQUE_EXTENSIONS = ['.svg'];
+/** Image assets that happen to be text, and exported glTF scene JSON (generated, often megabytes — §4.9 introspection gives the model what it needs). */
+const OPAQUE_EXTENSIONS = ['.svg', '.gltf'];
 
 /**
  * Exact root-relative paths that are in the project but never in the conversation:
