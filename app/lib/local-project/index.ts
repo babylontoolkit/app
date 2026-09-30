@@ -230,9 +230,9 @@ export async function chooseProjectsFolder(): Promise<boolean> {
   try {
     await projectsRoot(picked);
   } catch (error) {
-    logger.error(`Could not create the Web and Unity folders in ${picked.name}`, error);
+    logger.error(`Could not create the Apps and Unity folders in ${picked.name}`, error);
     toast.error(
-      `Could not create the Web and Unity folders in ${picked.name}: ${(error as Error)?.message ?? 'unknown error'}`,
+      `Could not create the Apps and Unity folders in ${picked.name}: ${(error as Error)?.message ?? 'unknown error'}`,
     );
   }
   localProjectState.set({ kind: 'connected', folderName: picked.name });
