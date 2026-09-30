@@ -1501,7 +1501,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
     → all pass.
   - Verify level: standard
 
-- [ ] **T2** — Carry the service-worker fix into the app as a pnpm patch
+- [x] **T2** — Carry the service-worker fix into the app as a pnpm patch
   - Depends on: T1
   - Files: `patches/@babylonjs-toolkit__nodepod@1.9.18-btk.7.patch` (create via pnpm), `package.json`,
     `pnpm-lock.yaml`, `public/__sw__.js` (modify via sync)
