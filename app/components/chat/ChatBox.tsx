@@ -22,6 +22,7 @@ import type { DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import { brand } from '~/config/brand';
 import { McpTools } from './MCPTools';
+import { UnityBridgeButton } from '~/components/unity-bridge/UnityBridgeButton';
 import { WebSearch } from './WebSearch.client';
 import { SkillAutocompleteMenu, useSkillAutocomplete } from './SkillAutocomplete';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
@@ -354,6 +355,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
              * mean unpicking the prop chain for a control the owner does not want surfaced.
              */}
             {false && <ColorSchemeDialog designScheme={props.designScheme} setDesignScheme={props.setDesignScheme} />}
+            <UnityBridgeButton />
             <McpTools />
             <IconButton title="Upload file" className="transition-all" onClick={() => props.handleFileUpload()}>
               <div className="i-ph:paperclip text-xl"></div>

@@ -48,6 +48,9 @@ import { baseEffortStore, effortPanelOpen } from '~/lib/stores/effort';
 import { chatResetRequest } from '~/lib/stores/chat-reset';
 import { resetAgentStatus, updateAgentStatus } from '~/lib/stores/agent-status';
 import { resetActiveSkills, updateActiveSkills } from '~/lib/stores/active-skills';
+import { beginBridgeScan, updateBridgeFromPart } from '~/lib/stores/unity-bridge';
+import { handleLocalSceneCall } from '~/lib/local-scenes/import';
+import { readLocalSceneServer } from '~/lib/local-scenes/origin';
 import { createSampler } from '~/utils/sampler';
 import { createProjectFromRegistry } from '~/lib/registry/create-project';
 import { requestSignIn } from '~/lib/stores/auth-gate';
@@ -685,6 +688,17 @@ export const ChatImpl = memo(
         toolkitSystems,
 
         /*
+         * The user's local Unity dev-server origin (D38), saved per project in the Local scenes section.
+         * The client knows no scene list — that only ever comes from the helper's own report.
+         */
+        localSceneServer: activeProjectId
+          ? (() => {
+              const o = readLocalSceneServer(activeProjectId);
+              return o ? { origin: o } : undefined;
+            })()
+          : undefined,
+
+        /*
          * The whole file tree was replaced since the last turn (§4.13a — a branch switch, a discard,
          * a pull). Suppresses INV-3(b)'s manifest-shrink signal for exactly one turn: a switch from a
          * 90-file feature branch to a 60-file default is that signal's exact shape and it is correct.
@@ -1086,6 +1100,9 @@ export const ChatImpl = memo(
         return;
       }
 
+      // Unity Bridge job lines are deduped by count per scan of this (replayed) array.
+      beginBridgeScan();
+
       for (const part of chatData) {
         if (!part || typeof part !== 'object') {
           continue;
@@ -1185,6 +1202,43 @@ export const ChatImpl = memo(
               }),
             }).catch(() => undefined);
           })();
+
+          continue;
+        }
+
+        /*
+         * Unity Bridge consent requests and job rows (§4.17). Replay-safe: a consent is keyed by its
+         * tool-call id and job lines are deduped by count, so re-presented parts change nothing.
+         */
+        if (call.type === 'bridge-consent' || call.type === 'bridge-job') {
+          updateBridgeFromPart(part);
+          continue;
+        }
+
+        /*
+         * `import_local_scene` (D22) — the browser fetches the scene from the user's local dev server and
+         * writes it into the project, then posts the outcome back. Same dedupe latch as the preview relay.
+         */
+        const sceneCall = part as {
+          type?: string;
+          generationId?: string;
+          toolCallId?: string;
+          url?: string;
+          overwrite?: boolean;
+        };
+
+        if (sceneCall.type === 'local-scene-call' && sceneCall.toolCallId && sceneCall.generationId && sceneCall.url) {
+          if (handledToolCalls.current.has(sceneCall.toolCallId)) {
+            continue;
+          }
+
+          handledToolCalls.current.add(sceneCall.toolCallId);
+          void handleLocalSceneCall({
+            generationId: sceneCall.generationId,
+            toolCallId: sceneCall.toolCallId,
+            url: sceneCall.url,
+            overwrite: sceneCall.overwrite === true,
+          });
 
           continue;
         }

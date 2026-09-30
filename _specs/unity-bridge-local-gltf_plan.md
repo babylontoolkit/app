@@ -3047,7 +3047,7 @@ async function ensureAutomation(project, { api, runUnity, now = Date.now, log })
 
 ### Phase 7 — Unity Bridge UI
 
-- [ ] **T21** — Client store, the Unity icon, the Connect dialog, and the shared Local scenes section
+- [x] **T21** — Client store, the Unity icon, the Connect dialog, and the shared Local scenes section
   - Depends on: T17, T5, T6
   - Files: `app/lib/stores/unity-bridge.ts` (create) + spec; `app/components/unity-bridge/UnityBridgeButton.tsx`,
     `UnityBridgeConnectDialog.tsx` (create) + `UnityBridgeButton.spec.tsx`;
@@ -3236,7 +3236,7 @@ unless they start with `app/` (the app repo). House rules for every file here (D
 The existing suite runs with `npm test` (`node --test tests/*.test.js`). D33 applies: edit the working tree
 only, never commit.
 
-- [ ] **T23** — Desktop Agent bridge core: the `bridge` command, config, pairing, poll loop, logout
+- [x] **T23** — Desktop Agent bridge core: the `bridge` command, config, pairing, poll loop, logout
   - Depends on: T17, T14
   - Files: `lib/bridge/cli.js`, `args.js`, `config.js`, `api.js`, `pairing.js`, `loop.js`, `log.js`,
     `protocol.js` (create); `bin/bt-agent.js`, `lib/doctor.js`, `README.md` (modify);

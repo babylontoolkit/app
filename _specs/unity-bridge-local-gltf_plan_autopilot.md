@@ -57,3 +57,12 @@ Tasks:
 - T6 ✅ verified (fresh verifier, attempt 2) · adversarial scene/URI set all contained under public/scenes/<name>/. Orchestrator follow-up: URIs with a scheme but no `://` (`https:evil.com/x`, `file:x`, `C:\x`) now skipped as absolute (+1 spec).
 - Phase 2 complete.
 - T24/T25-code fix in progress; Phase 7 implemented → live verifier running (also covers T23's UI half and T2's preview check).
+- T24/T25-code ✅ fixes verified (fresh verifier, attempt 2): unsafe jobIds dropped before any path is built (probe: Assets survives); unity.command params placed after `--` (live: `-- --yes true` is an unknown PARAMETER, CLI stays JSON) + RESERVED_PARAM_KEYS in both policy copies. helper npm test 115/115. Ticks for T24/T25 wait on the agent-driven live runs in the end-to-end session.
+- Commits: c0c3e1b5 (T1–T7), 0dc2fc15 (T18–T20 + validate reserved keys).
+- T26 drafted (SPEC §3/§4.4c/§4.5.4d/§4.6/§4.8/§4.17/§4.18a/§5/§8/§10, CLAUDE.md, spec/billing.md, spec/sandbox-nodepod.md + sweep fixes in spec/fail-loud.md, spec/hosting.md) — verification after the end-to-end run.
+- Note for the owner: `pnpm.patchedDependencies` in package.json is honoured by the pinned pnpm 9.14.4 (lockfile carries patch_hash) but a global pnpm ≥10 warns it is ignored — move it to pnpm-workspace.yaml when pnpm is upgraded, or the SW fix silently disappears on install.
+- T21 ✅ verified (independent, live) · icon left of MCP; Connect dialog with Local scenes first + `--server http://localhost:5173` command; pairing via the dialog; link → green icon
+- T23 ✅ verified (UI half live in the Phase 7 session: code approved in the dialog, device listed online)
+- T22: unit + live PASS for Status panel (versions, scripts toggle persists), Local-scene import (sha256-identical to the dev server), Jobs panel; Allow/Deny round trip + jobs updating mid-export need a model turn → tick waits for the T25 end-to-end session.
+- T2 live ✗ blocked: in a fresh project (next@9.25.1 workaround) `npm run dev` fails in the sandbox — "[offload] WorkerPool is broken — Worker construction failed" → vite.config load error. Running an old-SW vs new-SW A/B to rule T2 in/out.
+- Slips (T21): "Blender Blender 5.1.2 found" doubled word; new device appears only on the next 20 s poll after Approve.
