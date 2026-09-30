@@ -410,7 +410,7 @@ export default function FeaturesTab() {
           <div>
             <h3 className="text-lg font-medium text-bolt-elements-textPrimary">Where your projects live</h3>
             <p className="text-sm text-bolt-elements-textSecondary">
-              A folder on this computer that holds every project you open here. Web apps are kept in its Web folder and
+              A folder on this computer that holds every project you open here. Apps are kept in its Apps folder and
               Unity projects in its Unity folder.
             </p>
           </div>

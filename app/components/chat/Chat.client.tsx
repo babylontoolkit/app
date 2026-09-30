@@ -2289,7 +2289,7 @@ export const ChatImpl = memo(
         /*
          * 🔴 PUT THE PROJECT ON THE USER'S DISK, from jump street (§4.5.4d, owner 2026-09-15). The
          * starter is mounted and verified; if this browser has a projects folder, the project gets
-         * `<folder>/Web/<slug>/` now and every later change is written through. Fire-and-forget with the
+         * `<folder>/Apps/<slug>/` now and every later change is written through. Fire-and-forget with the
          * same posture as the checkpoint above: the disk is the extra copy, and a disk that cannot be
          * written (it says so, loudly) must never make a created project read as not created.
          */

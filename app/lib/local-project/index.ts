@@ -223,9 +223,9 @@ export async function chooseProjectsFolder(): Promise<boolean> {
   parentHandle = picked;
 
   /*
-   * D61: the user sees `Web/` and `Unity/` the moment they choose the folder. Nothing else in it is
+   * D61: the user sees `Apps/` and `Unity/` the moment they choose the folder. Nothing else in it is
    * touched. A failure is loud but does not un-choose the folder — the next project door retries the
-   * same helper, since `findProjectFolder` / `createProjectFolder` resolve `Web/` through it too.
+   * same helper, since `findProjectFolder` / `createProjectFolder` resolve `Apps/` through it too.
    */
   try {
     await projectsRoot(picked);

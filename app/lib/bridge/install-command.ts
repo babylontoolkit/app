@@ -5,7 +5,7 @@
  *
  * D59: the helper's projects folder is REQUIRED — the helper runs as a start-at-login service, so "wherever the
  * command happened to run" is not a folder anyone chose. D61: the field holds the user's App Builder projects
- * folder (the one they picked in the App Builder, which holds `Web/` and `Unity/`), and the command points the
+ * folder (the one they picked in the App Builder, which holds `Apps/` and `Unity/`), and the command points the
  * helper at its `Unity` subfolder (the helper creates it if missing). A browser folder picker cannot supply a full
  * path, so the dialog takes a typed one. Blank → no command at all; a path the quoted flag cannot carry (a `"`, a
  * line break, or a `$`/backtick that a shell would expand inside double quotes) → a sentence, never a broken

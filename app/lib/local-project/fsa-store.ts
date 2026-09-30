@@ -264,8 +264,8 @@ async function markerOf(dir: LocalDirectoryHandle, options: ProjectFolderOptions
 }
 
 /**
- * Find THIS project's folder in the projects folder's `Web/` subfolder (D61), by MARKER — never by
- * name. `parent` is the folder the user picked; `Web/` and `Unity/` are created in it if missing, and
+ * Find THIS project's folder in the projects folder's `Apps/` subfolder (D61), by MARKER — never by
+ * name. `parent` is the folder the user picked; `Apps/` and `Unity/` are created in it if missing, and
  * nothing at its top level is ever looked at. Tries the slug first (the common case, one read), then
  * every subfolder's marker (a rename, or a project created before the slug rule changed).
  * `undefined` = no folder on this disk belongs to the project.
@@ -276,12 +276,12 @@ export async function findProjectFolder(
   name: string | undefined,
   options: ProjectFolderOptions,
 ): Promise<ProjectFolder | undefined> {
-  const { web } = await projectsRoot(parent);
+  const { apps } = await projectsRoot(parent);
 
-  return findProjectFolderIn(web, projectId, name, options);
+  return findProjectFolderIn(apps, projectId, name, options);
 }
 
-/** The lookup itself, inside an already-resolved `Web/`. */
+/** The lookup itself, inside an already-resolved `Apps/`. */
 async function findProjectFolderIn(
   parent: LocalDirectoryHandle,
   projectId: string,
@@ -319,7 +319,7 @@ async function findProjectFolderIn(
 }
 
 /**
- * Create the project's folder in the projects folder's `Web/` subfolder (D61): the slug, or `slug-2`,
+ * Create the project's folder in the projects folder's `Apps/` subfolder (D61): the slug, or `slug-2`,
  * `slug-3`… when a folder of that name already exists there and is NOT this project's (a marker naming
  * another project, or no marker at all — a folder we did not make is never adopted, for the same
  * reason Save never adopts a repo). `pickedFolder` is the folder the user picked.
@@ -330,7 +330,7 @@ export async function createProjectFolder(
   name: string | undefined,
   options: ProjectFolderOptions,
 ): Promise<ProjectFolder> {
-  const { web: parent } = await projectsRoot(pickedFolder);
+  const { apps: parent } = await projectsRoot(pickedFolder);
   const existing = await findProjectFolderIn(parent, projectId, name, options);
 
   if (existing) {

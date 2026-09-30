@@ -6,7 +6,7 @@
  * Unity CLI ready and Blender CLI ready."
  *
  *   - Not online → a required **Your App Builder projects folder** field (D59 + D61: the folder picked in the
- *     App Builder, which holds `Web/` and `Unity/`; the last typed path is remembered per browser), then ONE
+ *     App Builder, which holds `Apps/` and `Unity/`; the last typed path is remembered per browser), then ONE
  *     command with a freshly minted single-use install code built in:
  *       npx @babylonjs-toolkit/agent bridge --install-service --pair XXXX-XXXX --projects "<folder>/Unity" [--server <this origin>]
  *     No command (and no Copy) until the folder is filled. `--server` is added only when this page is not the

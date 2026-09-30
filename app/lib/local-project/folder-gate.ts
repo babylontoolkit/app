@@ -124,7 +124,7 @@ export function folderGateCopy(request: FolderGateRequest): FolderGateCopy {
         title: 'Where should your projects live?',
         detail: `Your projects are kept in a folder on this computer, so they stay real files you can open in your own editor, back up, or push to GitHub. Choose that folder to ${
           intent === 'create' ? 'create this project' : 'open this project'
-        }. Web apps are kept in its Web folder and Unity projects in its Unity folder. You can change it any time in Settings.`,
+        }. Apps are kept in its Apps folder and Unity projects in its Unity folder. You can change it any time in Settings.`,
         primary: 'Choose a folder on this computer',
         ...secondary,
       };
