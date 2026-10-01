@@ -14,7 +14,9 @@ import { deliverClientToolResult } from './mcp-relay';
 import { MAX_SCREENSHOT_BASE64 } from './preview-tools';
 import {
   checkBreakerTripped,
+  completeTodosOnDone,
   createWorkspaceTools,
+  finalizeTodos,
   newWorkspaceTurnState,
   PLAN_ONLY_REFUSAL,
   summarizeWorkspace,
@@ -592,5 +594,63 @@ describe('a passing check asks for the checklist to be ticked (T9 re-attempt)', 
 
   it('no todos → no hint', async () => {
     expect(await verdictOf(passing, null)).not.toContain(TODO_TICK_HINT);
+  });
+});
+
+describe('finalizeTodos / completeTodosOnDone — no unchecked items on a finished turn (T9)', () => {
+  const open: TodoItem[] = [
+    { content: 'a', status: 'completed' },
+    { content: 'b', status: 'in_progress' },
+    { content: 'c', status: 'pending' },
+  ];
+
+  it('ended done: every pending / in_progress item becomes completed, order and text kept', () => {
+    expect(finalizeTodos(open, true)).toEqual([
+      { content: 'a', status: 'completed' },
+      { content: 'b', status: 'completed' },
+      { content: 'c', status: 'completed' },
+    ]);
+
+    /* Pure: the input is untouched. */
+    expect(open[1].status).toBe('in_progress');
+  });
+
+  it('CONTROL: a turn that stopped short keeps its open items — the same list back', () => {
+    expect(finalizeTodos(open, false)).toBe(open);
+  });
+
+  it('an empty list and an all-completed list come back unchanged', () => {
+    const empty: TodoItem[] = [];
+    const done: TodoItem[] = [{ content: 'a', status: 'completed' }];
+
+    expect(finalizeTodos(empty, true)).toBe(empty);
+    expect(finalizeTodos(done, true)).toBe(done);
+  });
+
+  it('completeTodosOnDone emits once on a real change and updates the state the summary reads', () => {
+    const state = newWorkspaceTurnState();
+    state.todos = open.map((t) => ({ ...t }));
+
+    const emitted: TodoItem[][] = [];
+
+    expect(completeTodosOnDone(state, true, (items) => emitted.push(items))).toBe(true);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].every((t) => t.status === 'completed')).toBe(true);
+    expect(state.todos.every((t) => t.status === 'completed')).toBe(true);
+
+    /* Already complete: no extra emit. */
+    expect(completeTodosOnDone(state, true, (items) => emitted.push(items))).toBe(false);
+    expect(emitted).toHaveLength(1);
+  });
+
+  it('completeTodosOnDone never emits for a stopped turn or an empty list', () => {
+    const emitted: TodoItem[][] = [];
+    const stopped = newWorkspaceTurnState();
+    stopped.todos = open.map((t) => ({ ...t }));
+
+    expect(completeTodosOnDone(stopped, false, (items) => emitted.push(items))).toBe(false);
+    expect(stopped.todos[2].status).toBe('pending');
+    expect(completeTodosOnDone(newWorkspaceTurnState(), true, (items) => emitted.push(items))).toBe(false);
+    expect(emitted).toEqual([]);
   });
 });

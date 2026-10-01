@@ -57,6 +57,7 @@ import {
 import {
   createWorkspaceTools,
   checkBreakerTripped,
+  completeTodosOnDone,
   doneGateWriteFacts,
   newWorkspaceTurnState,
   summarizeWorkspace,
@@ -984,8 +985,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   /*
    * 🔴 THE TOOL LOOP (tool-loop plan D2) — resolved ONCE, here, and read everywhere below. A platform
-   * kill switch (`AGENT_TOOL_LOOP`), off unless exactly `'true'`: with it off this request runs today's
-   * code path byte for byte.
+   * kill switch (`AGENT_TOOL_LOOP`), ON BY DEFAULT since 2026-09-30 (owner); exactly `'false'` turns it
+   * off, and with it off this request runs the legacy `<boltArtifact>` code path byte for byte.
    */
   const loopCfg = resolveToolLoopConfig(request.context);
   const toolLoop = loopCfg.enabled;
@@ -1882,6 +1883,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
   const workspaceListeners: Array<(event: WorkspaceToolCallEvent) => void> = [];
   const todoListeners: Array<(items: TodoItem[]) => void> = [];
+  const emitTodosToListeners = (items: TodoItem[]) => {
+    for (const listener of todoListeners) {
+      listener(items);
+    }
+  };
 
   /*
    * The workspace tools (D1). Built only with the loop on (empty otherwise), and spread into every
@@ -1899,11 +1905,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
             listener(event);
           }
         },
-        emitTodos: (items) => {
-          for (const listener of todoListeners) {
-            listener(items);
-          }
-        },
+        emitTodos: emitTodosToListeners,
         overlay,
         state: wsState,
         planOnly: discussNote !== null,
@@ -3015,6 +3017,14 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
                 ('reason' in decision ? ` (${decision.reason})` : '') +
                 ('compact' in decision && decision.compact ? ' (compact carry)' : ''),
             );
+          },
+
+          /*
+           * T9 (owner): a FINISHED turn leaves no unchecked items — the platform completes the list and
+           * emits it while the stream is still open. Only on `done`; a stop keeps its open items.
+           */
+          onDone: () => {
+            completeTodosOnDone(wsState, true, emitTodosToListeners);
           },
         });
       } else if (shouldForceContinuation({ finishReason, lastStepToolCalls })) {

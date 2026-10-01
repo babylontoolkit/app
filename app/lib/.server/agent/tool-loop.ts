@@ -8,8 +8,10 @@
  * proxy runs against the real `streamText`, since `runAgentGeneration` cannot be built in a unit test.
  *
  * `AGENT_TOOL_LOOP` is a PLATFORM kill switch, resolved ONCE per request right after the credit gate.
- * Until T10 it is on only when the value is exactly `'true'`, so with it unset the proxy is byte-for-byte
- * today's code path.
+ * ON BY DEFAULT since 2026-09-30 (owner, T10): unset, empty or any other value runs the tool loop, and
+ * ONLY the exact value `'false'` turns it off — restoring the legacy `<boltArtifact>` path byte-for-byte.
+ * An empty value is read as "unset" (on), because `AGENT_TOOL_LOOP=` in a copied `.env` is a blank, not
+ * a decision; the kill switch has to be typed.
  *
  * Every number is FLOORED, never trusted: `Number('0')` and `Number('-1')` parse, and a zero segment
  * budget does not build less — it ends every turn before a single write (the `budgets.ts` rule).
@@ -33,7 +35,7 @@ export interface ToolLoopConfig {
 }
 
 export const DEFAULT_TOOL_LOOP_CONFIG: ToolLoopConfig = {
-  enabled: false,
+  enabled: true,
   segmentSteps: 40,
   maxSegments: 6,
   turnMaxCredits: 2500,
@@ -69,7 +71,7 @@ export function resolveToolLoopConfig(context: unknown): ToolLoopConfig {
   const d = DEFAULT_TOOL_LOOP_CONFIG;
 
   return {
-    enabled: env(context, 'AGENT_TOOL_LOOP') === 'true',
+    enabled: env(context, 'AGENT_TOOL_LOOP') !== 'false',
     segmentSteps: numberSetting(context, 'AGENT_SEGMENT_STEPS', d.segmentSteps, FLOORS.segmentSteps),
     maxSegments: numberSetting(context, 'AGENT_MAX_SEGMENTS', d.maxSegments, FLOORS.maxSegments),
     turnMaxCredits: numberSetting(context, 'AGENT_TURN_MAX_CREDITS', d.turnMaxCredits, FLOORS.turnMaxCredits),
@@ -357,6 +359,13 @@ export interface RunToolLoopSegmentsInput<C, R extends ToolLoopSegmentRun> {
   /** Applied to a finished segment's response messages before they are re-sent (`stripReplayedReasoning`). */
   prepareCarried?: (messages: CoreMessage[]) => CoreMessage[];
   onDecision?: (decision: SegmentDecision, state: ToolLoopTurnState) => void;
+
+  /**
+   * The turn FINISHED — the decision was `done`, never a stop. Called before the runner returns, while
+   * the response stream is still open, so anything it emits reaches the client (T9: the platform
+   * completes the checklist here). Never called on a stop of any kind.
+   */
+  onDone?: () => void;
 }
 
 /**
@@ -384,6 +393,7 @@ export async function* runToolLoopSegments<C, R extends ToolLoopSegmentRun>(
     input.onDecision?.(decision, state);
 
     if (decision.kind === 'done') {
+      input.onDone?.();
       return;
     }
 

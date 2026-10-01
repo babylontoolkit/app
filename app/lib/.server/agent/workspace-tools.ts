@@ -189,6 +189,51 @@ export function todoNudgeFor(state: WorkspaceTurnState, planOnly: boolean): stri
   return TODO_NUDGE;
 }
 
+/**
+ * The checklist at the end of a turn (tool-loop plan T9, owner 2026-09-30: "i dont want unchecked items").
+ *
+ * The model calls `update_todos` inconsistently and almost never ticks its last items, so a FINISHED
+ * turn used to leave a half-unchecked list on screen beside "Your game is ready". When the segment
+ * decision was `done` — the model ended its turn and the done-gate is satisfied (verified, or nothing
+ * that needs verifying was written) — every item not `completed` is completed by the platform.
+ *
+ * A turn that STOPPED short (ceiling, segments, breaker, a user Stop) keeps its open items exactly as
+ * they are: they are the real remaining work, shown next to Keep building. Ticking them there would be
+ * claiming work that did not happen.
+ *
+ * Pure. Returns the SAME array when nothing changes (stopped, empty, or already all completed), so a
+ * caller can emit only on a real change; otherwise a new list of new items.
+ */
+export function finalizeTodos(todos: TodoItem[], endedDone: boolean): TodoItem[] {
+  if (!endedDone || todos.every((t) => t.status === 'completed')) {
+    return todos;
+  }
+
+  return todos.map((t) => ({ content: t.content, status: 'completed' as const }));
+}
+
+/**
+ * Apply `finalizeTodos` to the turn's state and emit the completed list as an `agent-todos` part, so the
+ * live checklist ticks. The persisted `agentWorkspace` summary is built from `state.todos` afterwards,
+ * so it carries the completed list too. Returns whether anything was emitted.
+ */
+export function completeTodosOnDone(
+  state: WorkspaceTurnState,
+  endedDone: boolean,
+  emitTodos: (items: TodoItem[]) => void,
+): boolean {
+  const next = finalizeTodos(state.todos, endedDone);
+
+  if (next === state.todos) {
+    return false;
+  }
+
+  state.todos = next;
+  emitTodos(next.map((item) => ({ ...item })));
+
+  return true;
+}
+
 /** The nudge as a trailing line of a tool result. */
 function nudgeLine(state: WorkspaceTurnState, planOnly: boolean): string {
   const line = todoNudgeFor(state, planOnly);

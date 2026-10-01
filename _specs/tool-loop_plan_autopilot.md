@@ -47,3 +47,13 @@ Command: `/bt-execute --auto-pilot @_specs/tool-loop_plan.md ALL` (TIME MATTERS)
 - Final deferred pass: T9 (live todo ticking — model-behaviour; owner call on auto-completing) and T10 (default-on flag — permission classifier; owner call) both still need the owner. No further automated action possible.
 
 ## Run 1 — ended 2026-09-30 (≈ 23:30) — 9/11 complete, 2 deferred
+
+## Run 2 — 2026-09-30 (owner decisions)
+- Owner: "YES TOOL LOOP ON BY DEFAULT … i actually never want to run everything in one request like that ever again" → T10 default flip approved. Kill switch `AGENT_TOOL_LOOP=false` kept (D16).
+- Owner on T9: "i dont want unchecked items" → decision: when a turn ends `done` (the model finished and the done-gate is satisfied), any todo not completed is marked completed server-side and re-emitted; a turn that STOPPED short (budget/segments/breaker/aborted) keeps its open items — they are the real remaining work, next to Keep building.
+- Run 2 build: T10 default ON (`!== 'false'`), T9 completeTodosOnDone on `done`; gates 404 files / 8716 green; live gen_muos5uc6_6msukf checklist all ticked live + after reload (model ticked them itself that turn). Verifier launched.
+- MARGIN FINDING for the owner (not a plan defect): across all 16 tool-loop turns, 1,113 credits charged (≈ $11.13 at $0.01/credit) vs $13.00 raw cost. Per-step prefix hashes are identical, yet Comet misses the cache on many steps (gen_muos5uc6_6msukf: steps 4–8 each re-wrote ~80k at 2×) — gateway per-backend warmth. The owner's cache-neutral billing rule (gate.ts billedUsage: creation priced at read rate) correctly makes the platform absorb it, so tool-loop turns are currently below cost on Comet. Pricing/provider decision — not changed unattended.
+- T9 ✅ T10 ✅ PASS (Run 2, independent verifier): default ON (`!== 'false'`), no spec depends on the ambient flag (CI-simulated with `AGENT_TOOL_LOOP=` and `=false`: 1998/1998 both); completeTodosOnDone only on `done`, relay-tested with a stopped-turn control; docs updated; gates 404 files / 8716 green. Prompt re-refreshed: pv_20261001002119_b5babc81. Records-only: a turn ending `done` on finishReason length/error (no tool calls) also gets its list completed.
+- `app/lib/.server/prompt/sections/00-platform-identity.md` was edited outside this plan ("never hand a GUI step back" → "never hand a step back") — left uncommitted for its author.
+
+## Run 2 — ended 2026-10-01 — 11/11 complete. Plan finished.

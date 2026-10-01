@@ -51,9 +51,9 @@ afterEach(() => {
 });
 
 describe('resolveToolLoopConfig', () => {
-  it('defaults with every AGENT_* var unset — and the loop is OFF', () => {
+  it('defaults with every AGENT_* var unset — and the loop is ON (owner, 2026-09-30)', () => {
     expect(resolveToolLoopConfig({})).toEqual({
-      enabled: false,
+      enabled: true,
       segmentSteps: 40,
       maxSegments: 6,
       turnMaxCredits: 2500,
@@ -63,20 +63,22 @@ describe('resolveToolLoopConfig', () => {
     expect(resolveToolLoopConfig({})).toEqual(DEFAULT_TOOL_LOOP_CONFIG);
   });
 
-  it("enables only on exactly 'true'", () => {
-    expect(resolveToolLoopConfig(ctx({ AGENT_TOOL_LOOP: 'true' })).enabled).toBe(true);
+  it("the kill switch is exactly 'false' — the legacy artifact path", () => {
+    expect(resolveToolLoopConfig(ctx({ AGENT_TOOL_LOOP: 'false' })).enabled).toBe(false);
+  });
 
-    for (const value of ['1', 'yes', 'TRUE', 'false', '']) {
-      expect(resolveToolLoopConfig(ctx({ AGENT_TOOL_LOOP: value })).enabled).toBe(false);
+  it("CONTROL: every other value keeps it ON — an empty value is 'unset', not a decision", () => {
+    for (const value of ['true', '', '0', 'no', '1', 'yes', 'FALSE', ' false']) {
+      expect(resolveToolLoopConfig(ctx({ AGENT_TOOL_LOOP: value })).enabled).toBe(true);
     }
   });
 
   it('reads process.env too (the env() fallback)', () => {
-    vi.stubEnv('AGENT_TOOL_LOOP', 'true');
+    vi.stubEnv('AGENT_TOOL_LOOP', 'false');
     vi.stubEnv('AGENT_SEGMENT_STEPS', '12');
 
     const cfg = resolveToolLoopConfig({});
-    expect(cfg.enabled).toBe(true);
+    expect(cfg.enabled).toBe(false);
     expect(cfg.segmentSteps).toBe(12);
   });
 
@@ -509,14 +511,13 @@ describe('resolveTurnBudgets — the reference budget the prompt bakes', () => {
   const baked = (context: unknown) =>
     buildReferenceIndex(ON_DEMAND_BLOCKS, resolveTurnBudgets(context).maxReferenceLoads);
 
-  it('loop ON → the baked index says 12', () => {
-    const index = baked(ctx({ AGENT_TOOL_LOOP: 'true' }));
-
-    expect(index).toContain('You may load at most 12 references');
+  it('loop ON (the default) → the baked index says 12', () => {
+    expect(baked(ctx({}))).toContain('You may load at most 12 references');
+    expect(baked(ctx({ AGENT_TOOL_LOOP: 'true' }))).toContain('You may load at most 12 references');
   });
 
-  it('loop OFF → the baked index says 3', () => {
-    const index = baked(ctx({}));
+  it('loop OFF (the kill switch) → the baked index says 3', () => {
+    const index = baked(ctx({ AGENT_TOOL_LOOP: 'false' }));
 
     expect(index).toContain('You may load at most 3 references');
   });
@@ -528,7 +529,7 @@ describe('resolveTurnBudgets — the reference budget the prompt bakes', () => {
   });
 
   it('the proxy may pass the switch it already resolved', () => {
-    expect(resolveTurnBudgets(ctx({}), true).maxReferenceLoads).toBe(12);
+    expect(resolveTurnBudgets(ctx({ AGENT_TOOL_LOOP: 'false' }), true).maxReferenceLoads).toBe(12);
     expect(resolveTurnBudgets(ctx({ AGENT_TOOL_LOOP: 'true' }), false).maxReferenceLoads).toBe(3);
   });
 });

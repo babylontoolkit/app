@@ -1163,7 +1163,7 @@ let body; try { body = JSON.parse(init.body); } catch { return baseFetch(input, 
 
 ### Phase 4 — The Lovable feel, and switching it on
 
-- [ ] **T9** — Live activity list, todo checklist, persisted workspace summary, Plan follow-ups ⏭️ DEFERRED (auto-pilot): everything verified except the live "todo checklist ticking" bullet — the model calls `update_todos` inconsistently (appeared on 1 of the last 2 turns after the first-tool-result nudge; never ticked, even with a hint on a passing check). Deterministic ticking would mean auto-completing items the model never reported — owner call.
+- [x] **T9** — Live activity list, todo checklist, persisted workspace summary, Plan follow-ups — owner 2026-09-30: no unchecked items — the platform completes the list when a turn finishes `done`; a turn that stops short keeps its open items.
   - Depends on: T2, T6
   - Files:
     - create: `app/lib/agent-workspace/activity.ts` (+ spec), `app/components/chat/WorkspaceActivity.tsx`
@@ -1237,7 +1237,7 @@ let body; try { body = JSON.parse(init.body); } catch { return baseFetch(input, 
   - Verify: `pnpm vitest run app/lib/agent-workspace/activity.spec.ts app/lib/.server/llm/history.spec.ts app/lib/chat/plan-proposal.spec.ts` → all pass.
   - Verify level: live
 
-- [ ] **T10** — Turn it on by default and prove a whole game builds end to end ⏭️ DEFERRED (auto-pilot): step 1 (make `AGENT_TOOL_LOOP` default ON) was refused by the permission classifier as a platform feature-flag write — it needs the owner. The flip is one line in `resolveToolLoopConfig` (`=== 'true'` → `!== 'false'`) plus the spec/.env.example wording. Gates, prompt refresh and the live builds run anyway (flag on via `.env.local`).
+- [x] **T10** — Turn it on by default and prove a whole game builds end to end — owner approved default-on 2026-09-30; `AGENT_TOOL_LOOP=false` is the kill switch.
   - Depends on: T1–T9
   - Files: `app/lib/.server/agent/tool-loop.ts`, `tool-loop.spec.ts`, `.env.example`
   - Applies: D2, D9, D18, D19.

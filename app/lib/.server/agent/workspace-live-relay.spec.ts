@@ -39,7 +39,11 @@ import {
   type WorkspaceToolCallEvent,
   WorkspaceOverlay,
   TODO_NUDGE,
+  completeTodosOnDone,
 } from './workspace-tools';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { TodoItem } from '~/lib/agent/workspace-protocol-types';
 import {
   createTurnMeter,
   DEFAULT_TOOL_LOOP_CONFIG,
@@ -330,6 +334,7 @@ async function runTurn(input: {
   } as unknown as FileMap;
   const overlay = new WorkspaceOverlay(files);
   const wsState = newWorkspaceTurnState();
+  const emittedTodos: TodoItem[][] = [];
   const controller = new AbortController();
   const totals = emptyUsage();
   const meter = createTurnMeter({ totals, ceiling: input.ceiling, creditsFor: input.creditsFor, controller });
@@ -343,7 +348,7 @@ async function runTurn(input: {
       emit: autoDeliver(input.generationId, {
         check: { ok: true, typecheck: 'unavailable', home: { errors: [] } },
       }),
-      emitTodos: () => undefined,
+      emitTodos: (items) => emittedTodos.push(items),
       overlay,
       state: wsState,
       planOnly: false,
@@ -354,6 +359,7 @@ async function runTurn(input: {
   let lastStepToolCalls = 0;
   const started: ToolLoopSegmentKind[] = [];
   const text: string[] = [];
+  let doneCalls = 0;
 
   const start = (messages: CoreMessage[]) =>
     streamText({
@@ -421,11 +427,17 @@ async function runTurn(input: {
       return start(messages);
     },
     drain,
+
+    /* Mirrors proxy.ts: a FINISHED turn completes the checklist (T9). */
+    onDone: () => {
+      doneCalls += 1;
+      completeTodosOnDone(wsState, true, (items) => emittedTodos.push(items));
+    },
   })) {
     text.push(chunk);
   }
 
-  return { state, started, totals, meter, overlay, wsState, text: text.join('') };
+  return { state, started, totals, meter, overlay, wsState, emittedTodos, doneCalls, text: text.join('') };
 }
 
 /** The text of a prompt's LAST user message. */
@@ -508,5 +520,91 @@ describe('the tool-loop segment runner against a live streamText', () => {
     expect(turn.overlay.writes.size).toBe(1);
     expect(turn.totals.completionTokens).toBe(500);
     expect(turn.totals.promptTokens).toBe(100);
+  });
+});
+
+/*
+ * T9 (owner, 2026-09-30: "i dont want unchecked items"): a turn that ends `done` leaves no unchecked
+ * items; a turn that STOPPED short keeps its open items, because they are the real remaining work.
+ */
+describe('the checklist at the end of a tool-loop turn (T9)', () => {
+  const todos = (items: Array<[string, string]>) =>
+    toolCall('t1', 'update_todos', { items: items.map(([content, status]) => ({ content, status })) });
+
+  it('a FINISHED turn completes every open item and emits the completed list', async () => {
+    const { model } = scriptedModel([
+      [
+        todos([
+          ['Speed up the kart', 'in_progress'],
+          ['Add a boost pad', 'pending'],
+        ]),
+        finish('tool-calls', 10),
+      ],
+      [toolCall('w1', 'write_file', { file_path: 'src/scripts/Kart.ts', content: 'x' }), finish('tool-calls', 10)],
+      [toolCall('c1', 'check_game', {}), finish('tool-calls', 10)],
+      [{ type: 'text-delta', textDelta: 'Done.' }, finish('stop', 3)],
+    ]);
+
+    const turn = await runTurn({ generationId: 'gen-todos-done', model, ceiling: null, creditsFor: () => null });
+
+    expect(turn.state.stopReason).toBe('none');
+    expect(turn.doneCalls).toBe(1);
+    expect(turn.wsState.todos.every((t) => t.status === 'completed')).toBe(true);
+
+    /* The model's own emit, then the platform's completed list — the last part the client sees. */
+    expect(turn.emittedTodos).toHaveLength(2);
+    expect(turn.emittedTodos[1]).toEqual([
+      { content: 'Speed up the kart', status: 'completed' },
+      { content: 'Add a boost pad', status: 'completed' },
+    ]);
+  });
+
+  it('CONTROL: a turn stopped by the credit ceiling keeps its open items and emits nothing extra', async () => {
+    const { model } = scriptedModel([
+      [todos([['Speed up the kart', 'in_progress']]), finish('tool-calls', 500)],
+      [{ type: 'text-delta', textDelta: 'never sent' }, finish('stop', 5)],
+    ]);
+
+    const turn = await runTurn({
+      generationId: 'gen-todos-budget',
+      model,
+      ceiling: 40,
+      creditsFor: (usage) => usage.completionTokens / 10,
+    });
+
+    expect(turn.state.stopReason).toBe('budget');
+    expect(turn.doneCalls).toBe(0);
+    expect(turn.wsState.todos).toEqual([{ content: 'Speed up the kart', status: 'in_progress' }]);
+    expect(turn.emittedTodos).toHaveLength(1);
+  });
+
+  it('a finished turn with no checklist emits nothing', async () => {
+    const { model } = scriptedModel([[{ type: 'text-delta', textDelta: 'It is fast.' }, finish('stop', 4)]]);
+
+    const turn = await runTurn({ generationId: 'gen-todos-none', model, ceiling: null, creditsFor: () => null });
+
+    expect(turn.doneCalls).toBe(1);
+    expect(turn.emittedTodos).toEqual([]);
+  });
+});
+
+/*
+ * The relay test above drives the runner the way the proxy does; this pins that the PROXY actually
+ * wires it that way — `completeTodosOnDone` is called from `onDone` only (never from a stop path).
+ */
+describe('proxy wiring: the checklist is completed on `done` only (T9)', () => {
+  const proxy = readFileSync(join(process.cwd(), 'app/lib/.server/agent/proxy.ts'), 'utf8');
+
+  it("completeTodosOnDone is called exactly once, inside the runner's onDone, with endedDone = true", () => {
+    const calls = proxy.match(/completeTodosOnDone\(/g) ?? [];
+
+    expect(calls).toHaveLength(1);
+    expect(proxy).toMatch(/onDone: \(\) => \{\s*completeTodosOnDone\(wsState, true, emitTodosToListeners\);\s*\}/);
+  });
+
+  it('CONTROL: the scan reads the real runner call (its sibling onDecision hook is there)', () => {
+    expect(proxy).toMatch(
+      /yield\* runToolLoopSegments\(\{[\s\S]*onDecision: \(decision, state\) =>[\s\S]*onDone: \(\) =>/,
+    );
   });
 });
