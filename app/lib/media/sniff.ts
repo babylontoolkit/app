@@ -15,7 +15,7 @@
  * Pure — the route feeds it the first chunk of the stream and re-emits it, so nothing is buffered.
  */
 
-export type SniffedImageType = 'png' | 'jpg' | 'gif' | 'webp' | 'mp4' | 'unknown';
+export type SniffedImageType = 'png' | 'jpg' | 'gif' | 'webp' | 'mp4' | 'mp3' | 'unknown';
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -58,6 +58,15 @@ export function sniffImageType(bytes: Uint8Array): SniffedImageType {
     return 'mp4';
   }
 
+  /*
+   * MP3 LAST, because its frame-sync test is the loosest one here: eleven set bits is a pattern other
+   * formats can start with, so every magic number above must get its answer first. An ID3 tag (what
+   * Suno and ElevenLabs actually return) is unambiguous; the raw-frame case is the fallback.
+   */
+  if (ascii(bytes, 0, 3) === 'ID3' || (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) {
+    return 'mp3';
+  }
+
   return 'unknown';
 }
 
@@ -67,6 +76,7 @@ const CONTENT_TYPES: Record<Exclude<SniffedImageType, 'unknown'>, string> = {
   gif: 'image/gif',
   webp: 'image/webp',
   mp4: 'video/mp4',
+  mp3: 'audio/mpeg',
 };
 
 /** The Content-Type the BYTES justify, or null when they are unrecognised (caller keeps its default). */
@@ -97,7 +107,13 @@ export function extensionMismatch(destPath: string, bytes: Uint8Array): { expect
 
   const normalised = ext === 'jpeg' ? 'jpg' : ext;
 
-  if (normalised !== 'png' && normalised !== 'jpg' && normalised !== 'gif' && normalised !== 'webp') {
+  if (
+    normalised !== 'png' &&
+    normalised !== 'jpg' &&
+    normalised !== 'gif' &&
+    normalised !== 'webp' &&
+    normalised !== 'mp3'
+  ) {
     return null;
   }
 

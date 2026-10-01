@@ -386,8 +386,8 @@ export const ON_DEMAND_BLOCKS: OnDemandBlock[] = [
     url: RAW(AGENT_REPO, 'references/web-kie-servers.md'),
     description:
       'Configuring the kie.ai MCP servers in a project’s .mcp.json for image, video and texture ' +
-      'generation. NOTE: this platform already gives you built-in generate_image/generate_video ' +
-      'tools — load this only when the user is setting up their OWN MCP server.',
+      'generation. NOTE: this platform already gives you built-in generate_image/generate_video/' +
+      'generate_sound tools — load this only when the user is setting up their OWN MCP server.',
   },
 
   /*

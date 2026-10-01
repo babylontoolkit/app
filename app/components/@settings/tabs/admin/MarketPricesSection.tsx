@@ -24,10 +24,10 @@ interface MediaVariant {
   usd: number;
 }
 interface MediaRow {
-  kind: 'image' | 'video';
+  kind: 'image' | 'video' | 'audio';
   label: string;
   vendor: string;
-  unit: 'per_image' | 'per_second' | 'per_video';
+  unit: 'per_image' | 'per_second' | 'per_video' | 'per_request' | 'per_1k_chars';
   aliases?: string[];
   variants: MediaVariant[];
 }
@@ -73,6 +73,8 @@ const UNIT_LABEL: Record<MediaRow['unit'], string> = {
   per_image: 'per image',
   per_second: 'per second',
   per_video: 'per video',
+  per_request: 'per request',
+  per_1k_chars: 'per 1,000 characters',
 };
 
 /**

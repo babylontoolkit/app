@@ -75,3 +75,26 @@ describe('mediaProtocolNote', () => {
     expect(mediaProtocolNote(base) ?? '').toMatch(/Do NOT wait for it, poll for it/);
   });
 });
+
+/**
+ * Sound (§4.16). The note is the ONLY place a turn is told `generate_sound` exists and that music is
+ * the expensive kind — dropping either line is the §4.2.8 silent failure: nothing throws, the model
+ * simply stops reaching for a capability it has, or reaches for the costly one unasked.
+ */
+describe('the sound tool is advertised and its cost is stated', () => {
+  it('names generate_sound alongside the image and video tools', () => {
+    expect(mediaProtocolNote(base)!).toContain('generate_sound');
+  });
+
+  it('says music is only for when the user asked for it', () => {
+    const note = mediaProtocolNote(base)!;
+
+    expect(note).toMatch(/kind=music/);
+    expect(note).toMatch(/only when the user actually asked for music/i);
+  });
+
+  /* CONTROL: it is still absent when the turn has no media tools at all. */
+  it('CONTROL: says nothing about sound when no media tools are offered', () => {
+    expect(mediaProtocolNote({ ...base, hasMediaTools: false })).toBeNull();
+  });
+});

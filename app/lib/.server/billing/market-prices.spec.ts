@@ -520,3 +520,87 @@ describe('media price lookup — what the up-front debit is computed from', () =
     expect(Math.ceil((price!.usd / 0.01) * 4.0)).toBe(24);
   });
 });
+
+/**
+ * Sound (§4.16 `generate_sound`) — the `audio` kind and its two units.
+ *
+ * `per_1k_chars` is the one unit whose price is a RATE: speech is billed on the characters KIE will
+ * speak, so a lookup with no character count is the same non-price `per_second` refuses, and the
+ * refusal is what stops a one-line voice clip being billed as a full thousand characters.
+ */
+describe('audio pricing — Suno effects/music and ElevenLabs speech', () => {
+  const list = BAKED_MARKET_PRICES;
+
+  it('the baked KIE list still validates with the audio rows in it', () => {
+    expect(validateMarketPriceList(BAKED_MARKET_PRICES).ok).toBe(true);
+  });
+
+  it('accepts an audio row priced per 1,000 characters', () => {
+    const value = validList();
+    value.media['elevenlabs/text-to-speech-turbo-2-5'] = {
+      kind: 'audio',
+      label: 'Turbo',
+      vendor: 'ElevenLabs',
+      unit: 'per_1k_chars',
+      variants: [{ options: {}, usd: 0.03 }],
+    };
+    expect(validateMarketPriceList(value).ok).toBe(true);
+  });
+
+  /* CONTROL: widening the unions must not have turned the checks into "anything goes". */
+  it('still rejects an unknown kind and an unknown unit', () => {
+    const badKind = validList();
+    badKind.media['nano-banana-2'].kind = 'hologram' as never;
+    expect(errorsOf(badKind).join()).toMatch(/kind must be one of/);
+
+    const badUnit = validList();
+    badUnit.media['nano-banana-2'].unit = 'per_minute' as never;
+    expect(errorsOf(badUnit).join()).toMatch(/unit must be one of/);
+  });
+
+  it('prices a Suno sound effect per request', () => {
+    expect(lookupMediaPrice(list, { model: 'suno/generate-sounds', options: {} })).toMatchObject({
+      model: 'suno/generate-sounds',
+      usd: 0.0125,
+      unit: 'per_request',
+    });
+  });
+
+  it('prices a Suno music track per request', () => {
+    expect(lookupMediaPrice(list, { model: 'suno/generate-music', options: {} })?.usd).toBe(0.06);
+  });
+
+  it('scales speech with the character count', () => {
+    const price = lookupMediaPrice(list, {
+      model: 'elevenlabs/text-to-speech-multilingual-v2',
+      options: {},
+      textChars: 500,
+    });
+    expect(price?.usd).toBeCloseTo(0.03, 9); // $0.06 per 1,000 × 500
+    expect(price?.unit).toBe('per_1k_chars');
+
+    const turbo = lookupMediaPrice(list, {
+      model: 'elevenlabs/text-to-speech-turbo-2-5',
+      options: {},
+      textChars: 1000,
+    });
+    expect(turbo?.usd).toBeCloseTo(0.03, 9);
+  });
+
+  it('refuses speech with no character count — the per_second rule', () => {
+    expect(lookupMediaPrice(list, { model: 'elevenlabs/text-to-speech-multilingual-v2', options: {} })).toBeNull();
+    expect(
+      lookupMediaPrice(list, { model: 'elevenlabs/text-to-speech-multilingual-v2', options: {}, textChars: 0 }),
+    ).toBeNull();
+  });
+
+  it('a short speech line costs a credit or two, not a full thousand characters worth', () => {
+    const price = lookupMediaPrice(list, {
+      model: 'elevenlabs/text-to-speech-multilingual-v2',
+      options: {},
+      textChars: 40,
+    });
+
+    expect(Math.ceil((price!.usd / 0.01) * 4.0)).toBe(1);
+  });
+});

@@ -75,6 +75,8 @@ const PUBLIC_BY_DESIGN: Record<string, string> = {
     'Upstream self-update; refuses to auto-pull, and the Features toggle that drove it is hidden (§2.3).',
   'api.bridge.pair.ts':
     'Install-code claim: a CLI has no session; the single-use code was minted by a signed-in user and is fingerprint-rate-limited.',
+  'api.media.kie-callback.ts':
+    'KIE calls it. Suno music REFUSES a create request with no callBackUrl, so the address must exist; the route reads nothing from the body and polling remains the only source of truth (§4.16).',
 
   /*
    * ⚠️ NOT a blessing — these two run `execSync` on the host and return branch/commit/disk facts to an

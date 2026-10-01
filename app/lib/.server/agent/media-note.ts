@@ -68,10 +68,14 @@ export function mediaProtocolNote(input: MediaNoteInput): string | null {
   return [
     '# Built-in media generation (available this turn)',
     '',
-    'You have `generate_image` / `generate_video` / `generate_google_video`. They save into the ' +
-      'project under `public/assets/generated/` and cost the user credits. Use them when the user asks ' +
-      'for art, or when bespoke art is clearly needed for the design you are building. Rules:',
+    'You have `generate_image` / `generate_video` / `generate_google_video` / `generate_sound`. They ' +
+      'save into the project under `public/assets/generated/` and cost the user credits. Use them when ' +
+      'the user asks for art or audio, or when bespoke assets are clearly needed for the design you ' +
+      'are building. Rules:',
     '',
+    '- `generate_sound` covers gameplay sound effects (kind=sound_effect, the default), spoken lines ' +
+      '(kind=speech) and backing music (kind=music). Music costs several times an effect, so generate ' +
+      'it ONLY when the user actually asked for music.',
     '- `<boltArtifact>` and `<boltAction>` are PLAIN-TEXT TAGS you write in your reply. NEVER call ' +
       'them as tools — they are not tools, and the call fails.',
     '- Ask for ONE image per call, at the point in the design where you need it. There is no batching ' +

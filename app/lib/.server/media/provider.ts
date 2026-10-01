@@ -49,11 +49,20 @@ export type { MediaProviderName };
  * storage format: values may be added, never renamed, or every in-flight and historical task written
  * under the old spelling becomes unpollable.
  *
- * `jobs` / `veo` are KIE's two shapes. The `comet-*` values are Comet's three (image, the Gemini
- * "nano banana" `:generateContent` route, and video create+poll) — declared here rather than with the
- * client that will use them, because the vocabulary belongs to the record, not to one implementation.
+ * `jobs` / `veo` are KIE's two shapes, and `suno-sounds` / `suno-music` its two audio ones (§4.16
+ * `generate_sound`; ElevenLabs speech rides `jobs` like any other KIE job). The `comet-*` values are
+ * Comet's three (image, the Gemini "nano banana" `:generateContent` route, and video create+poll) —
+ * declared here rather than with the client that will use them, because the vocabulary belongs to the
+ * record, not to one implementation.
  */
-export type MediaEndpoint = 'jobs' | 'veo' | 'comet-image' | 'comet-gemini-image' | 'comet-video';
+export type MediaEndpoint =
+  | 'jobs'
+  | 'veo'
+  | 'suno-sounds'
+  | 'suno-music'
+  | 'comet-image'
+  | 'comet-gemini-image'
+  | 'comet-video';
 
 export interface CreateMediaTaskInput {
   endpoint: MediaEndpoint;

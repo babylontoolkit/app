@@ -78,7 +78,7 @@ export async function loader({ request, params, context }: LoaderFunctionArgs) {
         'Content-Type':
           sniffed ||
           upstream.headers.get('content-type') ||
-          (task.kind === 'video' ? 'video/mp4' : 'application/octet-stream'),
+          (task.kind === 'video' ? 'video/mp4' : task.kind === 'audio' ? 'audio/mpeg' : 'application/octet-stream'),
         'Cache-Control': 'no-store',
       },
     });

@@ -56,14 +56,27 @@ export const LLM_CACHE_RATE_KEYS = ['cachedInputPerMTok', 'cacheWritePerMTok'] a
 
 const LLM_BASE_RATE_KEYS = ['inputPerMTok', 'outputPerMTok'] as const;
 
-export type MediaKind = 'image' | 'video';
+/**
+ * The kinds a media row can price. Declared as a LIST, not a bare union, because validation, the
+ * admin panel and the specs all need to enumerate it — three hand-written copies of one union is how
+ * a new kind validates in one place and is refused in another.
+ */
+export const MEDIA_KINDS = ['image', 'video', 'audio'] as const;
+
+export type MediaKind = (typeof MEDIA_KINDS)[number];
 
 /**
  * How a variant's `usd` converts to a task price:
- *  - `per_image` / `per_video`: flat.
+ *  - `per_image` / `per_video` / `per_request`: flat.
  *  - `per_second`: multiplied by the requested duration (which the request must therefore state).
+ *  - `per_1k_chars`: multiplied by `textChars / 1000` (which the request must therefore state).
+ *
+ * The two scaling units REFUSE when their multiplier is missing, exactly as `per_second` always has:
+ * a rate with no quantity is not a price, and assuming one bills a number nobody chose.
  */
-export type MediaUnit = 'per_image' | 'per_second' | 'per_video';
+export const MEDIA_UNITS = ['per_image', 'per_second', 'per_video', 'per_request', 'per_1k_chars'] as const;
+
+export type MediaUnit = (typeof MEDIA_UNITS)[number];
 
 /**
  * One priced configuration of a media model.
@@ -356,8 +369,8 @@ function validateMediaModel(model: string, pricing: unknown, errors: string[]): 
     return;
   }
 
-  if (pricing.kind !== 'image' && pricing.kind !== 'video') {
-    errors.push(`media["${model}"].kind must be "image" or "video".`);
+  if (!MEDIA_KINDS.includes(pricing.kind as MediaKind)) {
+    errors.push(`media["${model}"].kind must be one of: ${MEDIA_KINDS.join(', ')}.`);
   }
 
   if (typeof pricing.label !== 'string' || !pricing.label.trim()) {
@@ -368,8 +381,8 @@ function validateMediaModel(model: string, pricing: unknown, errors: string[]): 
     errors.push(`media["${model}"].vendor is required.`);
   }
 
-  if (pricing.unit !== 'per_image' && pricing.unit !== 'per_second' && pricing.unit !== 'per_video') {
-    errors.push(`media["${model}"].unit must be per_image, per_second or per_video.`);
+  if (!MEDIA_UNITS.includes(pricing.unit as MediaUnit)) {
+    errors.push(`media["${model}"].unit must be one of: ${MEDIA_UNITS.join(', ')}.`);
   }
 
   if (pricing.aliases !== undefined) {
@@ -461,6 +474,12 @@ export interface MediaPriceQuery {
 
   /** Required for `per_second` models — the price is meaningless without it. */
   durationSeconds?: number;
+
+  /**
+   * Required for `per_1k_chars` models (ElevenLabs speech) — the characters KIE will bill for, i.e.
+   * the text being spoken. Same rule as `durationSeconds`: absent means REFUSE, never assume.
+   */
+  textChars?: number;
 }
 
 export interface MediaPrice {
@@ -521,6 +540,17 @@ export function lookupMediaPrice(list: MarketPriceList, query: MediaPriceQuery):
     }
 
     return { model: id, usd: best.usd * duration, unit: pricing.unit, variant: best };
+  }
+
+  if (pricing.unit === 'per_1k_chars') {
+    const chars = query.textChars;
+
+    if (typeof chars !== 'number' || !Number.isFinite(chars) || chars <= 0) {
+      // Same refusal as per_second: a rate per thousand characters with no characters is not a price.
+      return null;
+    }
+
+    return { model: id, usd: (best.usd * chars) / 1000, unit: pricing.unit, variant: best };
   }
 
   return { model: id, usd: best.usd, unit: pricing.unit, variant: best };

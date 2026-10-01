@@ -516,7 +516,7 @@ describe('KieMediaProvider refuses another gateway’s endpoint', () => {
   }
 
   /* CONTROL: the refusal is about the OTHER gateway's routes, not about all traffic. */
-  for (const endpoint of ['jobs', 'veo'] as const) {
+  for (const endpoint of ['jobs', 'veo', 'suno-sounds', 'suno-music'] as const) {
     it(`still serves its own "${endpoint}" endpoint`, async () => {
       fetchSpy.mockResolvedValue(new Response(JSON.stringify({ code: 200, data: { taskId: 'kie-1' } })));
 
@@ -526,6 +526,66 @@ describe('KieMediaProvider refuses another gateway’s endpoint', () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
   }
+
+  /**
+   * The Suno routes (§4.16 sound). Their bodies are FLAT — unlike the jobs envelope, which wraps the
+   * payload in `{ model, input }`. Sending a Suno body through that envelope is a 400 at best and a
+   * silently ignored prompt at worst, so the shape is asserted, not just the URL.
+   */
+  describe('the Suno audio routes', () => {
+    // A Response body reads ONCE, so each call needs its own — `mockResolvedValue` shares one object.
+    beforeEach(() =>
+      fetchSpy.mockImplementation(async () => new Response(JSON.stringify({ code: 200, data: { taskId: 'suno-1' } }))),
+    );
+
+    it('creates sound effects and music on their own paths, with a flat body', async () => {
+      const kie = new KieMediaProvider('sentinel-key');
+
+      await kie.create({ endpoint: 'suno-sounds', model: 'suno/generate-sounds', payload: { prompt: 'chime' } });
+      expect(fetchSpy.mock.calls[0][0]).toBe('https://api.kie.ai/api/v1/generate/sounds');
+      expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toEqual({ prompt: 'chime' });
+
+      await kie.create({ endpoint: 'suno-music', model: 'suno/generate-music', payload: { prompt: 'synth' } });
+      expect(fetchSpy.mock.calls[1][0]).toBe('https://api.kie.ai/api/v1/generate');
+      expect(JSON.parse(fetchSpy.mock.calls[1][1].body)).toEqual({ prompt: 'synth' });
+    });
+
+    /* CONTROL: the jobs route still wraps, or this test is asserting nothing about Suno. */
+    it('CONTROL: the jobs route still sends the { model, input } envelope', async () => {
+      await new KieMediaProvider('k').create({ endpoint: 'jobs', model: 'nano-banana-2', payload: { prompt: 'x' } });
+
+      expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toEqual({
+        model: 'nano-banana-2',
+        input: { prompt: 'x' },
+      });
+    });
+
+    it('polls both Suno routes on the shared record-info endpoint', async () => {
+      fetchSpy.mockImplementation(async () => new Response(JSON.stringify({ code: 200, data: { status: 'PENDING' } })));
+
+      const kie = new KieMediaProvider('sentinel-key');
+
+      expect(await kie.query('suno-sounds', 'task-9')).toEqual({ state: 'pending' });
+      expect(fetchSpy.mock.calls[0][0]).toBe('https://api.kie.ai/api/v1/generate/record-info?taskId=task-9');
+
+      await kie.query('suno-music', 'task-9');
+      expect(fetchSpy.mock.calls[1][0]).toBe('https://api.kie.ai/api/v1/generate/record-info?taskId=task-9');
+    });
+
+    /*
+     * A Suno create that answers with a taskId and a non-200 `code` is a FAILURE. Accepting it stores
+     * a task id the gateway never issued — unpollable, and already debited.
+     */
+    it('refuses a Suno create whose code is not 200, even with a taskId', async () => {
+      fetchSpy.mockImplementation(
+        async () => new Response(JSON.stringify({ code: 429, msg: 'rate limited', data: { taskId: 'x' } })),
+      );
+
+      await expect(
+        new KieMediaProvider('k').create({ endpoint: 'suno-sounds', model: 'suno/generate-sounds', payload: {} }),
+      ).rejects.toThrow(/createTask failed/);
+    });
+  });
 });
 
 describe('mediaProviderFor — the one factory', () => {

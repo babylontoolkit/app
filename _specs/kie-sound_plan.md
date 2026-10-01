@@ -234,7 +234,7 @@ The music callback route is the one new unauthenticated route (D7). It never act
 
 ### Phase 1 — Server: prices, wire, tool
 
-- [ ] **T1** — Price sound: the `audio` kind, two new units, four KIE rows
+- [x] **T1** — Price sound: the `audio` kind, two new units, four KIE rows
   - Files:
     - `app/lib/.server/billing/market-prices.ts` (modify)
     - `app/lib/.server/billing/baked-market-prices.ts` (modify)
@@ -261,7 +261,7 @@ The music callback route is the one new unauthenticated route (D7). It never act
     - an unpriced call is refused, never guessed.
   - Verify level: standard
 
-- [ ] **T2** — KIE sound wire and service: Suno endpoints, audio quote/start/poll, MP3 sniffing, music callback route
+- [x] **T2** — KIE sound wire and service: Suno endpoints, audio quote/start/poll, MP3 sniffing, music callback route
   - Files:
     - `app/lib/.server/media/provider.ts`, `kie-client.ts`, `service.ts`, `store.ts` (modify)
     - `app/lib/media/sniff.ts` (modify)
@@ -297,7 +297,7 @@ The music callback route is the one new unauthenticated route (D7). It never act
     - the bytes are served as `audio/mpeg`.
   - Verify level: standard
 
-- [ ] **T3** — The `generate_sound` agent tool
+- [x] **T3** — The `generate_sound` agent tool
   - Files:
     - `app/lib/.server/agent/media-tools.ts`, `media-note.ts` (modify)
     - `app/lib/media/provider-defaults.ts` (modify)

@@ -475,6 +475,47 @@ export const BAKED_MARKET_PRICES: MarketPriceList = {
         { options: { resolution: '4k' }, usd: 0.75 },
       ],
     },
+
+    /* ---- audio (§4.16 `generate_sound`) ---- */
+
+    /*
+     * Suno prices sound effects and music per REQUEST, not per second — the feed rows are
+     * "Suno / Generate sounds" $0.0125 and "Suno / Generate Music" $0.06 (captured 2026-09-30). The
+     * Suno VERSION (V5, V5_5, …) is a request option and does not move the price, so there is one
+     * variant per row rather than one per version.
+     */
+    'suno/generate-sounds': {
+      kind: 'audio',
+      label: 'Suno Sound Effects',
+      vendor: 'Suno',
+      unit: 'per_request',
+      variants: [{ options: {}, usd: 0.0125 }],
+    },
+
+    'suno/generate-music': {
+      kind: 'audio',
+      label: 'Suno Music',
+      vendor: 'Suno',
+      unit: 'per_request',
+      variants: [{ options: {}, usd: 0.06 }],
+    },
+
+    /* ElevenLabs is billed per 1,000 characters of the spoken text (feed, captured 2026-09-30). */
+    'elevenlabs/text-to-speech-multilingual-v2': {
+      kind: 'audio',
+      label: 'ElevenLabs Multilingual v2',
+      vendor: 'ElevenLabs',
+      unit: 'per_1k_chars',
+      variants: [{ options: {}, usd: 0.06 }],
+    },
+
+    'elevenlabs/text-to-speech-turbo-2-5': {
+      kind: 'audio',
+      label: 'ElevenLabs Turbo 2.5',
+      vendor: 'ElevenLabs',
+      unit: 'per_1k_chars',
+      variants: [{ options: {}, usd: 0.03 }],
+    },
   },
 
   /*

@@ -561,3 +561,76 @@ describe('MEDIA_TOOL_NAMES', () => {
     expect(Object.keys(tools).sort()).toEqual([...MEDIA_TOOL_NAMES].sort());
   });
 });
+
+/**
+ * `generate_sound` (§4.16). The tool's own job is small — choose the priced model from the kind, hand
+ * the rest to the shared validator — so these cover the two things only the TOOL can get wrong:
+ * being offered on a gateway that cannot serve it, and letting a bad argument reach the spend path.
+ *
+ * The validator's own rules live in `~/lib/media/sound-request.spec.ts`.
+ */
+describe('generate_sound', () => {
+  function soundTool(provider: MediaProviderName = 'KIE') {
+    const { tools, wire } = toolsWith(provider);
+    const entry = (tools as unknown as Record<string, { execute?: (a: unknown, o: unknown) => Promise<string> }>)
+      .generate_sound;
+
+    return { entry, wire, tools };
+  }
+
+  const call = (entry: { execute?: (a: unknown, o: unknown) => Promise<string> }, args: unknown) =>
+    entry.execute!(args, { toolCallId: 'call-1', messages: [] });
+
+  it('is offered on a gateway with audio and ABSENT on one without', () => {
+    expect(soundTool('KIE').entry).toBeTypeOf('object');
+    expect(soundTool('Comet').entry).toBeUndefined();
+
+    // Absent means absent — not present-and-refusing, which still costs a tool round to discover.
+    expect(Object.keys(soundTool('Comet').tools)).not.toContain('generate_sound');
+  });
+
+  /*
+   * 🔴 Every one of these is a REFUSAL SENTENCE, and the tripwire proves it never reached the
+   * provider. A zod-shaped rejection would instead kill a generation the user already paid for.
+   */
+  it('refuses an option belonging to another kind, by name, before any spend', async () => {
+    const { entry, wire } = soundTool();
+
+    expect(await call(entry, { prompt: 'coin chime', voice: 'James' })).toContain(
+      'voice is not supported for sound_effect',
+    );
+    expect(wire.touched()).toBe(false);
+  });
+
+  it('refuses an over-long effect prompt before any spend', async () => {
+    const { entry, wire } = soundTool();
+
+    expect(await call(entry, { prompt: 'x'.repeat(501) })).toMatch(/at most 500 characters/);
+    expect(wire.touched()).toBe(false);
+  });
+
+  it('refuses language_code on the model that does not support it', async () => {
+    const { entry, wire } = soundTool();
+
+    const result = await call(entry, { kind: 'speech', prompt: 'Lap record', language_code: 'fr' });
+
+    expect(result).toMatch(/language_code is only supported by/);
+    expect(wire.touched()).toBe(false);
+  });
+
+  it('refuses a missing prompt with a sentence, not an exception', async () => {
+    const { entry } = soundTool();
+
+    await expect(call(entry, {})).resolves.toMatch(/prompt/i);
+  });
+
+  /*
+   * A wrongly-typed argument must not throw out of `execute`. The model sends `"true"` for a boolean
+   * often enough that this is the realistic case, and a throw here ends the whole generation.
+   */
+  it('turns a mistyped argument into a sentence rather than throwing', async () => {
+    const { entry } = soundTool();
+
+    await expect(call(entry, { prompt: 'engine hum', loop: 'yes' })).resolves.toMatch(/loop must be a boolean/);
+  });
+});

@@ -94,6 +94,57 @@ export interface MediaModelDefaults {
    */
   videoModeHint: string;
   videoResolutionHint: string;
+
+  /**
+   * `generate_sound`'s default model per kind, or `null` on a gateway that serves no audio.
+   *
+   * `null` is not a placeholder: it is what makes the tool and the Media panel's Sound tab ABSENT on
+   * Comet, which has no audio routes at all. Advertising a sound tool there would buy a refused call
+   * on every turn that wants one — the same wasted round the image/video defaults exist to remove.
+   */
+  sound: { effect: string; music: string; speech: string } | null;
+}
+
+/** The three kinds `generate_sound` serves — the MCP's vocabulary (`kie-sound`), kept verbatim. */
+export type SoundKind = 'sound_effect' | 'music' | 'speech';
+
+/**
+ * The canonical sound model ids, named ONCE.
+ *
+ * These strings are a price-list key, a wire route and a payload shape all at the same time, read by
+ * the service, the agent tool and the Media panel. Three copies of one id is how a model gets priced
+ * under one spelling and created under another — `isSecretPath`'s rule, applied to a model slug.
+ */
+export const SOUND_MODELS = {
+  effect: 'suno/generate-sounds',
+  music: 'suno/generate-music',
+  speech: 'elevenlabs/text-to-speech-multilingual-v2',
+  speechTurbo: 'elevenlabs/text-to-speech-turbo-2-5',
+} as const;
+
+/** Suno version options — a REQUEST option, never a price key (every version costs the same). */
+export const SUNO_EFFECT_VERSIONS = ['V5', 'V5_5'] as const;
+export const SUNO_MUSIC_VERSIONS = ['V4', 'V4_5', 'V4_5PLUS', 'V4_5ALL', 'V5', 'V5_5'] as const;
+export const SPEECH_MODELS = [SOUND_MODELS.speech, SOUND_MODELS.speechTurbo] as const;
+
+/**
+ * Which sound kind a model id is, or `null` when it is not a sound model at all.
+ *
+ * The ONE writer of that question — `endpointFor`, `buildProviderPayload` and `deriveDestPath` all
+ * ask it, and three private spellings is the `isGoogleVideoModel` lesson repeating.
+ */
+export function soundKindForModel(model: string): SoundKind | null {
+  const id = model.trim();
+
+  if (id === SOUND_MODELS.effect) {
+    return 'sound_effect';
+  }
+
+  if (id === SOUND_MODELS.music) {
+    return 'music';
+  }
+
+  return id.startsWith('elevenlabs/') ? 'speech' : null;
 }
 
 const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
@@ -104,6 +155,7 @@ const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
     videoAlternatives: ' Also: kling-2.6, bytedance/seedance-2, …',
     videoModeHint: 'kling-3.0 tier: std (720p), pro (1080p) or 4K. Default std.',
     videoResolutionHint: 'For seedance/grok models: 480p, 720p, 1080p, 4K.',
+    sound: { effect: SOUND_MODELS.effect, music: SOUND_MODELS.music, speech: SOUND_MODELS.speech },
   },
 
   Comet: {
@@ -135,6 +187,9 @@ const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
      */
     videoModeHint: '',
     videoResolutionHint: '',
+
+    /* Comet has no audio routes — `generate_sound` and the panel's Sound tab are absent here. */
+    sound: null,
   },
 };
 

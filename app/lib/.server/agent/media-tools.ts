@@ -22,6 +22,7 @@ import type { ObjectStore } from '~/lib/.server/storage';
 import type { MediaProvider } from '~/lib/.server/media/provider';
 import { MediaRefusedError, startMediaTask, type StartedMediaTask } from '~/lib/.server/media/service';
 import { isGoogleVideoModel, mediaModelDefaults } from '~/lib/media/provider-defaults';
+import { validateSoundRequest } from '~/lib/media/sound-request';
 
 const logger = createScopedLogger('media-tools');
 
@@ -56,7 +57,7 @@ export interface MediaTaskEvent {
   taskId: string;
   projectId: string;
   destPath: string;
-  kind: 'image' | 'video';
+  kind: 'image' | 'video' | 'audio';
   model: string;
   credits: number;
 }
@@ -115,7 +116,12 @@ interface CommonArgs {
  * factory's real keys, so adding a fourth tool without listing it here fails a test rather than
  * silently exempting that tool from the media-spent rescue.
  */
-export const MEDIA_TOOL_NAMES = ['generate_image', 'generate_video', 'generate_google_video'] as const;
+export const MEDIA_TOOL_NAMES = [
+  'generate_image',
+  'generate_video',
+  'generate_google_video',
+  'generate_sound',
+] as const;
 
 export function createMediaTools(ctx: MediaToolContext) {
   /*
@@ -354,5 +360,88 @@ export function createMediaTools(ctx: MediaToolContext) {
         });
       },
     }),
+
+    /*
+     * 🔴 PRESENT ONLY ON A GATEWAY THAT SERVES AUDIO. Comet has no sound routes, so advertising this
+     * there would buy a refused call on every turn that wants a sound effect — the wasted round the
+     * defaults table exists to remove. `undefined` keys are stripped below, so the tool is genuinely
+     * absent rather than present-and-broken.
+     */
+    ...(defaults.sound
+      ? {
+          generate_sound: tool({
+            description:
+              'Generate a sound effect, a line of speech, or a music track with the built-in audio ' +
+              'generator and save it into the project under public/assets/generated/ as an MP3. ' +
+              'Costs the user credits (shown in the result). ' +
+              'kind=sound_effect (the default) for gameplay audio — jumps, pickups, engines, impacts, ' +
+              'UI clicks, ambience; it has no exact duration control. ' +
+              'kind=speech for spoken lines (announcer, narration, character voice). ' +
+              'kind=music for a backing track — only when the user actually asked for music; it is ' +
+              'several times the price of an effect. ' +
+              'Pass ONLY the fields that belong to the chosen kind. ' +
+              'Renders happen in the background: DO NOT wait or poll — reference the returned path now.',
+            parameters: z.object({
+              prompt: z
+                .string()
+                .optional()
+                .describe(
+                  'Effects: describe the sound (max 500 chars). Speech: the exact words to say ' +
+                    '(max 5000). Music: describe the track (max 3000).',
+                ),
+              kind: z.string().optional().describe('sound_effect (default), speech, or music.'),
+              model: z
+                .string()
+                .optional()
+                .describe(
+                  'Effects/music: a Suno version (V5 default, V5_5; music also V4, V4_5, V4_5PLUS, ' +
+                    'V4_5ALL). Speech: an ElevenLabs model id. Leave unset for the default.',
+                ),
+              file_name: z.string().optional().describe('Preferred file name (without extension).'),
+
+              loop: z.boolean().optional().describe('Effects only: make it loopable (ambience, engines).'),
+              tempo: z.number().optional().describe('Effects only: requested BPM, 1-300.'),
+              key: z.string().optional().describe('Effects only: musical key such as C or Am. Omit for any.'),
+
+              voice: z.string().optional().describe('Speech only: ElevenLabs voice name or id.'),
+              stability: z.number().optional().describe('Speech only: 0-1.'),
+              similarity_boost: z.number().optional().describe('Speech only: 0-1.'),
+              speech_style: z.number().optional().describe('Speech only: style exaggeration, 0-1.'),
+              speed: z.number().optional().describe('Speech only: 0.7-1.2.'),
+              language_code: z
+                .string()
+                .optional()
+                .describe('Speech only, turbo 2.5 model only: two-letter ISO 639-1 code.'),
+
+              instrumental: z.boolean().optional().describe('Music only: no vocals. Default true.'),
+              custom_mode: z.boolean().optional().describe('Music only: exact lyrics/style mode; needs style+title.'),
+              style: z.string().optional().describe('Custom music only: genre/mood.'),
+              title: z.string().optional().describe('Custom music only: track title.'),
+              negative_tags: z.string().optional().describe('Custom music only: styles to avoid.'),
+              vocal_gender: z.string().optional().describe('Custom vocal music only: m or f.'),
+              duration: z.number().optional().describe('Custom music only, V5_5 only: seconds, 10-360.'),
+            }),
+            execute: async (args: Record<string, unknown>) => {
+              /*
+               * Every rule lives in one pure validator shared with the Media panel, and a refusal is a
+               * SENTENCE, never a throw: a zod-shaped failure would kill a generation the user has
+               * already paid for, where this is something the model fixes on the next round.
+               */
+              const request = validateSoundRequest(args);
+
+              if (!request.ok) {
+                return `generate_sound was refused: ${request.error}`;
+              }
+
+              return start({
+                model: request.model,
+                prompt: request.prompt,
+                options: request.options,
+                fileName: request.fileName,
+              });
+            },
+          }),
+        }
+      : {}),
   };
 }

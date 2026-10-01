@@ -204,6 +204,11 @@ describe('the gateways have different defaults', () => {
       videoAlternatives: ' Also: kling-2.6, bytedance/seedance-2, …',
       videoModeHint: 'kling-3.0 tier: std (720p), pro (1080p) or 4K. Default std.',
       videoResolutionHint: 'For seedance/grok models: 480p, 720p, 1080p, 4K.',
+      sound: {
+        effect: 'suno/generate-sounds',
+        music: 'suno/generate-music',
+        speech: 'elevenlabs/text-to-speech-multilingual-v2',
+      },
     });
 
     expect(mediaModelDefaults('Comet')).toEqual({
@@ -227,7 +232,30 @@ describe('the gateways have different defaults', () => {
        */
       videoModeHint: '',
       videoResolutionHint: '',
+
+      /*
+       * NULL for the same reason `video` is: Comet serves no audio routes at all. A non-null value
+       * here would put `generate_sound` in the tool set on a gateway that must refuse every call.
+       */
+      sound: null,
     });
+  });
+
+  /**
+   * The same invariant block 1 enforces for image/video, extended to sound: a default that the
+   * gateway's own baked list cannot price is a tool round spent discovering it does not exist.
+   */
+  it('prices every sound default in the gateway’s own baked list', () => {
+    const sound = mediaModelDefaults('KIE').sound!;
+
+    for (const [slot, model] of Object.entries(sound)) {
+      expect(findMediaModel(BAKED_MARKET_PRICES, model), `KIE sound.${slot} (${model}) is unpriced`).not.toBeNull();
+      expect(findMediaModel(BAKED_MARKET_PRICES, model)!.pricing.kind, `${model} must be audio`).toBe('audio');
+    }
+  });
+
+  it('CONTROL: a gateway with no audio offers no sound defaults to price', () => {
+    expect(mediaModelDefaults('Comet').sound).toBeNull();
   });
 
   it('spells Veo differently on each gateway — one character, and it is the whole defect', () => {

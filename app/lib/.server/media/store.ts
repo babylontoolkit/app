@@ -21,7 +21,7 @@ export interface MediaTaskRecord {
   projectId: string;
   userId: string;
 
-  kind: 'image' | 'video';
+  kind: 'image' | 'video' | 'audio';
 
   /**
    * 🔴 WHICH GATEWAY IS RENDERING THIS — stamped at creation, read by every later poll and download.

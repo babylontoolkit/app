@@ -59,3 +59,33 @@ describe('extensionMismatch', () => {
     expect(extensionMismatch('a/b/c.mp4', mp4())).toBeNull();
   });
 });
+
+/**
+ * MP3 (§4.16 sound). Both KIE audio routes return MP3, and the file proxy types the response from
+ * these bytes — so a miss here serves a game's sound effect as `application/octet-stream`.
+ */
+describe('mp3', () => {
+  const id3 = () => new Uint8Array([...'ID3'].map((c) => c.charCodeAt(0)));
+  const frameSync = () => new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0, 0, 0, 0]);
+
+  it('identifies both an ID3-tagged file and a raw frame', () => {
+    expect(sniffImageType(id3())).toBe('mp3');
+    expect(sniffImageType(frameSync())).toBe('mp3');
+    expect(contentTypeForBytes(frameSync())).toBe('audio/mpeg');
+  });
+
+  /*
+   * 🔴 The frame-sync test is eleven set bits, the loosest rule in the file — every magic number above
+   * it must still win. JPEG is the one that shares a leading 0xFF, so it is the test that matters.
+   */
+  it('CONTROL: does not steal JPEG, PNG or MP4', () => {
+    expect(sniffImageType(jpg())).toBe('jpg');
+    expect(sniffImageType(png())).toBe('png');
+    expect(sniffImageType(mp4())).toBe('mp4');
+  });
+
+  it('reports an .mp3 path holding PNG bytes as a mismatch', () => {
+    expect(extensionMismatch('public/assets/generated/jump.mp3', png())).toEqual({ expected: 'mp3', actual: 'png' });
+    expect(extensionMismatch('public/assets/generated/jump.mp3', frameSync())).toBeNull();
+  });
+});

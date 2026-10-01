@@ -17,7 +17,8 @@
  * against fakes.
  */
 import { createScopedLogger } from '~/utils/logger';
-import { isGoogleVideoModel } from '~/lib/media/provider-defaults';
+import { env } from '~/lib/.server/env';
+import { isGoogleVideoModel, soundKindForModel, type SoundKind } from '~/lib/media/provider-defaults';
 import { dispatchMediaCreate } from './dispatch';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
@@ -57,6 +58,85 @@ export const CUTOUT_MODEL = 'recraft/remove-background';
  */
 const CUTOUT_MAX_RESOLUTION_NOTE = '4K is too large for the cut-out pass (it caps at 4096px a side) — use 2K or 1K.';
 
+/**
+ * What a finished task IS — images, video clips and now sound (§4.16 `generate_sound`).
+ *
+ * One alias rather than the literal union repeated across the quote, the started task and the stored
+ * record: those three must agree, and three hand-written copies is how they stop agreeing.
+ */
+export type MediaTaskKind = 'image' | 'video' | 'audio';
+
+/**
+ * Where KIE posts a finished Suno MUSIC job.
+ *
+ * 🔴 **Music, and only music, requires a callback URL KIE can reach** — their Suno music API rejects a
+ * request without one even though we poll for the result and never read the callback (D7: the route is
+ * a 200 no-op; polling stays the only source of truth). So this is a precondition of the REQUEST, not
+ * a delivery mechanism, which is why a music request with no resolvable URL is refused in the QUOTE —
+ * before any debit — rather than failing at KIE after the user has been charged.
+ *
+ * Effects and speech never send one: a callback configured for music must not be attached to jobs that
+ * did not ask for it.
+ *
+ * ⚠️ A LOOPBACK OR PRIVATE ADDRESS IS REFUSED, not accepted. `http://localhost:5173/...` parses as a
+ * perfectly valid http URL, so a parse-only check would let a dev machine's `APP_URL` through — and
+ * the request would then be DEBITED and handed to KIE with a callback nobody outside this machine can
+ * reach. Refusing costs nothing; accepting spends the user's credits on a request that cannot be
+ * delivered. "Can KIE reach it" is the actual question, and an unroutable host is the one case we can
+ * answer without asking.
+ */
+function resolveMediaCallbackUrl(context: unknown): string | null {
+  const explicit = env(context, 'MEDIA_CALLBACK_URL')?.trim();
+  const appUrl = env(context, 'APP_URL')?.trim();
+  const candidate = explicit || (appUrl ? `${appUrl.replace(/\/+$/, '')}/api/media/kie-callback` : '');
+
+  if (!candidate) {
+    return null;
+  }
+
+  try {
+    const url = new URL(candidate);
+
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      return null;
+    }
+
+    return isPubliclyRoutableHost(url.hostname) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Loopback, link-local, CGNAT and the RFC1918 ranges — hosts no external service can call back to. */
+function isPubliclyRoutableHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === '::1') {
+    return false;
+  }
+
+  // `::ffff:127.0.0.1` is the same unroutable host wearing a v6 spelling.
+  const mapped = host.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  const ipv4 = (mapped?.[1] ?? host).match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+
+  if (!ipv4) {
+    // A name we cannot classify is assumed routable — DNS is not ours to resolve here.
+    return !host.startsWith('fc') && !host.startsWith('fd') && !host.startsWith('fe80:');
+  }
+
+  const [a, b] = ipv4.slice(1).map(Number);
+
+  return !(
+    a === 127 ||
+    a === 10 ||
+    a === 0 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
 export class MediaRefusedError extends Error {
   readonly statusCode: number;
 
@@ -86,7 +166,7 @@ export interface MediaQuote {
    * the swap is billed against the model that ran and is visible on the button — never silent.
    */
   model: string;
-  kind: 'image' | 'video';
+  kind: MediaTaskKind;
 
   /** The TOTAL raw cost — render plus the cut-out pass when there is one. What credits derive from. */
   usd: number;
@@ -159,6 +239,52 @@ export function quoteMediaRequest(
 
   if (!requested) {
     throw new MediaRefusedError(unpricedMessage(list, request));
+  }
+
+  /*
+   * 🔴 AUDIO BEFORE THE VIDEO FALLTHROUGH. That branch is `kind !== 'image'`, so a sound row reaching
+   * it would be priced correctly and then labelled `kind: 'video'` — an `.mp4` destination path for
+   * MP3 bytes, the panel counting it as a clip, and the file proxy defaulting its content type to
+   * `video/mp4`. Billed right, delivered wrong, nothing thrown.
+   */
+  if (requested.pricing.kind === 'audio') {
+    const soundKind = soundKindForModel(requested.id) ?? 'sound_effect';
+    const options = { ...request.options };
+
+    if (soundKind === 'music') {
+      const callbackUrl = resolveMediaCallbackUrl(context);
+
+      if (!callbackUrl) {
+        throw new MediaRefusedError(
+          "Music generation needs a PUBLICLY REACHABLE callback URL — KIE's Suno music API rejects a " +
+            'request without one, even though we poll for the result. Set MEDIA_CALLBACK_URL (or ' +
+            'APP_URL) to an address KIE can reach from the internet; localhost and private addresses ' +
+            'are refused here rather than charged for. Sound effects and speech need no callback.',
+        );
+      }
+
+      options.callbackUrl = callbackUrl;
+    }
+
+    const price = lookupMediaPrice(list, {
+      model: request.model,
+      options: lookupOptions(request),
+
+      // Speech is billed per 1,000 characters of what it will SPEAK, which is the prompt verbatim.
+      textChars: request.prompt?.length ?? 0,
+    });
+
+    if (!price) {
+      throw new MediaRefusedError(unpricedMessage(list, request));
+    }
+
+    return {
+      model: price.model,
+      kind: 'audio',
+      usd: price.usd,
+      credits: creditsForRawCost(price.usd, config),
+      options,
+    };
   }
 
   if (requested.pricing.kind !== 'image') {
@@ -329,10 +455,18 @@ function unpricedMessage(list: MarketPriceList, request: MediaRequest): string {
 
   const needsDuration = found.pricing.unit === 'per_second' && !request.durationSeconds;
 
-  return needsDuration
-    ? `"${found.id}" is priced per second, so durationSeconds is required to price the render.`
-    : `No priced variant of "${found.id}" matches ${JSON.stringify(request.options)}. ` +
-        `Priced variants: ${found.pricing.variants.map((v) => JSON.stringify(v.options)).join(', ')}.`;
+  if (needsDuration) {
+    return `"${found.id}" is priced per second, so durationSeconds is required to price the render.`;
+  }
+
+  if (found.pricing.unit === 'per_1k_chars' && !request.prompt?.trim()) {
+    return `"${found.id}" is priced per 1,000 characters, so the text to speak is required to price it.`;
+  }
+
+  return (
+    `No priced variant of "${found.id}" matches ${JSON.stringify(request.options)}. ` +
+    `Priced variants: ${found.pricing.variants.map((v) => JSON.stringify(v.options)).join(', ')}.`
+  );
 }
 
 export interface StartMediaInput extends MediaRequest {
@@ -353,7 +487,7 @@ export interface StartedMediaTask {
   credits: number;
   usd: number;
   model: string;
-  kind: 'image' | 'video';
+  kind: MediaTaskKind;
 }
 
 export async function startMediaTask(input: StartMediaInput): Promise<StartedMediaTask> {
@@ -727,7 +861,18 @@ async function refundMediaTask(
  */
 function endpointFor(provider: MediaProviderName, model: string): MediaEndpoint {
   switch (provider) {
-    case 'KIE':
+    case 'KIE': {
+      /*
+       * Sound first: `soundKindForModel` is the ONE writer of "which sound is this" (the same rule
+       * `isGoogleVideoModel` follows below), and the two Suno routes differ from each other as much
+       * as either differs from jobs. ElevenLabs speech is an ordinary KIE job.
+       */
+      const sound = soundKindForModel(model);
+
+      if (sound) {
+        return sound === 'sound_effect' ? 'suno-sounds' : sound === 'music' ? 'suno-music' : 'jobs';
+      }
+
       /*
        * ONE writer of "is this a Google Veo model" (`media/provider-defaults.ts`). This was a private
        * `VEO_MODELS` set of three exact KIE ids, and `cometEndpointFor` below asked the same question a
@@ -736,6 +881,7 @@ function endpointFor(provider: MediaProviderName, model: string): MediaEndpoint 
        * endpoint, which is unpollable-forever rather than an error. Same rule as `isSecretPath`.
        */
       return isGoogleVideoModel(model) ? 'veo' : 'jobs';
+    }
 
     case 'Comet':
       return cometEndpointFor(model);
@@ -813,6 +959,12 @@ export function buildProviderPayload(
     return buildCometPayload(model, request, delivery);
   }
 
+  const soundKind = soundKindForModel(model);
+
+  if (soundKind) {
+    return buildSoundPayload(soundKind, model, request);
+  }
+
   if (isGoogleVideoModel(model)) {
     // Same one writer as `endpointFor` — the Veo payload shape and the Veo route must never disagree.
     return {
@@ -887,6 +1039,76 @@ export function buildProviderPayload(
 }
 
 /**
+ * KIE's three sound bodies (§4.16), ported from the owner's `kie-sound` MCP.
+ *
+ * The options are already validated — `validateSoundRequest` (agent/media-tools) and the Media panel
+ * are the two doors, and both run it — so this only SHAPES them. Fields are omitted when unset rather
+ * than sent as defaults, because Suno and ElevenLabs both treat an explicit null as a value.
+ *
+ * ⚠️ `model` here is the Suno VERSION (`V5`), not the priced model id (`suno/generate-sounds`). The
+ * two are different facts and the wire wants the version; the ledger wants the id.
+ */
+function buildSoundPayload(kind: SoundKind, model: string, request: MediaRequest): Record<string, unknown> {
+  const o = request.options;
+  const optional = (key: string, as: 'string' | 'number' | 'boolean') =>
+    o[key] !== undefined && typeof o[key] === as ? o[key] : undefined;
+
+  if (kind === 'speech') {
+    // The jobs envelope adds `{ model, input }` around this — see `KieMediaProvider.create`.
+    const input: Record<string, unknown> = {
+      text: request.prompt,
+      voice: str(o.voice, DEFAULT_SPEECH_VOICE),
+    };
+
+    for (const [option, apiField] of [
+      ['stability', 'stability'],
+      ['similarityBoost', 'similarity_boost'],
+      ['speechStyle', 'style'],
+      ['speed', 'speed'],
+      ['languageCode', 'language_code'],
+    ] as const) {
+      const value = o[option];
+
+      if (value !== undefined) {
+        input[apiField] = value;
+      }
+    }
+
+    return input;
+  }
+
+  if (kind === 'sound_effect') {
+    return {
+      prompt: request.prompt,
+      model: str(o.sunoModel, 'V5'),
+      soundLoop: Boolean(o.loop ?? false),
+      ...(optional('tempo', 'number') !== undefined ? { soundTempo: o.tempo } : {}),
+      ...(optional('key', 'string') !== undefined ? { soundKey: o.key } : {}),
+    };
+  }
+
+  const customMode = Boolean(o.customMode ?? false);
+
+  return {
+    prompt: request.prompt,
+    model: str(o.sunoModel, 'V5'),
+    customMode,
+    instrumental: Boolean(o.instrumental ?? true),
+    ...(customMode && o.style !== undefined ? { style: o.style } : {}),
+    ...(customMode && o.title !== undefined ? { title: o.title } : {}),
+    ...(customMode && o.negativeTags !== undefined ? { negativeTags: o.negativeTags } : {}),
+    ...(customMode && o.vocalGender !== undefined ? { vocalGender: o.vocalGender } : {}),
+    ...(customMode && o.duration !== undefined ? { duration: o.duration } : {}),
+
+    // Resolved in the quote, BEFORE the debit — a music request without one never gets this far.
+    callBackUrl: o.callbackUrl,
+  };
+}
+
+/** KIE's documented default ElevenLabs voice ("James") — the MCP's default, kept. */
+const DEFAULT_SPEECH_VOICE = 'EkK5I93UQWFDigLMpZcX';
+
+/**
  * Comet's three request shapes (SPEC §4.16) — all live-probed 2026-08-10, see `comet-client.ts`.
  *
  * ⚠️ **`aspectRatio` maps to a SIZE, and only the two probed sizes exist.** `gpt-image-1.5` is
@@ -954,13 +1176,17 @@ function cometEndpointFor(model: string): MediaEndpoint {
  * referenced by path from game code, pushed to their repo like any other asset (§4.5.4b).
  */
 export function deriveDestPath(
-  kind: 'image' | 'video',
+  kind: MediaTaskKind,
   request: MediaRequest & { fileName?: string },
   taskId: string,
   delivery?: ImageDelivery,
 ): string {
-  // `finalFormat` — what actually lands on disk after any cut-out pass, never what was rendered.
-  const ext = kind === 'video' ? 'mp4' : requireDelivery(delivery, request.model).finalFormat;
+  /*
+   * `finalFormat` — what actually lands on disk after any cut-out pass, never what was rendered.
+   * Audio is always MP3: both KIE sound APIs return MP3 and neither transcodes.
+   */
+  const ext =
+    kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : requireDelivery(delivery, request.model).finalFormat;
   const preferred = request.fileName?.replace(/\.[a-zA-Z0-9]+$/, '');
   const slug = (preferred || request.prompt)
     .toLowerCase()

@@ -16,7 +16,8 @@ import { invalidateMarketPricesCache, promoteMarketPrices } from '~/lib/.server/
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
 import { setObjectStore, type ObjectStore } from '~/lib/.server/storage';
 import type { CreateMediaTaskInput, MediaProvider, MediaProviderName, MediaTaskState } from './provider';
-import { parseTaskState } from './kie-client';
+import { parseSunoTaskState, parseTaskState } from './kie-client';
+import { SOUND_MODELS } from '~/lib/media/provider-defaults';
 import { getMediaTask } from './store';
 import { setMediaDispatcher } from './dispatch';
 import {
@@ -122,6 +123,17 @@ const MONEY_ENV = [
   'LLM_PROVIDER',
   'KIE_API_KEY',
   'COMET_API_KEY',
+
+  /*
+   * ⚠️ The same trap, FIFTH occurrence, and this one is self-inflicted: these two decide whether a
+   * MUSIC request can resolve a callback URL, and a developer running the live music test has a real
+   * tunnel in `.env.local`. Unstubbed, "music with no reachable callback is refused" passes on CI and
+   * fails only for the person who set the feature up — which is precisely the shape the earlier four
+   * took. `APP_URL` is listed because it is the FALLBACK half of the same decision; stubbing one and
+   * not the other leaves the chain half-scrubbed, which is how the KIE_ENV list went wrong.
+   */
+  'MEDIA_CALLBACK_URL',
+  'APP_URL',
 ] as const;
 
 beforeEach(async () => {
@@ -1337,5 +1349,221 @@ describe('destination paths', () => {
     expect(pathFor({ prompt: 'whatever', options: {}, fileName: 'hero-bg.png' })).toMatch(
       /^public\/assets\/generated\/hero-bg-[a-z0-9_]+\.jpg$/,
     );
+  });
+});
+
+/**
+ * Sound (§4.16 `generate_sound`) — the audio kind end to end: quote, debit, wire shape, poll, refund.
+ *
+ * Audio is the first kind whose price is a RATE (speech, per 1,000 characters) and the first that
+ * reaches a KIE route other than jobs/veo. Both are places a wrong answer is silent: a mis-routed
+ * endpoint is unpollable forever, and a mis-scaled rate bills a one-line voice clip as a full
+ * thousand characters.
+ */
+describe('sound', () => {
+  function soundInput(overrides: Partial<Parameters<typeof startMediaTask>[0]> = {}) {
+    return {
+      model: SOUND_MODELS.effect,
+      prompt: 'arcade coin pickup chime',
+      options: {},
+      userId: USER,
+      projectId: PROJECT,
+      provider: new FakeProvider(),
+      objectStore: memoryStore(),
+      ...overrides,
+    };
+  }
+
+  describe('quoting', () => {
+    it('prices a sound effect as audio, not video — $0.0125 → 5 credits', () => {
+      const quote = quoteMediaRequest({ model: SOUND_MODELS.effect, prompt: 'coin chime', options: {} }, 'KIE');
+
+      expect(quote).toMatchObject({ model: SOUND_MODELS.effect, kind: 'audio', usd: 0.0125, credits: 5 });
+    });
+
+    /*
+     * The audio branch sits AHEAD of the `kind !== 'image'` video fallthrough. Without it a sound row
+     * is priced correctly and labelled `video`, which writes MP3 bytes to an `.mp4` path.
+     */
+    it('CONTROL: a video model is still quoted as video', () => {
+      expect(
+        quoteMediaRequest(
+          { model: 'kling-3.0/video', prompt: 'x', options: { mode: 'std', sound: false }, durationSeconds: 5 },
+          'KIE',
+        ).kind,
+      ).toBe('video');
+    });
+
+    it('scales a speech quote with the length of the text it will speak', () => {
+      const short = quoteMediaRequest({ model: SOUND_MODELS.speech, prompt: 'Go!', options: {} }, 'KIE');
+      const long = quoteMediaRequest({ model: SOUND_MODELS.speech, prompt: 'x'.repeat(1000), options: {} }, 'KIE');
+
+      expect(long.usd).toBeGreaterThan(short.usd);
+      expect(long.usd).toBeCloseTo(0.06, 9); // 1,000 chars at $0.06/1k
+      expect(long.credits).toBe(24);
+    });
+  });
+
+  describe('starting', () => {
+    beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+    it('debits once, creates on the suno-sounds route, and lands as .mp3', async () => {
+      await grant(100);
+
+      const provider = new FakeProvider();
+      const started = await startMediaTask(soundInput({ provider }));
+
+      expect(started.kind).toBe('audio');
+      expect(started.credits).toBe(5);
+      expect(started.destPath).toMatch(/^public\/assets\/generated\/.+\.mp3$/);
+
+      expect(provider.created).toHaveLength(1);
+      expect(provider.created[0].endpoint).toBe('suno-sounds');
+      expect(provider.created[0].payload).toMatchObject({
+        prompt: 'arcade coin pickup chime',
+
+        // The Suno VERSION, not the priced model id — the wire wants one, the ledger the other.
+        model: 'V5',
+        soundLoop: false,
+      });
+
+      expect(await ledger.balance(USER)).toBe(95);
+    });
+
+    it('routes ElevenLabs speech to the jobs endpoint with the text as input', async () => {
+      await grant(100);
+
+      const provider = new FakeProvider();
+      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.speech, prompt: 'Lap record!' }));
+
+      expect(provider.created[0].endpoint).toBe('jobs');
+      expect(provider.created[0].payload).toMatchObject({ text: 'Lap record!' });
+    });
+
+    it('sends a callback URL and instrumental:true on a music request', async () => {
+      vi.stubEnv('MEDIA_CALLBACK_URL', 'https://example.test/api/media/kie-callback');
+      await grant(100);
+
+      const provider = new FakeProvider();
+      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.music, prompt: 'driving synthwave' }));
+
+      expect(provider.created[0].endpoint).toBe('suno-music');
+      expect(provider.created[0].payload).toMatchObject({
+        callBackUrl: 'https://example.test/api/media/kie-callback',
+        instrumental: true,
+        customMode: false,
+      });
+    });
+
+    /*
+     * 🔴 REFUSED BEFORE THE DEBIT. KIE rejects a music create with no callBackUrl, so a request we
+     * cannot address is one we must not pay for — zero ledger rows is the assertion that matters.
+     */
+    it('refuses music with no resolvable callback and spends nothing', async () => {
+      await grant(100);
+
+      await expect(startMediaTask(soundInput({ model: SOUND_MODELS.music, prompt: 'synthwave' }))).rejects.toThrow(
+        /callback/i,
+      );
+      expect(await ledger.balance(USER)).toBe(100);
+    });
+
+    /*
+     * A localhost URL PARSES as valid http, so a parse-only check would accept it and then debit for a
+     * request KIE can never deliver a callback to. Refusing is free; charging is not.
+     */
+    it('refuses a loopback or private callback address', async () => {
+      await grant(100);
+
+      for (const url of ['http://localhost:5173/api/media/kie-callback', 'http://192.168.1.10/cb']) {
+        vi.stubEnv('MEDIA_CALLBACK_URL', url);
+        await expect(startMediaTask(soundInput({ model: SOUND_MODELS.music, prompt: 'synthwave' }))).rejects.toThrow(
+          /callback/i,
+        );
+      }
+
+      expect(await ledger.balance(USER)).toBe(100);
+    });
+
+    it('effects and speech never carry a callback, even when one is configured', async () => {
+      vi.stubEnv('MEDIA_CALLBACK_URL', 'https://example.test/api/media/kie-callback');
+      await grant(100);
+
+      const provider = new FakeProvider();
+      await startMediaTask(soundInput({ provider }));
+      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.speech, prompt: 'Go' }));
+
+      expect(provider.created[0].payload).not.toHaveProperty('callBackUrl');
+      expect(provider.created[1].payload).not.toHaveProperty('callBackUrl');
+    });
+  });
+
+  describe('Suno task state', () => {
+    it('reads the audio URL out of response.sunoData on SUCCESS', () => {
+      expect(
+        parseSunoTaskState({ status: 'SUCCESS', response: { sunoData: [{ audio_url: 'https://cdn.test/a.mp3' }] } }),
+      ).toEqual({ state: 'succeeded', resultUrl: 'https://cdn.test/a.mp3' });
+    });
+
+    it('tolerates the older camelCase audioUrl', () => {
+      expect(
+        parseSunoTaskState({ status: 'SUCCESS', response: { sunoData: [{ audioUrl: 'https://cdn.test/b.mp3' }] } }),
+      ).toMatchObject({ state: 'succeeded', resultUrl: 'https://cdn.test/b.mp3' });
+    });
+
+    /*
+     * 🔴 These two READ like success and are not. Treating them as terminal would refund a render that
+     * is still going — the user's money back for art they are about to receive, billed to us anyway.
+     */
+    it('treats TEXT_SUCCESS and FIRST_SUCCESS as still pending', () => {
+      for (const status of ['PENDING', 'TEXT_SUCCESS', 'FIRST_SUCCESS']) {
+        expect(parseSunoTaskState({ status }), status).toEqual({ state: 'pending' });
+      }
+    });
+
+    it('fails with the provider message on any other state', () => {
+      expect(parseSunoTaskState({ status: 'CREATE_TASK_FAILED', failMsg: 'prompt rejected' })).toEqual({
+        state: 'failed',
+        error: 'prompt rejected',
+      });
+    });
+
+    it('a SUCCESS with no track is a failure, not a success with no bytes', () => {
+      expect(parseSunoTaskState({ status: 'SUCCESS', response: { sunoData: [] } }).state).toBe('failed');
+    });
+
+    /* CONTROL: the jobs parser is unchanged and still cannot read Suno's shape — hence two parsers. */
+    it('CONTROL: the jobs parser does not understand an uppercase SUCCESS', () => {
+      expect(parseTaskState({ status: 'SUCCESS', response: { sunoData: [{ audio_url: 'x' }] } }).state).toBe('pending');
+    });
+
+    it('reads ElevenLabs speech results from resultJson.resultUrls', () => {
+      expect(
+        parseTaskState({ state: 'success', resultJson: JSON.stringify({ resultUrls: ['https://cdn.test/v.mp3'] }) }),
+      ).toEqual({ state: 'succeeded', resultUrl: 'https://cdn.test/v.mp3' });
+    });
+  });
+
+  describe('failure', () => {
+    beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+    it('refunds a failed sound exactly once', async () => {
+      await grant(100);
+
+      const provider = new FakeProvider();
+      const objectStore = memoryStore();
+      const started = await startMediaTask(soundInput({ provider, objectStore }));
+      expect(await ledger.balance(USER)).toBe(95);
+
+      provider.state = { state: 'failed', error: 'Suno refused the prompt' };
+
+      const poll = () =>
+        pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore });
+      await poll();
+      await poll();
+
+      expect(await ledger.balance(USER)).toBe(100);
+      expect((await getMediaTask(objectStore, PROJECT, started.taskId))?.refunded).toBe(true);
+    });
   });
 });

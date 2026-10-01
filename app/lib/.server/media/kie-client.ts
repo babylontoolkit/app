@@ -27,6 +27,18 @@ const logger = createScopedLogger('kie-media');
 const API = 'https://api.kie.ai';
 const UA = 'babylon-toolkit-app-builder/1.0';
 
+/** KIE's two Suno routes (§4.16 sound). Both are polled on the SAME record-info endpoint. */
+const SUNO_CREATE_PATH: Record<'suno-sounds' | 'suno-music', string> = {
+  'suno-sounds': '/api/v1/generate/sounds',
+  'suno-music': '/api/v1/generate',
+};
+
+const SUNO_POLL_PATH = '/api/v1/generate/record-info';
+
+function isSunoEndpoint(endpoint: MediaEndpoint): endpoint is 'suno-sounds' | 'suno-music' {
+  return endpoint === 'suno-sounds' || endpoint === 'suno-music';
+}
+
 export class KieMediaProvider implements MediaProvider {
   readonly name: MediaProviderName = 'KIE';
 
@@ -64,8 +76,10 @@ export class KieMediaProvider implements MediaProvider {
    * task to KIE's jobs endpoint — a debit taken, a task id that means nothing, and a poll that can
    * only ever time out. Refusing names the mismatch instead.
    */
-  private _assertKieEndpoint(endpoint: MediaEndpoint): asserts endpoint is 'jobs' | 'veo' {
-    if (endpoint !== 'jobs' && endpoint !== 'veo') {
+  private _assertKieEndpoint(
+    endpoint: MediaEndpoint,
+  ): asserts endpoint is 'jobs' | 'veo' | 'suno-sounds' | 'suno-music' {
+    if (endpoint !== 'jobs' && endpoint !== 'veo' && !isSunoEndpoint(endpoint)) {
       throw new Error(`KIE does not serve the "${endpoint}" endpoint — that task belongs to another provider.`);
     }
   }
@@ -73,14 +87,20 @@ export class KieMediaProvider implements MediaProvider {
   async create(input: CreateMediaTaskInput): Promise<string> {
     this._assertKieEndpoint(input.endpoint);
 
-    const result =
-      input.endpoint === 'veo'
+    /*
+     * Suno takes a FLAT body (prompt/model/options at the top level), unlike the jobs endpoint's
+     * `{ model, input }` envelope — `service.ts` has already shaped it, including the `model` field
+     * (the Suno VERSION, e.g. V5), which is not the priced model id.
+     */
+    const result = isSunoEndpoint(input.endpoint)
+      ? await this._request(`${API}${SUNO_CREATE_PATH[input.endpoint]}`, 'POST', input.payload)
+      : input.endpoint === 'veo'
         ? await this._request(`${API}/api/v1/veo/generate`, 'POST', input.payload)
         : await this._request(`${API}/api/v1/jobs/createTask`, 'POST', { model: input.model, input: input.payload });
 
     const taskId = result?.data?.taskId;
 
-    if (!taskId || (input.endpoint === 'veo' && result?.code !== 200)) {
+    if (!taskId || ((input.endpoint === 'veo' || isSunoEndpoint(input.endpoint)) && result?.code !== 200)) {
       // KIE's error text names the real problem (bad option, moderation) — surface it, capped.
       throw new Error(`KIE createTask failed: ${JSON.stringify(result).slice(0, 300)}`);
     }
@@ -93,15 +113,16 @@ export class KieMediaProvider implements MediaProvider {
   async query(endpoint: MediaEndpoint, kieTaskId: string): Promise<MediaTaskState> {
     this._assertKieEndpoint(endpoint);
 
-    const url =
-      endpoint === 'veo'
-        ? `${API}/api/v1/veo/record-info?taskId=${encodeURIComponent(kieTaskId)}`
-        : `${API}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(kieTaskId)}`;
+    const path = isSunoEndpoint(endpoint)
+      ? SUNO_POLL_PATH
+      : endpoint === 'veo'
+        ? '/api/v1/veo/record-info'
+        : '/api/v1/jobs/recordInfo';
 
-    const info = await this._request(url, 'GET');
+    const info = await this._request(`${API}${path}?taskId=${encodeURIComponent(kieTaskId)}`, 'GET');
     const data = info?.data ?? {};
 
-    return parseTaskState(data);
+    return isSunoEndpoint(endpoint) ? parseSunoTaskState(data) : parseTaskState(data);
   }
 
   download(url: string): Promise<Response> {
@@ -135,6 +156,45 @@ export function parseTaskState(data: Record<string, any>): MediaTaskState {
 
   return { state: 'pending' };
 }
+
+/**
+ * Suno's status shape, which shares nothing with the jobs one — hence a second parser rather than a
+ * widened first (SPEC §4.16 sound).
+ *
+ * `status` is UPPERCASE (`SUCCESS`), the pending set has two states that READ like success
+ * (`TEXT_SUCCESS`, `FIRST_SUCCESS` — lyrics done, first track done) and the audio URL lives in
+ * `response.sunoData[]`, which `extractResultUrl` does not know about. Running these through
+ * `parseTaskState` would read every in-progress Suno task as a failure and refund a render that is
+ * still going — money back for art the user is about to receive, and our account billed anyway.
+ *
+ * Exported for direct tests, like its sibling.
+ */
+export function parseSunoTaskState(data: Record<string, any>): MediaTaskState {
+  const status = data.status;
+
+  if (status === 'SUCCESS') {
+    // KIE's current schema is snake_case; older Suno responses used camelCase. Tolerate both.
+    const tracks: unknown[] = Array.isArray(data.response?.sunoData) ? data.response.sunoData : [];
+    const url = tracks
+      .map((track) => (track as Record<string, unknown>)?.audio_url || (track as Record<string, unknown>)?.audioUrl)
+      .find((candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0);
+
+    return url
+      ? { state: 'succeeded', resultUrl: url }
+      : { state: 'failed', error: 'Suno reported success but returned no audio URL.' };
+  }
+
+  if (SUNO_PENDING_STATES.includes(status)) {
+    return { state: 'pending' };
+  }
+
+  const message = data.failMsg || data.errorMessage || data.msg || `Suno reported state ${status ?? '(missing)'}.`;
+
+  return { state: 'failed', error: String(message).slice(0, 500) };
+}
+
+/** `TEXT_SUCCESS`/`FIRST_SUCCESS` are PENDING, whatever they read like — see `parseSunoTaskState`. */
+const SUNO_PENDING_STATES = ['PENDING', 'TEXT_SUCCESS', 'FIRST_SUCCESS'];
 
 function extractResultUrl(data: Record<string, any>): string | undefined {
   const candidates: unknown[] = [];
