@@ -1184,7 +1184,7 @@ export const ChatImpl = memo(
             projectId: media.projectId,
             taskId: media.taskId,
             destPath: media.destPath,
-            kind: media.kind === 'video' ? 'video' : 'image',
+            kind: media.kind === 'video' ? 'video' : media.kind === 'audio' ? 'audio' : 'image',
           });
           continue;
         }

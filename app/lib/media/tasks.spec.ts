@@ -43,7 +43,7 @@ function mockRoutes(status: 'succeeded' | 'failed') {
 let n = 0;
 
 /** Unique per test — the latch is module-level state shared across this whole spec file. */
-function handle(kind: 'image' | 'video' = 'image') {
+function handle(kind: 'image' | 'video' | 'audio' = 'image') {
   return { projectId: 'p1', taskId: `med_test_${n++}`, destPath: 'public/assets/generated/a.png', kind };
 }
 
@@ -127,12 +127,12 @@ describe('trackMediaTask — the terminal latch', () => {
  */
 describe('mediaRenderStore — in-flight render counts', () => {
   beforeEach(() => {
-    mediaRenderStore.set({ images: 0, videos: 0 });
+    mediaRenderStore.set({ images: 0, videos: 0, sounds: 0 });
   });
 
   /** Captures the store the moment the poll route is hit — i.e. while the task is genuinely in flight. */
   function mockRoutesCapturing(status: 'succeeded' | 'failed') {
-    const seen: Array<{ images: number; videos: number }> = [];
+    const seen: Array<{ images: number; videos: number; sounds: number }> = [];
 
     (globalThis.fetch as unknown as FetchMock) = vi.fn(async (url: string) => {
       if (String(url).endsWith('/file')) {
@@ -152,8 +152,8 @@ describe('mediaRenderStore — in-flight render counts', () => {
 
     await trackMediaTask(handle('image'));
 
-    expect(seen[0]).toEqual({ images: 1, videos: 0 }); // CONTROL: it really went up
-    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0 });
+    expect(seen[0]).toEqual({ images: 1, videos: 0, sounds: 0 }); // CONTROL: it really went up
+    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0, sounds: 0 });
   });
 
   it('counts images and videos separately', async () => {
@@ -167,7 +167,21 @@ describe('mediaRenderStore — in-flight render counts', () => {
 
     expect(seen.some((s) => s.videos === 1)).toBe(true);
     expect(seen.some((s) => s.images >= 1)).toBe(true);
-    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0 });
+    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0, sounds: 0 });
+  });
+
+  /*
+   * Sound (§4.16). An audio task must land in its OWN counter — folded into `images` it would make the
+   * status line claim a picture is rendering when a sound effect is, which is the one thing that line
+   * exists to get right.
+   */
+  it('counts an audio render as a sound, not an image', async () => {
+    const seen = mockRoutesCapturing('succeeded');
+
+    await trackMediaTask(handle('audio'));
+
+    expect(seen[0]).toEqual({ images: 0, videos: 0, sounds: 1 });
+    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0, sounds: 0 });
   });
 
   it('comes back down on a FAILED render', async () => {
@@ -175,8 +189,8 @@ describe('mediaRenderStore — in-flight render counts', () => {
 
     await trackMediaTask(handle('video'));
 
-    expect(seen[0]).toEqual({ images: 0, videos: 1 });
-    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0 });
+    expect(seen[0]).toEqual({ images: 0, videos: 1, sounds: 0 });
+    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0, sounds: 0 });
     expect(toast.error).toHaveBeenCalled();
   });
 
@@ -198,7 +212,7 @@ describe('mediaRenderStore — in-flight render counts', () => {
     nowSpy.mockRestore();
 
     expect(toast.warning).toHaveBeenCalled();
-    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0 });
+    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0, sounds: 0 });
   });
 
   it('comes back down when the loop THROWS — the finally, not the happy path, is what releases it', async () => {
@@ -214,7 +228,7 @@ describe('mediaRenderStore — in-flight render counts', () => {
 
     await expect(trackMediaTask(handle('image'))).rejects.toThrow('toaster unmounted');
 
-    expect(seen[0]).toEqual({ images: 1, videos: 0 });
-    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0 });
+    expect(seen[0]).toEqual({ images: 1, videos: 0, sounds: 0 });
+    expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0, sounds: 0 });
   });
 });

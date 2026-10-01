@@ -28,7 +28,17 @@ interface FieldChoice {
 
 interface FieldSpec {
   /** ⚠️ `quality` is Comet-only — it is the field its token-priced image models are priced on. */
-  key: 'resolution' | 'mode' | 'sound' | 'duration' | 'aspectRatio' | 'outputFormat' | 'transparent' | 'quality';
+  key:
+    | 'resolution'
+    | 'mode'
+    | 'sound'
+    | 'duration'
+    | 'aspectRatio'
+    | 'outputFormat'
+    | 'transparent'
+    | 'quality'
+    | 'loop'
+    | 'instrumental';
   label: string;
   choices: FieldChoice[];
   default: string;
@@ -273,6 +283,49 @@ export const VIDEO_MODELS: ModelSpec[] = [
 ];
 
 /**
+ * Sound (§4.16) — KIE only, because no other gateway serves audio.
+ *
+ * The three kinds are modelled as MODELS rather than as a second selector, because that is exactly
+ * what they are on the wire: each one is a distinct priced row with its own endpoint. It also means
+ * the kind dropdown, the per-kind fields and the quote all reuse the machinery already here, instead
+ * of this tab growing a parallel set of controls.
+ */
+export const SOUND_MODELS_SPEC: ModelSpec[] = [
+  {
+    id: 'suno/generate-sounds',
+    label: 'Sound effect (default)',
+    fields: [
+      {
+        key: 'loop',
+        label: 'Looping',
+        choices: [
+          { value: 'false', label: 'One-shot' },
+          { value: 'true', label: 'Loopable' },
+        ],
+        default: 'false',
+      },
+    ],
+  },
+  {
+    id: 'suno/generate-music',
+    label: 'Music track',
+    fields: [
+      {
+        key: 'instrumental',
+        label: 'Vocals',
+        choices: [
+          { value: 'true', label: 'Instrumental' },
+          { value: 'false', label: 'With vocals' },
+        ],
+        default: 'true',
+      },
+    ],
+  },
+  { id: 'elevenlabs/text-to-speech-multilingual-v2', label: 'Speech — multilingual v2', fields: [] },
+  { id: 'elevenlabs/text-to-speech-turbo-2-5', label: 'Speech — turbo 2.5 (cheaper)', fields: [] },
+];
+
+/**
  * The catalogue for a gateway — the ONE place that maps a provider onto a model list.
  *
  * 🔴 `null` RETURNS AN EMPTY LIST, IT DOES NOT MEAN KIE. There are three states, not two: Comet, KIE,
@@ -284,9 +337,14 @@ export const VIDEO_MODELS: ModelSpec[] = [
  * ⚠️ An empty list is a state the caller must RENDER, not index into. Every `models[0]` on this path
  * is optional-chained for that reason; the panel shows an unavailable card instead of a form.
  */
-export function modelsForProvider(kind: 'image' | 'video', provider: 'KIE' | 'Comet' | null): ModelSpec[] {
+export function modelsForProvider(kind: 'image' | 'video' | 'audio', provider: 'KIE' | 'Comet' | null): ModelSpec[] {
   if (!provider) {
     return [];
+  }
+
+  if (kind === 'audio') {
+    // Comet has no audio routes at all, so the tab is absent there rather than refusing every quote.
+    return provider === 'KIE' ? SOUND_MODELS_SPEC : [];
   }
 
   if (kind === 'video') {
@@ -298,7 +356,7 @@ export function modelsForProvider(kind: 'image' | 'video', provider: 'KIE' | 'Co
 
 interface TaskRow {
   id: string;
-  kind: 'image' | 'video';
+  kind: 'image' | 'video' | 'audio';
   model: string;
   prompt: string;
   destPath: string;
@@ -308,7 +366,12 @@ interface TaskRow {
 }
 
 /** The request body both quote and start send — one builder so they cannot disagree. */
-function buildRequest(kind: 'image' | 'video', model: ModelSpec, values: Record<string, string>, prompt: string) {
+function buildRequest(
+  kind: 'image' | 'video' | 'audio',
+  model: ModelSpec,
+  values: Record<string, string>,
+  prompt: string,
+) {
   const options: Record<string, string | number | boolean> = {};
   let durationSeconds: number | undefined;
 
@@ -317,7 +380,12 @@ function buildRequest(kind: 'image' | 'video', model: ModelSpec, values: Record<
 
     if (field.key === 'duration') {
       durationSeconds = Number(value);
-    } else if (field.key === 'sound' || field.key === 'transparent') {
+    } else if (
+      field.key === 'sound' ||
+      field.key === 'transparent' ||
+      field.key === 'loop' ||
+      field.key === 'instrumental'
+    ) {
       // Booleans on the wire, never the string a <select> hands back (the service reads both, the price lookup does not).
       options[field.key] = value === 'true';
     } else {
@@ -350,8 +418,14 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
   const mediaProvider = media.provider;
   const imageModels = useMemo(() => modelsForProvider('image', mediaProvider), [mediaProvider]);
   const videoModels = useMemo(() => modelsForProvider('video', mediaProvider), [mediaProvider]);
+  const soundModels = useMemo(() => modelsForProvider('audio', mediaProvider), [mediaProvider]);
 
-  const [kind, setKind] = useState<'image' | 'video'>('image');
+  /*
+   * ONE vocabulary. The task record, the wire and the price list all say `audio`; only the TAB says
+   * "Sound". A UI-side `'sound'` would have to be translated at every boundary, and a translation
+   * nobody can see is how two spellings of one fact drift apart.
+   */
+  const [kind, setKind] = useState<'image' | 'video' | 'audio'>('image');
   const [modelId, setModelId] = useState(imageModels[0]?.id ?? '');
   const [values, setValues] = useState<Record<string, string>>({});
   const [prompt, setPrompt] = useState('');
@@ -360,15 +434,15 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
   const [busy, setBusy] = useState(false);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
 
-  const models = kind === 'image' ? imageModels : videoModels;
+  const models = kind === 'image' ? imageModels : kind === 'video' ? videoModels : soundModels;
   const model = useMemo(
     (): ModelSpec | undefined => models.find((m) => m.id === modelId) ?? models[0],
     [models, modelId],
   );
 
-  const switchKind = (next: 'image' | 'video') => {
+  const switchKind = (next: 'image' | 'video' | 'audio') => {
     setKind(next);
-    setModelId((next === 'image' ? imageModels : videoModels)[0]?.id ?? '');
+    setModelId((next === 'image' ? imageModels : next === 'video' ? videoModels : soundModels)[0]?.id ?? '');
     setValues({});
   };
 
@@ -525,7 +599,8 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
         </div>
 
         <div className="flex gap-1 rounded-md border border-bolt-elements-borderColor p-0.5 self-start">
-          {(['image', 'video'] as const).map((k) => (
+          {/* Sound is absent, not disabled, on a gateway that serves no audio. */}
+          {(['image', 'video', ...(soundModels.length > 0 ? (['audio'] as const) : [])] as const).map((k) => (
             <button
               key={k}
               className={
@@ -535,7 +610,7 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
               }
               onClick={() => switchKind(k)}
             >
-              {k === 'image' ? 'Image' : 'Video'}
+              {k === 'image' ? 'Image' : k === 'video' ? 'Video' : 'Sound'}
             </button>
           ))}
         </div>
@@ -582,7 +657,13 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
           placeholder={
             kind === 'image'
               ? 'Describe the image — e.g. "seamless sci-fi metal floor texture, top-down, tileable"'
-              : 'Describe the video — e.g. "cinematic flythrough of a neon city at night"'
+              : kind === 'video'
+                ? 'Describe the video — e.g. "cinematic flythrough of a neon city at night"'
+                : model?.id.startsWith('elevenlabs/')
+                  ? 'The exact words to speak — e.g. "New lap record!"'
+                  : model?.id === 'suno/generate-music'
+                    ? 'Describe the track — e.g. "driving synthwave, upbeat, retro arcade"'
+                    : 'Describe the sound — e.g. "arcade coin pickup chime, short and bright"'
           }
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}

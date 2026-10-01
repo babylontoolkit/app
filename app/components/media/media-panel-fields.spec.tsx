@@ -32,6 +32,7 @@ import {
   withBackgroundField,
 } from './MediaPanel';
 import { hasCutoutPass, imageModelCapability, nativeAlphaModelFor } from '~/lib/media/image-capabilities';
+import { soundKindForModel } from '~/lib/media/provider-defaults';
 
 const backgroundField = (model: Parameters<typeof withBackgroundField>[0], provider: 'KIE' | 'Comet' | null) =>
   withBackgroundField(model, provider).fields.find((f) => f.key === 'transparent');
@@ -323,5 +324,48 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
 
     expect(IMAGE_MODELS.map((m) => m.fields.length)).toEqual(before);
     expect(COMET_IMAGE_MODELS.some((m) => m.fields.some((f) => f.key === 'transparent'))).toBe(false);
+  });
+});
+
+/**
+ * Sound (§4.16). The tab is KIE-only — Comet has no audio routes at all, so offering it there would
+ * be a control every quote refuses, which is the exact defect the three-gateway-states fix removed
+ * one kind up.
+ *
+ * Note the panel's kind is `'audio'`, not `'sound'`: the task record, the wire and the price list all
+ * say audio, and only the TAB LABEL says Sound. One vocabulary, one spelling.
+ */
+describe('the Sound tab is per gateway', () => {
+  it('offers KIE the three kinds of sound, keyed by their priced model ids', () => {
+    const ids = modelsForProvider('audio', 'KIE').map((m) => m.id);
+
+    expect(ids).toContain('suno/generate-sounds');
+    expect(ids).toContain('suno/generate-music');
+    expect(ids.filter((id) => id.startsWith('elevenlabs/')).length).toBeGreaterThan(0);
+  });
+
+  it('offers NOTHING on a gateway with no audio — absent, not refusing', () => {
+    expect(modelsForProvider('audio', 'Comet')).toEqual([]);
+    expect(modelsForProvider('audio', null)).toEqual([]);
+  });
+
+  /*
+   * The per-kind controls are the whole point of the tab: an effect can loop, a music track can have
+   * vocals, and speech takes neither. Asserting the FIELD KEYS rather than the labels, because the
+   * keys are what reach the provider payload.
+   */
+  it('gives each kind only the controls that apply to it', () => {
+    const byId = new Map(modelsForProvider('audio', 'KIE').map((m) => [m.id, m.fields.map((f) => f.key)]));
+
+    expect(byId.get('suno/generate-sounds')).toEqual(['loop']);
+    expect(byId.get('suno/generate-music')).toEqual(['instrumental']);
+    expect(byId.get('elevenlabs/text-to-speech-multilingual-v2')).toEqual([]);
+  });
+
+  /* Every sound model the panel offers must be one the agent tool would also accept. */
+  it('offers only models the shared validator recognises', () => {
+    for (const spec of modelsForProvider('audio', 'KIE')) {
+      expect(soundKindForModel(spec.id), `${spec.id} is not a sound model`).not.toBeNull();
+    }
   });
 });

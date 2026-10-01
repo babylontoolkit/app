@@ -24,7 +24,7 @@ import { vi } from 'vitest';
  * manager). The component reads exactly one atom from it.
  */
 const holder = vi.hoisted(() => ({
-  store: null as unknown as ReturnType<typeof atom<{ images: number; videos: number }>>,
+  store: null as unknown as ReturnType<typeof atom<{ images: number; videos: number; sounds: number }>>,
 }));
 vi.mock('~/lib/media/tasks', () => ({
   get mediaRenderStore() {
@@ -36,8 +36,8 @@ import { agentStatusStore, resetAgentStatus, updateAgentStatus } from '~/lib/sto
 import { activeSkillsStore } from '~/lib/stores/active-skills';
 import { StreamingStatus } from './StreamingStatus';
 
-function renders(images: number, videos: number) {
-  holder.store.set({ images, videos });
+function renders(images: number, videos: number, sounds = 0) {
+  holder.store.set({ images, videos, sounds });
 }
 
 /** A heartbeat that arrived just now — the panel branch. Absent → the fallback dots branch. */
@@ -46,7 +46,7 @@ function liveHeartbeat() {
 }
 
 beforeEach(() => {
-  holder.store = atom({ images: 0, videos: 0 });
+  holder.store = atom({ images: 0, videos: 0, sounds: 0 });
   resetAgentStatus();
   activeSkillsStore.set(null);
 });
@@ -202,5 +202,33 @@ describe('StreamingStatus — what the user reads during a long silence', () => 
 
     expect(container.querySelector('[style*="width"]')).toBeNull();
     expect(screen.queryByText(/usually about/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Sound (§4.16). A Suno render outlives the turn exactly like an image does, so the same line has to
+ * name it — otherwise the only thing still happening is the one thing the UI does not mention.
+ */
+describe('StreamingStatus — sounds in the render line', () => {
+  it('names sounds on their own', () => {
+    renders(0, 0, 1);
+    render(<StreamingStatus />);
+
+    expect(screen.getByText('Generating 1 sound…')).toBeInTheDocument();
+  });
+
+  it('joins sounds with the other kinds and pluralises each independently', () => {
+    renders(2, 0, 3);
+    render(<StreamingStatus />);
+
+    expect(screen.getByText('Generating 2 images and 3 sounds…')).toBeInTheDocument();
+  });
+
+  /* CONTROL: a zero sound count must not add an empty clause to a line that was already correct. */
+  it('CONTROL: says nothing about sound when none is in flight', () => {
+    renders(1, 0, 0);
+    render(<StreamingStatus />);
+
+    expect(screen.getByText('Generating 1 image…')).toBeInTheDocument();
   });
 });

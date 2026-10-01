@@ -842,3 +842,34 @@ describe('retired phases are dropped on the way in', () => {
     ).toEqual(['game-systems']);
   });
 });
+
+/**
+ * Sound in the build flow (§4.16, owner 2026-09-30): every new game ships with sound EFFECTS, and
+ * music only on request. Both halves are prompt text, so both fail silently — a dropped line means
+ * the model simply stops generating audio, or starts generating the expensive kind unasked.
+ */
+describe('builds generate sound effects, not music', () => {
+  const design = CREATION_PHASES.find((p) => p.id === 'design')!;
+  const game = CREATION_PHASES.find((p) => p.id === 'game')!;
+
+  it('asks the design step for an Audio list and generates it', () => {
+    expect(design.task).toMatch(/Audio/);
+    expect(design.task).toContain('generate_sound');
+    expect(design.task).toMatch(/kind: sound_effect/);
+  });
+
+  it('tells the design step NOT to generate music unasked', () => {
+    expect(design.task).toMatch(/not generate music unless the user actually asked/i);
+  });
+
+  /* The design phase is the only scheduled one that may spend on media; sound rides that same flag. */
+  it('CONTROL: the design step is still the media-enabled one', () => {
+    expect(design.allowsMedia).toBe(true);
+    expect(game.allowsMedia).toBe(false);
+  });
+
+  it('tells the game step to wire the sounds up, naming the reference it needs', () => {
+    expect(game.task).toMatch(/Audio list/);
+    expect(game.task).toContain('audio-source');
+  });
+});

@@ -137,10 +137,16 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
       'modes, and the GameMode that runs it (read its real class name off `src/scripts/`).\n' +
       '2. Write `DESIGN.md`: the visual direction (palette, type, mood), and the list of art the game and ' +
       'its front end need — landing hero, backgrounds, chrome art, and any in-game textures or sprites — ' +
-      'each with subject, aspect ratio, and whether it needs a transparent background.\n' +
+      'each with subject, aspect ratio, and whether it needs a transparent background. Add an **Audio** ' +
+      'list too: the gameplay sounds this game needs (about 3-6 — the cues a player hears, such as a ' +
+      'jump, a pickup, an impact, a UI click, an engine), each with the event that fires it, a short ' +
+      'description, and whether it loops or is a one-shot.\n' +
       '3. Generate every piece of art on that list now, one generate call per image. Do not wait for ' +
       'them — they render in the background and will be ready for the later steps. Record each returned ' +
       'path in `DESIGN.md`.\n' +
+      '4. Generate every sound on the Audio list the same way — one `generate_sound` call per sound, ' +
+      '`kind: sound_effect`. Record each returned path in `DESIGN.md`. Do NOT generate music unless the ' +
+      'user actually asked for music; it costs several times what an effect does.\n' +
       'Do not write game code, the landing page, or the chrome in this step.',
   },
   {
@@ -217,7 +223,9 @@ export const CREATION_PHASES: readonly CreationPhase[] = [
       'Build the GAME described in `SPEC.md` — the playable project in `src/scripts/**`: the GameMode ' +
       'named there plus whatever Script Components, systems and helpers it needs. Write your todo list ' +
       'first. Keep the play contract exactly as described. Use the in-game art listed in `DESIGN.md` ' +
-      'where it fits (the files are in `public/assets/generated/`). Do NOT touch the landing page or the ' +
+      'where it fits (the files are in `public/assets/generated/`). Wire up the sounds on that file’s ' +
+      'Audio list so they actually play on the events they name — load the `audio-source` reference for ' +
+      'the Toolkit’s audio API. Do NOT touch the landing page or the ' +
       'game chrome — that is the next step.\n' +
       "Verify with `check_game` (pass the GameMode's class name) and keep fixing until it passes. If the " +
       'request was a single narrow change that does not call for game code, do only what was asked and ' +

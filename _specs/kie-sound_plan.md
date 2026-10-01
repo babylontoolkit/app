@@ -333,7 +333,7 @@ The music callback route is the one new unauthenticated route (D7). It never act
 
 ### Phase 2 — The panel, the build flow, and the live proof
 
-- [ ] **T4** — Client: Sound tab, audio tasks and status line
+- [x] **T4** — Client: Sound tab, audio tasks and status line
   - Files:
     - `app/lib/media/tasks.ts` (modify)
     - `app/components/chat/Chat.client.tsx` (modify — the `media-task` kind coercion only)
@@ -364,7 +364,7 @@ The music callback route is the one new unauthenticated route (D7). It never act
     - the MP3 lands in `public/assets/generated/` and plays in the Code tab.
   - Verify level: live
 
-- [ ] **T5** — Builds ship with sound effects; prove the whole feature live
+- [x] **T5** — Builds ship with sound effects; prove the whole feature live
   - Files:
     - `app/lib/agent/creation-plan.ts` (+ `creation-plan.spec.ts`) (modify)
   - Details:
@@ -394,7 +394,7 @@ The music callback route is the one new unauthenticated route (D7). It never act
     - **Report:** the credits for each kind, and the generation and task ids.
   - Verify level: live
 
-- [ ] **T6** — Update SPEC.md to match what was built
+- [x] **T6** — Update SPEC.md to match what was built
   - Files: `SPEC.md`
   - Details:
     - §4.16 gains sound:

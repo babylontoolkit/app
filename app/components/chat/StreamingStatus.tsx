@@ -29,8 +29,8 @@ import { SkillBadges } from './SkillBadges';
  * exactly the stretch when it is the only thing still happening — which is the state the user described
  * as the product "spinning for nothing".
  */
-function renderLine(images: number, videos: number): string | null {
-  if (images === 0 && videos === 0) {
+function renderLine(images: number, videos: number, sounds: number): string | null {
+  if (images === 0 && videos === 0 && sounds === 0) {
     return null;
   }
 
@@ -42,6 +42,10 @@ function renderLine(images: number, videos: number): string | null {
 
   if (videos > 0) {
     parts.push(`${videos} video${videos === 1 ? '' : 's'}`);
+  }
+
+  if (sounds > 0) {
+    parts.push(`${sounds} sound${sounds === 1 ? '' : 's'}`);
   }
 
   return `Generating ${parts.join(' and ')}…`;
@@ -68,7 +72,7 @@ export const StreamingStatus = memo(({ progress: artifact }: { progress?: Artifa
   const skills = active?.skills ?? [];
 
   const renders = useStore(mediaRenderStore);
-  const media = renderLine(renders.images, renders.videos);
+  const media = renderLine(renders.images, renders.videos, renders.sounds);
 
   /*
    * A 1s tick keeps the elapsed label counting BETWEEN heartbeats (they arrive every ~3s) and lets

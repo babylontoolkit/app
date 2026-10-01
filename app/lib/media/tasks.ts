@@ -26,7 +26,7 @@ export interface MediaTaskHandle {
   projectId: string;
   taskId: string;
   destPath: string;
-  kind: 'image' | 'video';
+  kind: 'image' | 'video' | 'audio';
 }
 
 interface MediaTaskStatus {
@@ -68,23 +68,30 @@ export function isTrackingMediaTask(taskId: string): boolean {
  * Derived from `tracking` rather than kept alongside it — one source of truth, updated at the two lines
  * that already own the lifecycle, so a poller can never finish without the count following it down.
  */
-export const mediaRenderStore = atom<{ images: number; videos: number }>({ images: 0, videos: 0 });
+export const mediaRenderStore = atom<{ images: number; videos: number; sounds: number }>({
+  images: 0,
+  videos: 0,
+  sounds: 0,
+});
 
-const inFlightKinds = new Map<string, 'image' | 'video'>();
+const inFlightKinds = new Map<string, 'image' | 'video' | 'audio'>();
 
 function republishRenderCounts(): void {
   let images = 0;
   let videos = 0;
+  let sounds = 0;
 
   for (const kind of inFlightKinds.values()) {
     if (kind === 'video') {
       videos++;
+    } else if (kind === 'audio') {
+      sounds++;
     } else {
       images++;
     }
   }
 
-  mediaRenderStore.set({ images, videos });
+  mediaRenderStore.set({ images, videos, sounds });
 }
 
 /**
@@ -107,7 +114,8 @@ export async function trackMediaTask(handle: MediaTaskHandle, opts: { force?: bo
   inFlightKinds.set(handle.taskId, handle.kind);
   republishRenderCounts();
 
-  const intervalMs = handle.kind === 'video' ? 10_000 : 4_000;
+  // Suno takes tens of seconds to minutes, like video — polling it at the image rate is dead traffic.
+  const intervalMs = handle.kind === 'image' ? 4_000 : 10_000;
   const deadline = Date.now() + MAX_POLL_MS;
 
   try {
