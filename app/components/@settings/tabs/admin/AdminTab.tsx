@@ -211,6 +211,7 @@ export function AdminTab() {
   const [vmLoaded, setVmLoaded] = useState(false);
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [syncCount, setSyncCount] = useState(0);
 
   const load = () => {
     fetch('/api/admin/usage')
@@ -399,6 +400,7 @@ export function AdminTab() {
         agentCommitSha?: string;
         skills?: { commitSha?: string };
         message?: string;
+        managedAgent?: { status?: string; agentId?: string; agentVersion?: number; skipped?: string; error?: string };
       };
 
       if (!r.ok || !data.ok) {
@@ -413,6 +415,21 @@ export function AdminTab() {
           ? `Already current — docs @ ${docs}, skills @ ${skills}.`
           : `Live now — docs @ ${docs}, skills @ ${skills}.`,
       );
+
+      /*
+       * The sync provisions the managed agent itself (T12) and never fails over it — so a provisioning
+       * failure arrives inside a SUCCESS and must be shown, or the sync reads as complete while managed
+       * turns keep running on the previous docs.
+       */
+      if (data.managedAgent?.error) {
+        toast.warn(`Prompt synced, but the managed agent was not provisioned: ${data.managedAgent.error}`);
+      } else if (data.managedAgent?.status && data.managedAgent.status !== 'unchanged') {
+        toast.info(
+          `Managed agent ${data.managedAgent.status} — ${data.managedAgent.agentId} v${data.managedAgent.agentVersion}.`,
+        );
+      }
+
+      setSyncCount((n) => n + 1);
       load();
     } finally {
       setBusy(false);
@@ -967,7 +984,7 @@ export function AdminTab() {
                 `${prompt.summary.skills.commitSha ? ` · commit ${prompt.summary.skills.commitSha.slice(0, 8)}` : ''}`
               }
             />
-            <ManagedAgentRow />
+            <ManagedAgentRow reloadSignal={syncCount} />
           </div>
         )}
       </section>

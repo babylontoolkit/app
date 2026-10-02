@@ -1,5 +1,7 @@
 # Anthropic Model Support — Rebuild Guide
 
+> **Engine scope (2026-10-01).** This guide covers the LEGACY engine's provider path (`@ai-sdk/anthropic`, `thinkingFetch`, the sampling-param strip), which still serves Plan mode, MCP turns and the prompt enhancer. The managed engine (SPEC §4.2) talks to Anthropic's Managed Agents API through `@anthropic-ai/sdk` 0.131.0; effort is set on the provisioned agent (`MANAGED_AGENT_EFFORT`) and none of the wrappers here are in its path.
+
 How to wire current Claude models into this bolt.diy fork, and the three non-obvious
 failures you WILL hit if you only swap the model ID strings.
 

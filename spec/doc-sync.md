@@ -1,5 +1,7 @@
 # spec/doc-sync.md — Doc-Sync Subsystem (governs SPEC §4.3)
 
+> **Engine scope (2026-10-01).** On the managed engine (SPEC §4.2) the active prompt version is not sent as a prompt: a Managed Agents agent is provisioned from it (by every Synchronize, after the new version activates, or by Settings → Admin → Agent repository → Provision managed agent), uploading the Agent Reference files at the version's source commit and attaching the synced skills; the record is stored on the version and hash-skipped. Since T12 the sync route provisions as its last step, best-effort: a provisioning failure is reported in the sync response (`managedAgent: {error}`) and alerted, never a failed sync — and until it succeeds (sync again, or press Provision) managed turns keep reading the previous version's docs.
+
 Consumes the Agent Reference repo into versioned, cached system prompts. The GitHub repos stay authored exactly as today; the platform only ever reads snapshots.
 
 ## Sources

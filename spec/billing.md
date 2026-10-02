@@ -1,5 +1,7 @@
 # spec/billing.md — Credits, Stripe & Entitlements (governs SPEC §4.6, §4.6.1, §4.6.1a, §4.5.4)
 
+> **Engine scope (2026-10-01).** The formula, the ledger, the gate and `settleGeneration` are shared by both agent engines. The managed engine (SPEC §4.2) differs only in where usage comes from and how a turn is bounded: per-request usage from the session's `span.model_request_end` events plus active session-hours (`MANAGED_SESSION_HOUR_USD`) added as `extraRawCostUsd`, settled by a per-chat cursor (`chats.managed_settled_at`) so a detached and resumed turn bills once; the turn's credit ceiling becomes the session's hard `max_list_cost` budget. SPEC §4.6 "Settlement on the managed engine" is the authority.
+
 > **Status: IMPLEMENTED and verified end-to-end (Stage 3, 2026-07).** The design below is what we
 > built, with four deliberate divergences recorded in *Divergences from the original design* at the
 > bottom. Read that section before assuming a line here describes the code.

@@ -17,6 +17,7 @@ import {
   buildGameCheckResult,
   classifyRunCommand,
   createDataStreamParser,
+  engineMismatch,
   formatReport,
   isStrictPass,
   median,
@@ -25,6 +26,7 @@ import {
   parseResultsJsonl,
   parseTypecheckOutput,
   resolveInside,
+  resolveWorkDir,
 } from './lib.mjs';
 
 describe('createDataStreamParser', () => {
@@ -99,6 +101,49 @@ describe('applyStreamPart', () => {
     expect(turn.agentMeta).toMatchObject({ generationId: 'gen_9' });
     expect(turn.usage).toEqual({ promptTokens: 1 });
     expect(turn.errors).toEqual(['bad']);
+  });
+});
+
+describe('resolveWorkDir', () => {
+  const repo = '/work/repo';
+
+  it('defaults to <tmpdir>/btk-engine-eval, outside the repo (CONTROL: a valid default resolves)', () => {
+    expect(resolveWorkDir({ arg: undefined, repo, tmpdir: '/tmp' })).toBe('/tmp/btk-engine-eval');
+    expect(resolveWorkDir({ arg: '/scratch/eval', repo, tmpdir: '/tmp' })).toBe('/scratch/eval');
+  });
+
+  it('refuses a work dir inside the repo — the dev server watcher would drop every tool result', () => {
+    expect(() => resolveWorkDir({ arg: '/work/repo/.data/engine-eval', repo, tmpdir: '/tmp' })).toThrow(
+      /inside the repo/,
+    );
+    expect(() => resolveWorkDir({ arg: '/work/repo', repo, tmpdir: '/tmp' })).toThrow(/inside the repo/);
+    expect(() => resolveWorkDir({ arg: undefined, repo, tmpdir: '/work/repo/tmp' })).toThrow(/inside the repo/);
+  });
+
+  it('a sibling whose name merely starts with the repo name is outside it', () => {
+    expect(resolveWorkDir({ arg: '/work/repo-eval', repo, tmpdir: '/tmp' })).toBe('/work/repo-eval');
+  });
+});
+
+describe('engineMismatch', () => {
+  it('a run whose every turn ran on the requested engine is not a mismatch (CONTROL)', () => {
+    expect(engineMismatch('managed', new Set(['managed']))).toBeNull();
+    expect(engineMismatch('legacy', ['legacy', 'legacy'])).toBeNull();
+  });
+
+  it('a run the server routed to the deploy engine is a mismatch naming both engines', () => {
+    const message = engineMismatch('managed', new Set(['legacy']));
+
+    expect(message).toMatch(/^Engine mismatch: asked for managed, the server ran legacy/);
+    expect(message).toContain('AGENT_ENGINE_EVAL_OVERRIDE=true');
+  });
+
+  it('one stray turn on the wrong engine is enough', () => {
+    expect(engineMismatch('legacy', ['legacy', 'managed'])).toContain('legacy+managed');
+  });
+
+  it('a run with no reported turns has nothing to contradict', () => {
+    expect(engineMismatch('managed', new Set())).toBeNull();
   });
 });
 

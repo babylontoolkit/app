@@ -37,6 +37,17 @@ export default defineConfig((config) => {
        * to `true` would trade a real protection for a convenience.
        */
       allowedHosts: shareDomain() ? ['localhost', `.${shareDomain()}`] : undefined,
+
+      /*
+       * `.data/` is the platform's local-mode persistence (ledger, prompt versions, transcripts, the engine
+       * eval's scratch projects). It is DATA, never source: a `tsconfig.json` or `.html` written there made
+       * Vite full-reload the server mid-turn, which reset the in-process relay registry under a live
+       * generation (managed-agents-engine T11 finding). Vite's defaults (`.git`, `node_modules`, …) are kept
+       * — `ignored` here is ADDED to them, not a replacement.
+       */
+      watch: {
+        ignored: ['**/.data/**'],
+      },
     },
     plugins: [
       /*

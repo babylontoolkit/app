@@ -142,6 +142,46 @@ export function newTurnTally() {
   };
 }
 
+/**
+ * The engine the server REPORTED for each turn (`agentMeta.engine`; absent = legacy) against the engine the
+ * run asked for. The body's `engineOverride` is ignored unless the server opted in
+ * (AGENT_ENGINE_EVAL_OVERRIDE=true), so without this check a run silently measures the deploy's engine and
+ * files the number under the other one — a wrong T12 decision that throws nothing. Returns the error
+ * sentence, or null when every turn ran on the requested engine.
+ */
+export function engineMismatch(asked, seen) {
+  const engines = [...seen];
+  const wrong = engines.filter((engine) => engine !== asked);
+
+  if (wrong.length === 0) {
+    return null;
+  }
+
+  return `Engine mismatch: asked for ${asked}, the server ran ${engines.join('+')} (is AGENT_ENGINE_EVAL_OVERRIDE=true set?).`;
+}
+
+/**
+ * Where run projects, the starter copy and the shared node_modules live. NEVER inside the repo: the dev
+ * server's Vite watcher covers the whole repo (`.data/` included), and every run writes a `tsconfig.json`
+ * and a `dist/index.html` — Vite answers with "changed tsconfig file detected … forcing full reload",
+ * clearing the SSR module graph, so the next `/api/agent/tool-result` request loads a FRESH `mcp-relay`
+ * whose registry is empty. Every tool result then answers `delivered:false`, the turn waits out the relay
+ * timeout and the run reads as an engine failure. Measured 2026-10-01: every relayed write of the first
+ * matrix hit the 30 s timeout this way. Default: `<tmpdir>/btk-engine-eval`. Throws for a dir inside `repo`.
+ */
+export function resolveWorkDir({ arg, repo, tmpdir }) {
+  const dir = path.resolve(typeof arg === 'string' && arg.trim() ? arg : path.join(tmpdir, 'btk-engine-eval'));
+  const rel = path.relative(path.resolve(repo), dir);
+
+  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+    throw new Error(
+      `--work-dir ${dir} is inside the repo; the dev server's file watcher would reload the server module graph on every run and drop tool results. Use a directory outside ${repo}.`,
+    );
+  }
+
+  return dir;
+}
+
 /* ───────────────────────────── the game check ───────────────────────────── */
 
 const CHECK_MAX_ERRORS = 30; // mirrors workspace-protocol-types.ts

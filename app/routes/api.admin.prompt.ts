@@ -23,6 +23,7 @@ import { syncSkills } from '~/lib/.server/skills/sync';
 import { getSkillStore } from '~/lib/.server/skills/store';
 import { getPlatformConfig } from '~/lib/.server/agent/config';
 import { getMonitor, ALERT_SIGNALS } from '~/lib/.server/monitoring';
+import { provisionAfterSync } from '~/lib/.server/agent-managed/provision-after-sync';
 
 const logger = createScopedLogger('api.admin.prompt');
 
@@ -177,9 +178,17 @@ export async function action({ request, context }: ActionFunctionArgs) {
       invalidateActivePrompt();
       warmAfterPromptChange(context);
 
+      /*
+       * The managed engine reads the ACTIVE version through a provisioned agent (T12): provision it now so a
+       * sync is the only button an admin has to press. Best-effort and hash-skipped — it never fails the
+       * sync above, which has already activated; a failure is reported in `managedAgent` and alerted.
+       */
+      const managedAgent = await provisionAfterSync(context);
+
       return json({
         ok: true,
         status: build.status,
+        managedAgent,
         version: build.version,
         docsFetched: build.fetched,
         agentCommitSha: build.sourceCommitSha,

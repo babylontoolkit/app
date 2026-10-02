@@ -241,8 +241,8 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     /*
      * THE ENGINE (managed-agents-engine plan T2, D9) — chosen only AFTER the walls, the attachment caps
      * and the claim above, which run identically for both engines (`engine-seam.spec.ts` pins the
-     * order). `legacy` (the default) is exactly the call below; `managed` runs build turns on
-     * Anthropic's hosted loop. Plan-mode and MCP turns always stay legacy (`selectEngineForTurn`).
+     * order). `managed` (the default, T12) runs build turns on Anthropic's hosted loop; `legacy` (the
+     * `AGENT_ENGINE=legacy` kill switch) is the call below. Plan/MCP stay legacy (`selectEngineForTurn`).
      */
     const engine = selectEngineForTurn({
       // `engineOverride` is the eval harness's (T11) — honoured only off production with AGENT_ENGINE_EVAL_OVERRIDE=true.

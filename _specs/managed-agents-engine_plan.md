@@ -56,6 +56,33 @@ The owner's prompt, *"Make me a mario kart racer clone complete with drifting me
 
 **Spike caveats:** the project tools ran against a local copy of the starter rather than the browser, `check_game` was typecheck plus production build (no in-browser scene probe), and the spike skipped image generation. Those are the parts T5, T8 and T11 cover.
 
+### T11 results (2026-10-01)
+
+`node scripts/engine-eval.mjs --engines legacy,managed --prompts mario,platformer,edit,fix --n 1`, run as four processes against a local dev server (`AGENT_ENGINE_EVAL_OVERRIDE=true`). Both engines ran `claude-sonnet-5-5` on Anthropic at effort `medium`. The managed agent was re-provisioned first (version 2, prompt `pv_20261001032127_1fa4e8e6`). "Success" means the harness's final check passed (`tsc -b --force` plus `vite build`), files were written, the creation plan completed and no turn failed. The games were not played: the harness has no browser, so preview tools answered "unavailable". Credits are turn plus media, without the flat 100-credit project charge. Every run was checked against the server log: the managed runs finished `managed:end_turn` and the legacy runs `stop+segments:1`. There were no relay timeouts, refunds or errors.
+
+| Run / engine | Prompt | Total | First file | Credits (raw $) | Turns | Checks | Success | Errors |
+|---|---|---|---|---|---|---|---|---|
+| Legacy | Mario Kart | 10.9 min | 0.5 min | 763 ($2.61) | 3 | 2/2 pass | ✅ | 0 |
+| Managed | Mario Kart | 7.1 min | 1.0 min | 439 ($1.46) | 1 | 2/2 pass | ✅ | 0 |
+| Legacy | Platformer | 4.9 min | 0.7 min | 408 ($1.41) | 3 | 2/2 pass | ✅ | 0 |
+| Managed | Platformer | 3.1 min | 0.8 min | 212 ($0.69) | 1 | 2/2 pass | ✅ | 0 |
+| Legacy | Edit (pause menu) | 0.5 min | 0.2 min | 30 ($0.11) | 1 | 1/1 pass | ✅ | 0 |
+| Managed | Edit (pause menu) | 1.0 min | 0.5 min | 44 ($0.16) | 1 | 1/1 pass | ✅ | 0 |
+| Legacy | Fix (TS2322) | 0.3 min | 0.1 min | 13 ($0.04) | 1 | 1/1 pass | ✅ | 0 |
+| Managed | Fix (TS2322) | 0.4 min | 0.1 min | 6 ($0.02) | 1 | 1/1 pass | ✅ | 0 |
+
+**Reading:**
+- Both engines went 8/8, so N=1 shows no difference in reliability. That needs more runs, not this table.
+- On first builds the managed engine was about 35% faster and cost about half as much: 7.1 vs 10.9 min and 439 vs 763 credits for Mario Kart, 3.1 vs 4.9 min and 212 vs 408 credits for the platformer. It builds every phase in one turn, where the legacy engine needs three turns that each rebuild the prompt.
+- On single-turn edits and fixes the two are within a few credits and a few seconds of each other. The legacy engine was slightly quicker on the edit, and the managed engine was slightly cheaper on the fix.
+- Legacy is clearly healthier than in T1's same-day observation: no 20-minute stall and no refunded turns. Comparing against T1's legacy numbers would therefore overstate the gap.
+
+**What invalidated the first three attempts** (kept as `.data/engine-eval/results-*.jsonl`, not used above):
+1. The harness wrote run projects under `.data/engine-eval/` inside the repo. The dev server's Vite watcher saw each run's `tsconfig.json` and `dist/index.html`, logged "changed tsconfig file detected … forcing full reload", and cleared the SSR module graph. The next `/api/agent/tool-result` then loaded a fresh `mcp-relay` with an empty registry, answered `delivered:false`, and the turn waited out the 30 s relay timeout. Legacy refunded "wrote no files" turns because of this, and the managed engine paused.
+   - Fix: run projects now go to `--work-dir`, which defaults to `<tmpdir>/btk-engine-eval`. A directory inside the repo is refused (`resolveWorkDir`).
+2. Eight concurrent processes slowed one `tsc`+`vite build` check to 4.6 min.
+3. The dev server was stopped by a 30-minute background limit partway through one batch.
+
 ---
 
 ## Tasks
@@ -91,10 +118,10 @@ The owner's prompt, *"Make me a mario kart racer clone complete with drifting me
 - [x] **T10 — Transcript and history.** The chat transcript saved for the sidebar and reload is built from session events. Our history compaction and file-context assembly are skipped on this engine.
   **Acceptance:** reload and a second device show the same conversation; no file bodies stored in the transcript.
 
-- [ ] **T11 — Eval harness.** `scripts/engine-eval.mjs` runs a fixed prompt set (Mario Kart, a platformer, an edit turn, a fix turn) N times per engine and reports success rate, time and cost (modelled on Convex Chef's `test-kitchen`).
+- [x] **T11 — Eval harness.** `scripts/engine-eval.mjs` runs a fixed prompt set (Mario Kart, a platformer, an edit turn, a fix turn) N times per engine and reports success rate, time and cost (modelled on Convex Chef's `test-kitchen`).
   **Acceptance:** one command produces a comparison table; it is the evidence for T12.
 
-- [ ] **T12 — Switch the default.** `AGENT_ENGINE=managed` by default once T11 shows the managed engine beats legacy on success rate and median time. Update SPEC §3, §4.2, §4.2.8, §4.6, §8l and CLAUDE.md (the engine, the retention note, which context-budget levers no longer apply). Legacy stays as the kill switch.
+- [x] **T12 — Switch the default.** `AGENT_ENGINE=managed` by default once T11 shows the managed engine beats legacy on success rate and median time. Update SPEC §3, §4.2, §4.2.8, §4.6, §8l and CLAUDE.md (the engine, the retention note, which context-budget levers no longer apply). Legacy stays as the kill switch.
   **Acceptance:** SPEC and CLAUDE.md describe the managed engine; the gates pass.
   **Keep, do not remove (owner asked, 2026-09-30):** `LLM_PROVIDER_CHAIN` / `AUTO_MODEL_SELECT` still drive the legacy engine, which is the kill switch and still serves Plan mode and the prompt enhancer until they move. Remove them only when legacy is retired for good.
 

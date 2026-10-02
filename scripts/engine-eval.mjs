@@ -25,6 +25,7 @@
 import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -34,12 +35,14 @@ import {
   buildGameCheckResult,
   classifyRunCommand,
   createDataStreamParser,
+  engineMismatch,
   formatReport,
   isStrictPass,
   newTurnTally,
   parseArgs,
   parseResultsJsonl,
   resolveInside,
+  resolveWorkDir,
 } from './engine-eval/lib.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -96,13 +99,16 @@ const HELP = `Engine eval harness (managed-agents-engine plan T11)
 Usage:
   node scripts/engine-eval.mjs [--engines legacy,managed] [--prompts mario,platformer,edit,fix] [--n 1]
                                [--base http://localhost:5173] [--minutes 45] [--out .data/engine-eval/results.jsonl]
-                               [--data-dir .data] [--cookie "<Cookie header>"] [--refresh-starter]
+                               [--data-dir .data] [--work-dir <dir outside the repo>] [--cookie "<Cookie header>"]
+                               [--refresh-starter]
   node scripts/engine-eval.mjs --report [--out <file>]
   node scripts/engine-eval.mjs --help
 
 Runs each prompt --n times per engine against a running local dev server (start it with
 AGENT_ENGINE_EVAL_OVERRIDE=true), appends one JSON line per run to --out, then prints the comparison
 table. --report prints the table from --out without running anything. Runs spend real credits.
+Run projects, the starter copy and the shared node_modules go to --work-dir (default <tmpdir>/btk-engine-eval),
+which must be outside the repo: the dev server watches the repo and reloads its modules on every run's tsconfig.
 
 Prompts: ${Object.keys(PROMPTS).join(', ')}`;
 
@@ -210,7 +216,7 @@ async function prepareStarter(api, evalDir, refresh) {
     fs.writeFileSync(target.abs, file.isBinary ? Buffer.from(file.content ?? '', 'base64') : (file.content ?? ''));
   }
 
-  log(`Starter written to ${path.relative(REPO, starterDir)} (${files.length} files).`);
+  log(`Starter written to ${starterDir} (${files.length} files).`);
 
   return starterDir;
 }
@@ -371,7 +377,12 @@ async function sendTurn(api, run, { content, creationPhase }) {
   run.turns += 1;
   log(`  turn ${run.turns}${creationPhase ? ` (${creationPhase})` : ''}: ${content.slice(0, 80)}`);
 
-  const answer = (generationId, toolCallId, outcome) =>
+  /*
+   * `receivedAt` is when the data part reached the harness. A result the server no longer waits for
+   * (`delivered:false`) is logged with how long the harness held it, so a relay timeout reads as either
+   * "the harness was slow" (long hold) or "the part arrived late" (short hold) — never as an engine fault.
+   */
+  const answer = (generationId, toolCallId, outcome, { op, receivedAt = Date.now() } = {}) =>
     api
       .post(
         '/api/agent/tool-result',
@@ -379,8 +390,14 @@ async function sendTurn(api, run, { content, creationPhase }) {
         run.signal,
       )
       .then((reply) => {
+        const heldMs = Date.now() - receivedAt;
+        run.relayHoldMs.push(heldMs);
+
         if (!reply?.delivered) {
           run.undelivered += 1;
+          log(
+            `    tool result not delivered (${op ?? 'tool'} ${toolCallId}): held ${(heldMs / 1000).toFixed(1)}s by the harness`,
+          );
         }
       })
       .catch((error) => {
@@ -392,10 +409,13 @@ async function sendTurn(api, run, { content, creationPhase }) {
     if (data.type === 'workspace-tool-call' && data.toolCallId && data.generationId && !handled.has(data.toolCallId)) {
       handled.add(data.toolCallId);
       run.tools[data.op] = (run.tools[data.op] ?? 0) + 1;
+
+      const receivedAt = Date.now();
+
       pending.push(
         runWorkspaceOp(run, data)
           .catch((error) => ({ error: error?.message || String(error) }))
-          .then((outcome) => answer(data.generationId, data.toolCallId, outcome)),
+          .then((outcome) => answer(data.generationId, data.toolCallId, outcome, { op: data.op, receivedAt })),
       );
     } else if (
       data.type === 'preview-tool-call' &&
@@ -488,6 +508,14 @@ async function sendTurn(api, run, { content, creationPhase }) {
 
   if (tally.agentMeta?.model) {
     run.models.add(tally.agentMeta.model);
+  }
+
+  /*
+   * Which engine the SERVER says ran the turn — the override is ignored unless the server opted in, so
+   * a run that silently fell back to the deploy's engine must be visible (and is not a success).
+   */
+  if (tally.agentMeta) {
+    run.enginesSeen.add(tally.agentMeta.engine ?? 'legacy');
   }
 
   log(
@@ -591,6 +619,7 @@ async function runFirstBuild(api, run, userWords) {
       }
 
       run.stopReason = 'pause-incomplete';
+
       return;
     }
 
@@ -624,6 +653,7 @@ async function runOne(api, ctx, engine, promptId, index) {
     outcomes: [],
     generationIds: [],
     models: new Set(),
+    enginesSeen: new Set(),
     mediaTasks: new Map(),
     tools: {},
     writes: new Set(),
@@ -631,6 +661,7 @@ async function runOne(api, ctx, engine, promptId, index) {
     checks: [],
     firstWriteAt: null,
     undelivered: 0,
+    relayHoldMs: [],
     lastTurnFailed: false,
     planComplete: def.kind !== 'first-build',
     stopReason: null,
@@ -678,6 +709,13 @@ async function runOne(api, ctx, engine, promptId, index) {
   }
 
   const lastOutcome = run.outcomes.at(-1) ?? null;
+
+  const mismatch = engineMismatch(engine, run.enginesSeen);
+
+  if (mismatch) {
+    run.errors.push(mismatch);
+  }
+
   const success =
     !!finalCheck &&
     isStrictPass(finalCheck) &&
@@ -685,7 +723,7 @@ async function runOne(api, ctx, engine, promptId, index) {
     run.planComplete &&
     !controller.signal.aborted &&
     !run.lastTurnFailed &&
-    !run.errors.some((e) => e.startsWith('Harness:')) &&
+    !run.errors.some((e) => e.startsWith('Harness:') || e.startsWith('Engine mismatch:')) &&
     !['incomplete', 'paused'].includes(lastOutcome);
 
   const mediaCredits = [...run.mediaTasks.values()].reduce((sum, credits) => sum + credits, 0);
@@ -726,11 +764,13 @@ async function runOne(api, ctx, engine, promptId, index) {
     commands: run.commands,
     tools: run.tools,
     undeliveredToolResults: run.undelivered,
+    maxRelayHoldSeconds: run.relayHoldMs.length ? +(Math.max(...run.relayHoldMs) / 1000).toFixed(1) : null,
     models: [...run.models],
+    enginesSeen: [...run.enginesSeen],
     generationIds: run.generationIds,
     projectId: run.projectId,
     chatId: run.chatId,
-    dir: path.relative(REPO, run.dir),
+    dir: run.dir,
     base: ctx.base,
   };
 
@@ -822,7 +862,8 @@ async function main() {
     }
   }
 
-  const evalDir = path.dirname(out);
+  // Run projects live OUTSIDE the repo — see `resolveWorkDir` (inside it, the dev server's watcher drops tool results).
+  const evalDir = resolveWorkDir({ arg: args['work-dir'], repo: REPO, tmpdir: os.tmpdir() });
   const api = makeApi(base, typeof args.cookie === 'string' ? args.cookie : undefined);
 
   try {

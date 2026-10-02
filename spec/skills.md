@@ -1,5 +1,7 @@
 # spec/skills.md — Skills Subsystem (governs SPEC §4.11)
 
+> **Engine scope (2026-10-01).** The runtime tools below (`load_skill`, `read_skill_resource`, the index, sticky skills, `MAX_SKILL_LOADS`) are the LEGACY engine's. On the managed engine (SPEC §4.2) the synced skills are attached to the provisioned agent through Anthropic's Skills API — the same synced versions, the same `skills/exclusions.ts` — and the agent reads them on demand. Sync is unchanged and feeds both.
+
 Claude Code-style skill support in the platform chat: the workflow skills in `github.com/babylontoolkit/skills` (bt-spec, bt-plan, bt-design, …) are slash-invocable (`/bt-spec <task>`) and auto-loadable by description. agentskills.io-compliant progressive disclosure; we conform to the open spec, we do not extend it. All repo skills sync and are invocable by default — except the platform exclusion list (§"Platform-excluded skills" below).
 
 ## Sync (extends doc-sync)

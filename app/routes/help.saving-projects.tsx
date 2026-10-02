@@ -124,6 +124,15 @@ export default function SavingProjects() {
             </p>
           </Question>
 
+          <Question q="Where does my conversation with the AI go?">
+            <p>
+              We keep the conversation so it shows up in your chat list on any device. The AI that builds your game is
+              run by Anthropic, so its agent sessions — the conversation and the steps it takes on your project — are
+              also processed and stored by Anthropic under its Managed Agents data retention terms, and are not covered
+              by zero data retention.
+            </p>
+          </Question>
+
           <Question q="It says there are two versions of my project. What did I do?">
             <p>
               Nothing wrong. It means your game changed in two places — here, and somewhere else (another device, or an

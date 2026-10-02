@@ -138,7 +138,7 @@ function gateRefusal(message: string | undefined): Error {
 }
 
 export const NOT_PROVISIONED_HINT =
-  'An admin must press "Provision managed agent" (Settings → Admin → Prompt) before the managed engine can run a turn — or set AGENT_ENGINE=legacy.';
+  'An admin must press Synchronize (it provisions) or "Provision managed agent" (Settings → Admin → Prompt) before the managed engine can run a turn — or set AGENT_ENGINE=legacy.';
 
 /**
  * The turn's outcome facts (`describeTurnOutcome`). Pure.

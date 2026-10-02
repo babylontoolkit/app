@@ -1,5 +1,7 @@
 # spec/context-budget.md — what the model is allowed to see
 
+> **Engine scope (2026-10-01).** Everything in this document is the LEGACY engine's context: the prefix we assemble, its breakpoints and TTL, history compaction, the file manifest, sticky blocks and skills, the read and skill budgets, the cache warmer. On the managed engine (SPEC §4.2, `AGENT_ENGINE`) Anthropic's Managed Agents session holds, caches and compacts the conversation, so those levers do not apply there — SPEC §4.2.8's opening note lists exactly which do and which still bind (attachment caps, opaque files, the paths-only manifest sent once, output economics).
+
 > ## OUTPUT tokens are a budget too — and on creation they were the bigger one
 >
 > This document is about what the model READS. The other half of the bill is what it WRITES, and a

@@ -1,8 +1,8 @@
 /**
- * Managed agent provisioning (`_specs/managed-agents-engine_plan.md` T3) — one row under Agent
- * repository, beside Synchronize. Synchronize builds the prompt version; this turns that version into the
- * Managed Agents agent the managed engine runs on. Re-pressing with nothing changed is a no-op on the
- * server (hash-skipped), so the button is safe to press.
+ * Managed agent provisioning (`_specs/managed-agents-engine_plan.md` T3, T12) — one row under Agent
+ * repository, beside Synchronize. Synchronize builds the prompt version AND provisions the managed agent
+ * from it (T12); this button is the manual / retry path. Re-pressing with nothing changed is a no-op on
+ * the server (hash-skipped), so the button is safe to press.
  */
 import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
@@ -23,7 +23,8 @@ interface ManagedAgentState {
   } | null;
 }
 
-export function ManagedAgentRow() {
+/** `reloadSignal` changes after a Synchronize (which provisions server-side) so the row re-reads its state. */
+export function ManagedAgentRow({ reloadSignal = 0 }: { reloadSignal?: number }) {
   const [state, setState] = useState<ManagedAgentState | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -34,7 +35,7 @@ export function ManagedAgentRow() {
       .catch(() => undefined);
   };
 
-  useEffect(load, []);
+  useEffect(load, [reloadSignal]);
 
   const provision = async () => {
     setBusy(true);
@@ -81,7 +82,7 @@ export function ManagedAgentRow() {
   } else if (!state.configured) {
     detail = `Not configured: ${state.message ?? ''}`;
   } else if (!state.agent) {
-    detail = `Not provisioned (${state.key}) — click Provision managed agent.`;
+    detail = `Not provisioned (${state.key}) — press Synchronize (it provisions) or Provision managed agent.`;
   } else {
     const a = state.agent;
     detail =

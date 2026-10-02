@@ -774,6 +774,13 @@ function fakeGeneration(overrides: Partial<AgentGeneration> = {}): AgentGenerati
 
 /** POST a body at the real route and read the whole data stream back as text. */
 async function postToAgentRoute(body: Record<string, unknown>): Promise<string> {
+  /*
+   * This spec measures the LEGACY proxy's tier boundary (`runAgentGeneration` is the mock above). Since T12
+   * the deploy default is `managed`, so an unpinned drive would take the managed engine instead — pin the
+   * kill switch so the route reaches the door this spec is about.
+   */
+  vi.stubEnv('AGENT_ENGINE', 'legacy');
+
   const response = await (
     agentRouteAction as unknown as (args: {
       request: Request;

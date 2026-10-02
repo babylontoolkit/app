@@ -1,7 +1,8 @@
 /**
  * Managed Agents provisioning (`_specs/managed-agents-engine_plan.md` T3, D4, D10, D12).
  *
- * An ADMIN action (Settings → Admin → Agent repository → "Provision managed agent", beside Synchronize)
+ * An ADMIN action — run by every Synchronize (`provision-after-sync.ts`, T12) and by the manual "Provision
+ * managed agent" button beside it (Settings → Admin → Agent repository) —
  * that turns the active prompt version into a Managed Agents agent:
  *
  *   - the system prompt (`system-prompt.ts`) and the custom tool definitions (`tools.ts`);
