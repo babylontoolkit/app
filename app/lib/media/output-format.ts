@@ -96,9 +96,9 @@ export interface ImageDeliveryHints {
  *
  * 🔴 Split out from the realization on 2026-08-10 (T8). `ImageDelivery.cutout` used to mean two
  * things at once — *the user wants alpha* and *run a second priced stage* — which was correct only
- * for as long as KIE was the only gateway, because there those ARE the same fact. On Comet
- * `gpt-image-1.5` produces real alpha in one call, so the two come apart, and a boolean that fuses
- * them cannot express it. This one answers only the question a caller can actually answer.
+ * for as long as KIE was the only gateway, because there those ARE the same fact. A model that
+ * produces real alpha in one call pulls the two apart, and a boolean that fuses them cannot express
+ * it. This one answers only the question a caller can actually answer.
  */
 export interface ImageIntent {
   /** Must this art sit over other content? */

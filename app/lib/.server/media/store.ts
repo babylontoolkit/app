@@ -10,7 +10,7 @@
  * not a copy).
  */
 import type { ObjectStore } from '~/lib/.server/storage';
-import type { MediaEndpoint, MediaProviderName } from './provider';
+import type { MediaEndpoint, MediaProviderName, RetiredMediaProviderName } from './provider';
 
 export type MediaTaskStatus = 'pending' | 'succeeded' | 'failed';
 
@@ -33,8 +33,11 @@ export interface MediaTaskRecord {
    *
    * ⚠️ OPTIONAL because records written before this field existed have none. They resolve to `'KIE'`
    * (`mediaProviderOf`) — the only gateway that could have written them.
+   *
+   * A RETIRED gateway's name is still a valid value — those records exist — and the poll fails and
+   * refunds them without contacting anyone (`retiredMediaGatewayError`).
    */
-  provider?: MediaProviderName;
+  provider?: MediaProviderName | RetiredMediaProviderName;
 
   endpoint: MediaEndpoint;
 

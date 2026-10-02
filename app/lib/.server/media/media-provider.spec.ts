@@ -4,8 +4,8 @@
  * ## The defect this file exists to prevent
  *
  * `MEDIA_PROVIDER` is an operator switch and a render takes MINUTES. Flip it while a KIE render is in
- * flight and a poll that resolved its gateway from CURRENT config would ask Comet about a task id
- * Comet has never issued. Nothing throws: the query returns "not found" or errors transiently, the
+ * flight and a poll that resolved its gateway from CURRENT config would ask fal about a task id
+ * fal has never issued. Nothing throws: the query returns "not found" or errors transiently, the
  * task never completes, and the refund path eventually fires on a render that may well have
  * succeeded — the user refunded for art they did not get, our account billed for art nobody
  * receives. The download half is the same bug one door along.
@@ -22,10 +22,10 @@
  * which is the whole point of the rule and exactly the case the rule does not need. The flip is what
  * makes the assertion able to fail.
  *
- * ⚠️ **The `'KIE'` cases carry a `'Comet'` CONTROL.** "The resolver was asked for KIE" passes for a
+ * ⚠️ **The `'KIE'` cases carry a `'FAL'` CONTROL.** "The resolver was asked for KIE" passes for a
  * function that hardcodes `'KIE'` and ignores the record entirely — the same shape as this repo's
  * de-dup assertion that would have passed for a function collapsing everything to one entry. A record
- * stamped `Comet` must resolve to `Comet`, or the legacy fallback is not a fallback, it is a constant.
+ * stamped `FAL` must resolve to `FAL`, or the legacy fallback is not a fallback, it is a constant.
  *
  * ⚠️ `env()` falls back to `process.env` and Vitest loads `.env.local`, which on this machine holds a
  * real `COMET_API_KEY` and may hold `MEDIA_PROVIDER` / `LLM_PROVIDER`. Every one of them is stubbed
@@ -61,7 +61,6 @@ import {
   type MediaTaskState,
 } from './provider';
 import { KieMediaProvider } from './kie-client';
-import { CometMediaProvider } from './comet-client';
 import { FalMediaProvider } from './fal-client';
 import { FAL_ROUTES } from '~/lib/media/fal-routes';
 import { getMediaTask, putMediaTask, type MediaTaskRecord } from './store';
@@ -188,9 +187,8 @@ function imageInput(overrides: Partial<Parameters<typeof startMediaTask>[0]> = {
 }
 
 /**
- * A stored task, written directly. `startMediaTask` cannot create a Comet task yet (T8 ships the
- * client, and `endpointFor` refuses before then) — but a record CAN carry any provider, which is
- * exactly the state a mid-flight cutover produces and the state the resolver must honour.
+ * A stored task, written directly — a record CAN carry any provider (including a RETIRED one, Comet),
+ * which is exactly the state a mid-flight cutover produces and the state the resolver must honour.
  */
 function storedRecord(overrides: Partial<MediaTaskRecord> = {}): MediaTaskRecord {
   const now = new Date().toISOString();
@@ -232,9 +230,19 @@ describe('mediaProviderOf — which gateway a stored task belongs to', () => {
     /*
      * CONTROL for every "resolves to KIE" assertion in this file. Without this, all of them pass for
      * `() => 'KIE'`, which reads as a working fallback and is actually a hardcoded constant that
-     * would send every Comet task to KIE the day T8 lands.
+     * would send every fal task to KIE.
      */
-    expect(mediaProviderOf({ id: 'b', provider: 'Comet' })).toBe('Comet');
+    expect(mediaProviderOf({ id: 'b', provider: 'FAL' })).toBe('FAL');
+  });
+
+  it('REFUSES a record stamped with a retired gateway — never the KIE fallback', () => {
+    /*
+     * Comet stopped being a media gateway on 2026-10-01. Its records still exist; resolving one to KIE
+     * would hand KIE a task id (or result URL) it never issued. The poll never reaches this — it fails
+     * and refunds the task first (`retiredMediaGatewayError`) — so a throw here is a backstop.
+     */
+    expect(() => mediaProviderOf({ id: 'r', provider: 'Comet' })).toThrow(NotConfiguredError);
+    expect(() => mediaProviderOf({ id: 'r', provider: 'Comet' })).toThrow(/no longer a media gateway/);
   });
 
   it('treats an unrecognised provider as KIE rather than making the record unpollable', () => {
@@ -249,7 +257,7 @@ describe('mediaProviderOf — which gateway a stored task belongs to', () => {
 
   it('is not case-forgiving — the stored value is a stamped enum, not user input', () => {
     // Records are written by us from `MediaProviderName`, so a lowercase value means a corrupt record.
-    expect(mediaProviderOf({ id: 'e', provider: 'comet' })).toBe('KIE');
+    expect(mediaProviderOf({ id: 'e', provider: 'fal' })).toBe('KIE');
   });
 });
 
@@ -272,10 +280,10 @@ describe('the provider is STAMPED at creation', () => {
   it('takes the name off the INSTANCE, not off config — they can already disagree at creation', async () => {
     /*
      * The operator flipped `MEDIA_PROVIDER` a moment ago; the request in flight still holds the client
-     * that was resolved before the flip. Stamping from config here would label a KIE task `Comet` and
+     * that was resolved before the flip. Stamping from config here would label a KIE task `FAL` and
      * make it unpollable from the instant it was born.
      */
-    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
+    vi.stubEnv('MEDIA_PROVIDER', 'FAL');
     await grant(100);
 
     const objectStore = memoryStore();
@@ -289,10 +297,10 @@ describe('the provider is STAMPED at creation', () => {
 describe('an in-flight task is polled by the gateway that CREATED it', () => {
   beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
 
-  it('still asks KIE after MEDIA_PROVIDER flips to Comet mid-render — and the task advances', async () => {
+  it('still asks KIE after MEDIA_PROVIDER flips to FAL mid-render — and the task advances', async () => {
     /*
      * 🔴 THE LOAD-BEARING TEST. Create on KIE, flip the operator switch, poll. A `pollMediaTask` that
-     * resolved from `getMediaProvider(context)` would ask Comet about a KIE task id and the render
+     * resolved from `getMediaProvider(context)` would ask fal about a KIE task id and the render
      * would hang until the refund path fired on art that had rendered fine.
      */
     await grant(100);
@@ -302,8 +310,7 @@ describe('an in-flight task is polled by the gateway that CREATED it', () => {
     const started = await startMediaTask(imageInput({ provider, objectStore }));
 
     // The cutover happens here — AFTER the task exists. Without this the assertion cannot fail.
-    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
-    vi.stubEnv('LLM_PROVIDER', 'Comet');
+    vi.stubEnv('MEDIA_PROVIDER', 'FAL');
 
     provider.state = { state: 'succeeded', resultUrl: 'https://cdn.kie.ai/x.jpg' };
 
@@ -323,17 +330,17 @@ describe('an in-flight task is polled by the gateway that CREATED it', () => {
     expect(task).toMatchObject({ status: 'succeeded', resultUrl: 'https://cdn.kie.ai/x.jpg' });
   });
 
-  it('asks Comet for a Comet-stamped record under the very same env — the control', async () => {
+  it('asks FAL for a FAL-stamped record under KIE config — the control', async () => {
     /*
-     * Same environment as the test above (`MEDIA_PROVIDER=Comet`), opposite record. Both tests pass
+     * The mirror of the test above (`MEDIA_PROVIDER=KIE` here), opposite record. Both tests pass
      * only for a resolver keyed on the RECORD: `() => 'KIE'` fails here, and reading config fails
      * above. Neither alone can tell those two implementations apart.
      */
-    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
+    vi.stubEnv('MEDIA_PROVIDER', 'KIE');
 
-    const provider = new FakeProvider('Comet');
+    const provider = new FakeProvider('FAL');
     const objectStore = memoryStore();
-    await putMediaTask(objectStore, storedRecord({ provider: 'Comet', endpoint: 'comet-image' }));
+    await putMediaTask(objectStore, storedRecord({ provider: 'FAL', endpoint: 'fal-queue' }));
 
     const asked: MediaProviderName[] = [];
     await pollMediaTask({
@@ -346,13 +353,12 @@ describe('an in-flight task is polled by the gateway that CREATED it', () => {
       objectStore,
     });
 
-    expect(asked).toEqual(['Comet']);
+    expect(asked).toEqual(['FAL']);
   });
 
-  it('polls a legacy record (no provider field) via KIE even on a Comet-configured box', async () => {
+  it('polls a legacy record (no provider field) via KIE even on a FAL-configured box', async () => {
     // The deploy-day case: records written before T7 carry no provider and must not be stranded.
-    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
-    vi.stubEnv('LLM_PROVIDER', 'Comet');
+    vi.stubEnv('MEDIA_PROVIDER', 'FAL');
 
     const provider = new FakeProvider('KIE');
     provider.state = { state: 'succeeded', resultUrl: 'https://cdn.kie.ai/legacy.jpg' };
@@ -392,7 +398,7 @@ describe('an in-flight task is polled by the gateway that CREATED it', () => {
       imageInput({ provider, objectStore, prompt: 'a wordmark', options: { resolution: '2K', transparent: true } }),
     );
 
-    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
+    vi.stubEnv('MEDIA_PROVIDER', 'FAL');
     provider.state = { state: 'succeeded', resultUrl: 'https://cdn.kie.ai/render.jpg' };
 
     const asked: MediaProviderName[] = [];
@@ -496,12 +502,11 @@ describe('fal.ai — routing and the poll rule (media-gateways T3)', () => {
     expect(mediaProviderOf({ id: 'f', provider: 'FAL' })).toBe('FAL');
   });
 
-  it('builds the fal client for FAL — never a KIE or Comet one', () => {
+  it('builds the fal client for FAL — never a KIE one', () => {
     const provider = mediaProviderFor('FAL', 'sentinel-key');
 
     expect(provider).toBeInstanceOf(FalMediaProvider);
     expect(provider).not.toBeInstanceOf(KieMediaProvider);
-    expect(provider).not.toBeInstanceOf(CometMediaProvider);
     expect(provider.name).toBe('FAL');
   });
 
@@ -520,14 +525,13 @@ describe('fal.ai — routing and the poll rule (media-gateways T3)', () => {
 });
 
 describe('downloadMediaResult — the bytes come from the task’s gateway too', () => {
-  it('downloads a KIE-stamped result via KIE after the switch flipped to Comet', async () => {
+  it('downloads a KIE-stamped result via KIE after the switch flipped to FAL', async () => {
     /*
      * The file route used to import KIE's `downloadResult` directly. That coupling was invisible until
      * a second gateway existed: polling would have become provider-aware while downloading silently
      * stayed on KIE. Now both read the record — so both must be tested against a flipped switch.
      */
-    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
-    vi.stubEnv('LLM_PROVIDER', 'Comet');
+    vi.stubEnv('MEDIA_PROVIDER', 'FAL');
 
     const provider = new FakeProvider('KIE');
     const asked: MediaProviderName[] = [];
@@ -545,20 +549,39 @@ describe('downloadMediaResult — the bytes come from the task’s gateway too',
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
   });
 
-  it('downloads a Comet-stamped result via Comet — the control', async () => {
-    const provider = new FakeProvider('Comet');
+  it('downloads a FAL-stamped result via FAL — the control', async () => {
+    const provider = new FakeProvider('FAL');
     const asked: MediaProviderName[] = [];
 
-    await downloadMediaResult({ id: 'med_y', provider: 'Comet', resultUrl: 'https://cdn.comet/final.png' }, (name) => {
-      asked.push(name);
-      return provider;
-    });
+    await downloadMediaResult(
+      { id: 'med_y', provider: 'FAL', resultUrl: 'https://v3.fal.media/files/final.png' },
+      (name) => {
+        asked.push(name);
+        return provider;
+      },
+    );
 
-    expect(asked).toEqual(['Comet']);
+    expect(asked).toEqual(['FAL']);
+  });
+
+  it('REFUSES to download a result stamped with a retired gateway — nothing is contacted', async () => {
+    const asked: MediaProviderName[] = [];
+
+    await expect(
+      downloadMediaResult(
+        { id: 'med_c', provider: 'Comet', resultUrl: 'https://example.invalid/final.png' },
+        (name) => {
+          asked.push(name);
+          return new FakeProvider(name);
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'MediaRefusedError', statusCode: 410 });
+
+    expect(asked, 'a client was resolved for a retired gateway').toEqual([]);
   });
 
   it('downloads a legacy (unstamped) result via KIE', async () => {
-    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
+    vi.stubEnv('MEDIA_PROVIDER', 'FAL');
 
     const provider = new FakeProvider('KIE');
     const asked: MediaProviderName[] = [];
@@ -587,8 +610,9 @@ describe('downloadMediaResult — the bytes come from the task’s gateway too',
 
 describe('KieMediaProvider refuses another gateway’s endpoint', () => {
   /*
-   * `MediaEndpoint` is a shared, PERSISTED vocabulary that now names Comet's routes too. The tempting
-   * implementation — "anything that is not veo is jobs" — would POST a Comet task to KIE's jobs
+   * `MediaEndpoint` is a shared, PERSISTED vocabulary that still names the retired Comet routes (old
+   * records carry them). The tempting implementation — "anything that is not veo is jobs" — would POST
+   * such a task to KIE's jobs
    * endpoint: a debit taken, a task id that means nothing to anyone, and a poll that can only ever
    * time out. Refusing names the mismatch instead.
    */
@@ -715,20 +739,6 @@ describe('mediaProviderFor — the one factory', () => {
     expect(provider.name).toBe('KIE');
   });
 
-  it('builds the COMET client for Comet — never a KIE one', () => {
-    /*
-     * T8 shipped `CometMediaProvider`, so this stopped being a refusal. What it still pins is the
-     * thing that would be catastrophic and silent: falling back to a KIE client would spend the wrong
-     * gateway's key and bill users against a price list their operator never promoted, and every
-     * downstream assertion would still pass because the seam is identical.
-     */
-    const provider = mediaProviderFor('Comet', 'sentinel-key');
-
-    expect(provider).toBeInstanceOf(CometMediaProvider);
-    expect(provider).not.toBeInstanceOf(KieMediaProvider);
-    expect(provider.name).toBe('Comet');
-  });
-
   it('still refuses an unknown gateway with a class the HTTP layer will SHOW the operator', () => {
     /*
      * 🔴 The class, not the wording, is the load-bearing half — and it is the half a message
@@ -752,14 +762,14 @@ describe('resolveMediaProvider — the non-throwing door', () => {
    * 🔴 THE REGRESSION THIS EXISTS FOR. The agent proxy resolves media tools in straight-line code on
    * every turn with a project. Composed from throwing parts — `getMediaProvider` refuses a typo'd
    * `MEDIA_PROVIDER`, `mediaProviderFor` refuses a gateway with no client — that made an unserveable
-   * CAPABILITY take down the whole REQUEST: on a box with `LLM_PROVIDER=Comet` (this repo's own
-   * `.env.local`), `/api/agent` returned HTTP 500 before a token. No chat, because image generation
+   * CAPABILITY take down the whole REQUEST: on a box whose media gateway had no client yet,
+   * `/api/agent` returned HTTP 500 before a token. No chat, because image generation
    * was unavailable.
    *
    * The rule is the one already written down for `/api/me`'s premium hint: a degraded capability
    * reports OFF, never ON, and never throws on the hot path.
    */
-  const ENV = ['MEDIA_PROVIDER', 'LLM_PROVIDER', 'KIE_API_KEY', 'COMET_API_KEY'] as const;
+  const ENV = ['MEDIA_PROVIDER', 'LLM_PROVIDER', 'KIE_API_KEY', 'COMET_API_KEY', 'FAL_API_KEY'] as const;
 
   beforeEach(() => {
     for (const key of ENV) {
@@ -778,16 +788,21 @@ describe('resolveMediaProvider — the non-throwing door', () => {
     expect(resolveMediaProvider({})?.name).toBe('KIE');
   });
 
-  it('returns the Comet client on a Comet box (control — the null cases are about failures, not Comet)', () => {
-    /*
-     * Before T8 this asserted `null`, because Comet had no media client. Keeping it as a CONTROL is
-     * the point: without it, `resolveMediaProvider` returning null for EVERYTHING would satisfy every
-     * other case in this describe.
-     */
+  it('returns the KIE client on a Comet LLM box — never a Comet one (Comet is not a media gateway)', () => {
     vi.stubEnv('LLM_PROVIDER', 'Comet');
     vi.stubEnv('COMET_API_KEY', 'sentinel-comet');
+    vi.stubEnv('KIE_API_KEY', 'sentinel-kie');
 
-    expect(resolveMediaProvider({})?.name).toBe('Comet');
+    expect(resolveMediaProvider({})?.name).toBe('KIE');
+  });
+
+  it('returns null instead of throwing on MEDIA_PROVIDER=Comet', () => {
+    vi.stubEnv('MEDIA_PROVIDER', 'Comet');
+    vi.stubEnv('COMET_API_KEY', 'sentinel-comet');
+    vi.stubEnv('KIE_API_KEY', 'sentinel-kie');
+
+    expect(() => getMediaProvider({})).toThrow(NotConfiguredError);
+    expect(resolveMediaProvider({})).toBeNull();
   });
 
   it('returns null instead of throwing on a typo’d MEDIA_PROVIDER', () => {
@@ -800,7 +815,8 @@ describe('resolveMediaProvider — the non-throwing door', () => {
     expect(resolveMediaProvider({})).toBeNull();
   });
 
-  it('returns null when no media provider is configured at all', () => {
+  it('returns null when the media gateway has no key', () => {
+    // Anthropic falls back to KIE for media, and there is no KIE key here.
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
 
     expect(resolveMediaProvider({})).toBeNull();
@@ -873,9 +889,11 @@ describe('the media provider list agrees with its neighbours', () => {
      * ⚠️ No longer EQUAL (2026-09-29): Anthropic has a price list (for LLM rows) but sells no renders,
      * so it is the one list with no media provider — an empty `media` table, which is valid.
      *
-     * fal (T3) is a media provider with a media-only list, so it is NOT in this difference.
+     * fal (T3) is a media provider with a media-only list, so it is NOT in this difference. Comet IS
+     * (2026-10-01): it keeps its LLM list and is no longer a media gateway, so its media table is empty.
      */
     expect(MARKET_PRICE_PROVIDERS.filter((p) => !(MEDIA_PROVIDERS as readonly string[]).includes(p))).toEqual([
+      'Comet',
       'Anthropic',
     ]);
   });
@@ -897,8 +915,8 @@ const SELF = join(APP_DIR, 'lib/.server/media/media-provider.spec.ts');
  *
  * The rule is "no ROUTE or PROXY constructs a media client": it protects the shipped request paths,
  * where a stray `new` bypasses `requireMediaKey`'s per-provider key lookup and would strand an
- * in-flight KIE task on a Comet box. A spec that tests a client has to construct the class it is
- * testing — `comet-client.spec.ts` does, exactly as this file already did, which is why `SELF`
+ * in-flight KIE task on a fal box. A spec that tests a client has to construct the class it is
+ * testing — `fal-client.spec.ts` does, exactly as this file already did, which is why `SELF`
  * existed. Generalising `SELF` to every spec is that same decision applied consistently rather than
  * one file at a time; the alternative (an allow-list entry per spec) turns a wall into a place to
  * append, which is the failure mode this repo has recorded for exactly this shape of test.
@@ -937,9 +955,9 @@ function walk(dir: string, out: string[] = []): string[] {
 /**
  * Any media client construction, present or future.
  *
- * ⚠️ Deliberately NOT `new KieMediaProvider` / `new CometMediaProvider` as literals: the Comet client
- * does not exist yet, so a needle naming it matches nothing and would report a clean bill of health
- * for a rule it has never been able to check. A shape catches the class that has not been written.
+ * ⚠️ Deliberately NOT `new KieMediaProvider` / `new FalMediaProvider` as literals: a needle naming
+ * only the classes that exist today matches nothing for the next one, and would report a clean bill of
+ * health for a rule it has never been able to check. A shape catches the class that has not been written.
  */
 const CONSTRUCTS_A_MEDIA_CLIENT = /new\s+\w*MediaProvider\s*\(/;
 
@@ -976,15 +994,15 @@ describe('no route or proxy constructs a media provider directly', () => {
      * not. Without this pair, widening the filter to `.spec` could have quietly dropped shipped code.
      */
     const scanned = new Set(SOURCE_FILES.map(repoPath));
-    expect(scanned).not.toContain('app/lib/.server/media/comet-client.spec.ts');
-    expect(scanned).toContain('app/lib/.server/media/comet-client.ts');
+    expect(scanned).not.toContain('app/lib/.server/media/fal-client.spec.ts');
+    expect(scanned).toContain('app/lib/.server/media/fal-client.ts');
     expect([...scanned].filter((file) => IS_SPEC.test(file))).toEqual([]);
   });
 
   it('the matcher matches a real construction and not the factory call (control)', () => {
-    // Positive: both the shipping class and the one T8 will add.
+    // Positive: a shipping class and one not yet written.
     expect(CONSTRUCTS_A_MEDIA_CLIENT.test('  const p = new KieMediaProvider(apiKey);')).toBe(true);
-    expect(CONSTRUCTS_A_MEDIA_CLIENT.test('return new CometMediaProvider(key)')).toBe(true);
+    expect(CONSTRUCTS_A_MEDIA_CLIENT.test('return new FutureMediaProvider(key)')).toBe(true);
 
     // Negative: the sanctioned route through the factory must not read as a violation.
     expect(CONSTRUCTS_A_MEDIA_CLIENT.test('mediaProviderFor(name, requireMediaKey(name, context))')).toBe(false);
@@ -1029,7 +1047,7 @@ describe('no route or proxy constructs a media provider directly', () => {
      * DEFAULT-DENY. A new file is a failure until someone writes down why it is allowed — because the
      * point of the seam is that adding a gateway is ONE entry in `mediaProviderFor`, not a fifth `new`
      * somewhere nobody greps. A route holding its own `new` also bypasses `requireMediaKey`'s
-     * per-provider key lookup, which is what keeps an in-flight KIE task pollable on a Comet box.
+     * per-provider key lookup, which is what keeps an in-flight KIE task pollable on a fal box.
      */
     expect(constructors.filter((file) => !MAY_CONSTRUCT[file])).toEqual([]);
   });

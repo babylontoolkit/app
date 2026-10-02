@@ -211,7 +211,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
 
       /*
        * WHICH GATEWAY SERVES RENDERS (§4.16) — a rendering hint for the Media panel, which has to know
-       * whether to offer KIE's model list or Comet's.
+       * whether to offer KIE's model list or fal's.
        *
        * ⚠️ It carries the PROVIDER and nothing else. A `transparency` boolean was here too, computed
        * from `supportsTransparency` and read by nobody, with a doc comment claiming it "gates the

@@ -20,3 +20,17 @@ Command: `/bt-execute --auto-pilot @_specs/media-gateways_plan.md ALL` (TIME MAT
 - DECISION T3: T3/T4 ticked although T2's probe is deferred — their Acceptance is against stubbed responses, built to fal's documented shapes. ⚠️ FIRST thing to confirm when the fal probe runs: `status_url === response_url + '/status'`. If wrong, every fal task stays pending forever with the debit held (the service has no server-side expiry for pending tasks — a pre-existing property, KIE behaves the same).
 - Phase 2 verifier notes (records, not failures): `generate_google_video`'s "720p, 1080p or 4k" text is gateway-blind (fal drops 4k silently) — folded into T6's per-provider tool text; on FAL only `generate_video` is driven through the agent tool in specs; Seedream maps an uncovered ratio (21:9) to 16:9.
 - Full suite after Phase 2 (implementer): 431 files, 9173 passed, 8 skipped, 0 failed.
+
+### Run 1 interrupted by the owner (2026-10-01), before Phase 3
+
+- Owner: Comet has a security issue and is no longer trusted. **The plan was rewritten to remove ALL Comet media**: KIE and FAL are the only media gateways. Old T1 (Comet audio probe + prices) is replaced by a new T1 "Remove Comet as a media gateway" (it also deletes the Comet audio rows and `scripts/comet-audio-probe.mjs` committed in ef3862ce). T5 (Comet audio routes) is deleted, and T6/T7/T8 are reduced to KIE + FAL. T3/T4 stay ticked. Comet's LLM wiring is out of scope. Not resumed; waiting for the owner.
+
+## Run 2 — started 2026-10-01 (resumed against the rewritten plan)
+
+Command: `/bt-execute --auto-pilot @_specs/media-gateways_plan.md ALL` (TIME MATTERS, standard verifier). Branch `btk-sandbox`. Queue: T1, T6, T7, T8; T2 re-attempted at the end.
+
+- DECISION run 2: the uncommitted Run-1 T5 work (Comet audio routes in `comet-client.ts`, three `comet-sound/speech/music` endpoint values in `provider.ts`, probe edits) was reverted to HEAD before T1 — T5 is void, those endpoint values were never committed or persisted, and T1 deletes the Comet client and probe.
+- T1 — ✅ PASS (1 attempt). Comet removed as a media gateway: `MEDIA_PROVIDERS=['KIE','FAL']`, `MEDIA_PROVIDER=Comet` refused (`RETIRED_MEDIA_PROVIDERS` in config.ts), comet-client + probe deleted, Comet media price rows gone (LLM rows byte-identical), stored Comet tasks fail + refund once via a guard in `pollMediaTask`, `no-comet-media.spec.ts` default-deny scan. Tests: 431 files / 9080 passed. Verifier (independent): PASS; stale comments fixed directly.
+- DECISION T1: with `MEDIA_PROVIDER` unset, any non-media LLM provider (Comet, Anthropic) falls back to KIE (plan: "whenever that provider is not a media gateway").
+- DECISION T1: stored-Comet refusal is a guard in `pollMediaTask` before any client resolves (not a stand-in provider); a succeeded-but-undelivered Comet record gets 410 at download and no refund (plan scoped the refund to pending records; such records should not exist since MEDIA_PROVIDER was KIE in practice).
+- Note T1: `realizeImageDelivery`'s native-alpha branch is now unexercised (no gateway declares a native-alpha model) — kept, not deleted.

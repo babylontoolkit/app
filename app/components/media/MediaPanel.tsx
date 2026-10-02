@@ -33,7 +33,6 @@ interface FieldChoice {
 }
 
 interface FieldSpec {
-  /** ⚠️ `quality` is Comet-only — it is the field its token-priced image models are priced on. */
   key:
     | 'resolution'
     | 'mode'
@@ -42,7 +41,6 @@ interface FieldSpec {
     | 'aspectRatio'
     | 'outputFormat'
     | 'transparent'
-    | 'quality'
     | 'loop'
     | 'instrumental';
   label: string;
@@ -115,51 +113,9 @@ export const IMAGE_MODELS: ModelSpec[] = [
 ];
 
 /**
- * 🔴 THE MODEL LISTS ARE PER GATEWAY, because the gateways do not serve the same models.
- *
- * Comet's flat-priced image models (`doubao-seedream-5`, `seedream-5-0-pro`) are in its feed and
- * return HTTP 503 `no available channel` — so what it actually serves is `gpt-image-1.5` (token-priced,
- * and the ONLY transparency capability on this gateway) and `gemini-3-pro-image` (cheap, opaque, jpeg).
- * Showing KIE's list on a Comet deploy would offer six models that every quote refuses.
- *
- * ⚠️ `quality` is a Comet-only field and it is the PRICE dial: `low`/`medium`/`high` at 1024x1024
- * measured $0.010 / $0.031 / $0.111 of true cost. It is labelled by what it buys rather than by the
- * API's word, because "high" reads as a quality preference and is really a 4x bill.
- */
-export const COMET_IMAGE_MODELS: ModelSpec[] = [
-  {
-    id: 'gpt-image-1.5',
-    label: 'GPT Image 1.5 (default)',
-    fields: [
-      {
-        key: 'quality',
-        label: 'Quality',
-        choices: [
-          { value: 'low', label: 'Draft — cheapest' },
-          { value: 'medium', label: 'Standard' },
-          { value: 'high', label: 'Best — ~4x the credits' },
-        ],
-        default: 'medium',
-      },
-
-      /*
-       * Only the two PROBED sizes: 16:9 -> 1536x1024 and 1:1 -> 1024x1024. Any other aspect has no
-       * measured token count, therefore no price row, therefore a refusal — so it is not offered.
-       */
-      aspect([ASPECTS[0], ASPECTS[2]]),
-    ],
-  },
-  {
-    id: 'gemini-3-pro-image',
-    label: 'Nano Banana Pro — cheapest, opaque only',
-    fields: [],
-  },
-];
-
-/**
  * 🔴 THE BACKGROUND CONTROL IS DRIVEN BY THE CAPABILITY TABLE, NEVER HAND-ATTACHED.
  *
- * It was written literally onto `gpt-image-1.5` in the array above, which merely AGREED with
+ * It was once written literally onto one model's field list, which merely AGREED with
  * `image-capabilities.ts` — so adding a model here, or flipping `nativeAlpha` there, would silently
  * desynchronise them and offer transparency a quote then refuses. Deriving it means the table is the
  * only place that answers "can this model do alpha", which is what FR7 asked for ("a per-model
@@ -196,9 +152,9 @@ export function withBackgroundField(model: ModelSpec, provider: ImageProviderNam
           { value: 'false', label: native ? 'Opaque' : 'Opaque — JPG' },
 
           /*
-           * The COST is in the label because it differs by gateway and the user cannot see why: on KIE
-           * transparency is a second priced stage, on Comet the alpha comes out of the same call. A
-           * user who learned one would otherwise be surprised by the other.
+           * The COST is in the label because it differs by model and the user cannot see why: on KIE
+           * and fal transparency is a second priced stage; a native-alpha model gets it in the same
+           * call. A user who learned one would otherwise be surprised by the other.
            */
           { value: 'true', label: native ? 'Transparent — PNG, no extra cost' : 'Transparent — PNG' },
         ],
@@ -207,20 +163,6 @@ export function withBackgroundField(model: ModelSpec, provider: ImageProviderNam
     ],
   };
 }
-
-/**
- * ⚠️ EVERY VIDEO MODEL THIS GATEWAY PRICES IS GOOGLE VEO, and none of them is a "default".
- *
- * The owner's rule is that Veo — the most expensive video on either catalogue — is never fallen back
- * to, only chosen (`provider-defaults.ts`). The agent's `generate_video` refuses here for that reason.
- * A human in this panel IS choosing, and the exact credit price sits on the Generate button before
- * anything is spent, so the panel may offer them — but the first entry must not wear "(default)",
- * because a pre-selected most-expensive-option is the fallback wearing a dropdown.
- */
-export const COMET_VIDEO_MODELS: ModelSpec[] = [
-  { id: 'veo3-fast', label: 'Veo 3 Fast — Google', fields: [duration([4, 6, 8], 4)] },
-  { id: 'veo3', label: 'Veo 3 — Google, 4x the credits', fields: [duration([4, 6, 8], 4)] },
-];
 
 /**
  * Exported for `media-panel-fields.spec.tsx` only — `modelsForProvider` is the sole runtime reader.
@@ -295,7 +237,7 @@ export const VIDEO_MODELS: ModelSpec[] = [
  *
  * Image fields follow the price rows: Nano Banana is priced by resolution, Seedream 4.5 is one flat
  * price (its size comes from the aspect). Video: Kling and Veo price on audio on/off, Grok on
- * resolution. The Veo rows are labelled as Google and none is a default — the same rule as Comet's.
+ * resolution. The Veo rows are labelled as Google and none is a default — Veo is chosen, never fallen back to.
  */
 const FAL_IMAGE_FIELDS: Record<string, FieldSpec[]> = {
   'image-nano': [resolution(['1K', '2K', '4K'], '2K'), aspect()],
@@ -385,11 +327,10 @@ export const SOUND_MODELS_SPEC: ModelSpec[] = [
 /**
  * The catalogue for a gateway — the ONE place that maps a provider onto a model list.
  *
- * 🔴 `null` RETURNS AN EMPTY LIST, IT DOES NOT MEAN KIE. There are three states, not two: Comet, KIE,
- * and *no media gateway on this deployment at all* (`LLM_PROVIDER=Anthropic` with no `MEDIA_PROVIDER`
- * — `getMediaProvider` returns null, and `/api/me` reports it as null). The `? COMET : KIE` ternary
- * this replaced sent the third state down the KIE branch, so a box that could serve nothing offered
- * nano-banana-2 and kling-3.0 and only refused at quote time.
+ * 🔴 `null` RETURNS AN EMPTY LIST, IT DOES NOT MEAN KIE. `null` is *no media gateway on this
+ * deployment at all* (`/api/me` reports it when the gateway has no key). A ternary that sent it down
+ * the KIE branch would offer nano-banana-2 and kling-3.0 on a box that can serve nothing, refused only
+ * at quote time.
  *
  * ⚠️ An empty list is a state the caller must RENDER, not index into. Every `models[0]` on this path
  * is optional-chained for that reason; the panel shows an unavailable card instead of a form.
@@ -405,15 +346,14 @@ export function modelsForProvider(kind: 'image' | 'video' | 'audio', provider: I
 }
 
 /**
- * Every gateway's catalogue, per tab. A RECORD, not the `=== 'Comet' ? … : KIE` ternaries it replaced:
+ * Every gateway's catalogue, per tab. A RECORD, not the per-gateway ternaries it replaced:
  * those sent any gateway they had not heard of down the KIE branch, so fal would have offered KIE's
  * models and every quote would have refused. A new gateway must state its lists here or fail to compile.
  *
- * An empty list makes its tab ABSENT (Comet and fal have no Sound tab until T6/T7).
+ * An empty list makes its tab ABSENT (fal has no Sound tab until T6/T7).
  */
 const CATALOGUES: Record<ImageProviderName, Record<'image' | 'video' | 'audio', ModelSpec[]>> = {
   KIE: { image: IMAGE_MODELS, video: VIDEO_MODELS, audio: SOUND_MODELS_SPEC },
-  Comet: { image: COMET_IMAGE_MODELS, video: COMET_VIDEO_MODELS, audio: [] },
   FAL: { image: FAL_IMAGE_MODELS, video: FAL_VIDEO_MODELS, audio: [] },
 };
 
@@ -470,12 +410,9 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
    * is still the referee). It decides which model list is drawn; drawing the wrong one offers models
    * every quote would refuse.
    *
-   * 🔴 THREE STATES, NOT TWO (2026-08-11). This was `provider === 'Comet' ? COMET : KIE`, so `null` —
-   * which means *this deployment serves no media at all* — took the `else` and drew KIE's catalogue.
-   * On an `LLM_PROVIDER=Anthropic` box with no `MEDIA_PROVIDER` the panel therefore offered
-   * nano-banana-2 and kling-3.0, models no gateway could serve, and the user learned that only when
-   * the quote came back refused. Same shape as the T9 tool-defaults defect one layer up: a ternary
-   * treating "not Comet" as "therefore KIE" when the real third state is "no gateway".
+   * 🔴 `null` IS ITS OWN STATE (2026-08-11): *this deployment serves no media at all*. A ternary that
+   * drew KIE's catalogue for it offered models no gateway could serve, and the user learned that only
+   * when the quote came back refused.
    */
   const { media, loading: sessionLoading } = useStore(sessionStore);
   const mediaProvider = media.provider;

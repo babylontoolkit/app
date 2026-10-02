@@ -1,16 +1,21 @@
-# Media gateways — fal.ai as a third gateway, and sound on all three
+# Media gateways — fal.ai beside KIE, sound on both, Comet removed
 
-**Goal.** KIE, Comet and fal.ai become interchangeable media gateways, chosen by `MEDIA_PROVIDER` (`KIE` | `Comet` | `FAL`). Each one serves:
+**Goal.** KIE and fal.ai become interchangeable media gateways, chosen by `MEDIA_PROVIDER` (`KIE` | `FAL`). Each one serves:
 - **images**, including transparent ones;
 - **video** (`generate_video` plus the separate `generate_google_video` for Veo);
 - **sound**: sound effects, music and speech through `generate_sound` and the Media panel's Sound tab.
 
 Every render is priced, debited before anything is spent, polled, and delivered into `public/assets/generated/`. If one gateway has an outage, the owner switches gateways with one environment variable.
 
+**Comet is removed as a media gateway.** No render goes to Comet, no Comet media price is quoted, and `MEDIA_PROVIDER=Comet` is refused.
+
 **Owner decisions:**
 - *2026-09-30:* Anthropic is the only LLM provider. **Higgsfield is dropped**: its public REST API has no standalone sound, music or speech model (details below).
-- *2026-10-01:* add **fal.ai** as a third media gateway with the same capabilities as KIE. **All three gateways get sound.** The fal key is the owner's existing `FAL_API_KEY` in `.env.local`.
-- *2026-10-01:* this plan replaces `_specs/comet-sound_plan.md`, which was never executed. Its five tasks are folded in here (T1, T5, T6, T7, T8).
+- *2026-10-01:* add **fal.ai** as a media gateway with the same capabilities as KIE. The fal key is the owner's existing `FAL_API_KEY` in `.env.local`.
+- *2026-10-01:* **Comet is removed from media entirely.** The owner no longer trusts Comet because of a security issue. KIE and fal are the only media gateways, and both get sound.
+- *2026-10-01:* this plan replaces `_specs/comet-sound_plan.md`, which was never executed and is now void.
+
+**Out of scope:** Comet's LLM wiring (`PLATFORM_PROVIDERS`, the LLM price list, the provider ladder). This plan covers media only.
 
 ---
 
@@ -18,7 +23,7 @@ Every render is priced, debited before anything is spent, polled, and delivered 
 
 **Mode:** Quick Plan (no spec file). The owner's messages answer the scope, so there was no interview.
 - `spec_impact: yes` (SPEC §4.16 and §4.6's price lists change).
-- `size: medium`, inferred. 8 tasks: two gateways are being extended at once, and each needs its own probe and pricing.
+- `size: medium`, inferred. 7 tasks: one gateway is added, one is removed, and sound is extended to the new one.
 - `proof: functional`.
 
 ### Why Higgsfield is out (checked 2026-09-30)
@@ -33,82 +38,54 @@ Seed Audio and its text-to-speech exist only in Higgsfield's CLI and web app, wh
 
 ### What exists and is reused
 
-All paths are relative to the repo root.
+All paths are relative to the repo root. This describes the code before T3/T4. T3/T4 (done) added fal, and T1 removes Comet.
 
 - **The seam** (`app/lib/.server/media/provider.ts`):
   - `MediaProvider { name, create, query, download }`.
-  - `MediaEndpoint` is **persisted on task records**, so values may be added and never renamed. Today it holds `'jobs' | 'veo' | 'suno-sounds' | 'suno-music' | 'comet-image' | 'comet-gemini-image' | 'comet-video'`.
+  - `MediaEndpoint` is **persisted on task records**, so values may be added and never renamed or removed. It holds `'jobs' | 'veo' | 'suno-sounds' | 'suno-music' | 'comet-image' | 'comet-gemini-image' | 'comet-video'` (+ `'fal-queue'` since T3). The three `comet-*` values stay in the type so old records still parse; nothing creates them after T1.
   - The one factory is `mediaProviderFor(name, apiKey, baseUrl)`, an exhaustive switch.
-  - The provider is stamped on each task record, so polling always asks the gateway that created the task, even if `MEDIA_PROVIDER` has since changed (`mediaProviderOf`).
+  - The provider is stamped on each task record, so polling asks the gateway that created the task, even if `MEDIA_PROVIDER` has since changed (`mediaProviderOf`).
 - **Provider lists** (`app/lib/.server/agent/config.ts`):
-  - `PLATFORM_PROVIDERS = ['Anthropic','KIE','Comet']` (:43) and `MEDIA_PROVIDERS = ['KIE','Comet']` (:58). The doc comment calls the second a "strict subset" of the first.
-  - `MEDIA_KEY_ENV` (:840) maps each gateway to its key variable.
-  - `getMediaProvider` (:864) reads `MEDIA_PROVIDER` and otherwise falls back to the LLM provider.
-  - `mediaBaseUrlFor` (:936) is a `=== 'Comet'` ternary.
-  - `requireMediaKey` (:947) says "image/video generation".
+  - `PLATFORM_PROVIDERS = ['Anthropic','KIE','Comet']` and `MEDIA_PROVIDERS` (`['KIE','Comet','FAL']` after T3; `['KIE','FAL']` after T1).
+  - `MEDIA_KEY_ENV` maps each gateway to its key variable.
+  - `getMediaProvider` reads `MEDIA_PROVIDER` and otherwise falls back to the LLM provider.
+  - `mediaBaseUrlFor` (a record since T3) and `requireMediaKey` (which says "image/video generation").
 - **Client-safe tables:**
-  - `ImageProviderName = 'KIE' | 'Comet'` (`app/lib/media/image-capabilities.ts:40`).
-  - `CAPABILITIES` (:72): KIE has no native-alpha model; Comet's is `gpt-image-1.5`.
-  - `hasCutoutPass(provider)` is `provider === 'KIE'` (:136).
-  - `DEFAULTS: Record<ImageProviderName, MediaModelDefaults>` (`app/lib/media/provider-defaults.ts:150`). Comet has `sound: null`.
-  - `SOUND_MODELS` (:118) and `soundKindForModel` (:136) know **KIE ids only**.
-  - `isGoogleVideoModel` (:221) strips `-_.` and tests `^veo\d`, so **`fal-ai/veo3/fast` would NOT match**, because the vendor prefix comes first. T3 fixes this.
+  - `ImageProviderName` (`app/lib/media/image-capabilities.ts`).
+  - `CAPABILITIES`: KIE has no native-alpha model, and Comet's was `gpt-image-1.5` (removed by T1).
+  - `CUTOUT_MODEL_BY_PROVIDER` (T4): KIE `recraft/remove-background`, FAL `fal-ai/bria/background/remove`.
+  - `DEFAULTS: Record<ImageProviderName, MediaModelDefaults>` (`app/lib/media/provider-defaults.ts`). FAL has `sound: null` until T6.
+  - `SOUND_MODELS` and `soundKindForModel` know **KIE ids only**.
 - **Service** (`app/lib/.server/media/service.ts`):
-  - `CUTOUT_MODEL = 'recraft/remove-background'` (:50) is a single KIE constant.
-  - The poll path chains the cut-out with a hardcoded `endpoint: 'jobs'` and `payload: { image }` (:741-747).
-  - `endpointFor` (:862) is a switch per provider.
-  - `buildProviderPayload` (:950) branches to `buildCometPayload` (:1125).
-  - `buildSoundPayload` (:1051) builds KIE-only bodies.
-  - The music refusal (:254-264) applies to every provider and names KIE.
-  - `deriveDestPath` (:1178) gives audio the `.mp3` extension.
-  - KIE sends `image_input: []` (:1029): **there are no reference images on any gateway today**, so fal uses only its text-to-image and text-to-video routes, and its `/edit` and image-to-video routes are not used.
-- **The provider task id** field on `MediaTaskRecord` is named `kieTaskId` for historical reasons (`store.ts:62`). It holds any gateway's id. Do not rename it, because records persist.
+  - `endpointFor` and `buildProviderPayload` are exhaustive per-provider switches (`buildKiePayload`, `buildFalPayload`, and `buildCometPayload` until T1).
+  - fal sound models are priced but refused before debit by `ROUTE_REFUSAL` until T6.
+  - `buildSoundPayload` builds KIE-only bodies.
+  - The music refusal (no reachable `MEDIA_CALLBACK_URL`) applies to every provider and names KIE.
+  - `deriveDestPath` gives audio the `.mp3` extension.
+  - **No gateway takes reference images today** (KIE sends `image_input: []`), so fal uses only its text-to-image and text-to-video routes.
+- **The provider task id** field on `MediaTaskRecord` is named `kieTaskId` for historical reasons (`store.ts`). It holds any gateway's id. Do not rename it, because records persist.
 - **Price lists:**
-  - `MARKET_PRICE_PROVIDERS = ['KIE','Comet','Anthropic']` (`market-price-store.ts:50`), with a storage-key record (:63) and a baked-list record (:70).
-  - `validateMarketPrices` (`market-prices.ts:175`) **requires LLM rows and the platform default model**. fal sells no LLM, so its list must be media-only (T2).
-  - `rates.ts:448` iterates every provider's `llm` rows; a provider with an empty `llm` contributes nothing.
-  - `lookupMediaPrice` (`market-prices.ts:508`) supports units `per_request`, `per_second` and `per_1k_chars`.
-  - The admin feed fetchers are `fetchKieMarketFeed` and `fetchCometMarketFeed` (`market-feed.ts`), dispatched in `app/routes/api.admin.market-prices.ts:194-197`. The UI is `app/components/@settings/tabs/admin/MarketPricesSection.tsx`.
+  - `MARKET_PRICE_PROVIDERS = ['KIE','Comet','Anthropic','FAL']`; FAL is media-only (`MEDIA_ONLY_PRICE_PROVIDERS`, T2) and `LLM_PRICE_PROVIDERS` excludes it.
+  - Comet's list (`baked-comet-prices.ts`) holds its LLM rows **and** media rows: image, video, and the audio rows plus `COMET_AUDIO_PROVENANCE` added earlier in this run. T1 removes the media rows and leaves the LLM rows.
+  - `lookupMediaPrice` (`market-prices.ts`) supports units `per_request`, `per_second` and `per_1k_chars`. It refuses rather than guessing.
+- **Comet media code T1 removes:**
+  - `app/lib/.server/media/comet-client.ts` + `comet-client.spec.ts`, including the parked-render map and `PENDING_RENDER_TTL_MS`;
+  - the Comet branches in `provider.ts`, `service.ts`, `output-format.ts`, `image-capabilities.ts`, `provider-defaults.ts`, `media-tools.ts`, `MediaPanel.tsx`, `api.me.ts` and `app/lib/stores/session.ts`;
+  - `scripts/comet-audio-probe.mjs`.
 - **Dispatch queue** (`dispatch.ts`): serialises `provider.create` with spacing and retries. It wraps any provider unchanged.
 - **Client:** `MediaPanel.tsx`:
-  - `modelsForProvider(kind, provider: 'KIE'|'Comet'|null)` (:340) returns sound models for KIE only;
-  - `withBackgroundField` (:166) decides whether the transparency control is shown;
-  - the Sound tab appears only when its list is non-empty (:602).
+  - `modelsForProvider(kind, provider)` reads a `CATALOGUES` record (T3) and returns sound models for KIE only;
+  - the Sound tab appears only when its list is non-empty.
 - **Agent side:**
-  - `media-tools.ts` builds `generate_sound` only when `defaults.sound` is non-null (:365-446). Its prose is KIE-specific.
-  - `media-note.ts:71-76` always names `generate_sound`, even where the tool is absent (an existing defect, fixed in T6).
+  - `media-tools.ts` builds `generate_sound` only when `defaults.sound` is non-null. Its prose is KIE-specific.
+  - `generate_google_video`'s description promises "720p, 1080p or 4k" on every gateway, but fal drops 4k (T6 fixes this).
+  - `media-note.ts` always names `generate_sound`, even where the tool is absent (an existing defect, fixed in T6).
 - **Tests to mirror:**
-  - `comet-client.spec.ts`: a fetch stub with `seen[]` and a `responder`;
-  - `media.spec.ts`: `FakeProvider` (:55), quoting (:205), poll and refund (:490);
-  - `media-provider.spec.ts`: endpoint routing (:535);
+  - `fal-client.spec.ts`: a fetch stub with `seen[]` and a `responder`;
+  - `media.spec.ts`: `FakeProvider`, quoting, poll and refund;
+  - `media-provider.spec.ts`: endpoint routing;
   - `provider-defaults.spec.ts`: every default must be priced in its own provider's baked list;
-  - `comet-prices.spec.ts`, `sound-request.spec.ts`, `media-tools.spec.ts`, `media-panel-fields.spec.tsx`, `market-price-store.spec.ts`.
-
-### Comet's audio API (docs, 2026-09-30, https://apidoc.cometapi.com/llms.txt)
-
-- **Common to all routes:**
-  - Host `https://api.cometapi.com` with `Authorization: Bearer <COMET_API_KEY>`.
-  - The audio routes are **not under `/v1`**, so the client derives the host from its base URL.
-- **Sound effects:**
-  - `POST /runwayml/v1/sound_effect` with `{model:"eleven_text_to_sound_v2", promptText (1–3000), duration? (0.5–30), loop?}`.
-  - The body is strict (`additionalProperties:false`).
-  - Returns `{id}`.
-- **Speech:**
-  - `POST /runwayml/v1/text_to_speech` with `{model:"eleven_multilingual_v2" (≤1000 chars) | "eleven_v3" (≤5000), promptText, voice:{type:"runway-preset", presetId}}`.
-  - `presetId` is one of 49 names (Maya, Arjun, Serene, Bernard, Rachel, …).
-- **Polling sound effects and speech:**
-  - `GET /runwayml/v1/tasks/{id}`. Statuses: `PENDING | THROTTLED | RUNNING | SUCCEEDED | FAILED | CANCELLED`.
-  - `output[]` holds the audio URLs.
-  - A 400 `task_not_exist` on a fresh task means pending, not failed.
-- **Music:**
-  - `POST /suno/submit/music` with `{prompt, tags, title, mv, make_instrumental, generation_type:"TEXT", metadata:{create_mode:"custom"}}`.
-  - `notify_hook` is optional.
-  - Returns `{code, data:"<task id>"}`.
-  - Poll `GET /suno/fetch/{id}`, which returns `{data:{status, fail_reason, data:[clips{audio_url, duration, status}]}}`. One submit can return two clips.
-- **Prices:**
-  - Sound effects: $0.008 (per second or per request, **to confirm in T1**).
-  - Speech: $0.008 per 50 characters.
-  - Suno: $0.144 per submit (from Comet's Suno guide; not in Comet's feed).
+  - `sound-request.spec.ts`, `media-tools.spec.ts`, `media-panel-fields.spec.tsx`, `media-config.spec.ts`.
 
 ### fal.ai's API (research 2026-10-01; sources are each model's `https://fal.ai/models/<id>/llms.txt` and https://fal.ai/docs/llms.txt)
 
@@ -131,7 +108,7 @@ All paths are relative to the repo root.
 - **Concurrency:** new accounts get **2 jobs in progress at once** (up to 40 as credit is bought). Jobs beyond that wait in the queue rather than failing.
 - **Pricing feed:** `GET https://api.fal.ai/v1/models/pricing?endpoint_id=a,b` (1–50 ids, key required) returns `{prices:[{endpoint_id, unit_price, unit, currency}]}`.
   - The prices are account-specific.
-  - It gives one base price per model. Resolution, audio and duration multipliers appear only in each model's prose, so the variant rows are curated by hand, as Comet's Suno row is.
+  - It gives one base price per model. Resolution, audio and duration multipliers appear only in each model's prose, so the variant rows are curated by hand.
 - **The fal models this plan uses:**
 
 | Use | fal id (price key) | Price (fal list, 2026-10-01) |
@@ -156,16 +133,6 @@ All paths are relative to the repo root.
 - fal's native-alpha `ideogram/v3/generate-transparent`: the cut-out pass keeps the user's chosen model and matches KIE's two-stage design.
 
 They can be added later as price rows.
-
-### Comet audio probe (T1)
-
-- **Not run, 2026-10-01:** `COMET_API_KEY` is blank in `.env.local`. `scripts/comet-audio-probe.mjs` exists and exits non-zero with "COMET_API_KEY is not set in .env.local" until the key is set.
-- **The baked rows come from Comet's published sources, not a probe** (`baked-comet-prices.ts`, arithmetic in `COMET_AUDIO_PROVENANCE`):
-  - feed (`GET https://api.cometapi.com/api/models`, no key, read 2026-10-01): `eleven_text_to_sound_v2`, `eleven_multilingual_v2` and `eleven_v3` each `per_request 0.01, ratio 0.8` → charged $0.008;
-  - `eleven_text_to_sound_v2`: `per_request` $0.008, one catch-all row priced with or without a duration;
-  - `eleven_multilingual_v2`, `eleven_v3`: `per_1k_chars` $0.16 (docs: "$0.008 per 50 characters");
-  - `suno_music`: `per_request` $0.144, HAND-MAINTAINED from Comet's Suno guide (the feed has no Suno rows).
-- **Run `node scripts/comet-audio-probe.mjs`** once the key is set to confirm: whether a sound-effect duration scales the charge (it submits 2 s and no-duration), the task status sequences and the `task_not_exist` behaviour, the Suno clip count and the working `mv`, whether result files download without the key, their real container, latency, and the charge.
 
 ### fal probe results (T2, 2026-10-01)
 
@@ -221,19 +188,20 @@ The API reports ONE price per model: the model's default configuration (Veo and 
 ### Assumptions (Quick Plan)
 
 1. **Sound kinds per gateway:**
-   - Comet uses its ElevenLabs routes for sound effects and speech, and Suno for music.
+   - KIE keeps today's models.
    - fal uses ElevenLabs for sound effects and speech, and MiniMax Music v2.6 for music.
 
-   Every gateway exposes the same three kinds.
-2. **Music without callbacks:** music on Comet and fal is polled only, so `MEDIA_CALLBACK_URL` stays a requirement for KIE music only.
-3. **Multi-clip results:** when one music submit returns several clips, the first finished one is delivered, as on KIE.
-4. **fal is a media-only gateway.** It joins `MEDIA_PROVIDERS` and `MARKET_PRICE_PROVIDERS`, but not `PLATFORM_PROVIDERS`, because it serves no LLM. Its price list holds no `llm` rows, and validation knows that.
-5. **Transparency on fal** works like KIE: render, then a priced cut-out pass (`fal-ai/bria/background/remove`), quoted and debited together.
-6. **No `FAL_BASE_URL`.** fal has one public host, and `mediaBaseUrlFor` returns `undefined` for fal.
-7. **Probe spend:**
-   - The live probes spend real money: about $0.20 on Comet and about $1.50 on fal (images, one cut-out, a 4-second video with audio off, a short Veo clip with audio off, a sound effect, a speech line and a song).
+   Both gateways expose the same three kinds.
+2. **Music without callbacks:** music on fal is polled only, so `MEDIA_CALLBACK_URL` stays a requirement for KIE music only.
+3. **fal is a media-only gateway.** It is in `MEDIA_PROVIDERS` and `MARKET_PRICE_PROVIDERS`, but not in `PLATFORM_PROVIDERS`, because it serves no LLM. Its price list holds no `llm` rows, and validation knows that.
+4. **Transparency on fal** works like KIE: render, then a priced cut-out pass (`fal-ai/bria/background/remove`), quoted and debited together.
+5. **No `FAL_BASE_URL`.** fal has one public host.
+6. **Comet tasks already on record** are never sent back to Comet. The next poll ends them as failed, with a sentence saying Comet is no longer a media gateway, and refunds them exactly once. `MEDIA_PROVIDER` has been `KIE` in practice, so there should be none, but the poll path must not depend on that.
+7. **`MEDIA_PROVIDER=Comet` is refused**, never silently ignored. The refusal is a describable not-configured error naming `KIE` and `FAL`. If `MEDIA_PROVIDER` is unset and the LLM provider is Comet, the media fallback is KIE and never Comet.
+8. **Probe spend:**
+   - The fal probe spends real money: about $1.50 (images, one cut-out, a 4-second video with audio off, a short Veo clip with audio off, a sound effect, a speech line and a song).
    - The owner asked for this feature, which covers it.
-   - If a key is missing, that task stops and reports it rather than baking unverified prices.
+   - It cannot run until the fal account is topped up (see the probe results above).
 
 ### SPEC conformance
 
@@ -247,7 +215,8 @@ The plan follows SPEC §4.16 as written:
 
 It also follows §4.6: price lists are per gateway, versioned and admin-promoted, with a baked fallback; the admin feed is for the operator to read and is never applied automatically.
 
-It changes two rules:
+It changes three rules:
+- the media gateways become KIE and fal, and Comet is no longer one;
 - "music needs a reachable callback" becomes KIE-only;
 - "media providers are a subset of LLM providers" is relaxed for media-only fal.
 
@@ -255,41 +224,55 @@ It changes two rules:
 
 ## Tasks
 
-### Phase 1 — Prove both gateways and price them
+### Phase 1 — Remove Comet, and prove and price fal
 
-- [ ] **T1** — Live-probe Comet audio and bake Comet's audio prices  ⏭️ DEFERRED (auto-pilot): COMET_API_KEY is blank in .env.local — rows baked from Comet's public feed + docs; run `node scripts/comet-audio-probe.mjs` once a key is set, then tick
+- [x] **T1** — Remove Comet as a media gateway
   - Files:
-    - `scripts/comet-audio-probe.mjs` (create; mirrors `scripts/cache-probe.mjs` / `kie-model-health.mjs`)
-    - `app/lib/.server/billing/baked-comet-prices.ts` (modify)
+    - `app/lib/.server/agent/config.ts` (modify)
+    - `app/lib/.server/media/provider.ts` (modify)
+    - `app/lib/.server/media/comet-client.ts` + `comet-client.spec.ts` (delete)
+    - `app/lib/.server/media/service.ts` (modify)
+    - `app/lib/media/image-capabilities.ts`, `provider-defaults.ts`, `output-format.ts` (modify)
+    - `app/lib/.server/agent/media-tools.ts` (modify)
+    - `app/components/media/MediaPanel.tsx`, `app/routes/api.me.ts`, `app/lib/stores/session.ts` (modify)
+    - `app/lib/.server/billing/baked-comet-prices.ts` (modify: media rows only)
+    - `scripts/comet-audio-probe.mjs` (delete)
+    - `.env.example` (modify)
+    - every spec that asserts Comet media behaviour (modify)
   - Details:
-    1. **The probe.** It reads `COMET_API_KEY` from `.env.local`, then makes:
-       - one sound effect: 2 s, then the same prompt with no duration;
-       - one speech line (`eleven_multilingual_v2`, ~60 characters);
-       - one Suno instrumental.
-
-       It polls each one to completion and records:
-       - the submit and poll status sequences;
-       - the result URL's host, and whether downloading it needs the bearer key;
-       - `Content-Type`, plus a decode of the first bytes;
-       - how many clips each Suno submit returns;
-       - the `mv` value that worked;
-       - latency;
-       - the charge Comet reports (balance before and after, or the dashboard).
-
-       It writes a results table into this plan's Codebase Analysis.
-    2. **Comet audio rows** in `baked-comet-prices.ts`, priced from the probe:
-       - `eleven_text_to_sound_v2`: `per_second` if the probe confirms it; otherwise `per_request`, with a separate no-duration row;
-       - `eleven_multilingual_v2` and `eleven_v3`: `per_1k_chars`;
-       - `suno_music`: `per_request`, $0.144.
-
-       Every row applies Comet's `pricing × ratio` rule. The Suno row is commented as hand-maintained, because Comet's feed has no Suno rows.
+    1. **Registration.**
+       - `MEDIA_PROVIDERS = ['KIE','FAL']`, and `ImageProviderName = 'KIE' | 'FAL'`.
+       - Remove the Comet entries from `MEDIA_KEY_ENV`, `mediaBaseUrlFor` and every `Record<ImageProviderName, …>` table: `CAPABILITIES` (`gpt-image-1.5`'s native alpha goes), `CUTOUT_MODEL_BY_PROVIDER`, `DEFAULTS`, the panel's `CATALOGUES`, and the image/video option switches.
+       - `getMediaProvider` refuses `MEDIA_PROVIDER=Comet` (case-insensitive) with a describable not-configured error naming `KIE` and `FAL`. If `MEDIA_PROVIDER` is unset, the LLM-provider fallback goes to KIE whenever that provider is not a media gateway, Comet included.
+       - `.env.example`: the `MEDIA_PROVIDER` comment lists `KIE | FAL`.
+    2. **Client and payloads.**
+       - Delete `comet-client.ts` and its spec, along with the parked-render map.
+       - Remove the factory's `case 'Comet'`, `buildCometPayload`, `cometEndpointFor`, and the Comet branches in `output-format.ts` and `media-tools.ts`.
+       - `MediaEndpoint` keeps its three `comet-*` values, because they are persisted. Nothing creates them.
+    3. **Comet tasks already on record.**
+       - A task stamped `Comet` is never sent to Comet.
+       - Its next poll ends it as `failed` with the sentence "Comet is no longer a media gateway; this render was refunded.", and refunds it exactly once through the existing refund latch.
+       - Put this in one place: a provider resolution that returns a refusing stand-in for `Comet`, or a guard before `query`.
+    4. **Prices.**
+       - Remove Comet's **media** rows from `baked-comet-prices.ts`: image, video, and the audio rows with `COMET_AUDIO_PROVENANCE`.
+       - Comet's LLM rows and `COMET_PRICE_PROVENANCE` stay; Comet as an LLM gateway is out of scope.
+       - Update `comet-prices.spec.ts` to match.
+    5. Delete `scripts/comet-audio-probe.mjs`.
   - Tests:
-    - `comet-prices.spec.ts`:
-      - `prices every Comet audio row` → `lookupMediaPrice` resolves all three kinds in the units the probe chose;
-      - `refuses a sound effect with no duration when only per_second is priced` → null (only if `per_second` was chosen).
+    - `media-config.spec.ts`:
+      - `MEDIA_PROVIDER=Comet is refused, naming KIE and FAL`;
+      - `LLM_PROVIDER=Comet with no MEDIA_PROVIDER falls back to KIE, never Comet`;
+      - `MEDIA_PROVIDERS is exactly KIE and FAL`.
+    - `media.spec.ts`:
+      - `a stored Comet task fails and refunds exactly once, and nothing contacts Comet` → the refusing stand-in records zero calls, and the balance is back in full after two polls.
+    - `no-comet-media.spec.ts` (create): a comment-stripped source scan of `app/lib/media/**`, `app/lib/.server/media/**`, `media-tools.ts`, `media-note.ts` and `app/components/media/**`. It finds no `Comet` / `comet` except the three persisted `comet-*` endpoint values and the stored-task refusal, each in a named allow-list with a reason. It also has a control proving the scanner finds a planted `Comet` string.
+    - The existing KIE and FAL media tests pass unchanged.
   - Acceptance:
-    - The probe runs end to end and its table is in this file.
-    - Comet's baked list prices all three sound kinds, and each row cites the probe or Comet's published page.
+    - Comet cannot be reached as a media gateway from the env, the agent tools, the Media panel or the poll path.
+    - No Comet media price is quoted.
+    - Comet's LLM rows and LLM wiring are untouched.
+    - KIE and FAL behaviour is unchanged.
+    - `pnpm typecheck && pnpm lint && pnpm test` are green.
   - Verify level: standard
 
 - [ ] **T2** — Live-probe fal, give fal a media-only price list, and add the admin feed  ⏭️ DEFERRED (auto-pilot): fal returned 403 "Exhausted balance" on every submit ($0 spent) — code + baked prices done; top up fal, run `node scripts/fal-media-probe.mjs`, check the findings against T3–T4, then tick
@@ -331,7 +314,7 @@ It changes two rules:
          - the cut-out as its own row.
        - Each row cites the model's `llms.txt` URL and the probe. `capturedAt` is the probe date. The source says "fal list price; account-specific discounts may apply".
     4. **Admin feed:**
-       - `fetchFalMarketFeed(apiKey, { filter })` calls `GET https://api.fal.ai/v1/models/pricing?endpoint_id=…` with the ids from the active fal list, in batches of 50. It returns the same row shape the panel already renders for Comet.
+       - `fetchFalMarketFeed(apiKey, { filter })` calls `GET https://api.fal.ai/v1/models/pricing?endpoint_id=…` with the ids from the active fal list, in batches of 50. It returns the same row shape the panel already renders for the other gateways.
        - The route dispatches on provider `'FAL'` and uses `FAL_API_KEY`. A missing key is a describable "not configured" error.
        - The panel's provider picker shows FAL. The feed is for the operator to read and is never applied.
   - Tests:
@@ -340,7 +323,7 @@ It changes two rules:
       - `refuses a FAL list that carries llm rows` → an error naming FAL as media-only;
       - `still refuses a KIE list with no llm rows` → the existing error (control).
     - `market-price-store.spec.ts`:
-      - `promotes and loads a FAL list under its own key` → stored at `fal`; KIE and Comet are untouched;
+      - `promotes and loads a FAL list under its own key` → stored at `fal`; KIE's pointer is untouched;
       - `serves the baked FAL list when nothing is promoted`.
     - `fal-prices.spec.ts` (create):
       - `prices every fal row in the plan table` → `lookupMediaPrice` resolves each in its unit and variants;
@@ -351,12 +334,14 @@ It changes two rules:
   - Acceptance:
     - The probe ran, and its table, including the cut-out's measured transparency, is in this file.
     - The fal list validates and is served baked.
-    - KIE and Comet lists validate exactly as before.
+    - Every other provider's list validates exactly as before.
     - The admin panel can show FAL's list and fetch its feed.
     - If `FAL_API_KEY` is missing, the task stops and reports that.
   - Verify level: standard
 
 ### Phase 2 — fal renders images, transparent images and video
+
+> As built, T3 and T4 also kept Comet working (its native-alpha transparency and its catalogue). T1 removes that; the checked text below is what remains true.
 
 - [x] **T3** — The fal client and gateway: images and video end to end in the server, the agent tools and the panel
   - Files:
@@ -372,7 +357,7 @@ It changes two rules:
     - `.env.example` (modify)
   - Details:
     1. **Registration.**
-       - `MEDIA_PROVIDERS = ['KIE','Comet','FAL']`, with `MEDIA_KEY_ENV.FAL = 'FAL_API_KEY'`.
+       - `MEDIA_PROVIDERS` gains `'FAL'`, with `MEDIA_KEY_ENV.FAL = 'FAL_API_KEY'`.
        - `ImageProviderName` gains `'FAL'`.
        - `PLATFORM_PROVIDERS` is unchanged. Rewrite the "strict subset" comment, and the spec that asserts it, as: every media provider is either a platform provider or listed in a `MEDIA_ONLY_PROVIDERS = ['FAL']` constant.
        - `getMediaProvider` accepts `FAL` (case-insensitive, like the others). Because fal is never an LLM provider, `MEDIA_PROVIDER=FAL` is the only way to select it.
@@ -406,7 +391,7 @@ It changes two rules:
     7. **`isGoogleVideoModel`** matches a `veo<digit>` **path segment** anywhere in the id, so `fal-ai/veo3/fast` and `fal-ai/veo3` count as Google video. `veo3_fast` and `veo3-fast` still match; `kling…` and `grok…` do not.
     8. **Panel.** `modelsForProvider` takes `ImageProviderName | null` and returns fal's image and video lists (sound in T7).
   - Tests:
-    - `fal-client.spec.ts` (create; same fetch-stub pattern as `comet-client.spec.ts`):
+    - `fal-client.spec.ts` (create; a fetch stub with `seen[]` and a `responder`):
       - `submits to queue.fal.run with Key auth and returns response_url`;
       - `polls the status URL derived from response_url, never one rebuilt from the model id` → for a `fal-ai/veo3/fast` job, the URL has no `/fast/requests`;
       - `COMPLETED with error is failed, not succeeded`;
@@ -428,7 +413,7 @@ It changes two rules:
       - `MEDIA_PROVIDER=fal selects FAL and reads FAL_API_KEY`.
   - Acceptance:
     - On `MEDIA_PROVIDER=FAL`, `generate_image`, `generate_video`, `generate_google_video` and the panel's Image and Video tabs create, debit, poll and deliver against stubbed fal responses shaped like T2's probe output.
-    - KIE and Comet behaviour is unchanged (their existing tests pass).
+    - KIE behaviour is unchanged (its existing tests pass).
     - No new `=== 'KIE'` / `=== 'Comet'` / `=== 'FAL'` ternary.
   - Verify level: standard
 
@@ -440,24 +425,23 @@ It changes two rules:
   - Details:
     1. Replace `hasCutoutPass(provider) === (provider === 'KIE')` with one exported record:
 
-       `CUTOUT_MODEL_BY_PROVIDER: Record<ImageProviderName, string | null> = { KIE: 'recraft/remove-background', Comet: null, FAL: 'fal-ai/bria/background/remove' }`
+       `CUTOUT_MODEL_BY_PROVIDER: Record<ImageProviderName, string | null> = { KIE: 'recraft/remove-background', FAL: 'fal-ai/bria/background/remove' }`
 
        `hasCutoutPass` and `supportsTransparency` read it. `CAPABILITIES.FAL = {}` (no native-alpha model is used on fal).
     2. In `service.ts`, `CUTOUT_MODEL` becomes `cutoutModelFor(provider)`, used by:
        - the quote (`cutoutAvailable`, the combined price);
-       - the "is not a model you generate with" refusal, which now checks all three ids;
+       - the "is not a model you generate with" refusal, which now checks every gateway's cut-out id;
        - the poll-path chain.
 
        The chain creates the cut-out through `cutoutTaskFor(provider, renderUrl)`:
        - KIE: `{endpoint: 'jobs', payload: {image}}`, byte-identical to today;
        - FAL: `{endpoint: 'fal-queue', model: cutout id, payload: {image_url}}`.
 
-       Comet keeps refusing nothing, because it resolves transparency to its native-alpha model.
     3. The stage-1 render for a transparent request on fal is asked for as jpeg, with the same flat-backdrop prompt directive KIE uses, because the alpha comes from stage 2.
   - Tests:
     - `image-capabilities.spec.ts`:
       - `FAL supports transparency through a cut-out pass`;
-      - `Comet has no cut-out pass` (control).
+      - `KIE stays on Recraft` (control).
     - `media.spec.ts`:
       - `a transparent fal image quotes render + cut-out together, debits once, chains bria on the poll and delivers the cut-out` → the second create has `payload.image_url` equal to the render URL;
       - `a fal cut-out that cannot start fails and refunds in full`;
@@ -468,92 +452,79 @@ It changes two rules:
     - KIE's transparency path is byte-identical.
   - Verify level: standard
 
-### Phase 3 — Sound on all three gateways
+### Phase 3 — Sound on both gateways
 
-- [ ] **T5** — Comet audio routes in the Comet client
-  - Files:
-    - `app/lib/.server/media/provider.ts` (modify)
-    - `app/lib/.server/media/comet-client.ts` (modify)
-  - Details:
-    1. Append `'comet-sound'`, `'comet-speech'` and `'comet-music'` to `MediaEndpoint`.
-    2. Derive `host` from the base URL with a trailing `/v1` removed. `COMET_BASE_URL` still overrides it.
-    3. **`create`:**
-       - `comet-sound` → `POST {host}/runwayml/v1/sound_effect`;
-       - `comet-speech` → `POST {host}/runwayml/v1/text_to_speech`;
-       - `comet-music` → `POST {host}/suno/submit/music`, with **no `notify_hook`**.
-    4. **`query`:**
-       - `comet-sound` / `comet-speech` → `GET {host}/runwayml/v1/tasks/{id}`:
-         - `SUCCEEDED` → `output[0]`;
-         - `FAILED` / `CANCELLED` → `failed`;
-         - `PENDING` / `THROTTLED` / `RUNNING`, a missing status, or 400 `task_not_exist` → `pending`.
-       - `comet-music` → `GET {host}/suno/fetch/{id}`:
-         - the first finished clip with a non-empty `audio_url` → `succeeded`;
-         - a status T1 recorded as a terminal failure → `failed`, with `fail_reason`;
-         - otherwise `pending`.
-    5. `download` stays a plain GET, unless T1 found that audio URLs need the key.
-  - Tests (`comet-client.spec.ts`):
-    - `posts a sound effect to /runwayml/v1/sound_effect with promptText, duration and loop` → no `/v1/v1` in the URL;
-    - `posts speech with a runway-preset voice`;
-    - `submits music without notify_hook`;
-    - `maps runway statuses, including task_not_exist → pending`;
-    - `delivers the first finished Suno clip, and stays pending while audio_url is empty`;
-    - `refuses a KIE sound endpoint`.
-  - Acceptance: the Comet client creates, polls and downloads all three sound kinds against stubbed responses shaped like T1's probe output.
-  - Verify level: standard
+> T5 (Comet audio routes in the Comet client) was removed with Comet on 2026-10-01. Its id is not reused.
 
-- [ ] **T6** — Make sound provider-aware on all three gateways: models, validation, payloads, the music rule, the tool and the prompt note
+- [ ] **T6** — Make sound provider-aware on KIE and fal: models, validation, payloads, the music rule, the tool and the prompt note
+  - Depends on: T1 (Comet gone from `ImageProviderName`).
   - Files:
     - `app/lib/media/provider-defaults.ts` (modify)
     - `app/lib/media/sound-request.ts` (modify)
+    - `app/lib/media/fal-routes.ts` (modify: enable the `sfx`, `tts` and `music-minimax` families)
     - `app/lib/.server/media/service.ts` (modify)
     - `app/lib/.server/agent/media-tools.ts` (modify)
     - `app/lib/.server/agent/media-note.ts` (modify)
     - `app/lib/.server/agent/config.ts` (modify: `requireMediaKey` wording)
   - Details:
-    1. **Model ids.** `SOUND_MODELS` becomes a per-provider record `Record<ImageProviderName, { effect, music, speech: string[], voices, musicOptions }>`:
+    1. **Model ids.** `SOUND_MODELS` becomes a per-provider record, `Record<ImageProviderName, { effect, music, speech: string[], voices, musicOptions }>`, exported from a client-safe module so T7's panel reads it:
        - KIE: today's values, byte-identical;
-       - Comet: T1's ids, voices = the runway preset names, `mv` from T1;
-       - FAL: `fal-ai/elevenlabs/sound-effects/v2`, `fal-ai/minimax-music/v2.6`, `[fal-ai/elevenlabs/tts/multilingual-v2, fal-ai/elevenlabs/tts/turbo-v2.5]`, voices = the ElevenLabs names T2 confirmed, no version option.
+       - FAL:
+         - effect `fal-ai/elevenlabs/sound-effects/v2`;
+         - music `fal-ai/minimax-music/v2.6`;
+         - speech `[fal-ai/elevenlabs/tts/multilingual-v2, fal-ai/elevenlabs/tts/turbo-v2.5]`;
+         - voices: the documented ElevenLabs names (Rachel, the default, plus Aria, Roger, Sarah, Laura, Charlie, George, Callum, River, Liam, Charlotte, Alice, Matilda, Will, Jessica, Eric, Chris, Brian, Daniel, Lily, Bill);
+         - no version option.
 
        `soundKindForModel(model)` checks every provider's ids through that record. Never use `=== 'KIE'` ternaries.
-    2. **Defaults.** `DEFAULTS.Comet.sound` and `DEFAULTS.FAL.sound` are set from that record.
-    3. **Validation.** `validateSoundRequest(args, provider)` checks against the provider's models, voices and music options, and still returns sentences when it refuses. On fal, sound-effect duration is capped at 22 s and the refusal names the limit.
+    2. **Defaults.** `DEFAULTS.FAL.sound` is set from that record.
+    3. **Validation.** `validateSoundRequest(args, provider)` checks against the provider's models, voices and music options, and still returns sentences when it refuses.
+       - On fal, sound-effect duration is capped at 22 s, and the refusal names the limit.
+       - Music on fal needs `lyrics` unless it is instrumental, and the refusal says so.
     4. **`service.ts`:**
-       - `cometEndpointFor` maps sound kinds to T5's endpoints;
-       - `buildCometPayload` builds the three Comet bodies: `prompt`→`promptText`, duration→`duration`, voice→`{type:'runway-preset', presetId}`, and music→`{prompt, tags, title, mv, make_instrumental, generation_type:'TEXT', metadata:{create_mode:'custom'}}`;
-       - `buildFalPayload` builds the three fal bodies: sound effect `{text, duration_seconds, loop}`; speech `{text, voice}`; music `{prompt, lyrics?, is_instrumental}`;
-       - the music refusal (:254-264) applies only when the provider is KIE;
-       - the quote passes `textChars` for speech, which the `per_1k_chars` rows need;
-       - `deriveDestPath` keeps `.mp3`, unless T1/T2 found a gateway returns WAV; then the extension comes from the same delivery decision for that model.
-    5. **The agent tool.** `generate_sound`'s schema and description text come from the provider's record, so the cached prompt never shows KIE names on Comet or fal.
+       - **fal sound bodies.** `buildFalPayload` builds the three bodies:
+         - sound effect: `{text, duration_seconds, loop}`;
+         - speech: `{text, voice}`;
+         - music: `{prompt, lyrics?, is_instrumental}`.
+       - **fal sound-effect duration is always sent.** It is priced `per_second`, and a request with no duration is refused by the price lookup, so a default (e.g. 5 s) is applied when the request has none. The quote and the payload use the same value.
+       - **Routing.** `ROUTE_REFUSAL` stops refusing fal sound models.
+       - **Music callback rule.** The music refusal applies only when the provider is KIE.
+       - **Speech quote.** The quote passes `textChars` for speech, which the `per_1k_chars` rows need.
+       - **File extension.** `deriveDestPath` keeps `.mp3`, unless the fal probe finds a model returns WAV; then the extension comes from the same delivery decision for that model.
+    5. **The agent tools.**
+       - `generate_sound`'s schema and description come from the provider's record, so the cached prompt never shows KIE names on fal.
+       - `generate_google_video`'s resolution text comes from the provider's defaults too (fal has no 4k).
+       - The text stays deterministic for a given provider.
     6. **The prompt note.** `media-note.ts` names `generate_sound` only when `defaults.sound` is non-null.
     7. **Missing key.** `requireMediaKey` says "media generation".
   - Tests:
     - `sound-request.spec.ts`:
-      - `accepts Comet ids and runway voices for Comet`;
       - `accepts fal ids and ElevenLabs voices for FAL`;
-      - `refuses a KIE voice on Comet with a sentence naming valid voices`;
-      - `refuses a 30 s fal sound effect naming the 22 s limit`.
+      - `refuses a KIE voice on FAL with a sentence naming valid voices`;
+      - `refuses a 30 s fal sound effect naming the 22 s limit`;
+      - `refuses fal music with lyrics missing and not instrumental`.
     - `media.spec.ts`:
-      - `quotes, debits and creates a Comet sound effect, then delivers it as .mp3`;
-      - `the same on FAL`;
-      - `Comet and FAL music need no MEDIA_CALLBACK_URL`;
+      - `quotes, debits and creates a fal sound effect, then delivers it as .mp3`;
+      - `a fal sound effect with no duration is quoted and sent with the same default`;
+      - `fal music needs no MEDIA_CALLBACK_URL`;
       - `KIE music still refuses without a reachable callback` (control);
       - `speech is quoted per 1k chars on FAL`;
-      - `a failed Comet or FAL sound refunds exactly once`.
+      - `a failed fal sound refunds exactly once`.
     - `media-tools.spec.ts`:
-      - `generate_sound is offered on Comet and FAL with that gateway's voices and no KIE ids in its text`.
+      - `generate_sound is offered on FAL with ElevenLabs voices and no KIE ids in its text`;
+      - `generate_google_video names only the resolutions the gateway renders`;
+      - the "a call that names NO model" table gains FAL rows for `generate_image`, `generate_google_video` and `generate_sound`.
     - The `media-note` test:
       - `does not name generate_sound when the gateway has no sound`, using a stub defaults table with `sound: null`.
   - Acceptance:
-    - On each gateway, the agent tool and the server create, debit, poll and deliver all three sound kinds.
+    - On both gateways, the agent tool and the server create, debit, poll and deliver all three sound kinds.
     - KIE's sound behaviour is unchanged (existing KIE sound tests pass).
     - No provider-name ternary is added.
   - Verify level: standard
 
-### Phase 4 — The Media panel on every gateway, proved live, and SPEC
+### Phase 4 — The Media panel on both gateways, proved live, and SPEC
 
-- [ ] **T7** — The Sound tab on every gateway, and a live run of fal and Comet end to end
+- [ ] **T7** — The Sound tab on both gateways, and a live run of fal end to end
   - Files:
     - `app/components/media/MediaPanel.tsx` (modify)
     - `app/components/media/media-panel-fields.spec.tsx` (modify)
@@ -561,42 +532,43 @@ It changes two rules:
     1. Replace `SOUND_MODELS_SPEC` ("KIE only") with fields built from T6's per-provider sound record: model list, voice list and music options. `modelsForProvider('audio', provider)` returns that provider's list.
     2. The price on Generate comes from the same quote action as today.
   - Tests (`media-panel-fields.spec.tsx`):
-    - `shows the Sound tab on Comet with Comet voices`;
     - `shows the Sound tab on FAL with ElevenLabs voices and fal image/video models`;
     - `still shows KIE's sound fields on KIE`;
     - `hides the Sound tab when the gateway has no sound models` (control, stub table).
-  - Acceptance (live, one session per gateway):
+  - Acceptance (live):
     1. With `MEDIA_PROVIDER=FAL` and the dev server restarted, use the Media panel to generate:
-       - one opaque image and one **transparent** image (decode the delivered PNG: most pixels outside the subject are fully transparent);
+       - one opaque image;
+       - one **transparent** image (decode the delivered PNG: most pixels outside the subject are fully transparent);
        - one 4-second video with audio off;
        - one sound effect, one speech line and one music track.
 
        Each file lands in `public/assets/generated/` and plays or renders in the browser, and the balance drops by exactly the quoted amount. An invalid request that fal accepts and then fails is refunded.
     2. In one fal chat turn ("add a coin pickup sound, short background music and a transparent coin icon"), the agent calls `generate_sound` and `generate_image` with transparency, and the files appear.
-    3. With `MEDIA_PROVIDER=Comet`, generate one sound effect, one speech line and one music track from the Sound tab, with the same checks.
-    4. Switching back to `MEDIA_PROVIDER=KIE` still shows KIE's tabs. A task started on fal before the switch still completes and delivers.
-    5. If a key is missing where this runs, report that and run the steps for that gateway against stubbed providers.
+    3. Switching back to `MEDIA_PROVIDER=KIE` still shows KIE's tabs. A task started on fal before the switch still completes and delivers.
+    4. If the fal account still cannot render (no balance), report that and run steps 1–2 against a stubbed fal provider.
   - Verify level: live
 
 - [ ] **T8** — Update SPEC.md to match what was built
   - Files: `SPEC.md`
   - Details: following SPEC.md's "How to update this spec":
     - **§4.16:**
-      - the gateway list becomes KIE, Comet and fal;
-      - the heading's "sound … (KIE only)" becomes all three gateways;
+      - the gateway list becomes KIE and fal;
+      - the heading's "second gateway (Comet)" and "sound … (KIE only)" become KIE and fal, both with sound;
       - fal's queue shape and its two-stage transparency;
-      - Comet's and fal's sound routes, and polling-only music;
-      - the callback rule scoped to KIE.
-    - **§4.6:** fal's media-only price list and its admin feed.
+      - fal's sound routes, and polling-only music;
+      - the callback rule scoped to KIE;
+      - Comet is not a media gateway: `MEDIA_PROVIDER=Comet` is refused, and an old Comet task is refunded on its next poll.
+    - **§4.6:** fal's media-only price list and its admin feed; Comet's list carries LLM rows only.
     - **Decisions:**
       - **Higgsfield evaluated and rejected 2026-09-30** (no standalone audio in its public API);
-      - **fal added 2026-10-01** as a media-only gateway.
+      - **fal added 2026-10-01** as a media-only gateway;
+      - **Comet removed from media 2026-10-01** (owner: security issue, no longer trusted).
 
     Record the product only, never verification procedure.
   - Acceptance:
     - SPEC.md matches T1–T7.
-    - Nothing in it says sound is KIE-only, or that media providers must also serve an LLM.
-    - Both decisions and their reasons are recorded.
+    - Nothing in it describes Comet as a media gateway, says sound is KIE-only, or says media providers must also serve an LLM.
+    - All three decisions and their reasons are recorded.
   - Verify level: standard
 
 ---
@@ -605,14 +577,14 @@ It changes two rules:
 
 | Phase | Tasks | What makes it slow | Estimate |
 | --- | --- | --- | --- |
-| 1 — Probe and price | T1, T2 | Real gateway latency (music and video take minutes); the media-only price-list rule touches validation | ~45 min |
-| 2 — fal images, video, transparency | T3, T4 | T3 registers a new gateway across about ten files and writes the queue client | ~45 min |
-| 3 — Sound everywhere | T5, T6 | T6 touches six files across the shared validator and the tool text, for three gateways | ~45 min |
-| 4 — Panel, live, SPEC | T7, T8 | One live session per gateway generating real media | ~45 min |
+| 1 — Remove Comet, price fal | T1 (T2 done in code; its probe waits on a fal top-up) | Comet runs through about a dozen media files and their specs | ~30 min |
+| 2 — fal images, video, transparency | T3, T4 | Done | — |
+| 3 — Sound on both | T6 | Six files across the shared validator and the tool text | ~35 min |
+| 4 — Panel, live, SPEC | T7, T8 | One live fal session generating real media | ~40 min |
 
-**Total ≈ 2 h 15 min – 4 h 15 min.** That is 8 tasks × 17 min plus 4 phases × 10 min, plus one 20-minute fix round for the probes' genuine unknowns, ±30 %. With `--strict`, multiply by 2–3.
+**Remaining ≈ 1 h 15 min – 2 h 15 min**, ±30 %. With `--strict`, multiply by 2–3.
 
-Biggest uncertainty: whether fal's background removal returns real alpha, and how its status URL relates to `response_url`. T2 settles both before any client code is written.
+Biggest uncertainty: whether fal's background removal returns real alpha, and whether the status URL really is `response_url + '/status'`. The fal probe settles both once the account is topped up. If the status URL is wrong, every fal task stays pending with its debit held, so check it first.
 
 ## How to execute this plan
 

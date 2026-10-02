@@ -1594,7 +1594,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   /*
    * Whether media tools exist at all is the MEDIA provider's key, not the LLM provider's (§4.16).
    * This gated on `config.kieApiKey`, which is the same question only for as long as KIE is the only
-   * gateway that renders: a Comet media deploy would have advertised no media tools at all while
+   * gateway that renders: a fal media deploy would have advertised no media tools at all while
    * holding a working key, and the model would have drawn the art in CSS — the §4.16 pathology where
    * a capability that exists is unreachable, announced only by the model saying so.
    *

@@ -10,11 +10,9 @@
  *  1. **KIE is byte-identical to the pre-T8 behaviour** (render jpg, deliver png, second priced stage,
  *     flat-backdrop directive). This is the AC7 control: the whole point of extracting the intent half
  *     was that the incumbent gateway must not move.
- *  2. **Comet SUBSTITUTES the capable model.** `gpt-image-1.5` is the only thing on that gateway that
- *     emits alpha; a transparent request for `gemini-3-pro-image` that runs on `gemini-3-pro-image`
- *     produces a flat opaque image and bills for it. The substitution must be visible (it is the quote's
- *     `model`, so the ledger names what ran) and it must be REAL — an assertion that only checks the
- *     returned model when the requested one was already capable passes for `() => input.model`.
+ *  2. **No live gateway has a native-alpha model** (Comet's `gpt-image-1.5` was the only one, and Comet
+ *     stopped being a media gateway on 2026-10-01). KIE and fal both reach alpha through a priced
+ *     cut-out pass on the REQUESTED model.
  *  3. **An unservable transparency is REFUSED, never downgraded.** Downgrading delivers exactly the
  *     thing the user paid extra not to get, and says "done" while doing it.
  *
@@ -68,59 +66,34 @@ describe('nativeAlphaModelFor — which model on this gateway can actually do al
     expect(nativeAlphaModelFor('KIE', 'nano-banana-2')).toBeNull();
   });
 
-  it('answers gpt-image-1.5 on Comet, whatever was preferred', () => {
-    expect(nativeAlphaModelFor('Comet')).toBe('gpt-image-1.5');
-    expect(nativeAlphaModelFor('Comet', 'gemini-3-pro-image')).toBe('gpt-image-1.5');
-  });
-
-  it('keeps a preferred model that is ITSELF capable — no pointless substitution', () => {
-    expect(nativeAlphaModelFor('Comet', 'gpt-image-1.5')).toBe('gpt-image-1.5');
+  it('has NOTHING on fal either — its native-alpha model is deliberately unused', () => {
+    expect(nativeAlphaModelFor('FAL')).toBeNull();
+    expect(nativeAlphaModelFor('FAL', 'fal-ai/nano-banana-2')).toBeNull();
   });
 
   it('treats an UNKNOWN model as incapable — the safe direction', () => {
     /*
      * Absent from the table means "we have never measured this", and the two ways of being wrong are
      * not symmetrical: optimistically assuming alpha ships an opaque image against a paid-for
-     * transparent request (silent), while pessimistically assuming none costs a substitution or a
-     * second stage (visible on the quote).
+     * transparent request (silent), while pessimistically assuming none costs a second stage (visible
+     * on the quote).
      */
-    expect(nativeAlphaModelFor('Comet', 'gpt-image-9')).toBe('gpt-image-1.5');
-    expect(imageModelCapability('Comet', 'gpt-image-9')).toBeUndefined();
-  });
-
-  it('records the two models that were PROBED and refused, rather than omitting them', () => {
-    // "We know this one cannot" and "we have never heard of this one" are different facts.
-    expect(imageModelCapability('Comet', 'gpt-image-1')).toEqual({ nativeAlpha: false });
-    expect(imageModelCapability('Comet', 'gpt-image-2')).toEqual({ nativeAlpha: false });
-    expect(imageModelCapability('Comet', 'gpt-image-1.5')).toEqual({ nativeAlpha: true });
+    expect(imageModelCapability('KIE', 'gpt-image-1.5')).toBeUndefined();
+    expect(imageModelCapability('FAL', 'gpt-image-9')).toBeUndefined();
   });
 });
 
 describe('supportsTransparency — whether the panel may offer the control at all', () => {
-  it('is true on KIE via the cut-out pass, and true on Comet via a native model', () => {
+  it('is true on KIE and on fal, both via the cut-out pass (the mechanism, not just the answer)', () => {
     /*
-     * Two different mechanisms, one answer — which is exactly why the panel asks this question rather
-     * than asking "does the model have alpha". Offering a control the gateway will refuse invites a
-     * user to pay for something that cannot happen.
+     * ⚠️ `true` for both passes for `() => true`, so the mechanism is pinned too: neither gateway has a
+     * native-alpha model, so each `true` must come from its cut-out.
      */
-    expect(supportsTransparency('KIE')).toBe(true);
-    expect(supportsTransparency('Comet')).toBe(true);
-  });
-
-  it('answers Comet from the TABLE, not from a constant (control)', () => {
-    /*
-     * ⚠️ The assertion above is `true` for both gateways, so it passes for `() => true` — vacuous on
-     * its own, and now load-bearing, since the Media panel uses it to decide whether the Background
-     * control renders at all. This pins the MECHANISM: Comet's answer is true because a capable model
-     * is in the table, and it is that model. Flip `gpt-image-1.5`'s `nativeAlpha` and this fails while
-     * KIE's (cut-out-based) answer stays true.
-     */
-    expect(nativeAlphaModelFor('Comet')).toBe('gpt-image-1.5');
-    expect(supportsTransparency('Comet')).toBe(nativeAlphaModelFor('Comet') !== null);
-
-    // ...and KIE's true comes from somewhere else entirely — it has no native-alpha model at all.
-    expect(nativeAlphaModelFor('KIE')).toBeNull();
-    expect(supportsTransparency('KIE')).toBe(true);
+    for (const provider of ['KIE', 'FAL'] as const) {
+      expect(supportsTransparency(provider)).toBe(true);
+      expect(nativeAlphaModelFor(provider)).toBeNull();
+      expect(hasCutoutPass(provider)).toBe(true);
+    }
   });
 });
 
@@ -146,20 +119,13 @@ describe('the cut-out pass is per gateway (media-gateways T4)', () => {
     });
   });
 
-  it('Comet has no cut-out pass', () => {
-    // CONTROL: Comet's transparency is per MODEL; a cut-out row here would bill a stage that never runs.
-    expect(hasCutoutPass('Comet')).toBe(false);
-    expect(cutoutModelFor('Comet')).toBeNull();
-    expect(supportsTransparency('Comet')).toBe(true);
-  });
-
   it('keeps KIE on Recraft — byte-identical to before T4', () => {
     expect(cutoutModelFor('KIE')).toBe('recraft/remove-background');
     expect(hasCutoutPass('KIE')).toBe(true);
   });
 
   it('every gateway answers — a missing row is a compile error, and no two share a cut-out id', () => {
-    expect(Object.keys(CUTOUT_MODEL_BY_PROVIDER).sort()).toEqual(['Comet', 'FAL', 'KIE']);
+    expect(Object.keys(CUTOUT_MODEL_BY_PROVIDER).sort()).toEqual(['FAL', 'KIE']);
 
     const ids = Object.values(CUTOUT_MODEL_BY_PROVIDER).filter(Boolean);
     expect(new Set(ids).size).toBe(ids.length);
@@ -168,7 +134,7 @@ describe('the cut-out pass is per gateway (media-gateways T4)', () => {
 
 describe('realizeImageDelivery — opaque requests', () => {
   it('passes an explicit jpg straight through, on both gateways', () => {
-    for (const provider of ['KIE', 'Comet'] as const) {
+    for (const provider of ['KIE', 'FAL'] as const) {
       expect(realize({ provider, model: 'm', explicitFormat: 'jpg' })).toEqual({
         model: 'm',
         cutout: false,
@@ -180,22 +146,14 @@ describe('realizeImageDelivery — opaque requests', () => {
   });
 
   it('passes an explicit png straight through — an opaque png is a legitimate ask', () => {
-    /*
-     * `toEqual`, not `toMatchObject`: `background` must be ABSENT. A stray `background: 'transparent'`
-     * on an opaque request would ask a native-alpha model to cut its own backdrop out.
-     */
-    expect(realize({ provider: 'Comet', model: 'gpt-image-1.5', explicitFormat: 'png' })).toEqual({
-      model: 'gpt-image-1.5',
+    // `toEqual`, not `toMatchObject`: `background` must be ABSENT on an opaque request.
+    expect(realize({ provider: 'FAL', model: 'fal-ai/nano-banana-2', explicitFormat: 'png' })).toEqual({
+      model: 'fal-ai/nano-banana-2',
       cutout: false,
       renderFormat: 'png',
       finalFormat: 'png',
       cutoutPrompt: false,
     });
-  });
-
-  it('never substitutes a model for an OPAQUE request, even on a gateway that has a capable one', () => {
-    // The substitution exists to buy alpha. Applying it to an opaque render would silently re-price it.
-    expect(delivery(realize({ provider: 'Comet', model: 'gemini-3-pro-image' })).model).toBe('gemini-3-pro-image');
   });
 });
 
@@ -221,69 +179,6 @@ describe('realizeImageDelivery — KIE, the AC7 control', () => {
 
   it('keeps the REQUESTED model — KIE has nothing to substitute to', () => {
     expect(delivery(realize({ provider: 'KIE', model: 'flux-2-pro', wantsAlpha: true })).model).toBe('flux-2-pro');
-  });
-});
-
-describe('realizeImageDelivery — Comet, one call and real alpha', () => {
-  it('resolves ANY requested model to the capable one, and bills no second stage', () => {
-    /*
-     * 🔴 The requested model is deliberately NOT `gpt-image-1.5`. An assertion that only ever asks
-     * about a model which was already capable passes for `model: input.model` — i.e. for the exact
-     * defect where a transparent request runs on a flat-RGB model and reports success.
-     */
-    expect(realize({ provider: 'Comet', model: 'gemini-3-pro-image', wantsAlpha: true })).toEqual({
-      model: 'gpt-image-1.5',
-      cutout: false,
-      background: 'transparent',
-      renderFormat: 'png',
-      finalFormat: 'png',
-      cutoutPrompt: false,
-    });
-  });
-
-  it.each(['gpt-image-1', 'gpt-image-2', 'gemini-3-pro-image', 'gpt-image-9'])(
-    'substitutes for %s — every model without measured alpha resolves to the one with it',
-    (model) => {
-      expect(delivery(realize({ provider: 'Comet', model, wantsAlpha: true })).model).toBe('gpt-image-1.5');
-    },
-  );
-
-  it('leaves an already-capable model alone (the substitution CONTROL)', () => {
-    // Pairs with the case above: together they prove the resolution is a lookup, not a constant.
-    expect(delivery(realize({ provider: 'Comet', model: 'gpt-image-1.5', wantsAlpha: true })).model).toBe(
-      'gpt-image-1.5',
-    );
-  });
-
-  it('does NOT append the flat-backdrop directive to a native-alpha render', () => {
-    /*
-     * 🔴 The single most destructive thing this table prevents. That directive commands a flat OPAQUE
-     * backdrop for a background remover's benefit; sent to a model that was about to produce a
-     * genuinely empty one it destroys exactly what was paid for — and the result looks like a
-     * perfectly good render.
-     */
-    expect(delivery(realize({ provider: 'Comet', model: 'gpt-image-1.5', wantsAlpha: true })).cutoutPrompt).toBe(false);
-  });
-
-  it('ignores an explicit jpg when alpha is owed — a container cannot carry it', () => {
-    const result = delivery(realize({ provider: 'Comet', wantsAlpha: true, explicitFormat: 'jpg' }));
-
-    expect(result.renderFormat).toBe('png');
-    expect(result.finalFormat).toBe('png');
-  });
-
-  it('prefers the native model even when a cut-out pass is also available', () => {
-    /*
-     * The cheaper answer AND the better one: one call, no second debit, and no remover guessing at
-     * edges. A realization that reached for the cut-out first would bill two stages for alpha the
-     * gateway hands over for free.
-     */
-    const result = delivery(
-      realize({ provider: 'Comet', model: 'gpt-image-1', wantsAlpha: true, cutoutAvailable: true }),
-    );
-
-    expect(result.cutout).toBe(false);
-    expect(result.background).toBe('transparent');
   });
 });
 

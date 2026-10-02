@@ -176,15 +176,15 @@ describe('managed media tools — the server answers them (T8)', () => {
     expect(await reasons()).toEqual([]);
   });
 
-  it('generate_sound on a gateway with NO audio (Comet): "not available on Comet", no debit, no task', async () => {
+  it('generate_sound on a gateway with NO audio (fal, until T6): "not available on FAL", no debit, no task', async () => {
     await fund(1000);
 
-    const { provider, created } = fakeProvider('Comet');
+    const { provider, created } = fakeProvider('FAL');
     const { dispatcher, tasks } = dispatcherWith({ provider });
     const answer = await dispatcher.dispatch(call('generate_sound', { prompt: 'a coin pickup chime' }));
 
     expect(answer?.isError).toBe(true);
-    expect(textOf(answer)).toContain('not available on Comet');
+    expect(textOf(answer)).toContain('not available on FAL');
     expect(created).toHaveLength(0);
     expect(tasks).toHaveLength(0);
     expect(await reasons()).toEqual([['adjustment', 1000]]);

@@ -126,10 +126,10 @@ export const MEDIA_TOOL_NAMES = [
 export function createMediaTools(ctx: MediaToolContext) {
   /*
    * 🔴 PER GATEWAY, NEVER A LITERAL (T9, 2026-08-11 — see `media/provider-defaults.ts` for the
-   * measurement). These ids used to be inlined KIE models, so on Comet every call that did not name a
-   * model was refused and the turn spent a whole extra round rediscovering the catalogue. The
+   * measurement). These ids used to be inlined KIE models, so on another gateway every call that did not
+   * name a model was refused and the turn spent a whole extra round rediscovering the catalogue. The
    * DESCRIPTIONS below are built from the same source: they ride in the cached prompt, so advertising
-   * `nano-banana-2` on a Comet deploy misleads the agent on every turn of every conversation.
+   * `nano-banana-2` on a fal deploy misleads the agent on every turn of every conversation.
    */
   const defaults = mediaModelDefaults(ctx.provider.name);
 
@@ -362,8 +362,8 @@ export function createMediaTools(ctx: MediaToolContext) {
     }),
 
     /*
-     * 🔴 PRESENT ONLY ON A GATEWAY THAT SERVES AUDIO. Comet has no sound routes, so advertising this
-     * there would buy a refused call on every turn that wants a sound effect — the wasted round the
+     * 🔴 PRESENT ONLY ON A GATEWAY THAT SERVES AUDIO. Advertising this on a gateway with no
+     * sound routes would buy a refused call on every turn that wants a sound effect — the wasted round the
      * defaults table exists to remove. `undefined` keys are stripped below, so the tool is genuinely
      * absent rather than present-and-broken.
      */

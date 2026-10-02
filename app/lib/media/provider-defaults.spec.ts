@@ -6,9 +6,9 @@
  * `generate_image`, `generate_video` and `generate_google_video` carried three inlined default model
  * ids — `nano-banana-2`, `kling-3.0/video`, `veo3_fast` — every one of them a **KIE** model. Nothing
  * said so, because while KIE was the only gateway "a default model" and "a KIE model" were the same
- * string. On Comet none of them is in the price list, so `lookupMediaPrice` returns null and
+ * string. On another gateway none of them is in the price list, so `lookupMediaPrice` returns null and
  * `startMediaTask` refuses — correctly, before any debit — and the turn spends a whole tool round
- * rediscovering the catalogue. Measured on the first live Comet media turn (`gen_mso6s0gd_frqrfh`):
+ * rediscovering the catalogue. Measured on the first live non-KIE media turn (`gen_mso6s0gd_frqrfh`):
  * step 0 made three calls, all refused, 8.2s and 31,098 cache-write tokens for zero tasks.
  *
  * It SELF-HEALS (the refusal names the available models), which is exactly why it would never be
@@ -18,7 +18,7 @@
  * ## The one assertion that makes this class of bug unshippable
  *
  * **Every default in the table is priced in that provider's OWN baked price list**, checked against
- * the REAL lists (`baked-market-prices.ts`, `baked-comet-prices.ts`) through the REAL resolver
+ * the REAL lists (`baked-market-prices.ts`, `baked-fal-prices.ts`) through the REAL resolver
  * (`findMediaModel`, which is what `quoteMediaRequest` calls), iterating `providersWithDefaults()`.
  *
  * ⚠️ **What would make this file vacuous, and how each is prevented:**
@@ -29,7 +29,7 @@
  *  - *A resolver that says yes to everything.* `findMediaModel` returning a truthy row for any string
  *    would pass every case above, so there is a CONTROL asserting a fabricated id resolves to null on
  *    both lists.
- *  - *A table collapsed to one row.* "Both gateways have defaults" is true for a table where Comet is
+ *  - *A table collapsed to one row.* "Both gateways have defaults" is true for a table where fal is
  *    a copy of KIE — which is the original defect. So the per-gateway block asserts the ids DIFFER and
  *    asserts the literals, and the fallback block asserts the fallback returns KIE's row *and* that a
  *    recognised provider does not.
@@ -44,11 +44,10 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { MEDIA_PROVIDERS } from '~/lib/.server/agent/config';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
-import { BAKED_COMET_PRICES } from '~/lib/.server/billing/baked-comet-prices';
 import { BAKED_FAL_PRICES } from '~/lib/.server/billing/baked-fal-prices';
 import { findMediaModel, type MarketPriceList } from '~/lib/.server/billing/market-prices';
 import { activeMarketPrices, invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
-import { nativeAlphaModelFor, type ImageProviderName } from './image-capabilities';
+import { type ImageProviderName } from './image-capabilities';
 import {
   isGoogleVideoModel,
   mediaModelDefaults,
@@ -60,12 +59,11 @@ import {
  * Which baked list prices which gateway.
  *
  * ⚠️ Declared here AND pinned to production below (`activeMarketPrices` with a cold cache returns the
- * baked list by reference). A spec that invents its own mapping can prove a Comet default is priced
+ * baked list by reference). A spec that invents its own mapping can prove a fal default is priced
  * by checking it against KIE's list — the exact confusion under test, one level up.
  */
 const BAKED_BY_PROVIDER: Record<ImageProviderName, MarketPriceList> = {
   KIE: BAKED_MARKET_PRICES,
-  Comet: BAKED_COMET_PRICES,
   FAL: BAKED_FAL_PRICES,
 };
 
@@ -104,7 +102,7 @@ describe('every default model is priced in that gateway’s own baked price list
     }
 
     // ...and the two lists are genuinely different documents, or "priced on its own gateway" means nothing.
-    expect(BAKED_MARKET_PRICES).not.toBe(BAKED_COMET_PRICES);
+    expect(BAKED_MARKET_PRICES).not.toBe(BAKED_FAL_PRICES);
   });
 
   for (const provider of providersWithDefaults()) {
@@ -113,7 +111,7 @@ describe('every default model is priced in that gateway’s own baked price list
         /*
          * 🔴 THE ASSERTION. The id is READ from the table and handed to the resolver the money path
          * uses — this spec never names a model, so it cannot be satisfied by a consistently-typed
-         * table. Restore any of the three KIE literals into the Comet row and this fails on that row,
+         * table. Restore any of the three KIE literals into the fal row and this fails on that row,
          * which is precisely the live failure (`lookupMediaPrice` → null → `MediaRefusedError`).
          */
         const model = mediaModelDefaults(provider)[slot];
@@ -157,15 +155,15 @@ describe('every default model is priced in that gateway’s own baked price list
     }
   });
 
-  it('CONTROL — a KIE default is NOT priced on Comet (the live defect, reproduced)', () => {
+  it('CONTROL — a KIE default is NOT priced on fal (the live defect, reproduced)', () => {
     /*
-     * The measured failure in one line. If this ever starts passing, either Comet has adopted KIE's
+     * The measured failure in one line. If this ever starts passing, either fal has adopted KIE's
      * slugs (fine, and then the whole table can collapse) or the mapping above has drifted — and
      * either way the block at the top of this file has stopped meaning anything.
      */
-    expect(findMediaModel(BAKED_COMET_PRICES, 'nano-banana-2')).toBeNull();
-    expect(findMediaModel(BAKED_COMET_PRICES, 'kling-3.0/video')).toBeNull();
-    expect(findMediaModel(BAKED_COMET_PRICES, 'veo3_fast')).toBeNull();
+    expect(findMediaModel(BAKED_FAL_PRICES, 'nano-banana-2')).toBeNull();
+    expect(findMediaModel(BAKED_FAL_PRICES, 'kling-3.0/video')).toBeNull();
+    expect(findMediaModel(BAKED_FAL_PRICES, 'veo3_fast')).toBeNull();
 
     // ...and they ARE priced on KIE, so the null above is about the gateway, not about the ids.
     expect(findMediaModel(BAKED_MARKET_PRICES, 'nano-banana-2')).not.toBeNull();
@@ -182,20 +180,20 @@ describe('every default model is priced in that gateway’s own baked price list
 describe('the gateways have different defaults', () => {
   it('names different image and video models on each gateway', () => {
     const kie = mediaModelDefaults('KIE');
-    const comet = mediaModelDefaults('Comet');
+    const fal = mediaModelDefaults('FAL');
 
     /*
      * The whole point of T9. Collapse the table to one row — the state the code was in before the fix
      * — and all three of these fail, whichever row survives.
      */
-    expect(kie.image).not.toBe(comet.image);
-    expect(kie.video).not.toBe(comet.video);
-    expect(kie.googleVideo).not.toBe(comet.googleVideo);
+    expect(kie.image).not.toBe(fal.image);
+    expect(kie.video).not.toBe(fal.video);
+    expect(kie.googleVideo).not.toBe(fal.googleVideo);
   });
 
   it('pins the literal ids, because the literal IS the fact', () => {
     /*
-     * Literals rather than relations: "KIE's image default is not Comet's" stays true if both are
+     * Literals rather than relations: "KIE's image default is not fal's" stays true if both are
      * changed to nonsense together. These are the exact strings the wire will carry, and block 1 is
      * what proves each one is priced.
      */
@@ -213,32 +211,17 @@ describe('the gateways have different defaults', () => {
       },
     });
 
-    expect(mediaModelDefaults('Comet')).toEqual({
-      image: 'gemini-3-pro-image',
-
-      /*
-       * NULL, and it is the whole owner rule in one field: every video model Comet prices is Google
-       * Veo, and `generate_video` may never fall back to Veo. Putting either Veo id here is the exact
-       * regression this block exists to catch.
-       */
-      video: null,
-      googleVideo: 'veo3-fast',
-      videoAlternatives: ' Also: veo3 (higher quality, ~4x the price).',
-
-      /*
-       * EMPTY, and that is the assertion. Comet serves no `kling-3.0*` model, so `mode` is never even
-       * added to the payload, and its video rows price on `{}` — describing either knob would put
-       * prose in the cached prefix for a control that cannot act. `toEqual` on the whole row is what
-       * makes this hold: a new field added without a Comet answer fails here rather than silently
-       * shipping KIE's wording as a default.
-       */
+    expect(mediaModelDefaults('FAL')).toEqual({
+      image: 'fal-ai/nano-banana-2',
+      video: 'fal-ai/kling-video/v3/standard/text-to-video',
+      googleVideo: 'fal-ai/veo3/fast',
+      videoAlternatives:
+        ' Also: fal-ai/kling-video/v3/pro/text-to-video (higher quality), ' +
+        'xai/grok-imagine-video/text-to-video (cheapest; resolution 480p or 720p).',
       videoModeHint: '',
-      videoResolutionHint: '',
+      videoResolutionHint: 'Grok Imagine only: 480p or 720p. Default 720p.',
 
-      /*
-       * NULL for the same reason `video` is: Comet serves no audio routes at all. A non-null value
-       * here would put `generate_sound` in the tool set on a gateway that must refuse every call.
-       */
+      // NULL until fal sound ships (T6) — a non-null value would offer `generate_sound` and refuse it.
       sound: null,
     });
   });
@@ -257,25 +240,25 @@ describe('the gateways have different defaults', () => {
   });
 
   it('CONTROL: a gateway with no audio offers no sound defaults to price', () => {
-    expect(mediaModelDefaults('Comet').sound).toBeNull();
+    expect(mediaModelDefaults('FAL').sound).toBeNull();
   });
 
   it('spells Veo differently on each gateway — one character, and it is the whole defect', () => {
     /*
-     * The SAME model, two slugs: KIE wants `veo3_fast`, Comet `veo3-fast`. No type can tell you which
+     * The SAME model, two slugs: KIE wants `veo3_fast`, fal `fal-ai/veo3/fast`. No type can tell you which
      * spelling a gateway wants, and the two look identical at a glance — so this is asserted on its
      * own rather than left inside the object comparison above, where a reviewer's eye slides past it.
      */
     expect(mediaModelDefaults('KIE').googleVideo).toBe('veo3_fast');
-    expect(mediaModelDefaults('Comet').googleVideo).toBe('veo3-fast');
-    expect(mediaModelDefaults('KIE').googleVideo).not.toBe(mediaModelDefaults('Comet').googleVideo);
+    expect(mediaModelDefaults('FAL').googleVideo).toBe('fal-ai/veo3/fast');
+    expect(mediaModelDefaults('KIE').googleVideo).not.toBe(mediaModelDefaults('FAL').googleVideo);
   });
 
   it('never lets the general video slot equal the Google one', () => {
     /*
-     * 🔴 REPLACES a test that asserted the OPPOSITE. It read "gives Comet the same model for the
+     * 🔴 REPLACES a test that asserted the OPPOSITE. It read "gives one gateway the same model for the
      * general and the Google-specific video slot" and called the duplication deliberate — reasoning
-     * that Veo was Comet's only video surface, so the general tool may as well point at it. That is
+     * that Veo was that gateway's only video surface, so the general tool may as well point at it. That is
      * exactly the fallback the owner banned: `generate_google_video` exists so Veo is chosen on
      * purpose, and a general tool resolving to it spends the most expensive video on the catalogue
      * without anyone asking. The catalogue fact was right; the conclusion drawn from it was wrong.
@@ -288,54 +271,6 @@ describe('the gateways have different defaults', () => {
 
       expect(video, `${provider} points its general video slot at the Google model`).not.toBe(googleVideo);
     }
-  });
-});
-
-/*
- * ================================================================================================
- * 3. COMET'S IMAGE DEFAULT IS THE CHEAP OPAQUE WORKHORSE, NOT THE ALPHA MODEL
- * ================================================================================================
- */
-describe('Comet’s image default is not the transparency model', () => {
-  it('is gemini-3-pro-image, never gpt-image-1.5', () => {
-    /*
-     * `gpt-image-1.5` exists on this gateway for ONE reason — it is the only model that emits a real
-     * alpha channel — and a transparent request already resolves to it inside `realizeImageDelivery`.
-     * Making it the default would charge every ordinary background for a capability nobody asked for,
-     * silently, with the render still arriving and the ledger still correct.
-     */
-    expect(mediaModelDefaults('Comet').image).toBe('gemini-3-pro-image');
-    expect(mediaModelDefaults('Comet').image).not.toBe('gpt-image-1.5');
-  });
-
-  it('routes transparency to gpt-image-1.5 WITHOUT it being the default (the control)', () => {
-    /*
-     * The pair that makes the assertion above safe rather than merely restrictive: alpha is still
-     * reachable. Without this, "the default is not gpt-image-1.5" would also pass for a build where
-     * the alpha capability had been deleted outright.
-     */
-    expect(nativeAlphaModelFor('Comet')).toBe('gpt-image-1.5');
-    expect(nativeAlphaModelFor('Comet', mediaModelDefaults('Comet').image)).toBe('gpt-image-1.5');
-  });
-
-  it('costs materially less than the alpha model at the same ordinary 16:9 render', () => {
-    /*
-     * The price is the reason, so the price is asserted — with LITERALS from the baked list, because a
-     * purely relational "cheaper than" comparison passes for two rows that were both repriced. $0.017
-     * (the whole gemini row) against $0.062 for gpt-image-1.5 at medium/16:9, which is what an
-     * ordinary background would have billed: ~3.6x, on every image, forever.
-     */
-    const gemini = findMediaModel(BAKED_COMET_PRICES, 'gemini-3-pro-image')!;
-    const gptImage = findMediaModel(BAKED_COMET_PRICES, 'gpt-image-1.5')!;
-
-    const geminiUsd = gemini.pricing.variants[0].usd;
-    const gptMedium16x9 = gptImage.pricing.variants.find(
-      (variant) => variant.options.quality === 'medium' && variant.options.aspectRatio === '16:9',
-    )!;
-
-    expect(geminiUsd).toBe(0.017);
-    expect(gptMedium16x9.usd).toBe(0.062);
-    expect(geminiUsd).toBeLessThan(gptMedium16x9.usd);
   });
 });
 
@@ -360,9 +295,9 @@ describe('an unrecognised provider gets KIE’s row rather than an exception', (
   it('CONTROL — a RECOGNISED provider does not take the fallback', () => {
     /*
      * Without this, "unknown → KIE" passes for a function that returns KIE's row for every input,
-     * including 'Comet' — which is the original defect with a fallback bolted on top of it.
+     * including 'FAL' — which is the original defect with a fallback bolted on top of it.
      */
-    expect(mediaModelDefaults('Comet')).not.toEqual(mediaModelDefaults('KIE'));
+    expect(mediaModelDefaults('FAL')).not.toEqual(mediaModelDefaults('KIE'));
   });
 
   it('matches EXACTLY — a lowercased provider name is not a provider name', () => {
@@ -370,10 +305,11 @@ describe('an unrecognised provider gets KIE’s row rather than an exception', (
      * ⚠️ Documenting a real edge, not blessing one. The only production caller passes
      * `MediaProvider.name`, which is the typed `MediaProviderName` enum, so exact matching is correct
      * today. If a caller ever hands this a raw env string it must normalise first: the failure is a
-     * Comet deploy silently serving KIE defaults again, which is this whole file's subject.
+     * fal deploy silently serving KIE defaults again, which is this whole file's subject. A RETIRED
+     * gateway's name (Comet, 2026-10-01) is just an unknown string here too.
      */
-    expect(mediaModelDefaults('comet')).toEqual(mediaModelDefaults('KIE'));
-    expect(mediaModelDefaults('COMET')).toEqual(mediaModelDefaults('KIE'));
+    expect(mediaModelDefaults('fal')).toEqual(mediaModelDefaults('KIE'));
+    expect(mediaModelDefaults('Comet')).toEqual(mediaModelDefaults('KIE'));
   });
 });
 
@@ -386,7 +322,7 @@ describe('the table covers every media gateway', () => {
   it('CONTROL — the list every block above iterates is real', () => {
     // An assertion over an empty list is green by vacuity; every `for` in this file derives from here.
     expect(providersWithDefaults().length).toBeGreaterThanOrEqual(2);
-    expect([...providersWithDefaults()].sort()).toEqual(['Comet', 'FAL', 'KIE']);
+    expect([...providersWithDefaults()].sort()).toEqual(['FAL', 'KIE']);
   });
 
   it('mirrors MEDIA_PROVIDERS exactly', () => {
@@ -470,11 +406,13 @@ describe('no gateway advertises another gateway’s models', () => {
      * one of each gateway's exclusive ids in a fake clause and require the scanner to find it — and
      * require it NOT to fire on a clause naming a model the gateway does price.
      */
-    expect(foreignIdsMentionedIn(' Also: kling-2.6 (cheaper).', 'Comet')).toContain('kling-2.6');
-    expect(foreignIdsMentionedIn(' Also: gemini-3-pro-image (cheaper).', 'KIE')).toContain('gemini-3-pro-image');
+    expect(foreignIdsMentionedIn(' Also: kling-2.6 (cheaper).', 'FAL')).toContain('kling-2.6');
+    expect(foreignIdsMentionedIn(' Also: xai/grok-imagine-video/text-to-video (cheaper).', 'KIE')).toContain(
+      'xai/grok-imagine-video/text-to-video',
+    );
 
     expect(foreignIdsMentionedIn(' Also: kling-2.6 (cheaper).', 'KIE')).toEqual([]);
-    expect(foreignIdsMentionedIn(' Also: gemini-3-pro-image (cheaper).', 'Comet')).toEqual([]);
+    expect(foreignIdsMentionedIn(' Also: xai/grok-imagine-video/text-to-video (cheaper).', 'FAL')).toEqual([]);
   });
 
   it('CONTROL — each gateway really has exclusive ids to be caught by', () => {
@@ -541,15 +479,15 @@ describe('provider-defaults.ts imports nothing from ~/lib/.server', () => {
  * that `execute` actually refuses.
  *
  * ⚠️ The regression this replaced was WORSE than the bug it was fixing. `generate_video` used to
- * default to `kling-3.0/video`, which Comet cannot price — so an unqualified call was already refused,
+ * default to `kling-3.0/video`, which Comet (then a media gateway) could not price — so an unqualified call was already refused,
  * for free. Pointing it at `veo3-fast` to save a wasted tool round turned that free refusal into an
  * automatic 128-credit Veo render. Removing a refusal is not a saving when its replacement spends.
  */
 describe('generate_video never falls back to Google Veo', () => {
   it('no gateway has a Veo model as its general video default', () => {
     /*
-     * 🔴 THE RULE. Mutation that kills it: `Comet.video = 'veo3-fast'` — the state this shipped in for
-     * one live drive, which billed 128 credits of Veo from a tool that had asked for "a video".
+     * 🔴 THE RULE. Mutation that kills it: `FAL.video = 'fal-ai/veo3/fast'` — the shape a Veo default
+     * shipped in for one live drive, which billed 128 credits of Veo from a tool that had asked for "a video".
      */
     for (const provider of providersWithDefaults()) {
       const { video } = mediaModelDefaults(provider);
@@ -565,7 +503,7 @@ describe('generate_video never falls back to Google Veo', () => {
      * Without this, a predicate that returns `false` for everything satisfies the rule above while
      * permitting exactly what it bans. The ids are read from the REAL baked lists, both spellings.
      */
-    expect(isGoogleVideoModel('veo3-fast')).toBe(true); // Comet
+    expect(isGoogleVideoModel('veo3-fast')).toBe(true); // hyphenated spelling
     expect(isGoogleVideoModel('veo3_fast')).toBe(true); // KIE — one character apart
     expect(isGoogleVideoModel('veo3')).toBe(true);
     expect(isGoogleVideoModel('veo3_lite')).toBe(true);
@@ -602,25 +540,6 @@ describe('generate_video never falls back to Google Veo', () => {
     for (const id of ['kling-3.0/video', 'kling-2.6', 'bytedance/seedance-2', 'grok-imagine-video-1-5-preview']) {
       expect(isGoogleVideoModel(id), `"${id}" is not a Google model`).toBe(false);
     }
-  });
-
-  it('is null on Comet specifically, because every video model it prices is Veo', () => {
-    /*
-     * Not a style choice — a fact about the catalogue. `baked-comet-prices.ts` prices `veo3-fast` and
-     * `veo3` and nothing else in `kind: 'video'`, so there is nothing else this could point at. If
-     * Comet ever lists a non-Google video model, THAT is what goes here.
-     */
-    expect(mediaModelDefaults('Comet').video).toBeNull();
-
-    const cometVideo = Object.entries(BAKED_COMET_PRICES.media ?? {})
-      .filter(([, row]) => row.kind === 'video')
-      .map(([id]) => id);
-
-    expect(cometVideo.length).toBeGreaterThan(0);
-    expect(
-      cometVideo.every((id) => isGoogleVideoModel(id)),
-      `Comet now serves non-Google video: ${cometVideo}`,
-    ).toBe(true);
   });
 
   it('KIE keeps a real, non-Google default — the rule is not "no video"', () => {

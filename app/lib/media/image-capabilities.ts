@@ -7,9 +7,8 @@
  * Transparency used to be one boolean, `ImageDelivery.cutout`, which meant two different things at
  * once: *the user wants alpha* and *run a second priced stage*. On KIE those are the same fact —
  * **no** KIE image model emits an alpha channel, so alpha always costs a
- * `recraft/remove-background` pass. On Comet they come apart: `gpt-image-1.5` produces real alpha in
- * ONE call (live-probed 2026-08-10: 74.31% fully transparent, 6.69% semi, decoded pixel by pixel),
- * while `gpt-image-1` and `gpt-image-2` REFUSE the `background` parameter outright.
+ * `recraft/remove-background` pass (fal's is `fal-ai/bria/background/remove`). A gateway whose model
+ * produces real alpha in ONE call would pull them apart — which is why the table exists at all.
  *
  * So the capability is per MODEL, not per provider and certainly not per file format — and it has to
  * be data, because the one thing that must never happen is a transparent request quietly rendering
@@ -37,7 +36,7 @@
 import type { ImageOutputFormat } from './output-format';
 
 /** The gateways that serve renders. Mirrors `MEDIA_PROVIDERS`; asserted equal in the specs. */
-export type ImageProviderName = 'KIE' | 'Comet' | 'FAL';
+export type ImageProviderName = 'KIE' | 'FAL';
 
 export interface ImageModelCapability {
   /**
@@ -54,8 +53,7 @@ export interface ImageModelCapability {
 /*
  * ⚠️ NO `minPixels`. The plan called for a per-model pixel floor here (seedream refuses 1024x1024 with
  * "must be at least 3686400 pixels") and it is deliberately ABSENT rather than declared-and-unread:
- * the seedream models that have such a floor are the ones Comet answers 503 for, so nothing shipped
- * needs it, and a field written by nobody and read by nobody is the `PENDING_RENDER_TTL_MS` class —
+ * no model shipped today needs it, and a field written by nobody and read by nobody is the `PENDING_RENDER_TTL_MS` class —
  * a promise in a type that no code keeps. What actually protects an unserveable size today is the
  * PRICE LIST: only probed (quality, aspectRatio) cells have rows, so anything else is refused in the
  * quote, before the debit. Add the floor back with the model that needs it, and a test.
@@ -75,21 +73,6 @@ const CAPABILITIES: Record<ImageProviderName, Record<string, ImageModelCapabilit
    * record is a MEASUREMENT, not a stub — see `output-format.ts`'s header for the raw numbers.
    */
   KIE: {},
-
-  Comet: {
-    /* Live-probed 2026-08-10. The only transparency capability on this gateway. */
-    'gpt-image-1.5': { nativeAlpha: true },
-
-    /*
-     * Probed and REFUSED the parameter. Listed rather than omitted, because "we know this one cannot"
-     * and "we have never heard of this one" are different facts and only the first is evidence.
-     */
-    'gpt-image-1': { nativeAlpha: false },
-    'gpt-image-2': { nativeAlpha: false },
-
-    /* Token-priced nano-banana equivalent. No alpha — Google's image models emit flat RGB. */
-    'gemini-3-pro-image': { nativeAlpha: false },
-  },
 
   /*
    * fal: nothing native is USED. fal does sell a native-alpha model (`ideogram/v3/generate-transparent`)
@@ -134,13 +117,9 @@ export function supportsTransparency(provider: ImageProviderName): boolean {
  * single `CUTOUT_MODEL` constant, which were two writers of one fact that agreed only while KIE was
  * the only gateway with a cut-out — on fal they would have priced Recraft (a model fal does not sell)
  * and refused every transparent render, or worse, chained a KIE model id onto a fal task.
- *
- * Comet is `null`: it has no remover in its catalogue, and its transparency is per MODEL
- * (`gpt-image-1.5`'s native alpha) instead.
  */
 export const CUTOUT_MODEL_BY_PROVIDER: Record<ImageProviderName, string | null> = {
   KIE: 'recraft/remove-background',
-  Comet: null,
   FAL: 'fal-ai/bria/background/remove',
 };
 
@@ -157,8 +136,7 @@ export function allCutoutModels(): string[] {
 /**
  * Does this gateway have a priced cut-out pass — i.e. can it add alpha to a model that has none?
  *
- * KIE does (`recraft/remove-background`), and so does fal (`fal-ai/bria/background/remove`); Comet has
- * no equivalent in its catalogue, which is why its transparency is per-model rather than universal.
+ * KIE does (`recraft/remove-background`), and so does fal (`fal-ai/bria/background/remove`).
  *
  * ⚠️ Named and exported so there is ONE writer of that fact. It was inlined as `provider === 'KIE'`
  * in the panel *while the panel also called `supportsTransparency`, which encodes the same rule* —

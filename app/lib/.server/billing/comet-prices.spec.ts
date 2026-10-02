@@ -40,15 +40,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { FAMILY_POLICY, familyOf } from '~/lib/modules/llm/model-families';
 import { COMET_MODELS } from '~/lib/modules/llm/providers/comet-wire';
-import {
-  BAKED_COMET_PRICES,
-  COMET_AUDIO_PROVENANCE,
-  COMET_PRICE_PROVENANCE,
-  cometChargedRate,
-} from './baked-comet-prices';
+import { BAKED_COMET_PRICES, COMET_PRICE_PROVENANCE, cometChargedRate } from './baked-comet-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { fetchCometMarketFeed } from './market-feed';
-import { findMediaModel, lookupMediaPrice, validateMarketPriceList, type MarketPriceList } from './market-prices';
+import { findMediaModel, validateMarketPriceList, type MarketPriceList } from './market-prices';
 import { invalidateMarketPricesCache } from './market-price-store';
 import { cometRates, KIE_MODEL_RATES, MODEL_RATES } from './rates';
 
@@ -325,194 +320,30 @@ describe('validation — the baked list is served without ever passing the wall'
   });
 
   /*
-   * An EMPTY media table is valid and is the correct state today (Comet media lands in T8).
-   * `lookupMediaPrice` has NO most-expensive fallback — media debits run BEFORE spend — so an unpriced
-   * media model is REFUSED rather than guessed, and a speculative row is the one shape that would turn
-   * that refusal into a wrong charge on a render nobody asked for.
+   * 🔴 COMET IS NOT A MEDIA GATEWAY (owner, 2026-10-01: a security issue). Its list carries LLM rows
+   * only, and an empty media table must still validate — `lookupMediaPrice` has no fallback, so with no
+   * rows every Comet render is refused before any debit.
    */
-  it('accepts an empty media table, and does not ship one', () => {
-    /*
-     * T8 filled this table, so the property under test moved: what still matters is that an EMPTY
-     * media table validates — an operator promoting a list with no media rows must get a refusal at
-     * generation time (`lookupMediaPrice` has no fallback), never a rejected promotion.
-     */
-    expect(validateMarketPriceList({ ...BAKED_COMET_PRICES, media: {} }, 'Comet').ok).toBe(true);
+  it('ships NO media rows, and an empty media table validates', () => {
+    expect(BAKED_COMET_PRICES.media).toEqual({});
+    expect(validateMarketPriceList(BAKED_COMET_PRICES, 'Comet').ok).toBe(true);
 
-    // ...and the shipped list DOES carry rows now, so the assertion above is not passing by vacuity.
-    expect(Object.keys(BAKED_COMET_PRICES.media).length).toBeGreaterThan(0);
-  });
-});
-
-/*
- * ------------------------------------------------------------------------------------------------ *
- * MEDIA (§4.16, T8) — the rows a debit is taken from BEFORE anything renders
- * ------------------------------------------------------------------------------------------------
- */
-
-/**
- * Comet's media rows are DERIVED, not quoted: every serveable image model on this gateway is
- * token-priced, and a media debit runs before the spend from an EXACT number, so a per-token rate has
- * to become a flat number per priced variant. That is only safe because the platform controls the two
- * fields that decide the token count — and only for the six cells that were actually measured.
- *
- * 🔴 The rule that makes omitting an unmeasured cell SAFE rather than dangerous is that
- * `lookupMediaPrice` has **no most-expensive fallback**: an unlisted `(quality, aspectRatio)` pair
- * returns null and the request is refused. Assert both halves, or "we only priced six cells" turns
- * into "everything else is billed off a neighbouring cell", silently.
- */
-describe('the media rows (§4.16)', () => {
-  const IMAGE_CELLS: Array<[Record<string, string>, number]> = [
-    [{ quality: 'low', aspectRatio: '1:1' }, 0.029],
-    [{ quality: 'medium', aspectRatio: '1:1' }, 0.049],
-    [{ quality: 'high', aspectRatio: '1:1' }, 0.129],
-    [{ quality: 'low', aspectRatio: '16:9' }, 0.032],
-    [{ quality: 'medium', aspectRatio: '16:9' }, 0.062],
-    [{ quality: 'high', aspectRatio: '16:9' }, 0.181],
-  ];
-
-  it('validates with the media table populated', () => {
-    // A baked list its own validator refuses becomes the prices charged forever, silently.
-    const result = validateMarketPriceList(BAKED_COMET_PRICES, 'Comet');
-
-    expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
+    // ...and the LLM rows are still there — the removal is media only.
+    expect(Object.keys(BAKED_COMET_PRICES.llm).length).toBeGreaterThan(0);
+    expect(Object.keys(COMET_PRICE_PROVENANCE).length).toBeGreaterThan(0);
   });
 
-  it.each(IMAGE_CELLS)('prices gpt-image-1.5 %j at $%s', (options, usd) => {
-    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'gpt-image-1.5', options })).toMatchObject({
-      model: 'gpt-image-1.5',
-      usd,
-    });
-  });
-
-  it('prices every cell DIFFERENTLY across quality (control)', () => {
-    /*
-     * ⚠️ Without this the block above passes for a lookup that returns the same row for everything —
-     * the subset match makes that a genuinely reachable bug, since `{}` matches every query.
-     */
-    const prices = IMAGE_CELLS.map(
-      ([options]) => lookupMediaPrice(BAKED_COMET_PRICES, { model: 'gpt-image-1.5', options })?.usd,
-    );
-
-    expect(new Set(prices).size).toBe(IMAGE_CELLS.length);
-  });
-
-  it.each([
-    [{ quality: 'ultra', aspectRatio: '16:9' }],
-    [{ quality: 'medium', aspectRatio: '9:16' }],
-    [{ quality: 'medium', aspectRatio: '4:3' }],
-    [{}],
-  ])('REFUSES the unmeasured cell %j rather than pricing it off a neighbour', (options) => {
-    /*
-     * The `{}` case is the interesting one: `gpt-image-1.5` has no catch-all variant, so a request that
-     * reached the lookup without normalised options is refused rather than silently billed at the
-     * cheapest cell. `providerImageOptions` is what supplies the defaults, and this is what happens if
-     * it ever stops.
-     */
-    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'gpt-image-1.5', options })).toBeNull();
-  });
-
-  it('prices the cheap opaque workhorse with a single catch-all variant', () => {
-    /*
-     * `gemini-3-pro-image` takes no size/quality knobs on this wire, so one row is correct — and it has
-     * NO alpha and returns image/jpeg whatever is asked for, which is why a transparent request never
-     * resolves to it (`media/image-capabilities.ts`).
-     */
-    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'gemini-3-pro-image', options: {} })?.usd).toBe(0.017);
-    expect(
-      lookupMediaPrice(BAKED_COMET_PRICES, { model: 'gemini-3-pro-image', options: { quality: 'high' } })?.usd,
-    ).toBe(0.017);
-  });
-
-  it.each([
-    ['veo3-fast', 4, 0.32],
-    ['veo3-fast', 8, 0.64],
-    ['veo3', 4, 1.28],
-  ])('prices %s per second: %is = $%s', (model, durationSeconds, usd) => {
-    const price = lookupMediaPrice(BAKED_COMET_PRICES, { model, options: {}, durationSeconds });
-
-    expect(price?.usd).toBeCloseTo(usd, 9);
-  });
-
-  it('refuses a per-second row with NO duration — that is not a price', () => {
-    // Assuming a duration would bill a number nobody quoted, on a row whose whole unit is time.
-    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'veo3-fast', options: {} })).toBeNull();
-  });
-
-  it('has NO cut-out row, which is why transparency here is a native-model decision', () => {
-    /*
-     * KIE's entire transparency capability is `recraft/remove-background`. Comet has none, and gets
-     * alpha from `gpt-image-1.5` in one call instead — so a row appearing here would make the service
-     * offer a two-stage chain the gateway cannot run.
-     */
-    expect(BAKED_COMET_PRICES.media['recraft/remove-background']).toBeUndefined();
-
-    /* CONTROL: the incumbent list DOES carry it, so the assertion is about Comet, not about the key. */
-    expect(BAKED_MARKET_PRICES.media['recraft/remove-background']).toBeDefined();
-  });
-
-  it('never leaves an image model unpriced-but-listed, in either direction', () => {
-    /*
-     * Every media row must be reachable by `findMediaModel` under its own id — a row keyed one way and
-     * looked up another is priced-but-not-listed wearing media clothes, and media has no fallback to
-     * catch it.
-     */
-    for (const id of Object.keys(BAKED_COMET_PRICES.media)) {
-      expect(findMediaModel(BAKED_COMET_PRICES, id), `${id} is not findable by its own id`).not.toBeNull();
+  it('quotes no media price — a lookup for any former Comet media id finds nothing', () => {
+    for (const id of [
+      'gpt-image-1.5',
+      'gemini-3-pro-image',
+      'veo3-fast',
+      'veo3',
+      'eleven_text_to_sound_v2',
+      'suno_music',
+    ]) {
+      expect(findMediaModel(BAKED_COMET_PRICES, id), id).toBeNull();
     }
-  });
-});
-
-/*
- * ------------------------------------------------------------------------------------------------ *
- * Sound (media-gateways T1) — priced from Comet's published feed + docs, unprobed until the key lands
- * ------------------------------------------------------------------------------------------------
- */
-
-describe('the audio rows (media-gateways T1)', () => {
-  it('prices every Comet audio row', () => {
-    /* Sound effect: one per-request row prices a request with AND without a duration. */
-    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'eleven_text_to_sound_v2', options: {} })?.usd).toBe(0.008);
-    expect(
-      lookupMediaPrice(BAKED_COMET_PRICES, { model: 'eleven_text_to_sound_v2', options: {}, durationSeconds: 2 })?.usd,
-    ).toBe(0.008);
-
-    /* Speech: $0.16 per 1,000 characters, so 50 characters is the docs' "$0.008 per 50 characters". */
-    for (const model of ['eleven_multilingual_v2', 'eleven_v3']) {
-      expect(lookupMediaPrice(BAKED_COMET_PRICES, { model, options: {}, textChars: 50 })?.usd).toBeCloseTo(0.008, 9);
-      expect(lookupMediaPrice(BAKED_COMET_PRICES, { model, options: {}, textChars: 1000 })?.usd).toBeCloseTo(0.16, 9);
-
-      /* CONTROL: per_1k_chars with no characters is not a price. */
-      expect(lookupMediaPrice(BAKED_COMET_PRICES, { model, options: {} })).toBeNull();
-    }
-
-    /* Music: per submit. */
-    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'suno_music', options: {} })?.usd).toBe(0.144);
-
-    /*
-     * No `refuses a sound effect with no duration when only per_second is priced` test: per_request
-     * was chosen (Comet's feed quotes the sound effect per request), so there is no per_second row
-     * for a missing duration to be refused by. Revisit if the probe shows a duration scales the charge.
-     */
-  });
-
-  it('derives every feed-sourced audio row from its own official price, ratio and scale', () => {
-    const audio = Object.entries(BAKED_COMET_PRICES.media).filter(([, p]) => p.kind === 'audio');
-
-    expect(audio.length).toBe(4);
-
-    for (const [model, pricing] of audio) {
-      const provenance = COMET_AUDIO_PROVENANCE[model];
-
-      expect(provenance, `${model} is priced with no recorded provenance`).toBeDefined();
-      expect(provenance.source, `${model} must say it is unprobed until the probe runs`).toMatch(/unprobed/);
-
-      const expected = Math.round(provenance.officialUsd * (provenance.ratio ?? 1) * provenance.scale * 1e6) / 1e6;
-
-      expect(pricing.variants[0].usd, model).toBe(expected);
-    }
-
-    /* The hand-maintained row is the one with no feed ratio — flagged, not hidden. */
-    expect(COMET_AUDIO_PROVENANCE.suno_music.ratio).toBeNull();
   });
 });
 

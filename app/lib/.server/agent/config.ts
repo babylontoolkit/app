@@ -46,8 +46,8 @@ export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
 /**
  * The providers that serve MEDIA renders (SPEC §4.16).
  *
- * Every one of them is EITHER a platform provider (KIE, Comet — one vendor, one key, both kinds of
- * spend) OR listed in `MEDIA_ONLY_PROVIDERS` (fal.ai, which renders and serves no LLM). That is the
+ * Every one of them is EITHER a platform provider (KIE — one vendor, one key, both kinds of spend)
+ * OR listed in `MEDIA_ONLY_PROVIDERS` (fal.ai, which renders and serves no LLM). That is the
  * relation the specs assert; it replaced "a strict subset of the platform providers" when fal joined
  * (`_specs/media-gateways_plan.md` T3), because adding fal to `PLATFORM_PROVIDERS` would have offered
  * a gateway with no text model to the LLM ladder.
@@ -61,7 +61,16 @@ export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
  * against both it and `MARKET_PRICE_PROVIDERS` in the specs — a media provider whose prices nothing
  * can promote is an unbillable render.
  */
-export const MEDIA_PROVIDERS = ['KIE', 'Comet', 'FAL'] as const;
+export const MEDIA_PROVIDERS = ['KIE', 'FAL'] as const;
+
+/**
+ * 🔴 **Comet is NOT a media gateway (owner, 2026-10-01: a security issue).** It stays a platform (LLM)
+ * provider — that wiring is untouched — but it renders nothing: `MEDIA_PROVIDER=Comet` is refused by
+ * name, and a Comet LLM deploy with no override renders on KIE. Task records it stamped before the
+ * removal are failed and refunded on their next poll, never sent to it (`media/provider.ts`).
+ */
+export const RETIRED_MEDIA_PROVIDERS = ['Comet'] as const;
+export type RetiredMediaProviderName = (typeof RETIRED_MEDIA_PROVIDERS)[number];
 
 /**
  * Media gateways that are NOT platform (LLM) providers. `MEDIA_PROVIDER=FAL` is the only way to select
@@ -851,7 +860,6 @@ export function hasPlatformKey(config: PlatformConfig): boolean {
 /** Which env var holds each media gateway's key. The same key the LLM side uses — one key, one bill. */
 const MEDIA_KEY_ENV: Record<MediaProviderName, string> = {
   KIE: 'KIE_API_KEY',
-  Comet: 'COMET_API_KEY',
 
   /* fal serves no LLM, so this key buys renders only. */
   FAL: 'FAL_API_KEY',
@@ -863,7 +871,7 @@ export function mediaKeyEnvFor(provider: MediaProviderName): string {
 }
 
 /**
- * Who serves renders — `MEDIA_PROVIDER`, else the LLM provider.
+ * Who serves renders — `MEDIA_PROVIDER`, else the LLM provider when it is a media gateway, else KIE.
  *
  * 🔴 **A SEPARATE SWITCH ON PURPOSE.** Media is a different money path from a generation: an exact
  * price debited before any spend, its own refund machinery, its own price rows. Tying it to
@@ -872,15 +880,26 @@ export function mediaKeyEnvFor(provider: MediaProviderName): string {
  * this), and "should media move in the same cutover?" becomes a config answer instead of a
  * code change.
  *
- * `null` means the platform serves no media: `LLM_PROVIDER=Anthropic` with nothing overriding it,
- * because Anthropic sells no renders. Callers report that as "not configured" (a describable state
- * the Media panel and the agent tool gate on), never as a silent no-op.
+ * When the LLM provider is NOT a media gateway (Anthropic, which sells no renders; Comet, which is no
+ * longer trusted with media) the fallback is KIE, the incumbent media gateway. It still needs
+ * `KIE_API_KEY` — without it `getMediaConfig` is `null`, which callers report as "not configured" (a
+ * describable state the Media panel and the agent tool gate on), never as a silent no-op.
+ *
+ * The return type keeps `null` for its callers' sake; no branch produces it today.
  */
 export function getMediaProvider(context?: unknown): MediaProviderName | null {
   const raw = env(context, 'MEDIA_PROVIDER')?.trim();
 
   if (raw) {
     const match = MEDIA_PROVIDERS.find((name) => name.toLowerCase() === raw.toLowerCase());
+    const retired = RETIRED_MEDIA_PROVIDERS.find((name) => name.toLowerCase() === raw.toLowerCase());
+
+    if (retired) {
+      throw new NotConfiguredError(
+        `MEDIA_PROVIDER="${raw}"`,
+        `${retired} is no longer a media gateway. Supported: ${MEDIA_PROVIDERS.join(', ')}.`,
+      );
+    }
 
     if (!match) {
       /*
@@ -898,7 +917,7 @@ export function getMediaProvider(context?: unknown): MediaProviderName | null {
 
   const platform = getPlatformProvider(context);
 
-  return MEDIA_PROVIDERS.find((name) => name === platform) ?? null;
+  return MEDIA_PROVIDERS.find((name) => name === platform) ?? 'KIE';
 }
 
 /** A media gateway's platform key, whichever gateway is asked for — never only the configured one. */
@@ -936,12 +955,6 @@ export function getMediaConfig(context?: unknown): MediaConfig | null {
 /**
  * A gateway's origin override for MEDIA, if it has one.
  *
- * **Comet:** `COMET_BASE_URL`, the same variable its LLM wire reads. That file states the rule — the
- * override repoints EVERY family because Comet serves all of them from one origin — so an operator
- * who sets it means renders too. Honouring it for text and ignoring it for media would be the
- * two-readers-of-one-variable drift this repo has been bitten by, failing silently (renders simply go
- * somewhere else).
- *
  * **KIE: `undefined`, deliberately.** `KIE_BASE_URL` is documented as CLAUDE-SCOPED — it moves that
  * one LLM adapter, not the whole account — and `KieMediaProvider` has no base-URL concept at all: its
  * media host is a fixed constant. Returning `KIE_BASE_URL` here would have been a value computed at
@@ -959,7 +972,6 @@ export function mediaBaseUrlFor(provider: MediaProviderName, context?: unknown):
  */
 const MEDIA_BASE_URL_ENV: Record<MediaProviderName, string | null> = {
   KIE: null,
-  Comet: 'COMET_BASE_URL',
   FAL: null,
 };
 

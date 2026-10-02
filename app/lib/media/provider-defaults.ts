@@ -8,6 +8,8 @@
  * them a **KIE** model id. Nothing in the type system or the tests said so, because while KIE was the
  * only gateway a "default model" and "a KIE model" were the same string.
  *
+ * (Comet was a media gateway until 2026-10-01; the measurement below is why the table is per gateway.)
+ *
  * On Comet none of those ids is in the price list, so `lookupMediaPrice` returns null and
  * `startMediaTask` REFUSES — correctly, before any debit. The result is not a wrong render or a wrong
  * bill; it is a whole tool round spent discovering that the defaults do not exist here. Measured on
@@ -68,8 +70,8 @@ export interface MediaModelDefaults {
   /**
    * `generate_google_video` — the Veo family specifically.
    *
-   * ⚠️ The id differs by gateway for the SAME model: KIE spells it `veo3_fast` (underscore) and Comet
-   * `veo3-fast` (hyphen). That one character is the whole defect in miniature — it looks like the same
+   * ⚠️ The id differs by gateway for the SAME model: KIE spells it `veo3_fast` (underscore) and fal
+   * `fal-ai/veo3/fast`. That one character is the whole defect in miniature — it looks like the same
    * value and is not, and no type can tell you which spelling a given gateway wants.
    */
   googleVideo: string;
@@ -78,7 +80,7 @@ export interface MediaModelDefaults {
    * Other video ids worth naming in `generate_video`'s schema, as a ready-made clause ('' for none).
    *
    * ⚠️ Provider-scoped for the same reason as the defaults, and it is not cosmetic: this text sits in
-   * the CACHED prompt, so a KIE model list shown on a Comet deploy actively teaches the agent ids that
+   * the CACHED prompt, so a KIE model list shown on a fal deploy actively teaches the agent ids that
    * will be refused — buying the wasted round back that the defaults just removed.
    */
   videoAlternatives: string;
@@ -99,7 +101,7 @@ export interface MediaModelDefaults {
    * `generate_sound`'s default model per kind, or `null` on a gateway that serves no audio.
    *
    * `null` is not a placeholder: it is what makes the tool and the Media panel's Sound tab ABSENT on
-   * Comet, which has no audio routes at all. Advertising a sound tool there would buy a refused call
+   * a gateway with no audio routes. Advertising a sound tool there would buy a refused call
    * on every turn that wants one — the same wasted round the image/video defaults exist to remove.
    */
   sound: { effect: string; music: string; speech: string } | null;
@@ -156,40 +158,6 @@ const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
     videoModeHint: 'kling-3.0 tier: std (720p), pro (1080p) or 4K. Default std.',
     videoResolutionHint: 'For seedance/grok models: 480p, 720p, 1080p, 4K.',
     sound: { effect: SOUND_MODELS.effect, music: SOUND_MODELS.music, speech: SOUND_MODELS.speech },
-  },
-
-  Comet: {
-    /*
-     * The cheap opaque workhorse ($0.017/image). NOT `gpt-image-1.5`, which is ~3x the price at the
-     * same quality tier and whose reason to exist here is native alpha — a transparent request already
-     * resolves to it through `realizeImageDelivery`, so making it the default would charge every
-     * ordinary background for a capability the caller did not ask for.
-     */
-    image: 'gemini-3-pro-image',
-
-    /*
-     * 🔴 NULL, AND IT MUST STAY NULL WHILE THIS CATALOGUE IS WHAT IT IS. Comet prices exactly two
-     * video models and BOTH are Veo (`veo3-fast`, `veo3`) — there is no non-Google video on this
-     * gateway to default to. So `generate_video` refuses here rather than silently becoming the
-     * Google tool. Filling this in with either Veo id is the exact regression the field's doc comment
-     * describes; if Comet ever lists a non-Google video model, that is the only thing that goes here.
-     */
-    video: null,
-    googleVideo: 'veo3-fast',
-
-    /* `veo3` is the only other priced video row on this gateway — 4x the price, so worth naming. */
-    videoAlternatives: ' Also: veo3 (higher quality, ~4x the price).',
-
-    /*
-     * Veo takes neither knob on this wire: `mode` is only injected for `kling-3.0*` models (which
-     * Comet does not serve), and its video rows price on `{}` alone. Empty, so the schema says nothing
-     * rather than describing a control that cannot act.
-     */
-    videoModeHint: '',
-    videoResolutionHint: '',
-
-    /* Comet has no audio routes — `generate_sound` and the panel's Sound tab are absent here. */
-    sound: null,
   },
 
   /*

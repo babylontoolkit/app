@@ -64,7 +64,7 @@ const { MediaButton } = await import('./MediaButton');
 const { EMPTY_SESSION, sessionStore } = await import('~/lib/stores/session');
 
 /** The three facts this component reads, and nothing else. */
-const session = (loading: boolean, provider: 'KIE' | 'Comet' | null, loadFailed = false) => ({
+const session = (loading: boolean, provider: 'KIE' | 'FAL' | null, loadFailed = false) => ({
   ...EMPTY_SESSION,
   loading,
   loadFailed,
@@ -95,7 +95,7 @@ describe('MediaButton — offered only where media can actually be generated', (
    * whichever one someone tested.
    */
   it('CONTROL — offers the button on a configured gateway', () => {
-    for (const provider of ['KIE', 'Comet'] as const) {
+    for (const provider of ['KIE', 'FAL'] as const) {
       sessionStore.set(session(false, provider));
 
       const view = render(<MediaButton />);
@@ -208,7 +208,7 @@ describe('MediaButton — offered only where media can actually be generated', (
     sessionStore.set(session(true, null));
 
     const view = render(<MediaButton />);
-    sessionStore.set(session(false, 'Comet'));
+    sessionStore.set(session(false, 'FAL'));
     view.rerender(<MediaButton />);
 
     expect(mediaButton()).not.toBeNull();
@@ -226,7 +226,7 @@ describe('MediaButton — offered only where media can actually be generated', (
     projectIdStore.set(undefined);
 
     for (const loading of [true, false]) {
-      for (const provider of ['KIE', 'Comet', null] as const) {
+      for (const provider of ['KIE', 'FAL', null] as const) {
         sessionStore.set(session(loading, provider));
 
         const view = render(<MediaButton />);

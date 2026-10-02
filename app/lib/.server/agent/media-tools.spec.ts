@@ -228,7 +228,7 @@ describe('there is NO media round budget — a call is never refused (2026-08-08
  * ================================================================================================
  * T9 (2026-08-11) — THE DEFAULTS AND THE SCHEMA TEXT BELONG TO THE GATEWAY
  *
- * The three default model ids were inlined KIE slugs. On Comet none of them is priced, so every call
+ * The three default model ids were inlined KIE slugs. On another gateway none of them is priced, so every call
  * that named no model was refused before any debit and the turn burned a round rediscovering the
  * catalogue (`gen_mso6s0gd_frqrfh`: 3 calls, 3 refusals, 8.2s, 31,098 cache-write tokens, 0 tasks).
  * It self-heals, so the only symptom is a turn that cost twice what it should have.
@@ -247,13 +247,22 @@ function schemaText(tool: unknown): string {
 }
 
 describe('the tool SCHEMAS advertise this gateway’s models, not the other one’s (T9)', () => {
-  /*
-   * fal's comparison gateway is COMET, not KIE: fal's ids embed KIE's (`fal-ai/nano-banana-2` contains
-   * `nano-banana-2`), so a substring scan against KIE would flag fal for naming its OWN model.
-   */
-  const OTHER: Record<MediaProviderName, MediaProviderName> = { KIE: 'Comet', Comet: 'KIE', FAL: 'Comet' };
+  const OTHER: Record<MediaProviderName, MediaProviderName> = { KIE: 'FAL', FAL: 'KIE' };
 
-  for (const provider of ['KIE', 'Comet', 'FAL'] as const) {
+  /*
+   * fal's ids EMBED KIE's (`fal-ai/nano-banana-2` contains `nano-banana-2`), so a bare substring scan
+   * would flag fal for naming its OWN model. A foreign id counts only as a whole token — not preceded
+   * or followed by an id character or a path separator.
+   */
+  const mentions = (text: string, id: string) =>
+    new RegExp(`(?<![\\w/.-])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w/-])`).test(text);
+
+  it('CONTROL — the token match finds a foreign id, and not one embedded in a fal path', () => {
+    expect(mentions('Default nano-banana-2.', 'nano-banana-2')).toBe(true);
+    expect(mentions('Default fal-ai/nano-banana-2.', 'nano-banana-2')).toBe(false);
+  });
+
+  for (const provider of ['KIE', 'FAL'] as const) {
     it(`${provider}: every default is named, and no id from ${OTHER[provider]} appears`, () => {
       /*
        * 🔴 THIS TEXT RIDES IN THE CACHED PREFIX. A wrong default costs one round on the turn it fires;
@@ -297,20 +306,22 @@ describe('the tool SCHEMAS advertise this gateway’s models, not the other one�
           continue;
         }
 
-        expect(blob, `${provider}'s schema advertises ${OTHER[provider]}'s "${foreign}"`).not.toContain(foreign);
+        expect(mentions(blob, foreign), `${provider}'s schema advertises ${OTHER[provider]}'s "${foreign}"`).toBe(
+          false,
+        );
       }
 
       /*
        * 🔴 AND THE KNOB PROSE, WHICH THE ID SCAN ABOVE CANNOT SEE. The T9 verifier found that
        * `mode`'s hardcoded "kling-3.0 tier: std (720p)…" and `resolution`'s "For seedance/grok
-       * models…" survived the first fix and shipped to Comet — because the loop above only tests the
+       * models…" survived the first fix and shipped to another gateway — because the loop above only tests the
        * three default IDS, and `'kling-3.0/video'` does not substring-match `"kling-3.0 tier"`. One
        * character of punctuation between a defect and its test.
        *
        * Asserted on the FAMILY NAME rather than the id for exactly that reason. Mutation that kills
        * it: reverting either `.describe()` to its literal.
        */
-      const foreignFamilies = provider === 'Comet' ? ['kling-3.0', 'seedance', 'grok'] : [];
+      const foreignFamilies = provider === 'FAL' ? ['kling-3.0', 'seedance'] : [];
 
       for (const family of foreignFamilies) {
         expect(blob, `${provider}'s schema describes a "${family}" knob it cannot serve`).not.toContain(family);
@@ -337,22 +348,15 @@ describe('the tool SCHEMAS advertise this gateway’s models, not the other one�
      * bill of health forever. Pin that real prose came out, and that the blobs are not identical.
      */
     const kie = schemaText(toolsWith('KIE').tools.generate_video);
-    const comet = schemaText(toolsWith('Comet').tools.generate_video);
+    const fal = schemaText(toolsWith('FAL').tools.generate_video);
 
     expect(kie.length).toBeGreaterThan(200);
-    expect(comet.length).toBeGreaterThan(200);
+    expect(fal.length).toBeGreaterThan(200);
 
-    /*
-     * Prose from the PARAMETERS, not only the tool description — proves the shape walk works.
-     *
-     * ⚠️ Comet's clause used to be `Default veo3-fast.` and is now the refusal notice, because
-     * `generate_video` may never fall back to Google Veo. Both are substantive strings from the
-     * parameter layer, which is what this control is really asserting.
-     */
+    // Prose from the PARAMETERS, not only the tool description — proves the shape walk works.
     expect(kie).toMatch(/Default kling-3\.0\/video\./);
-    expect(comet).toMatch(/no non-Google default/);
-    expect(comet).not.toMatch(/Default veo3-fast\./);
-    expect(kie).not.toBe(comet);
+    expect(fal).toContain('fal-ai/kling-video/v3/standard/text-to-video');
+    expect(kie).not.toBe(fal);
   });
 });
 
@@ -413,16 +417,9 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
     { provider: 'KIE', tool: 'generate_image', model: 'nano-banana-2' },
     { provider: 'KIE', tool: 'generate_video', model: 'kling-3.0/video' },
     { provider: 'KIE', tool: 'generate_google_video', model: 'veo3_fast' },
-    { provider: 'Comet', tool: 'generate_image', model: 'gemini-3-pro-image' },
-
-    /*
-     * ⚠️ NO `Comet / generate_video` ROW, and its absence is the point. This table used to carry
-     * `{ Comet, generate_video, 'veo3-fast' }` — asserting, as correct behaviour, that an unqualified
-     * "make me a video" resolves to Google Veo. Comet prices no non-Google video, so on that gateway
-     * `generate_video` REFUSES; the refusal is pinned in the Google-video block at the end of this
-     * file, which is where a reader looking for the missing row will find it.
-     */
-    { provider: 'Comet', tool: 'generate_google_video', model: 'veo3-fast' },
+    { provider: 'FAL', tool: 'generate_image', model: 'fal-ai/nano-banana-2' },
+    { provider: 'FAL', tool: 'generate_video', model: 'fal-ai/kling-video/v3/standard/text-to-video' },
+    { provider: 'FAL', tool: 'generate_google_video', model: 'fal-ai/veo3/fast' },
   ];
 
   for (const { provider, tool, model } of CASES) {
@@ -432,7 +429,7 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
 
       /*
        * 🔴 The measured symptom, asserted directly. Before the fix this read "The media generation was
-       * refused: … is not in the active Marketplace price list" for all three Comet rows, and the
+       * refused: … is not in the active Marketplace price list" for every non-KIE row, and the
        * agent spent the next round working out why.
        */
       expect(result, `${provider}/${tool} was refused: ${result}`).not.toMatch(/refused|could not start/i);
@@ -452,15 +449,15 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
      * removed — which would not be a fix, it would be a debit computed from a fallback price. These
      * are the exact cross-gateway ids from the live incident, each refused by the OTHER gateway.
      */
-    const comet = drivableTools('Comet');
-    const cometResult = await comet.call('generate_image', { prompt: 'x', model: 'nano-banana-2' });
+    const fal = drivableTools('FAL');
+    const falResult = await fal.call('generate_image', { prompt: 'x', model: 'nano-banana-2' });
 
-    expect(cometResult).toMatch(/refused/i);
-    expect(comet.created, 'a refused call must never reach the wire').toHaveLength(0);
-    expect(comet.emitted, 'a refused call must never emit a task to the client').toHaveLength(0);
+    expect(falResult).toMatch(/refused/i);
+    expect(fal.created, 'a refused call must never reach the wire').toHaveLength(0);
+    expect(fal.emitted, 'a refused call must never emit a task to the client').toHaveLength(0);
 
     const kie = drivableTools('KIE');
-    const kieResult = await kie.call('generate_image', { prompt: 'x', model: 'gemini-3-pro-image' });
+    const kieResult = await kie.call('generate_image', { prompt: 'x', model: 'fal-ai/nano-banana-2' });
 
     expect(kieResult).toMatch(/refused/i);
     expect(kie.created).toHaveLength(0);
@@ -487,36 +484,14 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
    * for deliberately. `provider-defaults.spec.ts` pins the DATA (no gateway defaults to Veo); these
    * pin that `execute` actually refuses, which is the half that spends money if it is missing.
    */
-  it('Comet: an unqualified generate_video is REFUSED, not silently served as Veo', async () => {
-    /*
-     * 🔴 THE REGRESSION TEST, and it is about money. This tool shipped for one live drive with
-     * `Comet.video = 'veo3-fast'`, so this exact call debited 128 credits of Google video from a
-     * request that only said "a video". `wire.touched()` false is the load-bearing half: it proves
-     * nothing reached the gateway, so nothing was billed.
-     */
-    const { call, created, emitted } = drivableTools('Comet');
-    const result = await call('generate_video', { prompt: 'neon light trails' });
-
-    expect(result).toMatch(/generate_google_video/);
-    expect(result).not.toMatch(/^Started \(/);
-
-    /*
-     * `created` is the RECORDING provider's log — empty means `provider.create` was never called, i.e.
-     * nothing was priced, debited or sent. That is the half that matters: the refusal has to happen
-     * before the spend, not after it.
-     */
-    expect(created, 'a refused call must reach neither the gateway nor the ledger').toEqual([]);
-    expect(emitted, 'a refused call must not tell the client a render started').toEqual([]);
-  });
-
-  it('Comet: naming a Veo id on generate_video is REFUSED too — the rule is not just the default', async () => {
+  it('FAL: naming a Veo id on generate_video is REFUSED — the rule is not just the default', async () => {
     /*
      * Removing the default alone leaves the tool drivable to Veo by naming the id, which is the same
      * spend through a different door. Mutation that kills it: dropping the `isGoogleVideoModel` guard
      * from `generate_video`'s execute.
      */
-    const { call, created, emitted } = drivableTools('Comet');
-    const result = await call('generate_video', { prompt: 'x', model: 'veo3-fast' });
+    const { call, created, emitted } = drivableTools('FAL');
+    const result = await call('generate_video', { prompt: 'x', model: 'fal-ai/veo3/fast' });
 
     expect(result).toMatch(/generate_google_video/);
     expect(created).toEqual([]);
@@ -525,8 +500,8 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
 
   it('KIE: the same guard, the other spelling — veo3_fast is refused on generate_video', async () => {
     /*
-     * The owner's rule was "for BOTH KIE and Comet". KIE spells it with an underscore, so a guard
-     * written against Comet's hyphenated id would pass every Comet test and leak on KIE.
+     * The owner's rule covers every gateway. KIE spells it with an underscore, so a guard written
+     * against fal's path id would pass every fal test and leak on KIE.
      */
     const { call, created } = drivableTools('KIE');
     const result = await call('generate_video', { prompt: 'x', model: 'veo3_fast' });
@@ -540,11 +515,11 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
      * Without this the three tests above pass for a build where Veo is simply unreachable and general
      * video is broken — refusing everything satisfies every "is refused" assertion ever written.
      */
-    const veo = drivableTools('Comet');
+    const veo = drivableTools('FAL');
     const viaGoogleTool = await veo.call('generate_google_video', { prompt: 'x' });
 
     expect(viaGoogleTool).toMatch(/^Started \(/);
-    expect(veo.created[0].model).toBe('veo3-fast');
+    expect(veo.created[0].model).toBe('fal-ai/veo3/fast');
 
     const kie = drivableTools('KIE');
     const general = await kie.call('generate_video', { prompt: 'x' });
@@ -587,10 +562,10 @@ describe('generate_sound', () => {
 
   it('is offered on a gateway with audio and ABSENT on one without', () => {
     expect(soundTool('KIE').entry).toBeTypeOf('object');
-    expect(soundTool('Comet').entry).toBeUndefined();
+    expect(soundTool('FAL').entry).toBeUndefined();
 
     // Absent means absent — not present-and-refusing, which still costs a tool round to discover.
-    expect(Object.keys(soundTool('Comet').tools)).not.toContain('generate_sound');
+    expect(Object.keys(soundTool('FAL').tools)).not.toContain('generate_sound');
   });
 
   /*

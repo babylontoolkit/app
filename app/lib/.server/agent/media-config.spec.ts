@@ -7,15 +7,15 @@
  * A generation and a render are different money paths: a render's price is EXACT and debited BEFORE
  * any spend, from a per-gateway price list, with its own refund machinery. Tying media to
  * `LLM_PROVIDER` would mean a text cutover silently moves every render to a gateway whose media
- * surface nobody has driven — so `MEDIA_PROVIDER` exists, defaults to the LLM provider, and reports
- * `null` when the platform genuinely serves no media.
+ * surface nobody has driven — so `MEDIA_PROVIDER` exists, defaults to the LLM provider when that is a
+ * media gateway, and otherwise to KIE (Anthropic sells no renders; Comet stopped being a media gateway
+ * on 2026-10-01 and is refused by name).
  *
  * ## The two failures these tests are for, both silent
  *
- * **(a) A degraded capability must report OFF, never ON.** `null` is a real answer — Anthropic sells
- * no image or video generation, so an Anthropic deploy with no override has no media gateway. Quietly
- * borrowing another gateway's key would spend on a provider the operator never chose and price the
- * render from a list they never promoted.
+ * **(a) A degraded capability must report OFF, never ON.** A gateway with no key is `null` from
+ * `getMediaConfig` — never another gateway's key, which would spend on a provider the operator never
+ * chose and price the render from a list they never promoted.
  *
  * **(b) `requireMediaKey` takes the provider as an ARGUMENT.** Its most important caller is the POLL
  * path, which must ask about the gateway the task was CREATED on. A version that read the configured
@@ -58,14 +58,12 @@ import {
  */
 const EXPECTED_KEY_ENV: Record<MediaProviderName, string> = {
   KIE: 'KIE_API_KEY',
-  Comet: 'COMET_API_KEY',
   FAL: 'FAL_API_KEY',
 };
 
 /** Distinct per gateway, so "it returned *a* key" and "it returned *the right* key" cannot be confused. */
 const SENTINEL: Record<MediaProviderName, string> = {
   KIE: 'sentinel-KIE-media-key',
-  Comet: 'sentinel-COMETAPI-media-key',
   FAL: 'sentinel-FAL-media-key',
 };
 
@@ -105,9 +103,18 @@ describe('the union these tests are generated from', () => {
    * CONTROL. Every parameterised block below derives its cases from `MEDIA_PROVIDERS`, and a suite
    * over an empty list runs zero tests and reports green.
    */
-  it('is non-empty, names both shipping gateways, and excludes Anthropic', () => {
+  it('MEDIA_PROVIDERS is exactly KIE and FAL', () => {
+    /*
+     * Comet was removed as a media gateway (owner, 2026-10-01: a security issue). It stays a PLATFORM
+     * provider — its LLM wiring is out of scope — so this is the one place both facts meet.
+     */
+    expect([...MEDIA_PROVIDERS]).toEqual(['KIE', 'FAL']);
+    expect(MEDIA_PROVIDERS).not.toContain('Comet' as never);
+    expect(PLATFORM_PROVIDERS).toContain('Comet');
+  });
+
+  it('is non-empty and excludes Anthropic', () => {
     expect(MEDIA_PROVIDERS.length).toBeGreaterThanOrEqual(2);
-    expect([...MEDIA_PROVIDERS]).toEqual(expect.arrayContaining(['KIE', 'Comet']));
 
     // Anthropic is a platform provider that sells no renders — the reason `null` is a real answer.
     expect(PLATFORM_PROVIDERS).toContain('Anthropic');
@@ -153,18 +160,50 @@ describe('fal.ai is a media-only gateway (media-gateways T3)', () => {
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
     vi.stubEnv('FAL_API_KEY', SENTINEL.FAL);
 
-    // A fal key alone does not make fal the media gateway; Anthropic sells no renders → null.
-    expect(getMediaProvider()).toBeNull();
+    // A fal key alone does not make fal the media gateway; the fallback is KIE, which has no key here.
+    expect(getMediaProvider()).toBe('KIE');
+    expect(getMediaConfig()).toBeNull();
   });
 });
 
 describe('getMediaProvider — MEDIA_PROVIDER wins, LLM_PROVIDER is the default', () => {
-  it('follows the LLM provider when nothing overrides it', () => {
-    vi.stubEnv('LLM_PROVIDER', 'Comet');
-    expect(getMediaProvider()).toBe('Comet');
-
+  it('follows the LLM provider when nothing overrides it and it is a media gateway', () => {
     vi.stubEnv('LLM_PROVIDER', 'KIE');
     expect(getMediaProvider()).toBe('KIE');
+  });
+
+  it('LLM_PROVIDER=Comet with no MEDIA_PROVIDER falls back to KIE, never Comet', () => {
+    /*
+     * 🔴 Comet is still a platform (LLM) provider, so a Comet text deploy is a real configuration — and
+     * its renders must NOT follow it. Both keys are present: the answer must be KIE with KIE's key, so
+     * a version that resolved Comet (or handed back Comet's credential) fails here.
+     */
+    vi.stubEnv('LLM_PROVIDER', 'Comet');
+    vi.stubEnv('COMET_API_KEY', 'sentinel-COMET-llm-key');
+    stubAllKeys();
+
+    expect(getMediaProvider()).toBe('KIE');
+    expect(getMediaConfig()).toEqual({ provider: 'KIE', apiKey: SENTINEL.KIE });
+  });
+
+  it('MEDIA_PROVIDER=Comet is refused, naming KIE and FAL', () => {
+    /*
+     * A describable refusal, never a quiet fall-through to KIE: an operator who typed Comet believes
+     * renders are going there, and the honest answer is that they cannot. Case-insensitive, like every
+     * other value of this variable.
+     */
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
+    stubAllKeys();
+
+    for (const spelling of ['Comet', 'comet', 'COMET', ' Comet ']) {
+      vi.stubEnv('MEDIA_PROVIDER', spelling);
+
+      expect(() => getMediaProvider(), spelling).toThrow(NotConfiguredError);
+      expect(() => getMediaProvider(), spelling).toThrow(/no longer a media gateway/);
+      expect(() => getMediaProvider(), spelling).toThrow(/KIE/);
+      expect(() => getMediaProvider(), spelling).toThrow(/FAL/);
+      expect(() => getMediaConfig(), spelling).toThrow(NotConfiguredError);
+    }
   });
 
   it('falls back to the platform default (KIE) when neither var is set', () => {
@@ -186,17 +225,20 @@ describe('getMediaProvider — MEDIA_PROVIDER wins, LLM_PROVIDER is the default'
     });
   }
 
-  it('reports null on Anthropic — a capability the vendor does not sell degrades to OFF', () => {
+  it('falls back to KIE on Anthropic, which sells no renders — and is OFF without a KIE key', () => {
     /*
-     * The costly alternative is not an error, it is a wrong answer: borrowing KIE's key here would
-     * spend on a gateway the operator never selected and bill from a price list they never promoted.
-     * `null` is what the Media panel, the agent tool gate and the route's 503 all read.
+     * The fallback names KIE, the incumbent media gateway, and it spends only KIE's OWN key: with no
+     * `KIE_API_KEY` the box reports "not configured" (`null`), which is what the Media panel, the
+     * agent tool gate and the route's 503 all read — never another gateway's credential.
      */
     vi.stubEnv('LLM_PROVIDER', 'Anthropic');
-    stubAllKeys();
+    vi.stubEnv('FAL_API_KEY', SENTINEL.FAL);
 
-    expect(getMediaProvider(), 'an Anthropic deploy silently borrowed another gateway').toBeNull();
-    expect(getMediaConfig()).toBeNull();
+    expect(getMediaProvider()).toBe('KIE');
+    expect(getMediaConfig(), 'an Anthropic deploy borrowed another gateway').toBeNull();
+
+    vi.stubEnv('KIE_API_KEY', SENTINEL.KIE);
+    expect(getMediaConfig()).toEqual({ provider: 'KIE', apiKey: SENTINEL.KIE });
   });
 
   it('lets MEDIA_PROVIDER rescue an Anthropic deploy', () => {
@@ -415,7 +457,7 @@ describe('.env.example documents MEDIA_PROVIDER without assigning it twice', () 
      * Without this, the assertion above is green for a counter that never matches `MEDIA_PROVIDER` at
      * all — the vacuous-scan shape this repo keeps finding.
      */
-    const synthetic = ['MEDIA_PROVIDER=KIE', '# prose', '# MEDIA_PROVIDER=Comet'].join('\n');
+    const synthetic = ['MEDIA_PROVIDER=KIE', '# prose', '# MEDIA_PROVIDER=FAL'].join('\n');
 
     expect(envExampleAssignments(synthetic, 'MEDIA_PROVIDER')).toHaveLength(2);
   });

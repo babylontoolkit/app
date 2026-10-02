@@ -24,8 +24,6 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  COMET_IMAGE_MODELS,
-  COMET_VIDEO_MODELS,
   FAL_IMAGE_MODELS,
   FAL_VIDEO_MODELS,
   IMAGE_MODELS,
@@ -36,7 +34,7 @@ import {
 import { hasCutoutPass, imageModelCapability, nativeAlphaModelFor } from '~/lib/media/image-capabilities';
 import { soundKindForModel } from '~/lib/media/provider-defaults';
 
-const backgroundField = (model: Parameters<typeof withBackgroundField>[0], provider: 'KIE' | 'Comet' | null) =>
+const backgroundField = (model: Parameters<typeof withBackgroundField>[0], provider: 'KIE' | 'FAL' | null) =>
   withBackgroundField(model, provider).fields.find((f) => f.key === 'transparent');
 
 const byId = (models: typeof IMAGE_MODELS, id: string) => models.find((m) => m.id === id)!;
@@ -48,9 +46,9 @@ describe('the Background control is DERIVED from the capability table', () => {
    * function that returns the model untouched, so without this the whole file passes for a product
    * with no transparency at all.
    */
-  it('offers it on KIE and on Comet — the product HAS transparency (control)', () => {
+  it('offers it on KIE and on fal — the product HAS transparency (control)', () => {
     expect(backgroundField(byId(IMAGE_MODELS, 'nano-banana-2'), 'KIE')).toBeDefined();
-    expect(backgroundField(byId(COMET_IMAGE_MODELS, 'gpt-image-1.5'), 'Comet')).toBeDefined();
+    expect(backgroundField(byId(FAL_IMAGE_MODELS, 'fal-ai/nano-banana-2'), 'FAL')).toBeDefined();
   });
 
   it('offers it on EVERY KIE image model — there the alpha comes from the cut-out pass, not the model', () => {
@@ -70,42 +68,27 @@ describe('the Background control is DERIVED from the capability table', () => {
     expect(hasCutoutPass('KIE')).toBe(true);
   });
 
-  it('offers it on Comet ONLY where the table says the model has native alpha', () => {
+  it('has no native-alpha model on either gateway — every offer is a cut-out pass', () => {
     /*
-     * 🔴 The asymmetry that makes this a table and not a flag. Comet has no cut-out pass, so a model
-     * without native alpha has no route to transparency at all — and offering the control there would
-     * be an invitation to a refusal.
+     * Comet's `gpt-image-1.5` was the only native-alpha model, and Comet is no longer a media gateway
+     * (2026-10-01). Both live gateways add alpha with a priced second stage, so the label must never
+     * promise "no extra cost".
      */
-    expect(hasCutoutPass('Comet')).toBe(false);
-    expect(nativeAlphaModelFor('Comet')).toBe('gpt-image-1.5');
+    for (const provider of ['KIE', 'FAL'] as const) {
+      expect(nativeAlphaModelFor(provider), `${provider} has a native-alpha model`).toBeNull();
+      expect(hasCutoutPass(provider)).toBe(true);
+    }
 
-    expect(backgroundField(byId(COMET_IMAGE_MODELS, 'gpt-image-1.5'), 'Comet')).toBeDefined();
-    expect(backgroundField(byId(COMET_IMAGE_MODELS, 'gemini-3-pro-image'), 'Comet')).toBeUndefined();
-  });
-
-  it('follows the TABLE, not the model id — the two cannot desynchronise', () => {
-    /*
-     * The defect this replaced: the field was hand-attached to `gpt-image-1.5` in the model array and
-     * merely AGREED with the table. Driving the SAME model against a gateway whose table does not mark
-     * it capable is what proves the derivation actually consults the table — a test that only ever
-     * asks about `gpt-image-1.5` on Comet passes for a hardcoded id check.
-     */
-    const gptOnComet = byId(COMET_IMAGE_MODELS, 'gpt-image-1.5');
-
-    expect(imageModelCapability('KIE', 'gpt-image-1.5')).toBeUndefined();
-    expect(backgroundField(gptOnComet, 'Comet')).toBeDefined();
-
-    // On KIE the same model would be offered it for the OTHER reason (the cut-out), so check the label.
-    expect(
-      backgroundField(gptOnComet, 'Comet')!
-        .choices.map((c) => c.label)
-        .join('|'),
-    ).toMatch(/no extra cost/);
-    expect(
-      backgroundField(byId(IMAGE_MODELS, 'nano-banana-2'), 'KIE')!
-        .choices.map((c) => c.label)
-        .join('|'),
-    ).not.toMatch(/no extra cost/);
+    for (const [model, provider] of [
+      [byId(IMAGE_MODELS, 'nano-banana-2'), 'KIE'],
+      [byId(FAL_IMAGE_MODELS, 'fal-ai/nano-banana-2'), 'FAL'],
+    ] as const) {
+      expect(
+        backgroundField(model, provider)!
+          .choices.map((c) => c.label)
+          .join('|'),
+      ).not.toMatch(/no extra cost/);
+    }
   });
 
   it('offers nothing at all before the session has answered', () => {
@@ -113,53 +96,38 @@ describe('the Background control is DERIVED from the capability table', () => {
      * `media.provider` is null until `/api/me` responds. Drawing a Background control then would offer
      * a capability whose gateway is unknown — and the default must be off, never a guess at KIE.
      */
-    for (const model of [...IMAGE_MODELS, ...COMET_IMAGE_MODELS]) {
+    for (const model of [...IMAGE_MODELS, ...FAL_IMAGE_MODELS]) {
       expect(backgroundField(model, null), `${model.id} must not be offered transparency yet`).toBeUndefined();
     }
   });
 
   it('is idempotent, and adds nothing else', () => {
     // It runs on every render through `useMemo`; a second pass must not stack a duplicate control.
-    const once = withBackgroundField(byId(COMET_IMAGE_MODELS, 'gpt-image-1.5'), 'Comet');
-    const twice = withBackgroundField(once, 'Comet');
+    const once = withBackgroundField(byId(FAL_IMAGE_MODELS, 'fal-ai/nano-banana-2'), 'FAL');
+    const twice = withBackgroundField(once, 'FAL');
 
     expect(twice.fields.filter((f) => f.key === 'transparent')).toHaveLength(1);
     expect(twice.fields.map((f) => f.key)).toEqual(once.fields.map((f) => f.key));
 
     // ...and it never mutates the shared module-level array it was handed.
-    expect(byId(COMET_IMAGE_MODELS, 'gpt-image-1.5').fields.some((f) => f.key === 'transparent')).toBe(false);
+    expect(byId(FAL_IMAGE_MODELS, 'fal-ai/nano-banana-2').fields.some((f) => f.key === 'transparent')).toBe(false);
   });
 });
 
 describe('the model lists are per gateway', () => {
-  it('share no ids — a Comet deploy must not offer models KIE serves, or the reverse', () => {
-    /*
-     * Comet's flat-priced image models answer 503 and KIE's models are not on Comet at all, so a list
-     * shown on the wrong gateway is six models every quote refuses. Disjointness is the cheap proxy
-     * for "these are genuinely different catalogues".
-     */
+  it('share no ids — a fal deploy must not offer models KIE serves, or the reverse', () => {
+    // A list shown on the wrong gateway is a list every quote refuses.
     const kie = new Set(IMAGE_MODELS.map((m) => m.id));
 
-    expect(COMET_IMAGE_MODELS.length).toBeGreaterThan(0);
-    expect(COMET_IMAGE_MODELS.filter((m) => kie.has(m.id))).toEqual([]);
-  });
-
-  it('offers Comet only the two PROBED aspect ratios', () => {
-    /*
-     * `gpt-image-1.5` is token-priced on `(size, quality)`, so an unprobed aspect has no price row and
-     * would be refused after the user chose it. The panel does not offer what the list cannot price.
-     */
-    const aspects = byId(COMET_IMAGE_MODELS, 'gpt-image-1.5').fields.find((f) => f.key === 'aspectRatio');
-
-    expect(new Set(aspects?.choices.map((c) => c.value))).toEqual(new Set(['1:1', '16:9']));
+    expect(FAL_IMAGE_MODELS.length).toBeGreaterThan(0);
+    expect(FAL_IMAGE_MODELS.filter((m) => kie.has(m.id))).toEqual([]);
   });
 });
 
 /**
  * 🔴 `modelsForProvider` — THREE GATEWAY STATES, NOT TWO (2026-08-11).
  *
- * The mapping was a ternary, `provider === 'Comet' ? COMET_IMAGE_MODELS : IMAGE_MODELS`, which treats
- * "not Comet" as "therefore KIE". But a deployment can serve NO media at all — `LLM_PROVIDER=Anthropic`
+ * The mapping was a two-branch ternary, which treated "not the other gateway" as "therefore KIE". But a deployment can serve NO media at all — `LLM_PROVIDER=Anthropic`
  * with no `MEDIA_PROVIDER` makes `getMediaProvider` return null and `/api/me` reports `provider: null` —
  * and that third state took the `else`. A box with no gateway drew KIE's catalogue: nano-banana-2,
  * kling-3.0, six models nothing could serve, and the user found out only when the quote came back
@@ -172,7 +140,7 @@ describe('the model lists are per gateway', () => {
 const ids = (models: typeof IMAGE_MODELS) => models.map((m) => m.id);
 
 /** The gateways that can actually serve a render — `null` is the absence of one, never a third gateway. */
-const GATEWAYS = ['KIE', 'Comet', 'FAL'] as const;
+const GATEWAYS = ['KIE', 'FAL'] as const;
 const KINDS = ['image', 'video'] as const;
 
 describe('modelsForProvider — the catalogue for a gateway', () => {
@@ -212,15 +180,13 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
    * holding its own copy of the catalogue asserts that someone updated both lists, not that the function
    * returns this one.
    *
-   * Mutation that kills it: swapping either branch of either ternary (`provider === 'Comet'` inverted,
-   * or `kind === 'video'` inverted). Each of the four assertions names a different cell, so no single
+   * Mutation that kills it: swapping either branch of either ternary (the provider inverted, or
+   * `kind === 'video'` inverted). Each of the four assertions names a different cell, so no single
    * branch flip leaves all four green.
    */
   it('maps each gateway onto its OWN catalogue, for each kind', () => {
     expect(ids(modelsForProvider('image', 'KIE'))).toEqual(ids(IMAGE_MODELS));
-    expect(ids(modelsForProvider('image', 'Comet'))).toEqual(ids(COMET_IMAGE_MODELS));
     expect(ids(modelsForProvider('video', 'KIE'))).toEqual(ids(VIDEO_MODELS));
-    expect(ids(modelsForProvider('video', 'Comet'))).toEqual(ids(COMET_VIDEO_MODELS));
     expect(ids(modelsForProvider('image', 'FAL'))).toEqual(ids(FAL_IMAGE_MODELS));
     expect(ids(modelsForProvider('video', 'FAL'))).toEqual(ids(FAL_VIDEO_MODELS));
   });
@@ -256,36 +222,21 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
   });
 
   /**
-   * The IMAGE catalogues are disjoint, which is what makes the assertions above meaningful: if the two
-   * lists shared their ids, "returns the Comet list" and "returns the KIE list" would be the same claim
-   * and a broken mapping would satisfy both.
-   *
-   * ⚠️ Deliberately IMAGE only. The video catalogues are NOT disjoint — both price a model called
-   * `veo3`, at different rates on different gateways — so asserting disjointness there would be a false
-   * statement about the product. The overlap is pinned as a literal below instead of being papered over.
+   * The catalogues are disjoint, which is what makes the assertions above meaningful: if the two lists
+   * shared their ids, "returns the fal list" and "returns the KIE list" would be the same claim and a
+   * broken mapping would satisfy both. fal ids are model PATHS (`fal-ai/…`, `xai/…`), so this holds for
+   * video too — `veo3` on KIE is `fal-ai/veo3` on fal.
    */
-  it('offers disjoint IMAGE catalogues, so "the Comet list" and "the KIE list" are different claims', () => {
-    const kie = new Set(ids(modelsForProvider('image', 'KIE')));
-    const comet = ids(modelsForProvider('image', 'Comet'));
+  it('offers disjoint catalogues, so "the fal list" and "the KIE list" are different claims', () => {
+    for (const kind of KINDS) {
+      const kie = new Set(ids(modelsForProvider(kind, 'KIE')));
+      const fal = ids(modelsForProvider(kind, 'FAL'));
 
-    expect(comet.filter((id) => kie.has(id))).toEqual([]);
-  });
-
-  /**
-   * The VIDEO catalogues overlap on exactly one id, and that is intended: `veo3` exists on both
-   * gateways under the same name, priced separately in each one's rows.
-   *
-   * Pinned as a literal because the overlap is the reason the disjointness test above is scoped to
-   * images, and a silent second collision would quietly weaken that reasoning. It also proves the two
-   * video lists are genuinely different rather than one list reached by two names — the failure mode
-   * the disjointness check exists to rule out for images.
-   */
-  it('shares exactly one video id between gateways — `veo3`, priced per gateway', () => {
-    const kie = new Set(ids(modelsForProvider('video', 'KIE')));
-    const shared = ids(modelsForProvider('video', 'Comet')).filter((id) => kie.has(id));
-
-    expect(shared).toEqual(['veo3']);
-    expect(ids(modelsForProvider('video', 'Comet'))).not.toEqual(ids(modelsForProvider('video', 'KIE')));
+      expect(
+        fal.filter((id) => kie.has(id)),
+        kind,
+      ).toEqual([]);
+    }
   });
 
   /**
@@ -315,10 +266,9 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
 
     expect(hasBackground(IMAGE_MODELS, 'nano-banana-2'), 'the raw constant must not carry the control').toBe(false);
 
-    // Comet: per-model, so the derivation has to have consulted the table and not just appended a field.
-    expect(hasBackground(modelsForProvider('image', 'Comet'), 'gpt-image-1.5')).toBe(true);
-    expect(hasBackground(modelsForProvider('image', 'Comet'), 'gemini-3-pro-image')).toBe(false);
-    expect(hasBackground(COMET_IMAGE_MODELS, 'gpt-image-1.5'), 'the raw constant must not carry the control').toBe(
+    // fal: the same derivation through its own cut-out pass, and its raw constant is bare too.
+    expect(hasBackground(modelsForProvider('image', 'FAL'), 'fal-ai/nano-banana-2')).toBe(true);
+    expect(hasBackground(FAL_IMAGE_MODELS, 'fal-ai/nano-banana-2'), 'the raw constant must not carry the control').toBe(
       false,
     );
   });
@@ -347,22 +297,22 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
    *
    * Mutation that kills it: making `withBackgroundField` push onto `model.fields` in place. The field
    * would then stack once per render, and — because the arrays are module-level — the KIE catalogue
-   * would keep the control after an operator switched the deployment to Comet.
+   * would keep the control after an operator switched the deployment to fal.
    */
   it('leaves the shared catalogues unmodified across repeated calls', () => {
     const before = IMAGE_MODELS.map((m) => m.fields.length);
 
     modelsForProvider('image', 'KIE');
     modelsForProvider('image', 'KIE');
-    modelsForProvider('image', 'Comet');
+    modelsForProvider('image', 'FAL');
 
     expect(IMAGE_MODELS.map((m) => m.fields.length)).toEqual(before);
-    expect(COMET_IMAGE_MODELS.some((m) => m.fields.some((f) => f.key === 'transparent'))).toBe(false);
+    expect(FAL_IMAGE_MODELS.some((m) => m.fields.some((f) => f.key === 'transparent'))).toBe(false);
   });
 });
 
 /**
- * Sound (§4.16). The tab is KIE-only — Comet has no audio routes at all, so offering it there would
+ * Sound (§4.16). The tab is KIE-only — fal has no audio routes yet (T6), so offering it there would
  * be a control every quote refuses, which is the exact defect the three-gateway-states fix removed
  * one kind up.
  *
@@ -379,7 +329,7 @@ describe('the Sound tab is per gateway', () => {
   });
 
   it('offers NOTHING on a gateway with no audio — absent, not refusing', () => {
-    expect(modelsForProvider('audio', 'Comet')).toEqual([]);
+    expect(modelsForProvider('audio', 'FAL')).toEqual([]);
     expect(modelsForProvider('audio', null)).toEqual([]);
   });
 

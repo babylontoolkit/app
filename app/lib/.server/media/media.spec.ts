@@ -19,7 +19,7 @@ import type { CreateMediaTaskInput, MediaProvider, MediaProviderName, MediaTaskS
 import { parseSunoTaskState, parseTaskState } from './kie-client';
 import { SOUND_MODELS } from '~/lib/media/provider-defaults';
 import { createMediaTools } from '~/lib/.server/agent/media-tools';
-import { getMediaTask } from './store';
+import { getMediaTask, putMediaTask } from './store';
 import { setMediaDispatcher } from './dispatch';
 import {
   buildProviderPayload,
@@ -763,285 +763,110 @@ describe('the cut-out pass', () => {
 });
 
 /**
- * COMET — the same money rules on a gateway whose transparency works completely differently (T8).
+ * COMET IS NO LONGER A MEDIA GATEWAY (owner, 2026-10-01: a security issue) — but its task records are
+ * still in storage, stamped `Comet`, some of them pending and already debited.
  *
- * On KIE, "the user wants alpha" and "run a second priced stage" are the same fact, because no KIE
- * image model emits an alpha channel. On Comet they come apart: `gpt-image-1.5` produces real alpha in
- * ONE call. Three things therefore have to be true here and are each silent when wrong:
- *
- *  1. **ONE debit for ONE stage.** Charging a cut-out that never runs is theft by arithmetic.
- *  2. **The QUOTE and the ANCHOR name the model that actually runs.** A transparent request for
- *     `gemini-3-pro-image` resolves to `gpt-image-1.5`; pricing the requested model and calling a
- *     different one is the priced-but-not-listed mis-bill wearing media clothes.
- *  3. **An unpriced variant is refused BEFORE the debit, with ZERO ledger rows.** `lookupMediaPrice`
- *     has no most-expensive fallback on purpose — media debits run before spend.
+ * 🔴 Two properties, both silent when wrong: the task is NEVER sent anywhere (not to Comet, and not to
+ * KIE as the unknown-name fallback, which would be asked about a task id it never issued), and the
+ * user gets their credits back EXACTLY once — the ordinary refund latch, not a second mechanism.
  */
-describe('Comet — transparency in ONE stage', () => {
-  function cometInput(overrides: Partial<Parameters<typeof startMediaTask>[0]> = {}) {
-    return {
-      model: 'gpt-image-1.5',
-      prompt: 'a chunky racing wordmark',
-      options: {},
-      userId: USER,
+describe('a stored Comet task', () => {
+  async function storedCometTask(objectStore: ObjectStore, credits = 24) {
+    const id = 'med_comet_legacy';
+    const now = new Date().toISOString();
+
+    // The debit `startMediaTask` took when Comet was still a gateway.
+    await ledger.append({ userId: USER, delta: -credits, reason: 'media', generationId: id });
+    await putMediaTask(objectStore, {
+      id,
       projectId: PROJECT,
-      provider: new FakeProvider('Comet'),
-      objectStore: memoryStore(),
-      ...overrides,
-    };
+      userId: USER,
+      kind: 'image',
+      provider: 'Comet',
+      endpoint: 'comet-image',
+      model: 'gpt-image-1.5',
+      prompt: 'a hero',
+      options: {},
+      destPath: 'public/assets/generated/a-hero-comet.png',
+      usd: 0.06,
+      credits,
+      status: 'pending',
+      kieTaskId: 'comet-upstream-1',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return id;
   }
 
-  describe('quoting', () => {
-    it('prices a transparent image as ONE stage, on the model that can actually do it', () => {
-      /*
-       * 🔴 The requested model is deliberately one that CANNOT do alpha. An assertion made against
-       * `gpt-image-1.5` in the first place passes for a quote that never substitutes anything — i.e.
-       * for the defect where a transparent request runs on a flat-RGB model and reports success.
-       */
-      const quote = quoteMediaRequest(
-        { model: 'gemini-3-pro-image', prompt: 'a wordmark', options: { transparent: true } },
-        'Comet',
-      );
+  it('a stored Comet task fails and refunds exactly once, and nothing contacts Comet', async () => {
+    await grant(100);
 
-      expect(quote.model, 'the substitution is visible on the quote, never silent').toBe('gpt-image-1.5');
-      expect(quote.usd).toBeCloseTo(0.062, 9);
-      expect(quote.credits).toBe(25);
+    const objectStore = memoryStore();
+    const taskId = await storedCometTask(objectStore);
+    expect(await ledger.balance(USER), 'the fixture must start debited').toBe(76);
 
-      // No second stage: alpha comes out of the same call, so there is nothing else to bill.
-      expect(quote.cutoutUsd, 'nothing extra is charged for alpha on this gateway').toBeUndefined();
-      expect(quote.delivery).toEqual({
-        model: 'gpt-image-1.5',
-        cutout: false,
-        background: 'transparent',
-        renderFormat: 'png',
-        finalFormat: 'png',
-        cutoutPrompt: false,
-      });
+    const resolved: MediaProviderName[] = [];
+    const stand = new FakeProvider('KIE');
+    const resolveProvider = (name: MediaProviderName) => {
+      resolved.push(name);
+      return stand;
+    };
+
+    const first = await pollMediaTask({ projectId: PROJECT, taskId, resolveProvider, objectStore });
+    const second = await pollMediaTask({ projectId: PROJECT, taskId, resolveProvider, objectStore });
+
+    expect(first).toMatchObject({
+      status: 'failed',
+      error: 'Comet is no longer a media gateway; this render was refunded.',
+      refunded: true,
     });
+    expect(second?.status).toBe('failed');
 
-    it('leaves an OPAQUE request on the model that was asked for (the substitution control)', () => {
-      /*
-       * ⚠️ Pairs with the test above. Without it, "resolves to gpt-image-1.5" passes for a quote that
-       * hardcodes one model and silently re-prices every render on this gateway.
-       */
-      const quote = quoteMediaRequest(
-        { model: 'gemini-3-pro-image', prompt: 'a photographic hero', options: {} },
-        'Comet',
-      );
+    // Nothing was contacted: no client resolved, no query, no create, no download.
+    expect(resolved, 'a client was resolved for a Comet task').toEqual([]);
+    expect(stand.queries).toBe(0);
+    expect(stand.created).toEqual([]);
+    expect(stand.downloaded).toEqual([]);
 
-      expect(quote.model).toBe('gemini-3-pro-image');
-      expect(quote.usd).toBeCloseTo(0.017, 9);
-      expect(quote.credits).toBe(7);
-      expect(quote.delivery).toMatchObject({ cutout: false, finalFormat: 'jpg' });
-      expect(quote.delivery?.background).toBeUndefined();
-    });
-
-    it('normalises the gateway options ONCE, into the record that prices the render', () => {
-      /*
-       * Comet prices `gpt-image-1.5` on `(quality, aspectRatio)`; KIE prices on `resolution`. The quote
-       * carries the normalised record so the price lookup and the provider payload cannot ask for
-       * different things — a render billed for one configuration and rendered at another.
-       */
-      const quote = quoteMediaRequest({ model: 'gpt-image-1.5', prompt: 'x', options: {} }, 'Comet');
-
-      expect(quote.options).toEqual({ aspectRatio: '16:9', quality: 'medium' });
-      expect(quote.credits, 'the default cell is medium 16:9 — $0.062').toBe(25);
-    });
-
-    it.each([
-      [{ quality: 'low', aspectRatio: '1:1' }, 0.029, 12],
-      [{ quality: 'medium', aspectRatio: '1:1' }, 0.049, 20],
-      [{ quality: 'high', aspectRatio: '1:1' }, 0.129, 52],
-      [{ quality: 'low', aspectRatio: '16:9' }, 0.032, 13],
-      [{ quality: 'medium', aspectRatio: '16:9' }, 0.062, 25],
-      [{ quality: 'high', aspectRatio: '16:9' }, 0.181, 73],
-    ])('prices the probed cell %j at $%s → %i credits', (options, usd, credits) => {
-      const quote = quoteMediaRequest({ model: 'gpt-image-1.5', prompt: 'x', options }, 'Comet');
-
-      expect(quote.usd).toBeCloseTo(usd, 9);
-      expect(quote.credits).toBe(credits);
-    });
-
-    it('prices Comet video per second', () => {
-      // $0.08/s x 4s = $0.32 → 128 credits. Comet bills video in the platform's own unit.
-      const quote = quoteMediaRequest(
-        { model: 'veo3-fast', prompt: 'a fox running', options: {}, durationSeconds: 4 },
-        'Comet',
-      );
-
-      expect(quote).toMatchObject({ kind: 'video', credits: 128 });
-      expect(quote.usd).toBeCloseTo(0.32, 9);
-      expect(quote.delivery, 'video needs no delivery decision at all').toBeUndefined();
-    });
-
-    it('never runs the image machinery over a VIDEO request', () => {
-      /*
-       * Kind is decided FIRST, from the requested model. Otherwise a video prompt that happens to say
-       * "logo" would resolve a video to an image model — and be billed as one.
-       */
-      const quote = quoteMediaRequest(
-        { model: 'veo3-fast', prompt: 'a spinning team logo', options: { transparent: true }, durationSeconds: 4 },
-        'Comet',
-      );
-
-      expect(quote.model).toBe('veo3-fast');
-      expect(quote.kind).toBe('video');
-    });
-
-    it('prices against COMET rows, never KIE ones (the two lists are separate)', () => {
-      // KIE's default image model is not on this gateway at all — it must refuse, not price it.
-      expect(() => quoteMediaRequest({ model: 'nano-banana-2', prompt: 'x', options: {} }, 'Comet')).toThrow(
-        /not in the Marketplace/,
-      );
-    });
+    // Back in full, by ONE refund row, after two polls.
+    expect(await ledger.balance(USER)).toBe(100);
+    expect((await ledger.list(USER)).filter((e) => e.reason === 'refund')).toHaveLength(1);
   });
 
-  describe('starting a render (billing enforced)', () => {
-    beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+  it('refunds exactly once when two polls race', async () => {
+    await grant(100);
 
-    it('debits ONCE for ONE stage, and the anchor names the model that ran', async () => {
-      await grant(100);
+    const objectStore = memoryStore();
+    const taskId = await storedCometTask(objectStore);
+    const resolveProvider = () => new FakeProvider('KIE');
 
-      const provider = new FakeProvider('Comet');
-      const objectStore = memoryStore();
-      const started = await startMediaTask(
-        cometInput({ provider, objectStore, model: 'gemini-3-pro-image', options: { transparent: true } }),
-      );
+    await Promise.all([
+      pollMediaTask({ projectId: PROJECT, taskId, resolveProvider, objectStore }),
+      pollMediaTask({ projectId: PROJECT, taskId, resolveProvider, objectStore }),
+    ]);
 
-      expect(started.model, 'the substituted model is what the caller is told ran').toBe('gpt-image-1.5');
-      expect(started.credits).toBe(25);
-      expect(await ledger.balance(USER)).toBe(75);
+    expect(await ledger.balance(USER)).toBe(100);
+    expect((await ledger.list(USER)).filter((e) => e.reason === 'refund')).toHaveLength(1);
+  });
 
-      // ONE row, not two — there is no cut-out stage on this gateway.
-      expect((await ledger.list(USER)).filter((e) => e.reason === 'media')).toHaveLength(1);
+  it('CONTROL — a KIE task under the same harness IS queried and is not failed', async () => {
+    // Without this, the test above passes for a poll that fails and refunds EVERY task unasked.
+    await grant(100);
 
-      // The generations anchor drives the §4.10 margin report: it must name what was actually billed.
-      expect(upserts[0]).toMatchObject({ model: 'gpt-image-1.5', provider: 'Comet' });
+    const objectStore = memoryStore();
+    const provider = new FakeProvider('KIE');
+    const started = await startMediaTask(imageInput({ provider, objectStore }));
 
-      const record = await getMediaTask(objectStore, PROJECT, started.taskId);
-      expect(record).toMatchObject({
-        status: 'pending',
-        provider: 'Comet',
-        endpoint: 'comet-image',
-        model: 'gpt-image-1.5',
-        credits: 25,
-      });
-      expect(record?.cutout, 'no second stage is owed').toBeUndefined();
-      expect(record?.stage).toBeUndefined();
-      expect(started.destPath).toMatch(/\.png$/);
-
-      // One upstream call, carrying the parameter that actually buys the alpha.
-      expect(provider.created).toHaveLength(1);
-      expect(provider.created[0]).toMatchObject({
-        endpoint: 'comet-image',
-        model: 'gpt-image-1.5',
-        payload: { background: 'transparent', size: '1536x1024', quality: 'medium' },
-      });
+    const task = await pollMediaTask({
+      projectId: PROJECT,
+      taskId: started.taskId,
+      resolveProvider: () => provider,
+      objectStore,
     });
 
-    it('stores the NORMALISED options — what was priced is what was asked for', async () => {
-      await grant(100);
-
-      const objectStore = memoryStore();
-      const provider = new FakeProvider('Comet');
-      const started = await startMediaTask(cometInput({ provider, objectStore }));
-
-      const record = await getMediaTask(objectStore, PROJECT, started.taskId);
-
-      expect(record?.options).toEqual({ aspectRatio: '16:9', quality: 'medium' });
-      expect(provider.created[0].payload).toMatchObject({ size: '1536x1024', quality: 'medium' });
-    });
-
-    it('REFUSES an unpriced (quality, aspectRatio) pair with ZERO ledger rows', async () => {
-      /*
-       * 🔴 Only the six probed cells exist. An unlisted pair has no measured token count, so it has no
-       * price — and a media debit runs BEFORE the spend, so it is refused rather than priced off a
-       * neighbouring cell. Zero ledger rows is the assertion that matters: a refusal that has already
-       * taken the money is not a refusal.
-       */
-      await grant(100);
-
-      const provider = new FakeProvider('Comet');
-
-      await expect(startMediaTask(cometInput({ provider, options: { quality: 'ultra' } }))).rejects.toThrow(
-        /Priced variants/,
-      );
-
-      expect(await ledger.balance(USER), 'nothing was taken').toBe(100);
-      expect(
-        (await ledger.list(USER)).filter((e) => e.reason === 'media'),
-        'no debit row at all',
-      ).toHaveLength(0);
-      expect(upserts, 'not even an anchor was written').toHaveLength(0);
-      expect(provider.created, 'no spend at the gateway').toHaveLength(0);
-    });
-
-    it('starts a Comet video on the video route with a STRING duration', async () => {
-      await grant(200);
-
-      const provider = new FakeProvider('Comet');
-      const objectStore = memoryStore();
-      const started = await startMediaTask(
-        cometInput({ provider, objectStore, model: 'veo3-fast', durationSeconds: 4, prompt: 'a fox' }),
-      );
-
-      expect(started.credits).toBe(128);
-      expect(started.destPath).toMatch(/\.mp4$/);
-      expect(provider.created[0]).toMatchObject({
-        endpoint: 'comet-video',
-        model: 'veo3-fast',
-        payload: { prompt: 'a fox', seconds: '4' },
-      });
-    });
-
-    it('never chains a second call when the render lands', async () => {
-      await grant(100);
-
-      const provider = new FakeProvider('Comet');
-      const objectStore = memoryStore();
-      const started = await startMediaTask(cometInput({ provider, objectStore, options: { transparent: true } }));
-
-      provider.state = { state: 'succeeded', resultUrl: 'comet-inline:comet-local-1' };
-
-      const task = await pollMediaTask({
-        projectId: PROJECT,
-        taskId: started.taskId,
-        resolveProvider: () => provider,
-        objectStore,
-      });
-
-      expect(task).toMatchObject({ status: 'succeeded', resultUrl: 'comet-inline:comet-local-1' });
-      expect(provider.created, 'the alpha already came out of call one').toHaveLength(1);
-      expect(await ledger.balance(USER), 'a delivered render keeps its charge').toBe(75);
-    });
-
-    it('refunds a failed Comet render EXACTLY once when two polls race', async () => {
-      /*
-       * The same concurrency harness as the KIE case: two polls both observing pending → failed must
-       * produce ONE compensating row. Re-run on this gateway because the record's provider now decides
-       * which client is asked, and a second refund is money invented out of nothing.
-       */
-      await grant(100);
-
-      const provider = new FakeProvider('Comet');
-      const objectStore = memoryStore();
-      const started = await startMediaTask(cometInput({ provider, objectStore }));
-
-      provider.state = { state: 'failed', error: 'the render was interrupted' };
-
-      let release!: () => void;
-      provider.gate = new Promise((resolve) => (release = resolve));
-
-      const polls = Promise.all([
-        pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore }),
-        pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore }),
-      ]);
-
-      release();
-      await polls;
-
-      expect(await ledger.balance(USER), 'the race produced ONE refund').toBe(100);
-      expect((await ledger.list(USER)).filter((e) => e.reason === 'refund')).toHaveLength(1);
-    });
+    expect(provider.queries).toBe(1);
+    expect(task?.status).toBe('pending');
   });
 });
 
@@ -1114,7 +939,7 @@ describe('wire shapes', () => {
   /*
    * The delivery decision comes from the REAL quote, exactly as production composes it — the payload
    * builder no longer derives one for itself (it has no gateway to derive it against, and guessing
-   * would answer the KIE question on a Comet task). Routing these through `quoteMediaRequest` makes
+   * would answer the KIE question on a fal task). Routing these through `quoteMediaRequest` makes
    * them exercise the actual composition rather than a convenience default.
    */
   const deliveryFor = (request: Parameters<typeof quoteMediaRequest>[0]) =>
@@ -1172,112 +997,19 @@ describe('wire shapes', () => {
     expect(plain.prompt).toBe('a photographic sunset');
   });
 
-  /**
-   * Comet's three request shapes — composed EXACTLY as `startMediaTask` composes them (quote first,
-   * then the payload from the quote's normalised options and its delivery decision). Building them
-   * from a hand-made delivery would test a convenience path production does not use.
-   */
-  const cometPayloadFor = (request: Parameters<typeof quoteMediaRequest>[0]) => {
-    const quote = quoteMediaRequest(request, 'Comet');
-
-    return buildProviderPayload(quote.model, { ...request, options: quote.options }, quote.delivery, 'Comet');
-  };
-
-  it('maps aspectRatio to one of the two PROBED sizes', () => {
-    /*
-     * `gpt-image-1.5` is token-priced and its token count is a function of `(size, quality)`, so an
-     * unprobed aspect has no price row. Anything else in this map would be a size we have never
-     * measured a price for.
-     */
-    expect(cometPayloadFor({ model: 'gpt-image-1.5', prompt: 'a hero', options: {} })).toEqual({
-      prompt: 'a hero',
-      size: '1536x1024',
-      quality: 'medium',
-      output_format: 'jpeg',
-    });
-
-    expect(cometPayloadFor({ model: 'gpt-image-1.5', prompt: 'a tile', options: { aspectRatio: '1:1' } })).toEqual({
-      prompt: 'a tile',
-      size: '1024x1024',
-      quality: 'medium',
-      output_format: 'jpeg',
-    });
-  });
-
-  it('STATES the output format, and it matches the extension the file will be given', () => {
-    /*
-     * 🔴 An unstated `output_format` is not a neutral omission — it is a silent extension/content
-     * mismatch on the DEFAULT path. `deriveDestPath` names the file from `finalFormat`, which for an
-     * ordinary photographic request is `jpg`, while `gpt-image-1.5` with no format asked returns
-     * OpenAI's default PNG. The result: PNG bytes written behind a `.jpg` name on every opaque Comet
-     * image, tripping the file proxy's `media-format-mismatch` monitor on normal traffic.
-     *
-     * `jpeg` on the wire, `jpg` in the filename — the API's spelling and ours differ, which is exactly
-     * the kind of detail that makes this worth asserting as a PAIR rather than in two places.
-     */
-    const opaque = { model: 'gpt-image-1.5', prompt: 'a hero background', options: {} };
-    const opaqueQuote = quoteMediaRequest(opaque, 'Comet');
-
-    expect(cometPayloadFor(opaque)).toMatchObject({ output_format: 'jpeg' });
-    expect(deriveDestPath('image', opaque, 'med_abc123_x', opaqueQuote.delivery)).toMatch(/\.jpg$/);
-
-    // ...and a transparent render is png at BOTH ends, or the alpha is thrown away by the container.
-    const alpha = { model: 'gpt-image-1.5', prompt: 'a team logo', options: { transparent: true } };
-    const alphaQuote = quoteMediaRequest(alpha, 'Comet');
-
-    expect(cometPayloadFor(alpha)).toMatchObject({ output_format: 'png' });
-    expect(deriveDestPath('image', alpha, 'med_abc123_x', alphaQuote.delivery)).toMatch(/\.png$/);
-  });
-
-  it('asks for real alpha with `background`, and does NOT append the cut-out directive', () => {
-    /*
-     * 🔴 THE MOST DESTRUCTIVE THING IN THIS FILE IF IT REGRESSES. `cutoutRenderPrompt` commands a flat
-     * OPAQUE backdrop for a background remover's benefit. Sent to a model that was about to hand us a
-     * genuinely empty one it destroys exactly what was paid for — and the result looks like a
-     * perfectly good render, which is why it needs a test rather than a comment.
-     */
-    const comet = cometPayloadFor({ model: 'gpt-image-1.5', prompt: 'a team logo', options: { transparent: true } });
-
-    expect(comet).toMatchObject({ background: 'transparent', prompt: 'a team logo' });
-    expect(String(comet.prompt).toLowerCase()).not.toContain('checkerboard');
-
-    /*
-     * CONTROL: the same intent on KIE still gets the directive. Without this pairing, the assertion
-     * above passes for a pipeline that has stopped appending it anywhere — which would put a painted
-     * checkerboard back into every KIE cut-out.
-     */
-    const kieRequest = {
-      model: 'nano-banana-2',
-      prompt: 'a team logo',
-      options: { resolution: '2K', transparent: true },
-    };
-    const kie = buildProviderPayload('nano-banana-2', kieRequest, quoteMediaRequest(kieRequest, 'KIE').delivery);
-
-    expect(String(kie.prompt).toLowerCase()).toContain('checkerboard');
-  });
-
-  it('sends the native Gemini shape — no size, no quality, no format', () => {
-    // That route takes `contents` and nothing else; a stray `size` is a 400 on a route with no sizes.
-    expect(cometPayloadFor({ model: 'gemini-3-pro-image', prompt: 'a neon skyline', options: {} })).toEqual({
-      contents: [{ parts: [{ text: 'a neon skyline' }] }],
-    });
-  });
-
-  it('stringifies the video duration — `seconds` is a STRING on this wire', () => {
-    expect(cometPayloadFor({ model: 'veo3-fast', prompt: 'a fox', options: {}, durationSeconds: 4 })).toEqual({
-      prompt: 'a fox',
-      seconds: '4',
-    });
-  });
-
   it('refuses to build an image payload with no delivery decision', () => {
     /*
      * There is no fallback on purpose: a re-derivation here has no gateway to consult, so it would
-     * silently answer the KIE question on a Comet task and the file would be billed as one thing,
+     * silently answer the KIE question on a fal task and the file would be billed as one thing,
      * written as another and referenced as a third.
      */
     expect(() =>
-      buildProviderPayload('gpt-image-1.5', { model: 'gpt-image-1.5', prompt: 'x', options: {} }, undefined, 'Comet'),
+      buildProviderPayload(
+        'fal-ai/nano-banana-2',
+        { model: 'fal-ai/nano-banana-2', prompt: 'x', options: {} },
+        undefined,
+        'FAL',
+      ),
     ).toThrow(/no delivery decision/);
   });
 

@@ -110,21 +110,22 @@ describe('validation — the promotion wall', () => {
   });
 
   /*
-   * An EMPTY media table is valid and is the correct state for Comet today (media lands in T8).
+   * An EMPTY media table is valid and is the correct state for Comet (no longer a media gateway).
    * `lookupMediaPrice` has no most-expensive fallback — media debits run BEFORE spend — so an unpriced
    * media model is REFUSED rather than guessed, and a speculative row is the one shape that would turn
    * that refusal into a wrong charge.
    */
   it('accepts an empty media table — no media rows is a refusal, never a guess', () => {
     /*
-     * T8 filled this table, so the property under test moved: what still matters is that an EMPTY
-     * media table validates — an operator promoting a list with no media rows must get a refusal at
-     * generation time (`lookupMediaPrice` has no fallback), never a rejected promotion.
+     * Comet is no longer a media gateway (2026-10-01), so its SHIPPED list is exactly this case: no
+     * media rows, and it must validate — every Comet render is refused at quote time, never a rejected
+     * promotion of its LLM rows.
      */
-    expect(validateMarketPriceList({ ...BAKED_COMET_PRICES, media: {} }, 'Comet').ok).toBe(true);
+    expect(BAKED_COMET_PRICES.media).toEqual({});
+    expect(validateMarketPriceList(BAKED_COMET_PRICES, 'Comet').ok).toBe(true);
 
-    // ...and the shipped list DOES carry rows now, so the assertion above is not passing by vacuity.
-    expect(Object.keys(BAKED_COMET_PRICES.media).length).toBeGreaterThan(0);
+    // CONTROL: the media table is not what makes the list valid — the LLM rows are really there.
+    expect(Object.keys(BAKED_COMET_PRICES.llm).length).toBeGreaterThan(0);
   });
 
   /*
