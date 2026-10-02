@@ -25,7 +25,7 @@ import type { CreateMediaTaskInput, MediaProvider, MediaProviderName } from '~/l
 import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from '~/lib/.server/billing/generations';
 import { invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
-import { mediaModelDefaults } from '~/lib/media/provider-defaults';
+import { mediaModelDefaults, SOUND_MODELS, type MediaModelDefaults } from '~/lib/media/provider-defaults';
 import { createMediaTools, MEDIA_TOOL_NAMES, type MediaTaskEvent } from './media-tools';
 import { setMediaDispatcher } from '~/lib/.server/media/dispatch';
 
@@ -143,7 +143,7 @@ const tripwireStore = new Proxy(
   },
 ) as unknown as ObjectStore;
 
-function toolsWith(provider: MediaProviderName = 'KIE') {
+function toolsWith(provider: MediaProviderName = 'KIE', defaults?: MediaModelDefaults) {
   const wire = tripwireProvider(provider);
 
   const tools = createMediaTools({
@@ -152,6 +152,7 @@ function toolsWith(provider: MediaProviderName = 'KIE') {
     provider: wire.provider,
     objectStore: tripwireStore,
     emit: () => undefined,
+    ...(defaults ? { defaults } : {}),
   });
 
   return { tools, wire };
@@ -392,7 +393,10 @@ function drivableTools(name: MediaProviderName) {
     emit: (event) => emitted.push(event),
   });
 
-  const call = async (toolName: 'generate_image' | 'generate_video' | 'generate_google_video', args: object) =>
+  const call = async (
+    toolName: 'generate_image' | 'generate_video' | 'generate_google_video' | 'generate_sound',
+    args: object,
+  ) =>
     (tools as unknown as Record<string, { execute: (a: unknown, o: unknown) => Promise<string> }>)[toolName].execute(
       args,
       { toolCallId: 'call-1', messages: [] },
@@ -411,7 +415,7 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
    */
   const CASES: {
     provider: MediaProviderName;
-    tool: 'generate_image' | 'generate_video' | 'generate_google_video';
+    tool: 'generate_image' | 'generate_video' | 'generate_google_video' | 'generate_sound';
     model: string;
   }[] = [
     { provider: 'KIE', tool: 'generate_image', model: 'nano-banana-2' },
@@ -420,6 +424,8 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
     { provider: 'FAL', tool: 'generate_image', model: 'fal-ai/nano-banana-2' },
     { provider: 'FAL', tool: 'generate_video', model: 'fal-ai/kling-video/v3/standard/text-to-video' },
     { provider: 'FAL', tool: 'generate_google_video', model: 'fal-ai/veo3/fast' },
+    { provider: 'KIE', tool: 'generate_sound', model: 'suno/generate-sounds' },
+    { provider: 'FAL', tool: 'generate_sound', model: 'fal-ai/elevenlabs/sound-effects/v2' },
   ];
 
   for (const { provider, tool, model } of CASES) {
@@ -529,6 +535,41 @@ describe('a call that names NO model prices and starts on this gateway (T9)', ()
   });
 });
 
+describe('generate_google_video names only the resolutions the gateway renders (T6)', () => {
+  it('generate_google_video names only the resolutions the gateway renders', () => {
+    const fal = schemaText(toolsWith('FAL').tools.generate_google_video);
+    const kie = schemaText(toolsWith('KIE').tools.generate_google_video);
+
+    expect(fal).toContain('720p or 1080p. Default 720p.');
+    expect(fal).not.toMatch(/4k/i);
+
+    // KIE's text is unchanged — it renders 4k.
+    expect(kie).toContain('720p, 1080p or 4k. Default 720p.');
+  });
+
+  it('refuses 4k on FAL before any spend, and still serves it on KIE', async () => {
+    const fal = drivableTools('FAL');
+
+    expect(await fal.call('generate_google_video', { prompt: 'x', resolution: '4k' })).toMatch(
+      /not rendered on this gateway\. Use 720p or 1080p/,
+    );
+    expect(fal.created).toHaveLength(0);
+
+    const kie = drivableTools('KIE');
+
+    expect(await kie.call('generate_google_video', { prompt: 'x', resolution: '4k' })).not.toMatch(/not rendered/);
+  });
+});
+
+describe('generate_google_video forwards the gateway’s own resolution spelling', () => {
+  it('"1080P" on FAL sends "1080p"', async () => {
+    const { call, created } = drivableTools('FAL');
+
+    expect(await call('generate_google_video', { prompt: 'x', resolution: '1080P' })).toMatch(/^Started \(/);
+    expect(created[0].payload).toMatchObject({ resolution: '1080p' });
+  });
+});
+
 describe('MEDIA_TOOL_NAMES', () => {
   /*
    * The proxy counts a turn's PAID media calls by these names (the media-spent rescue in
@@ -562,10 +603,43 @@ describe('generate_sound', () => {
 
   it('is offered on a gateway with audio and ABSENT on one without', () => {
     expect(soundTool('KIE').entry).toBeTypeOf('object');
-    expect(soundTool('FAL').entry).toBeUndefined();
+    expect(soundTool('FAL').entry).toBeTypeOf('object');
+
+    // Every shipped gateway serves audio since T6, so the audio-less gateway is a stub defaults table.
+    const silent = toolsWith('FAL', { ...mediaModelDefaults('FAL'), sound: null }).tools;
 
     // Absent means absent — not present-and-refusing, which still costs a tool round to discover.
-    expect(Object.keys(soundTool('FAL').tools)).not.toContain('generate_sound');
+    expect(Object.keys(silent)).not.toContain('generate_sound');
+  });
+
+  it('generate_sound is offered on FAL with ElevenLabs voices and no KIE ids in its text', () => {
+    const text = schemaText(soundTool('FAL').entry);
+
+    for (const voice of SOUND_MODELS.FAL.voices!) {
+      expect(text, `voice ${voice} is not offered`).toContain(voice);
+    }
+
+    expect(text).toContain('0.5-22');
+
+    // Nothing KIE-only: no Suno model or version, no KIE ElevenLabs id, no Suno-only knob.
+    for (const foreign of [SOUND_MODELS.KIE.effect, SOUND_MODELS.KIE.music, ...SOUND_MODELS.KIE.speech]) {
+      expect(text).not.toContain(foreign);
+    }
+
+    expect(text).not.toMatch(/Suno|V5_5|V4_5|custom_mode|tempo/);
+
+    // CONTROL: the KIE text DOES carry its Suno vocabulary, so the scan above can fail.
+    expect(schemaText(soundTool('KIE').entry)).toMatch(/Suno version/);
+  });
+
+  it('generate_sound on FAL refuses a KIE voice id and a Suno version before any spend', async () => {
+    const { entry, wire } = soundTool('FAL');
+
+    expect(await call(entry, { kind: 'speech', prompt: 'Go', voice: 'EkK5I93UQWFDigLMpZcX' })).toMatch(
+      /not available on this gateway.*Rachel/,
+    );
+    expect(await call(entry, { prompt: 'chime', model: 'V5' })).toMatch(/Unsupported sound_effect model: V5/);
+    expect(wire.touched()).toBe(false);
   });
 
   /*

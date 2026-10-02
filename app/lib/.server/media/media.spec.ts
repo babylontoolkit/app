@@ -1096,7 +1096,7 @@ describe('destination paths', () => {
 describe('sound', () => {
   function soundInput(overrides: Partial<Parameters<typeof startMediaTask>[0]> = {}) {
     return {
-      model: SOUND_MODELS.effect,
+      model: SOUND_MODELS.KIE.effect,
       prompt: 'arcade coin pickup chime',
       options: {},
       userId: USER,
@@ -1109,9 +1109,9 @@ describe('sound', () => {
 
   describe('quoting', () => {
     it('prices a sound effect as audio, not video — $0.0125 → 5 credits', () => {
-      const quote = quoteMediaRequest({ model: SOUND_MODELS.effect, prompt: 'coin chime', options: {} }, 'KIE');
+      const quote = quoteMediaRequest({ model: SOUND_MODELS.KIE.effect, prompt: 'coin chime', options: {} }, 'KIE');
 
-      expect(quote).toMatchObject({ model: SOUND_MODELS.effect, kind: 'audio', usd: 0.0125, credits: 5 });
+      expect(quote).toMatchObject({ model: SOUND_MODELS.KIE.effect, kind: 'audio', usd: 0.0125, credits: 5 });
     });
 
     /*
@@ -1128,8 +1128,11 @@ describe('sound', () => {
     });
 
     it('scales a speech quote with the length of the text it will speak', () => {
-      const short = quoteMediaRequest({ model: SOUND_MODELS.speech, prompt: 'Go!', options: {} }, 'KIE');
-      const long = quoteMediaRequest({ model: SOUND_MODELS.speech, prompt: 'x'.repeat(1000), options: {} }, 'KIE');
+      const short = quoteMediaRequest({ model: SOUND_MODELS.KIE.speech[0], prompt: 'Go!', options: {} }, 'KIE');
+      const long = quoteMediaRequest(
+        { model: SOUND_MODELS.KIE.speech[0], prompt: 'x'.repeat(1000), options: {} },
+        'KIE',
+      );
 
       expect(long.usd).toBeGreaterThan(short.usd);
       expect(long.usd).toBeCloseTo(0.06, 9); // 1,000 chars at $0.06/1k
@@ -1167,7 +1170,7 @@ describe('sound', () => {
       await grant(100);
 
       const provider = new FakeProvider();
-      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.speech, prompt: 'Lap record!' }));
+      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.KIE.speech[0], prompt: 'Lap record!' }));
 
       expect(provider.created[0].endpoint).toBe('jobs');
       expect(provider.created[0].payload).toMatchObject({ text: 'Lap record!' });
@@ -1178,7 +1181,7 @@ describe('sound', () => {
       await grant(100);
 
       const provider = new FakeProvider();
-      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.music, prompt: 'driving synthwave' }));
+      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.KIE.music, prompt: 'driving synthwave' }));
 
       expect(provider.created[0].endpoint).toBe('suno-music');
       expect(provider.created[0].payload).toMatchObject({
@@ -1195,7 +1198,7 @@ describe('sound', () => {
     it('refuses music with no resolvable callback and spends nothing', async () => {
       await grant(100);
 
-      await expect(startMediaTask(soundInput({ model: SOUND_MODELS.music, prompt: 'synthwave' }))).rejects.toThrow(
+      await expect(startMediaTask(soundInput({ model: SOUND_MODELS.KIE.music, prompt: 'synthwave' }))).rejects.toThrow(
         /callback/i,
       );
       expect(await ledger.balance(USER)).toBe(100);
@@ -1210,9 +1213,9 @@ describe('sound', () => {
 
       for (const url of ['http://localhost:5173/api/media/kie-callback', 'http://192.168.1.10/cb']) {
         vi.stubEnv('MEDIA_CALLBACK_URL', url);
-        await expect(startMediaTask(soundInput({ model: SOUND_MODELS.music, prompt: 'synthwave' }))).rejects.toThrow(
-          /callback/i,
-        );
+        await expect(
+          startMediaTask(soundInput({ model: SOUND_MODELS.KIE.music, prompt: 'synthwave' })),
+        ).rejects.toThrow(/callback/i);
       }
 
       expect(await ledger.balance(USER)).toBe(100);
@@ -1224,7 +1227,7 @@ describe('sound', () => {
 
       const provider = new FakeProvider();
       await startMediaTask(soundInput({ provider }));
-      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.speech, prompt: 'Go' }));
+      await startMediaTask(soundInput({ provider, model: SOUND_MODELS.KIE.speech[0], prompt: 'Go' }));
 
       expect(provider.created[0].payload).not.toHaveProperty('callBackUrl');
       expect(provider.created[1].payload).not.toHaveProperty('callBackUrl');
@@ -1689,5 +1692,180 @@ describe('fal.ai — transparent images, the cut-out pass per gateway (T4)', () 
       model: 'recraft/remove-background',
       payload: { image: 'https://cdn.kie.ai/render.jpg' },
     });
+  });
+});
+
+/**
+ * fal.ai sound (`_specs/media-gateways_plan.md` T6) — ElevenLabs effects and speech, MiniMax music,
+ * through the same quote → debit → create → poll → deliver path, on fal's OWN price rows.
+ *
+ * fal's list: effects $0.002/s (5 s default → $0.01 → 4 credits), multilingual speech $0.10 per 1,000
+ * characters, music $0.15 per track (60 credits). Every create is on `fal-queue` with the documented
+ * body, and no body ever carries `sync_mode`.
+ */
+describe('fal.ai — sound (T6)', () => {
+  beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+  const FAL_EFFECT = SOUND_MODELS.FAL.effect;
+  const FAL_MUSIC = SOUND_MODELS.FAL.music;
+  const FAL_SPEECH = SOUND_MODELS.FAL.speech[0];
+
+  function falSound(provider: FakeProvider, overrides: Partial<Parameters<typeof startMediaTask>[0]> = {}) {
+    return imageInput({ model: FAL_EFFECT, prompt: 'arcade coin pickup chime', options: {}, provider, ...overrides });
+  }
+
+  it('quotes, debits and creates a fal sound effect, then delivers it as .mp3', async () => {
+    expect(
+      quoteMediaRequest({ model: FAL_EFFECT, prompt: 'x', options: {}, durationSeconds: 10 }, 'FAL'),
+    ).toMatchObject({ model: FAL_EFFECT, kind: 'audio', usd: 0.02, credits: 8 });
+
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startMediaTask(
+      falSound(provider, { objectStore, options: { loop: true }, durationSeconds: 10 }),
+    );
+
+    expect(started).toMatchObject({ kind: 'audio', model: FAL_EFFECT, credits: 8 });
+    expect(started.destPath).toMatch(/^public\/assets\/generated\/.+\.mp3$/);
+    expect(await ledger.balance(USER)).toBe(92);
+
+    expect(provider.created).toHaveLength(1);
+    expect(provider.created[0]).toMatchObject({ endpoint: 'fal-queue', model: FAL_EFFECT });
+    expect(provider.created[0].payload).toEqual({
+      text: 'arcade coin pickup chime',
+      duration_seconds: 10,
+      loop: true,
+    });
+    expect(provider.created[0].payload).not.toHaveProperty('sync_mode');
+
+    provider.state = { state: 'succeeded', resultUrl: 'https://v3.fal.media/files/chime.mp3' };
+
+    const done = await pollMediaTask({
+      projectId: PROJECT,
+      taskId: started.taskId,
+      resolveProvider: () => provider,
+      objectStore,
+    });
+
+    expect(done).toMatchObject({
+      status: 'succeeded',
+      kind: 'audio',
+      provider: 'FAL',
+      resultUrl: 'https://v3.fal.media/files/chime.mp3',
+    });
+    expect(await ledger.balance(USER), 'a delivered sound keeps its charge').toBe(92);
+  });
+
+  /*
+   * 🔴 ONE LENGTH, QUOTED AND SENT. The row is priced per second, so a request with no length cannot
+   * be priced; the default is resolved once (`soundEffectSeconds`) and the payload and the record take
+   * it from the quote. Leaving the body without `duration_seconds` would let fal pick a length that was
+   * never billed.
+   */
+  it('a fal sound effect with no duration is quoted and sent with the same default', async () => {
+    const quote = quoteMediaRequest({ model: FAL_EFFECT, prompt: 'x', options: {} }, 'FAL');
+
+    expect(quote).toMatchObject({ usd: 0.01, credits: 4, durationSeconds: 5 });
+
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startMediaTask(falSound(provider, { objectStore }));
+
+    expect(started.credits).toBe(quote.credits);
+    expect(provider.created[0].payload).toMatchObject({ duration_seconds: 5, loop: false });
+    expect((await getMediaTask(objectStore, PROJECT, started.taskId))?.durationSeconds).toBe(5);
+  });
+
+  it('fal music needs no MEDIA_CALLBACK_URL', async () => {
+    await grant(200);
+
+    const provider = new FakeProvider('FAL');
+    const started = await startMediaTask(
+      falSound(provider, { model: FAL_MUSIC, prompt: 'driving synthwave for a night race', options: {} }),
+    );
+
+    expect(started).toMatchObject({ kind: 'audio', model: FAL_MUSIC, credits: 60 });
+    expect(provider.created[0]).toMatchObject({ endpoint: 'fal-queue', model: FAL_MUSIC });
+    expect(provider.created[0].payload).toEqual({
+      prompt: 'driving synthwave for a night race',
+      is_instrumental: true,
+    });
+    expect(provider.created[0].payload).not.toHaveProperty('callBackUrl');
+
+    // Vocals: the lyrics ride in the body.
+    await startMediaTask(
+      falSound(provider, {
+        model: FAL_MUSIC,
+        prompt: 'an upbeat pop anthem',
+        options: { instrumental: false, lyrics: 'race to the line' },
+      }),
+    );
+
+    expect(provider.created[1].payload).toEqual({
+      prompt: 'an upbeat pop anthem',
+      is_instrumental: false,
+      lyrics: 'race to the line',
+    });
+  });
+
+  it('KIE music still refuses without a reachable callback', async () => {
+    await grant(100);
+
+    const provider = new FakeProvider('KIE');
+
+    await expect(
+      startMediaTask(imageInput({ model: SOUND_MODELS.KIE.music, prompt: 'synthwave', options: {}, provider })),
+    ).rejects.toThrow(/callback/i);
+    expect(provider.created).toHaveLength(0);
+    expect(await ledger.balance(USER)).toBe(100);
+  });
+
+  it('speech is quoted per 1k chars on FAL', async () => {
+    const short = quoteMediaRequest({ model: FAL_SPEECH, prompt: 'Go!', options: {} }, 'FAL');
+    const long = quoteMediaRequest({ model: FAL_SPEECH, prompt: 'x'.repeat(1000), options: {} }, 'FAL');
+
+    expect(long.usd).toBeCloseTo(0.1, 9); // 1,000 chars at $0.10/1k
+    expect(long.credits).toBe(40);
+    expect(short.usd).toBeLessThan(long.usd);
+
+    // Turbo is half the rate.
+    expect(
+      quoteMediaRequest({ model: SOUND_MODELS.FAL.speech[1], prompt: 'x'.repeat(1000), options: {} }, 'FAL').usd,
+    ).toBeCloseTo(0.05, 9);
+
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    await startMediaTask(falSound(provider, { model: FAL_SPEECH, prompt: 'Lap record!', options: { voice: 'Aria' } }));
+    await startMediaTask(falSound(provider, { model: FAL_SPEECH, prompt: 'Go!', options: {} }));
+
+    expect(provider.created[0].payload).toEqual({ text: 'Lap record!', voice: 'Aria' });
+
+    // No voice stated → fal's documented default, from the catalogue.
+    expect(provider.created[1].payload).toEqual({ text: 'Go!', voice: 'Rachel' });
+  });
+
+  it('a failed fal sound refunds exactly once', async () => {
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startMediaTask(falSound(provider, { objectStore }));
+
+    expect(await ledger.balance(USER)).toBe(96);
+
+    provider.state = { state: 'failed', error: 'fal: content policy' };
+
+    const poll = () =>
+      pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore });
+    await poll();
+    await poll();
+
+    expect(await ledger.balance(USER)).toBe(100);
+    expect((await getMediaTask(objectStore, PROJECT, started.taskId))?.refunded).toBe(true);
   });
 });

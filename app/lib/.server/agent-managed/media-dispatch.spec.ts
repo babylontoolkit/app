@@ -20,6 +20,7 @@ import type { FileMap } from '~/lib/.server/llm/constants';
 import { setMediaDispatcher } from '~/lib/.server/media/dispatch';
 import type { CreateMediaTaskInput, MediaProvider, MediaProviderName } from '~/lib/.server/media/provider';
 import { setObjectStore, type ObjectStore } from '~/lib/.server/storage';
+import { mediaModelDefaults, type MediaModelDefaults } from '~/lib/media/provider-defaults';
 import { createManagedDispatcher, MEDIA_TOOLS } from './dispatch';
 import { MANAGED_CUSTOM_TOOL_NAMES } from './tools';
 
@@ -95,7 +96,7 @@ function fakeProvider(name: MediaProviderName, behaviour: 'ok' | 'refuse' = 'ok'
   return { provider, created };
 }
 
-function dispatcherWith(media: { provider: MediaProvider } | null) {
+function dispatcherWith(media: { provider: MediaProvider; defaults?: MediaModelDefaults } | null) {
   const tasks: MediaTaskEvent[] = [];
   const dispatcher = createManagedDispatcher({
     generationId: 'gen_media_spec',
@@ -107,7 +108,14 @@ function dispatcherWith(media: { provider: MediaProvider } | null) {
     emitPreview: () => undefined,
     emitTodos: () => undefined,
     media: media
-      ? { userId: USER, projectId: PROJECT, provider: media.provider, objectStore: store, emit: (e) => tasks.push(e) }
+      ? {
+          userId: USER,
+          projectId: PROJECT,
+          provider: media.provider,
+          objectStore: store,
+          emit: (e: MediaTaskEvent) => tasks.push(e),
+          ...(media.defaults ? { defaults: media.defaults } : {}),
+        }
       : null,
   });
 
@@ -176,11 +184,18 @@ describe('managed media tools — the server answers them (T8)', () => {
     expect(await reasons()).toEqual([]);
   });
 
-  it('generate_sound on a gateway with NO audio (fal, until T6): "not available on FAL", no debit, no task', async () => {
+  /*
+   * Every shipped gateway serves audio since T6, so a gateway WITHOUT it is a stub defaults table
+   * (`sound: null`) — the shape a future audio-less gateway would have.
+   */
+  it('generate_sound on a gateway with NO audio: "not available on FAL", no debit, no task', async () => {
     await fund(1000);
 
     const { provider, created } = fakeProvider('FAL');
-    const { dispatcher, tasks } = dispatcherWith({ provider });
+    const { dispatcher, tasks } = dispatcherWith({
+      provider,
+      defaults: { ...mediaModelDefaults('FAL'), sound: null },
+    });
     const answer = await dispatcher.dispatch(call('generate_sound', { prompt: 'a coin pickup chime' }));
 
     expect(answer?.isError).toBe(true);
@@ -188,6 +203,19 @@ describe('managed media tools — the server answers them (T8)', () => {
     expect(created).toHaveLength(0);
     expect(tasks).toHaveLength(0);
     expect(await reasons()).toEqual([['adjustment', 1000]]);
+  });
+
+  it('generate_sound on FAL (T6) debits and starts an audio task on fal-queue', async () => {
+    await fund(1000);
+
+    const { provider, created } = fakeProvider('FAL');
+    const { dispatcher, tasks } = dispatcherWith({ provider });
+    const answer = await dispatcher.dispatch(call('generate_sound', { prompt: 'a coin pickup chime' }));
+
+    expect(answer?.isError).toBe(false);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ endpoint: 'fal-queue', model: 'fal-ai/elevenlabs/sound-effects/v2' });
+    expect(tasks[0]).toMatchObject({ kind: 'audio' });
   });
 
   it('CONTROL: generate_sound on KIE (which serves audio) does debit and start a task', async () => {

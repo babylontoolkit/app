@@ -40,6 +40,8 @@
  * both would pay twice for two copies that can disagree.
  */
 
+import { mediaModelDefaults, type MediaModelDefaults } from '~/lib/media/provider-defaults';
+
 export interface MediaNoteInput {
   /** Media tools are actually in this turn's tool set — never advertise a capability that is absent. */
   hasMediaTools: boolean;
@@ -58,6 +60,17 @@ export interface MediaNoteInput {
    * reliably breaks without one is "do not wait for the render".
    */
   creationPhase?: string | null;
+
+  /**
+   * The media gateway this turn's tools were built for. `generate_sound` is named only when its
+   * defaults (`mediaModelDefaults` — the SAME table `createMediaTools` gates the tool on) have a
+   * non-null `sound`: the tool is absent on a gateway with no audio, and a note naming it there
+   * advertises a capability the turn does not have.
+   */
+  mediaProvider?: string | null;
+
+  /** Overrides the table lookup — tests only (a stub gateway with `sound: null`). */
+  defaults?: Pick<MediaModelDefaults, 'sound'>;
 }
 
 export function mediaProtocolNote(input: MediaNoteInput): string | null {
@@ -65,17 +78,28 @@ export function mediaProtocolNote(input: MediaNoteInput): string | null {
     return null;
   }
 
+  const defaults = input.defaults ?? (input.mediaProvider ? mediaModelDefaults(input.mediaProvider) : undefined);
+
+  // No gateway named (older callers) = the tool is present: every shipped gateway has served sound since T6.
+  const hasSound = defaults === undefined || defaults.sound !== null;
+
   return [
     '# Built-in media generation (available this turn)',
     '',
-    'You have `generate_image` / `generate_video` / `generate_google_video` / `generate_sound`. They ' +
+    (hasSound
+      ? 'You have `generate_image` / `generate_video` / `generate_google_video` / `generate_sound`. They '
+      : 'You have `generate_image` / `generate_video` / `generate_google_video`. They ') +
       'save into the project under `public/assets/generated/` and cost the user credits. Use them when ' +
-      'the user asks for art or audio, or when bespoke assets are clearly needed for the design you ' +
+      `the user asks for ${hasSound ? 'art or audio' : 'art'}, or when bespoke assets are clearly needed for the design you ` +
       'are building. Rules:',
     '',
-    '- `generate_sound` covers gameplay sound effects (kind=sound_effect, the default), spoken lines ' +
-      '(kind=speech) and backing music (kind=music). Music costs several times an effect, so generate ' +
-      'it ONLY when the user actually asked for music.',
+    ...(hasSound
+      ? [
+          '- `generate_sound` covers gameplay sound effects (kind=sound_effect, the default), spoken lines ' +
+            '(kind=speech) and backing music (kind=music). Music costs several times an effect, so generate ' +
+            'it ONLY when the user actually asked for music.',
+        ]
+      : []),
     '- `<boltArtifact>` and `<boltAction>` are PLAIN-TEXT TAGS you write in your reply. NEVER call ' +
       'them as tools — they are not tools, and the call fails.',
     '- Ask for ONE image per call, at the point in the design where you need it. There is no batching ' +

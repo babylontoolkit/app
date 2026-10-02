@@ -211,6 +211,35 @@ describe('query — the status URL and the states', () => {
     expect(seen.map((request) => request.url)).toEqual([`${responseUrl}/status`, responseUrl]);
   });
 
+  /*
+   * T6: sound end to end through the client — submit an ElevenLabs effect, poll it, read the `{audio:{url}}`
+   * result. The result-shape table is covered by `falResultUrl` below; this proves the query path reaches it.
+   */
+  it('an audio job submits, polls and returns the {audio:{url}} file', async () => {
+    const model = 'fal-ai/elevenlabs/sound-effects/v2';
+    const { response_url: responseUrl } = submitted(model, 'req-sfx');
+
+    responder = async (request) =>
+      request.method === 'POST'
+        ? jsonResponse(submitted(model, 'req-sfx'))
+        : request.url.endsWith('/status')
+          ? jsonResponse({ status: 'COMPLETED' })
+          : jsonResponse({ audio: { url: 'https://v3.fal.media/files/chime.mp3', content_type: 'audio/mpeg' } });
+
+    const id = await client().create({
+      endpoint: FAL,
+      model,
+      payload: { text: 'coin chime', duration_seconds: 5, loop: false },
+    });
+
+    expect(id).toBe(responseUrl);
+    expect(seen[0].body).toEqual({ text: 'coin chime', duration_seconds: 5, loop: false });
+    expect(await client().query(FAL, id)).toEqual({
+      state: 'succeeded',
+      resultUrl: 'https://v3.fal.media/files/chime.mp3',
+    });
+  });
+
   it('a COMPLETED result with no file URL, or with an error, is failed', async () => {
     const { response_url: responseUrl } = submitted('fal-ai/nano-banana-2');
 

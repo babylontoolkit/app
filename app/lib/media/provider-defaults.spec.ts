@@ -48,10 +48,14 @@ import { BAKED_FAL_PRICES } from '~/lib/.server/billing/baked-fal-prices';
 import { findMediaModel, type MarketPriceList } from '~/lib/.server/billing/market-prices';
 import { activeMarketPrices, invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
 import { type ImageProviderName } from './image-capabilities';
+import { falRouteFor } from './fal-routes';
 import {
   isGoogleVideoModel,
   mediaModelDefaults,
   providersWithDefaults,
+  SOUND_MODELS,
+  soundEffectSeconds,
+  soundKindForModel,
   type MediaModelDefaults,
 } from './provider-defaults';
 
@@ -209,6 +213,7 @@ describe('the gateways have different defaults', () => {
         music: 'suno/generate-music',
         speech: 'elevenlabs/text-to-speech-multilingual-v2',
       },
+      googleVideoResolutions: ['720p', '1080p', '4k'],
     });
 
     expect(mediaModelDefaults('FAL')).toEqual({
@@ -221,8 +226,15 @@ describe('the gateways have different defaults', () => {
       videoModeHint: '',
       videoResolutionHint: 'Grok Imagine only: 480p or 720p. Default 720p.',
 
-      // NULL until fal sound ships (T6) — a non-null value would offer `generate_sound` and refuse it.
-      sound: null,
+      // ElevenLabs effects + speech and MiniMax music (T6).
+      sound: {
+        effect: 'fal-ai/elevenlabs/sound-effects/v2',
+        music: 'fal-ai/minimax-music/v2.6',
+        speech: 'fal-ai/elevenlabs/tts/multilingual-v2',
+      },
+
+      // No 4k on fal's Veo.
+      googleVideoResolutions: ['720p', '1080p'],
     });
   });
 
@@ -230,17 +242,58 @@ describe('the gateways have different defaults', () => {
    * The same invariant block 1 enforces for image/video, extended to sound: a default that the
    * gateway's own baked list cannot price is a tool round spent discovering it does not exist.
    */
-  it('prices every sound default in the gateway’s own baked list', () => {
-    const sound = mediaModelDefaults('KIE').sound!;
+  it('prices every sound model in the gateway’s own baked list', () => {
+    for (const provider of providersWithDefaults()) {
+      const models = SOUND_MODELS[provider];
+      const list = BAKED_BY_PROVIDER[provider];
 
-    for (const [slot, model] of Object.entries(sound)) {
-      expect(findMediaModel(BAKED_MARKET_PRICES, model), `KIE sound.${slot} (${model}) is unpriced`).not.toBeNull();
-      expect(findMediaModel(BAKED_MARKET_PRICES, model)!.pricing.kind, `${model} must be audio`).toBe('audio');
+      for (const model of [models.effect, models.music, ...models.speech]) {
+        expect(findMediaModel(list, model), `${provider} sound ${model} is unpriced`).not.toBeNull();
+        expect(findMediaModel(list, model)!.pricing.kind, `${model} must be audio`).toBe('audio');
+      }
+
+      // The defaults are drawn from the catalogue, never typed a second time.
+      expect(mediaModelDefaults(provider).sound).toEqual({
+        effect: models.effect,
+        music: models.music,
+        speech: models.speech[0],
+      });
     }
   });
 
-  it('CONTROL: a gateway with no audio offers no sound defaults to price', () => {
-    expect(mediaModelDefaults('FAL').sound).toBeNull();
+  it('routes every fal sound model — a priced id with no route is refused before the debit', () => {
+    const fal = SOUND_MODELS.FAL;
+
+    for (const model of [fal.effect, fal.music, ...fal.speech]) {
+      expect(falRouteFor(model), `${model} has no fal route`).not.toBeNull();
+    }
+  });
+
+  it('CONTROL: a KIE sound id is not priced on fal, and a fal one not on KIE', () => {
+    expect(findMediaModel(BAKED_FAL_PRICES, SOUND_MODELS.KIE.effect)).toBeNull();
+    expect(findMediaModel(BAKED_MARKET_PRICES, SOUND_MODELS.FAL.effect)).toBeNull();
+  });
+
+  it('soundKindForModel knows every gateway’s ids', () => {
+    for (const provider of providersWithDefaults()) {
+      const models = SOUND_MODELS[provider];
+
+      expect(soundKindForModel(models.effect)).toBe('sound_effect');
+      expect(soundKindForModel(models.music)).toBe('music');
+
+      for (const speech of models.speech) {
+        expect(soundKindForModel(speech)).toBe('speech');
+      }
+    }
+
+    // CONTROL: an image id is not sound.
+    expect(soundKindForModel('fal-ai/nano-banana-2')).toBeNull();
+  });
+
+  it('resolves one sound-effect length: fal defaults to 5 s, KIE has no length control', () => {
+    expect(soundEffectSeconds('FAL')).toBe(5);
+    expect(soundEffectSeconds('FAL', 12)).toBe(12);
+    expect(soundEffectSeconds('KIE')).toBeUndefined();
   });
 
   it('spells Veo differently on each gateway — one character, and it is the whole defect', () => {

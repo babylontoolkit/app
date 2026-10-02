@@ -25,7 +25,7 @@
  * in this file and `fal-client.ts` so the probe can correct it in one place.
  */
 
-/** How a fal model's request body is shaped. Sound families arrive with T6. */
+/** How a fal model's request body is shaped. */
 export type FalFamily =
   | 'image-nano'
   | 'image-seedream'
@@ -55,8 +55,9 @@ export interface FalRoute {
 /**
  * Every fal model the platform can submit. Keys are the price-list ids (`baked-fal-prices.ts`).
  *
- * ⚠️ Sound rows are priced (T2) but are NOT listed here until T6 builds their payloads: an unroutable
- * model is refused before the debit, which is the honest state for a capability that is not built yet.
+ * The sound rows (T6) share their ids with `SOUND_MODELS.FAL` (`provider-defaults.ts`) — the catalogue
+ * the validator, the agent tool and the panel read. A sound model listed there but not here would be
+ * refused before the debit; `provider-defaults.spec.ts` keeps the two in step.
  */
 export const FAL_ROUTES: Readonly<Record<string, FalRoute>> = {
   'fal-ai/nano-banana-2': { family: 'image-nano', label: 'Nano Banana 2 (default)' },
@@ -72,6 +73,10 @@ export const FAL_ROUTES: Readonly<Record<string, FalRoute>> = {
   'xai/grok-imagine-video/text-to-video': { family: 'video-grok', label: 'Grok Imagine Video' },
   'fal-ai/veo3/fast': { family: 'video-veo', label: 'Veo 3 Fast — Google' },
   'fal-ai/veo3': { family: 'video-veo', label: 'Veo 3 — Google, 2x the credits' },
+  'fal-ai/elevenlabs/sound-effects/v2': { family: 'sfx', label: 'Sound effect (default)' },
+  'fal-ai/minimax-music/v2.6': { family: 'music-minimax', label: 'Music track' },
+  'fal-ai/elevenlabs/tts/multilingual-v2': { family: 'tts', label: 'Speech — multilingual v2' },
+  'fal-ai/elevenlabs/tts/turbo-v2.5': { family: 'tts', label: 'Speech — turbo 2.5 (cheaper)' },
 };
 
 export function falRouteFor(model: string): FalRoute | null {

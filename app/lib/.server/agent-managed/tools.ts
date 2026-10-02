@@ -20,6 +20,13 @@
  * `/workspace/agent` (D4, D12).
  */
 import type { BetaManagedAgentsCustomToolParams } from '@anthropic-ai/sdk/resources/beta/agents/agents';
+import { SOUND_MODELS } from '~/lib/media/provider-defaults';
+
+/**
+ * The per-second effect length the managed `duration` text quotes — read from the catalogue, never
+ * typed, so the two cannot drift. A constant of the code, so the provisioned text stays deterministic.
+ */
+const FAL_EFFECT_SECONDS = SOUND_MODELS.FAL.effectSeconds ?? { min: 0.5, max: 22, default: 5 };
 
 type JsonSchema = Record<string, unknown>;
 
@@ -225,7 +232,13 @@ export const MANAGED_CUSTOM_TOOLS: readonly BetaManagedAgentsCustomToolParams[] 
       title: str('Custom music only: track title.'),
       negative_tags: str('Custom music only: styles to avoid.'),
       vocal_gender: str('Custom vocal music only: m or f.'),
-      duration: num('Custom music only, V5_5 only: seconds, 10-360.'),
+
+      // Gateway-neutral on purpose: the managed agent is provisioned once, for every media gateway.
+      duration: num(
+        `Seconds. Effects, where the gateway prices them per second: ${FAL_EFFECT_SECONDS.min}-` +
+          `${FAL_EFFECT_SECONDS.max}, default ${FAL_EFFECT_SECONDS.default}. ` +
+          'Custom music on a Suno gateway (V5_5 only): 10-360.',
+      ),
     },
     ['prompt'],
   ),

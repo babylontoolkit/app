@@ -18,7 +18,13 @@
  */
 import { createScopedLogger } from '~/utils/logger';
 import { env } from '~/lib/.server/env';
-import { isGoogleVideoModel, soundKindForModel, type SoundKind } from '~/lib/media/provider-defaults';
+import {
+  isGoogleVideoModel,
+  soundEffectSeconds,
+  soundKindForModel,
+  soundModelsFor,
+  type SoundKind,
+} from '~/lib/media/provider-defaults';
 import { dispatchMediaCreate } from './dispatch';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
@@ -236,6 +242,16 @@ export interface MediaQuote {
 
   /** The cut-out pass's own raw cost, for the admin/step log. Present only when `delivery.cutout`. */
   cutoutUsd?: number;
+
+  /**
+   * The length the price was looked up with, when the QUOTE resolved one the caller did not state — a
+   * fal sound effect with no duration, priced per second at the gateway's default length.
+   *
+   * 🔴 The payload and the stored record take THIS value, never re-resolve it: a per-second price
+   * quoted for 5 seconds and a body sent with fal's own choice of length is a clip billed for a length
+   * nobody asked for. Absent means "the request's own `durationSeconds`".
+   */
+  durationSeconds?: number;
 }
 
 /**
@@ -293,13 +309,13 @@ export function quoteMediaRequest(
    * `video/mp4`. Billed right, delivered wrong, nothing thrown.
    */
   if (requested.pricing.kind === 'audio') {
-    // fal's sound rows are priced (T2) but have no request shape until T6 — refused before any debit.
+    // A sound row this gateway has no request shape for (an operator-added fal row) — refused before any debit.
     refuseUnroutable(mediaProvider, requested.id);
 
     const soundKind = soundKindForModel(requested.id) ?? 'sound_effect';
     const options = { ...request.options };
 
-    if (soundKind === 'music') {
+    if (soundKind === 'music' && MUSIC_NEEDS_CALLBACK[mediaProvider]) {
       const callbackUrl = resolveMediaCallbackUrl(context);
 
       if (!callbackUrl) {
@@ -314,16 +330,28 @@ export function quoteMediaRequest(
       options.callbackUrl = callbackUrl;
     }
 
+    /*
+     * 🔴 ONE RESOLVER FOR THE LENGTH (`soundEffectSeconds`). fal prices effects PER SECOND, and a request
+     * with no length cannot be priced — so the gateway's default is applied HERE, and the payload and the
+     * record take it from the quote. KIE's effects have no length control and pass through unchanged.
+     */
+    const durationSeconds =
+      soundKind === 'sound_effect'
+        ? soundEffectSeconds(mediaProvider, request.durationSeconds)
+        : request.durationSeconds;
+    const soundRequest = { ...request, durationSeconds };
+
     const price = lookupMediaPrice(list, {
       model: request.model,
-      options: lookupOptions(request),
+      options: lookupOptions(soundRequest),
+      durationSeconds,
 
       // Speech is billed per 1,000 characters of what it will SPEAK, which is the prompt verbatim.
       textChars: request.prompt?.length ?? 0,
     });
 
     if (!price) {
-      throw new MediaRefusedError(unpricedMessage(list, request));
+      throw new MediaRefusedError(unpricedMessage(list, soundRequest));
     }
 
     return {
@@ -332,6 +360,7 @@ export function quoteMediaRequest(
       usd: price.usd,
       credits: creditsForRawCost(price.usd, config),
       options,
+      ...(durationSeconds !== undefined ? { durationSeconds } : {}),
     };
   }
 
@@ -544,6 +573,18 @@ function providerVideoOptions(
 }
 
 /**
+ * Does this gateway's MUSIC route need a publicly reachable callback URL (`resolveMediaCallbackUrl`)?
+ *
+ * KIE's Suno music API rejects a request without one even though we poll; fal's queue is polled and
+ * needs none. A table, never a provider-name check: a gateway added to `MediaProviderName` must answer
+ * here or fail to compile, rather than silently inheriting a refusal that names KIE.
+ */
+const MUSIC_NEEDS_CALLBACK: Record<MediaProviderName, boolean> = {
+  KIE: true,
+  FAL: false,
+};
+
+/**
  * Refuse, BEFORE the debit, a priced model this gateway cannot actually submit. Only fal has a route
  * table (`fal-routes.ts`): a row an operator adds to fal's price list for a model the platform has no
  * request shape for — or a video length fal cannot render exactly — would otherwise be debited and then
@@ -704,7 +745,12 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
       input.provider.create({
         endpoint: endpointFor(mediaProvider, quote.model),
         model: quote.model,
-        payload: buildProviderPayload(quote.model, { ...input, options: quote.options }, quote.delivery, mediaProvider),
+        payload: buildProviderPayload(
+          quote.model,
+          { ...input, options: quote.options, durationSeconds: quote.durationSeconds ?? input.durationSeconds },
+          quote.delivery,
+          mediaProvider,
+        ),
       }),
     );
   } catch (error) {
@@ -744,7 +790,9 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
      * billed for something else is how a task becomes unauditable.
      */
     options: quote.options,
-    durationSeconds: input.durationSeconds,
+
+    // The length that was BILLED — the quote's resolution of it, when the caller stated none.
+    durationSeconds: quote.durationSeconds ?? input.durationSeconds,
     destPath,
     usd: quote.usd,
     credits: debited,
@@ -1369,11 +1417,31 @@ function buildFalPayload(model: string, request: MediaRequest, delivery?: ImageD
       // Stage 2 is created by the poll path (`cutoutTaskFor`), never quoted as a primary model.
       throw new Error(`internal: the fal cut-out "${model}" is not a model a request is built for`);
 
-    case 'sfx':
+    case 'sfx': {
+      /*
+       * 🔴 THE LENGTH IS ALWAYS SENT, and it is the quoted one (`soundEffectSeconds`): the row is priced
+       * per second, so leaving it to fal ("the model picks a length") bills one length and renders another.
+       */
+      const seconds = soundEffectSeconds('FAL', request.durationSeconds);
+
+      return { text: request.prompt, duration_seconds: seconds, loop: Boolean(o.loop ?? false) };
+    }
+
     case 'tts':
-    case 'music-minimax':
-      // T6. No route lists these families yet, so the quote refuses them before any debit.
-      throw new Error(`internal: fal sound ("${model}") has no payload builder yet`);
+      // The voice NAME — validated against fal's documented list before the debit; the default is its first.
+      return { text: request.prompt, voice: str(o.voice, soundModelsFor('FAL')?.voices?.[0] ?? 'Rachel') };
+
+    case 'music-minimax': {
+      const instrumental = Boolean(o.instrumental ?? true);
+
+      return {
+        prompt: request.prompt,
+        is_instrumental: instrumental,
+
+        // Required unless instrumental — `validateSoundRequest` refuses vocals without lyrics up front.
+        ...(!instrumental && typeof o.lyrics === 'string' ? { lyrics: o.lyrics } : {}),
+      };
+    }
 
     default: {
       const unreachable: never = route.family;
@@ -1394,7 +1462,8 @@ export function deriveDestPath(
 ): string {
   /*
    * `finalFormat` — what actually lands on disk after any cut-out pass, never what was rendered.
-   * Audio is always MP3: both KIE sound APIs return MP3 and neither transcodes.
+   * Audio is always MP3: both KIE sound APIs return MP3 and neither transcodes, and fal documents MP3
+   * for all three of its sound models (ElevenLabs effects and speech, MiniMax music).
    */
   const ext =
     kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : requireDelivery(delivery, request.model).finalFormat;

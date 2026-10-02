@@ -988,7 +988,7 @@ export function requireMediaKey(provider: MediaProviderName, context?: unknown):
   if (!apiKey) {
     throw new NotConfiguredError(
       `The media key for ${provider}`,
-      `Set ${MEDIA_KEY_ENV[provider]} in the server environment — image/video generation uses the ` +
+      `Set ${MEDIA_KEY_ENV[provider]} in the server environment — media generation uses the ` +
         `platform ${provider} key.`,
     );
   }

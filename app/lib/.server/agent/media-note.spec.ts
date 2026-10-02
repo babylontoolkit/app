@@ -6,6 +6,7 @@
  * "the artifact doesn't come back when we generate images from chat" report).
  */
 import { describe, expect, it } from 'vitest';
+import { mediaModelDefaults, type MediaModelDefaults } from '~/lib/media/provider-defaults';
 import { mediaProtocolNote } from './media-note';
 
 const base = { hasMediaTools: true, isFirstBuildTurn: false };
@@ -91,6 +92,25 @@ describe('the sound tool is advertised and its cost is stated', () => {
 
     expect(note).toMatch(/kind=music/);
     expect(note).toMatch(/only when the user actually asked for music/i);
+  });
+
+  /*
+   * The tool is ABSENT on a gateway with no audio (`createMediaTools` gates it on `defaults.sound`), so
+   * naming it there advertises a capability the turn does not have — a refused call on every turn
+   * that believes the note. A stub table: every shipped gateway serves audio since T6.
+   */
+  it('does not name generate_sound when the gateway has no sound', () => {
+    const silent: MediaModelDefaults = { ...mediaModelDefaults('FAL'), sound: null };
+    const note = mediaProtocolNote({ ...base, defaults: silent })!;
+
+    expect(note).not.toContain('generate_sound');
+    expect(note).not.toMatch(/kind=music/);
+    expect(note).toContain('`generate_image` / `generate_video` / `generate_google_video`.');
+
+    // CONTROL: both shipped gateways DO serve sound, and the note says so for each.
+    for (const provider of ['KIE', 'FAL'] as const) {
+      expect(mediaProtocolNote({ ...base, mediaProvider: provider })!).toContain('generate_sound');
+    }
   });
 
   /* CONTROL: it is still absent when the turn has no media tools at all. */

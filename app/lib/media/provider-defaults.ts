@@ -105,48 +105,174 @@ export interface MediaModelDefaults {
    * on every turn that wants one — the same wasted round the image/video defaults exist to remove.
    */
   sound: { effect: string; music: string; speech: string } | null;
+
+  /**
+   * The resolutions `generate_google_video` may name on this gateway, default first.
+   *
+   * ⚠️ Gateway-scoped because the cached tool description is built from it: fal's Veo renders 720p and
+   * 1080p only, so the KIE text ("720p, 1080p or 4k") promised a 4k clip fal would render at 720p while
+   * billing the request as asked. The tool refuses a resolution outside this list, before any debit.
+   */
+  googleVideoResolutions: readonly string[];
 }
 
 /** The three kinds `generate_sound` serves — the MCP's vocabulary (`kie-sound`), kept verbatim. */
 export type SoundKind = 'sound_effect' | 'music' | 'speech';
 
+/** Suno version options — a REQUEST option, never a price key (every version costs the same). */
+export const SUNO_EFFECT_VERSIONS = ['V5', 'V5_5'] as const;
+export const SUNO_MUSIC_VERSIONS = ['V4', 'V4_5', 'V4_5PLUS', 'V4_5ALL', 'V5', 'V5_5'] as const;
+
 /**
- * The canonical sound model ids, named ONCE.
+ * How a gateway's sound arguments are spoken — which validator and which tool text apply.
+ *
+ * A DIALECT, not a provider name: KIE serves Suno (effects + music, with a version option) and
+ * ElevenLabs (speech, any voice id); fal serves ElevenLabs effects with a length, ElevenLabs speech
+ * with a fixed set of voice NAMES, and MiniMax music with lyrics. A third gateway that spoke either
+ * dialect would reuse it rather than adding a branch.
+ */
+export type SoundDialect = 'suno' | 'elevenlabs-minimax';
+
+/** One gateway's sound catalogue (SPEC §4.16, `_specs/media-gateways_plan.md` T6). */
+export interface SoundModels {
+  dialect: SoundDialect;
+
+  /** The PRICED model id for each kind — a price-list key, a wire route and a payload shape at once. */
+  effect: string;
+  music: string;
+
+  /** Speech model ids, the default FIRST. */
+  speech: readonly string[];
+
+  /**
+   * The voice names this gateway accepts, the default FIRST — or `null` when any voice name or id is
+   * accepted (KIE's ElevenLabs takes raw voice ids, so a list would refuse real voices).
+   *
+   * ⚠️ fal's `voice` is a free string with NO enum in its schema, so an unknown name is refused only at
+   * run time — after the debit. Offering exactly the documented list is what makes that refusal free.
+   */
+  voices: readonly string[] | null;
+
+  /** Suno version choices for effects and music, or `null` on a gateway with no version option. */
+  musicOptions: { effectVersions: readonly string[]; musicVersions: readonly string[] } | null;
+
+  /**
+   * A sound effect's length in seconds — the bounds and the default used when none is stated — or
+   * `null` when the gateway has no length control (Suno picks its own).
+   *
+   * 🔴 The default is not cosmetic on a gateway that prices effects PER SECOND: a request with no
+   * length cannot be priced at all, so the quote and the payload both resolve it through
+   * `soundEffectSeconds` — one function, so the length billed is the length asked for.
+   */
+  effectSeconds: { min: number; max: number; default: number } | null;
+}
+
+/**
+ * The canonical sound model ids per gateway, named ONCE.
  *
  * These strings are a price-list key, a wire route and a payload shape all at the same time, read by
  * the service, the agent tool and the Media panel. Three copies of one id is how a model gets priced
  * under one spelling and created under another — `isSecretPath`'s rule, applied to a model slug.
+ *
+ * A RECORD, never a ternary: a gateway added to `ImageProviderName` must state its catalogue here or
+ * fail to compile.
  */
-export const SOUND_MODELS = {
-  effect: 'suno/generate-sounds',
-  music: 'suno/generate-music',
-  speech: 'elevenlabs/text-to-speech-multilingual-v2',
-  speechTurbo: 'elevenlabs/text-to-speech-turbo-2-5',
-} as const;
+export const SOUND_MODELS: Readonly<Record<ImageProviderName, SoundModels>> = {
+  KIE: {
+    dialect: 'suno',
+    effect: 'suno/generate-sounds',
+    music: 'suno/generate-music',
+    speech: ['elevenlabs/text-to-speech-multilingual-v2', 'elevenlabs/text-to-speech-turbo-2-5'],
+    voices: null,
+    musicOptions: { effectVersions: SUNO_EFFECT_VERSIONS, musicVersions: SUNO_MUSIC_VERSIONS },
+    effectSeconds: null,
+  },
 
-/** Suno version options — a REQUEST option, never a price key (every version costs the same). */
-export const SUNO_EFFECT_VERSIONS = ['V5', 'V5_5'] as const;
-export const SUNO_MUSIC_VERSIONS = ['V4', 'V4_5', 'V4_5PLUS', 'V4_5ALL', 'V5', 'V5_5'] as const;
-export const SPEECH_MODELS = [SOUND_MODELS.speech, SOUND_MODELS.speechTurbo] as const;
+  /*
+   * fal.ai — each id is the fal model path, its price-list key (`baked-fal-prices.ts`) and its route
+   * (`fal-routes.ts`). Voices are fal's documented ElevenLabs names (read 2026-10-01).
+   */
+  FAL: {
+    dialect: 'elevenlabs-minimax',
+    effect: 'fal-ai/elevenlabs/sound-effects/v2',
+    music: 'fal-ai/minimax-music/v2.6',
+    speech: ['fal-ai/elevenlabs/tts/multilingual-v2', 'fal-ai/elevenlabs/tts/turbo-v2.5'],
+    voices: [
+      'Rachel',
+      'Aria',
+      'Roger',
+      'Sarah',
+      'Laura',
+      'Charlie',
+      'George',
+      'Callum',
+      'River',
+      'Liam',
+      'Charlotte',
+      'Alice',
+      'Matilda',
+      'Will',
+      'Jessica',
+      'Eric',
+      'Chris',
+      'Brian',
+      'Daniel',
+      'Lily',
+      'Bill',
+    ],
+    musicOptions: null,
+    effectSeconds: { min: 0.5, max: 22, default: 5 },
+  },
+};
+
+/** A gateway's sound catalogue, or `null` for one this table does not know (never KIE's by default). */
+export function soundModelsFor(provider: ImageProviderName | string): SoundModels | null {
+  return Object.hasOwn(SOUND_MODELS, provider) ? SOUND_MODELS[provider as ImageProviderName] : null;
+}
+
+/**
+ * The length a sound effect is priced AND requested at, in seconds — or `undefined` where the gateway
+ * has no length control.
+ *
+ * The ONE resolver both the quote and the payload read: a per-second price looked up with one length
+ * and a body sent with another bills a clip that was never rendered.
+ */
+export function soundEffectSeconds(provider: ImageProviderName | string, requested?: number): number | undefined {
+  const range = soundModelsFor(provider)?.effectSeconds;
+
+  return range ? (requested ?? range.default) : requested;
+}
 
 /**
  * Which sound kind a model id is, or `null` when it is not a sound model at all.
  *
  * The ONE writer of that question — `endpointFor`, `buildProviderPayload` and `deriveDestPath` all
- * ask it, and three private spellings is the `isGoogleVideoModel` lesson repeating.
+ * ask it, and three private spellings is the `isGoogleVideoModel` lesson repeating. Every gateway's
+ * ids are checked, through the table, so a fal id is never mistaken for "not sound".
  */
 export function soundKindForModel(model: string): SoundKind | null {
   const id = model.trim();
 
-  if (id === SOUND_MODELS.effect) {
-    return 'sound_effect';
+  for (const catalogue of Object.values(SOUND_MODELS)) {
+    if (id === catalogue.effect) {
+      return 'sound_effect';
+    }
+
+    if (id === catalogue.music) {
+      return 'music';
+    }
+
+    if (catalogue.speech.includes(id)) {
+      return 'speech';
+    }
   }
 
-  if (id === SOUND_MODELS.music) {
-    return 'music';
-  }
+  return null;
+}
 
-  return id.startsWith('elevenlabs/') ? 'speech' : null;
+/** The `{effect, music, speech}` defaults a gateway's sound catalogue implies (speech: its first id). */
+function soundDefaults(models: SoundModels): NonNullable<MediaModelDefaults['sound']> {
+  return { effect: models.effect, music: models.music, speech: models.speech[0] };
 }
 
 const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
@@ -157,7 +283,8 @@ const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
     videoAlternatives: ' Also: kling-2.6, bytedance/seedance-2, …',
     videoModeHint: 'kling-3.0 tier: std (720p), pro (1080p) or 4K. Default std.',
     videoResolutionHint: 'For seedance/grok models: 480p, 720p, 1080p, 4K.',
-    sound: { effect: SOUND_MODELS.effect, music: SOUND_MODELS.music, speech: SOUND_MODELS.speech },
+    sound: soundDefaults(SOUND_MODELS.KIE),
+    googleVideoResolutions: ['720p', '1080p', '4k'],
   },
 
   /*
@@ -178,8 +305,11 @@ const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
     videoModeHint: '',
     videoResolutionHint: 'Grok Imagine only: 480p or 720p. Default 720p.',
 
-    /* Sound on fal arrives with T6; until then the tool and the panel's Sound tab are absent here. */
-    sound: null,
+    /* ElevenLabs effects and speech, MiniMax music (T6). */
+    sound: soundDefaults(SOUND_MODELS.FAL),
+
+    /* fal's Veo takes `720p` / `1080p` only — no 4k. */
+    googleVideoResolutions: ['720p', '1080p'],
   },
 };
 

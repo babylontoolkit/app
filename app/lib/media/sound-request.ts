@@ -18,22 +18,38 @@
  * after the debit has been taken.
  *
  * It returns a RESULT rather than throwing: both callers want the sentence, not a stack trace.
+ *
+ * ## Per gateway (`_specs/media-gateways_plan.md` T6)
+ *
+ * The rules come from the gateway's sound catalogue (`SOUND_MODELS` in `provider-defaults.ts`), chosen
+ * by its DIALECT rather than by a provider-name check: KIE speaks Suno + ElevenLabs (versions, any voice
+ * id), fal speaks ElevenLabs + MiniMax (a fixed voice list, an effect length, music lyrics). A KIE voice
+ * id sent to fal, or a 30-second effect, is refused here — before the debit — with a sentence naming
+ * what is valid, instead of being refused at the gateway after the user has paid.
  */
-import {
-  SOUND_MODELS,
-  SPEECH_MODELS,
-  SUNO_EFFECT_VERSIONS,
-  SUNO_MUSIC_VERSIONS,
-  type SoundKind,
-} from './provider-defaults';
+import { soundModelsFor, type SoundDialect, type SoundKind, type SoundModels } from './provider-defaults';
+import type { ImageProviderName } from './image-capabilities';
 
 /** Tool/panel argument names (snake_case — the MCP's vocabulary, which the model already knows). */
 const COMMON_KEYS = ['prompt', 'kind', 'model', 'file_name'];
 
-const KIND_KEYS: Record<SoundKind, string[]> = {
-  sound_effect: ['loop', 'tempo', 'key'],
-  speech: ['voice', 'stability', 'similarity_boost', 'speech_style', 'speed', 'language_code'],
-  music: ['instrumental', 'custom_mode', 'style', 'title', 'negative_tags', 'vocal_gender', 'duration'],
+/**
+ * The arguments each kind accepts, per dialect, in the order the tool schema lists them.
+ *
+ * Exported because `generate_sound`'s schema is built from it: a parameter the schema offers but the
+ * validator refuses is a refused call on every turn that uses it.
+ */
+export const SOUND_KIND_KEYS: Readonly<Record<SoundDialect, Readonly<Record<SoundKind, readonly string[]>>>> = {
+  suno: {
+    sound_effect: ['loop', 'tempo', 'key'],
+    speech: ['voice', 'stability', 'similarity_boost', 'speech_style', 'speed', 'language_code'],
+    music: ['instrumental', 'custom_mode', 'style', 'title', 'negative_tags', 'vocal_gender', 'duration'],
+  },
+  'elevenlabs-minimax': {
+    sound_effect: ['loop', 'duration'],
+    speech: ['voice'],
+    music: ['instrumental', 'lyrics'],
+  },
 };
 
 const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -41,10 +57,19 @@ const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 /** Major and minor; `Cm` style, as KIE documents it. */
 export const SOUND_KEYS = [...NOTES, ...NOTES.map((note) => `${note}m`)];
 
-const PROMPT_LIMIT: Record<SoundKind, number> = { sound_effect: 500, speech: 5000, music: 3000 };
+/** Prompt length bounds per dialect and kind (`min` only where the gateway documents one). */
+const PROMPT_LIMIT: Record<SoundDialect, Record<SoundKind, { min?: number; max: number }>> = {
+  suno: { sound_effect: { max: 500 }, speech: { max: 5000 }, music: { max: 3000 } },
+
+  /* MiniMax Music v2.6 takes a 10–2000 character prompt (fal's schema). */
+  'elevenlabs-minimax': { sound_effect: { max: 500 }, speech: { max: 5000 }, music: { min: 10, max: 2000 } },
+};
 
 /** Custom-mode music takes longer lyrics — except on V4, which did not raise the limit. */
 const CUSTOM_MUSIC_PROMPT_LIMIT = 5000;
+
+/** MiniMax lyrics cap — an ASSUMPTION (fal documents the field, not its limit); generous on purpose. */
+const LYRICS_LIMIT = 3000;
 
 export interface SoundRequestInput {
   [key: string]: unknown;
@@ -63,6 +88,12 @@ export type SoundRequestResult =
       /** The normalised option record the price lookup and the provider payload both read. */
       options: Record<string, string | number | boolean>;
 
+      /**
+       * A sound effect's requested length in seconds, where the gateway has a length control. Unset
+       * means "the gateway's default" — resolved once, in `soundEffectSeconds`, by the quote.
+       */
+      durationSeconds?: number;
+
       fileName?: string;
     }
   | { ok: false; error: string };
@@ -71,32 +102,9 @@ function refuse(error: string): SoundRequestResult {
   return { ok: false, error };
 }
 
-export function validateSoundRequest(args: SoundRequestInput): SoundRequestResult {
-  if (!args || typeof args !== 'object' || Array.isArray(args)) {
-    return refuse('Expected an object of sound arguments.');
-  }
-
-  const kind = (args.kind === undefined ? 'sound_effect' : args.kind) as SoundKind;
-
-  if (typeof kind !== 'string' || !Object.hasOwn(KIND_KEYS, kind)) {
-    return refuse('kind must be sound_effect, speech or music');
-  }
-
-  /*
-   * An option belonging to ANOTHER kind is refused by name rather than ignored. Silently dropping
-   * `voice` from a speech request the caller spelled as an effect produces a render that is not what
-   * was asked for, at full price — the refusal costs a round and nothing else.
-   */
-  const allowed = new Set([...COMMON_KEYS, ...KIND_KEYS[kind]]);
-
-  for (const key of Object.keys(args)) {
-    if (args[key] !== undefined && !allowed.has(key)) {
-      return refuse(`${key} is not supported for ${kind}`);
-    }
-  }
-
-  const options: Record<string, string | number | boolean> = {};
-  let failure: string | undefined;
+/** The typed readers both dialects use; the first failure wins and is reported. */
+function readerFor(args: SoundRequestInput) {
+  const state: { failure?: string } = {};
 
   const str = (key: string, max = Infinity): string | undefined => {
     const value = args[key];
@@ -106,7 +114,7 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
     }
 
     if (typeof value !== 'string' || !value.trim() || value.length > max) {
-      failure ??= `${key} must be a nonempty string${Number.isFinite(max) ? ` of at most ${max} characters` : ''}`;
+      state.failure ??= `${key} must be a nonempty string${Number.isFinite(max) ? ` of at most ${max} characters` : ''}`;
       return undefined;
     }
 
@@ -119,7 +127,7 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
     }
 
     if (typeof args[key] !== 'boolean') {
-      failure ??= `${key} must be a boolean`;
+      state.failure ??= `${key} must be a boolean`;
       return fallback;
     }
 
@@ -140,30 +148,94 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
       value > max ||
       (integer && !Number.isInteger(value))
     ) {
-      failure ??= `${key} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}`;
+      state.failure ??= `${key} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}`;
       return undefined;
     }
 
     return value;
   };
 
-  const requestedModel = str('model');
+  return { state, str, bool, num };
+}
 
-  if (failure) {
-    return refuse(failure);
+type Reader = ReturnType<typeof readerFor>;
+
+export function validateSoundRequest(
+  args: SoundRequestInput,
+  provider: ImageProviderName | string,
+): SoundRequestResult {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return refuse('Expected an object of sound arguments.');
   }
 
-  if (kind === 'speech') {
-    const model = requestedModel ?? SOUND_MODELS.speech;
+  const models = soundModelsFor(provider);
 
-    if (!SPEECH_MODELS.includes(model as (typeof SPEECH_MODELS)[number])) {
-      return refuse(`Unsupported speech model: ${model}. Use ${SPEECH_MODELS.join(', ')}`);
+  if (!models) {
+    return refuse(`The ${provider} media gateway serves no sound.`);
+  }
+
+  const kind = (args.kind === undefined ? 'sound_effect' : args.kind) as SoundKind;
+  const kindKeys = SOUND_KIND_KEYS[models.dialect];
+
+  if (typeof kind !== 'string' || !Object.hasOwn(kindKeys, kind)) {
+    return refuse('kind must be sound_effect, speech or music');
+  }
+
+  /*
+   * An option belonging to ANOTHER kind is refused by name rather than ignored. Silently dropping
+   * `voice` from a speech request the caller spelled as an effect produces a render that is not what
+   * was asked for, at full price — the refusal costs a round and nothing else.
+   */
+  const allowed = new Set([...COMMON_KEYS, ...kindKeys[kind]]);
+
+  for (const key of Object.keys(args)) {
+    if (args[key] !== undefined && !allowed.has(key)) {
+      return refuse(`${key} is not supported for ${kind}`);
+    }
+  }
+
+  const reader = readerFor(args);
+  const requestedModel = reader.str('model');
+
+  if (reader.state.failure) {
+    return refuse(reader.state.failure);
+  }
+
+  return DIALECT_VALIDATORS[models.dialect](args, { kind, models, requestedModel, reader });
+}
+
+interface DialectInput {
+  kind: SoundKind;
+  models: SoundModels;
+  requestedModel: string | undefined;
+  reader: Reader;
+}
+
+const DIALECT_VALIDATORS: Record<SoundDialect, (args: SoundRequestInput, input: DialectInput) => SoundRequestResult> = {
+  suno: validateSuno,
+  'elevenlabs-minimax': validateElevenLabsMiniMax,
+};
+
+/** KIE: Suno effects and music (a VERSION in `model`), ElevenLabs speech (any voice id). */
+function validateSuno(
+  args: SoundRequestInput,
+  { kind, models, requestedModel, reader }: DialectInput,
+): SoundRequestResult {
+  const { str, bool, num, state } = reader;
+  const limits = PROMPT_LIMIT.suno;
+  const options: Record<string, string | number | boolean> = {};
+
+  if (kind === 'speech') {
+    const model = requestedModel ?? models.speech[0];
+
+    if (!models.speech.includes(model)) {
+      return refuse(`Unsupported speech model: ${model}. Use ${models.speech.join(', ')}`);
     }
 
-    const prompt = str('prompt', PROMPT_LIMIT.speech);
+    const prompt = str('prompt', limits.speech.max);
 
     if (!prompt) {
-      return refuse(failure ?? 'generate_sound needs a "prompt" — for speech it is the exact text to say.');
+      return refuse(state.failure ?? 'generate_sound needs a "prompt" — for speech it is the exact text to say.');
     }
 
     const voice = str('voice');
@@ -192,8 +264,11 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
         return refuse('language_code must be a two-letter ISO 639-1 code');
       }
 
-      if (model !== SOUND_MODELS.speechTurbo) {
-        return refuse(`language_code is only supported by ${SOUND_MODELS.speechTurbo}`);
+      // The turbo model is the one that takes a language code; named from the catalogue, never typed.
+      const turbo = models.speech.find((id) => id.includes('turbo'));
+
+      if (model !== turbo) {
+        return refuse(`language_code is only supported by ${turbo}`);
       }
 
       options.languageCode = language;
@@ -202,7 +277,7 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
     // Read BEFORE the guard, or a bad file_name sets `failure` too late to be reported.
     const fileName = str('file_name');
 
-    return failure ? refuse(failure) : { ok: true, kind, model, prompt, options, fileName };
+    return state.failure ? refuse(state.failure) : { ok: true, kind, model, prompt, options, fileName };
   }
 
   /*
@@ -210,7 +285,8 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
    * Keeping the tool's vocabulary identical to the MCP's matters more than the mismatch reads: the
    * version rides in `options.sunoModel` and the priced id comes from the kind.
    */
-  const versions: readonly string[] = kind === 'music' ? SUNO_MUSIC_VERSIONS : SUNO_EFFECT_VERSIONS;
+  const versions: readonly string[] =
+    (kind === 'music' ? models.musicOptions?.musicVersions : models.musicOptions?.effectVersions) ?? [];
   const version = requestedModel ?? 'V5';
 
   if (!versions.includes(version)) {
@@ -220,10 +296,10 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
   options.sunoModel = version;
 
   if (kind === 'sound_effect') {
-    const prompt = str('prompt', PROMPT_LIMIT.sound_effect);
+    const prompt = str('prompt', limits.sound_effect.max);
 
     if (!prompt) {
-      return refuse(failure ?? 'generate_sound needs a "prompt" describing the sound.');
+      return refuse(state.failure ?? 'generate_sound needs a "prompt" describing the sound.');
     }
 
     options.loop = bool('loop', false);
@@ -246,15 +322,15 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
 
     const fileName = str('file_name');
 
-    return failure ? refuse(failure) : { ok: true, kind, model: SOUND_MODELS.effect, prompt, options, fileName };
+    return state.failure ? refuse(state.failure) : { ok: true, kind, model: models.effect, prompt, options, fileName };
   }
 
   const customMode = bool('custom_mode', false);
-  const limit = customMode && version !== 'V4' ? CUSTOM_MUSIC_PROMPT_LIMIT : PROMPT_LIMIT.music;
+  const limit = customMode && version !== 'V4' ? CUSTOM_MUSIC_PROMPT_LIMIT : limits.music.max;
   const prompt = str('prompt', limit);
 
   if (!prompt) {
-    return refuse(failure ?? 'generate_sound needs a "prompt" describing the music.');
+    return refuse(state.failure ?? 'generate_sound needs a "prompt" describing the music.');
   }
 
   options.customMode = customMode;
@@ -271,7 +347,7 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
     const title = str('title', 80);
 
     if (!style || !title) {
-      return refuse(failure ?? 'custom_mode music requires both style and title');
+      return refuse(state.failure ?? 'custom_mode music requires both style and title');
     }
 
     options.style = style;
@@ -310,7 +386,129 @@ export function validateSoundRequest(args: SoundRequestInput): SoundRequestResul
 
   const musicFileName = str('file_name');
 
-  return failure
-    ? refuse(failure)
-    : { ok: true, kind, model: SOUND_MODELS.music, prompt, options, fileName: musicFileName };
+  return state.failure
+    ? refuse(state.failure)
+    : { ok: true, kind, model: models.music, prompt, options, fileName: musicFileName };
+}
+
+/**
+ * fal: ElevenLabs effects (with a LENGTH) and speech (a fixed voice list), MiniMax music (lyrics).
+ *
+ * `model` names a priced id here, never a version — effects and music have one model each, so naming
+ * any other id is refused with the one that exists.
+ */
+function validateElevenLabsMiniMax(
+  args: SoundRequestInput,
+  { kind, models, requestedModel, reader }: DialectInput,
+): SoundRequestResult {
+  const { str, bool, num, state } = reader;
+  const limits = PROMPT_LIMIT['elevenlabs-minimax'];
+  const options: Record<string, string | number | boolean> = {};
+
+  if (kind === 'speech') {
+    const model = requestedModel ?? models.speech[0];
+
+    if (!models.speech.includes(model)) {
+      return refuse(`Unsupported speech model: ${model}. Use ${models.speech.join(', ')}`);
+    }
+
+    const prompt = str('prompt', limits.speech.max);
+
+    if (!prompt) {
+      return refuse(state.failure ?? 'generate_sound needs a "prompt" — for speech it is the exact text to say.');
+    }
+
+    const voice = str('voice');
+
+    if (voice !== undefined) {
+      /*
+       * Matched case-insensitively and stored in its CANONICAL spelling — fal takes the name, and
+       * "rachel" is not a different voice. An unknown name is refused here because fal would only
+       * refuse it after the render was paid for.
+       */
+      const known = models.voices?.find((name) => name.toLowerCase() === voice.trim().toLowerCase());
+
+      if (models.voices && !known) {
+        return refuse(
+          `voice "${voice}" is not available on this gateway. Use one of: ${models.voices.join(', ')} ` +
+            `(default ${models.voices[0]}).`,
+        );
+      }
+
+      options.voice = known ?? voice;
+    }
+
+    const fileName = str('file_name');
+
+    return state.failure ? refuse(state.failure) : { ok: true, kind, model, prompt, options, fileName };
+  }
+
+  const pricedModel = kind === 'music' ? models.music : models.effect;
+
+  if (requestedModel !== undefined && requestedModel !== pricedModel) {
+    return refuse(`Unsupported ${kind} model: ${requestedModel}. Use ${pricedModel} (or leave model unset)`);
+  }
+
+  if (kind === 'sound_effect') {
+    const prompt = str('prompt', limits.sound_effect.max);
+
+    if (!prompt) {
+      return refuse(state.failure ?? 'generate_sound needs a "prompt" describing the sound.');
+    }
+
+    options.loop = bool('loop', false);
+
+    const range = models.effectSeconds;
+    let durationSeconds: number | undefined;
+
+    if (args.duration !== undefined && range) {
+      durationSeconds = num('duration', range.min, range.max);
+
+      if (durationSeconds === undefined) {
+        return refuse(
+          `duration must be a number of seconds between ${range.min} and ${range.max} — sound effects here are ` +
+            `capped at ${range.max} seconds (default ${range.default}).`,
+        );
+      }
+    }
+
+    const fileName = str('file_name');
+
+    return state.failure
+      ? refuse(state.failure)
+      : { ok: true, kind, model: pricedModel, prompt, options, durationSeconds, fileName };
+  }
+
+  const prompt = str('prompt', limits.music.max);
+
+  if (!prompt) {
+    return refuse(state.failure ?? 'generate_sound needs a "prompt" describing the music.');
+  }
+
+  if (limits.music.min && prompt.trim().length < limits.music.min) {
+    return refuse(
+      `prompt must be ${limits.music.min}-${limits.music.max} characters for music — describe the style and mood.`,
+    );
+  }
+
+  options.instrumental = bool('instrumental', true);
+
+  const lyrics = str('lyrics', LYRICS_LIMIT);
+
+  if (lyrics !== undefined) {
+    if (options.instrumental) {
+      return refuse('lyrics requires instrumental: false');
+    }
+
+    options.lyrics = lyrics;
+  } else if (!options.instrumental && !state.failure) {
+    return refuse(
+      'music with vocals needs "lyrics" (the words to sing) — pass lyrics, or set instrumental: true for a ' +
+        'track without vocals.',
+    );
+  }
+
+  const fileName = str('file_name');
+
+  return state.failure ? refuse(state.failure) : { ok: true, kind, model: pricedModel, prompt, options, fileName };
 }

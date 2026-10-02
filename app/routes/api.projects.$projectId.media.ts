@@ -99,7 +99,7 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       if (!media) {
         throw new NotConfiguredError(
           `Media generation (${mediaKeyEnvFor(mediaProvider)})`,
-          `Set ${mediaKeyEnvFor(mediaProvider)} in the server environment — image/video generation ` +
+          `Set ${mediaKeyEnvFor(mediaProvider)} in the server environment — media generation ` +
             `uses the platform ${mediaProvider} key.`,
         );
       }

@@ -456,7 +456,7 @@ It changes three rules:
 
 > T5 (Comet audio routes in the Comet client) was removed with Comet on 2026-10-01. Its id is not reused.
 
-- [ ] **T6** — Make sound provider-aware on KIE and fal: models, validation, payloads, the music rule, the tool and the prompt note
+- [x] **T6** — Make sound provider-aware on KIE and fal: models, validation, payloads, the music rule, the tool and the prompt note
   - Depends on: T1 (Comet gone from `ImageProviderName`).
   - Files:
     - `app/lib/media/provider-defaults.ts` (modify)

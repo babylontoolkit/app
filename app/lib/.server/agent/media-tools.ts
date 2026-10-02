@@ -21,8 +21,15 @@ import { createScopedLogger } from '~/utils/logger';
 import type { ObjectStore } from '~/lib/.server/storage';
 import type { MediaProvider } from '~/lib/.server/media/provider';
 import { MediaRefusedError, startMediaTask, type StartedMediaTask } from '~/lib/.server/media/service';
-import { isGoogleVideoModel, mediaModelDefaults } from '~/lib/media/provider-defaults';
-import { validateSoundRequest } from '~/lib/media/sound-request';
+import {
+  isGoogleVideoModel,
+  mediaModelDefaults,
+  soundModelsFor,
+  type MediaModelDefaults,
+  type SoundDialect,
+  type SoundModels,
+} from '~/lib/media/provider-defaults';
+import { SOUND_KIND_KEYS, validateSoundRequest } from '~/lib/media/sound-request';
 
 const logger = createScopedLogger('media-tools');
 
@@ -101,6 +108,12 @@ export interface MediaToolContext {
 
   /** Push the started task to the client (api.agent writes it as a data part). */
   emit: (event: MediaTaskEvent) => void;
+
+  /**
+   * The gateway's defaults, injected only by tests (e.g. a gateway with `sound: null`). Production
+   * reads `mediaModelDefaults(provider.name)` — the ONE table the Media panel reads too.
+   */
+  defaults?: MediaModelDefaults;
 }
 
 interface CommonArgs {
@@ -131,7 +144,10 @@ export function createMediaTools(ctx: MediaToolContext) {
    * DESCRIPTIONS below are built from the same source: they ride in the cached prompt, so advertising
    * `nano-banana-2` on a fal deploy misleads the agent on every turn of every conversation.
    */
-  const defaults = mediaModelDefaults(ctx.provider.name);
+  const defaults = ctx.defaults ?? mediaModelDefaults(ctx.provider.name);
+  const soundModels = defaults.sound ? soundModelsFor(ctx.provider.name) : null;
+  const soundText = soundModels ? SOUND_TOOL_TEXT[soundModels.dialect](soundModels) : null;
+  const googleResolutions = defaults.googleVideoResolutions;
 
   const start = async (input: {
     model: string;
@@ -338,7 +354,10 @@ export function createMediaTools(ctx: MediaToolContext) {
       parameters: z.object({
         prompt: z.string().optional().describe('What happens in the video.'),
         model: z.string().optional().describe(`Veo model id on this gateway. Default ${defaults.googleVideo}.`),
-        resolution: z.string().optional().describe('720p, 1080p or 4k. Default 720p.'),
+        resolution: z
+          .string()
+          .optional()
+          .describe(`${joinOr(googleResolutions)}. Default ${googleResolutions[0]}.`),
         aspect_ratio: z.string().optional().describe('16:9 or 9:16. Default 16:9.'),
         duration_seconds: z.number().optional().describe('4, 6 or 8 seconds. Default 8.'),
         file_name: z.string().optional().describe('Preferred file name (without extension).'),
@@ -348,11 +367,30 @@ export function createMediaTools(ctx: MediaToolContext) {
           return 'generate_google_video needs a "prompt" describing the video.';
         }
 
+        /*
+         * Validated here, never with `z.enum` (a zod violation kills a paid generation): a resolution the
+         * gateway cannot render is refused BEFORE the debit. fal's Veo has no 4k, and its payload drops
+         * anything but 720p/1080p — so without this a "4k" request is billed as asked and rendered at 720p.
+         */
+        const resolution = args.resolution?.trim();
+
+        // The gateway's OWN spelling is what is forwarded — "1080P" from the model becomes "1080p".
+        const canonical = resolution
+          ? googleResolutions.find((r) => r.toLowerCase() === resolution.toLowerCase())
+          : googleResolutions[0];
+
+        if (!canonical) {
+          return (
+            `generate_google_video was refused: resolution "${resolution}" is not rendered on this gateway. ` +
+            `Use ${joinOr(googleResolutions)}.`
+          );
+        }
+
         return start({
           model: args.model?.trim() || defaults.googleVideo,
           prompt: args.prompt,
           options: {
-            resolution: args.resolution || '720p',
+            resolution: canonical,
             aspectRatio: args.aspect_ratio || '16:9',
           },
           durationSeconds: args.duration_seconds ?? 8,
@@ -367,67 +405,18 @@ export function createMediaTools(ctx: MediaToolContext) {
      * defaults table exists to remove. `undefined` keys are stripped below, so the tool is genuinely
      * absent rather than present-and-broken.
      */
-    ...(defaults.sound
+    ...(soundText
       ? {
           generate_sound: tool({
-            description:
-              'Generate a sound effect, a line of speech, or a music track with the built-in audio ' +
-              'generator and save it into the project under public/assets/generated/ as an MP3. ' +
-              'Costs the user credits (shown in the result). ' +
-              'kind=sound_effect (the default) for gameplay audio — jumps, pickups, engines, impacts, ' +
-              'UI clicks, ambience; it has no exact duration control. ' +
-              'kind=speech for spoken lines (announcer, narration, character voice). ' +
-              'kind=music for a backing track — only when the user actually asked for music; it is ' +
-              'several times the price of an effect. ' +
-              'Pass ONLY the fields that belong to the chosen kind. ' +
-              'Renders happen in the background: DO NOT wait or poll — reference the returned path now.',
-            parameters: z.object({
-              prompt: z
-                .string()
-                .optional()
-                .describe(
-                  'Effects: describe the sound (max 500 chars). Speech: the exact words to say ' +
-                    '(max 5000). Music: describe the track (max 3000).',
-                ),
-              kind: z.string().optional().describe('sound_effect (default), speech, or music.'),
-              model: z
-                .string()
-                .optional()
-                .describe(
-                  'Effects/music: a Suno version (V5 default, V5_5; music also V4, V4_5, V4_5PLUS, ' +
-                    'V4_5ALL). Speech: an ElevenLabs model id. Leave unset for the default.',
-                ),
-              file_name: z.string().optional().describe('Preferred file name (without extension).'),
-
-              loop: z.boolean().optional().describe('Effects only: make it loopable (ambience, engines).'),
-              tempo: z.number().optional().describe('Effects only: requested BPM, 1-300.'),
-              key: z.string().optional().describe('Effects only: musical key such as C or Am. Omit for any.'),
-
-              voice: z.string().optional().describe('Speech only: ElevenLabs voice name or id.'),
-              stability: z.number().optional().describe('Speech only: 0-1.'),
-              similarity_boost: z.number().optional().describe('Speech only: 0-1.'),
-              speech_style: z.number().optional().describe('Speech only: style exaggeration, 0-1.'),
-              speed: z.number().optional().describe('Speech only: 0.7-1.2.'),
-              language_code: z
-                .string()
-                .optional()
-                .describe('Speech only, turbo 2.5 model only: two-letter ISO 639-1 code.'),
-
-              instrumental: z.boolean().optional().describe('Music only: no vocals. Default true.'),
-              custom_mode: z.boolean().optional().describe('Music only: exact lyrics/style mode; needs style+title.'),
-              style: z.string().optional().describe('Custom music only: genre/mood.'),
-              title: z.string().optional().describe('Custom music only: track title.'),
-              negative_tags: z.string().optional().describe('Custom music only: styles to avoid.'),
-              vocal_gender: z.string().optional().describe('Custom vocal music only: m or f.'),
-              duration: z.number().optional().describe('Custom music only, V5_5 only: seconds, 10-360.'),
-            }),
+            description: soundText.description,
+            parameters: z.object(soundParameters(soundModels!.dialect, soundText.params)),
             execute: async (args: Record<string, unknown>) => {
               /*
                * Every rule lives in one pure validator shared with the Media panel, and a refusal is a
                * SENTENCE, never a throw: a zod-shaped failure would kill a generation the user has
                * already paid for, where this is something the model fixes on the next round.
                */
-              const request = validateSoundRequest(args);
+              const request = validateSoundRequest(args, ctx.provider.name);
 
               if (!request.ok) {
                 return `generate_sound was refused: ${request.error}`;
@@ -437,6 +426,7 @@ export function createMediaTools(ctx: MediaToolContext) {
                 model: request.model,
                 prompt: request.prompt,
                 options: request.options,
+                durationSeconds: request.durationSeconds,
                 fileName: request.fileName,
               });
             },
@@ -445,3 +435,120 @@ export function createMediaTools(ctx: MediaToolContext) {
       : {}),
   };
 }
+
+/** "a, b or c" — the shape every list in these descriptions is written in. */
+function joinOr(items: readonly string[]): string {
+  return items.length < 2 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} or ${items.at(-1)}`;
+}
+
+/** The argument types `generate_sound` takes — the validator re-checks every one in `execute`. */
+const SOUND_BOOLEAN_ARGS = new Set(['loop', 'instrumental', 'custom_mode']);
+const SOUND_NUMBER_ARGS = new Set(['tempo', 'stability', 'similarity_boost', 'speech_style', 'speed', 'duration']);
+
+/**
+ * `generate_sound`'s schema for a dialect: the common arguments, then each kind's own, in the
+ * validator's order (`SOUND_KIND_KEYS`) — so the schema can never offer an argument the validator
+ * refuses, and the key order (part of the cached prompt) is fixed per gateway.
+ */
+function soundParameters(dialect: SoundDialect, describe: Record<string, string>): Record<string, z.ZodTypeAny> {
+  const keys = ['prompt', 'kind', 'model', 'file_name', ...Object.values(SOUND_KIND_KEYS[dialect]).flat()];
+
+  return Object.fromEntries(
+    [...new Set(keys)].map((key) => {
+      const base = SOUND_BOOLEAN_ARGS.has(key) ? z.boolean() : SOUND_NUMBER_ARGS.has(key) ? z.number() : z.string();
+      return [key, base.optional().describe(describe[key] ?? '')];
+    }),
+  );
+}
+
+interface SoundToolText {
+  description: string;
+
+  /** Per-argument descriptions, keyed by argument name. */
+  params: Record<string, string>;
+}
+
+/**
+ * `generate_sound`'s prose per DIALECT, built from the gateway's catalogue.
+ *
+ * 🔴 It sits in the CACHED prompt, so it must name only what THIS gateway serves: a Suno version or a
+ * KIE voice id shown on fal is a refused call on every turn that believes it, and the reverse is the
+ * same. Deterministic for a given catalogue — no clock, no config — so the prefix stays byte-stable.
+ * The Suno text is the pre-T6 text, byte for byte.
+ */
+const SOUND_TOOL_TEXT: Record<SoundDialect, (models: SoundModels) => SoundToolText> = {
+  suno: () => ({
+    description:
+      'Generate a sound effect, a line of speech, or a music track with the built-in audio ' +
+      'generator and save it into the project under public/assets/generated/ as an MP3. ' +
+      'Costs the user credits (shown in the result). ' +
+      'kind=sound_effect (the default) for gameplay audio — jumps, pickups, engines, impacts, ' +
+      'UI clicks, ambience; it has no exact duration control. ' +
+      'kind=speech for spoken lines (announcer, narration, character voice). ' +
+      'kind=music for a backing track — only when the user actually asked for music; it is ' +
+      'several times the price of an effect. ' +
+      'Pass ONLY the fields that belong to the chosen kind. ' +
+      'Renders happen in the background: DO NOT wait or poll — reference the returned path now.',
+    params: {
+      prompt:
+        'Effects: describe the sound (max 500 chars). Speech: the exact words to say ' +
+        '(max 5000). Music: describe the track (max 3000).',
+      kind: 'sound_effect (default), speech, or music.',
+      model:
+        'Effects/music: a Suno version (V5 default, V5_5; music also V4, V4_5, V4_5PLUS, ' +
+        'V4_5ALL). Speech: an ElevenLabs model id. Leave unset for the default.',
+      file_name: 'Preferred file name (without extension).',
+      loop: 'Effects only: make it loopable (ambience, engines).',
+      tempo: 'Effects only: requested BPM, 1-300.',
+      key: 'Effects only: musical key such as C or Am. Omit for any.',
+      voice: 'Speech only: ElevenLabs voice name or id.',
+      stability: 'Speech only: 0-1.',
+      similarity_boost: 'Speech only: 0-1.',
+      speech_style: 'Speech only: style exaggeration, 0-1.',
+      speed: 'Speech only: 0.7-1.2.',
+      language_code: 'Speech only, turbo 2.5 model only: two-letter ISO 639-1 code.',
+      instrumental: 'Music only: no vocals. Default true.',
+      custom_mode: 'Music only: exact lyrics/style mode; needs style+title.',
+      style: 'Custom music only: genre/mood.',
+      title: 'Custom music only: track title.',
+      negative_tags: 'Custom music only: styles to avoid.',
+      vocal_gender: 'Custom vocal music only: m or f.',
+      duration: 'Custom music only, V5_5 only: seconds, 10-360.',
+    },
+  }),
+
+  'elevenlabs-minimax': (models) => {
+    const seconds = models.effectSeconds;
+    const voices = models.voices ?? [];
+
+    return {
+      description:
+        'Generate a sound effect, a line of speech, or a music track with the built-in audio ' +
+        'generator and save it into the project under public/assets/generated/ as an MP3. ' +
+        'Costs the user credits (shown in the result). ' +
+        'kind=sound_effect (the default) for gameplay audio — jumps, pickups, engines, impacts, ' +
+        `UI clicks, ambience; it is priced per second, so set duration (${seconds?.min}-${seconds?.max} ` +
+        `seconds, default ${seconds?.default}). ` +
+        'kind=speech for spoken lines (announcer, narration, character voice). ' +
+        'kind=music for a backing track — only when the user actually asked for music; it is ' +
+        'several times the price of an effect. ' +
+        'Pass ONLY the fields that belong to the chosen kind. ' +
+        'Renders happen in the background: DO NOT wait or poll — reference the returned path now.',
+      params: {
+        prompt:
+          'Effects: describe the sound (max 500 chars). Speech: the exact words to say ' +
+          '(max 5000). Music: describe the style and mood of the track (10-2000 chars).',
+        kind: 'sound_effect (default), speech, or music.',
+        model:
+          `Speech: ${joinOr(models.speech)} (default ${models.speech[0]}). Effects and music have one ` +
+          'model each here. Leave unset for the default.',
+        file_name: 'Preferred file name (without extension).',
+        loop: 'Effects only: make it loopable (ambience, engines).',
+        duration: `Effects only: length in seconds, ${seconds?.min}-${seconds?.max}. Default ${seconds?.default}.`,
+        voice: `Speech only: one of ${voices.join(', ')}. Default ${voices[0]}.`,
+        instrumental: 'Music only: no vocals. Default true.',
+        lyrics: 'Music with vocals only (instrumental: false): the words to sing. Required then.',
+      },
+    };
+  },
+};

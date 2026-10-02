@@ -1809,6 +1809,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     hasMediaTools: toolPolicy.allowsMedia,
     isFirstBuildTurn,
     creationPhase,
+    mediaProvider: mediaProvider?.name,
   });
 
   if (mediaNote && allowTools) {
