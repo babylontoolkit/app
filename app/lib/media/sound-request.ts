@@ -27,7 +27,13 @@
  * id sent to fal, or a 30-second effect, is refused here — before the debit — with a sentence naming
  * what is valid, instead of being refused at the gateway after the user has paid.
  */
-import { soundModelsFor, type SoundDialect, type SoundKind, type SoundModels } from './provider-defaults';
+import {
+  soundKindForModel,
+  soundModelsFor,
+  type SoundDialect,
+  type SoundKind,
+  type SoundModels,
+} from './provider-defaults';
 import type { ImageProviderName } from './image-capabilities';
 
 /** Tool/panel argument names (snake_case — the MCP's vocabulary, which the model already knows). */
@@ -511,4 +517,86 @@ function validateElevenLabsMiniMax(
   const fileName = str('file_name');
 
   return state.failure ? refuse(state.failure) : { ok: true, kind, model: pricedModel, prompt, options, fileName };
+}
+
+/**
+ * The Media panel's request, read as `generate_sound` arguments — so the panel's door runs the SAME
+ * validator as the agent's (`_specs/media-gateways_plan.md` T7).
+ *
+ * The panel speaks the wire shape (`{model, prompt, options, durationSeconds}`, priced model ids,
+ * camelCase options); the validator speaks the tool's (`kind`, snake_case, and — where the gateway
+ * has versions — a VERSION in `model`). This is the one translation between them, driven by the
+ * catalogue, never by a gateway name:
+ *
+ * - `kind` comes from the priced id (`soundKindForModel`);
+ * - `model` is passed as-is for speech, and for effects/music only where the catalogue has no version
+ *   option (fal) — on a versioned gateway (KIE/Suno) it is the version from `options.sunoModel`, if any;
+ * - a sound effect's `durationSeconds` is its `duration`.
+ *
+ * Returns `null` when the model is not a sound model at all (the caller then has nothing to check).
+ */
+export interface PanelSoundRequest {
+  model: string;
+  prompt: string;
+  options: Record<string, string | number | boolean>;
+  durationSeconds?: number;
+}
+
+/** Option names the wire carries in camelCase, mapped to the tool's snake_case. */
+const WIRE_TO_TOOL_KEYS: Readonly<Record<string, string>> = {
+  customMode: 'custom_mode',
+  negativeTags: 'negative_tags',
+  vocalGender: 'vocal_gender',
+  similarityBoost: 'similarity_boost',
+  speechStyle: 'speech_style',
+  languageCode: 'language_code',
+};
+
+/**
+ * A stand-in prompt for a QUOTE, which is sent before the user has typed anything: the quote prices
+ * options, not words. Long enough for MiniMax's 10-character minimum, short enough for every maximum.
+ */
+const QUOTE_PROMPT_STANDIN = 'a short prompt to price this request';
+
+export function validatePanelSoundRequest(
+  request: PanelSoundRequest,
+  provider: ImageProviderName | string,
+  { forQuote = false }: { forQuote?: boolean } = {},
+): SoundRequestResult | null {
+  const kind = soundKindForModel(request.model);
+
+  if (!kind) {
+    return null;
+  }
+
+  const models = soundModelsFor(provider);
+
+  if (!models) {
+    return refuse(`The ${provider} media gateway serves no sound.`);
+  }
+
+  const { sunoModel, duration, ...rest } = request.options ?? {};
+  const args: SoundRequestInput = { kind };
+
+  for (const [key, value] of Object.entries(rest)) {
+    args[WIRE_TO_TOOL_KEYS[key] ?? key] = value;
+  }
+
+  if (kind === 'speech' || !models.musicOptions) {
+    args.model = request.model;
+  } else if (sunoModel !== undefined) {
+    args.model = sunoModel;
+  }
+
+  if (kind === 'sound_effect' && request.durationSeconds !== undefined) {
+    args.duration = request.durationSeconds;
+  } else if (kind === 'music' && duration !== undefined) {
+    args.duration = duration;
+  }
+
+  const prompt = request.prompt?.trim() ? request.prompt : forQuote ? QUOTE_PROMPT_STANDIN : request.prompt;
+
+  args.prompt = prompt;
+
+  return validateSoundRequest(args, provider);
 }

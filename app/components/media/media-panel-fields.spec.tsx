@@ -28,11 +28,13 @@ import {
   FAL_VIDEO_MODELS,
   IMAGE_MODELS,
   VIDEO_MODELS,
+  mediaKindsFor,
   modelsForProvider,
   withBackgroundField,
 } from './MediaPanel';
 import { hasCutoutPass, imageModelCapability, nativeAlphaModelFor } from '~/lib/media/image-capabilities';
-import { soundKindForModel } from '~/lib/media/provider-defaults';
+import { SOUND_MODELS, soundKindForModel } from '~/lib/media/provider-defaults';
+import { validatePanelSoundRequest } from '~/lib/media/sound-request';
 
 const backgroundField = (model: Parameters<typeof withBackgroundField>[0], provider: 'KIE' | 'FAL' | null) =>
   withBackgroundField(model, provider).fields.find((f) => f.key === 'transparent');
@@ -195,9 +197,9 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
    * fal (media-gateways T3): its own catalogue, never KIE's — the ternaries this replaced sent any
    * gateway they had not heard of down the KIE branch, offering models every fal quote would refuse.
    * Every fal image model gets the Background control (fal transparency is the Bria cut-out pass),
-   * the cut-out itself is never offered as a model, and there is no Sound tab until T6/T7.
+   * the cut-out itself is never offered as a model. (Its Sound tab is covered below — T7.)
    */
-  it('offers fal its own catalogue — Background on every image, no cut-out model, no sound yet', () => {
+  it('offers fal its own catalogue — Background on every image, no cut-out model', () => {
     const image = modelsForProvider('image', 'FAL');
 
     expect(ids(image)).toContain('fal-ai/nano-banana-2');
@@ -218,7 +220,6 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
       'fal-ai/veo3/fast',
       'fal-ai/veo3',
     ]);
-    expect(modelsForProvider('audio', 'FAL')).toEqual([]);
   });
 
   /**
@@ -312,44 +313,137 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
 });
 
 /**
- * Sound (§4.16). The tab is KIE-only — fal has no audio routes yet (T6), so offering it there would
- * be a control every quote refuses, which is the exact defect the three-gateway-states fix removed
- * one kind up.
+ * Sound (§4.16, `_specs/media-gateways_plan.md` T7). The tab is built from the per-gateway sound
+ * catalogue (`SOUND_MODELS`), so it is present wherever that catalogue is set and its controls come
+ * from the catalogue's data — never from a gateway name.
  *
  * Note the panel's kind is `'audio'`, not `'sound'`: the task record, the wire and the price list all
  * say audio, and only the TAB LABEL says Sound. One vocabulary, one spelling.
  */
-describe('the Sound tab is per gateway', () => {
-  it('offers KIE the three kinds of sound, keyed by their priced model ids', () => {
-    const ids = modelsForProvider('audio', 'KIE').map((m) => m.id);
+const fieldsOf = (provider: 'KIE' | 'FAL') =>
+  new Map(modelsForProvider('audio', provider).map((m) => [m.id, m.fields]));
 
-    expect(ids).toContain('suno/generate-sounds');
-    expect(ids).toContain('suno/generate-music');
-    expect(ids.filter((id) => id.startsWith('elevenlabs/')).length).toBeGreaterThan(0);
+describe('the Sound tab is per gateway', () => {
+  it('shows the Sound tab on FAL with ElevenLabs voices and fal image/video models', () => {
+    const sound = modelsForProvider('audio', 'FAL');
+    const fal = SOUND_MODELS.FAL;
+
+    expect(mediaKindsFor(sound)).toEqual(['image', 'video', 'audio']);
+
+    // Every fal sound id, from the catalogue — and no KIE id.
+    expect(ids(sound)).toEqual([fal.effect, fal.music, ...fal.speech]);
+    expect(ids(sound).every((id) => id.startsWith('fal-ai/'))).toBe(true);
+
+    // Speech offers exactly the ElevenLabs voice names, Rachel (the default) first.
+    const voice = fieldsOf('FAL')
+      .get(fal.speech[0])!
+      .find((f) => f.key === 'voice')!;
+
+    expect(voice.choices.map((c) => c.value)).toEqual(fal.voices);
+    expect(voice.default).toBe('Rachel');
+
+    // Effects get a length, defaulting to the one the quote and debit resolve to (5 s), capped at 22.
+    const length = fieldsOf('FAL')
+      .get(fal.effect)!
+      .find((f) => f.key === 'duration')!;
+
+    expect(length.default).toBe(String(fal.effectSeconds!.default));
+    expect(Math.max(...length.choices.map((c) => Number(c.value)))).toBe(22);
+
+    // Music: instrumental, plus lyrics shown only with vocals.
+    const music = fieldsOf('FAL').get(fal.music)!;
+
+    expect(music.map((f) => f.key)).toEqual(['instrumental', 'lyrics']);
+    expect(music.find((f) => f.key === 'lyrics')).toMatchObject({
+      input: 'text',
+      showWhen: { key: 'instrumental', value: 'false' },
+    });
+
+    // ...and the Image / Video tabs on the same gateway are fal's own.
+    expect(ids(modelsForProvider('image', 'FAL')).every((id) => id.startsWith('fal-ai/'))).toBe(true);
+    expect(ids(modelsForProvider('video', 'FAL'))).toEqual(ids(FAL_VIDEO_MODELS));
   });
 
-  it('offers NOTHING on a gateway with no audio — absent, not refusing', () => {
-    expect(modelsForProvider('audio', 'FAL')).toEqual([]);
-    expect(modelsForProvider('audio', null)).toEqual([]);
+  it("still shows KIE's sound fields on KIE", () => {
+    const kie = SOUND_MODELS.KIE;
+    const sound = modelsForProvider('audio', 'KIE');
+
+    expect(mediaKindsFor(sound)).toEqual(['image', 'video', 'audio']);
+    expect(ids(sound)).toEqual([
+      'suno/generate-sounds',
+      'suno/generate-music',
+      'elevenlabs/text-to-speech-multilingual-v2',
+      'elevenlabs/text-to-speech-turbo-2-5',
+    ]);
+
+    // Exactly the controls the KIE-only tab had: loop on effects, vocals on music, nothing on speech.
+    const byId = new Map(sound.map((m) => [m.id, m.fields.map((f) => f.key)]));
+
+    expect(byId.get(kie.effect)).toEqual(['loop']);
+    expect(byId.get(kie.music)).toEqual(['instrumental']);
+    expect(byId.get(kie.speech[0])).toEqual([]);
+    expect(sound.map((m) => m.label)).toEqual([
+      'Sound effect (default)',
+      'Music track',
+      'Speech — multilingual v2',
+      'Speech — turbo 2.5 (cheaper)',
+    ]);
   });
 
   /*
-   * The per-kind controls are the whole point of the tab: an effect can loop, a music track can have
-   * vocals, and speech takes neither. Asserting the FIELD KEYS rather than the labels, because the
-   * keys are what reach the provider payload.
+   * CONTROL, with a stub table: the tab must be able to VANISH. Both assertions above pass for a
+   * panel that always draws a Sound tab, which is the bug this replaced in the other direction (a tab
+   * every quote refuses).
    */
-  it('gives each kind only the controls that apply to it', () => {
-    const byId = new Map(modelsForProvider('audio', 'KIE').map((m) => [m.id, m.fields.map((f) => f.key)]));
+  it('hides the Sound tab when the gateway has no sound models', () => {
+    const stub = { KIE: SOUND_MODELS.KIE, FAL: null };
 
-    expect(byId.get('suno/generate-sounds')).toEqual(['loop']);
-    expect(byId.get('suno/generate-music')).toEqual(['instrumental']);
-    expect(byId.get('elevenlabs/text-to-speech-multilingual-v2')).toEqual([]);
+    expect(modelsForProvider('audio', 'FAL', stub)).toEqual([]);
+    expect(mediaKindsFor(modelsForProvider('audio', 'FAL', stub))).toEqual(['image', 'video']);
+    expect(mediaKindsFor(modelsForProvider('audio', 'KIE', stub))).toEqual(['image', 'video', 'audio']);
+    expect(modelsForProvider('audio', null)).toEqual([]);
   });
 
   /* Every sound model the panel offers must be one the agent tool would also accept. */
-  it('offers only models the shared validator recognises', () => {
-    for (const spec of modelsForProvider('audio', 'KIE')) {
-      expect(soundKindForModel(spec.id), `${spec.id} is not a sound model`).not.toBeNull();
+  it('offers only models the shared validator recognises, on both gateways', () => {
+    for (const provider of GATEWAYS) {
+      for (const spec of modelsForProvider('audio', provider)) {
+        expect(soundKindForModel(spec.id), `${provider}/${spec.id} is not a sound model`).not.toBeNull();
+      }
+    }
+  });
+
+  /*
+   * Every DEFAULT the panel would send passes the route's validator on its own gateway — a default
+   * that the route refuses is a tab whose first Generate always fails.
+   */
+  it("the panel's default request for every sound model passes the gateway's validator", () => {
+    for (const provider of GATEWAYS) {
+      for (const spec of modelsForProvider('audio', provider)) {
+        const options: Record<string, string | boolean> = {};
+        let durationSeconds: number | undefined;
+
+        for (const field of spec.fields) {
+          if (field.input === 'text' || field.showWhen) {
+            continue;
+          }
+
+          if (field.key === 'duration') {
+            durationSeconds = Number(field.default);
+          } else if (field.key === 'loop' || field.key === 'instrumental') {
+            options[field.key] = field.default === 'true';
+          } else {
+            options[field.key] = field.default;
+          }
+        }
+
+        const result = validatePanelSoundRequest(
+          { model: spec.id, prompt: 'upbeat arcade coin pickup chime', options, durationSeconds },
+          provider,
+        );
+
+        expect(result, `${provider}/${spec.id}`).toMatchObject({ ok: true });
+      }
     }
   });
 });

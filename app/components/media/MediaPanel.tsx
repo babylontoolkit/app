@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
-import { sessionStore } from '~/lib/stores/session';
+import { refreshSession, sessionStore } from '~/lib/stores/session';
 import {
   hasCutoutPass,
   imageModelCapability,
@@ -20,6 +20,8 @@ import {
   type ImageProviderName,
 } from '~/lib/media/image-capabilities';
 import { FAL_VIDEO_DURATIONS, defaultFalVideoSeconds, falModelsOfKind } from '~/lib/media/fal-routes';
+import { SOUND_MODELS, soundKindForModel, type SoundModels } from '~/lib/media/provider-defaults';
+import { SOUND_KIND_KEYS } from '~/lib/media/sound-request';
 import { trackMediaTask } from '~/lib/media/tasks';
 
 interface MediaPanelProps {
@@ -42,10 +44,29 @@ interface FieldSpec {
     | 'outputFormat'
     | 'transparent'
     | 'loop'
-    | 'instrumental';
+    | 'instrumental'
+    | 'voice'
+    | 'lyrics';
   label: string;
   choices: FieldChoice[];
   default: string;
+
+  /** A free-text field (a textarea) instead of a dropdown — `choices` is empty for these. */
+  input?: 'text';
+
+  /** Drawn, and sent, only while another field holds this value (fal lyrics: only with vocals). */
+  showWhen?: { key: FieldSpec['key']; value: string };
+}
+
+/** Whether a field is in play for these values — a hidden field is neither drawn nor sent. */
+function fieldShown(field: FieldSpec, fields: FieldSpec[], values: Record<string, string>): boolean {
+  if (!field.showWhen) {
+    return true;
+  }
+
+  const other = fields.find((f) => f.key === field.showWhen!.key);
+
+  return (values[field.showWhen.key] ?? other?.default) === field.showWhen.value;
 }
 
 interface ModelSpec {
@@ -282,47 +303,113 @@ export const FAL_VIDEO_MODELS: ModelSpec[] = falModelsOfKind('video').map(({ id,
 }));
 
 /**
- * Sound (§4.16) — KIE only, because no other gateway serves audio.
+ * Sound (§4.16) — on every gateway whose sound catalogue (`SOUND_MODELS`) is set, built FROM that
+ * catalogue rather than typed out here. A second copy of the ids is how a model gets offered under one
+ * spelling and priced under another; the record is what the agent tool and the service read too.
  *
  * The three kinds are modelled as MODELS rather than as a second selector, because that is exactly
  * what they are on the wire: each one is a distinct priced row with its own endpoint. It also means
  * the kind dropdown, the per-kind fields and the quote all reuse the machinery already here, instead
  * of this tab growing a parallel set of controls.
+ *
+ * Which controls a kind gets comes from the catalogue's DATA, never from a gateway name: a length
+ * control where `effectSeconds` is set (fal prices effects per second), a voice list where `voices`
+ * is set (fal takes a fixed set of names; KIE takes any voice id, so it offers no list), and lyrics
+ * where the dialect's music accepts them (MiniMax). KIE's fields are therefore exactly the ones it
+ * had when this tab was KIE-only — loop on effects, vocals on music, nothing on speech.
  */
-export const SOUND_MODELS_SPEC: ModelSpec[] = [
-  {
-    id: 'suno/generate-sounds',
-    label: 'Sound effect (default)',
-    fields: [
-      {
-        key: 'loop',
-        label: 'Looping',
-        choices: [
-          { value: 'false', label: 'One-shot' },
-          { value: 'true', label: 'Loopable' },
-        ],
-        default: 'false',
-      },
-    ],
-  },
-  {
-    id: 'suno/generate-music',
-    label: 'Music track',
-    fields: [
-      {
-        key: 'instrumental',
-        label: 'Vocals',
-        choices: [
-          { value: 'true', label: 'Instrumental' },
-          { value: 'false', label: 'With vocals' },
-        ],
-        default: 'true',
-      },
-    ],
-  },
-  { id: 'elevenlabs/text-to-speech-multilingual-v2', label: 'Speech — multilingual v2', fields: [] },
-  { id: 'elevenlabs/text-to-speech-turbo-2-5', label: 'Speech — turbo 2.5 (cheaper)', fields: [] },
-];
+const SOUND_LABELS: Readonly<Record<string, string>> = {
+  'elevenlabs/text-to-speech-multilingual-v2': 'Speech — multilingual v2',
+  'elevenlabs/text-to-speech-turbo-2-5': 'Speech — turbo 2.5 (cheaper)',
+  'fal-ai/elevenlabs/tts/multilingual-v2': 'Speech — multilingual v2',
+  'fal-ai/elevenlabs/tts/turbo-v2.5': 'Speech — turbo 2.5 (cheaper)',
+};
+
+/** Effect lengths offered where the gateway has a length control — clipped to its bounds. */
+const EFFECT_SECONDS = [1, 2, 3, 5, 10, 15, 22];
+
+const loopField: FieldSpec = {
+  key: 'loop',
+  label: 'Looping',
+  choices: [
+    { value: 'false', label: 'One-shot' },
+    { value: 'true', label: 'Loopable' },
+  ],
+  default: 'false',
+};
+
+const vocalsField: FieldSpec = {
+  key: 'instrumental',
+  label: 'Vocals',
+  choices: [
+    { value: 'true', label: 'Instrumental' },
+    { value: 'false', label: 'With vocals' },
+  ],
+  default: 'true',
+};
+
+/**
+ * One gateway's Sound tab, from its catalogue — or nothing, which makes the tab ABSENT.
+ *
+ * Exported for `media-panel-fields.spec.tsx`; `modelsForProvider` is the runtime reader.
+ */
+export function soundModelSpecs(models: SoundModels | null | undefined): ModelSpec[] {
+  if (!models) {
+    return [];
+  }
+
+  const effectFields: FieldSpec[] = [loopField];
+  const range = models.effectSeconds;
+
+  if (range) {
+    /*
+     * The default is ALWAYS a choice, and it is the one the quote and the debit resolve to
+     * (`soundEffectSeconds`) — the panel sends it explicitly, so the length billed is the length shown.
+     */
+    const seconds = [...new Set([...EFFECT_SECONDS, range.default])]
+      .filter((v) => v >= range.min && v <= range.max)
+      .sort((a, b) => a - b);
+
+    effectFields.push(duration(seconds, range.default));
+  }
+
+  const musicFields: FieldSpec[] = [vocalsField];
+
+  if (SOUND_KIND_KEYS[models.dialect].music.includes('lyrics')) {
+    musicFields.push({
+      key: 'lyrics',
+      label: 'Lyrics',
+      choices: [],
+      default: '',
+      input: 'text',
+      showWhen: { key: 'instrumental', value: 'false' },
+    });
+  }
+
+  const voices = models.voices;
+  const speechFields: FieldSpec[] = voices
+    ? [
+        {
+          key: 'voice',
+          label: 'Voice',
+          choices: voices.map((v, i) => ({ value: v, label: i === 0 ? `${v} (default)` : v })),
+          default: voices[0],
+        },
+      ]
+    : [];
+
+  return [
+    { id: models.effect, label: 'Sound effect (default)', fields: effectFields },
+    { id: models.music, label: 'Music track', fields: musicFields },
+    ...models.speech.map((id) => ({ id, label: SOUND_LABELS[id] ?? `Speech — ${id}`, fields: speechFields })),
+  ];
+}
+
+/** KIE's Sound tab, kept as a named export for the specs that pin its fields. */
+export const SOUND_MODELS_SPEC: ModelSpec[] = soundModelSpecs(SOUND_MODELS.KIE);
+
+/** A sound catalogue table — `SOUND_MODELS` at runtime; a stub in the spec that proves the tab can vanish. */
+export type SoundCatalogueTable = Readonly<Partial<Record<ImageProviderName, SoundModels | null>>>;
 
 /**
  * The catalogue for a gateway — the ONE place that maps a provider onto a model list.
@@ -335,9 +422,17 @@ export const SOUND_MODELS_SPEC: ModelSpec[] = [
  * ⚠️ An empty list is a state the caller must RENDER, not index into. Every `models[0]` on this path
  * is optional-chained for that reason; the panel shows an unavailable card instead of a form.
  */
-export function modelsForProvider(kind: 'image' | 'video' | 'audio', provider: ImageProviderName | null): ModelSpec[] {
+export function modelsForProvider(
+  kind: 'image' | 'video' | 'audio',
+  provider: ImageProviderName | null,
+  sound: SoundCatalogueTable = SOUND_MODELS,
+): ModelSpec[] {
   if (!provider) {
     return [];
+  }
+
+  if (kind === 'audio') {
+    return soundModelSpecs(sound[provider]);
   }
 
   const models = CATALOGUES[provider][kind];
@@ -350,12 +445,24 @@ export function modelsForProvider(kind: 'image' | 'video' | 'audio', provider: I
  * those sent any gateway they had not heard of down the KIE branch, so fal would have offered KIE's
  * models and every quote would have refused. A new gateway must state its lists here or fail to compile.
  *
- * An empty list makes its tab ABSENT (fal has no Sound tab until T6/T7).
+ * Sound is not here: it is derived from the per-gateway sound catalogue (`soundModelSpecs`), and an
+ * empty result makes the tab ABSENT.
  */
-const CATALOGUES: Record<ImageProviderName, Record<'image' | 'video' | 'audio', ModelSpec[]>> = {
-  KIE: { image: IMAGE_MODELS, video: VIDEO_MODELS, audio: SOUND_MODELS_SPEC },
-  FAL: { image: FAL_IMAGE_MODELS, video: FAL_VIDEO_MODELS, audio: [] },
+const CATALOGUES: Record<ImageProviderName, Record<'image' | 'video', ModelSpec[]>> = {
+  KIE: { image: IMAGE_MODELS, video: VIDEO_MODELS },
+  FAL: { image: FAL_IMAGE_MODELS, video: FAL_VIDEO_MODELS },
 };
+
+/**
+ * The tabs a gateway gets: Image and Video always, Sound only when its sound list is non-empty —
+ * absent, not disabled, on a gateway that serves no audio.
+ */
+export function mediaKindsFor(soundModels: readonly ModelSpec[]): Array<'image' | 'video' | 'audio'> {
+  return soundModels.length > 0 ? ['image', 'video', 'audio'] : ['image', 'video'];
+}
+
+/** What the quote is sent in place of free text — it says "some was given", never what. */
+const QUOTE_TEXT_STANDIN = 'quoted';
 
 interface TaskRow {
   id: string;
@@ -380,6 +487,20 @@ function buildRequest(
 
   for (const field of model.fields) {
     const value = values[field.key] ?? field.default;
+
+    // A field that is not in play is not sent (lyrics on an instrumental track would be refused).
+    if (!fieldShown(field, model.fields, values)) {
+      continue;
+    }
+
+    // Free text is sent only when there is some — an empty string is "not given", never a value.
+    if (field.input === 'text') {
+      if (value.trim()) {
+        options[field.key] = value;
+      }
+
+      continue;
+    }
 
     if (field.key === 'duration') {
       durationSeconds = Number(value);
@@ -467,6 +588,39 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
 
   useEffect(loadTasks, [loadTasks]);
 
+  /*
+   * What the QUOTE sees of the values. Free text (fal lyrics) never prices a task, so the quote gets a
+   * stand-in that only says whether some was given — enough for the server's validation to accept or
+   * refuse it, without re-quoting on every keystroke.
+   */
+  const quoteValues = useMemo(() => {
+    const out = { ...values };
+
+    for (const field of model?.fields ?? []) {
+      if (field.input === 'text') {
+        out[field.key] = values[field.key]?.trim() ? QUOTE_TEXT_STANDIN : '';
+      }
+    }
+
+    return out;
+  }, [model, values]);
+
+  /*
+   * SPEECH IS PRICED BY ITS TEXT (`per_1k_chars`), so its quote must carry the words — a quote with an
+   * empty prompt is refused ("the text to speak is required to price it") and the Generate button
+   * would never get a price. Every other kind prices on options alone and quotes with no prompt, as
+   * before. Debounced, so typing a line re-quotes once rather than once per key.
+   */
+  const pricesByText = model ? soundKindForModel(model.id) === 'speech' : false;
+  const [quotedPrompt, setQuotedPrompt] = useState('');
+
+  useEffect(() => {
+    const next = pricesByText ? prompt : '';
+    const timer = setTimeout(() => setQuotedPrompt(next), next ? 400 : 0);
+
+    return () => clearTimeout(timer);
+  }, [pricesByText, prompt]);
+
   /* The price on the button — re-quoted whenever anything that prices the task changes. */
   useEffect(() => {
     let cancelled = false;
@@ -482,10 +636,15 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
       return undefined;
     }
 
+    // Nothing to price yet — speech has no price until it has words; the button waits for them.
+    if (pricesByText && !quotedPrompt.trim()) {
+      return undefined;
+    }
+
     fetch(`/api/projects/${projectId}/media`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'quote', ...buildRequest(kind, model, values, '') }),
+      body: JSON.stringify({ action: 'quote', ...buildRequest(kind, model, quoteValues, quotedPrompt) }),
     })
       .then(async (r) => {
         const data = (await r.json()) as { credits?: number; message?: string };
@@ -505,7 +664,7 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [projectId, kind, model, values]);
+  }, [projectId, kind, model, quoteValues, quotedPrompt, pricesByText]);
 
   const generate = async () => {
     if (!prompt.trim()) {
@@ -543,7 +702,16 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
       }
 
       toast.success(`Generating — ${data.credits} credits. It will be saved to ${data.destPath}.`);
-      void trackMediaTask({ projectId, taskId: data.taskId, destPath: data.destPath, kind }).then(loadTasks);
+
+      /*
+       * The debit is SETTLED — re-read the server's balance so the header shows it (a settled charge the
+       * UI cannot see reads as a leak; the enhancer precedent). Again when the task ends, because a
+       * failed render is refunded and the header must show that too. Never subtracted locally.
+       */
+      void refreshSession();
+      void trackMediaTask({ projectId, taskId: data.taskId, destPath: data.destPath, kind })
+        .then(loadTasks)
+        .finally(() => void refreshSession());
       loadTasks();
       setPrompt('');
     } finally {
@@ -600,7 +768,7 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
 
         <div className="flex gap-1 rounded-md border border-bolt-elements-borderColor p-0.5 self-start">
           {/* Sound is absent, not disabled, on a gateway that serves no audio. */}
-          {(['image', 'video', ...(soundModels.length > 0 ? (['audio'] as const) : [])] as const).map((k) => (
+          {mediaKindsFor(soundModels).map((k) => (
             <button
               key={k}
               className={
@@ -634,22 +802,39 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
             </select>
           </label>
 
-          {model.fields.map((field) => (
-            <label key={field.key} className="flex flex-col gap-1 text-xs text-bolt-elements-textSecondary">
-              {field.label}
-              <select
-                className="px-2 py-1.5 rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary"
-                value={values[field.key] ?? field.default}
-                onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
-              >
-                {field.choices.map((choice) => (
-                  <option key={choice.value} value={choice.value}>
-                    {choice.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
+          {model.fields
+            .filter((field) => fieldShown(field, model.fields, values))
+            .map((field) =>
+              field.input === 'text' ? (
+                <label
+                  key={field.key}
+                  className="flex flex-col gap-1 text-xs text-bolt-elements-textSecondary col-span-2"
+                >
+                  {field.label}
+                  <textarea
+                    className="w-full h-16 text-sm p-2 rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary resize-none"
+                    placeholder="The words to sing"
+                    value={values[field.key] ?? field.default}
+                    onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
+                  />
+                </label>
+              ) : (
+                <label key={field.key} className="flex flex-col gap-1 text-xs text-bolt-elements-textSecondary">
+                  {field.label}
+                  <select
+                    className="px-2 py-1.5 rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 text-bolt-elements-textPrimary"
+                    value={values[field.key] ?? field.default}
+                    onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
+                  >
+                    {field.choices.map((choice) => (
+                      <option key={choice.value} value={choice.value}>
+                        {choice.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ),
+            )}
         </div>
 
         <textarea
@@ -659,9 +844,9 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
               ? 'Describe the image — e.g. "seamless sci-fi metal floor texture, top-down, tileable"'
               : kind === 'video'
                 ? 'Describe the video — e.g. "cinematic flythrough of a neon city at night"'
-                : model?.id.startsWith('elevenlabs/')
+                : soundKindForModel(model.id) === 'speech'
                   ? 'The exact words to speak — e.g. "New lap record!"'
-                  : model?.id === 'suno/generate-music'
+                  : soundKindForModel(model.id) === 'music'
                     ? 'Describe the track — e.g. "driving synthwave, upbeat, retro arcade"'
                     : 'Describe the sound — e.g. "arcade coin pickup chime, short and bright"'
           }

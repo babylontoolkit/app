@@ -524,7 +524,7 @@ It changes three rules:
 
 ### Phase 4 — The Media panel on both gateways, proved live, and SPEC
 
-- [ ] **T7** — The Sound tab on both gateways, and a live run of fal end to end
+- [x] **T7** — The Sound tab on both gateways, and a live run of fal end to end
   - Files:
     - `app/components/media/MediaPanel.tsx` (modify)
     - `app/components/media/media-panel-fields.spec.tsx` (modify)

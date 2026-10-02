@@ -22,6 +22,7 @@ import { ensureMarketPrices } from '~/lib/.server/billing/market-price-store';
 import { mediaProviderFor } from '~/lib/.server/media/provider';
 import { listMediaTasks } from '~/lib/.server/media/store';
 import { MediaRefusedError, quoteMediaRequest, startMediaTask } from '~/lib/.server/media/service';
+import { validatePanelSoundRequest } from '~/lib/media/sound-request';
 
 interface MediaActionBody {
   action?: 'quote' | 'start';
@@ -83,6 +84,22 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
       options: body.options ?? {},
       durationSeconds: body.durationSeconds,
     };
+
+    /*
+     * 🔴 A SOUND REQUEST IS VALIDATED HERE, against the gateway that will render it, before any quote
+     * or debit (`_specs/media-gateways_plan.md` T7). The agent's door (`generate_sound`) always ran
+     * `validateSoundRequest`; this door did not, so a panel request outside the gateway's limits (a
+     * 30 s fal effect, an unknown voice, vocals with no lyrics) was quoted, DEBITED, sent, refused by
+     * fal and then refunded — a round trip of the user's credits for a sentence we could have said
+     * first. Same validator, same sentence, as a 4xx.
+     */
+    if (body.action === 'quote' || body.action === 'start') {
+      const sound = validatePanelSoundRequest(mediaRequest, mediaProvider, { forQuote: body.action === 'quote' });
+
+      if (sound && !sound.ok) {
+        return json({ error: true, message: sound.error }, { status: 422 });
+      }
+    }
 
     if (body.action === 'quote') {
       // Never debits — this is the number on the Generate button.
