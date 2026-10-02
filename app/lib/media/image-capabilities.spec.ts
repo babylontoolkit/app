@@ -23,6 +23,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  CUTOUT_MODEL_BY_PROVIDER,
+  cutoutModelFor,
+  hasCutoutPass,
   imageModelCapability,
   isRefusal,
   nativeAlphaModelFor,
@@ -118,6 +121,48 @@ describe('supportsTransparency — whether the panel may offer the control at al
     // ...and KIE's true comes from somewhere else entirely — it has no native-alpha model at all.
     expect(nativeAlphaModelFor('KIE')).toBeNull();
     expect(supportsTransparency('KIE')).toBe(true);
+  });
+});
+
+describe('the cut-out pass is per gateway (media-gateways T4)', () => {
+  it('FAL supports transparency through a cut-out pass', () => {
+    /*
+     * fal has a native-alpha model in its catalogue and it is deliberately NOT used — so fal's `true`
+     * must come from the cut-out, never from the capability table. Asserting the mechanism, not just
+     * the answer: `() => true` passes the first line and fails the next two.
+     */
+    expect(supportsTransparency('FAL')).toBe(true);
+    expect(nativeAlphaModelFor('FAL')).toBeNull();
+    expect(hasCutoutPass('FAL')).toBe(true);
+    expect(cutoutModelFor('FAL')).toBe('fal-ai/bria/background/remove');
+
+    // Realized exactly like KIE: same requested model, a second stage, jpg render → png file.
+    expect(realize({ provider: 'FAL', model: 'fal-ai/nano-banana-2', wantsAlpha: true })).toEqual({
+      model: 'fal-ai/nano-banana-2',
+      cutout: true,
+      renderFormat: 'jpg',
+      finalFormat: 'png',
+      cutoutPrompt: true,
+    });
+  });
+
+  it('Comet has no cut-out pass', () => {
+    // CONTROL: Comet's transparency is per MODEL; a cut-out row here would bill a stage that never runs.
+    expect(hasCutoutPass('Comet')).toBe(false);
+    expect(cutoutModelFor('Comet')).toBeNull();
+    expect(supportsTransparency('Comet')).toBe(true);
+  });
+
+  it('keeps KIE on Recraft — byte-identical to before T4', () => {
+    expect(cutoutModelFor('KIE')).toBe('recraft/remove-background');
+    expect(hasCutoutPass('KIE')).toBe(true);
+  });
+
+  it('every gateway answers — a missing row is a compile error, and no two share a cut-out id', () => {
+    expect(Object.keys(CUTOUT_MODEL_BY_PROVIDER).sort()).toEqual(['Comet', 'FAL', 'KIE']);
+
+    const ids = Object.values(CUTOUT_MODEL_BY_PROVIDER).filter(Boolean);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 

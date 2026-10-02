@@ -20,7 +20,7 @@ import { modelTierEnabled, extendedModelsEnabled, refuseRetiredModelTierEnv } fr
 import type { MarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { MODEL_RATES } from './baked-anthropic-prices';
-import { activeMarketPrices, MARKET_PRICE_PROVIDERS } from './market-price-store';
+import { activeMarketPrices, LLM_PRICE_PROVIDERS } from './market-price-store';
 import { FAMILY_POLICY, familyOf } from '~/lib/modules/llm/model-families';
 import {
   PAID_MODEL_TIERS,
@@ -445,13 +445,13 @@ export function getModelTier(id: PaidModelTierId, context?: unknown): ModelTier 
    * not price the model itself (`providerRates`' `withTiers`, fill never overwrite), and a gap-fill
    * must err towards over-charging ourselves, never towards under-billing.
    */
-  const row = MARKET_PRICE_PROVIDERS.map((provider) => activeMarketPrices(provider).llm[model])
+  const row = LLM_PRICE_PROVIDERS.map((provider) => activeMarketPrices(provider).llm[model])
     .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
     .sort((a, b) => b.outputPerMTok - a.outputPerMTok || b.inputPerMTok - a.inputPerMTok)[0];
 
   if (!row) {
     const priced =
-      [...new Set(MARKET_PRICE_PROVIDERS.flatMap((provider) => Object.keys(activeMarketPrices(provider).llm)))]
+      [...new Set(LLM_PRICE_PROVIDERS.flatMap((provider) => Object.keys(activeMarketPrices(provider).llm)))]
         .sort()
         .join(', ') || '(none)';
 

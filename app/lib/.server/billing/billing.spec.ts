@@ -31,7 +31,13 @@ import {
 } from './rates';
 import { PAID_MODEL_TIERS } from './model-tiers';
 import { FAMILY_POLICY, familyOf, type CacheProfile } from '~/lib/modules/llm/model-families';
-import { invalidateMarketPricesCache, MARKET_PRICE_PROVIDERS, promoteMarketPrices } from './market-price-store';
+import {
+  invalidateMarketPricesCache,
+  LLM_PRICE_PROVIDERS,
+  MARKET_PRICE_PROVIDERS,
+  promoteMarketPrices,
+} from './market-price-store';
+import { MEDIA_ONLY_PRICE_PROVIDERS } from './market-prices';
 import type { LlmMarketRate } from './market-prices';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
@@ -506,9 +512,16 @@ describe('rate table', () => {
    * newly released model on Anthropic a source edit and a redeploy. Every platform provider now has a
    * promotable list, so the two sets are EQUAL, and a new provider forgotten in the store fails here.
    */
+  /*
+   * ⚠️ 2026-10-01 (media-gateways T2): the equality holds for the LLM lists. `FAL` has a list too but
+   * is MEDIA-ONLY — it sells no LLM, so it is not a platform provider and must never become one by
+   * way of this set. The full list is the LLM set plus exactly the media-only ones.
+   */
   it('has a price list for every platform provider, Anthropic included', () => {
-    expect([...MARKET_PRICE_PROVIDERS].sort()).toEqual([...PLATFORM_PROVIDERS].sort());
-    expect(MARKET_PRICE_PROVIDERS).toContain('Anthropic');
+    expect([...LLM_PRICE_PROVIDERS].sort()).toEqual([...PLATFORM_PROVIDERS].sort());
+    expect(LLM_PRICE_PROVIDERS).toContain('Anthropic');
+    expect([...MARKET_PRICE_PROVIDERS].sort()).toEqual([...LLM_PRICE_PROVIDERS, ...MEDIA_ONLY_PRICE_PROVIDERS].sort());
+    expect(PLATFORM_PROVIDERS as readonly string[]).not.toContain('FAL');
   });
 
   /*

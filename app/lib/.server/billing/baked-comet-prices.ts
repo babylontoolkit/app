@@ -322,5 +322,109 @@ export const BAKED_COMET_PRICES: MarketPriceList = {
       unit: 'per_second',
       variants: [{ options: {}, usd: 0.32 }],
     },
+
+    /*
+     * ---------------------------------------------------------------------------------------------- *
+     * Sound (`_specs/media-gateways_plan.md` T1) — ⚠️ UNPROBED: run `scripts/comet-audio-probe.mjs`
+     * once COMET_API_KEY is set. Priced from Comet's PUBLISHED sources, read 2026-10-01; the arithmetic
+     * per row is in `COMET_AUDIO_PROVENANCE` below so a spec can check it.
+     * ---------------------------------------------------------------------------------------------- *
+     */
+
+    /*
+     * ElevenLabs sound effects. Feed (`GET https://api.cometapi.com/api/models`, 2026-10-01):
+     * `per_request 0.01, ratio 0.8` → charged $0.008. The feed says PER REQUEST; Comet's docs call it
+     * "$0.008" without a unit, so whether a `duration` scales it is UNCONFIRMED — the probe submits the
+     * same prompt at 2 s and with no duration to settle it. Until then one catch-all row prices a
+     * request with or without a duration (a per_second row would REFUSE the no-duration case).
+     * Unprobed — run scripts/comet-audio-probe.mjs once COMET_API_KEY is set.
+     */
+    eleven_text_to_sound_v2: {
+      kind: 'audio',
+      label: 'ElevenLabs Sound Effects v2',
+      vendor: 'ElevenLabs',
+      unit: 'per_request',
+      variants: [{ options: {}, usd: 0.008 }],
+    },
+
+    /*
+     * ElevenLabs speech. Comet's docs (https://apidoc.cometapi.com/llms.txt): "$0.008 per 50
+     * characters" = $0.16 per 1,000 characters. The feed's `per_request 0.01 x ratio 0.8 = 0.008` is
+     * the same number for one 50-character block. Unprobed — run scripts/comet-audio-probe.mjs once
+     * COMET_API_KEY is set.
+     */
+    eleven_multilingual_v2: {
+      kind: 'audio',
+      label: 'ElevenLabs Multilingual v2',
+      vendor: 'ElevenLabs',
+      unit: 'per_1k_chars',
+      variants: [{ options: {}, usd: 0.16 }],
+    },
+
+    /* Same feed row shape and docs rate as multilingual v2 (≤5,000 chars). Unprobed — see above. */
+    eleven_v3: {
+      kind: 'audio',
+      label: 'ElevenLabs v3',
+      vendor: 'ElevenLabs',
+      unit: 'per_1k_chars',
+      variants: [{ options: {}, usd: 0.16 }],
+    },
+
+    /*
+     * 🔴 HAND-MAINTAINED. Comet's feed has NO Suno rows, so no admin feed fetch will ever show this
+     * price drifting — re-read Comet's Suno guide when repricing. $0.144 per submit, from that guide
+     * (2026-09-30). One submit can return two clips; the platform delivers the first finished one, so
+     * the price is per SUBMIT, never per clip. Unprobed — run scripts/comet-audio-probe.mjs once
+     * COMET_API_KEY is set.
+     */
+    suno_music: {
+      kind: 'audio',
+      label: 'Suno Music',
+      vendor: 'Suno',
+      unit: 'per_request',
+      variants: [{ options: {}, usd: 0.144 }],
+    },
+  },
+};
+
+/**
+ * The arithmetic behind each Comet AUDIO row — the media counterpart of `COMET_PRICE_PROVENANCE`.
+ *
+ * Kept as data for the same reason: `comet-prices.spec.ts` checks `charged === official x ratio x
+ * scale` per row, which prose cannot do. `scale` converts the feed's unit into the row's (speech is
+ * quoted per 50-character request and billed per 1,000 characters, so ×20). `ratio` is `null` for a
+ * row with no feed entry — the hand-maintained Suno price — and that null is the flag a reader needs.
+ */
+export interface CometAudioProvenance {
+  officialUsd: number;
+  ratio: number | null;
+  scale: number;
+  source: string;
+}
+
+export const COMET_AUDIO_PROVENANCE: Record<string, CometAudioProvenance> = {
+  eleven_text_to_sound_v2: {
+    officialUsd: 0.01,
+    ratio: 0.8,
+    scale: 1,
+    source: 'Comet feed GET /api/models 2026-10-01 (per_request 0.01, ratio 0.8); unprobed',
+  },
+  eleven_multilingual_v2: {
+    officialUsd: 0.01,
+    ratio: 0.8,
+    scale: 20,
+    source: 'Comet feed 2026-10-01 (per_request 0.01, ratio 0.8) + docs "$0.008 per 50 characters"; unprobed',
+  },
+  eleven_v3: {
+    officialUsd: 0.01,
+    ratio: 0.8,
+    scale: 20,
+    source: 'Comet feed 2026-10-01 (per_request 0.01, ratio 0.8) + docs "$0.008 per 50 characters"; unprobed',
+  },
+  suno_music: {
+    officialUsd: 0.144,
+    ratio: null,
+    scale: 1,
+    source: "Comet's Suno guide (hand-maintained — the feed has no Suno rows); unprobed",
   },
 };

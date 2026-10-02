@@ -24,10 +24,11 @@ import { createScopedLogger } from '~/utils/logger';
 import type { ObjectStore } from '~/lib/.server/storage';
 import { getObjectStore } from '~/lib/.server/storage';
 import type { MarketPriceList } from './market-prices';
-import { validateMarketPriceList } from './market-prices';
+import { isMediaOnlyPriceProvider, validateMarketPriceList } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { BAKED_COMET_PRICES } from './baked-comet-prices';
 import { BAKED_ANTHROPIC_PRICES } from './baked-anthropic-prices';
+import { BAKED_FAL_PRICES } from './baked-fal-prices';
 
 const logger = createScopedLogger('market-price-store');
 
@@ -46,9 +47,26 @@ const logger = createScopedLogger('market-price-store');
  * a gateway was one row in the Admin panel. The rates are still first-party; the list is just where an
  * operator states them. Its baked fallback is `BAKED_ANTHROPIC_PRICES` (built from `MODEL_RATES`).
  * `PLATFORM_PROVIDERS` and this list are now the SAME set.
+ *
+ * 🔴 `FAL` JOINED 2026-10-01 (media-gateways T2) as the first MEDIA-ONLY list: fal renders images,
+ * video and sound and sells no LLM, so it is NOT a platform provider and its `llm` table is empty
+ * (`MEDIA_ONLY_PRICE_PROVIDERS`). The equality above therefore holds for `LLM_PRICE_PROVIDERS`, not
+ * for this list — `billing.spec.ts` asserts it there.
  */
-export const MARKET_PRICE_PROVIDERS = ['KIE', 'Comet', 'Anthropic'] as const;
+export const MARKET_PRICE_PROVIDERS = ['KIE', 'Comet', 'Anthropic', 'FAL'] as const;
 export type MarketPriceProvider = (typeof MARKET_PRICE_PROVIDERS)[number];
+
+/**
+ * The lists that can price an LLM turn — every list except the media-only ones.
+ *
+ * 🔴 This, not `MARKET_PRICE_PROVIDERS`, is what the LLM side iterates (`marketPriceProvidersFor`, the
+ * rate tables). fal's empty `llm` table would contribute nothing there anyway, but a media-only
+ * gateway in an LLM ladder is a category error waiting for its first row; keeping it out by
+ * construction means nothing on the LLM path can ever treat fal as a place a turn is priced.
+ */
+export const LLM_PRICE_PROVIDERS: readonly MarketPriceProvider[] = MARKET_PRICE_PROVIDERS.filter(
+  (provider) => !isMediaOnlyPriceProvider(provider),
+);
 
 /**
  * The storage slug per provider.
@@ -63,6 +81,7 @@ const STORE_SLUG: Record<MarketPriceProvider, string> = {
   KIE: 'kie',
   Comet: 'comet',
   Anthropic: 'anthropic',
+  FAL: 'fal',
 };
 
 /** The baked fallback per provider — real, current-at-build pricing, never a zero rate. */
@@ -70,6 +89,7 @@ const BAKED_BY_PROVIDER: Record<MarketPriceProvider, MarketPriceList> = {
   KIE: BAKED_MARKET_PRICES,
   Comet: BAKED_COMET_PRICES,
   Anthropic: BAKED_ANTHROPIC_PRICES,
+  FAL: BAKED_FAL_PRICES,
 };
 
 /**
@@ -85,11 +105,14 @@ const BAKED_BY_PROVIDER: Record<MarketPriceProvider, MarketPriceList> = {
  *
  * Takes a plain string rather than `PlatformProviderName` to keep this module free of the
  * `config -> rates -> market-price-store` import cycle.
+ *
+ * ⚠️ LLM lists only (`LLM_PRICE_PROVIDERS`): a media-only list prices no turn. Media lists are loaded
+ * at the media doorways (`media/service.ts`, the media route), which ensure the MEDIA provider's list.
  */
 export function marketPriceProvidersFor(platformProvider: string): MarketPriceProvider[] {
-  const own = MARKET_PRICE_PROVIDERS.find((name) => name === platformProvider);
+  const own = LLM_PRICE_PROVIDERS.find((name) => name === platformProvider);
 
-  return own ? [own, ...MARKET_PRICE_PROVIDERS.filter((name) => name !== own)] : [...MARKET_PRICE_PROVIDERS];
+  return own ? [own, ...LLM_PRICE_PROVIDERS.filter((name) => name !== own)] : [...LLM_PRICE_PROVIDERS];
 }
 
 /** The immutable-versions prefix for a provider. */
@@ -279,7 +302,7 @@ export async function loadVersion(
   }
 
   try {
-    const checked = validateMarketPriceList(JSON.parse(new TextDecoder().decode(bytes)));
+    const checked = validateMarketPriceList(JSON.parse(new TextDecoder().decode(bytes)), provider);
     return checked.ok ? checked.list : null;
   } catch {
     return null;
@@ -333,7 +356,7 @@ export async function promoteMarketPrices(
   candidate: unknown,
   options?: { note?: string },
 ): Promise<PromoteResult> {
-  const checked = validateMarketPriceList(candidate);
+  const checked = validateMarketPriceList(candidate, provider);
 
   if (!checked.ok) {
     return { ok: false, errors: checked.errors };

@@ -10,13 +10,16 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import {
   findMediaModel,
+  isMediaOnlyPriceProvider,
   lookupMediaPrice,
+  MEDIA_ONLY_PRICE_PROVIDERS,
   searchCreditsFor,
   validateMarketPriceList,
   type MarketPriceList,
 } from './market-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { BAKED_COMET_PRICES } from './baked-comet-prices';
+import { BAKED_FAL_PRICES } from './baked-fal-prices';
 import { FAMILY_PREFIXES } from '~/lib/modules/llm/model-families';
 
 /** A minimal valid list to mutate per test. */
@@ -49,13 +52,13 @@ function validList(): MarketPriceList {
 }
 
 function errorsOf(value: unknown): string[] {
-  const result = validateMarketPriceList(value);
+  const result = validateMarketPriceList(value, 'KIE');
   return result.ok ? [] : result.errors;
 }
 
 describe('validation — the promotion wall', () => {
   it('accepts the baked list — the fallback must never be refused by its own validator', () => {
-    const result = validateMarketPriceList(BAKED_MARKET_PRICES);
+    const result = validateMarketPriceList(BAKED_MARKET_PRICES, 'KIE');
     expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
   });
 
@@ -68,7 +71,7 @@ describe('validation — the promotion wall', () => {
    * fail loudly, it silently becomes the prices charged on that provider forever.
    */
   it('accepts the baked Comet list — its fallback is served without ever passing validation', () => {
-    const result = validateMarketPriceList(BAKED_COMET_PRICES);
+    const result = validateMarketPriceList(BAKED_COMET_PRICES, 'Comet');
     expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
   });
 
@@ -103,7 +106,7 @@ describe('validation — the promotion wall', () => {
     expect(errorsOf(list).join()).toMatch(/cache rates derive/i);
 
     /* Control: the same list without the quote is accepted, so the refusal is about the cache key. */
-    expect(validateMarketPriceList(BAKED_COMET_PRICES).ok).toBe(true);
+    expect(validateMarketPriceList(BAKED_COMET_PRICES, 'Comet').ok).toBe(true);
   });
 
   /*
@@ -118,7 +121,7 @@ describe('validation — the promotion wall', () => {
      * media table validates — an operator promoting a list with no media rows must get a refusal at
      * generation time (`lookupMediaPrice` has no fallback), never a rejected promotion.
      */
-    expect(validateMarketPriceList({ ...BAKED_COMET_PRICES, media: {} }).ok).toBe(true);
+    expect(validateMarketPriceList({ ...BAKED_COMET_PRICES, media: {} }, 'Comet').ok).toBe(true);
 
     // ...and the shipped list DOES carry rows now, so the assertion above is not passing by vacuity.
     expect(Object.keys(BAKED_COMET_PRICES.media).length).toBeGreaterThan(0);
@@ -171,7 +174,7 @@ describe('validation — the promotion wall', () => {
   });
 
   it('accepts a minimal valid list', () => {
-    expect(validateMarketPriceList(validList()).ok).toBe(true);
+    expect(validateMarketPriceList(validList(), 'KIE').ok).toBe(true);
   });
 
   /*
@@ -199,7 +202,7 @@ describe('validation — the promotion wall', () => {
   });
 
   it.each([[null], ['a string'], [42], [[]]])('rejects a non-object list: %s', (bad) => {
-    expect(validateMarketPriceList(bad).ok).toBe(false);
+    expect(validateMarketPriceList(bad, 'KIE').ok).toBe(false);
   });
 
   it('rejects a wrong schemaVersion', () => {
@@ -251,7 +254,7 @@ describe('validation — the promotion wall', () => {
       cacheWritePerMTok: 1.5625,
     };
 
-    expect(validateMarketPriceList(list).ok).toBe(true);
+    expect(validateMarketPriceList(list, 'KIE').ok).toBe(true);
   });
 
   /*
@@ -312,7 +315,7 @@ describe('validation — the promotion wall', () => {
       const list = validList();
       list.llm[id] = { inputPerMTok: 3, outputPerMTok: 15 };
 
-      const result = validateMarketPriceList(list);
+      const result = validateMarketPriceList(list, 'KIE');
       expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
     },
   );
@@ -422,12 +425,12 @@ describe('validation — the promotion wall', () => {
 
 describe('search rate — the flat web_search toll (§4.2)', () => {
   it('is optional — a list promoted before search billing (no search field) is valid', () => {
-    expect(validateMarketPriceList(validList()).ok).toBe(true); // validList() has no `search`
+    expect(validateMarketPriceList(validList(), 'KIE').ok).toBe(true); // validList() has no `search`
   });
 
   it('accepts a well-formed search rate, including 0 (do-not-bill)', () => {
-    expect(validateMarketPriceList({ ...validList(), search: { creditsPerSearch: 10 } }).ok).toBe(true);
-    expect(validateMarketPriceList({ ...validList(), search: { creditsPerSearch: 0 } }).ok).toBe(true);
+    expect(validateMarketPriceList({ ...validList(), search: { creditsPerSearch: 10 } }, 'KIE').ok).toBe(true);
+    expect(validateMarketPriceList({ ...validList(), search: { creditsPerSearch: 0 } }, 'KIE').ok).toBe(true);
   });
 
   it('rejects a non-integer, negative, or non-object search rate, and extra keys', () => {
@@ -532,7 +535,7 @@ describe('audio pricing — Suno effects/music and ElevenLabs speech', () => {
   const list = BAKED_MARKET_PRICES;
 
   it('the baked KIE list still validates with the audio rows in it', () => {
-    expect(validateMarketPriceList(BAKED_MARKET_PRICES).ok).toBe(true);
+    expect(validateMarketPriceList(BAKED_MARKET_PRICES, 'KIE').ok).toBe(true);
   });
 
   it('accepts an audio row priced per 1,000 characters', () => {
@@ -544,7 +547,7 @@ describe('audio pricing — Suno effects/music and ElevenLabs speech', () => {
       unit: 'per_1k_chars',
       variants: [{ options: {}, usd: 0.03 }],
     };
-    expect(validateMarketPriceList(value).ok).toBe(true);
+    expect(validateMarketPriceList(value, 'KIE').ok).toBe(true);
   });
 
   /* CONTROL: widening the unions must not have turned the checks into "anything goes". */
@@ -602,5 +605,59 @@ describe('audio pricing — Suno effects/music and ElevenLabs speech', () => {
     });
 
     expect(Math.ceil((price!.usd / 0.01) * 4.0)).toBe(1);
+  });
+});
+
+/*
+ * ------------------------------------------------------------------------------------------------ *
+ * Media-only lists (media-gateways T2) — fal sells no LLM
+ * ------------------------------------------------------------------------------------------------
+ */
+
+describe('media-only price lists (FAL)', () => {
+  it('accepts a media-only FAL list with an empty llm table', () => {
+    const result = validateMarketPriceList(BAKED_FAL_PRICES, 'FAL');
+
+    expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
+    expect(BAKED_FAL_PRICES.llm).toEqual({});
+  });
+
+  it('refuses a FAL list that carries llm rows', () => {
+    const result = validateMarketPriceList(
+      { ...BAKED_FAL_PRICES, llm: { [DEFAULT_MODEL]: { inputPerMTok: 2, outputPerMTok: 10 } } },
+      'FAL',
+    );
+
+    expect(result.ok).toBe(false);
+    expect((result as { errors: string[] }).errors.join(' ')).toMatch(/FAL is a media-only gateway/);
+  });
+
+  it('refuses a FAL list whose llm is not an object, naming it media-only', () => {
+    const result = validateMarketPriceList({ ...BAKED_FAL_PRICES, llm: null }, 'FAL');
+
+    expect((result as { errors: string[] }).errors.join(' ')).toMatch(/media-only/);
+  });
+
+  it('still refuses a KIE list with no llm rows (control)', () => {
+    /*
+     * The relaxation is per PROVIDER, never per list shape: the same empty-llm list that FAL accepts
+     * must still be refused for an LLM gateway, with the existing errors, or a promotion could drop
+     * every LLM row and refuse every generation the moment it went live.
+     */
+    const errors = errorsOf({ ...BAKED_MARKET_PRICES, llm: {} });
+
+    expect(errors.join(' ')).toMatch(/llm must price at least one model/);
+    expect(errors.join(' ')).toMatch(/must price the platform default model/);
+  });
+
+  it('does not treat the FAL list as valid for an LLM provider (control the other way)', () => {
+    expect(validateMarketPriceList(BAKED_FAL_PRICES, 'Comet').ok).toBe(false);
+  });
+
+  it('declares exactly FAL as media-only, matched exactly', () => {
+    expect([...MEDIA_ONLY_PRICE_PROVIDERS]).toEqual(['FAL']);
+    expect(isMediaOnlyPriceProvider('FAL')).toBe(true);
+    expect(isMediaOnlyPriceProvider('fal')).toBe(false);
+    expect(isMediaOnlyPriceProvider('KIE')).toBe(false);
   });
 });

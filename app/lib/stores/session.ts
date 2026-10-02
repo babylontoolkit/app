@@ -14,6 +14,7 @@
  */
 import { atom } from 'nanostores';
 import { DEFAULT_MODEL } from '~/utils/constants';
+import type { ImageProviderName } from '~/lib/media/image-capabilities';
 
 export interface CreditPack {
   id: string;
@@ -212,7 +213,7 @@ export interface SessionState {
    * controls are drawn. `provider: null` means the platform serves no media here at all.
    */
   media: {
-    provider: 'KIE' | 'Comet' | null;
+    provider: ImageProviderName | null;
   };
 
   /**

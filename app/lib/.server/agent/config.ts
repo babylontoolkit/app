@@ -44,18 +44,30 @@ export const PLATFORM_PROVIDERS = ['Anthropic', 'KIE', 'Comet'] as const;
 export type PlatformProviderName = (typeof PLATFORM_PROVIDERS)[number];
 
 /**
- * The providers that serve MEDIA renders (SPEC §4.16) — a strict subset of the platform providers.
+ * The providers that serve MEDIA renders (SPEC §4.16).
+ *
+ * Every one of them is EITHER a platform provider (KIE, Comet — one vendor, one key, both kinds of
+ * spend) OR listed in `MEDIA_ONLY_PROVIDERS` (fal.ai, which renders and serves no LLM). That is the
+ * relation the specs assert; it replaced "a strict subset of the platform providers" when fal joined
+ * (`_specs/media-gateways_plan.md` T3), because adding fal to `PLATFORM_PROVIDERS` would have offered
+ * a gateway with no text model to the LLM ladder.
  *
  * `Anthropic` is absent because Anthropic sells no image or video generation. That is a FACT about
  * the vendor, not a gap in our wiring, which is why `getMediaProvider` reports "not configured" on an
  * Anthropic deploy rather than silently borrowing another gateway's key: media would then be spent on
  * a provider the operator never chose, and priced from a list they never promoted.
  *
- * ⚠️ Declared here beside `PLATFORM_PROVIDERS` so the subset relation is visible in one place, and
- * asserted against both it and `MARKET_PRICE_PROVIDERS` in the specs — a media provider whose prices
- * nothing can promote is an unbillable render.
+ * ⚠️ Declared here beside `PLATFORM_PROVIDERS` so the relation is visible in one place, and asserted
+ * against both it and `MARKET_PRICE_PROVIDERS` in the specs — a media provider whose prices nothing
+ * can promote is an unbillable render.
  */
-export const MEDIA_PROVIDERS = ['KIE', 'Comet'] as const;
+export const MEDIA_PROVIDERS = ['KIE', 'Comet', 'FAL'] as const;
+
+/**
+ * Media gateways that are NOT platform (LLM) providers. `MEDIA_PROVIDER=FAL` is the only way to select
+ * one — `getMediaProvider`'s fallback to the LLM provider can never land on it, by construction.
+ */
+export const MEDIA_ONLY_PROVIDERS = ['FAL'] as const;
 export type MediaProviderName = (typeof MEDIA_PROVIDERS)[number];
 
 /**
@@ -840,6 +852,9 @@ export function hasPlatformKey(config: PlatformConfig): boolean {
 const MEDIA_KEY_ENV: Record<MediaProviderName, string> = {
   KIE: 'KIE_API_KEY',
   Comet: 'COMET_API_KEY',
+
+  /* fal serves no LLM, so this key buys renders only. */
+  FAL: 'FAL_API_KEY',
 };
 
 /** Which env var a media provider's key comes from — a NAME, never the value (§5). */
@@ -934,8 +949,19 @@ export function getMediaConfig(context?: unknown): MediaConfig | null {
  * the `PENDING_RENDER_TTL_MS` class, and it is not reintroduced here just to look symmetric.
  */
 export function mediaBaseUrlFor(provider: MediaProviderName, context?: unknown): string | undefined {
-  return provider === 'Comet' ? env(context, 'COMET_BASE_URL') : undefined;
+  return MEDIA_BASE_URL_ENV[provider] ? env(context, MEDIA_BASE_URL_ENV[provider]!) : undefined;
 }
+
+/**
+ * A RECORD, not the `=== 'Comet'` ternary it replaced: a new gateway must state its answer here or
+ * fail to compile. **FAL: none** — fal has one public queue host (`queue.fal.run`), and its client
+ * refuses any task id outside it, so an override would have nowhere safe to point.
+ */
+const MEDIA_BASE_URL_ENV: Record<MediaProviderName, string | null> = {
+  KIE: null,
+  Comet: 'COMET_BASE_URL',
+  FAL: null,
+};
 
 /**
  * The key for a media provider, or a describable 503.

@@ -247,9 +247,13 @@ function schemaText(tool: unknown): string {
 }
 
 describe('the tool SCHEMAS advertise this gateway’s models, not the other one’s (T9)', () => {
-  const OTHER: Record<MediaProviderName, MediaProviderName> = { KIE: 'Comet', Comet: 'KIE' };
+  /*
+   * fal's comparison gateway is COMET, not KIE: fal's ids embed KIE's (`fal-ai/nano-banana-2` contains
+   * `nano-banana-2`), so a substring scan against KIE would flag fal for naming its OWN model.
+   */
+  const OTHER: Record<MediaProviderName, MediaProviderName> = { KIE: 'Comet', Comet: 'KIE', FAL: 'Comet' };
 
-  for (const provider of ['KIE', 'Comet'] as const) {
+  for (const provider of ['KIE', 'Comet', 'FAL'] as const) {
     it(`${provider}: every default is named, and no id from ${OTHER[provider]} appears`, () => {
       /*
        * 🔴 THIS TEXT RIDES IN THE CACHED PREFIX. A wrong default costs one round on the turn it fires;

@@ -13,7 +13,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStore } from '@nanostores/react';
 import { toast } from 'react-toastify';
 import { sessionStore } from '~/lib/stores/session';
-import { hasCutoutPass, imageModelCapability, supportsTransparency } from '~/lib/media/image-capabilities';
+import {
+  hasCutoutPass,
+  imageModelCapability,
+  supportsTransparency,
+  type ImageProviderName,
+} from '~/lib/media/image-capabilities';
+import { FAL_VIDEO_DURATIONS, defaultFalVideoSeconds, falModelsOfKind } from '~/lib/media/fal-routes';
 import { trackMediaTask } from '~/lib/media/tasks';
 
 interface MediaPanelProps {
@@ -163,7 +169,7 @@ export const COMET_IMAGE_MODELS: ModelSpec[] = [
  * control is offered on the model the KIE list prices for it. `supportsTransparency` answers
  * "can this GATEWAY deliver alpha by any route at all", and the per-model check answers "on this one".
  */
-export function withBackgroundField(model: ModelSpec, provider: 'KIE' | 'Comet' | null): ModelSpec {
+export function withBackgroundField(model: ModelSpec, provider: ImageProviderName | null): ModelSpec {
   if (!provider || !supportsTransparency(provider)) {
     return { ...model, fields: model.fields.filter((f) => f.key !== 'transparent') };
   }
@@ -283,6 +289,57 @@ export const VIDEO_MODELS: ModelSpec[] = [
 ];
 
 /**
+ * fal.ai's catalogue (`_specs/media-gateways_plan.md` T3) — built FROM `fal-routes.ts`, the table the
+ * service submits through, so the panel can never offer a fal model or a clip length the server has no
+ * request shape for. The quote is still the referee for price.
+ *
+ * Image fields follow the price rows: Nano Banana is priced by resolution, Seedream 4.5 is one flat
+ * price (its size comes from the aspect). Video: Kling and Veo price on audio on/off, Grok on
+ * resolution. The Veo rows are labelled as Google and none is a default — the same rule as Comet's.
+ */
+const FAL_IMAGE_FIELDS: Record<string, FieldSpec[]> = {
+  'image-nano': [resolution(['1K', '2K', '4K'], '2K'), aspect()],
+  'image-seedream': [aspect()],
+};
+
+export const FAL_IMAGE_MODELS: ModelSpec[] = falModelsOfKind('image').map(({ id, route }) => ({
+  id,
+  label: route.label,
+  fields: FAL_IMAGE_FIELDS[route.family] ?? [aspect()],
+}));
+
+/** The panel's clip lengths per fal video family — a short, readable subset of what the family renders. */
+const FAL_PANEL_SECONDS: Record<keyof typeof FAL_VIDEO_DURATIONS, number[]> = {
+  'video-kling': [5, 10],
+  'video-grok': [5, 10],
+  'video-veo': [...FAL_VIDEO_DURATIONS['video-veo']],
+};
+
+const FAL_VIDEO_FIELDS: Record<keyof typeof FAL_VIDEO_DURATIONS, FieldSpec[]> = {
+  'video-kling': [
+    sound,
+    duration(FAL_PANEL_SECONDS['video-kling'], defaultFalVideoSeconds('video-kling')),
+    aspect(ASPECTS.slice(0, 3)),
+  ],
+  'video-grok': [
+    resolution(['480p', '720p'], '720p'),
+    duration(FAL_PANEL_SECONDS['video-grok'], defaultFalVideoSeconds('video-grok')),
+    aspect(),
+  ],
+  'video-veo': [
+    sound,
+    duration(FAL_PANEL_SECONDS['video-veo'], defaultFalVideoSeconds('video-veo')),
+    aspect(ASPECTS.slice(0, 2)),
+  ],
+};
+
+export const FAL_VIDEO_MODELS: ModelSpec[] = falModelsOfKind('video').map(({ id, route }) => ({
+  id,
+  label: route.label,
+  fields: FAL_VIDEO_FIELDS[route.family as keyof typeof FAL_VIDEO_FIELDS] ?? [],
+}));
+
+/**
  * Sound (§4.16) — KIE only, because no other gateway serves audio.
  *
  * The three kinds are modelled as MODELS rather than as a second selector, because that is exactly
@@ -337,22 +394,28 @@ export const SOUND_MODELS_SPEC: ModelSpec[] = [
  * ⚠️ An empty list is a state the caller must RENDER, not index into. Every `models[0]` on this path
  * is optional-chained for that reason; the panel shows an unavailable card instead of a form.
  */
-export function modelsForProvider(kind: 'image' | 'video' | 'audio', provider: 'KIE' | 'Comet' | null): ModelSpec[] {
+export function modelsForProvider(kind: 'image' | 'video' | 'audio', provider: ImageProviderName | null): ModelSpec[] {
   if (!provider) {
     return [];
   }
 
-  if (kind === 'audio') {
-    // Comet has no audio routes at all, so the tab is absent there rather than refusing every quote.
-    return provider === 'KIE' ? SOUND_MODELS_SPEC : [];
-  }
+  const models = CATALOGUES[provider][kind];
 
-  if (kind === 'video') {
-    return provider === 'Comet' ? COMET_VIDEO_MODELS : VIDEO_MODELS;
-  }
-
-  return (provider === 'Comet' ? COMET_IMAGE_MODELS : IMAGE_MODELS).map((m) => withBackgroundField(m, provider));
+  return kind === 'image' ? models.map((m) => withBackgroundField(m, provider)) : models;
 }
+
+/**
+ * Every gateway's catalogue, per tab. A RECORD, not the `=== 'Comet' ? … : KIE` ternaries it replaced:
+ * those sent any gateway they had not heard of down the KIE branch, so fal would have offered KIE's
+ * models and every quote would have refused. A new gateway must state its lists here or fail to compile.
+ *
+ * An empty list makes its tab ABSENT (Comet and fal have no Sound tab until T6/T7).
+ */
+const CATALOGUES: Record<ImageProviderName, Record<'image' | 'video' | 'audio', ModelSpec[]>> = {
+  KIE: { image: IMAGE_MODELS, video: VIDEO_MODELS, audio: SOUND_MODELS_SPEC },
+  Comet: { image: COMET_IMAGE_MODELS, video: COMET_VIDEO_MODELS, audio: [] },
+  FAL: { image: FAL_IMAGE_MODELS, video: FAL_VIDEO_MODELS, audio: [] },
+};
 
 interface TaskRow {
   id: string;

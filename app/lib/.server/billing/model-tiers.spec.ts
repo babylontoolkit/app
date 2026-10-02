@@ -252,7 +252,7 @@ describe('the ladder is coherent (Standard · Premium defaults)', () => {
 
   /* The fallback list must never be refused by the validator every promotion passes through. */
   it('leaves the baked list valid — it prices every rung AND passes its own validator', () => {
-    const result = validateMarketPriceList(BAKED_MARKET_PRICES);
+    const result = validateMarketPriceList(BAKED_MARKET_PRICES, 'KIE');
     expect(result.ok, result.ok ? '' : result.errors.join('; ')).toBe(true);
   });
 

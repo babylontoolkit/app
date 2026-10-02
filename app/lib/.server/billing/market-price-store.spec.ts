@@ -29,6 +29,7 @@ import type { ObjectStore } from '~/lib/.server/storage';
 import { setObjectStore } from '~/lib/.server/storage';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { BAKED_COMET_PRICES } from './baked-comet-prices';
+import { BAKED_FAL_PRICES } from './baked-fal-prices';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import {
   activeMarketPrices,
@@ -43,7 +44,9 @@ import {
   readPointer,
   rollbackMarketPrices,
   MARKET_PRICE_PROVIDERS,
+  LLM_PRICE_PROVIDERS,
 } from './market-price-store';
+import { MEDIA_ONLY_PRICE_PROVIDERS } from './market-prices';
 
 function memoryStore(): ObjectStore {
   const objects = new Map<string, Uint8Array>();
@@ -516,10 +519,30 @@ describe('marketPriceProvidersFor', () => {
    * or a stale deploy naming a provider that has since been removed. It must degrade to EVERY list,
    * never to an empty one: refreshing nothing means every list serves baked with nothing said about it.
    */
-  it('degrades an unknown provider name to every list rather than to nothing', () => {
-    expect(marketPriceProvidersFor('Bedrock')).toEqual([...MARKET_PRICE_PROVIDERS]);
-    expect(marketPriceProvidersFor('')).toEqual([...MARKET_PRICE_PROVIDERS]);
-    expect(marketPriceProvidersFor('kie'), 'match is exact, not case-folded').toEqual([...MARKET_PRICE_PROVIDERS]);
+  it('degrades an unknown provider name to every LLM list rather than to nothing', () => {
+    expect(marketPriceProvidersFor('Bedrock')).toEqual([...LLM_PRICE_PROVIDERS]);
+    expect(marketPriceProvidersFor('')).toEqual([...LLM_PRICE_PROVIDERS]);
+    expect(marketPriceProvidersFor('kie'), 'match is exact, not case-folded').toEqual([...LLM_PRICE_PROVIDERS]);
+  });
+
+  /*
+   * 🔴 A media-only list prices no LLM turn, so it never joins the LLM set — not even when it is
+   * named as the platform provider (which no valid config can do, since FAL is not a platform
+   * provider; the name degrades like any unknown one). Its list is loaded at the MEDIA doorways.
+   */
+  it('never puts a media-only list (FAL) in the LLM set', () => {
+    for (const platform of [...MARKET_PRICE_PROVIDERS, 'nonsense']) {
+      expect(marketPriceProvidersFor(platform), platform).not.toContain('FAL');
+    }
+
+    expect(LLM_PRICE_PROVIDERS).toEqual(['KIE', 'Comet', 'Anthropic']);
+
+    /* CONTROL: FAL IS a market price provider — the exclusion is deliberate, not a missing entry. */
+    expect(MARKET_PRICE_PROVIDERS).toContain('FAL');
+
+    for (const mediaOnly of MEDIA_ONLY_PRICE_PROVIDERS) {
+      expect(MARKET_PRICE_PROVIDERS as readonly string[], mediaOnly).toContain(mediaOnly);
+    }
   });
 
   it('only ever names providers the store can actually serve', () => {
@@ -528,5 +551,72 @@ describe('marketPriceProvidersFor', () => {
         expect(MARKET_PRICE_PROVIDERS).toContain(resolved);
       }
     }
+  });
+});
+
+/*
+ * ------------------------------------------------------------------------------------------------ *
+ * The fal list (media-gateways T2) — media-only, its own key, never adopting another provider's bytes
+ * ------------------------------------------------------------------------------------------------
+ */
+
+describe('the FAL price list', () => {
+  it('serves the baked FAL list when nothing is promoted', async () => {
+    expect(activeMarketPrices('FAL')).toBe(BAKED_FAL_PRICES);
+    expect(await ensureMarketPrices('FAL', {})).toBe(BAKED_FAL_PRICES);
+    expect(activeMarketPriceVersionId('FAL')).toBeNull();
+  });
+
+  it('promotes and loads a FAL list under its own key', async () => {
+    const candidate = {
+      ...BAKED_FAL_PRICES,
+      media: {
+        ...BAKED_FAL_PRICES.media,
+        'fal-ai/minimax-music/v2.6': {
+          ...BAKED_FAL_PRICES.media['fal-ai/minimax-music/v2.6'],
+          variants: [{ options: {}, usd: 0.2 }],
+        },
+      },
+    };
+
+    const result = await promoteMarketPrices(contextStore, 'FAL', candidate);
+
+    expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
+
+    const versionId = result.ok ? result.pointer.versionId : '';
+
+    /* Stored at `pricing/fal-market/...` — asserted as a literal, never through the helper. */
+    expect(await contextStore.get(`pricing/fal-market/versions/${versionId}.json`)).not.toBeNull();
+    expect(await contextStore.get('pricing/fal-market/active.json')).not.toBeNull();
+
+    /* Loaded back through the validating read, with the FAL rule (an empty llm table is required). */
+    const loaded = await loadVersion(contextStore, 'FAL', versionId);
+    expect(loaded?.media['fal-ai/minimax-music/v2.6'].variants[0].usd).toBe(0.2);
+    expect(activeMarketPrices('FAL').media['fal-ai/minimax-music/v2.6'].variants[0].usd).toBe(0.2);
+
+    /* KIE and Comet are untouched: no pointer written, still their own baked tables. */
+    expect(await readPointer(contextStore, 'KIE')).toBeNull();
+    expect(await readPointer(contextStore, 'Comet')).toBeNull();
+    expect(activeMarketPrices('KIE')).toBe(BAKED_MARKET_PRICES);
+    expect(activeMarketPrices('Comet')).toBe(BAKED_COMET_PRICES);
+  });
+
+  it('refuses to promote a FAL list carrying llm rows, and writes nothing', async () => {
+    const result = await promoteMarketPrices(contextStore, 'FAL', {
+      ...BAKED_FAL_PRICES,
+      llm: { [DEFAULT_MODEL]: { inputPerMTok: 2, outputPerMTok: 10 } },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(await readPointer(contextStore, 'FAL')).toBeNull();
+    expect(activeMarketPrices('FAL')).toBe(BAKED_FAL_PRICES);
+  });
+
+  it('does not let FAL adopt a KIE list, nor KIE adopt the FAL list (control)', async () => {
+    /* An LLM list is refused under FAL (it carries llm rows) ... */
+    expect((await promoteMarketPrices(contextStore, 'FAL', BAKED_MARKET_PRICES)).ok).toBe(false);
+
+    /* ... and the media-only list is refused under KIE (no llm rows, no default). */
+    expect((await promoteMarketPrices(contextStore, 'KIE', BAKED_FAL_PRICES)).ok).toBe(false);
   });
 });

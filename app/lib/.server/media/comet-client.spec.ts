@@ -510,7 +510,7 @@ describe('the capability table covers every media gateway', () => {
      */
     const mirrored: ImageProviderName[] = [...MEDIA_PROVIDERS];
 
-    expect([...mirrored].sort()).toEqual(['Comet', 'KIE']);
+    expect([...mirrored].sort()).toEqual(['Comet', 'FAL', 'KIE']);
 
     for (const provider of mirrored) {
       expect(typeof supportsTransparency(provider)).toBe('boolean');

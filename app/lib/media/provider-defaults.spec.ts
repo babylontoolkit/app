@@ -45,6 +45,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { MEDIA_PROVIDERS } from '~/lib/.server/agent/config';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
 import { BAKED_COMET_PRICES } from '~/lib/.server/billing/baked-comet-prices';
+import { BAKED_FAL_PRICES } from '~/lib/.server/billing/baked-fal-prices';
 import { findMediaModel, type MarketPriceList } from '~/lib/.server/billing/market-prices';
 import { activeMarketPrices, invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
 import { nativeAlphaModelFor, type ImageProviderName } from './image-capabilities';
@@ -65,6 +66,7 @@ import {
 const BAKED_BY_PROVIDER: Record<ImageProviderName, MarketPriceList> = {
   KIE: BAKED_MARKET_PRICES,
   Comet: BAKED_COMET_PRICES,
+  FAL: BAKED_FAL_PRICES,
 };
 
 /** The three slots and the media `kind` each one MUST resolve to. */
@@ -384,7 +386,7 @@ describe('the table covers every media gateway', () => {
   it('CONTROL — the list every block above iterates is real', () => {
     // An assertion over an empty list is green by vacuity; every `for` in this file derives from here.
     expect(providersWithDefaults().length).toBeGreaterThanOrEqual(2);
-    expect([...providersWithDefaults()].sort()).toEqual(['Comet', 'KIE']);
+    expect([...providersWithDefaults()].sort()).toEqual(['Comet', 'FAL', 'KIE']);
   });
 
   it('mirrors MEDIA_PROVIDERS exactly', () => {
@@ -572,6 +574,24 @@ describe('generate_video never falls back to Google Veo', () => {
     for (const provider of providersWithDefaults()) {
       expect(isGoogleVideoModel(mediaModelDefaults(provider).googleVideo)).toBe(true);
     }
+  });
+
+  it('recognises fal’s Veo ids, whose vendor prefix comes first', () => {
+    /*
+     * The check used to be anchored at the START of the whole id, so `fal-ai/veo3/fast` read as NOT
+     * Google — `generate_video` would have served fal's most expensive video from the general tool.
+     */
+    expect(isGoogleVideoModel('fal-ai/veo3/fast')).toBe(true);
+    expect(isGoogleVideoModel('fal-ai/veo3')).toBe(true);
+
+    // The earlier spellings still match.
+    expect(isGoogleVideoModel('veo3_fast')).toBe(true);
+    expect(isGoogleVideoModel('veo3-fast')).toBe(true);
+
+    // CONTROL: fal's non-Google video stays non-Google, prefix and all.
+    expect(isGoogleVideoModel('fal-ai/kling-video/v3/standard/text-to-video')).toBe(false);
+    expect(isGoogleVideoModel('fal-ai/kling-video/v3/pro/text-to-video')).toBe(false);
+    expect(isGoogleVideoModel('xai/grok-imagine-video/text-to-video')).toBe(false);
   });
 
   it('CONTROL — it does not swallow the non-Google video models', () => {

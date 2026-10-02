@@ -86,7 +86,10 @@ const UNIT_LABEL: Record<MediaRow['unit'], string> = {
  * what the SERVER says it loaded, never what the local state hoped for. Promoting Comet's rates
  * over KIE's pointer is a silent repricing of every generation, so this is not a cosmetic filter.
  */
-type PriceProvider = 'KIE' | 'Comet' | 'Anthropic';
+type PriceProvider = 'KIE' | 'Comet' | 'Anthropic' | 'FAL';
+
+/** Media-only gateways sell no LLM — their list has no LLM table to show (mirrors the server rule). */
+const MEDIA_ONLY_PROVIDERS: readonly PriceProvider[] = ['FAL'];
 
 /**
  * Map a vendor feed row onto the panel's three columns.
@@ -97,6 +100,20 @@ type PriceProvider = 'KIE' | 'Comet' | 'Anthropic';
  * it happens to be the common value.
  */
 function normaliseFeedRow(row: Record<string, unknown>, provider: PriceProvider): FeedRow {
+  if (provider === 'FAL') {
+    /*
+     * fal reports ONE account-specific base price per model, in its own unit word ("images",
+     * "seconds"). Variant multipliers (resolution, audio) are not in it — compare the base only.
+     */
+    const price = row.unitPrice as number | null;
+
+    return {
+      label: String(row.endpointId ?? ''),
+      detail: `account price · ${String(row.currency ?? '')}`,
+      price: price == null ? '—' : `$${price} per ${String(row.unit ?? '?')}`,
+    };
+  }
+
   if (provider === 'Comet') {
     const inCharged = row.chargedInputPerMTok as number | null;
     const outCharged = row.chargedOutputPerMTok as number | null;
@@ -259,7 +276,7 @@ export function MarketPricesSection() {
             onChange={(e) => setProvider(e.target.value as PriceProvider)}
             aria-label="Price list provider"
           >
-            {(state.providers ?? ['KIE', 'Comet', 'Anthropic']).map((name) => (
+            {(state.providers ?? ['KIE', 'Comet', 'Anthropic', 'FAL']).map((name) => (
               <option key={name} value={name}>
                 {name}
               </option>
@@ -299,47 +316,54 @@ export function MarketPricesSection() {
       </div>
 
       {/* What LLM billing is using right now. Cache handling is per FAMILY — see the footer below. */}
-      <div className="mt-2 rounded-md border border-bolt-elements-borderColor overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-left text-bolt-elements-textTertiary">
-              <th className="px-3 py-1.5 font-medium">LLM model</th>
-              <th className="px-3 py-1.5 font-medium text-right">Input $/MTok</th>
-              <th className="px-3 py-1.5 font-medium text-right">Output $/MTok</th>
-              <th className="px-3 py-1.5 font-medium text-right">Cached in $/MTok</th>
-              <th className="px-3 py-1.5 font-medium text-right">Cache write $/MTok</th>
-            </tr>
-          </thead>
-          <tbody>
-            {Object.entries(active.list.llm).map(([model, row]) => (
-              <tr key={model} className="border-t border-bolt-elements-borderColor">
-                <td className="px-3 py-1.5 text-bolt-elements-textPrimary">{model}</td>
-                <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">${row.inputPerMTok}</td>
-                <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">${row.outputPerMTok}</td>
-                <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">
-                  {row.cachedInputPerMTok === undefined ? 'derived' : `$${row.cachedInputPerMTok}`}
-                </td>
-                <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">
-                  {row.cacheWritePerMTok === undefined ? 'derived' : `$${row.cacheWritePerMTok}`}
-                </td>
+      {MEDIA_ONLY_PROVIDERS.includes(provider) ? (
+        <div className="mt-2 rounded-md border border-bolt-elements-borderColor px-3 py-2 text-xs text-bolt-elements-textTertiary">
+          {provider} is a media-only gateway — it sells no LLM, so its list has no LLM rows (a list carrying any is
+          refused). Only the media table below is billed from it.
+        </div>
+      ) : (
+        <div className="mt-2 rounded-md border border-bolt-elements-borderColor overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-bolt-elements-textTertiary">
+                <th className="px-3 py-1.5 font-medium">LLM model</th>
+                <th className="px-3 py-1.5 font-medium text-right">Input $/MTok</th>
+                <th className="px-3 py-1.5 font-medium text-right">Output $/MTok</th>
+                <th className="px-3 py-1.5 font-medium text-right">Cached in $/MTok</th>
+                <th className="px-3 py-1.5 font-medium text-right">Cache write $/MTok</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="px-3 py-1.5 text-[11px] text-bolt-elements-textTertiary border-t border-bolt-elements-borderColor space-y-1">
-          <div>
-            Cache prices are per model FAMILY, derived from the model id. <strong>claude-*</strong>: derived per row
-            (0.1× input for reads, 2.0× input for 1-hour writes) — quoting them is refused. <strong>gpt-*</strong>: KIE
-            publishes both, so the row must quote <em>both</em> Cached in and Cache write — neither derives, and a
-            half-quoted row is refused. <strong>gemini-*</strong>: KIE quotes no cached rate, so cached tokens bill at
-            the full input rate — quoting them is refused.
-          </div>
-          <div>
-            Rows are keyed by the <strong>API model id</strong> (dashes: <code>gpt-5-6-sol</code>), never by the display
-            name in KIE's pricing feed (<code>gpt-5.6-sol</code>) — a feed name prices nothing real.
+            </thead>
+            <tbody>
+              {Object.entries(active.list.llm).map(([model, row]) => (
+                <tr key={model} className="border-t border-bolt-elements-borderColor">
+                  <td className="px-3 py-1.5 text-bolt-elements-textPrimary">{model}</td>
+                  <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">${row.inputPerMTok}</td>
+                  <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">${row.outputPerMTok}</td>
+                  <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">
+                    {row.cachedInputPerMTok === undefined ? 'derived' : `$${row.cachedInputPerMTok}`}
+                  </td>
+                  <td className="px-3 py-1.5 text-right text-bolt-elements-textSecondary">
+                    {row.cacheWritePerMTok === undefined ? 'derived' : `$${row.cacheWritePerMTok}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="px-3 py-1.5 text-[11px] text-bolt-elements-textTertiary border-t border-bolt-elements-borderColor space-y-1">
+            <div>
+              Cache prices are per model FAMILY, derived from the model id. <strong>claude-*</strong>: derived per row
+              (0.1× input for reads, 2.0× input for 1-hour writes) — quoting them is refused. <strong>gpt-*</strong>:
+              KIE publishes both, so the row must quote <em>both</em> Cached in and Cache write — neither derives, and a
+              half-quoted row is refused. <strong>gemini-*</strong>: KIE quotes no cached rate, so cached tokens bill at
+              the full input rate — quoting them is refused.
+            </div>
+            <div>
+              Rows are keyed by the <strong>API model id</strong> (dashes: <code>gpt-5-6-sol</code>), never by the
+              display name in KIE's pricing feed (<code>gpt-5.6-sol</code>) — a feed name prices nothing real.
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Media pricing — what generate_image / generate_video will debit from (§4.16). */}
       {mediaEntries.length > 0 && (

@@ -37,7 +37,7 @@
 import type { ImageOutputFormat } from './output-format';
 
 /** The gateways that serve renders. Mirrors `MEDIA_PROVIDERS`; asserted equal in the specs. */
-export type ImageProviderName = 'KIE' | 'Comet';
+export type ImageProviderName = 'KIE' | 'Comet' | 'FAL';
 
 export interface ImageModelCapability {
   /**
@@ -90,6 +90,13 @@ const CAPABILITIES: Record<ImageProviderName, Record<string, ImageModelCapabilit
     /* Token-priced nano-banana equivalent. No alpha — Google's image models emit flat RGB. */
     'gemini-3-pro-image': { nativeAlpha: false },
   },
+
+  /*
+   * fal: nothing native is USED. fal does sell a native-alpha model (`ideogram/v3/generate-transparent`)
+   * and it is left out on purpose (plan, "Left out on purpose"): transparency here keeps the user's
+   * chosen model and runs the same two-stage cut-out as KIE, through `fal-ai/bria/background/remove`.
+   */
+  FAL: {},
 };
 
 /**
@@ -119,10 +126,39 @@ export function supportsTransparency(provider: ImageProviderName): boolean {
 }
 
 /**
+ * The cut-out model per gateway — stage 2 of a transparent image — or `null` where there is none.
+ *
+ * 🔴 ONE RECORD, READ BY EVERY QUESTION ABOUT THE CUT-OUT: whether the gateway has one
+ * (`hasCutoutPass`), whether the panel offers transparency (`supportsTransparency`), what the quote
+ * prices and what the poll path creates (`service.ts`). It replaced a `provider === 'KIE'` check and a
+ * single `CUTOUT_MODEL` constant, which were two writers of one fact that agreed only while KIE was
+ * the only gateway with a cut-out — on fal they would have priced Recraft (a model fal does not sell)
+ * and refused every transparent render, or worse, chained a KIE model id onto a fal task.
+ *
+ * Comet is `null`: it has no remover in its catalogue, and its transparency is per MODEL
+ * (`gpt-image-1.5`'s native alpha) instead.
+ */
+export const CUTOUT_MODEL_BY_PROVIDER: Record<ImageProviderName, string | null> = {
+  KIE: 'recraft/remove-background',
+  Comet: null,
+  FAL: 'fal-ai/bria/background/remove',
+};
+
+/** The cut-out model for a gateway, or `null` when it has none. */
+export function cutoutModelFor(provider: ImageProviderName): string | null {
+  return CUTOUT_MODEL_BY_PROVIDER[provider] ?? null;
+}
+
+/** Every gateway's cut-out id — none of them is a model anyone generates WITH. */
+export function allCutoutModels(): string[] {
+  return Object.values(CUTOUT_MODEL_BY_PROVIDER).filter((id): id is string => Boolean(id));
+}
+
+/**
  * Does this gateway have a priced cut-out pass — i.e. can it add alpha to a model that has none?
  *
- * KIE does (`recraft/remove-background`); Comet has no equivalent in its catalogue, which is why its
- * transparency is per-model rather than universal.
+ * KIE does (`recraft/remove-background`), and so does fal (`fal-ai/bria/background/remove`); Comet has
+ * no equivalent in its catalogue, which is why its transparency is per-model rather than universal.
  *
  * ⚠️ Named and exported so there is ONE writer of that fact. It was inlined as `provider === 'KIE'`
  * in the panel *while the panel also called `supportsTransparency`, which encodes the same rule* —
@@ -134,7 +170,7 @@ export function supportsTransparency(provider: ImageProviderName): boolean {
  * Deliberate: the alternative is shipping the price list to the browser to render a dropdown.
  */
 export function hasCutoutPass(provider: ImageProviderName): boolean {
-  return provider === 'KIE';
+  return cutoutModelFor(provider) !== null;
 }
 
 /**
@@ -152,7 +188,7 @@ export interface ImageDelivery {
    */
   model: string;
 
-  /** A SECOND priced stage is owed (`recraft/remove-background`). Never true when `background` is set. */
+  /** A SECOND priced stage is owed (the gateway's cut-out model). Never true when `background` is set. */
   cutout: boolean;
 
   /** Sent as `background: "transparent"` on the payload — one call, real alpha. */
@@ -197,7 +233,7 @@ export interface RealizeInput {
   /** The caller's explicit format, honoured only when there is no alpha to carry. */
   explicitFormat: ImageOutputFormat;
 
-  /** Does this gateway have a priced cut-out stage available? (`recraft/remove-background`.) */
+  /** Does this gateway have a priced cut-out stage available? (`cutoutModelFor`.) */
   cutoutAvailable: boolean;
 }
 

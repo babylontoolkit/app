@@ -42,6 +42,7 @@ import { setGenerationStore, type GenerationStore, type GenerationUpsert } from 
 import { invalidateMarketPricesCache, MARKET_PRICE_PROVIDERS } from '~/lib/.server/billing/market-price-store';
 import {
   getMediaProvider,
+  MEDIA_ONLY_PROVIDERS,
   MEDIA_PROVIDERS as CONFIG_MEDIA_PROVIDERS,
   NotConfiguredError,
   PLATFORM_PROVIDERS,
@@ -61,6 +62,8 @@ import {
 } from './provider';
 import { KieMediaProvider } from './kie-client';
 import { CometMediaProvider } from './comet-client';
+import { FalMediaProvider } from './fal-client';
+import { FAL_ROUTES } from '~/lib/media/fal-routes';
 import { getMediaTask, putMediaTask, type MediaTaskRecord } from './store';
 import { setMediaDispatcher } from './dispatch';
 import { downloadMediaResult, pollMediaTask, startMediaTask } from './service';
@@ -119,6 +122,9 @@ const MEDIA_ENV = [
   'LLM_PROVIDER',
   'KIE_API_KEY',
   'COMET_API_KEY',
+
+  // `.env.local` holds a REAL fal key on this machine — scrubbed like the other two.
+  'FAL_API_KEY',
   'BILLING_ENFORCED',
   'CREDIT_UNIT_COST_USD',
   'CREDIT_MARGIN',
@@ -403,6 +409,113 @@ describe('an in-flight task is polled by the gateway that CREATED it', () => {
     expect(asked).toEqual(['KIE']);
     expect(mid).toMatchObject({ status: 'pending', stage: 'cutout' });
     expect(provider.created[1]?.model).toBe('recraft/remove-background');
+  });
+});
+
+describe('fal.ai — routing and the poll rule (media-gateways T3)', () => {
+  beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+  /** A request each fal family can price: video needs its exact duration, Grok its resolution. */
+  function requestFor(model: string): Partial<Parameters<typeof startMediaTask>[0]> {
+    switch (FAL_ROUTES[model].family) {
+      case 'video-veo':
+        return { model, prompt: 'a kart drifts', options: { sound: false }, durationSeconds: 8 };
+
+      case 'video-kling':
+      case 'video-grok':
+        return { model, prompt: 'a kart drifts', options: { sound: false }, durationSeconds: 5 };
+
+      default:
+        return { model, prompt: 'a neon city skyline', options: { resolution: '2K' } };
+    }
+  }
+
+  const SUBMITTABLE = Object.keys(FAL_ROUTES).filter((model) => FAL_ROUTES[model].family !== 'cutout');
+
+  it('CONTROL — there are image AND video fal models to route', () => {
+    // A loop over an empty or image-only list would pass the routing assertion below by vacuity.
+    expect(SUBMITTABLE.some((m) => FAL_ROUTES[m].family.startsWith('image'))).toBe(true);
+    expect(SUBMITTABLE.some((m) => FAL_ROUTES[m].family.startsWith('video'))).toBe(true);
+  });
+
+  it('routes every FAL model to fal-queue', async () => {
+    await grant(100_000);
+
+    for (const model of SUBMITTABLE) {
+      const provider = new FakeProvider('FAL');
+      const objectStore = memoryStore();
+      const started = await startMediaTask(imageInput({ provider, objectStore, ...requestFor(model) }));
+
+      expect(provider.created[0]?.endpoint, `${model} was created on the wrong route`).toBe('fal-queue');
+      expect(provider.created[0]?.model).toBe(model);
+
+      // The STORED endpoint is what every later poll uses — it must agree with the create.
+      expect((await getMediaTask(objectStore, PROJECT, started.taskId))?.endpoint).toBe('fal-queue');
+    }
+  });
+
+  it('CONTROL — the same model name on KIE never routes to fal-queue', async () => {
+    await grant(100);
+
+    const provider = new FakeProvider('KIE');
+    await startMediaTask(imageInput({ provider }));
+
+    expect(provider.created[0]?.endpoint).toBe('jobs');
+  });
+
+  it('a FAL task is polled by FAL after MEDIA_PROVIDER changes back to KIE', async () => {
+    vi.stubEnv('MEDIA_PROVIDER', 'FAL');
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startMediaTask(imageInput({ provider, objectStore, ...requestFor('fal-ai/nano-banana-2') }));
+
+    expect((await getMediaTask(objectStore, PROJECT, started.taskId))?.provider).toBe('FAL');
+
+    // The cutover AFTER the task exists — without it the assertion cannot fail.
+    vi.stubEnv('MEDIA_PROVIDER', 'KIE');
+    provider.state = { state: 'succeeded', resultUrl: 'https://v3.fal.media/files/x.jpg' };
+
+    const asked: MediaProviderName[] = [];
+    const task = await pollMediaTask({
+      projectId: PROJECT,
+      taskId: started.taskId,
+      resolveProvider: (name) => {
+        asked.push(name);
+        return provider;
+      },
+      objectStore,
+    });
+
+    expect(asked, 'the poll resolved the gateway from current config, not from the record').toEqual(['FAL']);
+    expect(task).toMatchObject({ status: 'succeeded', resultUrl: 'https://v3.fal.media/files/x.jpg' });
+  });
+
+  it('mediaProviderOf honours a FAL stamp (control for the KIE fallback)', () => {
+    expect(mediaProviderOf({ id: 'f', provider: 'FAL' })).toBe('FAL');
+  });
+
+  it('builds the fal client for FAL — never a KIE or Comet one', () => {
+    const provider = mediaProviderFor('FAL', 'sentinel-key');
+
+    expect(provider).toBeInstanceOf(FalMediaProvider);
+    expect(provider).not.toBeInstanceOf(KieMediaProvider);
+    expect(provider).not.toBeInstanceOf(CometMediaProvider);
+    expect(provider.name).toBe('FAL');
+  });
+
+  it('resolveMediaProvider serves fal on MEDIA_PROVIDER=fal, with its own key', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('MEDIA_PROVIDER', 'fal');
+    vi.stubEnv('FAL_API_KEY', 'sentinel-fal');
+
+    expect(resolveMediaProvider({})?.name).toBe('FAL');
+
+    // CONTROL: without fal's key there is no media here — never another gateway's key.
+    vi.stubEnv('FAL_API_KEY', undefined as unknown as string);
+    vi.stubEnv('KIE_API_KEY', 'sentinel-kie');
+    expect(resolveMediaProvider({})).toBeNull();
   });
 });
 
@@ -718,16 +831,28 @@ describe('the media provider list agrees with its neighbours', () => {
     expect([...MEDIA_PROVIDERS]).toEqual([...CONFIG_MEDIA_PROVIDERS]);
   });
 
-  it('is a strict subset of the platform providers', () => {
+  it('every media provider is a platform provider or media-only', () => {
     /*
      * A media gateway the platform cannot otherwise talk to would have no key resolution, no rate
-     * table and no operator switch — it would exist only in this list.
+     * table and no operator switch — it would exist only in this list. The one sanctioned exception is
+     * a gateway DECLARED media-only (fal.ai, T3): it serves no LLM, so it must never be offered to the
+     * LLM ladder, and declaring it is what keeps "not a platform provider" from being an accident.
      */
     for (const provider of MEDIA_PROVIDERS) {
-      expect(PLATFORM_PROVIDERS, `${provider} is not a platform provider`).toContain(provider);
+      const platform = (PLATFORM_PROVIDERS as readonly string[]).includes(provider);
+      const mediaOnly = (MEDIA_ONLY_PROVIDERS as readonly string[]).includes(provider);
+
+      expect(platform || mediaOnly, `${provider} is neither a platform provider nor declared media-only`).toBe(true);
+
+      // Never both: a media-only gateway that is ALSO a platform provider makes the declaration a lie.
+      expect(platform && mediaOnly, `${provider} is declared media-only AND is a platform provider`).toBe(false);
     }
 
-    // Strict: Anthropic sells no renders, so the two lists must NOT be the same list.
+    // CONTROL: the exception is real and narrow — fal, and only fal, is media-only today.
+    expect([...MEDIA_ONLY_PROVIDERS]).toEqual(['FAL']);
+    expect(PLATFORM_PROVIDERS).not.toContain('FAL' as never);
+
+    // Anthropic sells no renders, so the two lists must NOT be the same list.
     expect(PLATFORM_PROVIDERS).toContain('Anthropic');
     expect(MEDIA_PROVIDERS).not.toContain('Anthropic' as never);
   });
@@ -747,6 +872,8 @@ describe('the media provider list agrees with its neighbours', () => {
     /*
      * ⚠️ No longer EQUAL (2026-09-29): Anthropic has a price list (for LLM rows) but sells no renders,
      * so it is the one list with no media provider — an empty `media` table, which is valid.
+     *
+     * fal (T3) is a media provider with a media-only list, so it is NOT in this difference.
      */
     expect(MARKET_PRICE_PROVIDERS.filter((p) => !(MEDIA_PROVIDERS as readonly string[]).includes(p))).toEqual([
       'Anthropic',

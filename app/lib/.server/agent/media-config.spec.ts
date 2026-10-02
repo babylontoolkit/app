@@ -34,6 +34,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ENV_EXAMPLE_FILENAME, envExampleAssignments } from '~/lib/.server/billing/env-example';
 import {
+  MEDIA_ONLY_PROVIDERS,
   MEDIA_PROVIDERS,
   NotConfiguredError,
   PLATFORM_PROVIDERS,
@@ -58,16 +59,30 @@ import {
 const EXPECTED_KEY_ENV: Record<MediaProviderName, string> = {
   KIE: 'KIE_API_KEY',
   Comet: 'COMET_API_KEY',
+  FAL: 'FAL_API_KEY',
 };
 
 /** Distinct per gateway, so "it returned *a* key" and "it returned *the right* key" cannot be confused. */
 const SENTINEL: Record<MediaProviderName, string> = {
   KIE: 'sentinel-KIE-media-key',
   Comet: 'sentinel-COMETAPI-media-key',
+  FAL: 'sentinel-FAL-media-key',
 };
 
 /** Everything that can decide which gateway is configured, or whether a key is present. */
-const MEDIA_ENV = ['MEDIA_PROVIDER', 'LLM_PROVIDER', 'ANTHROPIC_API_KEY', 'KIE_API_KEY', 'COMET_API_KEY'] as const;
+/*
+ * `FAL_API_KEY` too: `.env.local` on this machine holds a REAL one, so an unscrubbed "FAL has no key"
+ * assertion would grade against the live credential (the `oauth.spec.ts` trap).
+ */
+const MEDIA_ENV = [
+  'MEDIA_PROVIDER',
+  'LLM_PROVIDER',
+  'ANTHROPIC_API_KEY',
+  'KIE_API_KEY',
+  'COMET_API_KEY',
+  'FAL_API_KEY',
+  'COMET_BASE_URL',
+] as const;
 
 beforeEach(() => {
   for (const key of MEDIA_ENV) {
@@ -104,6 +119,42 @@ describe('the union these tests are generated from', () => {
       expect(SENTINEL[provider], `no sentinel for ${provider}`).toBeTruthy();
       expect(EXPECTED_KEY_ENV[provider], `no expected env var for ${provider}`).toBeTruthy();
     }
+  });
+});
+
+describe('fal.ai is a media-only gateway (media-gateways T3)', () => {
+  it('every media provider is a platform provider or media-only', () => {
+    for (const provider of MEDIA_PROVIDERS) {
+      const platform = (PLATFORM_PROVIDERS as readonly string[]).includes(provider);
+      const mediaOnly = (MEDIA_ONLY_PROVIDERS as readonly string[]).includes(provider);
+
+      expect(platform || mediaOnly, `${provider} is neither`).toBe(true);
+      expect(platform && mediaOnly, `${provider} is both`).toBe(false);
+    }
+
+    // CONTROL: fal is a media provider, and it is NOT offered to the LLM ladder.
+    expect(MEDIA_PROVIDERS).toContain('FAL');
+    expect(PLATFORM_PROVIDERS).not.toContain('FAL' as never);
+  });
+
+  it('MEDIA_PROVIDER=fal selects FAL and reads FAL_API_KEY', () => {
+    vi.stubEnv('LLM_PROVIDER', 'KIE');
+    vi.stubEnv('MEDIA_PROVIDER', 'fal');
+    stubAllKeys();
+
+    expect(getMediaProvider()).toBe('FAL');
+    expect(mediaKeyEnvFor('FAL')).toBe('FAL_API_KEY');
+
+    // fal's OWN key — never the KIE key the LLM side is using — and no base-URL override.
+    expect(getMediaConfig()).toEqual({ provider: 'FAL', apiKey: SENTINEL.FAL, baseUrl: undefined });
+  });
+
+  it('is never reached by the LLM-provider fallback — only MEDIA_PROVIDER selects it', () => {
+    vi.stubEnv('LLM_PROVIDER', 'Anthropic');
+    vi.stubEnv('FAL_API_KEY', SENTINEL.FAL);
+
+    // A fal key alone does not make fal the media gateway; Anthropic sells no renders → null.
+    expect(getMediaProvider()).toBeNull();
   });
 });
 

@@ -38,16 +38,60 @@ import {
 } from './provider';
 import { putMediaTask, getMediaTask, type MediaTaskRecord } from './store';
 import { cutoutRenderPrompt, resolveImageIntent } from '~/lib/media/output-format';
-import { isRefusal, realizeImageDelivery, type ImageDelivery } from '~/lib/media/image-capabilities';
+import {
+  allCutoutModels,
+  cutoutModelFor,
+  isRefusal,
+  realizeImageDelivery,
+  type ImageDelivery,
+} from '~/lib/media/image-capabilities';
+import {
+  defaultFalVideoSeconds,
+  falRouteFor,
+  falRouteRefusal,
+  falWireDuration,
+  SEEDREAM_IMAGE_SIZES,
+} from '~/lib/media/fal-routes';
 
 const logger = createScopedLogger('media-service');
 
 /**
- * The cut-out model — stage 2 of a transparent image (§4.16). Not a model anyone selects: it takes an
- * image URL, not a prompt, so naming it as a primary model is always a mistake and is refused below
- * BEFORE the debit rather than after a wasted render.
+ * The cut-out model for a gateway — stage 2 of a transparent image (§4.16). Not a model anyone selects:
+ * it takes an image URL, not a prompt, so naming ANY gateway's cut-out as a primary model is always a
+ * mistake and is refused below BEFORE the debit rather than after a wasted render.
+ *
+ * Per gateway since fal joined (T4): KIE's `recraft/remove-background`, fal's
+ * `fal-ai/bria/background/remove`, none on Comet. The table is `CUTOUT_MODEL_BY_PROVIDER`
+ * (`image-capabilities.ts`) — the panel reads the same one.
  */
-export const CUTOUT_MODEL = 'recraft/remove-background';
+export { cutoutModelFor };
+
+/**
+ * How stage 2 is CREATED on each gateway, given stage 1's result URL — or `null` where there is no
+ * cut-out. A record, so a new gateway must answer here or fail to compile.
+ *
+ * 🔴 KIE's entry is byte-identical to what the poll path hardcoded before T4 (`{ image }` on `jobs`);
+ * fal's input field is `image_url` on its one queue route.
+ */
+const CUTOUT_TASK_BY_PROVIDER: Record<
+  MediaProviderName,
+  ((renderUrl: string) => { endpoint: MediaEndpoint; payload: Record<string, unknown> }) | null
+> = {
+  KIE: (renderUrl) => ({ endpoint: 'jobs', payload: { image: renderUrl } }),
+  Comet: null,
+  FAL: (renderUrl) => ({ endpoint: 'fal-queue', payload: { image_url: renderUrl } }),
+};
+
+/** The stage-2 create input for a gateway, or `null` when it has no cut-out pass. */
+export function cutoutTaskFor(
+  provider: MediaProviderName,
+  renderUrl: string,
+): { endpoint: MediaEndpoint; model: string; payload: Record<string, unknown> } | null {
+  const model = cutoutModelFor(provider);
+  const build = CUTOUT_TASK_BY_PROVIDER[provider];
+
+  return model && build ? { model, ...build(renderUrl) } : null;
+}
 
 /**
  * Recraft's input limits (their docs): ≤5MB, ≤16MP, ≤4096px on a side, ≥256px.
@@ -218,9 +262,9 @@ export function quoteMediaRequest(
    */
   const list = activeMarketPrices(mediaProvider);
 
-  if (request.model === CUTOUT_MODEL) {
+  if (allCutoutModels().includes(request.model.trim())) {
     throw new MediaRefusedError(
-      `"${CUTOUT_MODEL}" is the automatic cut-out pass, not a model you generate with — it takes an ` +
+      `"${request.model.trim()}" is the automatic cut-out pass, not a model you generate with — it takes an ` +
         'image, not a prompt. Ask for transparency instead (transparent: true) and it runs by itself.',
     );
   }
@@ -248,6 +292,9 @@ export function quoteMediaRequest(
    * `video/mp4`. Billed right, delivered wrong, nothing thrown.
    */
   if (requested.pricing.kind === 'audio') {
+    // fal's sound rows are priced (T2) but have no request shape until T6 — refused before any debit.
+    refuseUnroutable(mediaProvider, requested.id);
+
     const soundKind = soundKindForModel(requested.id) ?? 'sound_effect';
     const options = { ...request.options };
 
@@ -288,22 +335,30 @@ export function quoteMediaRequest(
   }
 
   if (requested.pricing.kind !== 'image') {
+    /*
+     * Normalised per gateway like the image options below — fal prices Kling and Veo on
+     * `generate_audio` where KIE prices on `sound`. KIE and Comet pass through UNCHANGED.
+     */
+    const options = providerVideoOptions(requested.id, request, mediaProvider);
+    const videoRequest = { ...request, options };
     const videoPrice = lookupMediaPrice(list, {
       model: request.model,
-      options: lookupOptions(request),
+      options: lookupOptions(videoRequest),
       durationSeconds: request.durationSeconds,
     });
 
     if (!videoPrice) {
-      throw new MediaRefusedError(unpricedMessage(list, request));
+      throw new MediaRefusedError(unpricedMessage(list, videoRequest));
     }
+
+    refuseUnroutable(mediaProvider, videoPrice.model, request.durationSeconds);
 
     return {
       model: videoPrice.model,
       kind: 'video',
       usd: videoPrice.usd,
       credits: creditsForRawCost(videoPrice.usd, config),
-      options: request.options,
+      options,
     };
   }
 
@@ -317,12 +372,13 @@ export function quoteMediaRequest(
    * different one is the priced-but-not-listed mis-bill wearing media clothes.
    */
   const intent = resolveImageIntent(imageHints(request));
+  const cutoutModel = cutoutModelFor(mediaProvider);
   const realized = realizeImageDelivery({
     provider: mediaProvider,
     model: request.model,
     wantsAlpha: intent.wantsAlpha,
     explicitFormat: intent.format,
-    cutoutAvailable: Boolean(lookupMediaPrice(list, { model: CUTOUT_MODEL, options: {} })),
+    cutoutAvailable: Boolean(cutoutModel && lookupMediaPrice(list, { model: cutoutModel, options: {} })),
   });
 
   /*
@@ -341,8 +397,10 @@ export function quoteMediaRequest(
     throw new MediaRefusedError(unpricedMessage(list, { ...request, model: realized.model, options }));
   }
 
+  refuseUnroutable(mediaProvider, price.model);
+
   const kind = 'image' as const;
-  const delivery: ImageDelivery = { ...realized, model: price.model };
+  const delivery: ImageDelivery = withFixedRenderFormat(mediaProvider, { ...realized, model: price.model });
 
   if (!delivery.cutout) {
     return {
@@ -359,7 +417,7 @@ export function quoteMediaRequest(
     throw new MediaRefusedError(CUTOUT_MAX_RESOLUTION_NOTE);
   }
 
-  const cutoutPrice = lookupMediaPrice(list, { model: CUTOUT_MODEL, options: {} });
+  const cutoutPrice = cutoutModel ? lookupMediaPrice(list, { model: cutoutModel, options: {} }) : null;
 
   /*
    * Refuse, never silently degrade. Dropping the cut-out would deliver an OPAQUE image against a
@@ -368,7 +426,7 @@ export function quoteMediaRequest(
    */
   if (!cutoutPrice) {
     throw new MediaRefusedError(
-      `Transparent images need the cut-out pass ("${CUTOUT_MODEL}"), which is not in the active ` +
+      `Transparent images need the cut-out pass ("${cutoutModel}"), which is not in the active ` +
         'Marketplace price list, so it cannot be billed. Add that row in Settings → Admin → ' +
         'Marketplace prices, or generate this image opaque (transparent: false).',
     );
@@ -432,15 +490,105 @@ function providerImageOptions(
   request: MediaRequest,
   mediaProvider: MediaProviderName,
 ): Record<string, string | number | boolean> {
-  if (mediaProvider !== 'Comet') {
-    return request.options;
-  }
+  switch (mediaProvider) {
+    case 'KIE':
+    case 'FAL':
+      // Both price images on `resolution` (fal's Nano Banana rows are keyed 1K/2K/4K, like KIE's).
+      return request.options;
 
-  return {
-    ...request.options,
-    aspectRatio: String(request.options.aspectRatio ?? '16:9'),
-    quality: String(request.options.quality ?? 'medium'),
-  };
+    case 'Comet':
+      return {
+        ...request.options,
+        aspectRatio: String(request.options.aspectRatio ?? '16:9'),
+        quality: String(request.options.quality ?? 'medium'),
+      };
+
+    default: {
+      const unreachable: never = mediaProvider;
+      throw new MediaRefusedError(`Unknown media provider: ${String(unreachable)}`, 503);
+    }
+  }
+}
+
+/**
+ * The video twin of `providerImageOptions` — the one translation into the vocabulary a gateway's VIDEO
+ * rows are priced on, folded into the record that prices the render AND builds its payload.
+ *
+ * KIE and Comet pass through unchanged (byte-identical to before T3). fal:
+ *  - Kling and Veo price on `generate_audio` (both tools and the panel say `sound`) — and fal DEFAULTS
+ *    it to TRUE on the wire, so it is always stated: an unstated value would render audio the user was
+ *    not charged for;
+ *  - Grok prices on `resolution` and has no audio switch; an unstated resolution is fal's own default,
+ *    `720p`, so the row priced is the clip rendered.
+ */
+function providerVideoOptions(
+  model: string,
+  request: MediaRequest,
+  mediaProvider: MediaProviderName,
+): Record<string, string | number | boolean> {
+  switch (mediaProvider) {
+    case 'KIE':
+    case 'Comet':
+      return request.options;
+
+    case 'FAL': {
+      const o = request.options;
+
+      switch (falRouteFor(model)?.family) {
+        case 'video-kling':
+        case 'video-veo':
+          return { ...o, generate_audio: Boolean(o.generate_audio ?? o.sound ?? false) };
+
+        case 'video-grok':
+          return { ...o, resolution: str(o.resolution, '720p') };
+
+        default:
+          return o;
+      }
+    }
+
+    default: {
+      const unreachable: never = mediaProvider;
+      throw new MediaRefusedError(`Unknown media provider: ${String(unreachable)}`, 503);
+    }
+  }
+}
+
+/**
+ * Refuse, BEFORE the debit, a priced model this gateway cannot actually submit. Only fal has a route
+ * table (`fal-routes.ts`): a row an operator adds to fal's price list for a model the platform has no
+ * request shape for — or a video length fal cannot render exactly — would otherwise be debited and then
+ * refused at fal. KIE and Comet route by model family and have no such table.
+ */
+const ROUTE_REFUSAL: Record<MediaProviderName, (model: string, durationSeconds?: number) => string | null> = {
+  KIE: () => null,
+  Comet: () => null,
+  FAL: falRouteRefusal,
+};
+
+function refuseUnroutable(mediaProvider: MediaProviderName, model: string, durationSeconds?: number): void {
+  const refusal = ROUTE_REFUSAL[mediaProvider](model, durationSeconds);
+
+  if (refusal) {
+    throw new MediaRefusedError(refusal);
+  }
+}
+
+/**
+ * A model that renders in ONE format (no `output_format` input — Seedream 4.5 on fal returns PNG) has
+ * that format applied to the delivery decision, so the file is named for the bytes it will contain.
+ * A cut-out still ends as PNG; only what stage 1 renders changes.
+ */
+const FIXED_RENDER_FORMAT: Record<MediaProviderName, (model: string) => 'png' | null> = {
+  KIE: () => null,
+  Comet: () => null,
+  FAL: (model) => falRouteFor(model)?.fixedFormat ?? null,
+};
+
+function withFixedRenderFormat(mediaProvider: MediaProviderName, delivery: ImageDelivery): ImageDelivery {
+  const fixed = FIXED_RENDER_FORMAT[mediaProvider](delivery.model);
+
+  return fixed ? { ...delivery, renderFormat: fixed, finalFormat: delivery.cutout ? 'png' : fixed } : delivery;
 }
 
 function unpricedMessage(list: MarketPriceList, request: MediaRequest): string {
@@ -739,11 +887,19 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
        */
       if (record.cutout && record.stage === 'render') {
         try {
-          const cutoutTaskId = await provider.create({
-            endpoint: 'jobs',
-            model: CUTOUT_MODEL,
-            payload: { image: state.resultUrl },
-          });
+          /*
+           * The cut-out for THE TASK'S gateway (the same provider this poll resolved from the record),
+           * never the configured one. A gateway with no cut-out cannot have stamped `cutout: true` —
+           * but if a record ever claims it, that is a refusal to start stage 2, refunded below, never a
+           * quiet delivery of the opaque render.
+           */
+          const cutoutTask = cutoutTaskFor(mediaProviderOf(record), state.resultUrl);
+
+          if (!cutoutTask) {
+            throw new Error(`${mediaProviderOf(record)} has no cut-out pass`);
+          }
+
+          const cutoutTaskId = await provider.create(cutoutTask);
 
           updated.stage = 'cutout';
           updated.renderUrl = state.resultUrl;
@@ -886,6 +1042,10 @@ function endpointFor(provider: MediaProviderName, model: string): MediaEndpoint 
     case 'Comet':
       return cometEndpointFor(model);
 
+    case 'FAL':
+      // fal has ONE route for every model — the routing lives in the `response_url` it returns.
+      return 'fal-queue';
+
     default: {
       const unreachable: never = provider;
       throw new MediaRefusedError(`Unknown media provider: ${String(unreachable)}`, 503);
@@ -953,12 +1113,27 @@ export function buildProviderPayload(
   delivery?: ImageDelivery,
   mediaProvider: MediaProviderName = 'KIE',
 ): Record<string, unknown> {
-  const o = request.options;
+  switch (mediaProvider) {
+    case 'KIE':
+      return buildKiePayload(model, request, delivery);
 
-  if (mediaProvider === 'Comet') {
-    return buildCometPayload(model, request, delivery);
+    case 'Comet':
+      return buildCometPayload(model, request, delivery);
+
+    case 'FAL':
+      return buildFalPayload(model, request, delivery);
+
+    default: {
+      // Exhaustive: a fourth gateway must choose its payload builder here, never fall into KIE's.
+      const unreachable: never = mediaProvider;
+      throw new MediaRefusedError(`Unknown media provider: ${String(unreachable)}`, 503);
+    }
   }
+}
 
+/** KIE's createTask bodies — byte-identical to what `buildProviderPayload` built before T3. */
+function buildKiePayload(model: string, request: MediaRequest, delivery?: ImageDelivery): Record<string, unknown> {
+  const o = request.options;
   const soundKind = soundKindForModel(model);
 
   if (soundKind) {
@@ -1160,6 +1335,104 @@ function buildCometPayload(model: string, request: MediaRequest, delivery?: Imag
     output_format: image.renderFormat === 'jpg' ? 'jpeg' : 'png',
     ...(image.background ? { background: image.background } : {}),
   };
+}
+
+/**
+ * fal's request bodies (`_specs/media-gateways_plan.md` T3), shaped by the model's FAMILY in
+ * `fal-routes.ts` — built from each model's documented input (`https://fal.ai/models/<id>/llms.txt`).
+ *
+ * ⚠️ `sync_mode` is never set (the client strips it too): it returns the file inline as a data URI,
+ * which the queue/poll/download path cannot deliver.
+ *
+ * Video options arrive NORMALISED by `providerVideoOptions` — the same record that priced the render —
+ * so `generate_audio` and Grok's `resolution` here are exactly what was billed.
+ */
+function buildFalPayload(model: string, request: MediaRequest, delivery?: ImageDelivery): Record<string, unknown> {
+  const o = request.options;
+  const route = falRouteFor(model);
+
+  if (!route) {
+    // The quote refuses an unroutable model before the debit, so reaching here is a programming error.
+    throw new Error(`internal: fal model "${model}" reached the wire with no route`);
+  }
+
+  switch (route.family) {
+    case 'image-nano':
+    case 'image-seedream': {
+      const image = requireDelivery(delivery, model);
+
+      /*
+       * A cut-out render gets the flat-backdrop directive, exactly as on KIE — stage 2 (Bria) supplies
+       * the alpha, and the directive stops the model painting a checkerboard it would have to guess
+       * about.
+       */
+      const prompt = image.cutoutPrompt ? cutoutRenderPrompt(request.prompt) : request.prompt;
+
+      if (route.family === 'image-seedream') {
+        // No `output_format` input on this model — it renders PNG (`fixedFormat` in the route table).
+        return {
+          prompt,
+          num_images: 1,
+          image_size: SEEDREAM_IMAGE_SIZES[str(o.aspectRatio, '16:9')] ?? SEEDREAM_IMAGE_SIZES['16:9'],
+        };
+      }
+
+      return {
+        prompt,
+        num_images: 1,
+        aspect_ratio: str(o.aspectRatio, '16:9'),
+        resolution: str(o.resolution, '2K'),
+
+        // `renderFormat`, NOT the final format — a cut-out renders as jpeg and becomes a PNG in stage 2.
+        output_format: image.renderFormat === 'jpg' ? 'jpeg' : 'png',
+      };
+    }
+
+    case 'video-kling':
+    case 'video-veo':
+    case 'video-grok': {
+      const seconds = request.durationSeconds ?? defaultFalVideoSeconds(route.family);
+      const duration = falWireDuration(route.family, seconds);
+
+      if (duration === null) {
+        // Refused in the quote (`falRouteRefusal`) — never rounded to a length that was not billed.
+        throw new Error(`internal: ${seconds}s reached the wire for "${model}", which cannot render it`);
+      }
+
+      const base = { prompt: request.prompt, aspect_ratio: str(o.aspectRatio, '16:9'), duration };
+
+      if (route.family === 'video-grok') {
+        return { ...base, resolution: str(o.resolution, '720p') };
+      }
+
+      return {
+        ...base,
+
+        // Stated always: fal defaults it to TRUE, and the price row was matched on this exact value.
+        generate_audio: Boolean(o.generate_audio ?? false),
+
+        // Veo takes 720p/1080p (and prices them alike); Kling has no resolution input.
+        ...(route.family === 'video-veo' && /^(720p|1080p)$/i.test(str(o.resolution, ''))
+          ? { resolution: str(o.resolution, '720p').toLowerCase() }
+          : {}),
+      };
+    }
+
+    case 'cutout':
+      // Stage 2 is created by the poll path (`cutoutTaskFor`), never quoted as a primary model.
+      throw new Error(`internal: the fal cut-out "${model}" is not a model a request is built for`);
+
+    case 'sfx':
+    case 'tts':
+    case 'music-minimax':
+      // T6. No route lists these families yet, so the quote refuses them before any debit.
+      throw new Error(`internal: fal sound ("${model}") has no payload builder yet`);
+
+    default: {
+      const unreachable: never = route.family;
+      throw new Error(`internal: unknown fal family ${String(unreachable)}`);
+    }
+  }
 }
 
 /** Which Comet route a model is created on and polled at. Video is async; both image routes are not. */

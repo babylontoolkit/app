@@ -26,6 +26,8 @@ import { describe, expect, it } from 'vitest';
 import {
   COMET_IMAGE_MODELS,
   COMET_VIDEO_MODELS,
+  FAL_IMAGE_MODELS,
+  FAL_VIDEO_MODELS,
   IMAGE_MODELS,
   VIDEO_MODELS,
   modelsForProvider,
@@ -170,7 +172,7 @@ describe('the model lists are per gateway', () => {
 const ids = (models: typeof IMAGE_MODELS) => models.map((m) => m.id);
 
 /** The gateways that can actually serve a render — `null` is the absence of one, never a third gateway. */
-const GATEWAYS = ['KIE', 'Comet'] as const;
+const GATEWAYS = ['KIE', 'Comet', 'FAL'] as const;
 const KINDS = ['image', 'video'] as const;
 
 describe('modelsForProvider — the catalogue for a gateway', () => {
@@ -219,6 +221,38 @@ describe('modelsForProvider — the catalogue for a gateway', () => {
     expect(ids(modelsForProvider('image', 'Comet'))).toEqual(ids(COMET_IMAGE_MODELS));
     expect(ids(modelsForProvider('video', 'KIE'))).toEqual(ids(VIDEO_MODELS));
     expect(ids(modelsForProvider('video', 'Comet'))).toEqual(ids(COMET_VIDEO_MODELS));
+    expect(ids(modelsForProvider('image', 'FAL'))).toEqual(ids(FAL_IMAGE_MODELS));
+    expect(ids(modelsForProvider('video', 'FAL'))).toEqual(ids(FAL_VIDEO_MODELS));
+  });
+
+  /**
+   * fal (media-gateways T3): its own catalogue, never KIE's — the ternaries this replaced sent any
+   * gateway they had not heard of down the KIE branch, offering models every fal quote would refuse.
+   * Every fal image model gets the Background control (fal transparency is the Bria cut-out pass),
+   * the cut-out itself is never offered as a model, and there is no Sound tab until T6/T7.
+   */
+  it('offers fal its own catalogue — Background on every image, no cut-out model, no sound yet', () => {
+    const image = modelsForProvider('image', 'FAL');
+
+    expect(ids(image)).toContain('fal-ai/nano-banana-2');
+    expect(ids(image)).not.toContain('fal-ai/bria/background/remove');
+    expect(ids(image).every((id) => id.startsWith('fal-ai/'))).toBe(true);
+
+    for (const model of image) {
+      expect(
+        model.fields.some((f) => f.key === 'transparent'),
+        `${model.id} has no Background control`,
+      ).toBe(true);
+    }
+
+    expect(ids(modelsForProvider('video', 'FAL'))).toEqual([
+      'fal-ai/kling-video/v3/standard/text-to-video',
+      'fal-ai/kling-video/v3/pro/text-to-video',
+      'xai/grok-imagine-video/text-to-video',
+      'fal-ai/veo3/fast',
+      'fal-ai/veo3',
+    ]);
+    expect(modelsForProvider('audio', 'FAL')).toEqual([]);
   });
 
   /**

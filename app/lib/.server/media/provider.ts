@@ -38,6 +38,7 @@ import { NotConfiguredError } from '~/lib/.server/env';
 import { getMediaConfig, MEDIA_PROVIDERS, type MediaProviderName } from '~/lib/.server/agent/config';
 import { KieMediaProvider } from './kie-client';
 import { CometMediaProvider } from './comet-client';
+import { FalMediaProvider } from './fal-client';
 
 const logger = createScopedLogger('media-provider');
 
@@ -54,6 +55,9 @@ export type { MediaProviderName };
  * Comet's three (image, the Gemini "nano banana" `:generateContent` route, and video create+poll) —
  * declared here rather than with the client that will use them, because the vocabulary belongs to the
  * record, not to one implementation.
+ *
+ * `fal-queue` is fal.ai's ONE route for every model (T3): submit to `queue.fal.run/{model}`, poll the
+ * `response_url` it returns. One value is enough because fal's routing lives in the stored id itself.
  */
 export type MediaEndpoint =
   | 'jobs'
@@ -62,7 +66,8 @@ export type MediaEndpoint =
   | 'suno-music'
   | 'comet-image'
   | 'comet-gemini-image'
-  | 'comet-video';
+  | 'comet-video'
+  | 'fal-queue';
 
 export interface CreateMediaTaskInput {
   endpoint: MediaEndpoint;
@@ -145,6 +150,10 @@ export function mediaProviderFor(name: MediaProviderName, apiKey: string, baseUr
        * media, which is the half nobody would think to check.
        */
       return new CometMediaProvider(apiKey, baseUrl);
+
+    case 'FAL':
+      // One public queue host and no base-URL override (`mediaBaseUrlFor` answers null for fal).
+      return new FalMediaProvider(apiKey);
 
     default: {
       // Exhaustive: a new name in `MEDIA_PROVIDERS` is a compile error here, not a runtime surprise.

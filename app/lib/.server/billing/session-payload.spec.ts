@@ -28,7 +28,7 @@
  * twice in this repo for want of one sibling in a scrub list).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { invalidateMarketPricesCache, MARKET_PRICE_PROVIDERS } from '~/lib/.server/billing/market-price-store';
+import { invalidateMarketPricesCache, LLM_PRICE_PROVIDERS } from '~/lib/.server/billing/market-price-store';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
 import { DEFAULT_PREMIUM_MODEL } from '~/lib/.server/billing/model-tiers';
 import { DEFAULT_MODEL } from '~/utils/constants';
@@ -323,8 +323,8 @@ describe('CONTROLS — the drive reaches the loader and the payload is the real 
 
     await callMe();
 
-    // One refresh per price list — every list can price a rung since 2026-09-29, so all are loaded.
-    expect(doors.ensureMarketPrices).toHaveBeenCalledTimes(MARKET_PRICE_PROVIDERS.length);
+    // One refresh per LLM price list — every one can price a rung since 2026-09-29; media-only lists (FAL) price none.
+    expect(doors.ensureMarketPrices).toHaveBeenCalledTimes(LLM_PRICE_PROVIDERS.length);
   });
 
   /*

@@ -18,6 +18,7 @@ import { setObjectStore, type ObjectStore } from '~/lib/.server/storage';
 import type { CreateMediaTaskInput, MediaProvider, MediaProviderName, MediaTaskState } from './provider';
 import { parseSunoTaskState, parseTaskState } from './kie-client';
 import { SOUND_MODELS } from '~/lib/media/provider-defaults';
+import { createMediaTools } from '~/lib/.server/agent/media-tools';
 import { getMediaTask } from './store';
 import { setMediaDispatcher } from './dispatch';
 import {
@@ -1564,6 +1565,397 @@ describe('sound', () => {
 
       expect(await ledger.balance(USER)).toBe(100);
       expect((await getMediaTask(objectStore, PROJECT, started.taskId))?.refunded).toBe(true);
+    });
+  });
+});
+
+/**
+ * fal.ai (`_specs/media-gateways_plan.md` T3 + T4) — the same money rules on the third gateway.
+ *
+ * Driven through a `FakeProvider` named `'FAL'`, so what is under test is the SERVICE: that a fal
+ * render is priced from fal's OWN list, debited once before the provider is called, created on
+ * `fal-queue`, polled by the gateway stamped on the record, and refunded exactly once on failure — and
+ * that a transparent fal image is ONE task, ONE debit, TWO stages, with Bria as stage 2.
+ *
+ * Prices are fal's baked list: Nano Banana 2 at 2K is $0.12 → 48 credits; plus Bria's $0.018 is
+ * $0.138 → 56 credits (`ceil(0.138 / 0.01 * 4)`).
+ */
+describe('fal.ai — images and video (T3)', () => {
+  beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+  function falImage(provider: FakeProvider, objectStore: ObjectStore, options: Record<string, string | boolean> = {}) {
+    return imageInput({
+      model: 'fal-ai/nano-banana-2',
+      options: { resolution: '2K', aspectRatio: '16:9', ...options },
+      provider,
+      objectStore,
+    });
+  }
+
+  it('quotes, debits and creates a fal image, then delivers it', async () => {
+    expect(
+      quoteMediaRequest({ model: 'fal-ai/nano-banana-2', prompt: 'x', options: { resolution: '2K' } }, 'FAL'),
+    ).toMatchObject({ model: 'fal-ai/nano-banana-2', kind: 'image', usd: 0.12, credits: 48 });
+
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startMediaTask(falImage(provider, objectStore));
+
+    expect(started).toMatchObject({ credits: 48, model: 'fal-ai/nano-banana-2', kind: 'image' });
+    expect(await ledger.balance(USER)).toBe(52);
+    expect(started.destPath).toMatch(/\.jpg$/);
+
+    expect(provider.created).toHaveLength(1);
+    expect(provider.created[0]).toMatchObject({ endpoint: 'fal-queue', model: 'fal-ai/nano-banana-2' });
+
+    // The documented Nano Banana input — and the format AGREES with the `.jpg` the file is given.
+    expect(provider.created[0].payload).toEqual({
+      prompt: 'a neon city skyline',
+      num_images: 1,
+      aspect_ratio: '16:9',
+      resolution: '2K',
+      output_format: 'jpeg',
+    });
+    expect(provider.created[0].payload).not.toHaveProperty('sync_mode');
+
+    expect(await getMediaTask(objectStore, PROJECT, started.taskId)).toMatchObject({
+      provider: 'FAL',
+      endpoint: 'fal-queue',
+    });
+
+    provider.state = { state: 'succeeded', resultUrl: 'https://v3.fal.media/files/hero.jpg' };
+
+    const done = await pollMediaTask({
+      projectId: PROJECT,
+      taskId: started.taskId,
+      resolveProvider: () => provider,
+      objectStore,
+    });
+
+    expect(done).toMatchObject({ status: 'succeeded', resultUrl: 'https://v3.fal.media/files/hero.jpg' });
+    expect(provider.created, 'an opaque image is single-stage').toHaveLength(1);
+    expect(await ledger.balance(USER), 'a delivered render keeps its charge').toBe(52);
+  });
+
+  it('prices against FAL rows, never KIE ones (the lists are separate)', () => {
+    // KIE prices `nano-banana-2`; fal does not — and vice versa. Each refusal names the gateway's own list.
+    expect(() => quoteMediaRequest({ model: 'nano-banana-2', prompt: 'x', options: {} }, 'FAL')).toThrow(
+      /not in the Marketplace/,
+    );
+    expect(() => quoteMediaRequest({ model: 'fal-ai/nano-banana-2', prompt: 'x', options: {} }, 'KIE')).toThrow(
+      /not in the Marketplace/,
+    );
+  });
+
+  it('generate_video with no model on FAL uses kling, never veo', async () => {
+    await grant(10_000);
+
+    const provider = new FakeProvider('FAL');
+    const tools = createMediaTools({
+      userId: USER,
+      projectId: PROJECT,
+      provider,
+      objectStore: memoryStore(),
+      emit: () => undefined,
+    });
+
+    const generate = (tools as unknown as Record<string, { execute: (a: unknown, o: unknown) => Promise<string> }>)
+      .generate_video;
+    const result = await generate.execute({ prompt: 'a kart drifts' }, { toolCallId: 'c1', messages: [] });
+
+    expect(result).toMatch(/^Started/);
+    expect(provider.created).toHaveLength(1);
+    expect(provider.created[0].model).toBe('fal-ai/kling-video/v3/standard/text-to-video');
+    expect(provider.created[0].model).not.toMatch(/veo/);
+
+    /*
+     * Kling's duration is a STRING on fal's wire, and audio is STATED false — fal defaults it to true,
+     * which would render (and bill fal for) audio the user was not charged for.
+     */
+    expect(provider.created[0].payload).toEqual({
+      prompt: 'a kart drifts',
+      aspect_ratio: '16:9',
+      duration: '5',
+      generate_audio: false,
+    });
+
+    // $0.084/s x 5s = $0.42 → 168 credits: the audio-OFF row, matching the payload.
+    expect(await ledger.balance(USER)).toBe(10_000 - 168);
+  });
+
+  it('CONTROL — a Veo id named on generate_video is refused on FAL too, with nothing spent', async () => {
+    await grant(10_000);
+
+    const provider = new FakeProvider('FAL');
+    const tools = createMediaTools({
+      userId: USER,
+      projectId: PROJECT,
+      provider,
+      objectStore: memoryStore(),
+      emit: () => undefined,
+    });
+
+    const generate = (tools as unknown as Record<string, { execute: (a: unknown, o: unknown) => Promise<string> }>)
+      .generate_video;
+    const result = await generate.execute(
+      { prompt: 'a kart drifts', model: 'fal-ai/veo3/fast' },
+      { toolCallId: 'c2', messages: [] },
+    );
+
+    expect(result).toMatch(/Google Veo model/);
+    expect(provider.created).toEqual([]);
+    expect(await ledger.balance(USER)).toBe(10_000);
+  });
+
+  it('prices audio ON from the audio-on row, and sends exactly that', async () => {
+    await grant(10_000);
+
+    const provider = new FakeProvider('FAL');
+    await startMediaTask(
+      imageInput({
+        provider,
+        model: 'fal-ai/veo3/fast',
+        prompt: 'rain on neon',
+        options: { sound: true, resolution: '1080p' },
+        durationSeconds: 6,
+      }),
+    );
+
+    expect(provider.created[0].payload).toEqual({
+      prompt: 'rain on neon',
+      aspect_ratio: '16:9',
+      duration: '6s',
+      generate_audio: true,
+      resolution: '1080p',
+    });
+
+    // $0.15/s x 6s = $0.90 → 360 credits.
+    expect(await ledger.balance(USER)).toBe(10_000 - 360);
+  });
+
+  it('sends Grok an INTEGER duration and the resolution it was priced at', async () => {
+    await grant(10_000);
+
+    const provider = new FakeProvider('FAL');
+    await startMediaTask(
+      imageInput({
+        provider,
+        model: 'xai/grok-imagine-video/text-to-video',
+        prompt: 'a kart',
+        options: { sound: false },
+        durationSeconds: 5,
+      }),
+    );
+
+    expect(provider.created[0].payload).toEqual({
+      prompt: 'a kart',
+      aspect_ratio: '16:9',
+      duration: 5,
+      resolution: '720p',
+    });
+
+    // Unstated resolution is fal's default 720p — $0.07/s x 5s = $0.35 → 140 credits.
+    expect(await ledger.balance(USER)).toBe(10_000 - 140);
+  });
+
+  it('refuses a clip length the family cannot render exactly, with ZERO ledger rows', async () => {
+    await grant(10_000);
+
+    const provider = new FakeProvider('FAL');
+    const before = (await ledger.list(USER)).length;
+
+    await expect(
+      startMediaTask(imageInput({ provider, model: 'fal-ai/veo3/fast', prompt: 'x', options: {}, durationSeconds: 5 })),
+    ).rejects.toThrow(/4, 6, 8 seconds only/);
+
+    expect(provider.created).toEqual([]);
+    expect((await ledger.list(USER)).length).toBe(before);
+  });
+
+  it('sends Seedream an explicit image_size at or above its pixel floor, and names the file .png', async () => {
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    const started = await startMediaTask(
+      imageInput({
+        provider,
+        model: 'fal-ai/bytedance/seedream/v4.5/text-to-image',
+        options: { aspectRatio: '16:9' },
+      }),
+    );
+
+    expect(provider.created[0].payload).toEqual({
+      prompt: 'a neon city skyline',
+      num_images: 1,
+      image_size: { width: 2560, height: 1440 },
+    });
+
+    // Seedream takes no output_format and renders PNG — the file must be named for those bytes.
+    expect(started.destPath).toMatch(/\.png$/);
+  });
+
+  it('a failed fal render refunds exactly once', async () => {
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startMediaTask(falImage(provider, objectStore));
+
+    expect(await ledger.balance(USER)).toBe(52);
+
+    provider.state = { state: 'failed', error: 'fal: Content policy violation (content_policy)' };
+
+    let release!: () => void;
+    provider.gate = new Promise((resolve) => (release = resolve));
+
+    const polls = Promise.all([
+      pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore }),
+      pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore }),
+    ]);
+
+    release();
+    await polls;
+    await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore });
+
+    expect(await ledger.balance(USER), 'refunded ONCE').toBe(100);
+    expect((await ledger.list(USER)).filter((e) => e.reason === 'refund')).toHaveLength(1);
+  });
+
+  it('refunds at once when fal refuses the submit (the exhausted-balance 403)', async () => {
+    await grant(100);
+
+    const provider = new FakeProvider('FAL');
+    provider.createError = new Error('fal refused the request (HTTP 403): User is locked. Reason: Exhausted balance.');
+
+    await expect(startMediaTask(falImage(provider, memoryStore()))).rejects.toThrow(/Exhausted balance/);
+    expect(await ledger.balance(USER)).toBe(100);
+  });
+});
+
+describe('fal.ai — transparent images, the cut-out pass per gateway (T4)', () => {
+  beforeEach(() => vi.stubEnv('BILLING_ENFORCED', 'true'));
+
+  const RENDER_URL = 'https://v3.fal.media/files/render.jpg';
+  const CUTOUT_URL = 'https://v3.fal.media/files/cutout.png';
+
+  async function startTransparent(provider: FakeProvider, objectStore: ObjectStore) {
+    await grant(100);
+
+    return startMediaTask(
+      imageInput({
+        model: 'fal-ai/nano-banana-2',
+        provider,
+        objectStore,
+        prompt: 'a wordmark',
+        options: { resolution: '2K', transparent: true },
+      }),
+    );
+  }
+
+  it('a transparent fal image quotes render + cut-out together, debits once, chains bria on the poll and delivers the cut-out', async () => {
+    const quote = quoteMediaRequest(
+      { model: 'fal-ai/nano-banana-2', prompt: 'a wordmark', options: { resolution: '2K', transparent: true } },
+      'FAL',
+    );
+
+    expect(quote).toMatchObject({ credits: 56, cutoutUsd: 0.018 });
+    expect(quote.usd).toBeCloseTo(0.138, 10);
+    expect(quote.delivery).toMatchObject({ cutout: true, renderFormat: 'jpg', finalFormat: 'png' });
+
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startTransparent(provider, objectStore);
+
+    expect(started.credits).toBe(56);
+    expect(started.destPath).toMatch(/\.png$/);
+    expect(
+      (await ledger.list(USER)).filter((e) => e.reason === 'media'),
+      'ONE debit',
+    ).toHaveLength(1);
+    expect(await ledger.balance(USER)).toBe(44);
+
+    // Stage 1 renders jpeg with the flat-backdrop directive — the alpha comes from stage 2.
+    expect(provider.created[0].payload).toMatchObject({ output_format: 'jpeg' });
+    expect(String(provider.created[0].payload.prompt)).not.toBe('a wordmark');
+    expect(String(provider.created[0].payload.prompt)).toContain('a wordmark');
+
+    provider.state = { state: 'succeeded', resultUrl: RENDER_URL };
+
+    const mid = await pollMediaTask({
+      projectId: PROJECT,
+      taskId: started.taskId,
+      resolveProvider: () => provider,
+      objectStore,
+    });
+
+    expect(mid).toMatchObject({ status: 'pending', stage: 'cutout', renderUrl: RENDER_URL });
+    expect(mid?.resultUrl, 'the opaque render is never the deliverable').toBeUndefined();
+
+    expect(provider.created[1]).toEqual({
+      endpoint: 'fal-queue',
+      model: 'fal-ai/bria/background/remove',
+      payload: { image_url: RENDER_URL },
+    });
+
+    provider.state = { state: 'succeeded', resultUrl: CUTOUT_URL };
+
+    const done = await pollMediaTask({
+      projectId: PROJECT,
+      taskId: started.taskId,
+      resolveProvider: () => provider,
+      objectStore,
+    });
+
+    expect(done).toMatchObject({ status: 'succeeded', resultUrl: CUTOUT_URL });
+    expect(await ledger.balance(USER)).toBe(44);
+  });
+
+  it('a fal cut-out that cannot start fails and refunds in full', async () => {
+    const provider = new FakeProvider('FAL');
+    const objectStore = memoryStore();
+    const started = await startTransparent(provider, objectStore);
+
+    provider.state = { state: 'succeeded', resultUrl: RENDER_URL };
+    provider.createError = new Error('fal refused the request (HTTP 503): bria unavailable');
+
+    const task = await pollMediaTask({
+      projectId: PROJECT,
+      taskId: started.taskId,
+      resolveProvider: () => provider,
+      objectStore,
+    });
+
+    expect(task).toMatchObject({ status: 'failed', refunded: true });
+    expect(task?.error).toMatch(/cut-out pass could not start/);
+    expect(task?.resultUrl, 'the opaque render is NOT quietly substituted').toBeUndefined();
+    expect(await ledger.balance(USER), 'both stages refunded').toBe(100);
+  });
+
+  it('refuses the fal cut-out as a primary model before any debit', () => {
+    expect(() =>
+      quoteMediaRequest({ model: 'fal-ai/bria/background/remove', prompt: 'x', options: {} }, 'FAL'),
+    ).toThrow(/automatic cut-out pass/);
+  });
+
+  it("KIE's cut-out payload is unchanged", async () => {
+    // CONTROL: the per-gateway table must leave KIE's stage 2 byte-identical — `{ image }` on `jobs`.
+    await grant(100);
+
+    const provider = new FakeProvider('KIE');
+    const objectStore = memoryStore();
+    const started = await startMediaTask(
+      imageInput({ provider, objectStore, prompt: 'a wordmark', options: { resolution: '2K', transparent: true } }),
+    );
+
+    provider.state = { state: 'succeeded', resultUrl: 'https://cdn.kie.ai/render.jpg' };
+    await pollMediaTask({ projectId: PROJECT, taskId: started.taskId, resolveProvider: () => provider, objectStore });
+
+    expect(provider.created[1]).toEqual({
+      endpoint: 'jobs',
+      model: 'recraft/remove-background',
+      payload: { image: 'https://cdn.kie.ai/render.jpg' },
     });
   });
 });

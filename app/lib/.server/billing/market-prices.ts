@@ -164,14 +164,37 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The gateways whose price list is MEDIA-ONLY — they sell no LLM, so their `llm` table must be `{}`
+ * (media-gateways T2: fal.ai renders images, video and sound and serves no model the agent runs on).
+ *
+ * Declared HERE, beside the rules it relaxes, rather than in `market-price-store.ts`: this module is
+ * pure and the store imports it, so the reverse import would close a cycle. The store's
+ * `MARKET_PRICE_PROVIDERS` must contain every name listed here (`market-price-store.spec.ts`).
+ */
+export const MEDIA_ONLY_PRICE_PROVIDERS = ['FAL'] as const;
+
+/** True when `provider`'s list may (and must) carry no LLM rows. Exact match — never case-folded. */
+export function isMediaOnlyPriceProvider(provider: string): boolean {
+  return (MEDIA_ONLY_PRICE_PROVIDERS as readonly string[]).includes(provider);
+}
+
+/**
  * Full structural validation of an untrusted list — the wall every promotion passes through before it
  * can price anything (`market-price-store.ts` refuses to store a list this rejects).
  *
  * Collects EVERY error rather than throwing at the first: the admin fixing a pasted list needs the
  * whole picture, not a fix-one-refresh-repeat loop.
+ *
+ * 🔴 `provider` is REQUIRED, and it is what decides the LLM rules. For a media-only gateway
+ * (`MEDIA_ONLY_PRICE_PROVIDERS`) the `llm` table must be EMPTY and the "price at least one model" and
+ * "price the platform default" rules do not apply — there is no LLM turn for that list to bill. Every
+ * other provider keeps both rules exactly as before. No default: a missing provider would validate a
+ * fal list as an LLM list (refused for a reason the operator cannot fix) or, worse, the other way round
+ * — an LLM list with no default row accepted because someone forgot the argument.
  */
-export function validateMarketPriceList(value: unknown): ValidationResult {
+export function validateMarketPriceList(value: unknown, provider: string): ValidationResult {
   const errors: string[] = [];
+  const mediaOnly = isMediaOnlyPriceProvider(provider);
 
   if (!isPlainObject(value)) {
     return { ok: false, errors: ['The price list must be a JSON object.'] };
@@ -190,7 +213,24 @@ export function validateMarketPriceList(value: unknown): ValidationResult {
   }
 
   if (!isPlainObject(value.llm)) {
-    errors.push('llm must be an object of model → { inputPerMTok, outputPerMTok }.');
+    errors.push(
+      mediaOnly
+        ? `llm must be an empty object — ${provider} is a media-only gateway and sells no LLM.`
+        : 'llm must be an object of model → { inputPerMTok, outputPerMTok }.',
+    );
+  } else if (mediaOnly) {
+    /*
+     * A media-only list carrying LLM rows is refused rather than tolerated: nothing would ever bill
+     * against them, so they would sit on the admin panel looking like prices the platform charges.
+     */
+    const rows = Object.keys(value.llm);
+
+    if (rows.length > 0) {
+      errors.push(
+        `llm must be empty — ${provider} is a media-only gateway and sells no LLM, so rows ` +
+          `[${rows.join(', ')}] would price nothing.`,
+      );
+    }
   } else {
     if (Object.keys(value.llm).length === 0) {
       // An empty LLM table would refuse every generation the moment it is promoted.

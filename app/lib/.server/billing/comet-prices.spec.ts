@@ -40,7 +40,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import { FAMILY_POLICY, familyOf } from '~/lib/modules/llm/model-families';
 import { COMET_MODELS } from '~/lib/modules/llm/providers/comet-wire';
-import { BAKED_COMET_PRICES, COMET_PRICE_PROVENANCE, cometChargedRate } from './baked-comet-prices';
+import {
+  BAKED_COMET_PRICES,
+  COMET_AUDIO_PROVENANCE,
+  COMET_PRICE_PROVENANCE,
+  cometChargedRate,
+} from './baked-comet-prices';
 import { BAKED_MARKET_PRICES } from './baked-market-prices';
 import { fetchCometMarketFeed } from './market-feed';
 import { findMediaModel, lookupMediaPrice, validateMarketPriceList, type MarketPriceList } from './market-prices';
@@ -249,7 +254,7 @@ describe('validation — the baked list is served without ever passing the wall'
    * neither of those ran. An invalid one does not fail loudly — it becomes the prices charged forever.
    */
   it('accepts BAKED_COMET_PRICES and prices the platform default', () => {
-    const result = validateMarketPriceList(BAKED_COMET_PRICES);
+    const result = validateMarketPriceList(BAKED_COMET_PRICES, 'Comet');
 
     expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
 
@@ -278,13 +283,13 @@ describe('validation — the baked list is served without ever passing the wall'
       },
     };
 
-    const result = validateMarketPriceList(list);
+    const result = validateMarketPriceList(list, 'Comet');
 
     expect(result.ok).toBe(false);
     expect(result.ok ? '' : result.errors.join()).toMatch(/cache rates derive/i);
 
     /* CONTROL: the same list WITHOUT the quote is accepted, so the refusal is about the cache key. */
-    expect(validateMarketPriceList(BAKED_COMET_PRICES).ok).toBe(true);
+    expect(validateMarketPriceList(BAKED_COMET_PRICES, 'Comet').ok).toBe(true);
   });
 
   /*
@@ -301,16 +306,19 @@ describe('validation — the baked list is served without ever passing the wall'
     expect(FAMILY_POLICY.chat.cacheProfile).toBe('none');
 
     /* The shipped list already contains three such rows and validates — that is the accept case. */
-    expect(validateMarketPriceList(BAKED_COMET_PRICES).ok).toBe(true);
+    expect(validateMarketPriceList(BAKED_COMET_PRICES, 'Comet').ok).toBe(true);
     expect(BAKED_COMET_PRICES.llm['grok-4.5']).toEqual({ inputPerMTok: 1.6, outputPerMTok: 4.8 });
 
-    const quoted = validateMarketPriceList({
-      ...BAKED_COMET_PRICES,
-      llm: {
-        ...BAKED_COMET_PRICES.llm,
-        'grok-4.5': { inputPerMTok: 1.6, outputPerMTok: 4.8, cacheWritePerMTok: 3.2 },
+    const quoted = validateMarketPriceList(
+      {
+        ...BAKED_COMET_PRICES,
+        llm: {
+          ...BAKED_COMET_PRICES.llm,
+          'grok-4.5': { inputPerMTok: 1.6, outputPerMTok: 4.8, cacheWritePerMTok: 3.2 },
+        },
       },
-    });
+      'Comet',
+    );
 
     expect(quoted.ok).toBe(false);
     expect(quoted.ok ? '' : quoted.errors.join()).toMatch(/no vendor quotes a cached rate/i);
@@ -328,7 +336,7 @@ describe('validation — the baked list is served without ever passing the wall'
      * media table validates — an operator promoting a list with no media rows must get a refusal at
      * generation time (`lookupMediaPrice` has no fallback), never a rejected promotion.
      */
-    expect(validateMarketPriceList({ ...BAKED_COMET_PRICES, media: {} }).ok).toBe(true);
+    expect(validateMarketPriceList({ ...BAKED_COMET_PRICES, media: {} }, 'Comet').ok).toBe(true);
 
     // ...and the shipped list DOES carry rows now, so the assertion above is not passing by vacuity.
     expect(Object.keys(BAKED_COMET_PRICES.media).length).toBeGreaterThan(0);
@@ -364,7 +372,7 @@ describe('the media rows (§4.16)', () => {
 
   it('validates with the media table populated', () => {
     // A baked list its own validator refuses becomes the prices charged forever, silently.
-    const result = validateMarketPriceList(BAKED_COMET_PRICES);
+    const result = validateMarketPriceList(BAKED_COMET_PRICES, 'Comet');
 
     expect(result.ok, result.ok ? '' : (result as { errors: string[] }).errors.join('; ')).toBe(true);
   });
@@ -451,6 +459,60 @@ describe('the media rows (§4.16)', () => {
     for (const id of Object.keys(BAKED_COMET_PRICES.media)) {
       expect(findMediaModel(BAKED_COMET_PRICES, id), `${id} is not findable by its own id`).not.toBeNull();
     }
+  });
+});
+
+/*
+ * ------------------------------------------------------------------------------------------------ *
+ * Sound (media-gateways T1) — priced from Comet's published feed + docs, unprobed until the key lands
+ * ------------------------------------------------------------------------------------------------
+ */
+
+describe('the audio rows (media-gateways T1)', () => {
+  it('prices every Comet audio row', () => {
+    /* Sound effect: one per-request row prices a request with AND without a duration. */
+    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'eleven_text_to_sound_v2', options: {} })?.usd).toBe(0.008);
+    expect(
+      lookupMediaPrice(BAKED_COMET_PRICES, { model: 'eleven_text_to_sound_v2', options: {}, durationSeconds: 2 })?.usd,
+    ).toBe(0.008);
+
+    /* Speech: $0.16 per 1,000 characters, so 50 characters is the docs' "$0.008 per 50 characters". */
+    for (const model of ['eleven_multilingual_v2', 'eleven_v3']) {
+      expect(lookupMediaPrice(BAKED_COMET_PRICES, { model, options: {}, textChars: 50 })?.usd).toBeCloseTo(0.008, 9);
+      expect(lookupMediaPrice(BAKED_COMET_PRICES, { model, options: {}, textChars: 1000 })?.usd).toBeCloseTo(0.16, 9);
+
+      /* CONTROL: per_1k_chars with no characters is not a price. */
+      expect(lookupMediaPrice(BAKED_COMET_PRICES, { model, options: {} })).toBeNull();
+    }
+
+    /* Music: per submit. */
+    expect(lookupMediaPrice(BAKED_COMET_PRICES, { model: 'suno_music', options: {} })?.usd).toBe(0.144);
+
+    /*
+     * No `refuses a sound effect with no duration when only per_second is priced` test: per_request
+     * was chosen (Comet's feed quotes the sound effect per request), so there is no per_second row
+     * for a missing duration to be refused by. Revisit if the probe shows a duration scales the charge.
+     */
+  });
+
+  it('derives every feed-sourced audio row from its own official price, ratio and scale', () => {
+    const audio = Object.entries(BAKED_COMET_PRICES.media).filter(([, p]) => p.kind === 'audio');
+
+    expect(audio.length).toBe(4);
+
+    for (const [model, pricing] of audio) {
+      const provenance = COMET_AUDIO_PROVENANCE[model];
+
+      expect(provenance, `${model} is priced with no recorded provenance`).toBeDefined();
+      expect(provenance.source, `${model} must say it is unprobed until the probe runs`).toMatch(/unprobed/);
+
+      const expected = Math.round(provenance.officialUsd * (provenance.ratio ?? 1) * provenance.scale * 1e6) / 1e6;
+
+      expect(pricing.variants[0].usd, model).toBe(expected);
+    }
+
+    /* The hand-maintained row is the one with no feed ratio — flagged, not hidden. */
+    expect(COMET_AUDIO_PROVENANCE.suno_music.ratio).toBeNull();
   });
 });
 

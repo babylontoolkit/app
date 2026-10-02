@@ -4,7 +4,7 @@
  *   GET  /api/admin/market-prices              → the active list + version history + baked reference
  *   POST /api/admin/market-prices  promote     → validate a candidate list, store it, make it live
  *   POST /api/admin/market-prices  rollback    → re-point at a stored version
- *   POST /api/admin/market-prices  fetch-feed  → KIE's public pricing feed, for the admin's EYES
+ *   POST /api/admin/market-prices  fetch-feed  → the vendor's pricing feed (KIE, Comet, fal), for the admin's EYES
  *
  * This is the ONLY way platform prices change without a deploy — the env price vars are retired
  * (`rates.ts` refuses them). Admin-only (session `isAdmin`), like the template pin: an open promote
@@ -22,6 +22,7 @@ import { errorResponse } from '~/lib/.server/http';
 import { BAKED_MARKET_PRICES } from '~/lib/.server/billing/baked-market-prices';
 import { BAKED_COMET_PRICES } from '~/lib/.server/billing/baked-comet-prices';
 import { BAKED_ANTHROPIC_PRICES } from '~/lib/.server/billing/baked-anthropic-prices';
+import { BAKED_FAL_PRICES } from '~/lib/.server/billing/baked-fal-prices';
 import {
   activeMarketPriceVersionId,
   ensureMarketPrices,
@@ -32,7 +33,7 @@ import {
   MARKET_PRICE_PROVIDERS,
   type MarketPriceProvider,
 } from '~/lib/.server/billing/market-price-store';
-import { fetchKieMarketFeed, fetchCometMarketFeed } from '~/lib/.server/billing/market-feed';
+import { fetchKieMarketFeed, fetchCometMarketFeed, fetchFalMarketFeed } from '~/lib/.server/billing/market-feed';
 import { env } from '~/lib/.server/env';
 import { NotConfiguredError } from '~/lib/.server/agent/config';
 
@@ -43,6 +44,7 @@ const BAKED_BY_PROVIDER: Record<MarketPriceProvider, typeof BAKED_MARKET_PRICES>
   KIE: BAKED_MARKET_PRICES,
   Comet: BAKED_COMET_PRICES,
   Anthropic: BAKED_ANTHROPIC_PRICES,
+  FAL: BAKED_FAL_PRICES,
 };
 
 /**
@@ -192,6 +194,26 @@ export async function action({ request, context }: ActionFunctionArgs) {
         }
 
         return json({ ok: true, feed: await fetchCometMarketFeed(apiKey, { filter: body.filter }) });
+      }
+
+      if (provider === 'FAL') {
+        const apiKey = env(context, 'FAL_API_KEY');
+
+        if (!apiKey) {
+          throw new NotConfiguredError(
+            'FAL_API_KEY',
+            "fal's pricing API is authenticated (its prices are account-specific), so the platform key is required to read it.",
+          );
+        }
+
+        /*
+         * fal answers only for the ids it is asked about, so the feed is the prices of the ids the
+         * ACTIVE fal list carries — what the operator is comparing against. Read-only, like the others.
+         */
+        const list = await ensureMarketPrices('FAL', context);
+        const endpointIds = Object.entries(list.media).flatMap(([id, pricing]) => [id, ...(pricing.aliases ?? [])]);
+
+        return json({ ok: true, feed: await fetchFalMarketFeed(apiKey, { endpointIds, filter: body.filter }) });
       }
 
       return json({ ok: true, feed: await fetchKieMarketFeed({ filter: body.filter }) });

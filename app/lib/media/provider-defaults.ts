@@ -191,6 +191,28 @@ const DEFAULTS: Record<ImageProviderName, MediaModelDefaults> = {
     /* Comet has no audio routes — `generate_sound` and the panel's Sound tab are absent here. */
     sound: null,
   },
+
+  /*
+   * fal.ai (media-only gateway, `_specs/media-gateways_plan.md` T3). Every id is the fal model path,
+   * which is also its price-list key (`baked-fal-prices.ts`) and its route (`fal-routes.ts`).
+   */
+  FAL: {
+    image: 'fal-ai/nano-banana-2',
+
+    /* Kling, never Veo — the owner rule this field's doc comment states. */
+    video: 'fal-ai/kling-video/v3/standard/text-to-video',
+    googleVideo: 'fal-ai/veo3/fast',
+    videoAlternatives:
+      ' Also: fal-ai/kling-video/v3/pro/text-to-video (higher quality), ' +
+      'xai/grok-imagine-video/text-to-video (cheapest; resolution 480p or 720p).',
+
+    /* Kling's tier on fal is a different MODEL id (standard/pro), not a `mode` field. */
+    videoModeHint: '',
+    videoResolutionHint: 'Grok Imagine only: 480p or 720p. Default 720p.',
+
+    /* Sound on fal arrives with T6; until then the tool and the panel's Sound tab are absent here. */
+    sound: null,
+  },
 };
 
 /**
@@ -213,13 +235,23 @@ export function mediaModelDefaults(provider: ImageProviderName | string): MediaM
  * mentioning a Veo id somewhere else — and without this the separation is advice rather than a wall.
  * `protocol-strip`'s rule: no prompt wording reliably stops a model, so the pipeline has to refuse.
  *
- * ⚠️ Matches on the FAMILY, after stripping separators, because the two gateways spell the same model
- * `veo3_fast` and `veo3-fast` and a future `veo4` must not need a new entry here. It is deliberately
+ * ⚠️ Matches on the FAMILY, after stripping separators, because the gateways spell the same model
+ * `veo3_fast`, `veo3-fast` and `fal-ai/veo3/fast`, and a future `veo4` must not need a new entry here. It is deliberately
  * NOT a hardcoded id list: an id list is a thing that goes stale the next time a vendor ships a model,
  * silently, in the expensive direction.
  */
 export function isGoogleVideoModel(model: string): boolean {
-  return /^veo\d/.test(model.trim().toLowerCase().replace(/[-_.]/g, ''));
+  /*
+   * Per PATH SEGMENT: fal prefixes its vendor (`fal-ai/veo3/fast`, `fal-ai/veo3`), so a test anchored
+   * at the start of the whole id read fal's Veo as NOT Google — and `generate_video` would have served
+   * the most expensive video on the gateway from the general tool. `kling-video/…` and
+   * `grok-imagine-video/…` have no segment starting `veo<digit>`, so they stay non-Google.
+   */
+  return model
+    .trim()
+    .toLowerCase()
+    .split('/')
+    .some((segment) => /^veo\d/.test(segment.replace(/[-_.]/g, '')));
 }
 
 /** Every gateway this table knows, for the specs to iterate rather than re-list. */
