@@ -136,13 +136,33 @@ They can be added later as price rows.
 
 ### fal probe results (T2, 2026-10-01)
 
-**The render probe could not run: every submit was refused, nothing rendered, $0 spent.** `scripts/fal-media-probe.mjs` submitted all 13 jobs; each answered at once with:
+**First attempt (morning of 2026-10-01): every submit was refused** with `HTTP 403 {"detail": "User is locked. Reason: Exhausted balance…"}`, $0 spent. **Re-run after the account was topped up (same day): 13 jobs submitted, 12 delivered.** Raw output: `report.json` in `PROBE_OUT_DIR`.
 
-```
-HTTP 403  {"detail": "User is locked. Reason: Exhausted balance. Top up your balance at fal.ai/dashboard/billing."}
-```
+| Job | Status sequence | Result | File field | Keyless download | Bytes | Latency |
+| --- | --- | --- | --- | --- | --- | --- |
+| `nano-banana-2` 1K jpeg | IN_QUEUE→IN_PROGRESS→COMPLETED | 200 | `images[0].url` | yes | JPEG | 16.7 s |
+| `nano-banana-pro` 1K | IN_QUEUE→IN_PROGRESS→COMPLETED | 200 | `images[0].url` | yes | PNG | 24.6 s |
+| `seedream/v4.5` | IN_PROGRESS→COMPLETED | 200 | `images[0].url` | yes | JPEG | 13.9 s |
+| cut-out (`bria/background/remove`) on the nano-banana-2 output | IN_PROGRESS→COMPLETED | 200 | `image.url` | yes | PNG, RGBA (colour type 6): **57.6 % fully transparent, 0.8 % semi** | 3.1 s |
+| `veo3/fast` 4 s, audio off | IN_PROGRESS→COMPLETED | 200 | `video.url` | yes | MP4 (isom) | 37.7 s |
+| `grok-imagine-video` | IN_QUEUE→IN_PROGRESS→COMPLETED | 200 | `video.url` | yes | MP4 (isom) | 29.6 s |
+| `kling-video/v3/standard` 3 s, audio off | IN_PROGRESS (never left it) | 400 "Request is still in progress" | — | — | — | **probe gave up at 12 min; still IN_PROGRESS on manual checks ~30 min after submit** |
+| `elevenlabs/sound-effects/v2` 3 s | IN_PROGRESS→COMPLETED | 200 | `audio.url` | yes | MP3, 3.0 s | 3.7 s |
+| …same, no `duration_seconds` | IN_PROGRESS→COMPLETED | 200 | `audio.url` | yes | MP3, 2.0 s (model chose) | 3.4 s |
+| `elevenlabs/tts/multilingual-v2` | IN_PROGRESS→COMPLETED | 200 | `audio.url` | yes | MP3, 3.2 s | 3.4 s |
+| `elevenlabs/tts/turbo-v2.5` | IN_PROGRESS→COMPLETED | 200 | `audio.url` | yes | MP3 | 3.4 s |
+| `minimax-music/v2.6` instrumental | IN_PROGRESS→COMPLETED | 200 | `audio.url` | yes | MP3, 90.9 s | 166 s |
+| invalid image (empty prompt, `9K`) | IN_QUEUE→COMPLETED | **422** `{detail:[{loc,msg,type}…]}` | — | — | — | 6.1 s |
+| invalid voice | IN_PROGRESS→COMPLETED | **422** `Voice not found: …` | — | — | — | 3.4 s |
 
-Top up the fal account, then re-run `node scripts/fal-media-probe.mjs` (raw output goes to `PROBE_OUT_DIR`, default the OS temp dir). It records everything T3 needs: the `response_url` ↔ `status_url` relation, the subpath-dropped claim for `fal-ai/veo3/fast`, the status sequence, a failed job's status and result bodies, each result's file-URL field, keyless downloads, magic bytes, the cut-out's decoded alpha, latency, and per-request charges (billing events).
+What this settles for the client (`fal-client.ts`):
+- **`status_url === response_url + '/status'` on every job**, and `response_url` drops the model's subpath (`fal-ai/veo3`, `fal-ai/kling-video`, `fal-ai/elevenlabs`). The client stores `response_url` and derives the status URL from it, which is right.
+- **A failed job reports `COMPLETED` with NO `error` field on the status body**; the failure is the result GET answering **422** with a pydantic-style `detail` list. The client maps a 4xx result after `COMPLETED` to `failed` (refunded) and only 5xx/429 to a flaky poll, which is right.
+- A result GET before completion answers **400 "Request is still in progress"** — the client only reads the result after `COMPLETED`, so this never reaches it.
+- Output files on `v3b.fal.media` download without the key. Every result also carries `content_type`.
+- The cut-out returns real alpha.
+- ⚠️ **Kling v3 Standard never completed** (still `IN_PROGRESS`, no logs, about 30 minutes after submit). It is fal's default `generate_video` model, and it is the one fal video model not yet delivered live (T7's live video was Veo). On the platform a stuck task holds its debit while pending (no server-side expiry — the same as KIE). One sample; worth re-checking before relying on Kling as the default.
+- The per-request charge could not be read: `billing-events` answers 403 for this key. The pricing API (200) echoed the baked prices exactly.
 
 **What was measured without spending:**
 
@@ -275,7 +295,7 @@ It changes three rules:
     - `pnpm typecheck && pnpm lint && pnpm test` are green.
   - Verify level: standard
 
-- [ ] **T2** — Live-probe fal, give fal a media-only price list, and add the admin feed  ⏭️ DEFERRED (auto-pilot): fal returned 403 "Exhausted balance" on every submit ($0 spent) — code + baked prices done; top up fal, run `node scripts/fal-media-probe.mjs`, check the findings against T3–T4, then tick
+- [x] **T2** — Live-probe fal, give fal a media-only price list, and add the admin feed
   - Files:
     - `scripts/fal-media-probe.mjs` (create)
     - `app/lib/.server/billing/baked-fal-prices.ts` (create)

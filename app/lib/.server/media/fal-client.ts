@@ -25,8 +25,10 @@
  *
  * ## 🔴 A FAILED JOB ALSO REPORTS `COMPLETED`
  *
- * The failure shows only as `error` / `error_type` fields beside it. Reading `COMPLETED` as success
- * would deliver nothing and report a succeeded task the download path cannot complete.
+ * Measured (2026-10-01 probe): the status body carries NO `error` field — the result GET answers 422
+ * with a `detail` list. fal documents `error` / `error_type` beside `COMPLETED`, so both are read.
+ * Reading `COMPLETED` as success would deliver nothing and report a succeeded task the download path
+ * cannot complete.
  *
  * ## SSRF wall
  *
@@ -34,9 +36,8 @@
  * anything that is not an `https://queue.fal.run/` URL before any request is made, so a corrupt or
  * tampered record can never point the key at another host.
  *
- * ⚠️ **Built to fal's DOCUMENTED shapes** — the paid render probe was refused with 403 "Exhausted
- * balance" (2026-10-01, `scripts/fal-media-probe.mjs`). The status-URL relation, the failed-job shape
- * and the result field names each live in ONE function here, so the probe can correct them in place.
+ * Confirmed by `scripts/fal-media-probe.mjs` (2026-10-01, 13 jobs): the status-URL relation, the
+ * failed-job shape and the result field names. Each lives in ONE function here.
  */
 import { createScopedLogger } from '~/utils/logger';
 import type { CreateMediaTaskInput, MediaEndpoint, MediaProvider, MediaProviderName, MediaTaskState } from './provider';
