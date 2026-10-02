@@ -548,7 +548,7 @@ It changes three rules:
     4. If the fal account still cannot render (no balance), report that and run steps 1–2 against a stubbed fal provider.
   - Verify level: live
 
-- [ ] **T8** — Update SPEC.md to match what was built
+- [x] **T8** — Update SPEC.md to match what was built
   - Files: `SPEC.md`
   - Details: following SPEC.md's "How to update this spec":
     - **§4.16:**

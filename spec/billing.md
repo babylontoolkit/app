@@ -209,8 +209,11 @@ us.** ⚠️ This opened *"everything the platform believes **KIE** charges us"*
 when there was one gateway, and false from the moment a second shipped (T4). The KIE keys were left
 untouched so nothing migrated, which is exactly why the singular kept reading as correct: the storage
 layout for the incumbent did not change, only the number of layouts. The document holds the LLM token rates
-(`llm`: model → input/output USD per MTok) and the per-task media prices for §4.16 image/video
-generation (`media`: model → variants of options → USD, per_image / per_second / per_video). It is
+(`llm`: model → input/output USD per MTok) and the per-task media prices for §4.16 image/video/sound
+generation (`media`: model → variants of options → USD, per_image / per_second / per_video /
+per_request / per_1k_chars). A list may be one-sided: **fal is a media-only gateway** (2026-10-01,
+`MEDIA_ONLY_PRICE_PROVIDERS`), so its list holds no `llm` rows and validation refuses any; **Comet's list
+carries LLM rows only**, since Comet is no longer a media gateway (SPEC §4.16, §8m). It is
 doc-sync rules applied to money, mirroring the §4.4 template pin:
 
 - **Baked fallback in code** (`billing/baked-market-prices.ts`) — captured from KIE's own public
@@ -220,7 +223,8 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   owner-confirmed, with cache accounting probe-verified against KIE's own usage numbers the same day
   (writes and reads REPORTED, unlike the 4-7/fable rows that report 0 write while being charged).
   Billing can never find "no prices".
-- **A list MUST price the platform default model (owner rule, 2026-07-27).** `validateMarketPriceList`
+- **A list MUST price the platform default model (owner rule, 2026-07-27)** — every list except a
+  media-only one (fal), which bills no LLM turn and so has no default to price. `validateMarketPriceList`
   refuses a list whose `llm` table lacks the `DEFAULT_MODEL` row — at PROMOTE and at LOAD
   (`loadVersion` re-validates stored bytes, so a legacy list missing the row fails to load and baked
   serves instead). Without this, an omitted default would bill every ordinary generation at the
