@@ -47,11 +47,13 @@ import {
   createTurnMeter,
   decideTurnEndVerdict,
   isDeliberateLoopStop,
+  MAX_TURN_RESUMES,
   resolveMaxOutputTokens,
   resolveToolLoopConfig,
   resolveTurnBudgets,
   resolveTurnCeiling,
   runToolLoopSegments,
+  shouldResumeTurn,
   type ToolLoopTurnState,
 } from './tool-loop';
 import {
@@ -2216,7 +2218,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * `runToolLoopSegments` so the `finally` reads it even when a segment throws. Untouched with the
    * loop off.
    */
-  const loopState: ToolLoopTurnState = { segmentsRun: 0, nudgesUsed: 0, stopReason: 'none' };
+  const loopState: ToolLoopTurnState = { segmentsRun: 0, nudgesUsed: 0, stopReason: 'none', resumes: 0 };
 
   /**
    * The live provider-level activity, for the liveness panel only (`agent/heartbeat.ts`).
@@ -2790,6 +2792,25 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     }
   }
 
+  /*
+   * May this tool-loop turn resume after the provider broke it (`shouldResumeTurn`)? Progress means a
+   * step was billed this turn — the work that step did is in the project.
+   */
+  function turnResumable(_error: unknown, resumesUsed: number): boolean {
+    return shouldResumeTurn({
+      aborted: Boolean(request.abortSignal?.aborted),
+      progressed: totals.completionTokens > 0,
+      resumesUsed,
+    });
+  }
+
+  function logTurnResume(error: unknown, resumeNumber: number): void {
+    logger.warn(
+      `Generation ${generationId}: the provider broke mid-turn — resuming (${resumeNumber}/${MAX_TURN_RESUMES}) ` +
+        `from the compact carry: ${(error as Error)?.name}: ${(error as Error)?.message}`,
+    );
+  }
+
   async function* run(): AsyncGenerator<AgentChunk> {
     try {
       /*
@@ -2811,6 +2832,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * nothing: the ledger has nothing to reverse, which is what makes another attempt honest rather
        * than a double charge — and `outTokens > 0` stops the loop the instant a step has been billed.
        */
+      /*
+       * A tool-loop turn whose first segment broke AFTER billed progress resumes in the segment runner
+       * (`shouldResumeTurn`) instead of failing — the files it wrote are already in the project.
+       */
+      let firstBroke = false;
+
       for (let attempt = 0; ; attempt++) {
         try {
           yield* drain(first);
@@ -2824,6 +2851,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
               attempts: attempt,
             })
           ) {
+            if (toolLoop && turnResumable(error, loopState.resumes ?? 0)) {
+              logTurnResume(error, (loopState.resumes ?? 0) + 1);
+              firstBroke = true;
+              break;
+            }
+
             throw error;
           }
 
@@ -2982,6 +3015,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           cfg: loopCfg,
           base: [...system, ...coreMessages],
           first,
+          firstBroke,
+          resumable: turnResumable,
+          onResume: (error, state) => logTurnResume(error, state.resumes ?? 0),
           state: loopState,
           readFacts: () => {
             const last = stepLog[stepLog.length - 1];
@@ -3500,7 +3536,8 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
           (toolLoop
             ? `+segments:${loopState.segmentsRun}` +
               (loopState.stopReason !== 'none' ? `+${loopState.stopReason}` : '') +
-              (loopState.nudgesUsed ? `+gate:${loopState.nudgesUsed}` : '')
+              (loopState.nudgesUsed ? `+gate:${loopState.nudgesUsed}` : '') +
+              (loopState.resumes ? `+resumed:${loopState.resumes}` : '')
             : ''),
         status: failed ? 'failed' : 'completed',
 

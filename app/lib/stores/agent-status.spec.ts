@@ -318,7 +318,9 @@ describe('concrete progress', () => {
     expect(describeAgentStatus({ ...base }, 0, { written: 0, writing: 0 }).progress).toBeUndefined();
   });
 
-  it('reports a long silence, and stays quiet about a short one', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('reports a long silence, and stays quiet about a short one', () => {
     const quiet = describeAgentStatus({ ...base, elapsedMs: 300_000, silentMs: SILENCE_WORTH_MENTIONING_MS }, 0);
     expect(quiet.progress).toContain('nothing from the model for');
 
@@ -330,7 +332,9 @@ describe('concrete progress', () => {
     expect(describeAgentStatus({ ...base, elapsedMs: 300_000, silentMs: 3000 }, 0).progress).toBeUndefined();
   });
 
-  it('combines what landed with whether anything is arriving', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('combines what landed with whether anything is arriving', () => {
     const d = describeAgentStatus({ ...base, elapsedMs: 300_000, silentMs: 40_000 }, 0, { written: 2, writing: 1 });
     expect(d.progress).toBe('2 files written · 1 in progress · nothing from the model for 40s');
   });
@@ -419,7 +423,9 @@ describe('a stall is only news once something has arrived', () => {
     expect(describeAgentStatus({ ...base, elapsedMs: 60_000, silentMs: 60_000 }, 0).progress).toBeUndefined();
   });
 
-  it('reports it once the silence is meaningfully shorter than the turn', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('reports it once the silence is meaningfully shorter than the turn', () => {
     const d = describeAgentStatus(
       { ...base, elapsedMs: 60_000, silentMs: 60_000 - SILENCE_RESTATES_ELAPSED_MS - 1 },
       0,
@@ -524,7 +530,9 @@ describe('the expectation bar', () => {
     expect(describeAgentStatus({ ...base, typicalMs: undefined }, 0).expectation).toBeUndefined();
   });
 
-  it('captions with the baseline, and does not repeat the elapsed time already in the label', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('captions with the baseline, and does not repeat the elapsed time already in the label', () => {
     const d = describeAgentStatus({ ...base, elapsedMs: 60_000 }, 0);
     expect(d.expectation).toBe('usually about 5m');
     expect(d.label).toContain('1m 0s');
@@ -533,7 +541,9 @@ describe('the expectation bar', () => {
     expect(d.expectation).not.toContain('1m 0s');
   });
 
-  it('stops predicting once past the baseline and reports being connected instead', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('stops predicting once past the baseline and reports being connected instead', () => {
     const d = describeAgentStatus({ ...base, elapsedMs: 400_000 }, 0);
     expect(isOverdue({ ...base, elapsedMs: 400_000 }, 0)).toBe(true);
     expect(d.expectation).toBe('longer than usual — still connected');
@@ -595,7 +605,9 @@ describe('the delivery note', () => {
     expect(note).not.toMatch(/almost|nearly|soon|shortly/i);
   });
 
-  it('suppresses the stall clause, so the symptom is not restated beside its explanation', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('suppresses the stall clause, so the symptom is not restated beside its explanation', () => {
     /*
      * On a batched provider "nothing from the model for 3m" is not news — it is how the transport
      * works. Printed next to the note it reads as two pieces of bad news, and the alarming one is the
@@ -633,5 +645,36 @@ describe('the delivery note', () => {
     updateAgentStatus(part({ deliveryMode: 'batched', typicalMs: 300_000 }));
     expect(agentStatusStore.get()?.deliveryMode).toBe('batched');
     expect(agentStatusStore.get()?.typicalMs).toBe(300_000);
+  });
+});
+
+/*
+ * Hidden for now (owner, 2026-09-30): the "usually about 5m" / "longer than usual" caption and the
+ * "nothing from the model for 2m" clause. The bar and the file count stay.
+ */
+describe('hidden status lines', () => {
+  const base = {
+    generationId: 'g1',
+    seq: 1,
+    kind: 'creation' as const,
+    phase: 'generating' as const,
+    elapsedMs: 600_000,
+    receivedAt: 0,
+    typicalMs: 300_000,
+    silentMs: 120_000,
+  };
+
+  it('shows neither the expectation caption nor the silence clause', () => {
+    const d = describeAgentStatus(base, 0);
+
+    expect(d.expectation).toBeUndefined();
+    expect(d.progress ?? '').not.toContain('nothing from the model');
+  });
+
+  it('CONTROL: still draws the bar and counts files', () => {
+    const d = describeAgentStatus(base, 0, { written: 2, writing: 0 });
+
+    expect(d.fraction).toBeGreaterThan(0);
+    expect(d.progress).toBe('2 files written');
   });
 });

@@ -29,7 +29,7 @@ export interface ToolLoopConfig {
   enabled: boolean; // AGENT_TOOL_LOOP
   segmentSteps: number; // AGENT_SEGMENT_STEPS      default 40      floor 5
   maxSegments: number; // AGENT_MAX_SEGMENTS       default 6       floor 1
-  turnMaxCredits: number; // AGENT_TURN_MAX_CREDITS   default 2500    floor 100
+  turnMaxCredits: number; // AGENT_TURN_MAX_CREDITS   default 25000   floor 100
   checkMaxNudges: number; // AGENT_CHECK_MAX_NUDGES   default 3       floor 0
   compactAtTokens: number; // AGENT_COMPACT_AT_TOKENS  default 300000  floor 50000
 }
@@ -38,7 +38,7 @@ export const DEFAULT_TOOL_LOOP_CONFIG: ToolLoopConfig = {
   enabled: true,
   segmentSteps: 40,
   maxSegments: 6,
-  turnMaxCredits: 2500,
+  turnMaxCredits: 25000,
   checkMaxNudges: 3,
   compactAtTokens: 300_000,
 };
@@ -336,6 +336,50 @@ export interface ToolLoopTurnState {
   segmentsRun: number;
   nudgesUsed: number;
   stopReason: ToolLoopStopReason;
+
+  /** Segments restarted after the provider broke mid-turn (`shouldResumeTurn`). Absent → 0. */
+  resumes?: number;
+}
+
+/*
+ * ─── resuming a turn the provider broke (2026-09-30) ────────────────────────────────────────────────
+ */
+
+/**
+ * 🔴 HOW MANY TIMES ONE TURN MAY RESTART AFTER THE PROVIDER BREAKS MID-TURN.
+ *
+ * *"I am getting a ton of refunds… it's taking a very long time to build the game."* Measured on the
+ * local generation log: 5 of the last 12 turns failed with `error+segments:0` — each after 1–13
+ * completed, BILLED steps (up to 636s and $5.17 of provider spend), each ending on a step that had just
+ * requested a tool. The provider retry ladder (`retry-policy.ts`) stands down the moment a step has been
+ * billed, which is right for a one-shot answer and wrong for a tool-loop turn: the work up to the break
+ * is already written into the user's project by the relay, so failing the turn throws away ten minutes
+ * of it, refunds the user, and makes them start again.
+ *
+ * So a broken turn RESUMES instead: a fresh segment from the compact carry (`carrySummary` — the files
+ * written, the todos, the last check), which needs nothing from the broken stream and so cannot replay
+ * whatever request shape broke it. Bounded, because a provider that keeps failing is not transient and
+ * paying to rediscover that is the waste this file's budgets exist to stop.
+ */
+export const MAX_TURN_RESUMES = 2;
+
+/** The resumed segment's user message. The model reads it. */
+export const RESUME_PROMPT =
+  'The connection to the model dropped in the middle of this turn. Everything you wrote before that is ' +
+  'already saved in the project. Continue from where you stopped: re-read any file with `read_file` before ' +
+  'editing it, finish the remaining work on your todo list, then run `check_game` and finish.';
+
+/**
+ * May a turn the provider broke be resumed rather than failed? PURE — a `true` starts another paid
+ * segment without the user asking, so every branch that says no is tested.
+ *
+ *   - **A Stop or closed tab is never resumed** — the user left or decided; the abort is the answer.
+ *   - **Only after progress.** A segment that broke before billing anything belongs to the provider
+ *     retry ladder, which has its own bound and its own verdict.
+ *   - **At most `MAX_TURN_RESUMES`.**
+ */
+export function shouldResumeTurn(input: { aborted: boolean; progressed: boolean; resumesUsed: number }): boolean {
+  return !input.aborted && input.progressed && input.resumesUsed < MAX_TURN_RESUMES;
 }
 
 export interface RunToolLoopSegmentsInput<C, R extends ToolLoopSegmentRun> {
@@ -346,6 +390,21 @@ export interface RunToolLoopSegmentsInput<C, R extends ToolLoopSegmentRun> {
 
   /** The first segment, ALREADY drained by the caller (the proxy keeps its provider-retry ladder there). */
   first: R;
+
+  /**
+   * The first segment BROKE after making progress and the caller already judged it resumable — start
+   * with a resume instead of a decision (its facts describe a stream that never finished).
+   */
+  firstBroke?: boolean;
+
+  /**
+   * A later segment threw: may the turn resume? Absent → rethrow (the pre-resume behaviour). The runner
+   * passes the resumes already used; the caller owns the rest of `shouldResumeTurn`'s facts.
+   */
+  resumable?: (error: unknown, resumesUsed: number) => boolean;
+
+  /** Called once per resume, before the resumed segment starts — the caller's place to log it. */
+  onResume?: (error: unknown, state: ToolLoopTurnState) => void;
   state: ToolLoopTurnState;
 
   /** The live facts after a segment; the runner supplies `segmentsRun` and `nudgesUsed`. */
@@ -384,44 +443,80 @@ export async function* runToolLoopSegments<C, R extends ToolLoopSegmentRun>(
 
   state.segmentsRun += 1;
 
+  let broke = input.firstBroke ?? false;
+
+  if (broke) {
+    state.resumes = (state.resumes ?? 0) + 1;
+  }
+
   for (;;) {
-    const decision = decideNextSegment(
-      { ...input.readFacts(), segmentsRun: state.segmentsRun, nudgesUsed: state.nudgesUsed },
-      cfg,
-    );
+    let gate = false;
 
-    input.onDecision?.(decision, state);
+    if (broke) {
+      /*
+       * Resume after a break. The broken stream's `response` never resolves, so the carry is the compact
+       * summary — always, whatever the size. Still bounded by the segment cap like any other segment.
+       */
+      broke = false;
 
-    if (decision.kind === 'done') {
-      input.onDone?.();
-      return;
-    }
+      if (state.segmentsRun >= cfg.maxSegments) {
+        state.stopReason = 'segments';
+        return;
+      }
 
-    if (decision.kind === 'stop') {
-      state.stopReason = decision.reason;
-      return;
-    }
-
-    const gate = decision.kind === 'gate';
-    const prompt = gate ? GATE_PROMPT : CONTINUE_PROMPT;
-
-    if (gate) {
-      state.nudgesUsed += 1;
-    }
-
-    if (decision.compact) {
-      messages = [...base, { role: 'user', content: `${carrySummary(input.summary())}\n\n${prompt}` }];
+      messages = [...base, { role: 'user', content: `${carrySummary(input.summary())}\n\n${RESUME_PROMPT}` }];
     } else {
-      const carried = (await previous.response).messages;
-      messages = [
-        ...messages,
-        ...(input.prepareCarried ? input.prepareCarried(carried) : carried),
-        { role: 'user', content: prompt },
-      ];
+      const decision = decideNextSegment(
+        { ...input.readFacts(), segmentsRun: state.segmentsRun, nudgesUsed: state.nudgesUsed },
+        cfg,
+      );
+
+      input.onDecision?.(decision, state);
+
+      if (decision.kind === 'done') {
+        input.onDone?.();
+        return;
+      }
+
+      if (decision.kind === 'stop') {
+        state.stopReason = decision.reason;
+        return;
+      }
+
+      gate = decision.kind === 'gate';
+
+      const prompt = gate ? GATE_PROMPT : CONTINUE_PROMPT;
+
+      if (gate) {
+        state.nudgesUsed += 1;
+      }
+
+      if (decision.compact) {
+        messages = [...base, { role: 'user', content: `${carrySummary(input.summary())}\n\n${prompt}` }];
+      } else {
+        const carried = (await previous.response).messages;
+        messages = [
+          ...messages,
+          ...(input.prepareCarried ? input.prepareCarried(carried) : carried),
+          { role: 'user', content: prompt },
+        ];
+      }
     }
 
     previous = input.start(gate ? 'tool-loop-gate' : 'tool-loop-continue', messages);
-    yield* input.drain(previous);
+
+    try {
+      yield* input.drain(previous);
+    } catch (error) {
+      if (!input.resumable?.(error, state.resumes ?? 0)) {
+        throw error;
+      }
+
+      broke = true;
+      state.resumes = (state.resumes ?? 0) + 1;
+      input.onResume?.(error, state);
+    }
+
     state.segmentsRun += 1;
   }
 }

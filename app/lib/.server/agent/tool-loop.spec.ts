@@ -56,7 +56,7 @@ describe('resolveToolLoopConfig', () => {
       enabled: true,
       segmentSteps: 40,
       maxSegments: 6,
-      turnMaxCredits: 2500,
+      turnMaxCredits: 25000,
       checkMaxNudges: 3,
       compactAtTokens: 300_000,
     });
@@ -133,7 +133,7 @@ describe('resolveToolLoopConfig', () => {
       resolveToolLoopConfig(
         ctx({ AGENT_SEGMENT_STEPS: 'lots', AGENT_MAX_SEGMENTS: 'NaN', AGENT_TURN_MAX_CREDITS: 'Infinity' }),
       ),
-    ).toMatchObject({ segmentSteps: 40, maxSegments: 6, turnMaxCredits: 2500 });
+    ).toMatchObject({ segmentSteps: 40, maxSegments: 6, turnMaxCredits: 25000 });
   });
 });
 

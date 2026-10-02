@@ -6,6 +6,7 @@ import { renderHeadToString } from 'remix-island';
 import { Head } from './root';
 import { themeStore } from '~/lib/stores/theme';
 import { assertNotLocalInProduction } from '~/lib/.server/supabase/auth';
+import { installServerLogFile } from '~/lib/.server/server-log';
 import { resolveSandboxProviderId, SANDBOX_PROVIDER_TRAITS } from '~/lib/common/sandbox-runtime';
 
 /**
@@ -22,6 +23,9 @@ import { resolveSandboxProviderId, SANDBOX_PROVIDER_TRAITS } from '~/lib/common/
  * start is the only version of this check that actually holds.
  */
 assertNotLocalInProduction();
+
+/* Server log lines also go to `.data/logs/server.log` in dev, so a failed build leaves its reason behind. */
+installServerLogFile();
 
 export default async function handleRequest(
   request: Request,

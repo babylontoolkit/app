@@ -44,6 +44,20 @@ function setLevel(level: DebugLevel) {
   currentLevel = level;
 }
 
+/**
+ * A durable copy of the server's log lines (`~/lib/.server/server-log.ts`). Registered by the SERVER
+ * entry only, so this shared module never imports a filesystem and the browser never has a sink.
+ * Without it every server failure lived only in the terminal that ran `pnpm dev`, and a failed build
+ * left nothing behind to diagnose.
+ */
+export type LogSink = (level: DebugLevel, scope: string | undefined, text: string) => void;
+
+let logSink: LogSink | undefined;
+
+export function setLogSink(sink: LogSink | undefined): void {
+  logSink = sink;
+}
+
 function log(level: DebugLevel, scope: string | undefined, messages: any[]) {
   const levelOrder: DebugLevel[] = ['trace', 'debug', 'info', 'warn', 'error', 'none'];
 
@@ -67,6 +81,14 @@ function log(level: DebugLevel, scope: string | undefined, messages: any[]) {
 
     return `${acc} ${current}`;
   }, '');
+
+  if (logSink && level !== 'trace' && level !== 'debug') {
+    try {
+      logSink(level, scope, String(allMessages));
+    } catch {
+      // A broken sink must never take logging (or the request) down with it.
+    }
+  }
 
   const labelBackgroundColor = getColorForLevel(level);
   const labelTextColor = level === 'warn' ? '#000000' : '#FFFFFF';

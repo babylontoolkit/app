@@ -6,7 +6,14 @@
  * and the user reports "it broke my game".
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { _resetClaims, claimProject, GenerationInFlightError, isProjectClaimed, shouldClaimProject } from './inflight';
+import {
+  _resetClaims,
+  claimProject,
+  GenerationInFlightError,
+  isProjectClaimed,
+  resolveClaimTtlMs,
+  shouldClaimProject,
+} from './inflight';
 
 /*
  * The takeover LOGS are the only externally visible difference between "the map still held a dead
@@ -86,7 +93,7 @@ describe('claimProject', () => {
     claimProject('prj_1', USER);
     expect(() => claimProject('prj_1', USER)).toThrow(GenerationInFlightError);
 
-    vi.advanceTimersByTime(16 * 60 * 1000); // past the 15-minute TTL
+    vi.advanceTimersByTime(181 * 60 * 1000); // past the default 3-hour TTL
 
     expect(() => claimProject('prj_1', USER)).not.toThrow();
   });
@@ -123,6 +130,129 @@ describe('claimProject', () => {
 
     // The takeover's claim must still be standing.
     expect(() => claimProject('prj_1', USER, new AbortController().signal)).toThrow(GenerationInFlightError);
+  });
+});
+
+/**
+ * 🔴 THE LOCK MUST OUTLAST A REAL BUILD (owner, 2026-09-30: "we will need at least a 2-3 hour max time").
+ *
+ * The TTL is not a build time limit — it is how long a live turn is trusted before ANOTHER tab may start
+ * a second build beside it. A tool-loop turn can run for hours; at the old 15 minutes a second tab could
+ * interleave its writes into a build that was still running, silently.
+ */
+describe('claim TTL — long enough for a multi-hour build', () => {
+  beforeEach(() => {
+    _resetClaims();
+    vi.useRealTimers();
+  });
+
+  it('still holds a running build after two and a half hours by default', () => {
+    vi.useFakeTimers();
+    claimProject('prj_1', USER);
+
+    vi.advanceTimersByTime(150 * 60 * 1000);
+
+    expect(() => claimProject('prj_1', USER)).toThrow(GenerationInFlightError);
+  });
+
+  it('honours a configured TTL stored on the claim', () => {
+    vi.useFakeTimers();
+    claimProject('prj_1', USER, undefined, { ttlMs: resolveClaimTtlMs('30') });
+
+    vi.advanceTimersByTime(29 * 60 * 1000);
+    expect(isProjectClaimed('prj_1')).toBe(true);
+
+    vi.advanceTimersByTime(2 * 60 * 1000);
+    expect(isProjectClaimed('prj_1')).toBe(false);
+  });
+
+  it('resolves AGENT_CLAIM_TTL_MINUTES: default 3 hours, floor 15 minutes, junk → default', () => {
+    expect(resolveClaimTtlMs(undefined)).toBe(180 * 60 * 1000);
+    expect(resolveClaimTtlMs('')).toBe(180 * 60 * 1000);
+    expect(resolveClaimTtlMs('abc')).toBe(180 * 60 * 1000);
+    expect(resolveClaimTtlMs('240')).toBe(240 * 60 * 1000);
+    expect(resolveClaimTtlMs('1')).toBe(15 * 60 * 1000);
+    expect(resolveClaimTtlMs('-5')).toBe(15 * 60 * 1000);
+  });
+});
+
+/**
+ * 🔴 A SEND FROM THE SAME TAB REPLACES THAT TAB'S OWN TURN (2026-09-30).
+ *
+ * *"the app builder project gets stuck in the BUILD state and whatever i enter give this error"* — a
+ * turn the tab had stopped showing (its `useChat` handle overwritten) stayed connected, so every send
+ * bounced off it with no Stop button to press. A tab shows one turn at a time, so its new send means
+ * the old one was given up on: abort it like a Stop and take over. Every other case is still refused —
+ * the CONTROLS below are what keep this from passing for a lock that was simply deleted.
+ */
+describe('claimProject — the same tab supersedes its own turn', () => {
+  beforeEach(() => {
+    _resetClaims();
+    vi.useRealTimers();
+  });
+
+  function holder(clientId: string | undefined, userId = USER) {
+    const controller = new AbortController();
+    const supersede = vi.fn(() => controller.abort());
+    const release = claimProject('prj_1', userId, controller.signal, { clientId, supersede });
+
+    return { controller, supersede, release };
+  }
+
+  it('aborts the old turn and takes the project when the same tab sends again', () => {
+    const old = holder('tab_a');
+
+    expect(() =>
+      claimProject('prj_1', USER, new AbortController().signal, { clientId: 'tab_a', supersede: vi.fn() }),
+    ).not.toThrow();
+    expect(old.supersede).toHaveBeenCalledTimes(1);
+    expect(old.controller.signal.aborted).toBe(true);
+  });
+
+  it('the superseded turn’s late release does not free the new claim', () => {
+    const old = holder('tab_a');
+
+    claimProject('prj_1', USER, new AbortController().signal, { clientId: 'tab_a' });
+    old.release();
+
+    expect(isProjectClaimed('prj_1')).toBe(true);
+    expect(() => claimProject('prj_1', USER, new AbortController().signal, { clientId: 'tab_b' })).toThrow(
+      GenerationInFlightError,
+    );
+  });
+
+  it('CONTROL: another tab is still refused, and the running turn is left alone', () => {
+    const old = holder('tab_a');
+
+    expect(() => claimProject('prj_1', USER, new AbortController().signal, { clientId: 'tab_b' })).toThrow(
+      GenerationInFlightError,
+    );
+    expect(old.supersede).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: a request with no tab id (an older bundle) is refused, even against an unidentified holder', () => {
+    const old = holder(undefined);
+
+    expect(() => claimProject('prj_1', USER, new AbortController().signal)).toThrow(GenerationInFlightError);
+    expect(() => claimProject('prj_1', USER, new AbortController().signal, { clientId: '' })).toThrow(
+      GenerationInFlightError,
+    );
+    expect(old.supersede).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: the same tab id under a different user is refused', () => {
+    const old = holder('tab_a', 'user_2');
+
+    expect(() => claimProject('prj_1', USER, new AbortController().signal, { clientId: 'tab_a' })).toThrow(
+      GenerationInFlightError,
+    );
+    expect(old.supersede).not.toHaveBeenCalled();
+  });
+
+  it('the refusal names the other tab, so its advice points somewhere the user can act', () => {
+    holder('tab_a');
+
+    expect(() => claimProject('prj_1', USER, undefined, { clientId: 'tab_b' })).toThrow(/another tab/i);
   });
 });
 
@@ -285,7 +415,7 @@ describe('isProjectClaimed — a read, never a claim', () => {
     claimProject('prj_1', USER);
     expect(isProjectClaimed('prj_1')).toBe(true);
 
-    vi.advanceTimersByTime(16 * 60 * 1000); // past the 15-minute TTL
+    vi.advanceTimersByTime(181 * 60 * 1000); // past the default 3-hour TTL
 
     expect(isProjectClaimed('prj_1')).toBe(false);
   });
@@ -302,7 +432,7 @@ describe('isProjectClaimed — a read, never a claim', () => {
     vi.useFakeTimers();
 
     claimProject('prj_1', USER);
-    vi.advanceTimersByTime(16 * 60 * 1000);
+    vi.advanceTimersByTime(181 * 60 * 1000);
 
     expect(isProjectClaimed('prj_1')).toBe(false);
 

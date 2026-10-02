@@ -423,6 +423,13 @@ const COPY: Record<AgentStatusKind, { label: string; thinking: string; generatin
 };
 
 /**
+ * Hidden for now (owner, 2026-09-30): the bar's "usually about 5m" / "longer than usual" caption, and the
+ * "nothing from the model for 2m" clause. Both are still computed; flip a flag to bring one back.
+ */
+const SHOW_EXPECTATION_CAPTION = false;
+const SHOW_SILENCE_CLAUSE = false;
+
+/**
  * Honest by design: it never pretends to BE the reasoning (when a provider streams real thinking text,
  * the ThinkingPanel shows it and this panel never appears), and it answers the two questions dead dots
  * cannot — "is it doing something, or is it frozen?" and "doing WHAT?".
@@ -474,6 +481,7 @@ export function describeAgentStatus(
    * pieces of bad news, and the alarming one is the line that reads first.
    */
   const stalled =
+    SHOW_SILENCE_CLAUSE &&
     status.deliveryMode !== 'batched' &&
     silent !== undefined &&
     silent >= SILENCE_WORTH_MENTIONING_MS &&
@@ -540,7 +548,7 @@ export function describeAgentStatus(
    */
   const fraction = elapsedFraction(status, now);
   const expectation =
-    status.typicalMs === undefined
+    !SHOW_EXPECTATION_CAPTION || status.typicalMs === undefined
       ? undefined
       : isOverdue(status, now)
         ? 'longer than usual — still connected'

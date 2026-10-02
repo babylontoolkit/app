@@ -136,7 +136,9 @@ describe('StreamingStatus — what the user reads during a long silence', () => 
     expect(screen.getByText(/Nothing is stuck/i)).toBeInTheDocument();
   });
 
-  it('renders the baseline caption, so elapsed time means something', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('renders the baseline caption, so elapsed time means something', () => {
     batchedCreation();
     render(<StreamingStatus />);
 
@@ -157,7 +159,9 @@ describe('StreamingStatus — what the user reads during a long silence', () => 
     expect(width).toBeLessThan(100);
   });
 
-  it('says it is still connected once past the baseline, instead of predicting', () => {
+  // Hidden for now (owner, 2026-09-30) — re-enable with SHOW_EXPECTATION_CAPTION / SHOW_SILENCE_CLAUSE in agent-status.ts.
+
+  it.skip('says it is still connected once past the baseline, instead of predicting', () => {
     batchedCreation(600_000, 600_000);
     render(<StreamingStatus />);
 
