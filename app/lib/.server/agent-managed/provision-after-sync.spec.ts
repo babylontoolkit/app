@@ -59,6 +59,13 @@ beforeEach(() => {
   vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test-not-real');
   vi.stubEnv('AGENT_ENGINE', undefined as unknown as string);
 
+  /* The ladder this spec means — never the developer's `.env.local` (three rungs, three agents). */
+  vi.stubEnv('LLM_MODEL', 'claude-sonnet-5-5');
+  vi.stubEnv('PREMIUM_MODEL', 'claude-opus-5-5');
+  vi.stubEnv('PLATINUM_MODEL', 'claude-fable-5-1');
+  vi.stubEnv('ENABLE_EXTENDED_MODELS', 'true');
+  vi.stubEnv('ENABLE_PLATINUM_MODEL', 'true');
+
   mocks.alert.mockReset();
   mocks.syncSkills.mockReset().mockResolvedValue({
     skillsIndex: '',
@@ -98,18 +105,81 @@ afterEach(() => {
 });
 
 describe('Synchronize provisions the managed agent (T12)', () => {
-  it('a successful sync provisions and reports the agent', async () => {
+  it('a successful sync provisions one agent per model tier and reports each', async () => {
     const { status, body } = await refresh();
 
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
-    expect(provisioner).toHaveBeenCalledTimes(1);
+    expect(provisioner.mock.calls.map(([options]) => options.model)).toEqual([
+      'claude-sonnet-5-5',
+      'claude-opus-5-5',
+      'claude-fable-5-1',
+    ]);
     expect(body.managedAgent).toEqual({
       status: 'updated',
       agentId: 'agent_1',
       agentVersion: 4,
       promptVersionId: 'pv_new',
+      tiers: [
+        {
+          tier: 'standard',
+          label: expect.any(String),
+          model: 'claude-sonnet-5-5',
+          status: 'updated',
+          agentId: 'agent_1',
+          agentVersion: 4,
+        },
+        {
+          tier: 'premium',
+          label: expect.any(String),
+          model: 'claude-opus-5-5',
+          status: 'updated',
+          agentId: 'agent_1',
+          agentVersion: 4,
+        },
+        {
+          tier: 'platinum',
+          label: expect.any(String),
+          model: 'claude-fable-5-1',
+          status: 'updated',
+          agentId: 'agent_1',
+          agentVersion: 4,
+        },
+      ],
     });
+  });
+
+  it('a paid rung that fails is reported and alerted, and Standard still provisions', async () => {
+    provisioner.mockImplementation(async (options: { model?: string }) => {
+      if (options.model === 'claude-fable-5-1') {
+        throw new Error('fable is down');
+      }
+
+      return {
+        status: 'unchanged',
+        key: `${options.model}:medium`,
+        promptVersionId: 'pv_new',
+        agentId: 'agent_1',
+        agentVersion: 4,
+      };
+    });
+
+    const { status, body } = await refresh();
+    const outcome = body.managedAgent as { status: string; tiers: Array<{ tier: string; error?: string }> };
+
+    expect(status).toBe(200);
+    expect(outcome.status).toBe('unchanged');
+    expect(outcome.tiers.find((row) => row.tier === 'platinum')?.error).toBe('fable is down');
+    expect(mocks.alert).toHaveBeenCalledTimes(1);
+    expect(mocks.alert.mock.calls[0][1]).toContain('fable is down');
+  });
+
+  it('ENABLE_EXTENDED_MODELS=false provisions the Standard agent only', async () => {
+    vi.stubEnv('ENABLE_EXTENDED_MODELS', 'false');
+
+    await refresh();
+
+    expect(provisioner.mock.calls.map(([options]) => options.model)).toEqual(['claude-sonnet-5-5']);
   });
 
   it('provisioning runs AFTER the build activated (never against the previous version)', async () => {
@@ -125,7 +195,9 @@ describe('Synchronize provisions the managed agent (T12)', () => {
 
     await refresh();
 
-    expect(order).toEqual(['build', 'provision']);
+    expect(order[0]).toBe('build');
+    expect(order.slice(1).every((step) => step === 'provision')).toBe(true);
+    expect(order.length).toBeGreaterThan(1);
   });
 
   it('a provisioning failure does NOT fail the sync — it is reported and alerted', async () => {
@@ -137,6 +209,8 @@ describe('Synchronize provisions the managed agent (T12)', () => {
     expect(body.ok).toBe(true);
     expect(body.status).toBe('created');
     expect(body.managedAgent).toEqual({ error: 'Anthropic is down' });
+
+    /* One alert naming every failed rung — never one per rung. */
     expect(mocks.alert).toHaveBeenCalledTimes(1);
     expect(mocks.alert.mock.calls[0][1]).toContain('Anthropic is down');
     expect(mocks.alert.mock.calls[0][2]).toMatchObject({ scope: 'managed-provision' });

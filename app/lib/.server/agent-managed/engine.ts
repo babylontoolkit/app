@@ -12,7 +12,10 @@
  *   2. The CREDIT GATE — before anything that can spend: no session is created, no event is sent, no
  *      stream is opened until it has allowed the turn. A refusal is the legacy engine's refusal, byte for
  *      byte (402, not retryable, the gate's sentence).
- *   3. The provisioned agent (T3) — never provisioned is "not configured", naming the admin's button.
+ *   3. The model tier (§4.6.1a, `decideModelTier` — the legacy engine's decision, unchanged) and that
+ *      rung's provisioned agent (T3). A paid rung never provisioned is provisioned on demand; if that
+ *      fails the turn runs Standard and says so. Standard never provisioned is "not configured", naming
+ *      the admin's button.
  *   4. The chat's session (T4), its budget for this turn (D13), and the event bridge (`turn.ts`).
  *
  * ## Money (T7)
@@ -25,7 +28,10 @@ import type { Message } from 'ai';
 import { managedBuildPhases, type CreationPhaseId, type CreationPlan } from '~/lib/agent/creation-plan';
 import { userTypedText } from '~/lib/chat/message-envelope';
 import { checkCreditGate } from '~/lib/.server/billing/gate';
-import { getBillingConfigSafe } from '~/lib/.server/billing/rates';
+import { ensureMarketPrices, LLM_PRICE_PROVIDERS } from '~/lib/.server/billing/market-price-store';
+import { decideModelTier, tierDeclinedNotice, type ModelTierDecision } from '~/lib/.server/billing/premium';
+import { getBillingConfigSafe, getModelTiers } from '~/lib/.server/billing/rates';
+import type { ManagedAgentRecord } from './record';
 import { envNumber, NotConfiguredError } from '~/lib/.server/env';
 import {
   carriesCreationBrief,
@@ -47,6 +53,7 @@ import { buildTurnAnnotations } from '~/lib/.server/agent/turn-annotations';
 import { resolveMediaProvider } from '~/lib/.server/media/provider';
 import { getChat, putChat } from '~/lib/.server/projects/message-store';
 import { getObjectStore } from '~/lib/.server/storage';
+import { getPromptStore } from '~/lib/.server/prompt/store';
 import {
   completeTodosOnDone,
   doneGateWriteFacts,
@@ -63,7 +70,9 @@ import { createScopedLogger } from '~/utils/logger';
 import { getManagedClient, getManagedEngineConfig } from './config';
 import { createManagedDispatcher } from './dispatch';
 import { buildManagedUserMessage } from './message';
-import { getManagedAgentStatus } from './provision';
+import { createStepTracker } from './step';
+import { recordManagedBuildPhases } from './build-complete';
+import { ensureManagedAgentRecord, getManagedAgentRecord } from './provision';
 import { REFERENCE_MOUNT_PATH } from './system-prompt';
 import { getOrCreateManagedSession, ManagedSessionError } from './sessions';
 import { inspectSession, SUPERSEDE_WAIT_MS, supersedePendingTurn } from './session-health';
@@ -202,6 +211,12 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const config = getManagedEngineConfig(request.context);
 
   /*
+   * The price lists, before anything prices anything (the tier ladder and settlement read them
+   * synchronously). Never throws: a failed refresh serves the last-loaded or baked list.
+   */
+  await Promise.all(LLM_PRICE_PROVIDERS.map((provider) => ensureMarketPrices(provider, request.context)));
+
+  /*
    * 2. Credit gate — once, up front, the ONE moment a turn may be refused for balance (§4.2.1). Never
    * BYOK: Managed Agents runs on the platform's key (D8), so the balance always applies.
    */
@@ -215,13 +230,59 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     throw gateRefusal(gate.message);
   }
 
-  /* 3. The provisioned agent. Never provisioned is a describable state, never a crash. */
-  const agent = await getManagedAgentStatus(request.context);
-  const record = agent.record;
+  const isFirstBuildTurn = isFirstBuildTurnFor({
+    carriesBrief: carriesCreationBrief(request.messages),
+    owesBuild: request.owesBuild === true,
+  });
+
+  /*
+   * 3. The model tier the user picked (§4.6.1a) — the SAME decision the legacy engine makes: a request,
+   * honoured only when the rung is servable and the balance clears its threshold, else resolved DOWN to
+   * Standard. Each rung is its own provisioned agent (a session's model is fixed for its life).
+   */
+  const tiers = getModelTiers(config.model, request.context);
+
+  for (const broken of tiers.filter((row) => !row.serveable)) {
+    logger.warn(`Model tier "${broken.id}" cannot be served: ${broken.reason ?? 'unknown reason'}`);
+  }
+
+  let tierDecision: ModelTierDecision = decideModelTier({
+    requested: request.tier ?? 'standard',
+    balance: gate.mode === 'byok' ? 0 : gate.balance,
+    tiers,
+    isFirstBuildTurn,
+  });
+  const requestedRow = tiers.find((row) => row.id === request.tier);
+  let tierNotice =
+    tierDecision.reason === 'below_minimum' && requestedRow
+      ? tierDeclinedNotice(requestedRow.label, requestedRow.minimumCredits)
+      : undefined;
+
+  let record: ManagedAgentRecord | null = null;
+
+  if (tierDecision.tier !== 'standard') {
+    const row = tiers.find((candidate) => candidate.id === tierDecision.tier);
+
+    record = row ? await ensureManagedAgentRecord(request.context, row.model) : null;
+
+    if (!record) {
+      logger.error(
+        `The ${row?.label ?? tierDecision.tier} agent (${row?.model ?? 'unknown model'}) is not provisioned and could not be — running Standard`,
+      );
+      tierNotice = `The ${row?.label ?? tierDecision.tier} model is not available right now — this turn used the standard model.`;
+      tierDecision = { tier: 'standard', reason: 'unavailable' };
+    }
+  }
+
+  /* The Standard agent. Never provisioned is a describable state, never a crash. */
+  record ??= await getManagedAgentRecord(request.context, config.model);
 
   if (!record) {
     throw new NotConfiguredError('The managed agent', NOT_PROVISIONED_HINT);
   }
+
+  const agentRecord = record;
+  const activeVersionId = (await getPromptStore().getActive())?.id ?? null;
 
   if (!request.projectId) {
     throw new ManagedSessionError(
@@ -234,10 +295,6 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const generationId = `gen_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
   const isRepair = Boolean(request.errors?.length);
-  const isFirstBuildTurn = isFirstBuildTurnFor({
-    carriesBrief: carriesCreationBrief(request.messages),
-    owesBuild: request.owesBuild === true,
-  });
   const statusKind = statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: false });
 
   /*
@@ -275,11 +332,11 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
       context: request.context,
       create: async () => {
         const created = await client.beta.sessions.create({
-          agent: { type: 'agent', id: record.agentId, version: record.agentVersion },
-          environment_id: record.environmentId,
+          agent: { type: 'agent', id: agentRecord.agentId, version: agentRecord.agentVersion },
+          environment_id: agentRecord.environmentId,
           title: `project ${projectId}`,
           ...(budgetFor(0) ? { budget: budgetFor(0) } : {}),
-          resources: record.referenceFiles.map((file) => ({
+          resources: agentRecord.referenceFiles.map((file) => ({
             type: 'file' as const,
             file_id: file.fileId,
             mount_path: `${REFERENCE_MOUNT_PATH}/${file.rel}`,
@@ -305,9 +362,53 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
    */
   let liveListCost: number | null = null;
 
-  if (!sessionRef.created) {
-    const inspection = await inspectSession(client, sessionRef.sessionId);
+  /* The model the turn actually runs: this tier's agent — or, on a resume, whatever the session runs. */
+  let servedModel = agentRecord.model;
 
+  /* Inspected ONCE; a session created by this turn needs no inspection. */
+  let inspection = sessionRef.created ? null : await inspectSession(client, sessionRef.sessionId);
+
+  if (inspection) {
+    /*
+     * The user changed model tier: the chat's session runs ANOTHER rung's agent, and a session's model
+     * cannot be changed. The old turn (if any) is superseded, its unbilled tail settled at ITS model,
+     * the session released and archived, and a new session is created on this tier's agent — whose
+     * first message carries the conversation so far (`conversationRecap`). A RESUME never switches:
+     * re-attaching to the waiting turn is its whole point.
+     */
+    if (inspection.kind === 'live' && inspection.model && inspection.model !== agentRecord.model && !request.resume) {
+      await supersedePendingTurn(client, sessionRef.sessionId, inspection.status, {
+        signal: request.abortSignal,
+        waitMs: Math.max(0, envNumber(request.context, 'MANAGED_SUPERSEDE_WAIT_MS', SUPERSEDE_WAIT_MS)),
+        pollMs: 250,
+      });
+      await rebindDeadSession({
+        client,
+        sessionId: sessionRef.sessionId,
+        reason: 'switched',
+        projectId,
+        chatId: request.chatId as string,
+        userId,
+        generationId,
+        model: inspection.model,
+        statusKind,
+        sessionHourUsd: config.sessionHourUsd,
+        context: request.context,
+      });
+
+      const previous = sessionRef.sessionId;
+
+      await client.beta.sessions.archive(previous).catch((error) => {
+        logger.warn(`Session ${previous}: could not archive it after a tier switch: ${(error as Error)?.message}`);
+      });
+      sessionRef = await claimSession();
+      inspection = sessionRef.created ? null : await inspectSession(client, sessionRef.sessionId);
+    } else if (inspection.kind === 'live' && inspection.model && request.resume) {
+      servedModel = inspection.model;
+    }
+  }
+
+  if (inspection) {
     if (inspection.kind === 'dead') {
       if (request.resume) {
         throw Object.assign(new Error('There is no managed turn to resume.'), { statusCode: 409, isRetryable: false });
@@ -321,7 +422,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         chatId: request.chatId as string,
         userId,
         generationId,
-        model: config.model,
+        model: servedModel,
         statusKind,
         sessionHourUsd: config.sessionHourUsd,
         context: request.context,
@@ -440,6 +541,9 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const workspaceSummary = deferred<AgentWorkspaceSummary | null>();
   const phasesCompleted = deferred<CreationPhaseId[] | undefined>();
 
+  /* What the turn is doing right now, from the session's own events — the status panel's step label. */
+  const steps = createStepTracker();
+
   /* This turn's identity across requests (the session's `user.message` event id) and its narration. */
   let turnId: string | undefined;
   let narration = '';
@@ -457,6 +561,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         userMessage,
         dispatcher,
         abortSignal: turnSignal,
+        onEvent: (event) => steps.observe(event),
         onTurnId: (id) => {
           turnId = id;
           assistantIdListeners.forEach((listener) => listener(managedAssistantId(id)));
@@ -532,6 +637,20 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
 
       phasesCompleted.resolve(completedPhases);
 
+      /*
+       * The SERVER records the finished build on the row — never only the tab that pressed Build, whose
+       * state a dropped stream or a reload loses (owner, 2026-10-02: the plan sat on Step 1 forever over
+       * a build that had finished). Never throws.
+       */
+      if (completedPhases) {
+        await recordManagedBuildPhases({
+          projectId,
+          phases: completedPhases,
+          generationId,
+          context: request.context,
+        });
+      }
+
       const settled = await settleManagedTurn({
         client,
         sessionId,
@@ -539,7 +658,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         chatId,
         userId,
         generationId,
-        model: config.model,
+        model: servedModel,
         statusKind,
         sessionHourUsd: config.sessionHourUsd,
         context: request.context,
@@ -579,11 +698,11 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
           chatId,
           userId,
           projectId,
-          model: config.model,
+          model: settled.model ?? servedModel,
           provider: 'Anthropic',
           creditsCharged: charged,
           rawCostUsd: settled.settlement?.rawCostUsd ?? 0,
-          promptVersionId: agent.activeVersionId,
+          promptVersionId: activeVersionId,
           skillsLoaded: [],
           promptTokens: settled.usage.promptTokens,
           completionTokens: settled.usage.completionTokens,
@@ -632,13 +751,14 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     creationPhasesCompleted: phasesCompleted.promise,
     textStream: run(),
     generationId,
-    promptVersionId: agent.activeVersionId ?? '',
-    model: config.model,
+    promptVersionId: activeVersionId ?? '',
+    model: servedModel,
     provider: 'Anthropic',
 
-    /* One provisioned agent per (model, effort) — the paid rungs are separate agents not provisioned yet (D10). */
-    tier: 'standard',
-    tierReason: 'standard_requested',
+    /* One provisioned agent per rung (D10, §4.6.1a): the rung that RAN and why. */
+    tier: tierDecision.tier,
+    tierReason: tierDecision.reason,
+    notice: tierNotice,
     blocksLoaded: [],
 
     /* The session holds the history on Anthropic's side; nothing is re-sent, so there is nothing to meter. */
@@ -647,6 +767,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     statusKind,
     deliveryMode: 'streamed',
     currentActivity: () => null,
+    currentStep: () => steps.current(),
     toolContext: { loaded: new Set<string>(), offerLoadSkill: false },
     usage: usage.promise,
     outcome: outcome.promise,

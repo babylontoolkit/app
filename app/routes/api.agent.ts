@@ -602,6 +602,9 @@ async function streamGeneration(
        * "the provider stalled, retrying 2 of 3" instead of implying the user is paying to think.
        */
       activity: () => generation.currentActivity(),
+
+      /* What the turn is doing right now — the managed engine observes it from session events. */
+      step: () => generation.currentStep?.() ?? null,
     },
   );
 

@@ -25,8 +25,22 @@ import { awaitingToolResults, listCurrentTurnEvents, unansweredToolCalls } from 
 const logger = createScopedLogger('managed-session-health');
 
 export type SessionInspection =
-  | { kind: 'live'; status: string; listCostCents: number }
+  | {
+      kind: 'live';
+      status: string;
+      listCostCents: number;
+
+      /** The model the session's agent runs — a session's model is fixed for its life. */
+      model?: string;
+    }
   | { kind: 'dead'; reason: 'terminated' | 'archived' | 'missing' };
+
+/** The model a retrieved session runs (`session.agent.model.id`), or undefined when not reported. */
+export function sessionModel(session: unknown): string | undefined {
+  const id = (session as { agent?: { model?: { id?: unknown } } } | null)?.agent?.model?.id;
+
+  return typeof id === 'string' && id ? id : undefined;
+}
 
 const isNotFound = (error: unknown) => (error as { status?: number })?.status === 404;
 
@@ -45,7 +59,12 @@ export async function inspectSession(client: Anthropic, sessionId: string): Prom
 
     const cents = Number(session.usage?.list_cost?.amount ?? 0);
 
-    return { kind: 'live', status: session.status, listCostCents: Number.isFinite(cents) ? cents : 0 };
+    return {
+      kind: 'live',
+      status: session.status,
+      listCostCents: Number.isFinite(cents) ? cents : 0,
+      model: sessionModel(session),
+    };
   } catch (error) {
     if (isNotFound(error)) {
       return { kind: 'dead', reason: 'missing' };

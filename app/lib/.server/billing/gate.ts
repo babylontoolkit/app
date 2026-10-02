@@ -171,6 +171,15 @@ export interface SettleInput {
    */
   extraRawCostUsd?: number;
 
+  /**
+   * The generation's TRUE cost, when the caller priced it itself — the managed engine, whose session can
+   * mix models across threads (a subagent on another model) and whose cache writes are split by TTL, so no
+   * single `(usage, model)` pair can price it (`agent-managed/session-cost.ts`). Replaces the recorded
+   * `rawCostUsd` only; the CREDITS still come from `decideCredits` (the managed engine passes them as
+   * `flatCredits`). Absent (every other caller) → byte-identical behaviour.
+   */
+  rawCostOverrideUsd?: number;
+
   context?: unknown;
 }
 
@@ -291,7 +300,9 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
    * platform can see what it absorbed under `billedUsage`. Never route it through that view.
    */
   const cost =
-    rawCostUsd(input.usage, input.model, input.provider, input.context) + extraCostUsd(input.extraRawCostUsd);
+    typeof input.rawCostOverrideUsd === 'number' && Number.isFinite(input.rawCostOverrideUsd)
+      ? Math.max(0, input.rawCostOverrideUsd)
+      : rawCostUsd(input.usage, input.model, input.provider, input.context) + extraCostUsd(input.extraRawCostUsd);
 
   /*
    * BYOK: record zero. The generation still exists in the ledger's sibling `generations` record for

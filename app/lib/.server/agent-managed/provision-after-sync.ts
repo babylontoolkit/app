@@ -19,16 +19,42 @@
  *     manual or forced run either way.
  */
 import { resolveAgentEngine } from './config';
-import { type ProvisionOptions, type ProvisionResult, provisionManagedAgent } from './provision';
+import {
+  type ProvisionOptions,
+  type ProvisionResult,
+  provisionManagedAgent,
+  provisionManagedAgents,
+} from './provision';
 import { env } from '~/lib/.server/env';
 import { ALERT_SIGNALS, getMonitor } from '~/lib/.server/monitoring';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('managed-provision');
 
-/** What the sync response reports about the managed agent. */
+/** One rung's line in the outcome: what happened to its agent, or why it failed. */
+export interface ManagedTierOutcome {
+  tier: string;
+  label: string;
+  model: string;
+  status?: ProvisionResult['status'];
+  agentId?: string;
+  agentVersion?: number;
+  error?: string;
+}
+
+/**
+ * What the sync response reports about the managed agents. The top-level fields are the STANDARD rung's
+ * (what the panel has always shown); `tiers` lists every rung — Standard, Premium, Platinum — because
+ * each is its own agent and a paid rung that failed to provision must be visible, not averaged away.
+ */
 export type ManagedProvisionOutcome =
-  | { status: ProvisionResult['status']; agentId: string; agentVersion: number; promptVersionId: string }
+  | {
+      status: ProvisionResult['status'];
+      agentId: string;
+      agentVersion: number;
+      promptVersionId: string;
+      tiers: ManagedTierOutcome[];
+    }
   | { skipped: 'not-configured' | 'legacy-engine' }
   | { error: string };
 
@@ -51,17 +77,46 @@ export async function provisionAfterSync(context: unknown): Promise<ManagedProvi
   }
 
   try {
-    const result = await (testProvisioner ?? provisionManagedAgent)({ context });
+    const results = await provisionManagedAgents({ context }, testProvisioner ?? provisionManagedAgent);
+    const tiers: ManagedTierOutcome[] = results.map((row) => ({
+      tier: row.tier,
+      label: row.label,
+      model: row.model,
+      ...(row.result
+        ? { status: row.result.status, agentId: row.result.agentId, agentVersion: row.result.agentVersion }
+        : { error: row.error }),
+    }));
 
-    if (result.status !== 'unchanged') {
-      logger.info(`Managed agent ${result.status} after sync: ${result.agentId} v${result.agentVersion}`);
+    for (const row of results) {
+      if (row.result && row.result.status !== 'unchanged') {
+        logger.info(
+          `Managed ${row.label} agent ${row.result.status} after sync: ${row.result.agentId} v${row.result.agentVersion}`,
+        );
+      }
+    }
+
+    const failed = results.filter((row) => row.error);
+
+    if (failed.length > 0) {
+      getMonitor(context).alert(
+        ALERT_SIGNALS.DOCSYNC_BUILD_FAILURE,
+        `The prompt synced, but provisioning ${failed.map((row) => `the ${row.label} agent (${row.model}): ${row.error}`).join('; ')}`,
+        { severity: 'warning', scope: 'managed-provision' },
+      );
+    }
+
+    const standard = results[0];
+
+    if (!standard?.result) {
+      return { error: standard?.error ?? 'No model tier could be provisioned.' };
     }
 
     return {
-      status: result.status,
-      agentId: result.agentId,
-      agentVersion: result.agentVersion,
-      promptVersionId: result.promptVersionId,
+      status: standard.result.status,
+      agentId: standard.result.agentId,
+      agentVersion: standard.result.agentVersion,
+      promptVersionId: standard.result.promptVersionId,
+      tiers,
     };
   } catch (error) {
     const message = (error as Error)?.message ?? String(error);

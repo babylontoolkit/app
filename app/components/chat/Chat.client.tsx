@@ -1070,6 +1070,29 @@ export const ChatImpl = memo(
               }
             });
           }
+        } else if (readCreationPhasesCompleted(message.annotations) && creationPlanActive(livePlan) && livePlan) {
+          /*
+           * 🔴 A FINISHED MANAGED BUILD THIS TAB DID NOT START (owner, 2026-10-02). After a dropped stream
+           * or a reload the phase refs are gone, but the resumed turn still finished the build and says so
+           * (`creationPhasesCompleted`). The server has already recorded it on the row
+           * (`recordManagedBuildPhases`); this tab catches up and announces it, instead of leaving the
+           * plan card spinning on Step 1 over a finished game with nothing on screen saying it is done.
+           */
+          const advanced = advanceCreationPlanTo(livePlan, readCreationPhasesCompleted(message.annotations) ?? [], {
+            generationId: readGenerationId(message.annotations) ?? '',
+            at: new Date().toISOString(),
+            state: outcome?.state ?? 'finished',
+          });
+
+          if (isCreationPlanComplete(advanced)) {
+            exitNewProjectMode(planProjectId);
+            armedPhaseRef.current = null;
+            setArmedPhase(null);
+            creationCompleteRef.current = true;
+            celebrateBuild();
+          } else {
+            updateCreationPlan(planProjectId, advanced);
+          }
         } else {
           // No plan (an older project, or a build that never started): unchanged single-turn behaviour.
           celebrateBuild();
@@ -1902,20 +1925,52 @@ export const ChatImpl = memo(
           });
 
           if (retry.kind === 'retry') {
-            phaseRetriesRef.current = { index: failedIndex, attempts: attempts + 1 };
-            retryingPhaseRef.current = true;
-            phaseTurnRef.current = false;
+            const armRetry = () => {
+              phaseRetriesRef.current = { index: failedIndex, attempts: attempts + 1 };
+              retryingPhaseRef.current = true;
+              phaseTurnRef.current = false;
 
-            armedPhaseRef.current = retry.index;
-            setArmedPhase(retry.index);
+              armedPhaseRef.current = retry.index;
+              setArmedPhase(retry.index);
+
+              /*
+               * Said out loud, but as a toast rather than the red alert below: the user has nothing to
+               * do and nothing has been lost. If the retry ALSO fails, `attempts` is spent and the
+               * failure comes through here again — loudly, with the alert — which is the fail-loud rule
+               * kept intact rather than traded away.
+               */
+              toast.info('That step did not come back — trying it once more.');
+            };
 
             /*
-             * Said out loud, but as a toast rather than the red alert below: the user has nothing to
-             * do and nothing has been lost. If the retry ALSO fails, `attempts` is spent and the
-             * failure comes through here again — loudly, with the alert — which is the fail-loud rule
-             * kept intact rather than traded away.
+             * 🔴 ON THE MANAGED ENGINE A DROPPED STREAM IS NOT A FAILED BUILD (owner, 2026-10-02).
+             *
+             * The agent runs on Anthropic's side and keeps working when our connection to it drops.
+             * Measured: the first build's stream dropped at 572 s, this retry posted "Step 1" two seconds
+             * later as a NEW message — which interrupted the healthy turn mid-build — and the build only
+             * finished because a resume picked it up again. So ask first: a turn still running on the
+             * server is RE-ATTACHED (the resume's own `onFinish` finishes the phase); only a turn that is
+             * really gone is retried.
              */
-            toast.info('That step did not come back — trying it once more.');
+            if (sessionStore.get().agentEngine === 'managed') {
+              const identity = liveTurnIdentity({ projectId: activeProjectId, chatId: activeServerChatId });
+
+              void managedTurnStatus('managed', identity)
+                .then(({ pending }) => {
+                  if (pending) {
+                    logger.info('The build stream dropped but the turn is still running — re-attaching');
+                    phaseTurnRef.current = true;
+                    setAutoResumeTick((tick) => tick + 1);
+                  } else {
+                    armRetry();
+                  }
+                })
+                .catch(() => armRetry());
+
+              return;
+            }
+
+            armRetry();
 
             return;
           }

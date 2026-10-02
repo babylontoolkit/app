@@ -75,6 +75,15 @@ export interface FakeClient {
    */
   interruptAnswersCalls: boolean;
 
+  /**
+   * Agent id → model. When a session's agent is listed here, `retrieve` reports `agent.model.id` like the
+   * live API (a session's model is its agent's, fixed for its life). Unlisted agents report no agent.
+   */
+  agentModels: Record<string, string>;
+
+  /** Every `sessions.archive` call, in order. */
+  archived: string[];
+
   /** Seed a session directly (for resume / settlement specs). */
   seed(id: string, events?: Array<Record<string, unknown> & { type: string }>): FakeSessionState;
 
@@ -102,6 +111,8 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
     updates,
     script,
     interruptAnswersCalls: true,
+    agentModels: {},
+    archived: [],
     seed,
     idle: async () => {
       while (running.size) {
@@ -198,9 +209,12 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
 
   const retrieve = async (id: string) => {
     const s = requireSession(id);
+    const agentId = (s.createParams.agent as { id?: string } | undefined)?.id;
+    const model = agentId ? state.agentModels[agentId] : undefined;
 
     return {
       id: s.id,
+      ...(model ? { agent: { type: 'agent', id: agentId, model: { id: model, effort: 'medium' } } } : {}),
       status: s.status,
       archived_at: s.archivedAt,
       budget: s.budget,
@@ -227,7 +241,12 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
 
           return retrieve(id);
         },
-        archive: async (id: string) => retrieve(id),
+        archive: async (id: string) => {
+          state.archived.push(id);
+          requireSession(id).archivedAt = new Date(clock).toISOString();
+
+          return retrieve(id);
+        },
         events: {
           send: async (id: string, params: { events: Array<Record<string, unknown> & { type: string }> }) => {
             const session = requireSession(id);

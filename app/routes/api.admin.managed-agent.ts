@@ -1,8 +1,11 @@
 /**
  * Managed Agents provisioning admin endpoint (`_specs/managed-agents-engine_plan.md` T3).
  *
- *   GET  /api/admin/managed-agent            → which agent the managed engine runs on (or "not configured")
- *   POST /api/admin/managed-agent provision  → create/update the agent from the active prompt version
+ *   GET  /api/admin/managed-agent            → which agent each model tier runs on (or "not configured")
+ *   POST /api/admin/managed-agent provision  → create/update every tier's agent from the active prompt version
+ *
+ * One agent per rung of the model tier ladder (§4.6.1a): Standard `LLM_MODEL`, Premium `PREMIUM_MODEL`,
+ * Platinum `PLATINUM_MODEL`. The top-level fields stay the Standard rung's; `tiers` lists every rung.
  *
  * Admin session only (`requireAdmin`), like the template and prompt admin surfaces: provisioning decides
  * the instructions and tools every managed generation runs with, so an open endpoint would be a remote
@@ -13,10 +16,30 @@ import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-r
 import { requireAdmin } from '~/lib/.server/supabase/auth';
 import { errorResponse } from '~/lib/.server/http';
 import { resolveAgentEngine } from '~/lib/.server/agent-managed/config';
-import { getManagedAgentStatus, provisionManagedAgent } from '~/lib/.server/agent-managed/provision';
+import {
+  getManagedAgentStatus,
+  managedTierModels,
+  provisionManagedAgents,
+  type ManagedAgentStatus,
+} from '~/lib/.server/agent-managed/provision';
+import { ensureMarketPrices, LLM_PRICE_PROVIDERS } from '~/lib/.server/billing/market-price-store';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('api.admin.managed-agent');
+
+function describeAgent(status: ManagedAgentStatus) {
+  return status.record
+    ? {
+        agentId: status.record.agentId,
+        agentVersion: status.record.agentVersion,
+        environmentId: status.record.environmentId,
+        referenceSha: status.record.referenceSha,
+        referenceFiles: status.record.referenceFiles.length,
+        skills: status.record.skills.map((skill) => skill.name),
+        provisionedAt: status.record.provisionedAt,
+      }
+    : null;
+}
 
 function isCoded(error: unknown): boolean {
   return typeof (error as { statusCode?: unknown })?.statusCode === 'number';
@@ -32,7 +55,16 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
   const engine = resolveAgentEngine(context);
 
   try {
+    await Promise.all(LLM_PRICE_PROVIDERS.map((provider) => ensureMarketPrices(provider, context)));
+
     const status = await getManagedAgentStatus(context);
+    const tiers = await Promise.all(
+      managedTierModels(context).map(async (rung) => {
+        const tierStatus = await getManagedAgentStatus(context, rung.model);
+
+        return { ...rung, key: tierStatus.key, current: tierStatus.current, agent: describeAgent(tierStatus) };
+      }),
+    );
 
     return json({
       configured: true,
@@ -40,17 +72,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
       key: status.key,
       activeVersionId: status.activeVersionId,
       current: status.current,
-      agent: status.record
-        ? {
-            agentId: status.record.agentId,
-            agentVersion: status.record.agentVersion,
-            environmentId: status.record.environmentId,
-            referenceSha: status.record.referenceSha,
-            referenceFiles: status.record.referenceFiles.length,
-            skills: status.record.skills.map((skill) => skill.name),
-            provisionedAt: status.record.provisionedAt,
-          }
-        : null,
+      agent: describeAgent(status),
+      tiers,
     });
   } catch (error) {
     if ((error as Error)?.name === 'NotConfiguredError') {
@@ -72,9 +95,27 @@ export async function action({ request, context }: ActionFunctionArgs) {
       return json({ error: true, message: `Unknown action: ${String(body.action)}` }, { status: 400 });
     }
 
-    const result = await provisionManagedAgent({ context, force: (body as { force?: boolean }).force === true });
+    await Promise.all(LLM_PRICE_PROVIDERS.map((provider) => ensureMarketPrices(provider, context)));
 
-    return json({ ok: true, ...result });
+    const results = await provisionManagedAgents({ context, force: (body as { force?: boolean }).force === true });
+    const tiers = results.map((row) => ({
+      tier: row.tier,
+      label: row.label,
+      model: row.model,
+      ...(row.result
+        ? { status: row.result.status, agentId: row.result.agentId, agentVersion: row.result.agentVersion }
+        : { error: row.error }),
+    }));
+    const standard = results[0]?.result;
+
+    if (!standard) {
+      const message = results[0]?.error ?? 'No model tier could be provisioned.';
+      logger.error(`Provisioning failed: ${message}`);
+
+      return json({ error: true, message: `Provisioning failed: ${message}`, tiers }, { status: 502 });
+    }
+
+    return json({ ok: true, ...standard, tiers });
   } catch (error) {
     if (isCoded(error)) {
       return errorResponse(error);

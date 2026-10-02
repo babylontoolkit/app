@@ -26,21 +26,31 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { refundGeneration, settleGeneration, type Settlement } from '~/lib/.server/billing/gate';
 import type { GenerationUsage } from '~/lib/.server/agent/step-usage';
 import { createScopedLogger } from '~/utils/logger';
+import { sessionModel } from './session-health';
 import { getManagedSettledAt, releaseManagedSession, setManagedSettledAt } from './sessions';
 import { getMonitor } from '~/lib/.server/monitoring';
+import { getBillingConfig, ratesFor } from '~/lib/.server/billing/rates';
 import {
-  emptyUsage,
-  parseCursor,
-  serializeCursor,
-  sessionHoursCostUsd,
-  unsettledUsage,
-  type UsageEventLike,
-} from './usage';
+  decideManagedCharge,
+  EMPTY_COST_CURSOR,
+  listCostCents,
+  parseCostCursor,
+  serializeCostCursor,
+  sessionCost,
+  tokensOf,
+  trueTokenCostUsd,
+  warmTokenCostUsd,
+  ZERO_TOKENS,
+  type ApiUsageLike,
+  type BillingRates,
+  type CostCursor,
+  type ManagedCharge,
+  type ThreadUsage,
+  type TierTokens,
+} from './session-cost';
+import { emptyUsage, isAfterCursor, parseCursor, type UsageEventLike } from './usage';
 
 const logger = createScopedLogger('managed-settle');
-
-/** How far back of the cursor the listing reaches — `created_at` and `processed_at` are not one clock. */
-const LIST_SLACK_MS = 5 * 60_000;
 
 const chains = new Map<string, Promise<unknown>>();
 
@@ -66,6 +76,12 @@ export interface SettleManagedInput {
   chatId: string;
   userId: string;
   generationId: string;
+
+  /**
+   * The model to bill at when the session does not report its own. The session's model WINS: a chat's
+   * session runs one tier's agent for its whole life, and the Premium/Platinum rungs are separate
+   * sessions — billing at a configured model instead would charge a Platinum turn at Standard's rates.
+   */
   model: string;
   statusKind: string;
   sessionHourUsd: number;
@@ -88,67 +104,164 @@ export interface ManagedSettlement {
   /** Model requests charged by this settlement. */
   requests: number;
 
-  /** The session-hour USD added to the raw cost. */
+  /** Always 0 now: session runtime is part of the session's cumulative cost (`session-cost.ts`). */
   sessionHoursUsd: number;
+
+  /** The model this settlement billed at (the session's own, when it reported one). */
+  model?: string;
 }
 
-async function listUsageEvents(input: SettleManagedInput, cursorAt: string | null): Promise<UsageEventLike[]> {
-  const params: Record<string, unknown> = { types: ['span.model_request_end'], order: 'asc' };
+/** Every thread of the session with its model and cumulative usage (`null` until the thread first idles). */
+async function readThreads(input: SettleManagedInput): Promise<ThreadUsage[]> {
+  const threads: ThreadUsage[] = [];
 
-  if (cursorAt) {
-    params['created_at[gt]'] = new Date(Date.parse(cursorAt) - LIST_SLACK_MS).toISOString();
+  for await (const thread of input.client.beta.sessions.threads.list(input.sessionId)) {
+    const model = (thread.agent as { model?: { id?: unknown } } | undefined)?.model?.id;
+
+    threads.push({
+      id: thread.id,
+      model: typeof model === 'string' && model ? model : input.model,
+      tokens: thread.usage ? tokensOf(thread.usage as ApiUsageLike) : null,
+    });
   }
 
-  const events: UsageEventLike[] = [];
+  return threads;
+}
 
-  for await (const event of input.client.beta.sessions.events.list(input.sessionId, params)) {
-    events.push(event as unknown as UsageEventLike);
+/**
+ * What the PREVIOUS settlement design (request events after a timestamp cursor) had already billed, so a
+ * session that was settled under it and continues under this one is never charged twice. Only the
+ * primary thread existed then; cache writes are counted as the 5-minute tier, which is what Managed Agents
+ * writes (measured 2026-10-02).
+ */
+async function legacyBaseline(
+  input: SettleManagedInput,
+  text: string | null,
+  cost: (t: TierTokens) => {
+    trueCostUsd: number;
+    warmBasisUsd: number;
+  },
+  billing: BillingRates,
+): Promise<CostCursor> {
+  const old = parseCursor(text);
+
+  if (!old.at) {
+    return { ...EMPTY_COST_CURSOR, tokens: { ...ZERO_TOKENS } };
   }
 
-  return events;
+  const tokens = { ...ZERO_TOKENS };
+
+  for await (const event of input.client.beta.sessions.events.list(input.sessionId, {
+    types: ['span.model_request_end'],
+    order: 'asc',
+  } as never)) {
+    const e = event as unknown as UsageEventLike;
+
+    if (isAfterCursor(e.processed_at, old.at)) {
+      continue;
+    }
+
+    tokens.input += e.model_usage?.input_tokens ?? 0;
+    tokens.output += e.model_usage?.output_tokens ?? 0;
+    tokens.cacheRead += e.model_usage?.cache_read_input_tokens ?? 0;
+    tokens.cache5m += e.model_usage?.cache_creation_input_tokens ?? 0;
+  }
+
+  const runtime = input.sessionHourUsd > 0 ? (old.activeSeconds / 3600) * input.sessionHourUsd : 0;
+  const priced = cost(tokens);
+  const warmBasisUsd = priced.warmBasisUsd + runtime;
+
+  return {
+    v: 2,
+    tokens,
+    trueCostUsd: priced.trueCostUsd + runtime,
+    warmBasisUsd,
+    credits: warmBasisUsd > 0 ? Math.max(1, Math.ceil((warmBasisUsd / billing.creditUnitCostUsd) * billing.margin)) : 0,
+  };
 }
 
 export function settleManagedTurn(input: SettleManagedInput): Promise<ManagedSettlement> {
   return serialised(`${input.projectId}:${input.chatId}`, () => settleNow(input));
 }
 
+/**
+ * One settlement: the session's CUMULATIVE cost across every thread (`session-cost.ts`) minus what the
+ * cursor says was already charged. Every thread is billed — a subagent's usage never reaches the primary
+ * event stream (measured), so a settlement that read only that stream would have given every subagent
+ * token away — and the total charged for a session can never be worth less than what it cost us.
+ */
 async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> {
   let usage = emptyUsage();
   let requests = 0;
-  let sessionHoursUsd = 0;
+  const sessionHoursUsd = 0;
+  let model = input.model;
+  let charge: ManagedCharge | null = null;
 
   try {
-    const cursor = parseCursor(await getManagedSettledAt(input.projectId, input.chatId, input.context));
-    const [events, session] = await Promise.all([
-      listUsageEvents(input, cursor.at),
-      input.client.beta.sessions.retrieve(input.sessionId).catch((error) => {
-        logger.warn(`Could not read session ${input.sessionId}'s active time: ${(error as Error)?.message}`);
-        return null;
-      }),
-    ]);
+    const config = getBillingConfig(input.context);
+    const billing: BillingRates = { creditUnitCostUsd: config.creditUnitCostUsd, margin: config.margin };
+    const stored = await getManagedSettledAt(input.projectId, input.chatId, input.context);
+    const session = await input.client.beta.sessions.retrieve(input.sessionId);
 
-    const unsettled = unsettledUsage(events, cursor);
-    const activeNow = session?.usage?.active_seconds ?? session?.stats?.active_seconds ?? cursor.activeSeconds;
-    const hours = sessionHoursCostUsd(activeNow, cursor, input.sessionHourUsd);
-    const next = { at: unsettled.latestAt, activeSeconds: Math.max(cursor.activeSeconds, activeNow) };
+    model = sessionModel(session) ?? input.model;
+
+    const ratesOf = (m: string) => ratesFor(m, 'Anthropic', input.context);
+    const threads = await readThreads({ ...input, model });
+    const sessionUsage = (session?.usage ?? null) as ApiUsageLike | null;
+    const activeSeconds = Number(sessionUsage?.active_seconds ?? session?.stats?.active_seconds ?? 0) || 0;
+
+    const cost = sessionCost({
+      threads,
+      sessionTokens: tokensOf(sessionUsage),
+      activeSeconds,
+      listCostCents: listCostCents(sessionUsage),
+      fallbackModel: model,
+      ratesOf,
+      sessionHourUsd: input.sessionHourUsd,
+    });
+
+    const cursor =
+      parseCostCursor(stored) ??
+      (await legacyBaseline(
+        input,
+        stored,
+        (t) => ({
+          trueCostUsd: trueTokenCostUsd(t, ratesOf(model)),
+          warmBasisUsd: warmTokenCostUsd(t, ratesOf(model)),
+        }),
+        billing,
+      ));
+
+    if (cost.models.length > 1 || cost.threads > 1) {
+      logger.warn(
+        `Session ${input.sessionId}: ${cost.threads} thread(s) on ${cost.models.join(', ')} — billing every thread`,
+      );
+    }
 
     /*
-     * Session-hours ride WITH model usage, never alone. A settlement with no new model request (a Stop
-     * tail, a detach before the first request, an error before any) used to bill its fraction of a
-     * second of session time on its own — and `ceil` turned $0.0000044 into a whole credit. Now the
-     * cursor is left where it is, so those seconds are carried into the next settlement that has real
-     * usage and are charged there, once.
+     * Nothing new → the cursor stays put, so session-hours ride WITH model usage, never alone (a Stop tail's
+     * fraction of a second is carried to the next settlement instead of `ceil`-ing into a whole credit).
      */
-    if (unsettled.requests > 0) {
+    const decided = decideManagedCharge(cost, cursor, billing);
+
+    if (decided) {
       try {
-        await setManagedSettledAt(input.projectId, input.chatId, serializeCursor(next), input.context);
-        usage = unsettled.usage;
-        requests = unsettled.requests;
-        sessionHoursUsd = hours;
+        /* Cursor FIRST, then the debit: a lost debit under-bills and alerts; the other order double-charges. */
+        await setManagedSettledAt(input.projectId, input.chatId, serializeCostCursor(decided.next), input.context);
+        charge = decided;
+        usage = decided.usage;
+        requests = 1;
+
+        if (decided.floorApplied) {
+          logger.warn(
+            `Session ${input.sessionId}: the never-below-cost floor set this charge (${decided.credits} credits for ` +
+              `$${decided.trueCostUsd.toFixed(4)} of cost)`,
+          );
+        }
       } catch (error) {
         logger.error(
-          `Chat ${input.chatId}: could not advance the settlement cursor — leaving ${unsettled.requests} request(s) ` +
-            `unsettled for the next settlement: ${(error as Error)?.message}`,
+          `Chat ${input.chatId}: could not advance the settlement cursor — leaving the usage unsettled for the ` +
+            `next settlement: ${(error as Error)?.message}`,
         );
       }
     }
@@ -156,26 +269,27 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
     logger.error(`Generation ${input.generationId}: could not read the session's usage: ${(error as Error)?.message}`);
   }
 
-  if (input.anchorWhenEmpty === false && requests === 0 && sessionHoursUsd <= 0) {
-    return { settlement: null, usage, requests, sessionHoursUsd };
+  if (input.anchorWhenEmpty === false && !charge) {
+    return { settlement: null, usage, requests, sessionHoursUsd, model };
   }
 
   /*
    * Always called, even for zero: it anchors the `generations` row the route's annotations and the
-   * Admin reports read, and with nothing to charge it writes no ledger row.
+   * Admin reports read, and with nothing to charge it writes no ledger row. The credits and the true cost
+   * were decided above (`decideManagedCharge`), so both are passed in rather than re-derived from one model.
    */
   const settlement = await settleGeneration({
     userId: input.userId,
     generationId: input.generationId,
-    model: input.model,
+    model,
     provider: 'Anthropic',
     statusKind: input.statusKind,
     usage,
-    extraRawCostUsd: sessionHoursUsd,
+    ...(charge ? { flatCredits: charge.credits, rawCostOverrideUsd: charge.trueCostUsd } : {}),
     context: input.context,
   });
 
-  return { settlement, usage, requests, sessionHoursUsd };
+  return { settlement, usage, requests, sessionHoursUsd, model };
 }
 
 /**
@@ -236,7 +350,10 @@ export async function refundManagedTurn(
  * cannot be listed: that tail is unbillable, and it is reported rather than silently dropped.
  */
 export async function rebindDeadSession(
-  input: Omit<SettleManagedInput, 'anchorWhenEmpty'> & { reason: 'terminated' | 'archived' | 'missing' },
+  input: Omit<SettleManagedInput, 'anchorWhenEmpty'> & {
+    /** `switched`: the chat's session is alive but runs another tier's agent (the user changed tier). */
+    reason: 'terminated' | 'archived' | 'missing' | 'switched';
+  },
 ): Promise<void> {
   if (input.reason === 'missing') {
     logger.error(
@@ -255,7 +372,9 @@ export async function rebindDeadSession(
 
   logger.warn(
     released
-      ? `Chat ${input.chatId}: released ${input.reason} session ${input.sessionId}; a new session will be created`
+      ? input.reason === 'switched'
+        ? `Chat ${input.chatId}: the user changed model tier — released session ${input.sessionId}; a new session will be created on the new tier's agent`
+        : `Chat ${input.chatId}: released ${input.reason} session ${input.sessionId}; a new session will be created`
       : `Chat ${input.chatId}: ${input.reason} session ${input.sessionId} was already replaced by a concurrent turn`,
   );
 }

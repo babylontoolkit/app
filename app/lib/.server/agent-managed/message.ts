@@ -10,6 +10,10 @@
  *   - a repair turn (`errors`) sends the build errors (`buildRepairMessage`, the legacy wording);
  *   - the FIRST message of a new session is prefixed with the project manifest — sorted paths only
  *     (D5) — so the agent knows the project's shape before its first `project_list`;
+ *   - the first message of a new session in a chat that ALREADY has turns (the user changed model tier, so
+ *     the chat moved to that tier's agent; or the old session died) carries a recap of the conversation
+ *     so far — the words only, capped, newest kept (`conversationRecap`). The new session has no memory
+ *     of the old one, and without it "make the jump higher" arrives with no idea what game this is;
  *   - a FIRST BUILD (T9) appends the phase list (design → game → front end) as guidance after the
  *     user's words: the whole build is one managed turn, not three requests.
  */
@@ -22,7 +26,7 @@ import type { Message } from 'ai';
 import { buildRepairMessage } from '~/lib/.server/agent/proxy';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { managedBuildGuidance, type CreationPhaseId } from '~/lib/agent/creation-plan';
-import { splitCarriedArtifact, stripTransportPrefix } from '~/lib/chat/message-envelope';
+import { splitCarriedArtifact, stripTransportPrefix, userTypedText } from '~/lib/chat/message-envelope';
 import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 
 /** The manifest's ceiling — a starter is ~80 files; a project with thousands is listed in part. */
@@ -65,6 +69,79 @@ function messageText(message: Message | undefined): string {
     .filter((p) => p?.type === 'text' && typeof p.text === 'string')
     .map((p) => p.text)
     .join('');
+}
+
+/** The recap's ceiling (chars). The files are read fresh with the tools — this is the conversation only. */
+export const RECAP_MAX_CHARS = 12_000;
+
+/** One message's ceiling inside the recap, so one long reply cannot crowd out the rest. */
+export const RECAP_MESSAGE_MAX_CHARS = 1_500;
+
+/** Assistant text without file bodies: artifact/action blocks are what the files are, not what was said. */
+function spokenText(text: string): string {
+  return text
+    .replace(/<boltArtifact[\s\S]*?<\/boltArtifact>/g, '')
+    .replace(/<boltAction[\s\S]*?<\/boltAction>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * The conversation BEFORE the message this turn sends, as plain lines — for the first message of a new
+ * session in a chat that already has turns. Empty when there is nothing earlier. Newest turns are kept
+ * when the cap bites (they are the ones the next request is most likely about), and the cut is SAID.
+ */
+export function conversationRecap(messages: Message[]): string {
+  let lastUserIndex = -1;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  const earlier = (lastUserIndex === -1 ? messages : messages.slice(0, lastUserIndex)).filter(
+    (m) => m.role === 'user' || m.role === 'assistant',
+  );
+
+  const lines: string[] = [];
+
+  for (const message of earlier) {
+    const raw = messageText(message);
+    const said = message.role === 'user' ? userTypedText(raw).trim() : spokenText(raw);
+
+    if (!said) {
+      continue;
+    }
+
+    const clipped = said.length > RECAP_MESSAGE_MAX_CHARS ? `${said.slice(0, RECAP_MESSAGE_MAX_CHARS)}…` : said;
+    lines.push(`${message.role === 'user' ? 'User' : 'You'}: ${clipped}`);
+  }
+
+  if (lines.length === 0) {
+    return '';
+  }
+
+  const kept: string[] = [];
+  let size = 0;
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (size + lines[i].length > RECAP_MAX_CHARS && kept.length > 0) {
+      break;
+    }
+
+    kept.unshift(lines[i]);
+    size += lines[i].length;
+  }
+
+  const cut = kept.length < lines.length ? `(${lines.length - kept.length} earlier message(s) omitted)\n` : '';
+
+  return (
+    '[Conversation so far — this chat continues on a new session, so here is what was said before. ' +
+    'The project files are current; read them with the tools rather than trusting this recap for code.]\n' +
+    `${cut}${kept.join('\n\n')}\n[End of conversation so far]\n\n`
+  );
 }
 
 const DATA_URL = /^data:([^;,]+);base64,(.+)$/s;
@@ -123,7 +200,7 @@ export function buildManagedUserMessage(input: ManagedMessageInput): BetaManaged
     return null;
   }
 
-  const manifest = input.newSession ? projectManifest(input.files) : '';
+  const manifest = input.newSession ? `${projectManifest(input.files)}${conversationRecap(input.messages)}` : '';
   const guidance = input.errors?.length ? '' : managedBuildGuidance(input.buildPhases ?? []);
   const words = body || '(see the attached image)';
   const text: BetaManagedAgentsTextBlock = {

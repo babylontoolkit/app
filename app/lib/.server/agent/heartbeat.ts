@@ -158,6 +158,15 @@ export interface AgentStatusPart {
    */
   typicalMs?: number;
 
+  /**
+   * The step the turn is in RIGHT NOW, observed (never inferred) — e.g. "Thinking", "Writing src/Kart.ts".
+   * Only engines that can see their steps send it (managed). Absent → the panel shows the turn sentence.
+   */
+  step?: string;
+
+  /** How long the current step has run, per the server's clock. Sent with `step` only. */
+  stepElapsedMs?: number;
+
   [key: string]: string | number | undefined;
 }
 
@@ -199,6 +208,26 @@ export interface HeartbeatOptions {
    * "clear it" call anyone can forget.
    */
   activity?: () => AgentActivitySnapshot | null | undefined;
+
+  /** Pull the turn's current observed step at tick time (`AgentGeneration.currentStep`). */
+  step?: () => { label: string; since: number } | null | undefined;
+}
+
+/** A throwing step source loses the step for that tick, never the heartbeat itself (liveness comes first). */
+function readStep(source: HeartbeatOptions['step']) {
+  try {
+    return source?.();
+  } catch {
+    return null;
+  }
+}
+
+function stepFields(step: { label: string; since: number } | null | undefined, now: number) {
+  if (!step || typeof step.label !== 'string' || !step.label) {
+    return {};
+  }
+
+  return { step: step.label.slice(0, 120), stepElapsedMs: Math.max(0, now - step.since) };
 }
 
 export function createHeartbeat(
@@ -264,6 +293,7 @@ export function createHeartbeat(
          */
         ...(options.deliveryMode ? { deliveryMode: options.deliveryMode } : {}),
         ...(typeof options.typicalMs === 'number' ? { typicalMs: options.typicalMs } : {}),
+        ...stepFields(readStep(options.step), now),
       });
     } catch {
       // A status channel must never break the generation it narrates.

@@ -86,6 +86,15 @@ export interface AgentStatusSnapshot {
    */
   typicalMs?: number;
 
+  /**
+   * The step the turn is in right now, as the SERVER observed it ("Thinking", "Writing src/Kart.ts") —
+   * sent only by an engine that can see its steps (managed). Absent → the turn sentence, as before.
+   */
+  step?: string;
+
+  /** How long that step had run when the server wrote this part. */
+  stepElapsedMs?: number;
+
   /** Client wall time when the part was first ingested — the anchor for live elapsed display. */
   receivedAt: number;
 }
@@ -123,6 +132,8 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     maxAttempts?: unknown;
     deliveryMode?: unknown;
     typicalMs?: unknown;
+    step?: unknown;
+    stepElapsedMs?: unknown;
   };
 
   if (
@@ -186,6 +197,14 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     ...(typeof status.typicalMs === 'number' && Number.isFinite(status.typicalMs) && status.typicalMs > 0
       ? { typicalMs: status.typicalMs }
       : {}),
+
+    /* A step is carried only with its clock, and only as short plain text — it is printed verbatim. */
+    ...(typeof status.step === 'string' &&
+    status.step.trim() &&
+    typeof status.stepElapsedMs === 'number' &&
+    Number.isFinite(status.stepElapsedMs)
+      ? { step: status.step.trim().slice(0, 120), stepElapsedMs: Math.max(0, status.stepElapsedMs) }
+      : {}),
     receivedAt: now,
   });
 }
@@ -197,6 +216,13 @@ export function resetAgentStatus(): void {
 /** Live elapsed time: the server's measurement plus the time since we received it. */
 export function currentElapsedMs(status: AgentStatusSnapshot, now = Date.now()): number {
   return status.elapsedMs + Math.max(0, now - status.receivedAt);
+}
+
+/** Live time in the current step, extrapolated like {@link currentElapsedMs}; undefined without a step. */
+export function currentStepMs(status: AgentStatusSnapshot, now = Date.now()): number | undefined {
+  return status.step && status.stepElapsedMs !== undefined
+    ? status.stepElapsedMs + Math.max(0, now - status.receivedAt)
+    : undefined;
 }
 
 /** Fresh = a heartbeat arrived recently = the stream is in a silent stretch RIGHT NOW. */
@@ -554,9 +580,22 @@ export function describeAgentStatus(
         ? 'longer than usual — still connected'
         : `usually ${formatTypical(status.typicalMs)}`;
 
+  /*
+   * The observed step, when the engine reports one (managed): "Thinking · 1m 40s", "Writing src/Kart.ts ·
+   * 12s". It REPLACES the turn sentence, which only ever said what the turn is for — the step says what is
+   * happening, and its own clock resetting as steps change is the visible progress the turn clock is not.
+   */
+  const stepMs = currentStepMs(status, now);
+  const detail =
+    status.step && stepMs !== undefined
+      ? `${status.step} · ${formatElapsed(stepMs)}`
+      : status.phase === 'thinking'
+        ? copy.thinking
+        : copy.generating;
+
   return {
     label: `${copy.label} — ${elapsed}`,
-    detail: status.phase === 'thinking' ? copy.thinking : copy.generating,
+    detail,
     ...(progressLine ? { progress: progressLine } : {}),
     ...(fraction === undefined ? {} : { fraction }),
     ...(expectation ? { expectation } : {}),

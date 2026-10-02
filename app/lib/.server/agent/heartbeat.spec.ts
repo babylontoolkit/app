@@ -462,3 +462,51 @@ describe('createHeartbeat — expectation fields', () => {
     hb.stop();
   });
 });
+
+describe('the observed step rides the heartbeat (managed engine)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('carries the step and how long it has run', () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const since = Date.now();
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), { step: () => ({ label: 'Thinking', since }) });
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+    hb.stop();
+
+    expect(writes.at(-1)).toMatchObject({ step: 'Thinking', stepElapsedMs: HEARTBEAT_INTERVAL_MS * 2 });
+  });
+
+  it('CONTROL: no step source → no step keys on the wire (legacy is unchanged)', () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s));
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+    hb.stop();
+
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((w) => !('step' in w) && !('stepElapsedMs' in w))).toBe(true);
+  });
+
+  it('a throwing step source never breaks the heartbeat', () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), {
+      step: () => {
+        throw new Error('boom');
+      },
+    });
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+    hb.stop();
+
+    /* The liveness signal still arrives — only the step is missing from it. */
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((w) => !('step' in w))).toBe(true);
+  });
+});

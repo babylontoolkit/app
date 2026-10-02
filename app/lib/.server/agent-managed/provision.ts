@@ -6,7 +6,11 @@
  * that turns the active prompt version into a Managed Agents agent:
  *
  *   - the system prompt (`system-prompt.ts`) and the custom tool definitions (`tools.ts`);
- *   - the model + effort from config (D10) — one agent per `${model}:${effort}`;
+ *   - the model + effort from config (D10) — one agent per `${model}:${effort}`, and one per RUNG of the
+ *     model tier ladder (§4.6.1a): Standard is `LLM_MODEL`, Premium `PREMIUM_MODEL`, Platinum
+ *     `PLATINUM_MODEL`. A session runs ONE agent for its whole life (only `tools`/`mcp_servers` are
+ *     updatable on a live session), so the user's tier choice is honoured by picking the agent, not by
+ *     overriding a model per turn — the API has no such override (`provisionManagedAgents`);
  *   - the synced `bt-*` skills, through the Skills API (the skill store's `listActive` already honours
  *     `skills/exclusions.ts` at its read seam, so an excluded skill is never even read here);
  *   - the Agent Reference (`reference.md`, `references/**`, `training/**` of `babylontoolkit/agent` at the
@@ -29,6 +33,8 @@ import Anthropic, { toFile } from '@anthropic-ai/sdk';
 import type { BetaManagedAgentsModel } from '@anthropic-ai/sdk/resources/beta/agents/agents';
 import { NotConfiguredError } from '~/lib/.server/env';
 import { getPlatformConfig } from '~/lib/.server/agent/config';
+import { getModelTiers } from '~/lib/.server/billing/rates';
+import type { ModelTierId } from '~/lib/.server/billing/model-tiers';
 import { githubFetch, githubJson } from '~/lib/.server/prompt/github';
 import { AGENT_REPO } from '~/lib/.server/prompt/sources';
 import { getPromptStore, type PromptStore } from '~/lib/.server/prompt/store';
@@ -226,6 +232,9 @@ export interface ProvisionOptions {
 
   /** Skip the hash check and push a new agent version even when nothing changed. Uploads still reuse by key. */
   force?: boolean;
+
+  /** The model to provision. Default: the Standard rung's model (`LLM_MODEL`). */
+  model?: string;
 }
 
 export interface ProvisionResult {
@@ -277,6 +286,25 @@ async function latestRecord(
 
     if (!best || record.provisionedAt > best.record.provisionedAt) {
       best = { record, versionId: meta.id };
+    }
+  }
+
+  return best;
+}
+
+/**
+ * The newest record of ANY key (any tier's agent) — where a tier's first provisioning finds the reference
+ * files and skills another tier already uploaded. Only the session RESOURCES and skill ids are shared;
+ * the agent itself is never taken from another key (updating it would change the other tier's model).
+ */
+async function latestAnyRecord(store: PromptStore): Promise<ManagedAgentRecord | null> {
+  let best: ManagedAgentRecord | null = null;
+
+  for (const meta of await store.list()) {
+    for (const record of Object.values(meta.managedAgents ?? {})) {
+      if (record && (!best || record.provisionedAt > best.provisionedAt)) {
+        best = record;
+      }
     }
   }
 
@@ -354,7 +382,8 @@ function agentDefinition(config: ManagedEngineConfig, system: string, skills: Ma
  */
 export async function provisionManagedAgent(options: ProvisionOptions): Promise<ProvisionResult> {
   const { context, force = false } = options;
-  const config = getManagedEngineConfig(context);
+  const base = getManagedEngineConfig(context);
+  const config: ManagedEngineConfig = options.model ? { ...base, model: options.model } : base;
   const key = managedAgentKey(config.model, config.effort);
   const store = getPromptStore();
   const active = await store.getActive();
@@ -397,9 +426,16 @@ export async function provisionManagedAgent(options: ProvisionOptions): Promise<
 
   const client = getManagedClient(context);
 
+  /*
+   * What this run may REUSE without uploading: its own key's record, else any tier's — the reference
+   * files and skills are the same for every rung, so a second rung must not upload them a second time
+   * (or create a second copy of every skill). The agent itself only ever comes from `prior`.
+   */
+  const assets = prior ?? (await latestAnyRecord(store));
+
   const environmentId =
     config.environmentId ??
-    prior?.environmentId ??
+    assets?.environmentId ??
     (
       await client.beta.environments.create({
         name: 'btk-app-builder',
@@ -410,8 +446,8 @@ export async function provisionManagedAgent(options: ProvisionOptions): Promise<
   let uploadedFiles = 0;
   let referenceFiles: ManagedReferenceFile[];
 
-  if (prior && prior.referenceSha === referenceSha && prior.referenceFiles.length > 0) {
-    referenceFiles = prior.referenceFiles;
+  if (assets && assets.referenceSha === referenceSha && assets.referenceFiles.length > 0) {
+    referenceFiles = assets.referenceFiles;
   } else {
     const source = testReferenceSource ?? githubReferenceSource(getPlatformConfig(context).githubToken);
     referenceFiles = await uploadReference(client, source, referenceSha);
@@ -422,7 +458,7 @@ export async function provisionManagedAgent(options: ProvisionOptions): Promise<
   const skills: ManagedSkillRef[] = [];
 
   for (const bundle of bundles) {
-    const priorRef = prior?.skills.find((skill) => skill.name === bundle.name);
+    const priorRef = assets?.skills.find((skill) => skill.name === bundle.name);
 
     if (priorRef && priorRef.contentHash === bundle.contentHash) {
       skills.push(priorRef);
@@ -500,10 +536,13 @@ export interface ManagedAgentStatus {
   current: boolean;
 }
 
-/** For the Admin panel and for T5: which agent the managed engine runs on right now. Makes no client call. */
-export async function getManagedAgentStatus(context: unknown): Promise<ManagedAgentStatus> {
+/**
+ * For the Admin panel and for T5: which agent a model runs on right now (default: the Standard rung's
+ * model). Makes no client call.
+ */
+export async function getManagedAgentStatus(context: unknown, model?: string): Promise<ManagedAgentStatus> {
   const config = getManagedEngineConfig(context);
-  const key = managedAgentKey(config.model, config.effort);
+  const key = managedAgentKey(model ?? config.model, config.effort);
   const store = getPromptStore();
   const active = await store.getActive();
   const own = active?.managedAgents?.[key];
@@ -523,6 +562,107 @@ export async function getManagedAgentStatus(context: unknown): Promise<ManagedAg
  * provisioned yet (a Synchronize that preceded a Provision) — that agent still works, it just reads the
  * previous docs. `null` means "never provisioned"; throws `NotConfiguredError` without a key.
  */
-export async function getManagedAgentRecord(context: unknown): Promise<ManagedAgentRecord | null> {
-  return (await getManagedAgentStatus(context)).record;
+export async function getManagedAgentRecord(context: unknown, model?: string): Promise<ManagedAgentRecord | null> {
+  return (await getManagedAgentStatus(context, model)).record;
+}
+
+// ─── the model tier ladder (§4.6.1a) ─────────────────────────────────────────────────────────────
+
+/** One rung the managed engine can serve: its tier id, label and model. */
+export interface ManagedTierModel {
+  tier: ModelTierId;
+  label: string;
+  model: string;
+}
+
+/**
+ * The rungs that need an agent: Standard (`LLM_MODEL`) plus every paid rung this deploy can SERVE —
+ * enabled by its flag and priced (`getModelTiers`, which never throws). A rung that cannot be served gets
+ * no agent: `decideModelTier` resolves it down to Standard anyway. Two rungs naming the same model share
+ * one agent (the key is the model), so the list is de-duplicated by model.
+ */
+export function managedTierModels(context: unknown): ManagedTierModel[] {
+  const standardModel = getManagedEngineConfig(context).model;
+  const seen = new Set<string>();
+  const rungs: ManagedTierModel[] = [];
+
+  for (const row of getModelTiers(standardModel, context)) {
+    if (!row.serveable || seen.has(row.model)) {
+      continue;
+    }
+
+    seen.add(row.model);
+    rungs.push({ tier: row.id, label: row.label, model: row.model });
+  }
+
+  return rungs;
+}
+
+export interface TierProvisionResult extends ManagedTierModel {
+  result?: ProvisionResult;
+  error?: string;
+}
+
+/**
+ * Provision an agent for every servable rung (Synchronize and the Admin button). Standard first, then the
+ * paid rungs IN ORDER, one at a time: the first run uploads the reference files and skills, and the later
+ * rungs reuse them (`latestAnyRecord`). A failing paid rung is reported, never thrown — it must not stop
+ * Standard, and Standard's failure is reported the same way so the caller sees every rung's outcome.
+ */
+export async function provisionManagedAgents(
+  options: Omit<ProvisionOptions, 'model'>,
+  provision: (options: ProvisionOptions) => Promise<ProvisionResult> = provisionManagedAgent,
+): Promise<TierProvisionResult[]> {
+  const results: TierProvisionResult[] = [];
+
+  for (const rung of managedTierModels(options.context)) {
+    try {
+      results.push({ ...rung, result: await provision({ ...options, model: rung.model }) });
+    } catch (error) {
+      const message = (error as Error)?.message ?? String(error);
+
+      /* No key / no prompt version is the same answer for every rung — report it once, as the caller's error. */
+      if ((error as Error)?.name === 'NotConfiguredError') {
+        throw error;
+      }
+
+      logger.error(`Provisioning the ${rung.label} agent (${rung.model}) failed: ${message}`);
+      results.push({ ...rung, error: message });
+    }
+  }
+
+  return results;
+}
+
+/** In-flight on-demand provisioning, per key — two turns asking for one missing rung create ONE agent. */
+const provisioning = new Map<string, Promise<ManagedAgentRecord | null>>();
+
+/**
+ * The agent for `model`, provisioning it on demand when the rung has never been provisioned (a paid rung
+ * enabled after the last Synchronize). With the reference files and skills already uploaded by another
+ * rung this is one `agents.create`. Returns `null` (never throws) when it cannot be provisioned — the
+ * caller then serves Standard and says why.
+ */
+export async function ensureManagedAgentRecord(context: unknown, model: string): Promise<ManagedAgentRecord | null> {
+  const existing = await getManagedAgentRecord(context, model);
+
+  if (existing) {
+    return existing;
+  }
+
+  const key = managedAgentKey(model, getManagedEngineConfig(context).effort);
+  let pending = provisioning.get(key);
+
+  if (!pending) {
+    pending = provisionManagedAgent({ context, model })
+      .then(() => getManagedAgentRecord(context, model))
+      .catch((error) => {
+        logger.error(`On-demand provisioning of ${key} failed: ${(error as Error)?.message ?? String(error)}`);
+        return null;
+      })
+      .finally(() => provisioning.delete(key));
+    provisioning.set(key, pending);
+  }
+
+  return pending;
 }

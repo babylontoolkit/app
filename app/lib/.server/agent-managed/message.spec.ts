@@ -1,15 +1,17 @@
 /**
  * The ONE `user.message` a managed turn sends (managed-agents-engine T9, T10).
  *
- * T10: the session holds the conversation, so a turn sends no history and no file bodies — only the
- * user's words, plus (on a new session) a paths-only manifest. T9: a first build appends the whole
+ * T10: the session holds the conversation, so a turn on an EXISTING session sends no history and no file
+ * bodies — only the user's words. A NEW session holds nothing, so its first message adds a paths-only
+ * manifest and, when the chat already had turns (a model-tier switch, a dead session), a recap of the
+ * WORDS said so far — never a file body. T9: a first build appends the whole
  * phase list as guidance after the user's words, which stay byte-exact.
  */
 import type { Message } from 'ai';
 import { describe, expect, it } from 'vitest';
 import { MANAGED_BUILD_OPEN, phaseById } from '~/lib/agent/creation-plan';
 import type { FileMap } from '~/lib/.server/llm/constants';
-import { buildManagedUserMessage } from './message';
+import { buildManagedUserMessage, conversationRecap, RECAP_MAX_CHARS } from './message';
 
 const SECRET_BODY = 'const KART_SECRET_BODY_7731 = "never sent";';
 
@@ -39,11 +41,48 @@ describe('a managed turn sends ONE message — no history, no file bodies (T10)'
   });
   const text = textOf(message);
 
-  it('carries the user’s words, unwrapped, and nothing of earlier turns', () => {
+  it('carries the user’s words, unwrapped, last', () => {
     expect(text.endsWith('add drifting')).toBe(true);
-    expect(text).not.toContain('EARLIER_TURN_QUESTION');
-    expect(text).not.toContain('EARLIER_TURN_ANSWER');
     expect(text).not.toContain('[Model:');
+  });
+
+  it('a NEW session in a chat with earlier turns recaps what was SAID — never a file body', () => {
+    expect(text).toContain('User: EARLIER_TURN_QUESTION make a racer');
+    expect(text).toContain('You: EARLIER_TURN_ANSWER');
+    expect(text).not.toContain('KART_SECRET_BODY_7731 = "never sent"');
+    expect(text).not.toContain('boltAction');
+
+    /* The recap precedes the words; the current message is never repeated inside it. */
+    expect(text.indexOf('EARLIER_TURN_QUESTION')).toBeLessThan(text.indexOf('add drifting'));
+    expect(text.split('add drifting').length).toBe(2);
+  });
+
+  it('CONTROL: an EXISTING session gets no recap — it already holds the conversation', () => {
+    const next = buildManagedUserMessage({
+      messages: [...HISTORY, { id: 'u2', role: 'user', content: 'add drifting' }],
+      files: FILES,
+      newSession: false,
+    });
+
+    expect(textOf(next)).toBe('add drifting');
+  });
+
+  it('the recap is capped, keeps the NEWEST turns and says what it cut', () => {
+    const long: Message[] = Array.from({ length: 40 }, (_, i) => ({
+      id: `m${i}`,
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `TURN_${i} ${'x'.repeat(1000)}`,
+    }));
+    const recap = conversationRecap([...long, { id: 'last', role: 'user', content: 'now' }]);
+
+    expect(recap.length).toBeLessThan(RECAP_MAX_CHARS + 1000);
+    expect(recap).toContain('TURN_39');
+    expect(recap).not.toContain('TURN_0 ');
+    expect(recap).toMatch(/\d+ earlier message\(s\) omitted/);
+  });
+
+  it('the first message of a brand-new chat has no recap', () => {
+    expect(conversationRecap([{ id: 'u1', role: 'user', content: 'make a racer' }])).toBe('');
   });
 
   it('the manifest is PATHS ONLY — no file body reaches the session', () => {

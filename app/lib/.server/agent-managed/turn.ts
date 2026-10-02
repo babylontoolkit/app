@@ -76,6 +76,9 @@ export interface ManagedTurnInput {
    * detached request and the resume that finishes it see the same id (T10's transcript key).
    */
   onTurnId?: (userMessageEventId: string) => void;
+
+  /** Every LIVE session event, for the status panel's step label (`step.ts`). Replayed events are not sent. */
+  onEvent?: (event: SessionEventLike) => void;
 }
 
 /**
@@ -267,6 +270,14 @@ export async function* runManagedTurn(input: ManagedTurnInput): AsyncGenerator<A
   function fold(event: SessionEventLike, replaying: boolean): { chunks: AgentChunk[]; terminal?: ManagedTerminal } {
     if (event.type === 'user.message') {
       noteTurnId(event.id);
+    }
+
+    if (!replaying) {
+      try {
+        input.onEvent?.(event);
+      } catch {
+        // A status observer must never break the turn it narrates.
+      }
     }
 
     const r = reducer.apply(event);

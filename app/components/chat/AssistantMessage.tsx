@@ -2,6 +2,7 @@ import { memo, Fragment } from 'react';
 import { Markdown } from './Markdown';
 import type { JSONValue } from 'ai';
 import Popover from '~/components/ui/Popover';
+import { decideBuildDoneBanner } from '~/lib/agent/build-done';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { WORK_DIR } from '~/utils/constants';
 import WithTooltip from '~/components/ui/Tooltip';
@@ -136,6 +137,9 @@ export const AssistantMessage = memo(
      * turn nothing.
      */
     const followUp = decidePlanFollowUp(annotations, content);
+
+    /* The first build finished on this message — a banner that outlives the toast and the reload. */
+    const buildDone = isStreaming ? null : decideBuildDoneBanner(annotations as unknown[] | undefined);
     const offerBuildAndApply = Boolean(onBuildAndApply && messageId && followUp?.kind === 'apply');
     const offerExecutePlan = Boolean(onExecutePlan && followUp?.kind === 'execute');
     const filteredAnnotations = (annotations?.filter(
@@ -318,6 +322,47 @@ export const AssistantMessage = memo(
         <Markdown append={append} chatMode={chatMode} setChatMode={setChatMode} model={model} provider={provider} html>
           {content}
         </Markdown>
+        {buildDone && (
+          <div
+            role="status"
+            className={
+              buildDone.state === 'ready'
+                ? 'mt-3 rounded-lg border border-green-500/40 bg-green-500/10 p-3'
+                : 'mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3'
+            }
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-bolt-elements-textPrimary">
+              <div
+                className={
+                  buildDone.state === 'ready'
+                    ? 'i-ph:check-circle-fill text-lg text-green-500'
+                    : 'i-ph:warning-circle-fill text-lg text-amber-500'
+                }
+                aria-hidden
+              />
+              {buildDone.state === 'ready'
+                ? 'Build complete — your game is ready'
+                : 'Build finished — not verified yet'}
+            </div>
+            <p className="mt-1 text-xs text-bolt-elements-textSecondary">
+              {buildDone.state === 'ready'
+                ? 'Every step is done: design, game code and front end. Open the Preview and press Play to try it.'
+                : 'Every step ran, but the final game check did not pass. Use the fix offered below to finish it.'}
+            </p>
+            {buildDone.state === 'ready' && (
+              <button
+                onClick={() => {
+                  workbenchStore.showWorkbench.set(true);
+                  workbenchStore.currentView.set('preview');
+                }}
+                className="mt-2 inline-flex items-center gap-2 px-3 py-1.5 text-xs rounded-md bg-accent-500 text-white hover:bg-bolt-elements-button-primary-backgroundHover transition-colors"
+              >
+                <div className="i-ph:play-fill" />
+                Open Preview
+              </button>
+            )}
+          </div>
+        )}
         {offerBuildAndApply && (
           <div className="mt-3">
             <button

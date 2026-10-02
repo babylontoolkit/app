@@ -560,6 +560,13 @@ export interface AgentGeneration {
    */
   currentActivity: () => AgentActivitySnapshot | null;
 
+  /**
+   * What the turn is doing right now, as an observed step ("Thinking", "Writing src/Kart.ts") and when it
+   * began — the managed engine reads it off the session's events (`agent-managed/step.ts`). Optional: the
+   * legacy engine cannot see its own steps through a silent provider stream and does not claim to.
+   */
+  currentStep?: () => { label: string; since: number } | null;
+
   /** Skills loaded during this generation — mutated by the tool loop as it runs. */
   toolContext: SkillToolContext;
 

@@ -23,6 +23,7 @@ import {
   phaseOwesFiles,
   currentCreationPhase,
   describeCreationPlan,
+  liveCreationStep,
   describeCreationPlanOutcome,
   isCreationPlanComplete,
   isTurnOutcomeState,
@@ -933,5 +934,42 @@ describe('the managed engine’s first build — one turn, every phase (managed-
     expect(parseCreationPhasesCompleted('design')).toBeNull();
     expect(parseCreationPhasesCompleted(['design', 'bogus'])).toBeNull();
     expect(parseCreationPhasesCompleted(['design', 'game', 'frontend'])).toEqual(['design', 'game', 'frontend']);
+  });
+});
+
+describe('liveCreationStep — the managed build card follows the agent’s step-numbered checklist', () => {
+  const plan = newCreationPlan();
+  const todo = (content: string, status: 'pending' | 'in_progress' | 'completed') => ({ content, status });
+
+  it('the step of the first open todo is the step running', () => {
+    expect(
+      liveCreationStep(plan, [
+        todo('Step 1: Write SPEC.md', 'completed'),
+        todo('Step 2: Kart physics', 'in_progress'),
+        todo('Step 3: Landing page', 'pending'),
+      ]),
+    ).toBe(1);
+  });
+
+  it('every step todo done → the last step (verifying), never past the end', () => {
+    expect(liveCreationStep(plan, [todo('Step 3: Landing page', 'completed'), todo('Step 9: x', 'completed')])).toBe(2);
+  });
+
+  it('never moves the card BACKWARDS past what the plan recorded', () => {
+    expect(liveCreationStep({ ...plan, next: 2 }, [todo('Step 1: SPEC', 'in_progress')])).toBe(2);
+  });
+
+  it('CONTROL: no step-numbered todos → null (the plan alone decides)', () => {
+    expect(liveCreationStep(plan, [todo('Write SPEC.md', 'in_progress')])).toBeNull();
+    expect(liveCreationStep(plan, [])).toBeNull();
+  });
+
+  it('describeCreationPlan draws the live step, and only forward', () => {
+    expect(describeCreationPlan(plan, 2).rows.map((r) => r.state)).toEqual(['done', 'done', 'current']);
+    expect(describeCreationPlan({ ...plan, next: 1 }, 0).rows.map((r) => r.state)).toEqual([
+      'done',
+      'current',
+      'pending',
+    ]);
   });
 });

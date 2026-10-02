@@ -700,19 +700,52 @@ export interface CreationPlanView {
   complete: boolean;
 }
 
-export function describeCreationPlan(plan: CreationPlan): CreationPlanView {
+export function describeCreationPlan(plan: CreationPlan, liveIndex?: number | null): CreationPlanView {
   const complete = isCreationPlanComplete(plan);
+
+  /* A live step (a managed build's checklist, `liveCreationStep`) only ever moves the card FORWARD. */
+  const current = typeof liveIndex === 'number' && liveIndex > plan.next ? liveIndex : plan.next;
 
   return {
     rows: plan.phases.map((id, n) => ({
       id,
       label: phaseById(id).label,
-      state: n < plan.next ? 'done' : n === plan.next ? 'current' : 'pending',
+      state: n < current ? 'done' : n === current ? 'current' : 'pending',
       outcome: plan.done.find((d) => d.id === id)?.state,
     })),
-    step: complete ? null : `Step ${plan.next + 1}`,
+    step: complete ? null : `Step ${current + 1}`,
     complete,
   };
+}
+
+/**
+ * The step a MANAGED first build is on RIGHT NOW, read from the agent's own checklist (owner, 2026-10-02:
+ * *"the build plan stayed on step 1 the whole time, even thru game code and front end stages"*). Pure.
+ *
+ * A managed build runs every step in ONE turn, and the plan only advances when a turn ends — so for the
+ * whole build (~15–20 minutes) the card said Step 1. The build guidance requires every todo to carry its
+ * step number (`Step 2: …`, `managedBuildGuidance`), so the step of the first todo still open is a
+ * statement the agent made about its own progress — not a guess. All step todos done → the last step
+ * (verifying). Never moves the card BACKWARDS past what the plan has recorded, and never past its end.
+ * `null` when no todo carries a step number (an older agent, or a turn that made no checklist).
+ */
+export function liveCreationStep(
+  plan: CreationPlan,
+  todos: ReadonlyArray<{ content: string; status: string }>,
+): number | null {
+  const numbered = todos
+    .map((todo) => ({ todo, step: /^\s*\**\s*step\s+(\d+)\b/i.exec(todo.content)?.[1] }))
+    .filter((t): t is { todo: (typeof todos)[number]; step: string } => Boolean(t.step));
+
+  if (numbered.length === 0) {
+    return null;
+  }
+
+  const open = numbered.find((t) => t.todo.status !== 'completed');
+  const step = open ? Number(open.step) : Math.max(...numbered.map((t) => Number(t.step)));
+  const last = plan.phases.length - 1;
+
+  return Math.min(last, Math.max(plan.next, step - 1));
 }
 
 export interface CreationPlanOutcome {
@@ -827,7 +860,8 @@ export function managedBuildGuidance(phases: readonly CreationPhaseId[]): string
     'interrupted), check the project and carry on from where it stands.\n\n' +
     `${steps}\n\n` +
     'The build is finished only when every step is done and `check_game` (with the GameMode’s class ' +
-    'name) passes after your last change. Keep your todo list current across all the steps.\n' +
+    'name) passes after your last change. Keep your todo list current across all the steps, and START ' +
+    'EVERY todo with its step number (`Step 1: …`, `Step 2: …`) — the user’s progress card follows it.\n' +
     MANAGED_BUILD_CLOSE
   );
 }

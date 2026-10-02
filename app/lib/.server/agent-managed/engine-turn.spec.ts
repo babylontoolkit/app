@@ -1220,3 +1220,31 @@ describe('session-hours are never settled ALONE (verifier finding: a 1-credit St
     );
   });
 });
+
+describe('the status panel sees the turn’s live step (owner, 2026-10-02)', () => {
+  it('the generation reports each step the session is in, observed from its events', async () => {
+    const seen: Array<string | undefined> = [];
+    let generation: AgentGeneration | null = null;
+
+    fake.script = (async (api) => {
+      api.emit({ type: 'event_start', event: { type: 'agent.thinking', id: 'th1' } });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      seen.push(generation?.currentStep?.()?.label);
+      api.emit({ type: 'agent.thinking' });
+      await api.callTool('project_write', { path: 'src/scripts/Drift.ts', content: 'export const d = 1;' });
+
+      /* The result event reaches the engine through the stream, a tick after the fake resolves the call. */
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      seen.push(generation?.currentStep?.()?.label);
+      api.endTurn();
+    }) satisfies Script;
+
+    generation = await turn();
+    generation.onWorkspaceToolCall(() => seen.push(generation?.currentStep?.()?.label));
+
+    const run = await drive(generation);
+
+    expect(run.error).toBeUndefined();
+    expect(seen).toEqual(['Thinking', 'Writing src/scripts/Drift.ts', 'Working out the next step']);
+  });
+});

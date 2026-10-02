@@ -34,7 +34,9 @@
  * an ordinary project nothing because a project with no plan renders `null`.
  */
 import { useStore } from '@nanostores/react';
-import { describeCreationPlan, phaseById } from '~/lib/agent/creation-plan';
+import { describeCreationPlan, liveCreationStep, phaseById } from '~/lib/agent/creation-plan';
+import { workspaceActivityStore } from '~/lib/agent-workspace/activity';
+import { streamingState } from '~/lib/stores/streaming';
 import { newProjectModeStore } from '~/lib/stores/new-project-mode';
 import { projectId } from '~/lib/persistence/useChatHistory';
 import { sessionStore } from '~/lib/stores/session';
@@ -55,6 +57,8 @@ export function CreationPlanCard() {
   const mode = useStore(newProjectModeStore);
   const pid = useStore(projectId);
   const engine = useStore(sessionStore).agentEngine;
+  const streaming = useStore(streamingState);
+  const activity = useStore(workspaceActivityStore);
 
   /*
    * The same second wall as the handoff card: a module-level store survives an SPA navigate, so
@@ -65,7 +69,13 @@ export function CreationPlanCard() {
     return null;
   }
 
-  const view = describeCreationPlan(mode.plan);
+  /*
+   * A managed build runs every step in ONE turn, so the plan alone would say Step 1 for the whole build
+   * (owner, 2026-10-02). While a turn runs, the agent's own step-numbered checklist moves the card on.
+   */
+  const todos = activity.current ? (activity.byGeneration[activity.current]?.todos ?? []) : [];
+  const liveIndex = streaming && engine === 'managed' ? liveCreationStep(mode.plan, todos) : null;
+  const view = describeCreationPlan(mode.plan, liveIndex);
 
   /*
    * A finished plan takes the card away rather than showing a row of ticks forever. The build is over;
@@ -76,7 +86,7 @@ export function CreationPlanCard() {
     return null;
   }
 
-  const current = phaseById(mode.plan.phases[mode.plan.next]);
+  const current = phaseById(mode.plan.phases[Math.max(mode.plan.next, liveIndex ?? 0)]);
 
   /*
    * 🔴 STICKY, because the chat AUTO-SCROLLS and this card lives at the top of the column.
@@ -94,7 +104,17 @@ export function CreationPlanCard() {
     <div className="max-w-chat mx-auto w-full px-1 sticky top-0 z-[2] pb-2 bg-bolt-elements-background-depth-1">
       <div className="rounded-lg border border-accent-500/40 bg-bolt-elements-background-depth-2 p-4">
         <div className="flex items-center gap-2 mb-1">
-          <div className="i-svg-spinners:90-ring-with-bg text-lg text-accent-500" />
+          {/*
+           * Spins only while a turn is RUNNING. A plan that is open with nothing running is waiting on the
+           * user (or on a resume) — a spinner there is how a finished build looked "stuck" forever.
+           */}
+          <div
+            className={
+              streaming
+                ? 'i-svg-spinners:90-ring-with-bg text-lg text-accent-500'
+                : 'i-ph:pause-circle text-lg text-bolt-elements-textTertiary'
+            }
+          />
           <h2 className="text-sm font-semibold text-bolt-elements-textPrimary">{current.activeLabel}</h2>
         </div>
 
@@ -113,7 +133,9 @@ export function CreationPlanCard() {
                   row.state === 'done'
                     ? 'i-ph:check-circle-fill text-base text-green-500'
                     : row.state === 'current'
-                      ? 'i-svg-spinners:90-ring-with-bg text-base text-accent-500'
+                      ? streaming
+                        ? 'i-svg-spinners:90-ring-with-bg text-base text-accent-500'
+                        : 'i-ph:circle-dashed text-base text-accent-500'
                       : 'i-ph:circle text-base text-bolt-elements-textTertiary'
                 }
                 aria-hidden

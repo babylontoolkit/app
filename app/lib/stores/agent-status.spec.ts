@@ -678,3 +678,29 @@ describe('hidden status lines', () => {
     expect(d.progress).toBe('2 files written');
   });
 });
+
+describe('the observed step (managed engine)', () => {
+  beforeEach(() => resetAgentStatus());
+
+  it('replaces the turn sentence with the step and its own live clock', () => {
+    updateAgentStatus(part({ step: 'Writing src/scripts/Kart.ts', stepElapsedMs: 12_000 }), 1000);
+
+    const status = agentStatusStore.get()!;
+
+    expect(describeAgentStatus(status, 6000).detail).toBe('Writing src/scripts/Kart.ts · 17s');
+  });
+
+  it('CONTROL: without a step the turn sentence stays (legacy, older servers)', () => {
+    updateAgentStatus(part(), 1000);
+
+    expect(describeAgentStatus(agentStatusStore.get()!, 1000).detail).not.toContain('·');
+  });
+
+  it('a step without its clock, or an empty one, is dropped — never printed without a time', () => {
+    updateAgentStatus(part({ step: 'Thinking' }), 1000);
+    expect(agentStatusStore.get()!.step).toBeUndefined();
+
+    updateAgentStatus(part({ seq: 2, step: '   ', stepElapsedMs: 5 }), 1000);
+    expect(agentStatusStore.get()!.step).toBeUndefined();
+  });
+});

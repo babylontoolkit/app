@@ -400,7 +400,14 @@ export function AdminTab() {
         agentCommitSha?: string;
         skills?: { commitSha?: string };
         message?: string;
-        managedAgent?: { status?: string; agentId?: string; agentVersion?: number; skipped?: string; error?: string };
+        managedAgent?: {
+          status?: string;
+          agentId?: string;
+          agentVersion?: number;
+          skipped?: string;
+          error?: string;
+          tiers?: Array<{ label: string; model: string; error?: string }>;
+        };
       };
 
       if (!r.ok || !data.ok) {
@@ -427,6 +434,11 @@ export function AdminTab() {
         toast.info(
           `Managed agent ${data.managedAgent.status} — ${data.managedAgent.agentId} v${data.managedAgent.agentVersion}.`,
         );
+      }
+
+      /* A paid tier's agent failing is a partial success — named, so Premium/Platinum are not silently Standard. */
+      for (const row of data.managedAgent?.tiers?.filter((tier) => tier.error) ?? []) {
+        toast.warn(`The ${row.label} agent (${row.model}) was not provisioned: ${row.error}`);
       }
 
       setSyncCount((n) => n + 1);
