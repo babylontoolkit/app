@@ -24,6 +24,7 @@ import { isStripeConfigured, CREDIT_PACKS, SUBSCRIPTION_PLANS } from '~/lib/.ser
 import { errorResponse } from '~/lib/.server/http';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
+import { resolveAgentEngine } from '~/lib/.server/agent-managed/config';
 
 /**
  * Which price lists to refresh — GUARDED, because `getPlatformProvider` throws on a typo'd
@@ -229,6 +230,19 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           return { provider: getMediaProvider(context) };
         } catch {
           return { provider: null };
+        }
+      })(),
+
+      /*
+       * Which agent engine runs this deploy's build turns (managed-agents-engine T6). A rendering hint
+       * only — the Stop button's interrupt and a reopened chat's resume check are wired to it; the server
+       * stays the authority on every turn. Read like `media` above: guarded, never fatal to `/api/me`.
+       */
+      agentEngine: (() => {
+        try {
+          return resolveAgentEngine(context);
+        } catch {
+          return 'legacy' as const;
         }
       })(),
 

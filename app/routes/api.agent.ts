@@ -12,11 +12,15 @@ import { projectOwesBuild } from '~/lib/agent/creation-plan';
 import { createDataStream, formatDataStreamPart, type DataStreamWriter, type Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
 import { runAgentGeneration } from '~/lib/.server/agent/proxy';
+import { resolveAgentEngine } from '~/lib/.server/agent-managed/config';
+import { resolveEngineForRequest, selectEngineForTurn } from '~/lib/.server/agent-managed/engine-select';
+import { runManagedGeneration } from '~/lib/.server/agent-managed/engine';
 import { NotConfiguredError } from '~/lib/.server/agent/config';
 import { requireVerifiedUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
 import { validateAttachments } from '~/lib/.server/agent/attachments';
-import { claimProject, shouldClaimProject } from '~/lib/.server/agent/inflight';
+import { claimProject, resolveClaimTtlMs, shouldClaimProject } from '~/lib/.server/agent/inflight';
+import { env } from '~/lib/.server/env';
 import { sanitizeGameBackend } from '~/lib/.server/game-backend/separation';
 import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
 import { ProtocolTagStreamFilter } from '~/lib/.server/agent/protocol-strip';
@@ -138,6 +142,20 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
      * prompt, and the sandbox's own server is the real validator of any call.
      */
     mcpTools?: Array<{ name: string; description?: string; server: string; inputSchema?: unknown }>;
+
+    /**
+     * The sending browser tab's id (`~/lib/chat/agent-request`). Lets a send from the same tab replace
+     * a turn that tab has given up on instead of being refused by it (`inflight.ts`, "same tab").
+     * Untrusted and only ever compared for equality with the claim holder's, under the same user.
+     */
+    clientId?: unknown;
+
+    /**
+     * Re-attach to a managed turn still running on Anthropic's side (managed-agents-engine T6): a
+     * reopened chat whose session is waiting on tool results. Only meaningful on the managed engine — a
+     * resume sends no new message; it replays the turn and answers what is outstanding.
+     */
+    managedResume?: boolean;
   }>();
 
   const cookies = parseCookies(request.headers.get('Cookie'));
@@ -203,63 +221,122 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
      * by guarantee, so it can neither corrupt the tree nor be corrupted by a build. `shouldClaimProject`
      * owns that rule — see the header of `inflight.ts` for why the scope is the fix.
      */
+    /*
+     * The generation stops when the client disconnects (Stop, a closed tab) OR when a later send from
+     * the same tab supersedes it. Either way it is a Stop to the proxy: billed for what it consumed,
+     * never refunded, and no further file actions.
+     */
+    const superseded = new AbortController();
+    const turnSignal = AbortSignal.any([request.signal, superseded.signal]);
+
     releaseProject =
       body.projectId && shouldClaimProject({ projectId: body.projectId, chatMode: body.chatMode })
-        ? claimProject(body.projectId, user.id, request.signal)
+        ? claimProject(body.projectId, user.id, turnSignal, {
+            clientId: parseClientId(body.clientId),
+            supersede: () => superseded.abort('superseded'),
+            ttlMs: resolveClaimTtlMs(env(context, 'AGENT_CLAIM_TTL_MINUTES')),
+          })
         : undefined;
 
-    const generation = await runAgentGeneration({
-      messages: body.messages,
-      files: body.files,
-      chatId: body.chatId,
-      user,
-      projectId: body.projectId,
-
-      /*
-       * Stop (§4.12). Remix hands us the client's disconnect signal, so closing the stream (the Stop
-       * button, or a closed tab) aborts the provider call instead of leaving it running and billing
-       * us for output nobody will ever read.
-       */
-      abortSignal: request.signal,
-
-      errors: body.errors,
-      repairOf: body.repairOf,
-      repairAttempt: body.repairAttempt,
-      model: body.model,
-      tier: body.tier,
-      premium: body.premium,
-      effort: body.effort,
+    /*
+     * THE ENGINE (managed-agents-engine plan T2, D9) — chosen only AFTER the walls, the attachment caps
+     * and the claim above, which run identically for both engines (`engine-seam.spec.ts` pins the
+     * order). `legacy` (the default) is exactly the call below; `managed` runs build turns on
+     * Anthropic's hosted loop. Plan-mode and MCP turns always stay legacy (`selectEngineForTurn`).
+     */
+    const engine = selectEngineForTurn({
+      // `engineOverride` is the eval harness's (T11) — honoured only off production with AGENT_ENGINE_EVAL_OVERRIDE=true.
+      engine: resolveEngineForRequest({
+        deployEngine: resolveAgentEngine(context),
+        override: (body as { engineOverride?: unknown }).engineOverride,
+        context,
+      }),
       chatMode: body.chatMode,
-      useAssetLibrary: body.useAssetLibrary,
-      toolkitSystems: body.toolkitSystems,
-      creationPhase: body.creationPhase,
-
-      /*
-       * Does this project still owe a build? Derived from the ROW, never from the body — see the
-       * ownership check above and `projectOwesBuild`. A generation that names no project cannot be a
-       * first build (there is nothing to build into), so `undefined` resolves to `false` downstream.
-       */
-      owesBuild: projectOwesBuild(project?.creationHandoff),
-
-      /*
-       * Which starter game type this project was created from (§4.4) — the row, never the body, for
-       * the same reason as `owesBuild` directly above: it is a fact about the project, and a caller
-       * who could name their own starter could hand themselves a base scene from someone else's.
-       */
-      starterId: project?.templateId,
-
-      /*
-       * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
-       * Sanitise at the boundary so a claim pointing at the platform Supabase becomes "no backend"
-       * rather than an RLS-first note scaffolding game code against our own database.
-       */
-      gameBackend: sanitizeGameBackend(body.gameBackend, context),
-      assetNotes: body.assetNotes,
-      mcpLiveTools: body.mcpTools,
-      apiKeys,
-      providerSettings,
-      context,
+      hasMcpTools: (body.mcpTools?.length ?? 0) > 0,
     });
+
+    /*
+     * A RESUME (T6) is never re-routed: it names a managed session's turn, and the legacy engine would
+     * treat the same request as a fresh send of the last user message — re-running the whole turn.
+     */
+    const resume = body.managedResume === true;
+
+    if (resume && resolveAgentEngine(context) !== 'managed') {
+      throw Object.assign(new Error('There is no managed turn to resume.'), { statusCode: 409, isRetryable: false });
+    }
+
+    const generation =
+      engine === 'managed' || resume
+        ? await runManagedGeneration({
+            messages: body.messages,
+            files: body.files,
+            chatId: body.chatId,
+            user,
+            projectId: body.projectId,
+            abortSignal: turnSignal,
+            errors: body.errors,
+            repairOf: body.repairOf,
+            repairAttempt: body.repairAttempt,
+            tier: body.tier,
+            effort: body.effort,
+            owesBuild: projectOwesBuild(project?.creationHandoff),
+            starterId: project?.templateId,
+            useAssetLibrary: body.useAssetLibrary,
+            resume,
+            context,
+          })
+        : await runAgentGeneration({
+            messages: body.messages,
+            files: body.files,
+            chatId: body.chatId,
+            user,
+            projectId: body.projectId,
+
+            /*
+             * Stop (§4.12). Remix hands us the client's disconnect signal, so closing the stream (the Stop
+             * button, or a closed tab) aborts the provider call instead of leaving it running and billing
+             * us for output nobody will ever read. A later send from the same tab aborts it the same way.
+             */
+            abortSignal: turnSignal,
+
+            errors: body.errors,
+            repairOf: body.repairOf,
+            repairAttempt: body.repairAttempt,
+            model: body.model,
+            tier: body.tier,
+            premium: body.premium,
+            effort: body.effort,
+            chatMode: body.chatMode,
+            useAssetLibrary: body.useAssetLibrary,
+            toolkitSystems: body.toolkitSystems,
+            creationPhase: body.creationPhase,
+
+            /*
+             * Does this project still owe a build? Derived from the ROW, never from the body — see the
+             * ownership check above and `projectOwesBuild`. A generation that names no project cannot be a
+             * first build (there is nothing to build into), so `undefined` resolves to `false` downstream.
+             */
+            owesBuild: projectOwesBuild(project?.creationHandoff),
+
+            /*
+             * Which starter game type this project was created from (§4.4) — the row, never the body, for
+             * the same reason as `owesBuild` directly above: it is a fact about the project, and a caller
+             * who could name their own starter could hand themselves a base scene from someone else's.
+             */
+            starterId: project?.templateId,
+
+            /*
+             * §4.15 hard separation: a client could post OUR platform project ref as its "game backend".
+             * Sanitise at the boundary so a claim pointing at the platform Supabase becomes "no backend"
+             * rather than an RLS-first note scaffolding game code against our own database.
+             */
+            gameBackend: sanitizeGameBackend(body.gameBackend, context),
+            assetNotes: body.assetNotes,
+            mcpLiveTools: body.mcpTools,
+            apiKeys,
+            providerSettings,
+            context,
+          });
 
     const dataStream = createDataStream({
       async execute(stream) {
@@ -305,6 +382,11 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
       { status: error?.statusCode || 500, headers: { 'Content-Type': 'application/json' } },
     );
   }
+}
+
+/** A tab id is an opaque short token; anything else is treated as absent (an older bundle). */
+function parseClientId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 && value.length <= 64 ? value : undefined;
 }
 
 /** The visible stream: prose + actions, then the annotations the client's badges are built from. */

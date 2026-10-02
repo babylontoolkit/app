@@ -53,7 +53,7 @@ import {
   getLedger,
   setLedger,
 } from './ledger';
-import { checkCreditGate, refundGeneration, settleGeneration } from './gate';
+import { billedUsage, checkCreditGate, decideCredits, refundGeneration, settleGeneration } from './gate';
 import { CREDIT_PACKS, MIN_PACK_MARGIN, packMargin } from './stripe';
 import { DEFAULT_SANDBOX_VM_TIER, SANDBOX_VM_TIERS, sandboxVmTier } from '~/lib/.server/sandbox/config';
 import {
@@ -2751,5 +2751,85 @@ describe('tierCoverage', () => {
 
     expect(priced.length + unpriced.length).toBe(SANDBOX_VM_TIERS.length);
     expect(SANDBOX_VM_TIERS.length).toBeGreaterThan(2);
+  });
+});
+
+/*
+ * 🔴 SESSION-HOURS ARE PRICED THROUGH THE ONE FORMULA (managed-agents-engine T7, D7).
+ *
+ * The managed engine pays Anthropic per active session-hour on top of tokens. `extraRawCostUsd` adds
+ * that to the raw cost BEFORE `ceil(raw / CREDIT_UNIT_COST_USD × CREDIT_MARGIN)`, so it earns the same
+ * margin as tokens and is recorded in `raw_cost_usd`. Absent — every other caller — must be byte-identical.
+ */
+describe('settlement — extraRawCostUsd (managed session-hours)', () => {
+  const MODEL = 'claude-sonnet-5';
+  const usage: TokenUsage = {
+    promptTokens: 1200,
+    completionTokens: 3400,
+    cacheReadTokens: 80_000,
+    cacheCreationTokens: 9000,
+  };
+
+  beforeEach(() => {
+    vi.stubEnv('CREDIT_UNIT_COST_USD', '0.01');
+    vi.stubEnv('CREDIT_MARGIN', '4');
+  });
+
+  it('credits = ceil((token cost + extra) / CREDIT_UNIT_COST_USD × CREDIT_MARGIN)', () => {
+    const tokenCost = rawCostUsd(billedUsage(usage), MODEL, 'Anthropic');
+    const extra = 0.04;
+
+    expect(
+      decideCredits({ usage, model: MODEL, provider: 'Anthropic', extraRawCostUsd: extra }, getBillingConfig()),
+    ).toBe(Math.ceil(((tokenCost + extra) / 0.01) * 4));
+  });
+
+  it('absent (or zero / negative / NaN) extra is byte-identical to the token-only formula', () => {
+    const tokenOnly = creditsForUsage(billedUsage(usage), MODEL, 'Anthropic', getBillingConfig());
+
+    for (const extra of [undefined, 0, -5, Number.NaN]) {
+      expect(
+        decideCredits({ usage, model: MODEL, provider: 'Anthropic', extraRawCostUsd: extra }, getBillingConfig()),
+      ).toBe(tokenOnly);
+    }
+  });
+
+  it('session time with no tokens is still charged (it was consumed), and BYOK still charges nothing', () => {
+    const none: TokenUsage = { promptTokens: 0, completionTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+
+    expect(
+      decideCredits({ usage: none, model: MODEL, provider: 'Anthropic', extraRawCostUsd: 0.08 }, getBillingConfig()),
+    ).toBe(32);
+    expect(decideCredits({ usage: none, model: MODEL, provider: 'Anthropic' }, getBillingConfig())).toBe(0);
+    expect(
+      decideCredits(
+        { usage, model: MODEL, provider: 'Anthropic', extraRawCostUsd: 0.08, byok: true },
+        getBillingConfig(),
+      ),
+    ).toBe(0);
+  });
+
+  it('settleGeneration debits it and records it in the raw cost', async () => {
+    await ledger.append({ userId: 'u-hours', delta: 10_000, reason: 'grant' });
+
+    const plain = await settleGeneration({
+      userId: 'u-hours',
+      generationId: 'g-plain',
+      model: MODEL,
+      provider: 'Anthropic',
+      usage,
+    });
+    const withHours = await settleGeneration({
+      userId: 'u-hours',
+      generationId: 'g-hours',
+      model: MODEL,
+      provider: 'Anthropic',
+      usage,
+      extraRawCostUsd: 0.5,
+    });
+
+    expect(withHours!.rawCostUsd).toBeCloseTo(plain!.rawCostUsd + 0.5, 10);
+    expect(withHours!.creditsCharged - plain!.creditsCharged).toBeGreaterThanOrEqual(199);
+    expect(await ledger.balance('u-hours')).toBe(10_000 - plain!.creditsCharged - withHours!.creditsCharged);
   });
 });

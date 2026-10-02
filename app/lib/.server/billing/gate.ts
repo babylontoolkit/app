@@ -20,7 +20,12 @@ import { getMonitor } from '~/lib/.server/monitoring';
 import { ALERT_SIGNALS } from '~/lib/.server/monitoring/events';
 import { getLedger } from './ledger';
 import { getGenerationStore } from './generations';
-import { creditsForUsage, getBillingConfig, rawCostUsd, type TokenUsage } from './rates';
+import { creditsForRawCost, creditsForUsage, getBillingConfig, rawCostUsd, type TokenUsage } from './rates';
+
+/** A non-negative, finite extra cost — anything else is 0 (a settlement can never refuse, or credit). */
+function extraCostUsd(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
 
 const logger = createScopedLogger('credit-gate');
 
@@ -155,6 +160,17 @@ export interface SettleInput {
    */
   maxCredits?: number;
 
+  /**
+   * USD spent on this generation OUTSIDE the token vector — added to the raw cost BEFORE the credit
+   * formula, and recorded in `raw_cost_usd` with it.
+   *
+   * The managed agent engine's session-hours (`_specs/managed-agents-engine_plan.md` D7): Anthropic
+   * bills each active session-hour on top of tokens, and a turn's credits must cover both through the
+   * ONE formula (`creditsForRawCost`), never a second margin. Absent (every other caller) means 0, so
+   * every existing settlement is byte-identical.
+   */
+  extraRawCostUsd?: number;
+
   context?: unknown;
 }
 
@@ -210,7 +226,10 @@ export function billedUsage(usage: TokenUsage): TokenUsage {
  * money guarantee); a flat price replaces the formula; a cap bounds it.
  */
 export function decideCredits(
-  input: Pick<SettleInput, 'usage' | 'model' | 'provider' | 'byok' | 'flatCredits' | 'maxCredits' | 'context'>,
+  input: Pick<
+    SettleInput,
+    'usage' | 'model' | 'provider' | 'byok' | 'flatCredits' | 'maxCredits' | 'extraRawCostUsd' | 'context'
+  >,
   config: ReturnType<typeof getBillingConfig>,
 ): number {
   if (input.byok) {
@@ -223,7 +242,9 @@ export function decideCredits(
     input.usage.cacheReadTokens +
     input.usage.cacheCreationTokens;
 
-  if (consumed <= 0) {
+  const extra = extraCostUsd(input.extraRawCostUsd);
+
+  if (consumed <= 0 && extra <= 0) {
     return 0;
   }
 
@@ -238,7 +259,13 @@ export function decideCredits(
    * warm (see the note above). `consumed` above still reads the TRUE vector, so "this generation
    * spent nothing" stays a question about reality rather than about pricing policy.
    */
-  const derived = creditsForUsage(billedUsage(input.usage), input.model, input.provider, config, input.context);
+  const derived =
+    extra > 0
+      ? creditsForRawCost(
+          rawCostUsd(billedUsage(input.usage), input.model, input.provider, input.context) + extra,
+          config,
+        )
+      : creditsForUsage(billedUsage(input.usage), input.model, input.provider, config, input.context);
   const cap = Math.floor(input.maxCredits ?? 0);
 
   return cap > 0 ? Math.min(derived, cap) : derived;
@@ -263,7 +290,8 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
    * TRUE usage — cache writes at the write rate. This is the honest cost, and the ONLY place the
    * platform can see what it absorbed under `billedUsage`. Never route it through that view.
    */
-  const cost = rawCostUsd(input.usage, input.model, input.provider, input.context);
+  const cost =
+    rawCostUsd(input.usage, input.model, input.provider, input.context) + extraCostUsd(input.extraRawCostUsd);
 
   /*
    * BYOK: record zero. The generation still exists in the ledger's sibling `generations` record for

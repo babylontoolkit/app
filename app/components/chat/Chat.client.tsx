@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react';
 import { clearTreeReplaced, isTreeReplaced, treeReplacedProject } from '~/lib/persistence/tree-replacement-signal';
 import type { Message } from 'ai';
 import { useChat } from '@ai-sdk/react';
+import { AGENT_TAB_ID, agentRequests } from '~/lib/chat/agent-request';
 import { useAnimate } from 'framer-motion';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
@@ -32,6 +33,13 @@ import {
 import { chatStore, creationTurnStore } from '~/lib/stores/chat';
 import { isCreationTurn } from '~/lib/chat/creation-turn';
 import { liveTurnIdentity } from '~/lib/chat/live-turn-identity';
+import {
+  managedTurnStatus,
+  requestManagedInterrupt,
+  resumeAction,
+  whenReady,
+  withManagedChatId,
+} from '~/lib/chat/managed-turn';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { describeTurnOutcome, KEEP_BUILDING_MESSAGE, type TurnOutcome } from '~/lib/agent/turn-outcome';
 import { stripOpaqueContent } from '~/lib/context/opaque-files';
@@ -356,8 +364,23 @@ export const ChatImpl = memo(
      * Every send therefore passes this as a per-request body override, which `useChat` merges OVER
      * the base body. It is read from the stores at the moment of sending, so it cannot be stale.
      */
+    /*
+     * The managed engine keys its session by the server chat id, and a new chat's first turn can be sent
+     * before that id is minted (it is minted at first save) — so on that engine it is minted here and
+     * recorded where the save will find it (managed-agents-engine T6).
+     */
     const liveTurnBody = useCallback(
-      () => liveTurnIdentity({ projectId: activeProjectId, chatId: activeServerChatId }),
+      () =>
+        withManagedChatId(
+          sessionStore.get().agentEngine,
+          liveTurnIdentity({ projectId: activeProjectId, chatId: activeServerChatId }),
+          () => {
+            const serverChatId = mintServerChatId();
+            chatMetadata.set({ ...chatMetadata.get(), serverChatId });
+
+            return serverChatId;
+          },
+        ),
       [activeProjectId, activeServerChatId],
     );
 
@@ -663,8 +686,17 @@ export const ChatImpl = memo(
        * server-side skill tool loop, and usage recording all live behind this route.
        */
       api: '/api/agent',
+
+      /*
+       * One agent turn in flight per tab (`agent-request.ts`): starting a turn aborts this tab's
+       * previous one, so a turn the page has stopped showing can never keep the project locked.
+       */
+      fetch: agentRequests.fetch,
       body: {
         apiKeys,
+
+        /* Lets the server hand this tab's new turn the project its old turn still holds (§4.12). */
+        clientId: AGENT_TAB_ID,
         files: agentFiles,
 
         /*
@@ -1106,6 +1138,63 @@ export const ChatImpl = memo(
         }
       }
     }, [initialMessages]);
+
+    /*
+     * RECONNECT (managed-agents-engine T6). On the managed engine a closed tab leaves its turn running on
+     * the server, waiting on tool results only a browser can produce. A reopened chat asks whether its
+     * turn is still pending and, if so, re-attaches: the resume turn replays the narration and answers
+     * the outstanding calls here. Once per chat per mount; legacy deploys never ask.
+     */
+    const agentEngine = session.agentEngine;
+    const resumeCheckedFor = useRef<string | null>(null);
+
+    useEffect(() => {
+      const identity = liveTurnIdentity({ projectId: activeProjectId, chatId: activeServerChatId });
+
+      /*
+       * Only a RESTORED chat (it mounted with history) can have a detached turn. A chat started in this
+       * tab never asks — its own turn is the one running, and resuming it would run it twice.
+       */
+      if (
+        agentEngine !== 'managed' ||
+        initialMessages.length === 0 ||
+        !identity.projectId ||
+        !identity.chatId ||
+        isLoading
+      ) {
+        return;
+      }
+
+      const key = `${identity.projectId}:${identity.chatId}`;
+
+      if (resumeCheckedFor.current === key) {
+        return;
+      }
+
+      resumeCheckedFor.current = key;
+
+      void managedTurnStatus(agentEngine, identity).then(async ({ pending, userText }) => {
+        if (!pending) {
+          return;
+        }
+
+        /* The outstanding call may be a game check: let the reopened tab's preview come up first. */
+        await whenReady(
+          () => workbenchStore.previews.get().length > 0,
+          (onChange) => workbenchStore.previews.listen(onChange),
+        );
+
+        logger.info('A managed turn is still running for this chat — re-attaching');
+
+        const next = resumeAction(messages.at(-1)?.role, userText);
+
+        if (next.kind === 'reload') {
+          reload({ body: { ...liveTurnBody(), managedResume: true } });
+        } else {
+          append({ role: 'user', content: next.content }, { body: { ...liveTurnBody(), managedResume: true } });
+        }
+      });
+    }, [agentEngine, activeProjectId, activeServerChatId, initialMessages]);
 
     /*
      * Liveness heartbeat (§4.2a) — clear on EVERY isLoading edge. Rising: a new generation must
@@ -1586,6 +1675,7 @@ export const ChatImpl = memo(
           clearInterval(timer);
           toast.error('The generation stopped responding and was cancelled. Please try again.');
           stop();
+          agentRequests.abort();
           setFakeLoading(false);
           chatStore.setKey('aborted', true);
           workbenchStore.abortAllActions();
@@ -1607,7 +1697,22 @@ export const ChatImpl = memo(
     };
 
     const abort = () => {
+      /*
+       * On the managed engine aborting the request only DETACHES the turn (a closed tab must not end a
+       * build), so an explicit Stop also interrupts the session. Fire-and-forget (managed-agents-engine T6).
+       */
+      requestManagedInterrupt(
+        sessionStore.get().agentEngine,
+        liveTurnIdentity({ projectId: activeProjectId, chatId: activeServerChatId }),
+      );
+
       stop();
+
+      /*
+       * `stop()` aborts only the request `useChat` still holds a handle to. If a later request replaced
+       * that handle, this is what reaches the turn actually running (`agent-request.ts`).
+       */
+      agentRequests.abort();
       chatStore.setKey('aborted', true);
       workbenchStore.abortAllActions();
 

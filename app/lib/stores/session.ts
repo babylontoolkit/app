@@ -215,6 +215,13 @@ export interface SessionState {
     provider: 'KIE' | 'Comet' | null;
   };
 
+  /**
+   * Which agent engine runs build turns on this deploy (managed-agents-engine T6) — a hint. `managed`
+   * wires the Stop button's session interrupt and a reopened chat's resume check; the server decides
+   * every turn's engine itself. Defaults to `legacy`, which is today's behaviour exactly.
+   */
+  agentEngine: 'managed' | 'legacy';
+
   pro: {
     /** The master switch. Off (the default) means Pro/BYOK UI does not exist for ANYONE. */
     proFeaturesEnabled: boolean;
@@ -248,6 +255,7 @@ export const EMPTY_SESSION: SessionState = {
    * failure §4.16 exists to prevent. Absent means off; the server turns it on.
    */
   media: { provider: null },
+  agentEngine: 'legacy',
   pro: { proFeaturesEnabled: false, byokUnlocked: false, tier: null, status: null, subscriberEmail: null },
 };
 
@@ -285,6 +293,7 @@ export async function refreshSession(): Promise<SessionState> {
         ? { ...EMPTY_SESSION.credits, ...data.credits, modelTiers: normalizeModelTiers(data.credits.modelTiers) }
         : EMPTY_SESSION.credits,
       media: data.media ?? EMPTY_SESSION.media,
+      agentEngine: data.agentEngine === 'managed' ? 'managed' : 'legacy',
       pro: data.pro ?? EMPTY_SESSION.pro,
     };
 

@@ -30,6 +30,7 @@
  */
 import { createHash } from 'node:crypto';
 import { getObjectStore, type ObjectStore } from '~/lib/.server/storage';
+import type { ManagedAgentRecord } from '~/lib/.server/agent-managed/record';
 
 export interface PromptVersionMeta {
   id: string;
@@ -82,6 +83,13 @@ export interface PromptVersionMeta {
   baseBytes: number;
   onDemandIds: string[];
   declarationIds: string[];
+
+  /**
+   * Managed Agents agents provisioned FROM this version (`agent-managed/provision.ts`), keyed by
+   * `${model}:${effort}`. Like `lastSeen*`, an annotation on an immutable build — absent until an admin
+   * provisions, and never part of the version's identity.
+   */
+  managedAgents?: Record<string, ManagedAgentRecord>;
 }
 
 export interface PromptVersion extends PromptVersionMeta {
@@ -111,6 +119,12 @@ export interface PromptStore {
    * stays immutable; all that changed is what we know about it.
    */
   recordSeen(id: string, commitSha: string): Promise<void>;
+
+  /**
+   * Record the Managed Agents agent provisioned from this version under `record.key`. Touches ONLY the
+   * `managedAgents` field, exactly like `recordSeen` touches only the observation fields.
+   */
+  recordManagedAgent(id: string, record: ManagedAgentRecord): Promise<void>;
 
   /** On-demand block body (a system doc routed in by keyword). Null when absent from this version. */
   readOnDemand(versionId: string, blockId: string): Promise<string | null>;
@@ -172,6 +186,9 @@ interface VersionRecord {
   base: string;
   onDemand: Record<string, string>;
   declarations: Record<string, string>;
+
+  /** Optional: provisioning annotations (`recordManagedAgent`). */
+  managedAgents?: Record<string, ManagedAgentRecord>;
 }
 
 export { platformDataDir } from '~/lib/.server/platform-dir';
@@ -285,6 +302,7 @@ export class PromptVersionStore implements PromptStore {
       baseBytes: record.baseBytes,
       onDemandIds: Object.keys(record.onDemand),
       declarationIds: Object.keys(record.declarations),
+      ...(record.managedAgents ? { managedAgents: record.managedAgents } : {}),
     };
   }
 
@@ -397,6 +415,26 @@ export class PromptVersionStore implements PromptStore {
     const updated: VersionRecord = { ...record, lastSeenCommitSha: commitSha, lastSeenAt: new Date().toISOString() };
 
     await this._putText(this._versionKey(record.id), JSON.stringify(updated, null, 2));
+  }
+
+  /**
+   * Stamp a provisioning record onto an existing version — same read-modify-write shape as `recordSeen`,
+   * carrying every identity field across untouched. Unlike `recordSeen` an unknown id THROWS: the caller
+   * has just created a real agent, and dropping its id silently would orphan it.
+   */
+  async recordManagedAgent(id: string, record: ManagedAgentRecord): Promise<void> {
+    const existing = await this._readRecord(id);
+
+    if (!existing) {
+      throw new Error(`Prompt version not found: ${id}`);
+    }
+
+    const updated: VersionRecord = {
+      ...existing,
+      managedAgents: { ...(existing.managedAgents ?? {}), [record.key]: record },
+    };
+
+    await this._putText(this._versionKey(existing.id), JSON.stringify(updated, null, 2));
   }
 
   async readOnDemand(versionId: string, blockId: string): Promise<string | null> {

@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
 import { MarketPricesSection } from './MarketPricesSection';
 import { AssetLibrarySection } from './AssetLibrarySection';
+import { ManagedAgentRow } from './ManagedAgentRow';
 
 interface UsageReport {
   generations: number;
@@ -966,6 +967,7 @@ export function AdminTab() {
                 `${prompt.summary.skills.commitSha ? ` · commit ${prompt.summary.skills.commitSha.slice(0, 8)}` : ''}`
               }
             />
+            <ManagedAgentRow />
           </div>
         )}
       </section>

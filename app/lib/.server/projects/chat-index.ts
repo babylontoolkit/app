@@ -44,6 +44,38 @@ export interface ChatIndexRow {
   messageCount: number;
   createdAt: string;
   updatedAt: string;
+
+  /**
+   * The Managed Agents session this chat runs on (`_specs/managed-agents-engine_plan.md` D5, T4).
+   *
+   * Set ONCE, on the chat's first managed turn, by `claimManagedSession` — never by `upsert`, which is
+   * what every transcript save calls. A save must never be the thing that erases (or forges) the
+   * pointer to a conversation's history: the session holds the whole conversation on Anthropic's side,
+   * and losing the id loses the thread for every device at once.
+   *
+   * 🔴 Cleared when the row moves to another project (migration 0026's trigger; mirrored by
+   * `FsChatIndex.upsert`). A session never follows a chat id across projects — the chat id is the only
+   * thing a caller names, and ownership is proven on the PROJECT.
+   */
+  managedSessionId?: string;
+
+  /** T7's settlement cursor: the `processed_at` of the last usage event already billed. */
+  managedSettledAt?: string;
+}
+
+/** What a caller passes to `claimManagedSession`. */
+export interface ManagedSessionClaim {
+  /** The server chat id (a UUID — validated by the caller). */
+  id: string;
+
+  /** The project the caller has proven they own. */
+  projectId: string;
+
+  /** The session the caller just created and wants to record. */
+  sessionId: string;
+
+  /** ISO timestamp for a row this call has to create. */
+  now: string;
 }
 
 export interface ChatIndex {
@@ -67,6 +99,38 @@ export interface ChatIndex {
 
   /** The project-delete reaper. Idempotent — a project with no indexed chats is not an error. */
   removeByProject(projectId: string): Promise<void>;
+
+  /** One row by chat id, or `null`. The caller checks `projectId` — ownership is not stored here. */
+  get(id: string): Promise<ChatIndexRow | null>;
+
+  /**
+   * COMPARE-AND-SET the chat's managed session (T4). Returns the row as it stands AFTER the attempt.
+   *
+   *   - No row yet (a brand-new chat — the transcript is saved at the END of a turn, the session is
+   *     needed at the START): a row is CREATED for `projectId` carrying `sessionId`. Insert-if-absent,
+   *     never an overwrite, so it cannot steal a row that appeared in the meantime.
+   *   - A row of THIS project with no session: `sessionId` is recorded.
+   *   - A row that already has a session, or that belongs to another project: NOTHING changes.
+   *
+   * So the FIRST writer wins and every later claimant reads the winner back. The caller compares the
+   * returned `managedSessionId` with its own to learn whether it won, and the returned `projectId` with
+   * its own to learn whether the chat is even theirs.
+   */
+  claimManagedSession(claim: ManagedSessionClaim): Promise<ChatIndexRow | null>;
+
+  /**
+   * Record T7's settlement cursor. Only on a row of `projectId` — returns `false` (writes nothing) when
+   * the row is missing or belongs to another project.
+   */
+  setManagedSettledAt(input: { id: string; projectId: string; settledAt: string }): Promise<boolean>;
+
+  /**
+   * COMPARE-AND-CLEAR the chat's managed session (managed-agents-engine T5 rebind): clears
+   * `managedSessionId` AND the settlement cursor, but only while the row of `projectId` still holds
+   * `sessionId`. Two racing requests that both found the same dead session cannot wipe a session the
+   * other one has already claimed in its place. Returns whether this call cleared it.
+   */
+  releaseManagedSession(input: { id: string; projectId: string; sessionId: string }): Promise<boolean>;
 }
 
 /*
@@ -82,8 +146,108 @@ export class FsChatIndex implements ChatIndex {
     this._table = new FsJsonTable<ChatIndexRow>(root ?? path.join(platformDataDir(), 'chats'));
   }
 
+  /**
+   * Every read-modify-write of one row goes through this, so the compare-and-set in
+   * `claimManagedSession` is atomic within the process (the FS index is local mode: one process).
+   */
+  private readonly _locks = new Map<string, Promise<unknown>>();
+
+  private _withRow<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this._locks.get(id) ?? Promise.resolve();
+    const next = previous.then(fn, fn);
+    const settled = next.catch(() => undefined);
+
+    this._locks.set(id, settled);
+    void settled.then(() => {
+      if (this._locks.get(id) === settled) {
+        this._locks.delete(id);
+      }
+    });
+
+    return next;
+  }
+
+  /**
+   * Mirrors the Supabase upsert exactly: the summary columns are replaced, the managed-session columns
+   * are NOT (the Postgres upsert never names them, so they survive), and a row that moves to another
+   * project loses them (migration 0026's trigger). Without the merge a plain `put` would erase the
+   * session pointer on every transcript save — local mode only, and silently.
+   */
   async upsert(row: ChatIndexRow): Promise<void> {
-    await this._table.put(row);
+    await this._withRow(row.id, async () => {
+      const existing = await this._table.get(row.id);
+      const { managedSessionId: _ignoredSession, managedSettledAt: _ignoredCursor, ...summary } = row;
+      const keep = existing && existing.projectId === row.projectId ? existing : undefined;
+
+      await this._table.put({
+        ...summary,
+        ...(keep?.managedSessionId ? { managedSessionId: keep.managedSessionId } : {}),
+        ...(keep?.managedSettledAt ? { managedSettledAt: keep.managedSettledAt } : {}),
+      });
+    });
+  }
+
+  async get(id: string): Promise<ChatIndexRow | null> {
+    return this._table.get(id);
+  }
+
+  async claimManagedSession(claim: ManagedSessionClaim): Promise<ChatIndexRow | null> {
+    return this._withRow(claim.id, async () => {
+      const existing = await this._table.get(claim.id);
+
+      if (!existing) {
+        const created: ChatIndexRow = {
+          id: claim.id,
+          projectId: claim.projectId,
+          messageCount: 0,
+          createdAt: claim.now,
+          updatedAt: claim.now,
+          managedSessionId: claim.sessionId,
+        };
+
+        await this._table.put(created);
+
+        return created;
+      }
+
+      if (existing.projectId !== claim.projectId || existing.managedSessionId) {
+        return existing;
+      }
+
+      const updated = { ...existing, managedSessionId: claim.sessionId };
+      await this._table.put(updated);
+
+      return updated;
+    });
+  }
+
+  async setManagedSettledAt(input: { id: string; projectId: string; settledAt: string }): Promise<boolean> {
+    return this._withRow(input.id, async () => {
+      const existing = await this._table.get(input.id);
+
+      if (!existing || existing.projectId !== input.projectId) {
+        return false;
+      }
+
+      await this._table.put({ ...existing, managedSettledAt: input.settledAt });
+
+      return true;
+    });
+  }
+
+  async releaseManagedSession(input: { id: string; projectId: string; sessionId: string }): Promise<boolean> {
+    return this._withRow(input.id, async () => {
+      const existing = await this._table.get(input.id);
+
+      if (!existing || existing.projectId !== input.projectId || existing.managedSessionId !== input.sessionId) {
+        return false;
+      }
+
+      const { managedSessionId: _session, managedSettledAt: _cursor, ...rest } = existing;
+      await this._table.put(rest);
+
+      return true;
+    });
   }
 
   async listByProject(projectId: string): Promise<ChatIndexRow[]> {
@@ -99,7 +263,7 @@ export class FsChatIndex implements ChatIndex {
   }
 
   async remove(id: string): Promise<void> {
-    await this._table.remove(id);
+    await this._withRow(id, () => this._table.remove(id));
   }
 
   async removeByProject(projectId: string): Promise<void> {
@@ -134,9 +298,17 @@ interface ChatRow {
   message_count: number;
   created_at: string;
   updated_at: string;
+  managed_session_id?: string | null;
+  managed_settled_at?: string | null;
 }
 
-function toRow(row: ChatIndexRow): ChatRow {
+/**
+ * 🔴 The managed-session columns are deliberately ABSENT here. `upsert` sends exactly these keys, and
+ * PostgREST's upsert updates exactly the keys it is sent — so leaving them out is what makes every
+ * transcript save preserve the session pointer. Adding them (even as `null`) would erase it on every
+ * save. They are written only by `claimManagedSession` / `setManagedSettledAt`.
+ */
+function toRow(row: ChatIndexRow): Omit<ChatRow, 'managed_session_id' | 'managed_settled_at'> {
   return {
     id: row.id,
     project_id: row.projectId,
@@ -155,6 +327,8 @@ function fromRow(row: ChatRow): ChatIndexRow {
     messageCount: row.message_count,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(row.managed_session_id ? { managedSessionId: row.managed_session_id } : {}),
+    ...(row.managed_settled_at ? { managedSettledAt: row.managed_settled_at } : {}),
   };
 }
 
@@ -218,6 +392,94 @@ export class SupabaseChatIndex implements ChatIndex {
     if (error) {
       throw new Error(`Failed to clear the chat index for ${projectId}: ${error.message}`);
     }
+  }
+
+  async get(id: string): Promise<ChatIndexRow | null> {
+    const db = await this._db();
+    const { data, error } = await db.from('chats').select().eq('id', id).maybeSingle();
+
+    if (error) {
+      throw new Error(`Failed to read chat ${id}: ${error.message}`);
+    }
+
+    return data ? fromRow(data as ChatRow) : null;
+  }
+
+  /**
+   * Two statements, each atomic on its own, and the row read back decides who won:
+   *
+   *   1. INSERT … ON CONFLICT (id) DO NOTHING — creates the row for a brand-new chat, carrying the
+   *      session; does nothing at all if any row with this id exists (it can never re-home a row).
+   *   2. UPDATE … WHERE id AND project_id AND managed_session_id IS NULL — records the session on an
+   *      existing row of this project that has none yet. A concurrent claimant that got there first
+   *      makes this match nothing.
+   */
+  async claimManagedSession(claim: ManagedSessionClaim): Promise<ChatIndexRow | null> {
+    const db = await this._db();
+
+    const inserted = await db.from('chats').upsert(
+      {
+        ...toRow({
+          id: claim.id,
+          projectId: claim.projectId,
+          messageCount: 0,
+          createdAt: claim.now,
+          updatedAt: claim.now,
+        }),
+        managed_session_id: claim.sessionId,
+      },
+      { onConflict: 'id', ignoreDuplicates: true },
+    );
+
+    if (inserted.error) {
+      throw new Error(`Failed to record the managed session for chat ${claim.id}: ${inserted.error.message}`);
+    }
+
+    const updated = await db
+      .from('chats')
+      .update({ managed_session_id: claim.sessionId })
+      .eq('id', claim.id)
+      .eq('project_id', claim.projectId)
+      .is('managed_session_id', null);
+
+    if (updated.error) {
+      throw new Error(`Failed to record the managed session for chat ${claim.id}: ${updated.error.message}`);
+    }
+
+    return this.get(claim.id);
+  }
+
+  async setManagedSettledAt(input: { id: string; projectId: string; settledAt: string }): Promise<boolean> {
+    const db = await this._db();
+    const { data, error } = await db
+      .from('chats')
+      .update({ managed_settled_at: input.settledAt })
+      .eq('id', input.id)
+      .eq('project_id', input.projectId)
+      .select('id');
+
+    if (error) {
+      throw new Error(`Failed to record the settlement cursor for chat ${input.id}: ${error.message}`);
+    }
+
+    return (data ?? []).length > 0;
+  }
+
+  async releaseManagedSession(input: { id: string; projectId: string; sessionId: string }): Promise<boolean> {
+    const db = await this._db();
+    const { data, error } = await db
+      .from('chats')
+      .update({ managed_session_id: null, managed_settled_at: null })
+      .eq('id', input.id)
+      .eq('project_id', input.projectId)
+      .eq('managed_session_id', input.sessionId)
+      .select('id');
+
+    if (error) {
+      throw new Error(`Failed to release the managed session of chat ${input.id}: ${error.message}`);
+    }
+
+    return (data ?? []).length > 0;
   }
 }
 
