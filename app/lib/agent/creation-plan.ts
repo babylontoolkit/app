@@ -769,3 +769,95 @@ export function describeCreationPlanOutcome(plan: CreationPlan): CreationPlanOut
 
   return { state: 'finished', headline: '', detail: '' };
 }
+
+/*
+ * ================================================================================================
+ * THE MANAGED ENGINE'S FIRST BUILD — one turn, every phase (`_specs/managed-agents-engine_plan.md` T9).
+ *
+ * The phases above exist because ONE legacy request could not hold the whole build (a 64k output
+ * ceiling, see this module's header). A Managed Agents session has no per-request ceiling — Anthropic
+ * runs the loop — so the managed engine runs the whole plan as ONE turn, with the phase list as
+ * guidance in its first message. The phase TABLE stays the one source: the managed guidance is built
+ * from the same labels and tasks, so the two engines cannot disagree about what a phase is.
+ * ================================================================================================
+ */
+
+/**
+ * The phases a managed first build owes, in order: what the project row's plan has not run yet, or the
+ * default plan when the build has not started. Read from the ROW (`CreationHandoff.plan`), never from
+ * the request's `creationPhase` — a stale client posting a later phase must not choose which steps run.
+ */
+export function managedBuildPhases(plan: CreationPlan | undefined | null): CreationPhaseId[] {
+  if (!plan) {
+    return [...DEFAULT_CREATION_PHASES];
+  }
+
+  if (isCreationPlanComplete(plan)) {
+    return [];
+  }
+
+  return plan.phases.slice(plan.next).filter((id) => !RETIRED_PHASES.includes(id));
+}
+
+export const MANAGED_BUILD_OPEN = '[First build — do ALL of these steps in THIS turn, in order]';
+export const MANAGED_BUILD_CLOSE = '[End of first build steps]';
+
+/**
+ * The guidance block appended to a managed first build's message: every owed phase, in order, with its
+ * task. Empty for no phases. Pure.
+ */
+export function managedBuildGuidance(phases: readonly CreationPhaseId[]): string {
+  if (phases.length === 0) {
+    return '';
+  }
+
+  const steps = phases
+    .map((id, n) => {
+      const { label, task } = phaseById(id);
+
+      return `## Step ${n + 1} — ${label}\n${task}`;
+    })
+    .join('\n\n');
+
+  return (
+    `${MANAGED_BUILD_OPEN}\n` +
+    'This is the project’s FIRST BUILD. The starter project already exists and is installed — do not ' +
+    're-create it. Run the steps below one after another in this single turn; do not stop between them ' +
+    'or ask for permission to continue. If part of a step is already done (an earlier attempt was ' +
+    'interrupted), check the project and carry on from where it stands.\n\n' +
+    `${steps}\n\n` +
+    'The build is finished only when every step is done and `check_game` (with the GameMode’s class ' +
+    'name) passes after your last change. Keep your todo list current across all the steps.\n' +
+    MANAGED_BUILD_CLOSE
+  );
+}
+
+/**
+ * Mark the phases a managed first build reported complete (`agentMeta.creationPhasesCompleted`) as done,
+ * in plan order, from `plan.next`. Stops at the first phase the turn did not report, so a plan can never
+ * skip a step it still owes. Never moves backwards. Pure.
+ */
+export function advanceCreationPlanTo(
+  plan: CreationPlan,
+  completed: readonly CreationPhaseId[],
+  record: Omit<CreationPhaseRecord, 'id'>,
+): CreationPlan {
+  let next = plan;
+
+  while (!isCreationPlanComplete(next) && completed.includes(next.phases[next.next])) {
+    next = advanceCreationPlan(next, { ...record, id: next.phases[next.next] });
+  }
+
+  return next;
+}
+
+/** `agentMeta.creationPhasesCompleted`, validated — `null` when absent or malformed (the legacy engine). */
+export function parseCreationPhasesCompleted(value: unknown): CreationPhaseId[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const ids = value.map(parseCreationPhaseId).filter((id): id is CreationPhaseId => id !== null);
+
+  return ids.length === value.length ? ids : null;
+}

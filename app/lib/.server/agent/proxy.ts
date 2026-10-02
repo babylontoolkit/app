@@ -80,7 +80,12 @@ import { creditsForRawCost, getBillingConfigSafe, getModelTiers, rawCostUsd } fr
 import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
 import { activeAssetLibrary, ensureAssetLibraryForContext } from '~/lib/.server/assets/library-store';
 import { assetLibraryIndexForRequest } from '~/lib/.server/assets/library-manifest';
-import { creationPhaseNote, parseCreationPhaseId, phaseOwesFiles } from '~/lib/agent/creation-plan';
+import {
+  creationPhaseNote,
+  parseCreationPhaseId,
+  phaseOwesFiles,
+  type CreationPhaseId,
+} from '~/lib/agent/creation-plan';
 import { starterGameTypeFrom, starterGameTypeNote } from '~/lib/agent/starter-note';
 import { findRegistryEntry } from '~/lib/registry/entries';
 import { toolkitSystemsNoteForRequest } from '~/lib/agent/toolkit-systems';
@@ -610,6 +615,26 @@ export interface AgentGeneration {
 
   /** Unity Bridge consent requests and job status (§4.17) — forwarded to the client as data parts. */
   onBridgeEvent(listener: (event: BridgeUiEvent) => void): void;
+
+  /**
+   * Which engine ran this turn (`_specs/managed-agents-engine_plan.md` T9/T11). Absent = the legacy
+   * engine, which never sets it — the route writes `'legacy'` for it on `agentMeta`.
+   */
+  engine?: 'managed' | 'legacy';
+
+  /**
+   * Managed first build (T9): the creation phases this ONE turn completed, resolved when the turn ends —
+   * `undefined` for any other turn, and always absent on the legacy engine (it runs a phase per request).
+   */
+  creationPhasesCompleted?: Promise<CreationPhaseId[] | undefined>;
+
+  /**
+   * Managed engine (T10): the id the assistant message of this turn is STORED under, announced as soon
+   * as it is known so the route can hand it to the client (`start_step`) — then the browser's copy and
+   * the server-written transcript name the reply alike, and a resumed turn replaces its partial reply
+   * instead of adding a second one. Never set by the legacy engine.
+   */
+  onAssistantMessageId?(listener: (messageId: string) => void): void;
 }
 
 /** Re-exported so callers keep importing it from the proxy; the math lives in `step-usage`. */

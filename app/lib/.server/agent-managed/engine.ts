@@ -22,6 +22,8 @@
  * closed tab. Only a FAILED turn that wrote no files refunds (`shouldRefundManagedTurn`).
  */
 import type { Message } from 'ai';
+import { managedBuildPhases, type CreationPhaseId, type CreationPlan } from '~/lib/agent/creation-plan';
+import { userTypedText } from '~/lib/chat/message-envelope';
 import { checkCreditGate } from '~/lib/.server/billing/gate';
 import { getBillingConfigSafe } from '~/lib/.server/billing/rates';
 import { envNumber, NotConfiguredError } from '~/lib/.server/env';
@@ -39,6 +41,12 @@ import type { PreviewToolCallEvent } from '~/lib/.server/agent/preview-tools';
 import { EMPTY_RESPONSE_ERROR } from '~/lib/.server/agent/retry-policy';
 import { resolveToolLoopConfig, resolveTurnCeiling } from '~/lib/.server/agent/tool-loop';
 import { getGenerationLog } from '~/lib/.server/agent/usage';
+import type { MediaTaskEvent } from '~/lib/.server/agent/media-tools';
+import { managedAssistantId, planManagedTranscript } from '~/lib/.server/agent/transcript-recovery';
+import { buildTurnAnnotations } from '~/lib/.server/agent/turn-annotations';
+import { resolveMediaProvider } from '~/lib/.server/media/provider';
+import { getChat, putChat } from '~/lib/.server/projects/message-store';
+import { getObjectStore } from '~/lib/.server/storage';
 import {
   completeTodosOnDone,
   doneGateWriteFacts,
@@ -102,6 +110,12 @@ export interface ManagedTurnRequest {
   /** Derived by the route from the project ROW (`projectOwesBuild`), never the body. */
   owesBuild?: boolean;
 
+  /**
+   * The project ROW's creation plan (`CreationHandoff.plan`) — which phases a first build still owes
+   * (T9, `managedBuildPhases`). The body's `creationPhase` is deliberately NOT read on this engine.
+   */
+  creationPlan?: CreationPlan;
+
   /** The project's starter (`Project.templateId`) — the row, never the body. */
   starterId?: string;
 
@@ -138,6 +152,9 @@ export function managedOutcomeFacts(input: {
   isFirstBuildTurn: boolean;
   overlay: WorkspaceOverlay;
   lastCheck: { ok: boolean; afterWriteSeq: number } | null;
+
+  /** The request detached because the browser stopped answering (a relay TIMEOUT), not a closed tab. */
+  browserTimedOut?: boolean;
 }): TurnOutcomeFacts {
   const wroteFiles = input.overlay.writes.size > 0;
   const gate = doneGateWriteFacts(input.overlay, false);
@@ -159,7 +176,14 @@ export function managedOutcomeFacts(input: {
     completionPassWroteFiles: false,
     wroteFiles,
     aborted: input.end === 'detached',
-    stopReason: input.end === 'budget' ? 'budget' : input.end === 'detached' ? 'aborted' : 'none',
+    stopReason:
+      input.end === 'budget'
+        ? 'budget'
+        : input.end === 'detached'
+          ? input.browserTimedOut
+            ? 'browser'
+            : 'aborted'
+          : 'none',
     lastCheckOk,
   };
 }
@@ -215,6 +239,12 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     owesBuild: request.owesBuild === true,
   });
   const statusKind = statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: false });
+
+  /*
+   * T9: a first build is ONE managed turn that runs every owed phase, in order (design → game → front
+   * end), listed as guidance in its message — not three requests. Read from the ROW's plan.
+   */
+  const buildPhases: CreationPhaseId[] = isFirstBuildTurn && !isRepair ? managedBuildPhases(request.creationPlan) : [];
 
   /*
    * The turn's credit ceiling as a session budget (D13): credits → USD list cost through the inverse of
@@ -320,6 +350,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         errors: request.errors,
         files: request.files,
         newSession: sessionRef.created,
+        buildPhases,
       });
 
   if (!request.resume && !userMessage) {
@@ -342,6 +373,14 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const workspaceListeners: Array<(event: WorkspaceToolCallEvent) => void> = [];
   const previewListeners: Array<(event: PreviewToolCallEvent) => void> = [];
   const todoListeners: Array<(items: TodoItem[]) => void> = [];
+  const mediaListeners: Array<(event: MediaTaskEvent) => void> = [];
+
+  /*
+   * T8: the media tools, answered by the SERVER exactly as the legacy engine answers them (debit → task
+   * → path); `media-task` reaches the route through `onMediaTask` and the browser writes the bytes.
+   * `resolveMediaProvider` never throws — no provider means "not available" answers, never a failed turn.
+   */
+  const mediaProvider = resolveMediaProvider(request.context);
 
   const overlay = new WorkspaceOverlay(request.files ?? {});
   const wsState = newWorkspaceTurnState();
@@ -352,9 +391,17 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
    * has finished — the relay's "generation ended" cancellation is about our request, never the project.
    */
   const turnEnded = new AbortController();
-  const dispatchSignal = request.abortSignal
-    ? AbortSignal.any([request.abortSignal, turnEnded.signal])
-    : turnEnded.signal;
+
+  /*
+   * The browser stopped answering (a relay TIMEOUT on one of its calls): treated exactly like a closed
+   * tab — the turn DETACHES, the call stays unanswered at `requires_action`, and a live tab re-attaches
+   * through the resume path (its outcome says `resume`). Never forwarded to the model as a failure.
+   */
+  const browserGone = new AbortController();
+  const turnSignal = request.abortSignal
+    ? AbortSignal.any([request.abortSignal, browserGone.signal])
+    : browserGone.signal;
+  const dispatchSignal = AbortSignal.any([turnSignal, turnEnded.signal]);
 
   const dispatcher = createManagedDispatcher({
     generationId,
@@ -366,12 +413,37 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     emitWorkspace: (event) => workspaceListeners.forEach((listener) => listener(event)),
     emitPreview: (event) => previewListeners.forEach((listener) => listener(event)),
     emitTodos,
+    onBrowserTimeout: (call) => {
+      if (!browserGone.signal.aborted) {
+        logger.warn(
+          `Managed turn ${generationId}: the browser did not answer ${call.name} (${call.id}) in time — detaching; ` +
+            'the session waits for a tab to re-attach',
+        );
+        browserGone.abort('browser-timeout');
+      }
+    },
+    media: mediaProvider
+      ? {
+          userId,
+          projectId,
+          provider: mediaProvider,
+          objectStore: getObjectStore(request.context),
+          context: request.context,
+          emit: (event) => mediaListeners.forEach((listener) => listener(event)),
+        }
+      : null,
   });
 
   const usage = deferred<GenerationUsage>();
   const outcome = deferred<TurnOutcomeFacts>();
   const settlementPromise = deferred<AgentSettlement | null>();
   const workspaceSummary = deferred<AgentWorkspaceSummary | null>();
+  const phasesCompleted = deferred<CreationPhaseId[] | undefined>();
+
+  /* This turn's identity across requests (the session's `user.message` event id) and its narration. */
+  let turnId: string | undefined;
+  let narration = '';
+  const assistantIdListeners: Array<(messageId: string) => void> = [];
 
   async function* run(): AsyncGenerator<AgentChunk> {
     let result: ManagedTurnResult | null = null;
@@ -379,10 +451,24 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     let failed = false;
 
     try {
-      const turn = runManagedTurn({ client, sessionId, userMessage, dispatcher, abortSignal: request.abortSignal });
+      const turn = runManagedTurn({
+        client,
+        sessionId,
+        userMessage,
+        dispatcher,
+        abortSignal: turnSignal,
+        onTurnId: (id) => {
+          turnId = id;
+          assistantIdListeners.forEach((listener) => listener(managedAssistantId(id)));
+        },
+      });
       let step = await turn.next();
 
       while (!step.done) {
+        if (step.value.type === 'text') {
+          narration += step.value.value;
+        }
+
         yield step.value;
         step = await turn.next();
       }
@@ -402,12 +488,18 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         }
 
         /* A finished, verified turn leaves no unchecked items (tool-loop T9, owner rule). */
-        const facts = managedOutcomeFacts({ end, isFirstBuildTurn, overlay, lastCheck: wsState.lastCheck });
+        const facts = managedOutcomeFacts({
+          end,
+          isFirstBuildTurn,
+          overlay,
+          lastCheck: wsState.lastCheck,
+          browserTimedOut: browserGone.signal.aborted && !request.abortSignal?.aborted,
+        });
 
         completeTodosOnDone(wsState, facts.lastCheckOk !== false, emitTodos);
       }
     } catch (error) {
-      if (request.abortSignal?.aborted) {
+      if (turnSignal.aborted) {
         end = 'detached';
         failed = false;
       } else {
@@ -421,10 +513,24 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
       turnEnded.abort();
       cancelGenerationToolCalls(generationId);
 
-      const facts = managedOutcomeFacts({ end, isFirstBuildTurn, overlay, lastCheck: wsState.lastCheck });
+      const facts = managedOutcomeFacts({
+        end,
+        isFirstBuildTurn,
+        overlay,
+        lastCheck: wsState.lastCheck,
+        browserTimedOut: browserGone.signal.aborted && !request.abortSignal?.aborted,
+      });
 
       outcome.resolve(facts);
-      workspaceSummary.resolve(summarizeWorkspace(overlay, wsState));
+
+      const summary = summarizeWorkspace(overlay, wsState);
+
+      workspaceSummary.resolve(summary);
+
+      /* T9: a first build that FINISHED its turn (verified or not — never failed, paused or detached) did every phase. */
+      const completedPhases = !failed && end === 'end_turn' && buildPhases.length > 0 ? buildPhases : undefined;
+
+      phasesCompleted.resolve(completedPhases);
 
       const settled = await settleManagedTurn({
         client,
@@ -455,18 +561,17 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
       }
 
       const charged = settled.settlement && !refund ? settled.settlement.creditsCharged : 0;
+      const agentSettlement: AgentSettlement | null = settled.settlement
+        ? {
+            creditsCharged: charged,
+            balanceAfter: refund
+              ? settled.settlement.balanceAfter + settled.settlement.creditsCharged
+              : settled.settlement.balanceAfter,
+            savings: null,
+          }
+        : null;
 
-      settlementPromise.resolve(
-        settled.settlement
-          ? {
-              creditsCharged: charged,
-              balanceAfter: refund
-                ? settled.settlement.balanceAfter + settled.settlement.creditsCharged
-                : settled.settlement.balanceAfter,
-              savings: null,
-            }
-          : null,
-      );
+      settlementPromise.resolve(agentSettlement);
 
       try {
         await getGenerationLog(request.context).record({
@@ -495,10 +600,36 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
       } catch (error) {
         logger.warn(`Could not record managed generation ${generationId}: ${(error as Error)?.message}`);
       }
+
+      /*
+       * T10: the turn's record, written by the SERVER at the end of every request — a managed turn can
+       * finish with nobody listening (a closed tab), and the browser used to be the only writer. Never
+       * throws (`writeManagedTranscript`).
+       */
+      await writeManagedTranscript({
+        generation,
+        projectId,
+        chatId,
+        turnId,
+        narration,
+        didWork: overlay.writes.size > 0 || (result?.toolCallsAnswered ?? 0) > 0,
+        messages: request.messages,
+        context: request.context,
+        facts: {
+          usage: settled.usage,
+          outcome: facts,
+          workspaceSummary: summary,
+          settlement: agentSettlement,
+          creationPhasesCompleted: completedPhases,
+        },
+        fallbackTurnId: generationId,
+      });
     }
   }
 
-  return {
+  const generation: AgentGeneration = {
+    engine: 'managed',
+    creationPhasesCompleted: phasesCompleted.promise,
     textStream: run(),
     generationId,
     promptVersionId: agent.activeVersionId ?? '',
@@ -525,7 +656,79 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     onPreviewToolCall: (listener) => previewListeners.push(listener),
     onWorkspaceToolCall: (listener) => workspaceListeners.push(listener),
     onAgentTodos: (listener) => todoListeners.push(listener),
-    onMediaTask: () => undefined,
+    onMediaTask: (listener) => mediaListeners.push(listener),
+    onAssistantMessageId: (listener) => assistantIdListeners.push(listener),
     onBridgeEvent: () => undefined,
   };
+
+  return generation;
+}
+
+/**
+ * Store this request's view of the turn in the chat's transcript (T10, `planManagedTranscript`): the
+ * agent's narration only — never a tool input, never a file body — with the same annotations the route
+ * streams. Idempotent per TURN: the reply's id comes from the session's `user.message` event id, so a
+ * resume replaces the detached request's partial reply instead of adding a second one. Never throws.
+ */
+function firstUserTitle(messages: Message[]): string | undefined {
+  const first = messages.find((m) => m.role === 'user');
+  const text = first
+    ? userTypedText(String(first.content ?? ''))
+        .trim()
+        .replace(/\s+/g, ' ')
+    : '';
+
+  return text ? text.slice(0, 80) : undefined;
+}
+
+async function writeManagedTranscript(input: {
+  generation: AgentGeneration;
+  projectId: string;
+  chatId: string;
+  turnId?: string;
+  fallbackTurnId: string;
+  narration: string;
+  didWork: boolean;
+  messages: Message[];
+  context?: unknown;
+  facts: Parameters<typeof buildTurnAnnotations>[1];
+}): Promise<void> {
+  try {
+    const annotations = buildTurnAnnotations(input.generation, input.facts);
+    const lastUser = [...input.messages].reverse().find((m) => m.role === 'user');
+    const existing = await getChat(input.projectId, input.chatId, input.context);
+
+    const plan = planManagedTranscript({
+      serverChatId: input.chatId,
+      existing,
+      requestMessages: input.messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.role === 'user' ? userTypedText(String(m.content ?? '')) : String(m.content ?? ''),
+      })),
+      userMessage: lastUser ? { id: lastUser.id, content: userTypedText(String(lastUser.content ?? '')) } : null,
+      assistant: {
+        id: managedAssistantId(input.turnId ?? input.fallbackTurnId),
+        role: 'assistant',
+        content: input.narration,
+        annotations: [
+          annotations.usage,
+          annotations.agentMeta,
+          ...(annotations.agentWorkspace ? [annotations.agentWorkspace] : []),
+          annotations.credits,
+        ],
+      },
+      didWork: input.didWork,
+
+      /* Only used when nothing is stored yet; the client renames it as it always has. */
+      title: firstUserTitle(input.messages),
+      now: new Date().toISOString(),
+    });
+
+    if (plan) {
+      await putChat(input.projectId, plan, input.context);
+    }
+  } catch (error) {
+    logger.error(`Could not store the transcript of ${input.generation.generationId}: ${(error as Error)?.message}`);
+  }
 }

@@ -1005,6 +1005,20 @@ const routeRaw = readFileSync(join(REPO, 'app/routes/api.agent.ts'), 'utf-8');
  */
 const route = routeRaw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
+/*
+ * The four end-of-turn annotations are BUILT in `turn-annotations.ts` (managed-agents-engine T10: the
+ * managed engine's server-written transcript carries the same ones) and the route only writes them —
+ * so the `agentMeta` scan reads the builder, and a separate assertion pins that the route builds them
+ * from the GENERATION, the only thing the builder is handed.
+ */
+const annotationsRaw = readFileSync(join(REPO, 'app/lib/.server/agent/turn-annotations.ts'), 'utf-8');
+const annotations = annotationsRaw
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^\s*\/\/.*$/gm, '')
+
+  /* From the builder's body on — the type declarations above it name every annotation too. */
+  .split('export function buildTurnAnnotations')[1];
+
 /** The `value: { … }` of one `writeMessageAnnotation`, located by its `type` and brace-matched. */
 function annotationValue(source: string, type: string): string {
   const at = source.indexOf(`'${type}'`);
@@ -1041,8 +1055,8 @@ describe('CONTROLS — the route scan can still see the code it judges', () => {
 
   it('strips comments, so the prose describing the tier fields is not the tier fields', () => {
     // Each of these sentences names a token an assertion below depends on. None may survive the strip.
-    expect(routeRaw).toContain('never the one that was requested');
-    expect(route).not.toContain('never the one that was requested');
+    expect(annotationsRaw).toContain('never the one that was requested');
+    expect(annotations).not.toContain('never the one that was requested');
 
     expect(routeRaw).toContain('still accepted as an alias');
     expect(route).not.toContain('still accepted as an alias');
@@ -1054,7 +1068,8 @@ describe('CONTROLS — the route scan can still see the code it judges', () => {
 
   it('extracts real, non-empty regions for every scan below', () => {
     expect(callArgs(route, 'runAgentGeneration')).toContain('messages:');
-    expect(annotationValue(route, 'agentMeta')).toContain('generationId:');
+    expect(annotationValue(annotations, 'agentMeta')).toContain('generationId:');
+    expect(route).toMatch(/buildTurnAnnotations\(generation,/);
   });
 });
 
@@ -1093,7 +1108,7 @@ describe('the request body accepts an UNTRUSTED tier, and keeps the legacy alias
 
 describe('the forward and the annotation read from the right side of the ladder', () => {
   const forwarded = callArgs(route, 'runAgentGeneration');
-  const meta = annotationValue(route, 'agentMeta');
+  const meta = annotationValue(annotations, 'agentMeta');
 
   it('forwards both the tier and the legacy boolean, from the body', () => {
     expect(forwarded).toMatch(/tier:\s*body\.tier\b/);

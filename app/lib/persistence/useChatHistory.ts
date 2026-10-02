@@ -1446,6 +1446,14 @@ export function useChatHistory() {
 
         const transcript = markAsTranscript(serverMessages);
         setInitialMessages(transcript);
+
+        /*
+         * The save copy starts as what was loaded. `storeMessageHistory` (which normally fills it) only
+         * runs once the list GROWS past what was loaded — and a managed resume REPLACES the last reply
+         * rather than adding one, so it never grew, and the end-of-turn save uploaded ONLY the final
+         * message over the whole stored conversation (found live, managed-agents-engine T10).
+         */
+        latestMessages.current = transcript.filter((m) => !m.annotations?.includes('no-store'));
         restoredTranscript = transcript;
 
         const firstUserMessage = transcript.find((message) => message.role === 'user');
@@ -1781,6 +1789,11 @@ ${value.content}
             }
 
             setInitialMessages(filteredMessages);
+
+            // The save copy starts as what was loaded — see the server-restore branch above.
+            latestMessages.current = [...archivedMessages, ...filteredMessages].filter(
+              (m) => !m.annotations?.includes('no-store'),
+            );
 
             // Ref and state together, always — `storeMessageHistory` reads the ref (see `urlIdRef`).
             urlIdRef.current = storedMessages.urlId;

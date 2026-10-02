@@ -82,13 +82,13 @@ The owner's prompt, *"Make me a mario kart racer clone complete with drifting me
 - [x] **T7 — Billing.** Per user turn: gate before send; settle from summed per-request usage at `status_idle` (`end_turn`); session-hour rate from config; credit ceiling → the session budget (D13) and a paused outcome with Keep building; `ledger-sql.spec.ts` and `billing.spec.ts` cases for each.
   **Acceptance:** a turn's credits match `ceil(raw / CREDIT_UNIT_COST_USD × CREDIT_MARGIN)` from the reported usage; an error before any model request refunds; a ceiling stop never refunds.
 
-- [ ] **T8 — Media and sound tools.** `generate_image` / `generate_video` / `generate_sound` become custom tools the SERVER answers (debit → task → path), exactly as today's `media/service.ts`; the browser still writes the bytes.
+- [x] **T8 — Media and sound tools.** `generate_image` / `generate_video` / `generate_sound` become custom tools the SERVER answers (debit → task → path), exactly as today's `media/service.ts`; the browser still writes the bytes.
   **Acceptance:** the media debit and refund tests pass against the managed path.
 
-- [ ] **T9 — First-build phases on the new engine.** Creation still clones the starter with no model call; the first build turn is one managed turn. The phase list (design → game → front end) becomes guidance in the first message rather than three separate requests, since the session no longer has an output ceiling per request.
+- [x] **T9 — First-build phases on the new engine.** Creation still clones the starter with no model call; the first build turn is one managed turn. The phase list (design → game → front end) becomes guidance in the first message rather than three separate requests, since the session no longer has an output ceiling per request.
   **Acceptance:** New Project → Build my game produces a playable game on the managed engine; the handoff card and celebration still work.
 
-- [ ] **T10 — Transcript and history.** The chat transcript saved for the sidebar and reload is built from session events. Our history compaction and file-context assembly are skipped on this engine.
+- [x] **T10 — Transcript and history.** The chat transcript saved for the sidebar and reload is built from session events. Our history compaction and file-context assembly are skipped on this engine.
   **Acceptance:** reload and a second device show the same conversation; no file bodies stored in the transcript.
 
 - [ ] **T11 — Eval harness.** `scripts/engine-eval.mjs` runs a fixed prompt set (Mario Kart, a platformer, an edit turn, a fix turn) N times per engine and reports success rate, time and cost (modelled on Convex Chef's `test-kitchen`).

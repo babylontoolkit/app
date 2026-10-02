@@ -21,6 +21,12 @@ import type { TurnIdentity } from './turn-identity';
 
 export type AgentEngineHint = 'managed' | 'legacy';
 
+/**
+ * The id prefix of a managed turn's reply as the SERVER stores it (T10, `managedAssistantId` in
+ * `transcript-recovery.ts`). Client-safe, so both halves read one constant.
+ */
+export const MANAGED_ASSISTANT_ID_PREFIX = 'managed-';
+
 /** The Stop button's interrupt. Never throws, never awaited by the caller. */
 export function requestManagedInterrupt(
   engine: AgentEngineHint,
@@ -87,8 +93,19 @@ export const RESUME_PLACEHOLDER = 'Continue the build that was in progress.';
 export function resumeAction(
   lastRole: string | undefined,
   userText: string | undefined,
+  lastId?: string,
 ): { kind: 'reload' } | { kind: 'append'; content: string } {
-  return lastRole === 'user' ? { kind: 'reload' } : { kind: 'append', content: userText || RESUME_PLACEHOLDER };
+  /*
+   * T10: the server stores a managed turn's reply at the end of EVERY request — including the one a
+   * closed tab detached. So a pending turn's saved transcript can end with THAT turn's partial reply
+   * (its id carries `MANAGED_ASSISTANT_ID_PREFIX`). Reload drops it and re-attaches; the server then
+   * replaces it with the whole reply under the same id. Appending would show the turn twice.
+   */
+  if (lastRole === 'user' || (lastRole === 'assistant' && lastId?.startsWith(MANAGED_ASSISTANT_ID_PREFIX))) {
+    return { kind: 'reload' };
+  }
+
+  return { kind: 'append', content: userText || RESUME_PLACEHOLDER };
 }
 
 /**

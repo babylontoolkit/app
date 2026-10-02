@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { advanceCreationPlan, newCreationPlan, type CreationPlan } from '~/lib/agent/creation-plan';
 import { newProjectModeStore } from '~/lib/stores/new-project-mode';
+import { sessionStore } from '~/lib/stores/session';
 
 /*
  * `useChatHistory` reaches the workbench, which boots a sandbox at module scope. Only `projectId` is
@@ -148,6 +149,28 @@ describe('CreationPlanCard', () => {
  * Asserted over the plan/no-plan pair rather than by rendering `BaseChat`, which would need the whole
  * chat harness to say something this simple.
  */
+describe('the caption follows the ENGINE (managed-agents-engine T9)', () => {
+  afterEach(() => sessionStore.set({ ...sessionStore.get(), agentEngine: 'legacy' }));
+
+  it('LEGACY: byte-identical — the step, then the per-response reason', () => {
+    sessionStore.set({ ...sessionStore.get(), agentEngine: 'legacy' });
+    mount(planAt(1));
+
+    expect(
+      screen.getByText('Step 2 — your game is built in steps so each one fits in a single response.'),
+    ).toBeTruthy();
+  });
+
+  it('MANAGED: one go, in order — no step counter, no per-response reason', () => {
+    sessionStore.set({ ...sessionStore.get(), agentEngine: 'managed' });
+
+    const { container } = mount(planAt(0));
+
+    expect(screen.getByText('Your game is built in one go: design, then the game, then the front end.')).toBeTruthy();
+    expect(container.textContent).not.toContain('single response');
+  });
+});
+
 describe('CreationHandoffCard and CreationPlanCard never stack', () => {
   it('a mode with NO plan shows the handoff card and not the plan card', async () => {
     const { CreationHandoffCard } = await import('./CreationHandoffCard');

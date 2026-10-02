@@ -7,6 +7,12 @@ import { describe, expect, it } from 'vitest';
 import { CREATION_BRIEF_MARKER } from '~/types/creation';
 import {
   CREATION_PHASES,
+  MANAGED_BUILD_CLOSE,
+  MANAGED_BUILD_OPEN,
+  advanceCreationPlanTo,
+  managedBuildGuidance,
+  managedBuildPhases,
+  parseCreationPhasesCompleted,
   CREATION_PLAN_VERSION,
   DEFAULT_CREATION_PHASES,
   MAX_CREATION_PHASES,
@@ -871,5 +877,61 @@ describe('builds generate sound effects, not music', () => {
   it('tells the game step to wire the sounds up, naming the reference it needs', () => {
     expect(game.task).toMatch(/Audio list/);
     expect(game.task).toContain('audio-source');
+  });
+});
+
+describe('the managed engine’s first build — one turn, every phase (managed-agents T9)', () => {
+  it('managedBuildPhases: the default plan when the build has not started, the row plan’s REMAINING phases after', () => {
+    expect(managedBuildPhases(undefined)).toEqual(['design', 'game', 'frontend']);
+
+    const started = { ...newCreationPlan(), next: 1 };
+
+    expect(managedBuildPhases(started)).toEqual(['game', 'frontend']);
+    expect(managedBuildPhases({ ...newCreationPlan(), next: 3 })).toEqual([]);
+  });
+
+  it('managedBuildGuidance lists every phase IN ORDER, with its label and task, from the one phase table', () => {
+    const text = managedBuildGuidance(['design', 'game', 'frontend']);
+
+    expect(text.startsWith(MANAGED_BUILD_OPEN)).toBe(true);
+    expect(text.endsWith(MANAGED_BUILD_CLOSE)).toBe(true);
+
+    const at = (id: 'design' | 'game' | 'frontend') => text.indexOf(phaseById(id).task);
+
+    expect(at('design')).toBeGreaterThan(0);
+    expect(at('design')).toBeLessThan(at('game'));
+    expect(at('game')).toBeLessThan(at('frontend'));
+    expect(text).toContain('## Step 1 — Art direction');
+    expect(text).toContain('## Step 3 — Front end');
+    expect(text).toContain('check_game');
+    expect(managedBuildGuidance([])).toBe('');
+  });
+
+  it('advanceCreationPlanTo completes the plan in ONE step when every remaining phase is reported', () => {
+    const record = { generationId: 'gen_1', at: '2026-10-01T00:00:00Z', state: 'finished' as const };
+    const done = advanceCreationPlanTo(newCreationPlan(), ['design', 'game', 'frontend'], record);
+
+    expect(isCreationPlanComplete(done)).toBe(true);
+    expect(done.done.map((d) => d.id)).toEqual(['design', 'game', 'frontend']);
+    expect(done.done.every((d) => d.generationId === 'gen_1')).toBe(true);
+  });
+
+  it('advanceCreationPlanTo stops at the first phase NOT reported — a plan never skips a step it owes', () => {
+    const record = { generationId: 'g', at: 'now', state: 'finished' as const };
+
+    const partial = advanceCreationPlanTo(newCreationPlan(), ['design', 'frontend'], record);
+
+    expect(partial.next).toBe(1);
+    expect(isCreationPlanComplete(partial)).toBe(false);
+
+    /* CONTROL: nothing reported → nothing moves. */
+    expect(advanceCreationPlanTo(newCreationPlan(), [], record).next).toBe(0);
+  });
+
+  it('parseCreationPhasesCompleted: absent/malformed → null (the legacy engine), valid ids → the list', () => {
+    expect(parseCreationPhasesCompleted(undefined)).toBeNull();
+    expect(parseCreationPhasesCompleted('design')).toBeNull();
+    expect(parseCreationPhasesCompleted(['design', 'bogus'])).toBeNull();
+    expect(parseCreationPhasesCompleted(['design', 'game', 'frontend'])).toEqual(['design', 'game', 'frontend']);
   });
 });

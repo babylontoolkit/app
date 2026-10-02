@@ -8,6 +8,7 @@ import {
   requestManagedInterrupt,
   RESUME_PLACEHOLDER,
   resumeAction,
+  MANAGED_ASSISTANT_ID_PREFIX,
   whenReady,
   withManagedChatId,
 } from './managed-turn';
@@ -69,6 +70,18 @@ describe('resumeAction', () => {
     expect(resumeAction('assistant', 'make it drift')).toEqual({ kind: 'append', content: 'make it drift' });
     expect(resumeAction('assistant', undefined)).toEqual({ kind: 'append', content: RESUME_PLACEHOLDER });
     expect(resumeAction(undefined, undefined)).toEqual({ kind: 'append', content: RESUME_PLACEHOLDER });
+  });
+
+  it('RELOADS over the server-written partial reply of the pending turn (T10) — appending would show it twice', () => {
+    expect(resumeAction('assistant', 'make it drift', `${MANAGED_ASSISTANT_ID_PREFIX}sevt_9`)).toEqual({
+      kind: 'reload',
+    });
+
+    /* CONTROL: an ordinary client-saved reply (any other id) still appends. */
+    expect(resumeAction('assistant', 'make it drift', 'msg-abc123')).toEqual({
+      kind: 'append',
+      content: 'make it drift',
+    });
   });
 });
 

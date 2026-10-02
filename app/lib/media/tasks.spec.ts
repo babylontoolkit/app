@@ -19,7 +19,13 @@ vi.mock('~/lib/stores/workbench', () => ({
 
 import { toast } from 'react-toastify';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { mediaRenderStore, trackMediaTask } from './tasks';
+import {
+  mediaRenderStore,
+  pendingTasksToResume,
+  resumePendingMediaTasks,
+  RESUME_PENDING_MAX_AGE_MS,
+  trackMediaTask,
+} from './tasks';
 
 type FetchMock = ReturnType<typeof vi.fn>;
 
@@ -230,5 +236,66 @@ describe('mediaRenderStore — in-flight render counts', () => {
 
     expect(seen[0]).toEqual({ images: 1, videos: 0, sounds: 0 });
     expect(mediaRenderStore.get()).toEqual({ images: 0, videos: 0, sounds: 0 });
+  });
+});
+
+describe('a paid render pending when the page reloaded is RESUMED on load (managed-agents Phase C)', () => {
+  const NOW = Date.parse('2026-10-02T04:30:00.000Z');
+  const task = (over: Record<string, unknown>) => ({
+    id: 'med_floor',
+    projectId: 'prj_1',
+    status: 'pending',
+    destPath: 'public/assets/generated/floor-tile.jpg',
+    kind: 'image',
+    createdAt: '2026-10-02T04:20:27.492Z',
+    ...over,
+  });
+
+  it('picks the pending, recent tasks of this project — never a finished, ancient or foreign one', () => {
+    const picked = pendingTasksToResume(
+      'prj_1',
+      [
+        task({}),
+        task({ id: 'med_done', status: 'succeeded' }),
+        task({ id: 'med_failed', status: 'failed' }),
+        task({ id: 'med_old', createdAt: new Date(NOW - RESUME_PENDING_MAX_AGE_MS - 1).toISOString() }),
+        task({ id: 'med_other', projectId: 'prj_2' }),
+        task({ id: 'med_song', kind: 'audio' }),
+      ],
+      NOW,
+    );
+
+    expect(picked).toEqual([
+      { projectId: 'prj_1', taskId: 'med_floor', destPath: 'public/assets/generated/floor-tile.jpg', kind: 'image' },
+      { projectId: 'prj_1', taskId: 'med_song', destPath: 'public/assets/generated/floor-tile.jpg', kind: 'audio' },
+    ]);
+  });
+
+  it('reads the project’s task list and starts a poller for each pending render', async () => {
+    const tracked: string[] = [];
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ tasks: [task({}), task({ id: 'x', status: 'succeeded' })] })),
+    );
+
+    const n = await resumePendingMediaTasks('prj_1', {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      track: async (h) => {
+        tracked.push(h.taskId);
+      },
+      now: NOW,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith('/api/projects/prj_1/media');
+    expect(n).toBe(1);
+    expect(tracked).toEqual(['med_floor']);
+  });
+
+  it('a failed list request resumes nothing and never throws', async () => {
+    const n = await resumePendingMediaTasks('prj_1', {
+      fetchImpl: (async () => new Response('no', { status: 500 })) as unknown as typeof fetch,
+      track: async () => undefined,
+    });
+
+    expect(n).toBe(0);
   });
 });

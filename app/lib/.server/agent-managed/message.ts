@@ -9,7 +9,9 @@
  *     attachments as image blocks;
  *   - a repair turn (`errors`) sends the build errors (`buildRepairMessage`, the legacy wording);
  *   - the FIRST message of a new session is prefixed with the project manifest — sorted paths only
- *     (D5) — so the agent knows the project's shape before its first `project_list`.
+ *     (D5) — so the agent knows the project's shape before its first `project_list`;
+ *   - a FIRST BUILD (T9) appends the phase list (design → game → front end) as guidance after the
+ *     user's words: the whole build is one managed turn, not three requests.
  */
 import type {
   BetaManagedAgentsImageBlock,
@@ -19,6 +21,7 @@ import type {
 import type { Message } from 'ai';
 import { buildRepairMessage } from '~/lib/.server/agent/proxy';
 import type { FileMap } from '~/lib/.server/llm/constants';
+import { managedBuildGuidance, type CreationPhaseId } from '~/lib/agent/creation-plan';
 import { splitCarriedArtifact, stripTransportPrefix } from '~/lib/chat/message-envelope';
 import { toProjectRelativePath } from '~/lib/common/sandbox-paths';
 
@@ -92,6 +95,13 @@ export interface ManagedMessageInput {
 
   /** The session was created by this turn — prefix the manifest. */
   newSession: boolean;
+
+  /**
+   * A FIRST BUILD (T9): the phases this one turn owes, appended after the user's words as guidance
+   * (`managedBuildGuidance`). Absent or empty on every other turn. Never on a repair — a repair is about
+   * its errors, and the build it repairs already ran.
+   */
+  buildPhases?: readonly CreationPhaseId[];
 }
 
 /** The turn's `user.message`, or `null` when there is nothing to send (no user text, no errors). */
@@ -114,7 +124,12 @@ export function buildManagedUserMessage(input: ManagedMessageInput): BetaManaged
   }
 
   const manifest = input.newSession ? projectManifest(input.files) : '';
-  const text: BetaManagedAgentsTextBlock = { type: 'text', text: `${manifest}${body || '(see the attached image)'}` };
+  const guidance = input.errors?.length ? '' : managedBuildGuidance(input.buildPhases ?? []);
+  const words = body || '(see the attached image)';
+  const text: BetaManagedAgentsTextBlock = {
+    type: 'text',
+    text: `${manifest}${words}${guidance ? `\n\n${guidance}` : ''}`,
+  };
 
   return { type: 'user.message', content: [text, ...images] };
 }

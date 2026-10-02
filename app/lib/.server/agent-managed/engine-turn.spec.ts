@@ -19,6 +19,13 @@ import { FsGenerationStore, setGenerationStore } from '~/lib/.server/billing/gen
 import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { rawCostUsd } from '~/lib/.server/billing/rates';
 import { FsChatIndex, getChatIndex, setChatIndex } from '~/lib/.server/projects/chat-index';
+import { getChat } from '~/lib/.server/projects/message-store';
+import { setObjectStore, type ObjectStore } from '~/lib/.server/storage';
+import { MANAGED_BUILD_OPEN } from '~/lib/agent/creation-plan';
+import { interruptManagedTurn } from './control';
+import { createManagedDispatcher } from './dispatch';
+import { newWorkspaceTurnState, WorkspaceOverlay } from '~/lib/.server/agent/workspace-tools';
+import { WORKSPACE_CHECK_TIMEOUT_MS } from '~/lib/agent/workspace-protocol-types';
 import { setPromptStore, type PromptStore } from '~/lib/.server/prompt/store';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
 import { describeTurnOutcome } from '~/lib/agent/turn-outcome';
@@ -106,10 +113,33 @@ beforeEach(async () => {
     list: async () => [],
   } as unknown as PromptStore);
 
+  /*
+   * ⚠️ The engine writes the turn's transcript (T10) through `putChat`, whose object store falls back to
+   * the developer's real `.data/storage` when unset — the first run of this file left seven chats there.
+   */
+  setObjectStore(memoryStore());
+
   fake = createFakeManagedClient();
   setManagedClientForTests(fake.client);
   chatId = randomUUID();
 });
+
+function memoryStore(): ObjectStore {
+  const objects = new Map<string, Uint8Array>();
+
+  return {
+    backend: 'filesystem',
+    put: async (key, bytes) => {
+      objects.set(key, bytes);
+    },
+    get: async (key) => objects.get(key) ?? null,
+    delete: async (key) => {
+      objects.delete(key);
+    },
+    list: async (prefix) =>
+      [...objects.entries()].filter(([k]) => k.startsWith(prefix)).map(([key, b]) => ({ key, size: b.byteLength })),
+  };
+}
 
 afterEach(async () => {
   /* A detached turn's script waits forever on its unanswered call — by design; it is simply dropped. */
@@ -118,6 +148,7 @@ afterEach(async () => {
   setGenerationStore(undefined);
   setChatIndex(undefined);
   setPromptStore(undefined);
+  setObjectStore(undefined);
   vi.unstubAllEnvs();
   await fs.rm(tmp, { recursive: true, force: true });
 });
@@ -478,7 +509,7 @@ describe('detach and resume (T6)', () => {
 });
 
 describe('failures and the budget (T7)', () => {
-  it('an error before any model request REFUNDS (session time charged, then handed back)', async () => {
+  it('an error before any model request charges NOTHING (its session time is carried, never billed alone)', async () => {
     fake.script = (async (api) => {
       api.addActiveSeconds(3600);
       api.emit({
@@ -491,10 +522,7 @@ describe('failures and the budget (T7)', () => {
 
     expect(run.error?.message).toBe('org over limit');
     expect((await run.generation.settlement)?.creditsCharged).toBe(0);
-    expect((await rows()).map((e) => [e.reason, e.delta])).toEqual([
-      ['generation', -32],
-      ['refund', 32],
-    ]);
+    expect(await rows()).toEqual([]);
   });
 
   it('a failure AFTER writing files is billed and never refunded', async () => {
@@ -717,5 +745,478 @@ describe('a new message SUPERSEDES a turn left waiting on tool results', () => {
         .slice(before)
         .map((e) => e.type),
     ).toEqual(['user.custom_tool_result']);
+  });
+});
+
+const creditsFor = (u: typeof USAGE_1) =>
+  expectedCredits(
+    {
+      promptTokens: u.input_tokens,
+      completionTokens: u.output_tokens,
+      cacheReadTokens: u.cache_read_input_tokens,
+      cacheCreationTokens: u.cache_creation_input_tokens,
+    },
+    0,
+  );
+
+describe('the transcript is written by the SERVER from the session events (T10)', () => {
+  const DISTINCTIVE = 'const FILE_BODY_MARKER_90210 = "never in the transcript";';
+
+  it('stores the narration with the route’s annotations — and never a tool input or file body', async () => {
+    fake.script = (async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Writing the kart.' }] });
+      api.modelRequest(USAGE_1);
+      await api.callTool('project_write', { path: 'src/Kart.ts', content: DISTINCTIVE });
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Done.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const run = await drive(await turn({ messages: [userMessage('build the kart')] }));
+
+    expect(run.error).toBeUndefined();
+
+    /* CONTROL: the write really carried the distinctive body to the browser… */
+    expect(JSON.stringify(run.workspaceCalls)).toContain('FILE_BODY_MARKER_90210');
+
+    const chat = await getChat(PROJECT, chatId);
+    const stored = JSON.stringify(chat);
+    const messages = chat!.messages as Array<{ id: string; role: string; content: string; annotations?: unknown[] }>;
+
+    /* …and none of it reached the stored transcript. */
+    expect(stored).not.toContain('FILE_BODY_MARKER_90210');
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(messages[0].content).toBe('build the kart');
+    expect(messages[1].content).toBe(run.text);
+    expect(messages[1].id.startsWith('managed-sevt_')).toBe(true);
+
+    const meta = messages[1].annotations?.find((a) => (a as { type: string }).type === 'agentMeta') as {
+      value: Record<string, unknown>;
+    };
+
+    expect(meta.value).toMatchObject({ engine: 'managed', generationId: run.generation.generationId });
+    expect(messages[1].annotations?.map((a) => (a as { type: string }).type)).toEqual([
+      'usage',
+      'agentMeta',
+      'agentWorkspace',
+      'credits',
+    ]);
+  });
+
+  it('a turn detached then RESUMED is ONE reply in the transcript — the resume replaces the partial', async () => {
+    fake.script = (async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Starting.' }] });
+      api.modelRequest(USAGE_1);
+      await api.callTool('project_write', { path: 'src/b.ts', content: 'b' });
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Finished.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const controller = new AbortController();
+
+    await drive(await turn({ abortSignal: controller.signal, messages: [userMessage('go')] }), () => {
+      controller.abort();
+      return false;
+    });
+
+    /* Written by the DETACHED request — nobody was listening, and it is still on record. */
+    const partial = (await getChat(PROJECT, chatId))!.messages as Array<{ id: string; content: string }>;
+
+    expect(partial.at(-1)?.content).toBe('Starting.');
+
+    /* The reopened tab re-posts with a DIFFERENT client message id; the reply id is the session's turn. */
+    const resumed = await drive(await turn({ resume: true, messages: [userMessage('go')] }));
+
+    expect(resumed.error).toBeUndefined();
+
+    const final = (await getChat(PROJECT, chatId))!.messages as Array<{ id: string; role: string; content: string }>;
+
+    expect(final.filter((m) => m.role === 'assistant')).toHaveLength(1);
+    expect(final).toHaveLength(partial.length);
+    expect(final.at(-1)).toMatchObject({ id: partial.at(-1)!.id, content: 'Starting.\n\nFinished.' });
+  });
+});
+
+describe('the first build is ONE managed turn (T9)', () => {
+  const WORDS = 'Make me a simple 3D coin collector with a score HUD';
+
+  it('sends the user’s words then every phase; a finished turn reports all phases completed, and engine=managed', async () => {
+    fake.script = (async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Built.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const run = await drive(await turn({ owesBuild: true, messages: [userMessage(WORDS)] }));
+
+    expect(run.error).toBeUndefined();
+
+    const sent = (fake.sends[0].events[0] as { content: Array<{ text: string }> }).content[0].text;
+
+    expect(sent).toContain(`${WORDS}\n\n${MANAGED_BUILD_OPEN}`);
+    expect(run.generation.engine).toBe('managed');
+    expect(run.generation.statusKind).toBe('creation');
+    expect(await run.generation.creationPhasesCompleted).toEqual(['design', 'game', 'frontend']);
+  });
+
+  it('only the phases the ROW still owes — never the body’s creationPhase', async () => {
+    fake.script = (async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Built.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const run = await drive(
+      await turn({
+        owesBuild: true,
+        creationPlan: { v: 1, phases: ['design', 'game', 'frontend'], next: 1, done: [] },
+        messages: [userMessage(WORDS)],
+      }),
+    );
+
+    expect(await run.generation.creationPhasesCompleted).toEqual(['game', 'frontend']);
+  });
+
+  it('a FAILED first build reports no phases (the plan stays, Keep building continues it)', async () => {
+    fake.script = (async (api) => {
+      api.emit({ type: 'session.status_terminated' });
+    }) satisfies Script;
+
+    const run = await drive(await turn({ owesBuild: true, messages: [userMessage(WORDS)] }));
+
+    expect(run.error).toBeDefined();
+    expect(await run.generation.creationPhasesCompleted).toBeUndefined();
+  });
+
+  it('CONTROL: an ordinary edit carries no guidance and reports no phases', async () => {
+    fake.script = (async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const run = await drive(await turn({ messages: [userMessage('faster')] }));
+    const sent = (fake.sends[0].events[0] as { content: Array<{ text: string }> }).content[0].text;
+
+    expect(sent).not.toContain(MANAGED_BUILD_OPEN);
+    expect(await run.generation.creationPhasesCompleted).toBeUndefined();
+  });
+});
+
+describe('Stop bills the stopped turn’s TAIL once (carried Phase B fix)', () => {
+  it('a model request that ends after the detach is billed by the interrupt — and the next turn does not re-bill it', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      await api.callTool('project_write', { path: 'src/a.ts', content: 'a' });
+    }) satisfies Script;
+
+    const controller = new AbortController();
+
+    await drive(await turn({ abortSignal: controller.signal }), () => {
+      controller.abort();
+      return false;
+    });
+
+    expect((await rows()).map((e) => -e.delta)).toEqual([creditsFor(USAGE_1)]);
+
+    /* The request that was running at the Stop finishes AFTER the turn's own settlement. */
+    const session = fake.sessions.get('sesn_1')!;
+    const at = new Date(Date.parse(session.events.at(-1)!.created_at!) + 500).toISOString();
+
+    session.events.push({
+      type: 'span.model_request_end',
+      id: 'sevt_tail',
+      processed_at: at,
+      created_at: at,
+      is_error: false,
+      model_request_start_id: 'start',
+      model_usage: { ...USAGE_2 },
+    });
+
+    await interruptManagedTurn({
+      projectId: PROJECT,
+      chatId,
+      userId: USER.id,
+      context: {},
+      waitForSettlement: true,
+      pollMs: 5,
+    });
+
+    expect((await rows()).map((e) => -e.delta)).toEqual([creditsFor(USAGE_1), creditsFor(USAGE_2)]);
+
+    /* The next turn charges only its own usage — the cursor already covers the tail. */
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_3);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const next = await drive(await turn({ messages: [userMessage('carry on')] }));
+
+    expect((await next.generation.settlement)?.creditsCharged).toBe(creditsFor(USAGE_3));
+    expect((await rows()).map((e) => -e.delta)).toEqual([
+      creditsFor(USAGE_1),
+      creditsFor(USAGE_2),
+      creditsFor(USAGE_3),
+    ]);
+  });
+
+  it('CONTROL: an interrupt with nothing new to bill writes no ledger row', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      await api.callTool('project_write', { path: 'src/a.ts', content: 'a' });
+    }) satisfies Script;
+
+    const controller = new AbortController();
+
+    await drive(await turn({ abortSignal: controller.signal }), () => {
+      controller.abort();
+      return false;
+    });
+    await interruptManagedTurn({
+      projectId: PROJECT,
+      chatId,
+      userId: USER.id,
+      context: {},
+      waitForSettlement: true,
+      pollMs: 5,
+    });
+
+    expect(await rows()).toHaveLength(1);
+  });
+});
+
+describe('a browser that stops answering DETACHES the turn — never a tool failure (managed D6)', () => {
+  it('relay timeout: no tool result, no interrupt, billed not refunded, outcome says resume', async () => {
+    fake.script = (async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Checking the game.' }] });
+      api.modelRequest(USAGE_1);
+      await api.callTool('check_game', {});
+      api.endTurn();
+    }) satisfies Script;
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    try {
+      const generation = await turn();
+      const running = drive(generation, () => false);
+
+      await vi.advanceTimersByTimeAsync(WORKSPACE_CHECK_TIMEOUT_MS + 50);
+
+      const run = await running;
+
+      expect(run.error).toBeUndefined();
+
+      const sent = fake.sends.flatMap((s) => s.events).map((e) => e.type);
+
+      expect(sent).not.toContain('user.custom_tool_result');
+      expect(sent).not.toContain('user.interrupt');
+
+      const facts = await run.generation.outcome;
+
+      expect(facts.stopReason).toBe('browser');
+      expect(describeTurnOutcome(facts)).toMatchObject({ state: 'paused', resume: true });
+
+      /* Billed for what it consumed; a detach is never refunded. */
+      expect((await rows()).map((e) => e.reason)).toEqual(['generation']);
+
+      /* The session is still waiting on the check — a live tab re-attaches to it. */
+      expect(fake.sessions.get('sesn_1')!.events.at(-1)).toMatchObject({
+        type: 'session.status_idle',
+        stop_reason: { type: 'requires_action' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('CONTROL: a closed tab (request abort) is still the plain detach, not "browser"', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      await api.callTool('check_game', {});
+    }) satisfies Script;
+
+    const controller = new AbortController();
+    const run = await drive(await turn({ abortSignal: controller.signal }), () => {
+      controller.abort();
+      return false;
+    });
+
+    expect((await run.generation.outcome).stopReason).toBe('aborted');
+    expect(describeTurnOutcome(await run.generation.outcome).resume).toBeUndefined();
+  });
+});
+
+describe('MUTATING tool calls in one parallel batch run in order (T5 race)', () => {
+  const TWO_LINES = {
+    '/home/project/src/main.ts': { type: 'file', content: 'const a = 1;\nconst b = 2;\n', isBinary: false },
+  } as unknown as FileMap;
+
+  const editA = { path: 'src/main.ts', old_string: 'const a = 1;', new_string: 'const a = 10;' };
+  const editB = { path: 'src/main.ts', old_string: 'const b = 2;', new_string: 'const b = 20;' };
+
+  it('two project_edits on one file in one batch BOTH land, and both results are sent', async () => {
+    fake.script = (async (api) => {
+      /* Both calls are emitted before either is answered — one parallel batch. */
+      await Promise.all([api.callTool('project_edit', editA), api.callTool('project_edit', editB)]);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Both edited.' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    /* A SLOW browser: each write is answered 20ms later, so the second edit arrives while the first is in flight. */
+    const generation = await turn({ files: TWO_LINES });
+    const run = await drive(generation, (call) => {
+      setTimeout(
+        () =>
+          deliverClientToolResult({
+            generationId: generation.generationId,
+            toolCallId: call.toolCallId,
+            userId: USER.id,
+            result: { ok: true },
+          }),
+        20,
+      );
+
+      return false;
+    });
+
+    expect(run.error).toBeUndefined();
+    expect(run.workspaceCalls).toHaveLength(2);
+
+    const last = run.workspaceCalls.at(-1)!.params as { content: string };
+
+    expect(last.content).toContain('const a = 10;');
+    expect(last.content).toContain('const b = 20;');
+
+    const results = fake.sends.flatMap((s) => s.events).filter((e) => e.type === 'user.custom_tool_result');
+
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => !r.is_error)).toBe(true);
+  });
+
+  it('a mutating call still QUEUED when the turn detaches never reaches the browser', async () => {
+    fake.script = (async (api) => {
+      await Promise.all([api.callTool('project_edit', editA), api.callTool('project_edit', editB)]);
+    }) satisfies Script;
+
+    const controller = new AbortController();
+    const run = await drive(await turn({ files: TWO_LINES, abortSignal: controller.signal }), () => {
+      /* The tab closes while the FIRST edit is with the browser; the second is still queued behind it. */
+      controller.abort();
+      return false;
+    });
+
+    expect(run.workspaceCalls).toHaveLength(1);
+    expect(fake.sends.flatMap((s) => s.events).map((e) => e.type)).not.toContain('user.custom_tool_result');
+  });
+
+  it('CONTROL: the same two edits dispatched CONCURRENTLY (the old path) lose one', async () => {
+    const writes: Array<{ content: string }> = [];
+    const generationId = 'gen_race_control';
+    const dispatcher = createManagedDispatcher({
+      generationId,
+      userId: USER.id,
+      files: TWO_LINES,
+      overlay: new WorkspaceOverlay(TWO_LINES),
+      state: newWorkspaceTurnState(),
+      emitWorkspace: (event) => {
+        writes.push(event.params as { content: string });
+        queueMicrotask(() =>
+          deliverClientToolResult({
+            generationId,
+            toolCallId: event.toolCallId,
+            userId: USER.id,
+            result: { ok: true },
+          }),
+        );
+      },
+      emitPreview: () => undefined,
+      emitTodos: () => undefined,
+    });
+
+    await Promise.all([
+      dispatcher.dispatch({ id: 'a', name: 'project_edit', input: editA }),
+      dispatcher.dispatch({ id: 'b', name: 'project_edit', input: editB }),
+    ]);
+
+    const last = writes.at(-1)!.content;
+
+    expect(last.includes('const a = 10;') && last.includes('const b = 20;')).toBe(false);
+  });
+});
+
+describe('session-hours are never settled ALONE (verifier finding: a 1-credit Stop tail)', () => {
+  it('a zero-request Stop tail writes NO row, and the next real turn charges the carried seconds', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      await api.callTool('project_write', { path: 'src/a.ts', content: 'a' });
+    }) satisfies Script;
+
+    const controller = new AbortController();
+
+    await drive(await turn({ abortSignal: controller.signal }), () => {
+      controller.abort();
+      return false;
+    });
+
+    const afterTurn = await rows();
+
+    /* The Stop: the session ran a little longer, but made NO model request. */
+    fake.sessions.get('sesn_1')!.activeSeconds += 180;
+
+    const generationsBefore = (await fs.readdir(path.join(tmp, 'generations')).catch(() => [])).length;
+
+    await interruptManagedTurn({
+      projectId: PROJECT,
+      chatId,
+      userId: USER.id,
+      context: {},
+      waitForSettlement: true,
+      pollMs: 5,
+    });
+
+    expect(await rows()).toEqual(afterTurn);
+    expect((await fs.readdir(path.join(tmp, 'generations')).catch(() => [])).length).toBe(generationsBefore);
+
+    /* The next turn has real usage: it charges its own tokens PLUS the 180 carried seconds. */
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_3);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const next = await drive(await turn({ messages: [userMessage('carry on')] }));
+    const carriedUsd = (180 / 3600) * 0.08;
+
+    expect((await next.generation.settlement)?.creditsCharged).toBe(
+      expectedCredits(
+        {
+          promptTokens: USAGE_3.input_tokens,
+          completionTokens: USAGE_3.output_tokens,
+          cacheReadTokens: USAGE_3.cache_read_input_tokens,
+          cacheCreationTokens: 0,
+        },
+        carriedUsd,
+      ),
+    );
+  });
+
+  it('CONTROL: with model usage, session-hours settle alongside it as before', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      api.addActiveSeconds(1800);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const run = await drive(await turn());
+
+    expect((await run.generation.settlement)?.creditsCharged).toBe(
+      expectedCredits(
+        {
+          promptTokens: USAGE_1.input_tokens,
+          completionTokens: USAGE_1.output_tokens,
+          cacheReadTokens: USAGE_1.cache_read_input_tokens,
+          cacheCreationTokens: USAGE_1.cache_creation_input_tokens,
+        },
+        0.04,
+      ),
+    );
   });
 });

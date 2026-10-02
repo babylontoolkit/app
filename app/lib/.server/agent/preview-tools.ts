@@ -57,6 +57,12 @@ export interface PreviewToolContext {
   userId: string;
   abortSignal?: AbortSignal;
   emit: (event: PreviewToolCallEvent) => void;
+
+  /**
+   * Called with the tool-call id when the browser did not answer in time (`ClientToolResult.timedOut`).
+   * The legacy engine leaves it unset; the managed engine uses it to detach rather than report a failure.
+   */
+  onRelayTimeout?: (toolCallId: string) => void;
 }
 
 /**
@@ -102,6 +108,10 @@ async function relay(
     abortSignal: abortSignal ?? ctx.abortSignal,
     timeoutMs: PREVIEW_TOOL_TIMEOUT_MS,
   });
+
+  if (outcome.timedOut) {
+    ctx.onRelayTimeout?.(toolCallId);
+  }
 
   if (outcome.error) {
     /* A sentence the model can act on — usually "start the dev server" or "the expression threw". */

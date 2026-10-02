@@ -14,12 +14,18 @@
  * chat of another project answers exactly like a chat that does not exist: 404, "Chat not found."
  */
 import type Anthropic from '@anthropic-ai/sdk';
+import { envNumber } from '~/lib/.server/env';
 import { isServerChatId } from '~/lib/persistence/chat-id';
+import { createScopedLogger } from '~/utils/logger';
 import { getChatIndex } from '~/lib/.server/projects/chat-index';
 import { NotFoundError } from '~/lib/.server/projects/ownership';
-import { type AgentEngine, getManagedClient, resolveAgentEngine } from './config';
+import { type AgentEngine, getManagedClient, getManagedEngineConfig, resolveAgentEngine } from './config';
+import { SUPERSEDE_WAIT_MS } from './session-health';
+import { settleManagedTurn } from './settle';
 import type { SessionEventLike } from './events';
 import { awaitingToolResults, listCurrentTurnEvents } from './turn';
+
+const logger = createScopedLogger('managed-control');
 
 const CHAT_NOT_FOUND = 'Chat not found.';
 
@@ -55,6 +61,9 @@ export interface ManagedTurnStatus {
 /** The project manifest a new session's first message carries (`message.ts`) — not the user's words. */
 const MANIFEST = /^\[Project files[\s\S]*?\[End of project files\]\n*/;
 
+/** A first build's phase guidance (`managedBuildGuidance`, T9) — not the user's words either. */
+const BUILD_GUIDANCE = /\s*\[First build — [\s\S]*?\[End of first build steps\]\s*$/;
+
 export const RESUME_USER_TEXT_MAX = 4000;
 
 /** The user's words in the current turn's `user.message`, manifest removed. Pure. */
@@ -66,6 +75,7 @@ export function currentTurnUserText(events: SessionEventLike[]): string | undefi
     .map((b) => b.text)
     .join('')
     .replace(MANIFEST, '')
+    .replace(BUILD_GUIDANCE, '')
     .trim();
 
   return text ? text.slice(0, RESUME_USER_TEXT_MAX) : undefined;
@@ -106,12 +116,31 @@ export async function getManagedTurnStatus(input: {
   return pending ? { engine, pending, userText: currentTurnUserText(events) } : { engine, pending };
 }
 
-/** Send `user.interrupt` to the chat's session. `false` when the chat has no session to interrupt. */
+/**
+ * Send `user.interrupt` to the chat's session. `false` when the chat has no session to interrupt.
+ *
+ * ## The stopped turn's TAIL is billed here (Phase B verifier finding)
+ *
+ * A Stop aborts the request, so the turn's own settlement runs at once — while a model request may still
+ * be in flight on Anthropic's side. Its `span.model_request_end` lands AFTER that settlement, and the
+ * cursor bills it only with the chat's NEXT settlement: a user who stops and never sends again would
+ * never pay for it. So, with `userId`, the interrupt waits (bounded, `MANAGED_SUPERSEDE_WAIT_MS`) for
+ * the session to go idle and runs the cursor settlement for the chat under its own generation id —
+ * serialised per chat and cursor-idempotent, so the tail is billed exactly once whichever settlement
+ * reaches it first. Fire-and-forget after the response by default (`waitForSettlement` is the specs').
+ */
 export async function interruptManagedTurn(input: {
   projectId: string;
   chatId: unknown;
   context?: unknown;
   client?: Anthropic;
+
+  /** The verified caller — settles the stopped turn's tail under this user. Absent = no tail settlement. */
+  userId?: string;
+
+  /** Await the tail settlement before returning (specs). Default: fire-and-forget. */
+  waitForSettlement?: boolean;
+  pollMs?: number;
 }): Promise<{ interrupted: boolean }> {
   const sessionId = await sessionFor(input.projectId, input.chatId, input.context);
 
@@ -122,5 +151,74 @@ export async function interruptManagedTurn(input: {
   const client = input.client ?? getManagedClient(input.context);
   await client.beta.sessions.events.send(sessionId, { events: [{ type: 'user.interrupt' }] });
 
+  if (input.userId) {
+    const tail = settleStoppedTail({
+      client,
+      sessionId,
+      projectId: input.projectId,
+      chatId: input.chatId as string,
+      userId: input.userId,
+      context: input.context,
+      pollMs: input.pollMs,
+    });
+
+    if (input.waitForSettlement) {
+      await tail;
+    } else {
+      void tail;
+    }
+  }
+
   return { interrupted: true };
+}
+
+/** Wait (bounded) for the interrupted session to go idle, then settle the chat's cursor. Never throws. */
+export async function settleStoppedTail(input: {
+  client: Anthropic;
+  sessionId: string;
+  projectId: string;
+  chatId: string;
+  userId: string;
+  context?: unknown;
+  pollMs?: number;
+}): Promise<void> {
+  try {
+    const waitMs = Math.max(0, envNumber(input.context, 'MANAGED_SUPERSEDE_WAIT_MS', SUPERSEDE_WAIT_MS));
+    const deadline = Date.now() + waitMs;
+
+    for (;;) {
+      const session = await input.client.beta.sessions.retrieve(input.sessionId);
+
+      if (session.status !== 'running' && session.status !== 'rescheduling') {
+        break;
+      }
+
+      if (Date.now() >= deadline) {
+        logger.warn(`Session ${input.sessionId}: still ${session.status} after the Stop — settling what has landed`);
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, input.pollMs ?? 500));
+    }
+
+    const config = getManagedEngineConfig(input.context);
+
+    await settleManagedTurn({
+      client: input.client,
+      sessionId: input.sessionId,
+      projectId: input.projectId,
+      chatId: input.chatId,
+      userId: input.userId,
+      generationId: `gen_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_stop`,
+      model: config.model,
+      statusKind: 'edit',
+      sessionHourUsd: config.sessionHourUsd,
+      context: input.context,
+
+      /* Nothing new since the turn's own settlement → no empty `generations` row for the Stop. */
+      anchorWhenEmpty: false,
+    });
+  } catch (error) {
+    logger.error(`Chat ${input.chatId}: could not settle the stopped turn's tail: ${(error as Error)?.message}`);
+  }
 }

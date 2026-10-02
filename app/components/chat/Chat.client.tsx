@@ -89,6 +89,9 @@ import {
 } from '~/lib/stores/new-project-mode';
 import {
   advanceCreationPlan,
+  advanceCreationPlanTo,
+  parseCreationPhasesCompleted,
+  type CreationPhaseId,
   creationPhaseMessage,
   isCreationPlanComplete,
   newCreationPlan,
@@ -102,7 +105,7 @@ import {
   type CreationPauseReason,
 } from '~/lib/chat/creation-plan-runner';
 import { useGameRegistry } from '~/lib/hooks/useGameRegistry';
-import { trackMediaTask } from '~/lib/media/tasks';
+import { resumePendingMediaTasks, trackMediaTask } from '~/lib/media/tasks';
 import { streamActivitySize } from '~/lib/chat/stream-activity';
 import type { GameRegistryEntry } from '~/types/game-registry';
 import { logStore } from '~/lib/stores/logs';
@@ -161,6 +164,20 @@ function readTurnOutcome(annotations: unknown[] | undefined): TurnOutcome | null
  * that phase COST — and two inline `annotations.find` copies is the shape of drift this file already
  * carries several notes about.
  */
+/**
+ * The phases a MANAGED first build completed in its one turn (`agentMeta.creationPhasesCompleted`,
+ * managed-agents-engine T9). `null` on the legacy engine (it never writes the field) and on any managed
+ * turn that did not finish a first build — so legacy behaviour is byte-identical.
+ */
+function readCreationPhasesCompleted(annotations: unknown[] | undefined): CreationPhaseId[] | null {
+  const meta = annotations?.find(
+    (a): a is { type: string; value?: { creationPhasesCompleted?: unknown } } =>
+      Boolean(a) && typeof a === 'object' && (a as { type?: unknown }).type === 'agentMeta',
+  );
+
+  return parseCreationPhasesCompleted(meta?.value?.creationPhasesCompleted);
+}
+
 function readGenerationId(annotations: unknown[] | undefined): string | undefined {
   const meta = annotations?.find(
     (a): a is { type: string; value?: { generationId?: string } } =>
@@ -639,6 +656,14 @@ export const ChatImpl = memo(
      */
     const phaseTurnRef = useRef(false);
 
+    /*
+     * Managed engine: the turn DETACHED because this browser did not answer a tool call in time (its
+     * outcome says `resume`). The tab is alive, so it re-attaches through the resume path — ONCE per
+     * reply (`autoResumedFor`); a second timeout on the same turn shows the outcome alert instead.
+     */
+    const [autoResumeTick, setAutoResumeTick] = useState(0);
+    const autoResumedFor = useRef<string | null>(null);
+
     /**
      * Why the creation plan stopped, if it did. Terminal until the user acts — never re-derived, or a
      * paused plan starts running again on its own (`decideNextCreationTurn`).
@@ -913,7 +938,17 @@ export const ChatImpl = memo(
         const wasPhaseTurn = phaseTurnRef.current;
         phaseTurnRef.current = false;
 
-        if (wasPhaseTurn && creationPlanActive(livePlan) && livePlan) {
+        if (outcome?.resume && sessionStore.get().agentEngine === 'managed') {
+          if (autoResumedFor.current !== message.id) {
+            autoResumedFor.current = message.id;
+
+            /* The resumed turn finishes the SAME phase turn — its own `onFinish` advances the plan. */
+            phaseTurnRef.current = wasPhaseTurn;
+            setAutoResumeTick((tick) => tick + 1);
+          } else {
+            setTurnOutcomeAlert(outcome);
+          }
+        } else if (wasPhaseTurn && creationPlanActive(livePlan) && livePlan) {
           /*
            * The server judged the turn unfinished. Do NOT advance: the next phase builds on the files
            * this one wrote, so continuing over a truncated phase compounds a broken tree and bills for
@@ -926,7 +961,14 @@ export const ChatImpl = memo(
            * unfinished phase re-runs ONCE with `KEEP_BUILDING_MESSAGE`; a budget stop is never continued.
            */
           const used = autoContinueRef.current.index === livePlan.next ? autoContinueRef.current.used : 0;
-          const action = decidePhaseOutcomeAction(outcome?.state, used);
+
+          /*
+           * A MANAGED first build runs every phase in ONE turn (T9) and says which it completed: that
+           * turn advances the plan straight to its end. An unverified one is not re-run as a build — its
+           * outcome alert carries the fix — because the whole build already ran.
+           */
+          const managedPhases = readCreationPhasesCompleted(message.annotations);
+          const action = managedPhases ? 'advance' : decidePhaseOutcomeAction(outcome?.state, used);
 
           if (action === 'auto-continue') {
             autoContinueRef.current = { index: livePlan.next, used: used + 1 };
@@ -969,12 +1011,14 @@ export const ChatImpl = memo(
                 return;
               }
 
-              const advanced = advanceCreationPlan(livePlan, {
-                id: livePlan.phases[livePlan.next],
+              const phaseRecord = {
                 generationId: readGenerationId(message.annotations) ?? '',
                 at: new Date().toISOString(),
                 state: outcome?.state ?? 'finished',
-              });
+              };
+              const advanced = managedPhases
+                ? advanceCreationPlanTo(livePlan, managedPhases, phaseRecord)
+                : advanceCreationPlan(livePlan, { id: livePlan.phases[livePlan.next], ...phaseRecord });
 
               const complete = isCreationPlanComplete(advanced);
 
@@ -1186,7 +1230,7 @@ export const ChatImpl = memo(
 
         logger.info('A managed turn is still running for this chat — re-attaching');
 
-        const next = resumeAction(messages.at(-1)?.role, userText);
+        const next = resumeAction(messages.at(-1)?.role, userText, messages.at(-1)?.id);
 
         if (next.kind === 'reload') {
           reload({ body: { ...liveTurnBody(), managedResume: true } });
@@ -1195,6 +1239,51 @@ export const ChatImpl = memo(
         }
       });
     }, [agentEngine, activeProjectId, activeServerChatId, initialMessages]);
+
+    /*
+     * Renders still pending from an earlier page (a reload or a closed tab dropped their in-memory
+     * pollers) are resumed once per project per mount — otherwise a paid render is never delivered and
+     * never refunded (`resumePendingMediaTasks`). Polling is idempotent server-side, so it is safe.
+     */
+    const mediaResumedFor = useRef<string | null>(null);
+
+    useEffect(() => {
+      if (!activeProjectId || mediaResumedFor.current === activeProjectId) {
+        return;
+      }
+
+      mediaResumedFor.current = activeProjectId;
+      void resumePendingMediaTasks(activeProjectId);
+    }, [activeProjectId]);
+
+    /* The auto-resume after a browser timeout (see `autoResumeTick`) — the mount-time path, once, now. */
+    const handledResumeTick = useRef(0);
+
+    useEffect(() => {
+      if (autoResumeTick === handledResumeTick.current || isLoading) {
+        return;
+      }
+
+      handledResumeTick.current = autoResumeTick;
+
+      const identity = liveTurnIdentity({ projectId: activeProjectId, chatId: activeServerChatId });
+
+      void managedTurnStatus(agentEngine, identity).then(({ pending, userText }) => {
+        if (!pending) {
+          return;
+        }
+
+        logger.info('The browser timed out on a managed tool call — re-attaching to the turn');
+
+        const next = resumeAction(messages.at(-1)?.role, userText, messages.at(-1)?.id);
+
+        if (next.kind === 'reload') {
+          reload({ body: { ...liveTurnBody(), managedResume: true } });
+        } else {
+          append({ role: 'user', content: next.content }, { body: { ...liveTurnBody(), managedResume: true } });
+        }
+      });
+    }, [autoResumeTick, isLoading]);
 
     /*
      * Liveness heartbeat (§4.2a) — clear on EVERY isLoading edge. Rising: a new generation must

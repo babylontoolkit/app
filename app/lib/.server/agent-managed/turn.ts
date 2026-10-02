@@ -29,6 +29,15 @@ import { createEventReducer, type CustomToolUse, type ManagedTerminal, type Sess
 
 const logger = createScopedLogger('managed-turn');
 
+/** Custom tools that change the project (or the turn's checklist) — serialised per turn (`answer`). */
+export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
+  'project_write',
+  'project_edit',
+  'project_run',
+  'check_game',
+  'update_todos',
+]);
+
 /** How many times a dropped stream is reopened before the turn gives up. */
 export const MAX_STREAM_RECONNECTS = 6;
 
@@ -60,6 +69,13 @@ export interface ManagedTurnInput {
   abortSignal?: AbortSignal;
 
   reconnectDelayMs?: number;
+
+  /**
+   * The session event id of this turn's `user.message`, reported once, as soon as it is known — from the
+   * send's response, the stream's echo, or (on resume) the replay. It names the TURN across requests: a
+   * detached request and the resume that finishes it see the same id (T10's transcript key).
+   */
+  onTurnId?: (userMessageEventId: string) => void;
 }
 
 /**
@@ -151,6 +167,14 @@ export async function* runManagedTurn(input: ManagedTurnInput): AsyncGenerator<A
 
   const detached = () => Boolean(abortSignal?.aborted);
 
+  let turnId: string | undefined;
+  const noteTurnId = (id: unknown) => {
+    if (!turnId && typeof id === 'string' && id) {
+      turnId = id;
+      input.onTurnId?.(id);
+    }
+  };
+
   async function sendAnswer(call: CustomToolUse, answer: ToolAnswer): Promise<void> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       if (detached()) {
@@ -188,6 +212,31 @@ export async function* runManagedTurn(input: ManagedTurnInput): AsyncGenerator<A
     }
   }
 
+  /*
+   * MUTATING calls run ONE AT A TIME, in arrival order. The session can emit several tool calls at once,
+   * and two `project_edit`s on one file dispatched concurrently both resolve against the same base — the
+   * second write clobbers the first (seen live twice: "the first edit didn't take effect"). Reads,
+   * preview calls and media do not touch the project's text, so they stay concurrent. Every call in a
+   * batch still gets its result sent.
+   */
+  let mutationChain: Promise<unknown> = Promise.resolve();
+
+  function dispatchInOrder(call: CustomToolUse) {
+    if (!MUTATING_TOOLS.has(call.name)) {
+      return dispatcher.dispatch(call);
+    }
+
+    /*
+     * A call still queued when the turn detaches never runs: dispatching it would send a write to a
+     * browser the session will never hear back from, and a resume re-runs it anyway.
+     */
+    const run = mutationChain.then(() => (detached() ? null : dispatcher.dispatch(call)));
+
+    mutationChain = run.catch(() => undefined);
+
+    return run;
+  }
+
   function answer(call: CustomToolUse): void {
     if (answered.has(call.id)) {
       return;
@@ -196,7 +245,7 @@ export async function* runManagedTurn(input: ManagedTurnInput): AsyncGenerator<A
     answered.add(call.id);
 
     const job = (async () => {
-      const result = await dispatcher.dispatch(call);
+      const result = await dispatchInOrder(call);
 
       if (result) {
         await sendAnswer(call, result);
@@ -216,6 +265,10 @@ export async function* runManagedTurn(input: ManagedTurnInput): AsyncGenerator<A
 
   /** Fold one event: returns its chunks and, when it ends the turn, the terminal. */
   function fold(event: SessionEventLike, replaying: boolean): { chunks: AgentChunk[]; terminal?: ManagedTerminal } {
+    if (event.type === 'user.message') {
+      noteTurnId(event.id);
+    }
+
     const r = reducer.apply(event);
 
     if (r.toolCall) {
@@ -267,7 +320,13 @@ export async function* runManagedTurn(input: ManagedTurnInput): AsyncGenerator<A
         }
       }
     } else {
-      await client.beta.sessions.events.send(sessionId, { events: [input.userMessage!] }, { signal: abortSignal });
+      const sent = await client.beta.sessions.events.send(
+        sessionId,
+        { events: [input.userMessage!] },
+        { signal: abortSignal },
+      );
+
+      noteTurnId(sent?.data?.find((event) => event.type === 'user.message')?.id);
     }
   } catch (error) {
     if (detached()) {

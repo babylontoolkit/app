@@ -37,10 +37,24 @@ import { useStore } from '@nanostores/react';
 import { describeCreationPlan, phaseById } from '~/lib/agent/creation-plan';
 import { newProjectModeStore } from '~/lib/stores/new-project-mode';
 import { projectId } from '~/lib/persistence/useChatHistory';
+import { sessionStore } from '~/lib/stores/session';
+
+/**
+ * The line under the heading. On the LEGACY engine each phase is its own request, so the counter and
+ * the "fits in a single response" reason are true. On the MANAGED engine the whole build is ONE turn
+ * (managed-agents-engine T9) — there is no per-response limit to explain, and the counter would sit on
+ * "Step 1" for the entire build — so it says what actually happens. Pure.
+ */
+export function planCardCaption(step: string | null, engine: 'managed' | 'legacy'): string {
+  return engine === 'managed'
+    ? 'Your game is built in one go: design, then the game, then the front end.'
+    : `${step} — your game is built in steps so each one fits in a single response.`;
+}
 
 export function CreationPlanCard() {
   const mode = useStore(newProjectModeStore);
   const pid = useStore(projectId);
+  const engine = useStore(sessionStore).agentEngine;
 
   /*
    * The same second wall as the handoff card: a module-level store survives an SPA navigate, so
@@ -89,9 +103,7 @@ export function CreationPlanCard() {
          * reads to understand the shape of the build; the counter is what they glance at to see how
          * far in they are, and it is the string that was previously the ONLY thing on screen.
          */}
-        <p className="text-xs text-bolt-elements-textTertiary mb-3">
-          {view.step} — your game is built in steps so each one fits in a single response.
-        </p>
+        <p className="text-xs text-bolt-elements-textTertiary mb-3">{planCardCaption(view.step, engine)}</p>
 
         <ol className="flex flex-col gap-1.5">
           {view.rows.map((row, n) => (

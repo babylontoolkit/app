@@ -145,7 +145,11 @@ vi.mock('~/lib/stores/mcpBridge', async () => {
 
   return { syncMcpBridge: vi.fn(async () => undefined), callMcpTool: vi.fn(), mcpToolsAtom: atom([]) };
 });
-vi.mock('~/lib/media/tasks', () => ({ trackMediaTask: vi.fn(), mediaRenderStore: null }));
+vi.mock('~/lib/media/tasks', () => ({
+  trackMediaTask: vi.fn(),
+  resumePendingMediaTasks: vi.fn(async () => 0),
+  mediaRenderStore: null,
+}));
 
 vi.mock('framer-motion', async (importOriginal) => ({
   ...((await importOriginal()) as object),

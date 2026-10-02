@@ -5,7 +5,8 @@
  *
  * The Stop button's half of the managed engine. Aborting the request only DETACHES a managed turn (a
  * closed tab must not end a build), so an explicit Stop sends `user.interrupt` to the chat's session
- * here. The interrupted tail's usage is billed by the next settlement's cursor. Two walls — a verified
+ * here, then (after responding) waits for the session to idle and settles the stopped turn's tail, so a
+ * model request still running at the Stop is billed even if the user never sends again. Two walls — a verified
  * session, then project ownership (404-not-403) — and the chat must belong to that project.
  */
 import { json, type ActionFunctionArgs } from '@remix-run/cloudflare';
@@ -26,7 +27,7 @@ export async function action({ request, context }: ActionFunctionArgs) {
       .catch(() => ({}) as Record<string, unknown>);
     const project = await requireOwnedProject(user, typeof body.projectId === 'string' ? body.projectId : '', context);
 
-    return json(await interruptManagedTurn({ projectId: project.id, chatId: body.chatId, context }));
+    return json(await interruptManagedTurn({ projectId: project.id, chatId: body.chatId, userId: user.id, context }));
   } catch (error) {
     return errorResponse(error);
   }

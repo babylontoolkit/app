@@ -3,7 +3,12 @@
  * richer client-saved transcript. Both are silent, which is why the decision is a pure function.
  */
 import { describe, expect, it } from 'vitest';
-import { planTranscriptRecovery, type RecoveryPlanInput } from './transcript-recovery';
+import {
+  managedAssistantId,
+  planManagedTranscript,
+  planTranscriptRecovery,
+  type RecoveryPlanInput,
+} from './transcript-recovery';
 
 const base: RecoveryPlanInput = {
   serverChatId: 'f4129a71-1c19-4b92-955f-a597b5aeb60c',
@@ -134,5 +139,142 @@ describe('planTranscriptRecovery', () => {
       { role: 'user', content: 'hello' },
       { role: 'assistant', content: 'Here is the redesign…' },
     ]);
+  });
+});
+
+describe('planManagedTranscript — the managed engine’s per-request record (T10)', () => {
+  const NOW = '2026-10-01T12:00:00.000Z';
+  const reply = (content: string, turn = 'sevt_7') => ({
+    id: managedAssistantId(turn),
+    role: 'assistant',
+    content,
+    annotations: [{ type: 'agentMeta', value: { engine: 'managed' } }],
+  });
+  const request = [
+    { id: 'u1', role: 'user', content: 'make a racer' },
+    { id: 'a1', role: 'assistant', content: 'Built it.' },
+    { id: 'u2', role: 'user', content: 'add drift' },
+  ];
+  const base = {
+    serverChatId: 'chat-1',
+    requestMessages: request,
+    userMessage: { id: 'u2', content: 'add drift' },
+    didWork: true,
+    now: NOW,
+  };
+
+  it('nothing stored yet: the request history + this turn’s user message + the reply', () => {
+    const plan = planManagedTranscript({ ...base, existing: null, assistant: reply('Drift added.') });
+
+    expect(plan?.messages).toEqual([
+      { id: 'u1', role: 'user', content: 'make a racer' },
+      { id: 'a1', role: 'assistant', content: 'Built it.' },
+      { id: 'u2', role: 'user', content: 'add drift' },
+      reply('Drift added.'),
+    ]);
+  });
+
+  it('a history rebuilt from the request carries NO file bodies (tags kept)', () => {
+    const plan = planManagedTranscript({
+      ...base,
+      existing: null,
+      requestMessages: [
+        {
+          id: 'a0',
+          role: 'assistant',
+          content: '<boltAction type="file" filePath="src/a.ts">SECRET_BODY_42</boltAction>',
+        },
+        ...request,
+      ],
+      assistant: reply('ok'),
+    });
+
+    const stored = JSON.stringify(plan?.messages);
+
+    expect(stored).not.toContain('SECRET_BODY_42');
+    expect(stored).toContain('filePath=\\"src/a.ts\\"');
+  });
+
+  it('IDEMPOTENT per turn: a resume REPLACES the detached request’s partial reply — one reply, never two', () => {
+    const first = planManagedTranscript({ ...base, existing: null, assistant: reply('Starting.') })!;
+    const resumed = planManagedTranscript({
+      ...base,
+      existing: first,
+
+      /* A reload drops the partial reply and re-posts the turn — but the reply id is the SESSION's turn id. */
+      userMessage: { id: 'u2', content: 'add drift' },
+      assistant: reply('Starting.\n\nDone — drift added.'),
+    })!;
+
+    expect(resumed.messages).toHaveLength(first.messages.length);
+    expect(resumed.messages.filter((m) => (m as { role: string }).role === 'assistant')).toHaveLength(2);
+    expect(resumed.messages.at(-1)).toEqual(reply('Starting.\n\nDone — drift added.'));
+
+    /* Same reply, again: nothing to write. */
+    expect(
+      planManagedTranscript({ ...base, existing: resumed, assistant: reply('Starting.\n\nDone — drift added.') }),
+    ).toBeNull();
+  });
+
+  it('NEVER SHRINKS: a shorter reply never replaces a longer stored one', () => {
+    const stored = planManagedTranscript({ ...base, existing: null, assistant: reply('A long and complete answer.') })!;
+
+    expect(planManagedTranscript({ ...base, existing: stored, assistant: reply('A long') })).toBeNull();
+  });
+
+  it('a turn the CLIENT already saved is left alone (its user message is stored with a reply after it)', () => {
+    const clientSaved = {
+      serverChatId: 'chat-1',
+      createdAt: NOW,
+      updatedAt: NOW,
+      messages: [...request, { id: 'client-reply', role: 'assistant', content: 'Drift added (rich).' }],
+    };
+
+    expect(planManagedTranscript({ ...base, existing: clientSaved, assistant: reply('Drift added.') })).toBeNull();
+  });
+
+  it('appends to the stored chat (keeping the client’s richer earlier messages) when the client did not save', () => {
+    const stored = {
+      serverChatId: 'chat-1',
+      title: 'Racer',
+      createdAt: NOW,
+      updatedAt: NOW,
+      messages: [
+        { id: 'u1', role: 'user', content: 'make a racer', annotations: ['rich'] },
+        { id: 'a1', role: 'assistant', content: 'Built it.', annotations: ['rich'] },
+      ],
+    };
+    const plan = planManagedTranscript({ ...base, existing: stored, assistant: reply('Drift added.') })!;
+
+    expect(plan.title).toBe('Racer');
+    expect(plan.messages.slice(0, 2)).toEqual(stored.messages);
+    expect(plan.messages.slice(2)).toEqual([{ id: 'u2', role: 'user', content: 'add drift' }, reply('Drift added.')]);
+  });
+
+  it('no chat id → nothing', () => {
+    expect(
+      planManagedTranscript({ ...base, serverChatId: undefined, existing: null, assistant: reply('x') }),
+    ).toBeNull();
+  });
+
+  it('an EMPTY reply is never stored as a message — the user’s words still are', () => {
+    const plan = planManagedTranscript({ ...base, didWork: false, existing: null, assistant: reply('   ') })!;
+
+    expect(plan.messages.map((m) => (m as { id: string }).id)).toEqual(['u1', 'a1', 'u2']);
+    expect(plan.messages.some((m) => !(m as { content: string }).content.trim())).toBe(false);
+
+    /* Already stored up to the user message: an empty reply writes nothing at all. */
+    expect(planManagedTranscript({ ...base, existing: plan, assistant: reply('') })).toBeNull();
+
+    /* CONTROL: a reply with words is appended after it. */
+    expect(planManagedTranscript({ ...base, existing: plan, assistant: reply('Done.') })!.messages.at(-1)).toEqual(
+      reply('Done.'),
+    );
+  });
+
+  it('an empty reply never REPLACES a stored one', () => {
+    const stored = planManagedTranscript({ ...base, existing: null, assistant: reply('Partial.') })!;
+
+    expect(planManagedTranscript({ ...base, existing: stored, assistant: reply('') })).toBeNull();
   });
 });

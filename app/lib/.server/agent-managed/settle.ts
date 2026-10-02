@@ -132,7 +132,14 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
     const hours = sessionHoursCostUsd(activeNow, cursor, input.sessionHourUsd);
     const next = { at: unsettled.latestAt, activeSeconds: Math.max(cursor.activeSeconds, activeNow) };
 
-    if (unsettled.requests > 0 || next.activeSeconds !== cursor.activeSeconds) {
+    /*
+     * Session-hours ride WITH model usage, never alone. A settlement with no new model request (a Stop
+     * tail, a detach before the first request, an error before any) used to bill its fraction of a
+     * second of session time on its own — and `ceil` turned $0.0000044 into a whole credit. Now the
+     * cursor is left where it is, so those seconds are carried into the next settlement that has real
+     * usage and are charged there, once.
+     */
+    if (unsettled.requests > 0) {
       try {
         await setManagedSettledAt(input.projectId, input.chatId, serializeCursor(next), input.context);
         usage = unsettled.usage;

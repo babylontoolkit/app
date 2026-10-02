@@ -160,6 +160,12 @@ export interface WorkspaceToolContext {
   overlay: WorkspaceOverlay;
   state: WorkspaceTurnState;
   planOnly: boolean;
+
+  /**
+   * Called with the tool-call id when the browser did not answer in time (`ClientToolResult.timedOut`).
+   * The legacy engine leaves it unset; the managed engine uses it to detach rather than report a failure.
+   */
+  onRelayTimeout?: (toolCallId: string) => void;
 }
 
 export function newWorkspaceTurnState(): WorkspaceTurnState {
@@ -454,6 +460,10 @@ async function relay(
     abortSignal: abortSignal ?? ctx.abortSignal,
     timeoutMs,
   });
+
+  if (outcome.timedOut) {
+    ctx.onRelayTimeout?.(toolCallId);
+  }
 
   if (outcome.error) {
     return { ok: false, message: `The workspace could not complete this: ${outcome.error}` };

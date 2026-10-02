@@ -83,9 +83,11 @@ export interface TurnOutcomeFacts {
    *  - `budget`   — the turn reached its credit ceiling;
    *  - `segments` — the turn used every stream segment it was allowed;
    *  - `breaker`  — the check-and-fix circuit breaker tripped;
-   *  - `aborted`  — the user pressed Stop.
+   *  - `aborted`  — the user pressed Stop;
+   *  - `browser`  — managed engine only: the browser did not answer a tool call in time, so the request
+   *    DETACHED and the turn waits on Anthropic's side for a tab to re-attach (managed-agents-engine D6).
    */
-  stopReason?: 'none' | 'budget' | 'segments' | 'breaker' | 'aborted';
+  stopReason?: 'none' | 'budget' | 'segments' | 'breaker' | 'aborted' | 'browser';
 
   /** The last `check_game` result on this turn: `true` passed, `false` failed, `null`/absent never ran. */
   lastCheckOk?: boolean | null;
@@ -109,6 +111,12 @@ export interface TurnOutcome {
    * the alert falls back to "Finish the build" — the only label those outcomes ever had.
    */
   actionLabel: string | null;
+
+  /**
+   * The turn is still under way on the server and a live tab should RE-ATTACH to it (the managed
+   * engine's resume path) rather than offer a button. Present only on the `browser` outcome.
+   */
+  resume?: true;
 }
 
 /**
@@ -150,6 +158,20 @@ export function describeTurnOutcome(facts: TurnOutcomeFacts): TurnOutcome {
    * A Stop is the user's own decision and is charged for what it consumed (`fail-loud.md` state 4).
    * Telling someone their build "did not finish" after they stopped it is noise.
    */
+  /* Before `aborted`: a detached managed turn is not over, it is waiting for this browser. */
+  if (facts.stopReason === 'browser') {
+    return {
+      state: 'paused',
+      headline: 'Waiting for the preview to answer',
+      detail:
+        'The preview took too long to respond, so the agent is waiting — nothing is lost. It picks up ' +
+        'again on its own here, or when you reopen this project.',
+      action: null,
+      actionLabel: null,
+      resume: true,
+    };
+  }
+
   if (facts.aborted) {
     return finished;
   }

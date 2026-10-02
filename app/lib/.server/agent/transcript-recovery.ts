@@ -31,6 +31,8 @@
  * is deliberately biased: when in doubt, do nothing.
  */
 
+import { MANAGED_ASSISTANT_ID_PREFIX } from '~/lib/chat/managed-turn';
+
 /** A stored conversation, as `message-store.ts` holds it. Structural to avoid a server-only import. */
 export interface RecoverableChat {
   serverChatId: string;
@@ -117,4 +119,147 @@ export function planTranscriptRecovery(input: RecoveryPlanInput): RecoverableCha
     updatedAt: input.now,
     messages,
   };
+}
+
+/*
+ * ================================================================================================
+ * THE MANAGED ENGINE'S TRANSCRIPT (`_specs/managed-agents-engine_plan.md` T10).
+ *
+ * On the managed engine the server writes the turn's record at the END OF EVERY REQUEST — a finished
+ * turn, a detached one (closed tab), a resumed one, a failed one — because a managed turn can finish
+ * with no browser listening, and the browser was the only writer. Same rules as `planTranscriptRecovery`
+ * above, extended for a turn that can span two requests:
+ *
+ *   - **Never shrink.** The client's copy is richer; a write only ever APPENDS this turn, or replaces
+ *     this turn's own earlier (shorter) server-written reply.
+ *   - **One reply per TURN, not per request.** The assistant message id is derived from the session's
+ *     `user.message` event id (`managedAssistantId`), which a detached request and the resume that
+ *     finishes it share — so a resume REPLACES the partial reply instead of adding a second one.
+ *   - **A turn the client already saved is left alone** (its user message is stored with something
+ *     after it).
+ *   - **No file bodies.** The reply is the agent's narration only (tool inputs never reach it), and
+ *     a history rebuilt from the request has `<boltAction type="file">` bodies emptied.
+ * ================================================================================================
+ */
+
+export { MANAGED_ASSISTANT_ID_PREFIX };
+
+/** The stored id of a managed turn's reply. Pure. */
+export function managedAssistantId(turnId: string): string {
+  return `${MANAGED_ASSISTANT_ID_PREFIX}${turnId}`;
+}
+
+const FILE_ACTION_BODY = /(<boltAction\b[^>]*\btype="(?:file|edit)"[^>]*>)[\s\S]*?(<\/boltAction>)/g;
+
+/** Empty every file-action body, keeping the tags (the record of WHICH files a turn touched). Pure. */
+export function stripFileBodies(content: string): string {
+  return content.replace(FILE_ACTION_BODY, '$1$2');
+}
+
+export interface StoredMessage {
+  id: string;
+  role: string;
+  content: string;
+  annotations?: unknown[];
+}
+
+export interface ManagedTranscriptInput {
+  serverChatId?: string;
+  existing: RecoverableChat | null;
+
+  /** The conversation as the client sent it this request (normalised), oldest first. */
+  requestMessages: { id?: string; role: string; content: string }[];
+
+  /** This turn's user message — what the user typed. `null` when the request carries none. */
+  userMessage: { id?: string; content: string } | null;
+
+  /** This turn's reply: the agent's narration plus the annotations the route writes. */
+  assistant: StoredMessage;
+
+  /** The turn did something worth recording even if it said nothing (wrote files, ran tools). */
+  didWork: boolean;
+
+  title?: string;
+  now: string;
+}
+
+function asStored(message: unknown): StoredMessage | null {
+  const m = message as Partial<StoredMessage> | null;
+
+  return m && typeof m === 'object' && typeof m.id === 'string' ? (m as StoredMessage) : null;
+}
+
+export function planManagedTranscript(input: ManagedTranscriptInput): RecoverableChat | null {
+  if (!input.serverChatId) {
+    return null;
+  }
+
+  const { assistant } = input;
+
+  /*
+   * An EMPTY reply (a Stop after only reads, a detach before the first narration) is never stored as a
+   * message — it renders as a blank bubble. The user's words still are, so the turn is on record.
+   */
+  const hasReply = assistant.content.trim().length > 0;
+
+  const lastUserIndex = input.requestMessages.map((m) => m.role).lastIndexOf('user');
+  const history = input.requestMessages
+    .filter((m, i) => (m.role === 'user' || m.role === 'assistant') && i !== lastUserIndex)
+    .map((m, i) => ({ id: m.id ?? `recovered-${i}`, role: m.role, content: stripFileBodies(m.content) }));
+
+  const base: unknown[] = input.existing ? [...input.existing.messages] : history;
+  const at = base.findIndex((m) => asStored(m)?.id === assistant.id);
+
+  const done = (messages: unknown[]): RecoverableChat => ({
+    serverChatId: input.serverChatId!,
+    title: input.existing?.title ?? input.title,
+    createdAt: input.existing?.createdAt ?? input.now,
+    updatedAt: input.now,
+    messages,
+  });
+
+  /* This turn's reply is already stored (the detached request wrote it): replace it — never with less. */
+  if (at >= 0) {
+    if (!hasReply) {
+      return null;
+    }
+
+    const stored = asStored(base[at])!;
+
+    if (String(stored.content ?? '').length > assistant.content.length) {
+      return null;
+    }
+
+    if (
+      stored.content === assistant.content &&
+      JSON.stringify(stored.annotations ?? []) === JSON.stringify(assistant.annotations ?? [])
+    ) {
+      return null;
+    }
+
+    const messages = [...base];
+    messages[at] = assistant;
+
+    return done(messages);
+  }
+
+  const userId = input.userMessage?.id;
+  const userAt = userId ? base.findIndex((m) => asStored(m)?.id === userId) : -1;
+
+  /* The client already saved this turn (its user message is stored with something after it). */
+  if (userAt >= 0 && userAt < base.length - 1) {
+    return null;
+  }
+
+  const messages = [...base];
+
+  if (input.userMessage && userAt < 0 && (hasReply || input.didWork || input.userMessage.content.trim())) {
+    messages.push({ id: userId ?? `${assistant.id}-user`, role: 'user', content: input.userMessage.content });
+  }
+
+  if (hasReply) {
+    messages.push(assistant);
+  }
+
+  return messages.length > base.length ? done(messages) : null;
 }

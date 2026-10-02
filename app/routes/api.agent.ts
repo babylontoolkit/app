@@ -7,7 +7,6 @@
  * (§4.2 step 3).
  */
 import { type ActionFunctionArgs } from '@remix-run/cloudflare';
-import { describeTurnOutcome } from '~/lib/agent/turn-outcome';
 import { projectOwesBuild } from '~/lib/agent/creation-plan';
 import { createDataStream, formatDataStreamPart, type DataStreamWriter, type Message } from 'ai';
 import { createScopedLogger } from '~/utils/logger';
@@ -26,6 +25,7 @@ import { ShellActionStreamFilter } from '~/lib/.server/agent/shell-strip';
 import { ProtocolTagStreamFilter } from '~/lib/.server/agent/protocol-strip';
 import { typicalDurationMs } from '~/lib/.server/agent/delivery';
 import { withGenerationHeartbeat } from '~/lib/.server/agent/heartbeat';
+import { buildTurnAnnotations } from '~/lib/.server/agent/turn-annotations';
 import { NO_REPLAY, PLAN_MODE } from '~/types/message-marks';
 import { getMonitor } from '~/lib/.server/monitoring';
 import type { FileMap } from '~/lib/.server/llm/constants';
@@ -280,6 +280,9 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
             tier: body.tier,
             effort: body.effort,
             owesBuild: projectOwesBuild(project?.creationHandoff),
+
+            /* The ROW's plan — which phases a managed first build still owes (T9); never the body's `creationPhase`. */
+            creationPlan: project?.creationHandoff?.plan,
             starterId: project?.templateId,
             useAssetLibrary: body.useAssetLibrary,
             resume,
@@ -495,6 +498,15 @@ async function streamGeneration(
   generation.onBridgeEvent((event) => {
     stream.writeData({ ...event, generationId: generation.generationId } as any);
   });
+
+  /*
+   * Managed engine (T10): name the assistant message as the server stores it, so the client's later
+   * full-list save and the server-written transcript agree on ONE id per turn. `start_step` is the AI
+   * SDK's own way to set it; the legacy engine never fires this, so its stream is unchanged.
+   */
+  generation.onAssistantMessageId?.((messageId) => {
+    stream.write(formatDataStreamPart('start_step', { messageId }));
+  });
   generation.onMediaTask((event) => {
     stream.writeData({
       type: 'media-task',
@@ -627,117 +639,39 @@ async function streamGeneration(
     );
   }
 
-  const usage = await generation.usage;
-
-  stream.writeMessageAnnotation({
-    type: 'usage',
-    value: {
-      completionTokens: usage.completionTokens,
-      promptTokens: usage.promptTokens,
-      totalTokens: usage.totalTokens,
-      cacheReadTokens: usage.cacheReadTokens,
-      cacheCreationTokens: usage.cacheCreationTokens,
-    },
-  });
-
   /*
-   * Traceability for the client (cost badge, and which doc snapshot produced this answer).
+   * The four annotations — built by `buildTurnAnnotations` (`agent/turn-annotations.ts`), which the
+   * managed engine also uses for the transcript it writes server-side (T10), so the stream and the
+   * stored record cannot disagree. Written in the same order as ever: usage, agentMeta, agentWorkspace
+   * (absent with the loop off), credits — the credits AFTER the text, from a settled number (§4.6).
    *
-   * `generationId` is here because the SELF-HEALING loop needs it (§4.2.7): if the code we just wrote
-   * fails to compile, the client re-POSTs with `repairOf: generationId`, which is what tells the server
-   * this is a repair rather than a fresh request — and that in turn is what escalates the effort level
-   * and caps the attempts.
+   * What each carries, and why, is documented on the builder: `generationId` (the repair loop names
+   * it, §4.2.7), the provider and the rung that RAN (§4.2a, §4.6.1a), the history as it went on the wire
+   * (§4.5.6), the turn's outcome for the user (`turn-outcome.ts` — persisted so the warning survives a
+   * reload), what the tool loop did (paths, never bodies, §4.2.8), the charge and its savings.
    */
-  stream.writeMessageAnnotation({
-    type: 'agentMeta',
-    value: {
-      generationId: generation.generationId,
-      promptVersionId: generation.promptVersionId,
-      model: generation.model,
+  const usage = await generation.usage;
+  const outcomeFacts = await generation.outcome;
+  const workspaceSummary = await generation.workspaceSummary;
+  const settlement = await generation.settlement;
+  const creationPhasesCompleted = generation.creationPhasesCompleted
+    ? await generation.creationPhasesCompleted
+    : undefined;
 
-      /*
-       * WHICH GATEWAY SERVED IT (§4.2a). With `AUTO_MODEL_SELECT` the provider can differ per turn, so
-       * the model string no longer implies who ran it — and the same model costs materially different
-       * amounts on different gateways. Shown in `/context` so a price change is explicable.
-       */
-      provider: generation.provider,
-
-      /*
-       * The rung that actually RAN, and why — never the one that was requested (§4.6.1a). A declined
-       * Premium turn and a plain Standard turn can run the same model and are very different facts, so a
-       * client reading only `model` cannot tell them apart; and once two rungs may name one model, the
-       * model string stops identifying a rung at all. This is what makes a Premium turn identifiable
-       * in the generation log and lets the composer pill name what was really billed.
-       */
-      tier: generation.tier,
-      tierReason: generation.tierReason,
-
-      skillsLoaded: [...generation.toolContext.loaded],
-      blocksLoaded: generation.blocksLoaded,
-
-      /*
-       * The re-sent history as it went on the wire (post-compaction) — the client's `/context`
-       * report and health dot read this, never a client-side estimate (§4.5.6).
-       */
-      history: generation.historyStats,
-
-      /*
-       * 🔴 HOW THIS TURN ENDED, FOR THE USER (`~/lib/agent/turn-outcome.ts`).
-       *
-       * Every marker for a truncated build already existed server-side — `finish_reason` carried
-       * `length+forced-continuation`, monitoring alerted on the rate, the Admin panel counted it — and
-       * the user was still shown `🎮 Your game is ready` on a project cut off mid-file. This is the
-       * user-visible half `spec/fail-loud.md`'s reporting corollary always required.
-       *
-       * It rides on `agentMeta` deliberately: annotations are persisted with the message, so the
-       * warning survives a reload. A toast would not, and a build the user walks away from broken is
-       * exactly the case that has to still be saying so when they come back.
-       */
-      outcome: { ...describeTurnOutcome(await generation.outcome) },
-    },
+  const annotations = buildTurnAnnotations(generation, {
+    usage,
+    outcome: outcomeFacts,
+    workspaceSummary,
+    settlement,
+    creationPhasesCompleted,
   });
 
-  /*
-   * WHAT THE TOOL LOOP DID (tool-loop plan D20c) — paths, commands, todos and the last check, never a
-   * file body (§4.2.8). Persisted with the message so the activity list survives a reload, and read by
-   * `history.ts` into a one-line summary for the next turn. Absent with the loop off.
-   */
-  const workspaceSummary = await generation.workspaceSummary;
+  stream.writeMessageAnnotation(annotations.usage as any);
+  stream.writeMessageAnnotation(annotations.agentMeta as any);
 
-  if (workspaceSummary) {
-    stream.writeMessageAnnotation({ type: 'agentWorkspace', value: workspaceSummary as any });
+  if (annotations.agentWorkspace) {
+    stream.writeMessageAnnotation(annotations.agentWorkspace as any);
   }
 
-  /*
-   * What this generation actually cost the user, and their new balance (§4.6). Sent AFTER the text so
-   * the credit badge updates from a settled number, never an estimate.
-   */
-  const settlement = await generation.settlement;
-
-  stream.writeMessageAnnotation({
-    type: 'credits',
-    value: {
-      creditsCharged: settlement?.creditsCharged ?? 0,
-      balanceAfter: settlement?.balanceAfter ?? null,
-      notice: generation.notice ?? null,
-
-      /*
-       * What the gateway saved on this turn, in credits (`billing/savings.ts`). Rides on the CREDITS
-       * annotation rather than `agentMeta` because it is a fact about the charge — the two must move
-       * together, and a saving arriving on a different annotation than the number it discounts is a
-       * pair the client can render half of.
-       *
-       * `null` is the normal, expected value (a turn Anthropic cannot price, a refunded failure, an
-       * unmetered server) and means SAY NOTHING — never "you saved 0".
-       */
-      savings: settlement?.savings
-        ? {
-            basis: settlement.savings.basis,
-            referenceCredits: settlement.savings.referenceCredits,
-            savedCredits: settlement.savings.savedCredits,
-            percent: settlement.savings.percent,
-          }
-        : null,
-    },
-  });
+  stream.writeMessageAnnotation(annotations.credits as any);
 }

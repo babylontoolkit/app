@@ -32,6 +32,13 @@ export interface ClientToolResult {
 
   /** An error message if the client could not run the tool. Fed back to the model as a tool_result. */
   error?: string;
+
+  /**
+   * The relay gave up waiting for the browser (its TIMER fired) — never set for a browser-side error, a
+   * Stop or a closed request. The legacy engine feeds the sentence to the model as before; the managed
+   * engine reads this flag to treat the browser as gone and detach instead (managed-agents-engine D6).
+   */
+  timedOut?: true;
 }
 
 interface Pending {
@@ -89,7 +96,7 @@ export function awaitClientToolResult(input: AwaitToolResultInput): Promise<Clie
 
     const timer = setTimeout(() => {
       logger.warn(`MCP tool call ${toolCallId} timed out after ${input.timeoutMs ?? MCP_RELAY_TIMEOUT_MS}ms`);
-      settle({ error: 'The tool did not respond in time.' });
+      settle({ error: 'The tool did not respond in time.', timedOut: true });
     }, input.timeoutMs ?? MCP_RELAY_TIMEOUT_MS);
 
     byGen.set(toolCallId, { userId, settle, timer });
@@ -98,6 +105,11 @@ export function awaitClientToolResult(input: AwaitToolResultInput): Promise<Clie
     input.abortSignal?.addEventListener('abort', () => settle({ error: 'The generation was stopped.' }), {
       once: true,
     });
+
+    // An already-aborted signal never fires 'abort' — settle now rather than waiting out the timer.
+    if (input.abortSignal?.aborted) {
+      settle({ error: 'The generation was stopped.' });
+    }
   });
 }
 

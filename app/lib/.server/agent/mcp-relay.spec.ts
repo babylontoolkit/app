@@ -64,11 +64,30 @@ describe('mcp-relay', () => {
     try {
       const promise = awaitClientToolResult({ generationId: 'g4', toolCallId: 'c1', userId: 'u1', timeoutMs: 1000 });
       vi.advanceTimersByTime(1001);
-      await expect(promise).resolves.toEqual({ error: 'The tool did not respond in time.' });
+
+      /* `timedOut` is set by the TIMER only — the managed engine reads it to detach (managed-agents D6). */
+      await expect(promise).resolves.toEqual({ error: 'The tool did not respond in time.', timedOut: true });
       expect(pendingCountForTests('g4')).toBe(0);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('a browser-side error and a Stop are NOT timeouts (no `timedOut` flag)', async () => {
+    const controller = new AbortController();
+    const delivered = awaitClientToolResult({ generationId: 'g9', toolCallId: 'c1', userId: 'u1' });
+    const stopped = awaitClientToolResult({
+      generationId: 'g9',
+      toolCallId: 'c2',
+      userId: 'u1',
+      abortSignal: controller.signal,
+    });
+
+    deliverClientToolResult({ generationId: 'g9', toolCallId: 'c1', userId: 'u1', error: 'boom' });
+    controller.abort();
+
+    expect(await delivered).toEqual({ error: 'boom' });
+    expect(await stopped).toEqual({ error: 'The generation was stopped.' });
   });
 
   it('settles every pending call when the generation ends', async () => {
@@ -94,5 +113,28 @@ describe('mcp-relay', () => {
 
     controller.abort();
     await expect(promise).resolves.toEqual({ error: 'The generation was stopped.' });
+  });
+
+  it('settles at once when the signal is ALREADY aborted (no wait for the timer, no leaked entry)', async () => {
+    vi.useFakeTimers();
+
+    try {
+      const controller = new AbortController();
+      controller.abort();
+
+      const promise = awaitClientToolResult({
+        generationId: 'g7',
+        toolCallId: 'c1',
+        userId: 'u1',
+        abortSignal: controller.signal,
+        timeoutMs: 60_000,
+      });
+
+      // No timer advance: an already-aborted call must not sit out the 60s relay timeout.
+      await expect(promise).resolves.toEqual({ error: 'The generation was stopped.' });
+      expect(pendingCountForTests('g7')).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

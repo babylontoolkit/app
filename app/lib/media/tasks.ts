@@ -247,3 +247,80 @@ async function deliverBytes(handle: MediaTaskHandle): Promise<void> {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/*
+ * ================================================================================================
+ * RESUME ON LOAD — a paid render must not be stranded by a reload.
+ *
+ * The poller above lives in PAGE memory. A render started by a turn is tracked from the stream's
+ * `media-task` part; reload or leave the page while a slow render is still pending and that poller is
+ * gone — and the stream parts are not replayed for a restored chat, so nothing ever asked again. Found
+ * live (managed-agents-engine Phase C, `med_muqgg3oa_oimk6x`): seven renders started in one build, six
+ * delivered before the page reloaded, the slowest stayed `pending` forever — debited, never delivered,
+ * never refunded (only `pollMediaTask` delivers or refunds, and only a poll calls it). The Media panel's
+ * manual Resume button was the only way back, and nobody knows to press it.
+ *
+ * So opening a project resumes its pending renders. Polling is idempotent server-side (per-task
+ * serialised, terminal states sticky, refund latched), so a second tab doing the same is harmless.
+ * ================================================================================================
+ */
+
+/** Older pending renders are left to the Media panel: a provider's result URL does not live forever. */
+export const RESUME_PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+interface ListedTask {
+  id?: string;
+  projectId?: string;
+  status?: string;
+  destPath?: string;
+  kind?: string;
+  createdAt?: string;
+}
+
+/** Which listed tasks to resume: pending, recent, well-formed, for THIS project. Pure. */
+export function pendingTasksToResume(projectId: string, tasks: ListedTask[], now: number): MediaTaskHandle[] {
+  return tasks
+    .filter(
+      (t) =>
+        t.status === 'pending' &&
+        typeof t.id === 'string' &&
+        typeof t.destPath === 'string' &&
+        (t.projectId === undefined || t.projectId === projectId) &&
+        now - Date.parse(t.createdAt ?? '') <= RESUME_PENDING_MAX_AGE_MS,
+    )
+    .map((t) => ({
+      projectId,
+      taskId: t.id as string,
+      destPath: t.destPath as string,
+      kind: t.kind === 'video' ? 'video' : t.kind === 'audio' ? 'audio' : 'image',
+    }));
+}
+
+/** Resume this project's pending renders (fire-and-forget pollers). Returns how many. Never throws. */
+export async function resumePendingMediaTasks(
+  projectId: string,
+  deps: { fetchImpl?: typeof fetch; track?: (handle: MediaTaskHandle) => Promise<void>; now?: number } = {},
+): Promise<number> {
+  try {
+    const response = await (deps.fetchImpl ?? fetch)(`/api/projects/${projectId}/media`);
+
+    if (!response.ok) {
+      return 0;
+    }
+
+    const data = (await response.json()) as { tasks?: ListedTask[] };
+    const handles = pendingTasksToResume(projectId, data.tasks ?? [], deps.now ?? Date.now());
+
+    for (const handle of handles) {
+      void (deps.track ?? trackMediaTask)(handle);
+    }
+
+    if (handles.length) {
+      logger.info(`Resumed ${handles.length} pending render(s) for ${projectId}`);
+    }
+
+    return handles.length;
+  } catch {
+    return 0;
+  }
+}
