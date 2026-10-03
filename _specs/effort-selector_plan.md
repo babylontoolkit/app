@@ -158,7 +158,7 @@ the user ~2× — **margin unchanged**. On managed, longer turns also bill more 
   history); `spec/agent-seams.md` line refs if `proxy.ts` moved.
   **Acceptance:** spec-consistency sweep finds no remaining "medium or high only" / "xhigh/max
   unofferable" / "/effort does not apply on managed" text.
-- [ ] **T10 — Gates.** `pnpm typecheck && pnpm lint:fix && pnpm lint && pnpm test` green; `pnpm dev`
+- [x] **T10 — Gates.** `pnpm typecheck && pnpm lint:fix && pnpm lint && pnpm test` green; `pnpm dev`
   runs.
 
 ## Findings

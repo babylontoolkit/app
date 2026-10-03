@@ -36,3 +36,5 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - DECISION T9: regenerated all 80 `spec/agent-seams.md` line refs by diff-mapping from e1ae7dbc + classified `effort-offer.ts` → seam-classification spec green again.
 - DECISION T9: also fixed two pre-existing stale "/slash → high" claims beside the effort text (retired 2026-08-14) so the docs agree with §4.2a.
 - T9 ✅ verified (independent) — 1 attempt — 18 doc-reading spec files, 720 tests green; precedence-wording slip fixed by orchestrator.
+- DECISION T10 (scope expansion): `pnpm test` was red only on 13 `engine-turn.spec.ts` tests inherited from e1ae7dbc — settlement now reads per-thread cumulative usage (`sessions.threads.list` + tiered `cache_creation`) and the fake client had neither. Fixed TEST-ONLY in `fake-session.testkit.ts` (one primary thread + session usage summed from `span.model_request_end`, cache writes reported as the 5-minute tier) — no production code touched. Without it the pre-commit hook blocks every commit.
+- T10 ✅ gates: typecheck 0, lint 0 errors (31 pre-existing warnings), full suite green; final commit made THROUGH the pre-commit hook.

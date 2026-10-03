@@ -207,6 +207,25 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
     return session;
   }
 
+  /** The session's cumulative token usage — the sum of its `span.model_request_end` events, as the live API reports it. */
+  function usageOf(s: FakeSessionState) {
+    const total = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+
+    for (const e of s.events) {
+      const u = e.type === 'span.model_request_end' ? (e.model_usage as Partial<typeof total> | undefined) : undefined;
+
+      if (u) {
+        total.input_tokens += u.input_tokens ?? 0;
+        total.output_tokens += u.output_tokens ?? 0;
+        total.cache_read_input_tokens += u.cache_read_input_tokens ?? 0;
+        total.cache_creation_input_tokens += u.cache_creation_input_tokens ?? 0;
+      }
+    }
+
+    /* Session/thread usage reports cache writes by TIER; Managed Agents writes the 5-minute tier. */
+    return { ...total, cache_creation: { ephemeral_5m_input_tokens: total.cache_creation_input_tokens } };
+  }
+
   const retrieve = async (id: string) => {
     const s = requireSession(id);
     const agentParams = s.createParams.agent as
@@ -224,7 +243,11 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
       status: s.status,
       archived_at: s.archivedAt,
       budget: s.budget,
-      usage: { active_seconds: s.activeSeconds, list_cost: { amount: String(s.listCostCents), currency: 'USD' } },
+      usage: {
+        ...usageOf(s),
+        active_seconds: s.activeSeconds,
+        list_cost: { amount: String(s.listCostCents), currency: 'USD' },
+      },
       stats: { active_seconds: s.activeSeconds },
     };
   };
@@ -232,6 +255,18 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
   const client = {
     beta: {
       sessions: {
+        /** One primary thread carrying the session's cumulative usage (what `settle.ts` bills). */
+        threads: {
+          list: (id: string) => {
+            const s = requireSession(id);
+            const agentParams = s.createParams.agent as { id?: string } | undefined;
+            const model = agentParams?.id ? state.agentModels[agentParams.id] : undefined;
+
+            return (async function* () {
+              yield { id: `${id}_primary`, ...(model ? { agent: { model: { id: model } } } : {}), usage: usageOf(s) };
+            })();
+          },
+        },
         create: async (params: Record<string, unknown>) => {
           const id = `sesn_${sessions.size + 1}`;
           const session = seed(id);
