@@ -23,6 +23,8 @@ import { FsProjectStore, setProjectStore } from '~/lib/.server/projects/store';
 import { FsGenerationStore, setGenerationStore } from './generations';
 import { settleGeneration } from './gate';
 import { settleBeforeDelete } from '~/lib/.server/agent-managed/delete-settle';
+import { settleManagedTurn } from '~/lib/.server/agent-managed/settle';
+import { parseCostCursor, serializeCostCursor, EMPTY_COST_CURSOR } from '~/lib/.server/agent-managed/session-cost';
 import { resetInFlightForTests, trackGeneration, trackManagedTurn } from './in-flight';
 import { FsLedger, setLedger } from './ledger';
 import { createUsageCheckpointer, openRunningGeneration } from './running-generation';
@@ -377,5 +379,294 @@ describe('a running row is billed exactly once, whoever races for it', () => {
     await runBillingSweep(undefined, { now: later(30) });
     expect((await row('gen_managed_live')).status).toBe('running');
     release();
+  });
+});
+
+/*
+ * no-unbilled-usage D6 (G6): the managed cursor carries its charge as a PENDING DEBIT in the same write that
+ * advances it, cleared once the debit lands. A settlement interrupted between the two — a crash, a ledger
+ * outage — leaves the intent, and the next settlement or the sweep debits it, exactly once.
+ */
+describe('(c) pending debit intents (D6)', () => {
+  const cursorOf = async (chatId: string) => parseCostCursor((await getChatIndex().get(chatId))?.managedSettledAt);
+
+  /** Make the next `generation` debit fail the way a ledger outage does (settleGeneration returns null). */
+  function failNextDebit() {
+    const append = ledger.append.bind(ledger);
+
+    ledger.append = async (entry) => {
+      if (entry.reason === 'generation') {
+        ledger.append = append;
+        throw new Error('ledger is down');
+      }
+
+      return append(entry);
+    };
+  }
+
+  const settleChat = (chatId: string, sessionId: string, generationId: string) =>
+    settleManagedTurn({
+      client: fake.client,
+      sessionId,
+      projectId,
+      chatId,
+      userId: USER,
+      generationId,
+      model: MODEL,
+      statusKind: 'edit',
+      sessionHourUsd: 0,
+    });
+
+  it('a debit that did not land stays on the cursor, and the sweep debits it exactly once', async () => {
+    const { chatId, sessionId } = await managedChat(1);
+
+    failNextDebit();
+
+    const settled = await settleChat(chatId, sessionId, 'gen_d6_lost');
+
+    expect(settled.settlement).toBeNull();
+    expect(settled.complete, 'an undebited charge is not accounted for').toBe(false);
+    expect(await debits()).toEqual([]);
+    expect((await cursorOf(chatId))?.pending?.map((p) => p.generationId)).toEqual(['gen_d6_lost']);
+
+    await runBillingSweep(undefined, { now: later(1) });
+    await runBillingSweep(undefined, { now: later(20) });
+
+    const charged = await debits();
+
+    expect(charged.map((e) => e.generationId)).toEqual(['gen_d6_lost']);
+    expect((await cursorOf(chatId))?.pending ?? []).toEqual([]);
+  });
+
+  it('a crash between the cursor write and the debit (intent on the cursor, no ledger row) → the sweep debits it once', async () => {
+    /* Running, so the chat pass (b) skips it: only the intent pass (c) can bill this. */
+    const { chatId } = await managedChat(1, 'running');
+    const intent = {
+      generationId: 'gen_d6_crash',
+      credits: 42,
+      rawCostUsd: 0.07,
+      model: MODEL,
+      userId: USER,
+      projectId,
+      chatId,
+      statusKind: 'edit',
+      usage: {
+        promptTokens: 1200,
+        completionTokens: 900,
+        totalTokens: 2100,
+        cacheReadTokens: 40_000,
+        cacheCreationTokens: 6000,
+      },
+    };
+
+    await getChatIndex().setManagedSettledAt({
+      id: chatId,
+      projectId,
+      settledAt: serializeCostCursor({ ...EMPTY_COST_CURSOR, credits: 42, pending: [intent] }),
+    });
+
+    const first = await runBillingSweep(undefined, { now: later(1) });
+
+    expect(first.pendingDebits).toBe(1);
+    expect((await debits()).map((e) => [e.generationId, -e.delta])).toEqual([['gen_d6_crash', 42]]);
+    expect((await cursorOf(chatId))?.pending ?? []).toEqual([]);
+    expect((await cursorOf(chatId))?.credits, 'the rest of the cursor is untouched').toBe(42);
+
+    await runBillingSweep(undefined, { now: later(20) });
+    expect(await debits()).toHaveLength(1);
+  });
+
+  it('an intent whose debit DID land (only its clear was lost) charges nothing more and is cleared', async () => {
+    const { chatId } = await managedChat(1, 'running');
+    const intent = {
+      generationId: 'gen_d6_landed',
+      credits: 17,
+      rawCostUsd: 0.03,
+      model: MODEL,
+      userId: USER,
+      projectId,
+      chatId,
+      usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    };
+
+    await settleGeneration({
+      userId: USER,
+      generationId: 'gen_d6_landed',
+      model: MODEL,
+      provider: 'Anthropic',
+      usage: intent.usage,
+      flatCredits: 17,
+    });
+    await getChatIndex().setManagedSettledAt({
+      id: chatId,
+      projectId,
+      settledAt: serializeCostCursor({ ...EMPTY_COST_CURSOR, credits: 17, pending: [intent] }),
+    });
+
+    await runBillingSweep(undefined, { now: later(1) });
+
+    expect((await debits()).map((e) => e.generationId)).toEqual(['gen_d6_landed']);
+    expect((await cursorOf(chatId))?.pending ?? []).toEqual([]);
+  });
+
+  it("an orphan's cursor intent is debited too", async () => {
+    fake.seed('sesn_orphan_d6', []).status = 'running';
+
+    const chatId = randomUUID();
+
+    await getManagedOrphanStore().record({
+      userId: USER,
+      projectId,
+      chatId,
+      sessionId: 'sesn_orphan_d6',
+      cursor: serializeCostCursor({
+        ...EMPTY_COST_CURSOR,
+        credits: 9,
+        pending: [
+          {
+            generationId: 'gen_d6_orphan',
+            credits: 9,
+            rawCostUsd: 0.01,
+            model: MODEL,
+            userId: USER,
+            projectId,
+            chatId,
+            usage: {
+              promptTokens: 5,
+              completionTokens: 5,
+              totalTokens: 10,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          },
+        ],
+      }),
+      model: MODEL,
+    });
+
+    await runBillingSweep(undefined, { now: later(1) });
+
+    expect((await debits()).map((e) => e.generationId)).toEqual(['gen_d6_orphan']);
+    expect(parseCostCursor((await getManagedOrphanStore().listOpen())[0]?.cursor)?.pending ?? []).toEqual([]);
+  });
+
+  it('CONTROL: an ordinary settlement leaves no intent on the cursor', async () => {
+    const { chatId, sessionId } = await managedChat(1);
+
+    const settled = await settleChat(chatId, sessionId, 'gen_d6_ok');
+
+    expect(settled.complete).toBe(true);
+    expect(await debits()).toHaveLength(1);
+    expect((await getChatIndex().get(chatId))?.managedSettledAt).not.toContain('pending');
+  });
+
+  it('a cursor written before D6 (no pending field) parses and settles as before', async () => {
+    const { chatId } = await managedChat(1);
+
+    await getChatIndex().setManagedSettledAt({
+      id: chatId,
+      projectId,
+      settledAt: JSON.stringify({ v: 2, tokens: {}, trueCostUsd: 0, warmBasisUsd: 0, credits: 0 }),
+    });
+
+    await runBillingSweep(undefined, { now: later(1) });
+
+    expect(await debits()).toHaveLength(1);
+    expect((await cursorOf(chatId))?.pending ?? []).toEqual([]);
+  });
+});
+
+/*
+ * Verifier money defect 1: an intent is a DECIDED charge and needs no session. An orphan whose session is
+ * gone (404) must still have its intents debited before it is resolved — and kept open when that fails.
+ */
+describe('(c) an intent survives its session (verifier money defect 1)', () => {
+  const intentFor = (chatId: string, generationId: string, credits: number) => ({
+    generationId,
+    credits,
+    rawCostUsd: 0.02,
+    model: MODEL,
+    userId: USER,
+    projectId,
+    chatId,
+    usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  });
+
+  async function orphanWithIntent(generationId: string, credits: number) {
+    const chatId = randomUUID();
+
+    /* `sesn_vanished` is never seeded: every read of it is a 404. */
+    await getManagedOrphanStore().record({
+      userId: USER,
+      projectId,
+      chatId,
+      sessionId: 'sesn_vanished',
+      cursor: serializeCostCursor({
+        ...EMPTY_COST_CURSOR,
+        credits,
+        pending: [intentFor(chatId, generationId, credits)],
+      }),
+      model: MODEL,
+    });
+  }
+
+  it('an orphan whose session is gone (404) has its intent debited once, then is resolved', async () => {
+    await orphanWithIntent('gen_gone_intent', 11);
+
+    await runBillingSweep(undefined, { now: later(1) });
+
+    expect((await debits()).map((e) => [e.generationId, -e.delta])).toEqual([['gen_gone_intent', 11]]);
+    expect(await getManagedOrphanStore().listOpen()).toEqual([]);
+
+    await runBillingSweep(undefined, { now: later(20) });
+    expect(await debits()).toHaveLength(1);
+  });
+
+  it('a transient debit failure keeps the 404 orphan OPEN, and the next sweep debits it', async () => {
+    await orphanWithIntent('gen_gone_retry', 6);
+
+    const append = ledger.append.bind(ledger);
+    let failing = true;
+
+    ledger.append = async (entry) => {
+      if (failing && entry.reason === 'generation') {
+        throw new Error('ledger is down');
+      }
+
+      return append(entry);
+    };
+
+    await runBillingSweep(undefined, { now: later(1) });
+
+    expect(await debits()).toEqual([]);
+    expect(await getManagedOrphanStore().listOpen(), 'kept for the retry').toHaveLength(1);
+
+    failing = false;
+    await runBillingSweep(undefined, { now: later(20) });
+
+    expect((await debits()).map((e) => e.generationId)).toEqual(['gen_gone_retry']);
+    expect(await getManagedOrphanStore().listOpen()).toEqual([]);
+  });
+
+  it('recovering an intent whose debit already landed never rewrites the row and never alerts', async () => {
+    const { chatId } = await managedChat(1, 'running');
+
+    await store.upsert({ id: 'gen_landed_failed', userId: USER, model: MODEL, status: 'failed', creditsCharged: 8 });
+    await ledger.append({ userId: USER, delta: -8, reason: 'generation', generationId: 'gen_landed_failed' });
+    await getChatIndex().setManagedSettledAt({
+      id: chatId,
+      projectId,
+      settledAt: serializeCostCursor({
+        ...EMPTY_COST_CURSOR,
+        credits: 8,
+        pending: [intentFor(chatId, 'gen_landed_failed', 8)],
+      }),
+    });
+
+    await runBillingSweep(undefined, { now: later(1) });
+
+    expect((await debits()).filter((e) => e.generationId === 'gen_landed_failed')).toHaveLength(1);
+    expect((await row('gen_landed_failed')).status, 'a failed row stays failed').toBe('failed');
+    expect(parseCostCursor((await getChatIndex().get(chatId))?.managedSettledAt)?.pending ?? []).toEqual([]);
   });
 });

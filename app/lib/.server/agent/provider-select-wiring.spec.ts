@@ -73,7 +73,16 @@ describe('the proxy feeds the ladder its health signal', () => {
    * own downstream failures are not evidence against the provider.
    */
   it('records a success only when the gateway actually produced billed output', () => {
-    expect(proxy()).toMatch(/if \(totals\.completionTokens > 0\) \{\s*recordProviderSuccess\(config\.provider\);/);
+    /*
+     * Measured BEFORE no-unbilled-usage D7 adds the wire usage of steps the SDK never reported: those are
+     * billed to the user, but a broken attempt is not evidence the gateway is healthy.
+     */
+    expect(proxy()).toMatch(
+      /const streamedOutput = totals\.completionTokens > 0;[\s\S]*?if \(streamedOutput\) \{\s*recordProviderSuccess\(config\.provider\);/,
+    );
+    expect(proxy().indexOf('const streamedOutput = totals.completionTokens > 0;')).toBeLessThan(
+      proxy().indexOf('addUnreportedUsage(totals'),
+    );
   });
 
   it('records that success from ONE place only', () => {

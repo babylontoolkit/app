@@ -77,6 +77,7 @@ import { cometEnvModel, cometGeminiBaseUrl, COMET_DEFAULT_BASE_URL, COMET_MODELS
 import { requireFamily } from '~/lib/modules/llm/model-families';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 import { tapStopReasons } from '~/lib/modules/llm/stop-reason-tap';
+import { tapWireUsage, type WireUsageRecorder } from '~/lib/modules/llm/wire-usage';
 import { withTailCache } from '~/lib/modules/llm/tail-cache';
 
 export default class CometApiProvider extends BaseProvider {
@@ -127,6 +128,13 @@ export default class CometApiProvider extends BaseProvider {
      * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
      */
     toolLoop?: boolean;
+
+    /**
+     * This generation's wire recorder (no-unbilled-usage D7, `wire-usage.ts`): every request's
+     * `message_start` usage, so a step that breaks before the SDK reports it is still billed. OPTIONAL and
+     * additive — omitted = the fetch chain exactly as before; non-Anthropic wires ignore it.
+     */
+    wireUsage?: WireUsageRecorder;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
 
@@ -244,7 +252,10 @@ export default class CometApiProvider extends BaseProvider {
         thinkingMode,
         effort,
         model,
-        withTailCache(tapStopReasons(rateLimitFetch({ provider: this.name })), options.toolLoop),
+        withTailCache(
+          tapWireUsage(options.wireUsage, tapStopReasons(rateLimitFetch({ provider: this.name }))),
+          options.toolLoop,
+        ),
       ),
     });
 

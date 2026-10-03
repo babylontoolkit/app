@@ -80,6 +80,7 @@ import { geminiFetch, KIE_GEMINI_BASE_URL } from './kie-gemini-wire';
 import { codexEffort, geminiThinkingLevel, requireFamily } from '~/lib/modules/llm/model-families';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 import { withTailCache } from '~/lib/modules/llm/tail-cache';
+import { tapWireUsage, type WireUsageRecorder } from '~/lib/modules/llm/wire-usage';
 
 export default class KieProvider extends BaseProvider {
   name = 'KIE';
@@ -141,6 +142,13 @@ export default class KieProvider extends BaseProvider {
      * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
      */
     toolLoop?: boolean;
+
+    /**
+     * This generation's wire recorder (no-unbilled-usage D7, `wire-usage.ts`): every request's
+     * `message_start` usage, so a step that breaks before the SDK reports it is still billed. OPTIONAL and
+     * additive — omitted = the fetch chain exactly as before; non-Anthropic wires ignore it.
+     */
+    wireUsage?: WireUsageRecorder;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
 
@@ -256,7 +264,10 @@ export default class KieProvider extends BaseProvider {
         thinkingMode,
         effort,
         model,
-        withTailCache(kieFetch(rateLimitFetch({ provider: this.name })), options.toolLoop),
+        withTailCache(
+          kieFetch(tapWireUsage(options.wireUsage, rateLimitFetch({ provider: this.name }))),
+          options.toolLoop,
+        ),
       ),
     });
 

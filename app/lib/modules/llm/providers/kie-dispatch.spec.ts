@@ -531,7 +531,10 @@ describe('kie.ts really wires the branches this spec reproduces', () => {
      */
     const flat = code.replace(/\(\s+/g, '(').replace(/\s+/g, ' ');
     expect(flat).toContain('thinkingFetch(thinkingMode, effort, model, withTailCache(kieFetch(');
-    expect(flat).toContain('options.toolLoop)');
+
+    /* The Claude wire is tapped for the step in flight (no-unbilled-usage D7), under KIE's body rewrite. */
+    expect(flat).toContain('kieFetch(tapWireUsage(options.wireUsage, rateLimitFetch(');
+    expect(flat).toMatch(/options\.toolLoop,? \)/);
   });
 
   /*

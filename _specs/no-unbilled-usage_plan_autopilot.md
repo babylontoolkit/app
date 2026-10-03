@@ -25,3 +25,11 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - T2 ✅ verified (independent) — 1 attempt.
 - T3 ✅ verified (independent) — 2 attempts (defect B fixed).
 - T4 ✅ verified (independent) — 2 attempts (defect A fixed). Suites: 131 files / 2,800 tests green.
+- DECISION T5: `_carry` also runs on a resume; a rebind whose `_prior` is incomplete records an orphan (post-settlement cursor) and releases; orphan write failure → ManagedRebindError 503, chat stays bound.
+- DECISION T6: `pending` is a LIST of intents; every settlement recovers stored intents first; anchored recovery writes only the ledger debit (`gate.ts debitAnchoredGeneration`); a refundable turn's intent is DROPPED (never debited) — refunds aren't idempotent so debit+refund pairs could refund twice.
+- DECISION T6 (verifier fix): intents debited before EVERY release (rebind gone/missing, orphan 404); orphan/chat released only when nothing is owed.
+- DECISION T7: wire tap on Anthropic-shaped SSE only (Anthropic + KIE/Comet Claude routes); gpt/gemini/chat wires NOT tapped (gap); broken step output floored at chars/4 (can under-bill, never over-bill).
+- RISK (carried to T8–T9 brief): migration 0026 re-home trigger nulls a chat's session+cursor on project move → pending intents lost (platform loses); T5 race keepForSweep-then-release-throws / concurrent switched rebinds → same cursor billed twice (user overcharged, rare).
+- T5 ✅ verified (independent) — 1 attempt.
+- T6 ✅ verified (independent) — 2 attempts (2 money defects fixed).
+- T7 ✅ verified (independent) — 1 attempt. Suites: 147 files / 3,187 tests green.

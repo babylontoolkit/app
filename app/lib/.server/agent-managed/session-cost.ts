@@ -218,6 +218,39 @@ export interface CostCursor {
 
   /** Credits charged for this session so far (all settlements). */
   credits: number;
+
+  /**
+   * Debits this cursor already counts but the ledger may not hold yet (no-unbilled-usage D6). A settlement
+   * writes its charge here IN THE SAME WRITE that advances the cursor, then clears it once the debit has
+   * landed — so a process that dies between the two leaves a record the next settlement, or the billing
+   * sweep, debits (idempotent by generation id, migration 0029). Absent on every cursor written before D6,
+   * and omitted when empty, so an ordinary cursor is byte-identical to before.
+   */
+  pending?: PendingDebit[];
+}
+
+/** One debit a cursor has counted and the ledger may not hold (see `CostCursor.pending`). */
+export interface PendingDebit {
+  generationId: string;
+  credits: number;
+
+  /** The charge's true cost — the generation row's `rawCostUsd`. */
+  rawCostUsd: number;
+  model: string;
+  userId: string;
+  projectId: string;
+  chatId: string;
+  statusKind?: string;
+  usage: GenerationUsage;
+
+  /** The ledger note's pricing label, when not the plain managed-session one (a carried-over charge). */
+  chargeLabel?: string;
+
+  /**
+   * The turn this charge belongs to is REFUNDED by policy (a failed turn that wrote nothing, §4.6): the user
+   * owes nothing for it, so an intent left behind is DROPPED, never debited (verifier money defect 2).
+   */
+  refundable?: true;
 }
 
 export const EMPTY_COST_CURSOR: CostCursor = {
@@ -240,16 +273,67 @@ export function parseCostCursor(text: string | null | undefined): CostCursor | n
       return null;
     }
 
+    const pending = pendingFromCursor(value.pending);
+
     return {
       v: 2,
       tokens: { ...ZERO_TOKENS, ...tokensFromCursor(value.tokens) },
       trueCostUsd: n(value.trueCostUsd),
       warmBasisUsd: n(value.warmBasisUsd),
       credits: n(value.credits),
+      ...(pending.length ? { pending } : {}),
     };
   } catch {
     return null;
   }
+}
+
+/** The pending debits a stored cursor carries; a malformed entry is dropped, never a reason to fail the parse. */
+function pendingFromCursor(value: unknown): PendingDebit[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const out: PendingDebit[] = [];
+
+  for (const raw of value as Array<Partial<PendingDebit>>) {
+    if (
+      !raw ||
+      typeof raw.generationId !== 'string' ||
+      !raw.generationId ||
+      typeof raw.userId !== 'string' ||
+      typeof raw.projectId !== 'string' ||
+      typeof raw.chatId !== 'string' ||
+      typeof raw.model !== 'string' ||
+      !(n(raw.credits) > 0)
+    ) {
+      continue;
+    }
+
+    const u = (raw.usage ?? {}) as Partial<GenerationUsage>;
+
+    out.push({
+      generationId: raw.generationId,
+      credits: n(raw.credits),
+      rawCostUsd: n(raw.rawCostUsd),
+      model: raw.model,
+      userId: raw.userId,
+      projectId: raw.projectId,
+      chatId: raw.chatId,
+      ...(typeof raw.statusKind === 'string' ? { statusKind: raw.statusKind } : {}),
+      ...(typeof raw.chargeLabel === 'string' && raw.chargeLabel ? { chargeLabel: raw.chargeLabel } : {}),
+      ...(raw.refundable === true ? { refundable: true as const } : {}),
+      usage: {
+        promptTokens: n(u.promptTokens),
+        completionTokens: n(u.completionTokens),
+        totalTokens: n(u.totalTokens),
+        cacheReadTokens: n(u.cacheReadTokens),
+        cacheCreationTokens: n(u.cacheCreationTokens),
+      },
+    });
+  }
+
+  return out;
 }
 
 function tokensFromCursor(value: unknown): TierTokens {
@@ -265,7 +349,9 @@ function tokensFromCursor(value: unknown): TierTokens {
 }
 
 export function serializeCostCursor(cursor: CostCursor): string {
-  return JSON.stringify(cursor);
+  const { pending, ...rest } = cursor;
+
+  return JSON.stringify(pending && pending.length ? { ...rest, pending } : rest);
 }
 
 export interface BillingRates {

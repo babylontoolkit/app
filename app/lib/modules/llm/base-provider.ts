@@ -1,6 +1,7 @@
 import type { LanguageModelV1 } from 'ai';
 import type { ProviderInfo, ProviderConfig, ModelInfo } from './types';
 import type { EffortLevel, ThinkingMode } from './capabilities';
+import type { WireUsageRecorder } from '~/lib/modules/llm/wire-usage';
 import type { IProviderSetting } from '~/types/model';
 import { createOpenAI } from '@ai-sdk/openai';
 import { LLMManager } from './manager';
@@ -196,6 +197,13 @@ export abstract class BaseProvider implements ProviderInfo {
      * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
      */
     toolLoop?: boolean;
+
+    /**
+     * This generation's wire recorder (no-unbilled-usage D7, `wire-usage.ts`): every request's
+     * `message_start` usage, so a step that breaks before the SDK reports it is still billed. OPTIONAL and
+     * additive — omitted = the fetch chain exactly as before; non-Anthropic wires ignore it.
+     */
+    wireUsage?: WireUsageRecorder;
   }): LanguageModelV1;
 }
 

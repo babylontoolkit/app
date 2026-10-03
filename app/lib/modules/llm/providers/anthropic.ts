@@ -16,6 +16,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { rateLimitFetch } from '~/lib/modules/llm/rate-limit';
 import { refusalFallbackFetch } from '~/lib/modules/llm/refusal-fallback';
 import { tapStopReasons } from '~/lib/modules/llm/stop-reason-tap';
+import { tapWireUsage, type WireUsageRecorder } from '~/lib/modules/llm/wire-usage';
 import { withTailCache } from '~/lib/modules/llm/tail-cache';
 
 export default class AnthropicProvider extends BaseProvider {
@@ -168,6 +169,13 @@ export default class AnthropicProvider extends BaseProvider {
      * breakpoint (`tail-cache.ts`). OPTIONAL and additive; omitted = the legacy fetch chain exactly.
      */
     toolLoop?: boolean;
+
+    /**
+     * This generation's wire recorder (no-unbilled-usage D7, `wire-usage.ts`): every request's
+     * `message_start` usage, so a step that breaks before the SDK reports it is still billed. OPTIONAL and
+     * additive — omitted = the fetch chain exactly as before; non-Anthropic wires ignore it.
+     */
+    wireUsage?: WireUsageRecorder;
   }) => LanguageModelV1 = (options) => {
     const { apiKeys, providerSettings, serverEnv, model } = options;
     const { apiKey } = this.getProviderBaseUrlAndKey({
@@ -235,7 +243,10 @@ export default class AnthropicProvider extends BaseProvider {
         effort,
         model,
         withTailCache(
-          refusalFallbackFetch(model, tapStopReasons(rateLimitFetch({ provider: this.name }))),
+          refusalFallbackFetch(
+            model,
+            tapWireUsage(options.wireUsage, tapStopReasons(rateLimitFetch({ provider: this.name }))),
+          ),
           options.toolLoop,
         ),
       ),

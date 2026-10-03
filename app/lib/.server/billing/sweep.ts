@@ -10,7 +10,8 @@
  *   (b) every chat bound to a managed session (active within `BILLING_SWEEP_MANAGED_WINDOW_MS`, default
  *       7 days) with no turn in flight here → a cursor settlement (`agent-managed/sweep.ts`), plus every
  *       orphan a failed delete left behind (D4);
- *   (c) pending-debit intents (D6) — a named hook, filled by T6.
+ *   (c) every pending-debit intent (D6) on a chat or orphan cursor — a charge whose cursor advanced and whose
+ *       debit never landed — debited once (`settlePendingDebits`).
  *
  * Started lazily at the first request (`ensureBillingSweep`, from the same doorways as the cache warmer and
  * from `/api/me`), then every `BILLING_SWEEP_INTERVAL_MS` (default 10 min). Every run goes through
@@ -26,7 +27,16 @@
  */
 import type Anthropic from '@anthropic-ai/sdk';
 import { getManagedClient } from '~/lib/.server/agent-managed/config';
-import { sweepManagedChats, sweepManagedOrphans, type ManagedSweepReport } from '~/lib/.server/agent-managed/sweep';
+import { getManagedOrphanStore } from '~/lib/.server/agent-managed/orphans';
+import { parseCostCursor } from '~/lib/.server/agent-managed/session-cost';
+import { settlePendingDebits } from '~/lib/.server/agent-managed/settle';
+import {
+  orphanCursorIO,
+  sweepManagedChats,
+  sweepManagedOrphans,
+  type ManagedSweepReport,
+} from '~/lib/.server/agent-managed/sweep';
+import { getChatIndex } from '~/lib/.server/projects/chat-index';
 import { envNumber } from '~/lib/.server/env';
 import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { createScopedLogger } from '~/utils/logger';
@@ -111,13 +121,54 @@ async function sweepRunningRows(context: unknown, now: number, report: SweepRepo
   }
 }
 
+/** Does this stored cursor carry a pending debit? A cheap string check before the parse. */
+function hasPendingDebit(cursor: string | null | undefined): boolean {
+  return Boolean(cursor && cursor.includes('"pending"') && parseCostCursor(cursor)?.pending?.length);
+}
+
 /**
- * (c) D6's pending-debit intents: a managed cursor advanced whose debit never landed (a crash between the
- * two). T6 fills this; until then it reports nothing. Kept here, named, so the sweep has ONE place where
- * every unbilled-usage class is collected.
+ * (c) D6's pending-debit intents: a managed cursor advanced whose debit never landed — a process that died
+ * between the two, or a ledger that refused. Every chat cursor and every open orphan cursor carrying one is
+ * debited through `settlePendingDebits` (serialised per chat; idempotent by generation id, migration 0029),
+ * whatever the session is doing — an intent is a charge already decided, not usage still accruing. Pass (b)
+ * heals the chats it settles on its own; this pass covers the rest (a session still running, a chat outside
+ * the window, an orphan). Never throws; returns the debits that charged.
  */
-async function sweepPendingDebitIntents(_context: unknown): Promise<number> {
-  return 0;
+async function sweepPendingDebitIntents(context: unknown): Promise<number> {
+  let debited = 0;
+
+  try {
+    const rows = await getChatIndex(context).listWithManagedSession();
+
+    for (const row of rows) {
+      if (hasPendingDebit(row.managedSettledAt)) {
+        debited += await settlePendingDebits({ projectId: row.projectId, chatId: row.id, context });
+      }
+    }
+  } catch (error) {
+    logger.error(`Could not sweep the pending debits of managed chats: ${(error as Error)?.message}`);
+  }
+
+  try {
+    const store = getManagedOrphanStore(context);
+
+    for (const orphan of await store.listOpen()) {
+      if (!hasPendingDebit(orphan.cursor)) {
+        continue;
+      }
+
+      debited += await settlePendingDebits({
+        projectId: orphan.projectId,
+        chatId: orphan.chatId,
+        context,
+        cursorIO: orphanCursorIO(orphan, store),
+      });
+    }
+  } catch (error) {
+    logger.error(`Could not sweep the pending debits of managed orphans: ${(error as Error)?.message}`);
+  }
+
+  return debited;
 }
 
 function managedClientOrNull(context: unknown, injected?: Anthropic): Anthropic | null {

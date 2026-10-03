@@ -630,8 +630,10 @@ describe('cometapi.ts really wires the branches this spec reproduces', () => {
      * which Prettier wraps across lines. `withTailCache` is the identity when the loop is off.
      */
     const flat = code.replace(/\(\s+/g, '(').replace(/\s+/g, ' ');
-    expect(flat).toContain('thinkingFetch(thinkingMode, effort, model, withTailCache(tapStopReasons(rateLimitFetch(');
-    expect(flat).toContain('options.toolLoop)');
+    expect(flat).toContain(
+      'thinkingFetch(thinkingMode, effort, model, withTailCache(tapWireUsage(options.wireUsage, tapStopReasons(rateLimitFetch(',
+    );
+    expect(flat).toMatch(/options\.toolLoop,? \)/);
   });
 
   /*

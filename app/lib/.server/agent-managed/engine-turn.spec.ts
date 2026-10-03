@@ -38,6 +38,10 @@ import type { ManagedAgentRecord } from './record';
 import { flushDetachedTail, settleManagedTurn, waitForDetachTails } from './settle';
 import { releaseManagedSession } from './sessions';
 import { SUPERSEDED_RESULT } from './session-health';
+import { FsManagedOrphanStore, getManagedOrphanStore, setManagedOrphanStore } from './orphans';
+import { parseCostCursor } from './session-cost';
+import { runBillingSweep } from '~/lib/.server/billing/sweep';
+import { FsProjectStore, setProjectStore } from '~/lib/.server/projects/store';
 
 const MODEL = 'claude-sonnet-5-5';
 const USER: AuthUser = {
@@ -125,6 +129,12 @@ beforeEach(async () => {
    */
   setObjectStore(memoryStore());
 
+  /* A rebind whose old session cannot be settled records an orphan (no-unbilled-usage D5) — never in `.data`. */
+  setManagedOrphanStore(new FsManagedOrphanStore(path.join(tmp, 'orphans')));
+
+  /* The billing sweep looks up a chat's owner through the project store — pinned, never `.data`. */
+  setProjectStore(new FsProjectStore(path.join(tmp, 'projects')));
+
   fake = createFakeManagedClient();
   setManagedClientForTests(fake.client);
   chatId = randomUUID();
@@ -158,6 +168,8 @@ afterEach(async () => {
   setChatIndex(undefined);
   setPromptStore(undefined);
   setObjectStore(undefined);
+  setManagedOrphanStore(undefined);
+  setProjectStore(undefined);
   vi.unstubAllEnvs();
   await fs.rm(tmp, { recursive: true, force: true });
 });
@@ -1598,5 +1610,437 @@ describe('the running row (no-unbilled-usage D2)', () => {
 
     const debits = (await rows()).filter((e) => e.generationId === generation.generationId);
     expect(debits).toHaveLength(1);
+  });
+});
+
+/*
+ * no-unbilled-usage D5 (G3): usage the session ran BEFORE this turn — an unsettled tail, a killed Stop tail,
+ * a failed read — is billed under its own id before the turn sends anything, so a failed turn's refund
+ * covers only the turn's own usage.
+ */
+describe('a turn bills carried-over usage separately, before it starts (no-unbilled-usage D5)', () => {
+  it('usage above the cursor bills as <gen>_carry before the turn; a failed turn refunds only its own usage', async () => {
+    await ledger.append({ userId: USER.id, delta: 10_000, reason: 'grant' });
+    fake.seed('sesn_carry', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+      { type: 'session.status_idle', stop_reason: { type: 'end_turn' } },
+    ]);
+    await bindChat('sesn_carry');
+
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_3);
+      api.emit({ type: 'session.status_terminated' });
+    }) satisfies Script;
+
+    const run = await drive(await turn());
+
+    expect(run.error).toBeDefined();
+
+    const all = await rows();
+    const debits = all.filter((e) => e.reason === 'generation');
+    const refunds = all.filter((e) => e.reason === 'refund');
+
+    expect(debits.map((e) => -e.delta)).toEqual([creditsFor(USAGE_1), creditsFor(USAGE_3)]);
+    expect(debits[0].generationId).toBe(`${run.generation.generationId}_carry`);
+    expect(debits[1].generationId).toBe(run.generation.generationId);
+    expect(
+      refunds.map((e) => e.delta),
+      'the refund covers only the failed turn',
+    ).toEqual([creditsFor(USAGE_3)]);
+    expect(refunds[0].generationId).toBe(run.generation.generationId);
+  });
+
+  it('CONTROL: consecutive turns with nothing carried write no _carry row', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+    await drive(await turn());
+    await drive(await turn({ messages: [userMessage('again')] }));
+
+    const debits = (await rows()).filter((e) => e.reason === 'generation');
+
+    expect(debits).toHaveLength(2);
+    expect(debits.some((e) => String(e.generationId).endsWith('_carry'))).toBe(false);
+  });
+});
+
+/*
+ * no-unbilled-usage D5 (G4): a rebind releases the old session ONLY once what it owes is accounted for —
+ * its `_prior` settlement completed, or the session is gone. Otherwise the session (and the cursor its
+ * settlement left) is kept as an orphan for the sweep BEFORE the chat lets go of it.
+ */
+describe('a rebind never releases a session that still owes usage (no-unbilled-usage D5)', () => {
+  const answer: Script = async (api) => {
+    api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Fresh session.' }] });
+    api.endTurn();
+  };
+
+  /** Make the session's usage read throw until `heal()`. */
+  function breakUsageRead(sessionId: string) {
+    const threads = fake.client.beta.sessions.threads as unknown as { list: (id: string) => unknown };
+    const list = threads.list.bind(threads);
+    let broken = true;
+
+    threads.list = (id: string) => {
+      if (broken && id === sessionId) {
+        throw new Error('anthropic is down');
+      }
+
+      return list(id);
+    };
+
+    return () => {
+      broken = false;
+    };
+  }
+
+  it('a dead session whose _prior read fails is kept as an orphan, then billed once by the sweep', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dead', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    dead.status = 'terminated';
+    await bindChat('sesn_dead');
+
+    const heal = breakUsageRead('sesn_dead');
+    const run = await drive(await turn());
+
+    expect(run.error).toBeUndefined();
+    expect((await getChatIndex().get(chatId))?.managedSessionId).not.toBe('sesn_dead');
+    expect((await rows()).some((e) => String(e.generationId).endsWith('_prior'))).toBe(false);
+
+    const orphans = await getManagedOrphanStore().listOpen();
+
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0]).toMatchObject({ sessionId: 'sesn_dead', chatId, projectId: PROJECT, userId: USER.id });
+
+    heal();
+    await runBillingSweep({}, { client: fake.client });
+
+    const swept = (await rows()).filter((e) => String(e.generationId).startsWith(`${chatId}_orphan_`));
+
+    expect(swept.map((e) => -e.delta)).toEqual([creditsFor(USAGE_1)]);
+    expect(await getManagedOrphanStore().listOpen()).toEqual([]);
+
+    await runBillingSweep({}, { client: fake.client });
+    expect((await rows()).filter((e) => String(e.generationId).startsWith(`${chatId}_orphan_`))).toHaveLength(1);
+  });
+
+  it('when even the orphan cannot be recorded the session stays BOUND and the turn is refused before sending', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dead', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    dead.status = 'terminated';
+    await bindChat('sesn_dead');
+    breakUsageRead('sesn_dead');
+    setManagedOrphanStore({
+      record: async () => {
+        throw new Error('db down');
+      },
+      listOpen: async () => [],
+      setCursor: async () => undefined,
+      resolve: async () => undefined,
+    });
+
+    const error = await turn().catch((e) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.isRetryable).toBe(true);
+    expect((await getChatIndex().get(chatId))?.managedSessionId).toBe('sesn_dead');
+    expect(fake.sessions.size, 'no new session was created').toBe(1);
+    expect(fake.sends).toEqual([]);
+  });
+
+  /** Interrupts to `sessionId` are recorded and IGNORED — the session keeps running past the wait. */
+  function ignoreInterrupts(sessionId: string) {
+    const events = fake.client.beta.sessions.events as unknown as {
+      send: (id: string, params: { events: Array<{ type: string }> }) => Promise<unknown>;
+    };
+    const send = events.send.bind(events);
+    const ignored: string[] = [];
+
+    events.send = async (id, params) => {
+      if (id === sessionId && params.events.every((e) => e.type === 'user.interrupt')) {
+        ignored.push(id);
+        return { data: [] };
+      }
+
+      return send(id, params);
+    };
+
+    return ignored;
+  }
+
+  it('an effort switch whose old session is STILL running after the wait: interrupted, settled, kept for the sweep, never archived early', async () => {
+    fake.script = answer;
+
+    const old = fake.seed('sesn_old', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    old.status = 'running';
+    await bindChat('sesn_old');
+
+    const ignored = ignoreInterrupts('sesn_old');
+    const run = await drive(await turn({ effort: 'high' }));
+
+    expect(run.error).toBeUndefined();
+    expect(ignored.length, 'the old session was interrupted').toBeGreaterThan(0);
+    expect((await getChatIndex().get(chatId))?.managedSessionId).not.toBe('sesn_old');
+    expect(fake.archived, 'a still-running session is not archived before it is settled').not.toContain('sesn_old');
+
+    const prior = (await rows()).filter((e) => String(e.generationId).endsWith('_sesn_old_prior'));
+
+    expect(
+      prior.map((e) => -e.delta),
+      'what had landed was settled at the switch',
+    ).toEqual([creditsFor(USAGE_1)]);
+
+    const orphans = await getManagedOrphanStore().listOpen();
+
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0].sessionId).toBe('sesn_old');
+    expect(parseCostCursor(orphans[0].cursor)?.credits, 'the orphan carries the POST-settlement cursor').toBe(
+      creditsFor(USAGE_1),
+    );
+
+    /* The old session's last request lands after the switch; then it stops. */
+    old.events.push({
+      type: 'span.model_request_end',
+      id: 'sevt_late',
+      processed_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+      model_usage: { ...USAGE_2 },
+    });
+    old.status = 'idle';
+
+    await runBillingSweep({}, { client: fake.client });
+
+    const swept = (await rows()).filter((e) => String(e.generationId).startsWith(`${chatId}_orphan_`));
+
+    expect(
+      swept.map((e) => -e.delta),
+      'only the usage after the switch',
+    ).toEqual([creditsFor(USAGE_2)]);
+    expect(fake.archived).toContain('sesn_old');
+    expect(await getManagedOrphanStore().listOpen()).toEqual([]);
+  });
+
+  it('CONTROL: an effort switch whose old session stops on the interrupt is settled and archived, no orphan', async () => {
+    fake.script = answer;
+
+    const old = fake.seed('sesn_old', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    old.status = 'running';
+    await bindChat('sesn_old');
+
+    const run = await drive(await turn({ effort: 'high' }));
+
+    expect(run.error).toBeUndefined();
+    expect(sentTo('sesn_old').map((e) => e.type)).toContain('user.interrupt');
+    expect(fake.archived).toEqual(['sesn_old']);
+    expect(await getManagedOrphanStore().listOpen()).toEqual([]);
+    expect(
+      (await rows()).filter((e) => String(e.generationId).endsWith('_sesn_old_prior')).map((e) => -e.delta),
+    ).toEqual([creditsFor(USAGE_1)]);
+  });
+});
+
+/* no-unbilled-usage D6: the normal path leaves no pending debit intent on the cursor. */
+describe('the managed cursor and its debit (no-unbilled-usage D6)', () => {
+  it('after a normal turn the cursor carries no pending debit intent', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+    await drive(await turn());
+
+    const cursor = parseCostCursor((await getChatIndex().get(chatId))?.managedSettledAt);
+
+    expect(cursor?.credits).toBe(creditsFor(USAGE_1));
+    expect(cursor?.pending ?? []).toEqual([]);
+  });
+});
+
+/* Verifier money defects 1 and 2 (no-unbilled-usage D5/D6). */
+describe('pending debit intents across a rebind and a refund (verifier money defects)', () => {
+  const answer: Script = async (api) => {
+    api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Fresh session.' }] });
+    api.endTurn();
+  };
+
+  /** Fail every `generation` debit (optionally only for one id) until healed. */
+  function failDebits(only?: string) {
+    const append = ledger.append.bind(ledger);
+    let failing = true;
+
+    ledger.append = async (entry) => {
+      if (failing && entry.reason === 'generation' && (!only || entry.generationId === only)) {
+        throw new Error('ledger is down');
+      }
+
+      return append(entry);
+    };
+
+    return () => {
+      failing = false;
+    };
+  }
+
+  async function bindWithIntent(sessionId: string, generationId: string, credits: number) {
+    await bindChat(sessionId);
+    await getChatIndex().setManagedSettledAt({
+      id: chatId,
+      projectId: PROJECT,
+      settledAt: JSON.stringify({
+        v: 2,
+        tokens: {},
+        trueCostUsd: 0,
+        warmBasisUsd: 0,
+        credits,
+        pending: [
+          {
+            generationId,
+            credits,
+            rawCostUsd: 0.02,
+            model: MODEL,
+            userId: USER.id,
+            projectId: PROJECT,
+            chatId,
+            usage: {
+              promptTokens: 5,
+              completionTokens: 5,
+              totalTokens: 10,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          },
+        ],
+      }),
+    });
+  }
+
+  const debitIds = async () => (await rows()).filter((e) => e.reason === 'generation').map((e) => e.generationId);
+
+  it('a MISSING session (404) with a pending intent: the intent is debited before the chat is released', async () => {
+    fake.script = answer;
+    await bindWithIntent('sesn_gone', 'gen_intent_missing', 7);
+
+    const run = await drive(await turn());
+
+    expect(run.error).toBeUndefined();
+    expect(await debitIds()).toContain('gen_intent_missing');
+    expect((await getChatIndex().get(chatId))?.managedSessionId).not.toBe('sesn_gone');
+  });
+
+  it('a session GONE during its _prior settlement with a pending intent: debited, then released', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dies', []);
+
+    dead.status = 'terminated';
+    await bindWithIntent('sesn_dies', 'gen_intent_gone', 5);
+
+    /* The inspection sees it; then it vanishes before the settlement reads it. */
+    const sessions = fake.client.beta.sessions as unknown as { retrieve: (id: string) => Promise<unknown> };
+    const retrieve = sessions.retrieve.bind(sessions);
+    let reads = 0;
+
+    sessions.retrieve = async (id: string) => {
+      if (id === 'sesn_dies' && ++reads > 1) {
+        throw Object.assign(new Error('not found'), { status: 404 });
+      }
+
+      return retrieve(id);
+    };
+
+    const heal = failDebits('gen_intent_gone');
+    const run = await drive(await turn());
+
+    heal();
+    expect(run.error).toBeUndefined();
+
+    /* The debit failed at the settlement's recovery: the intent is kept as an orphan, never lost. */
+    const orphans = await getManagedOrphanStore().listOpen();
+
+    expect(orphans.map((o) => o.sessionId)).toEqual(['sesn_dies']);
+    expect(parseCostCursor(orphans[0].cursor)?.pending?.map((p) => p.generationId)).toEqual(['gen_intent_gone']);
+
+    await runBillingSweep({}, { client: fake.client });
+
+    expect((await debitIds()).filter((id) => id === 'gen_intent_gone')).toHaveLength(1);
+    expect(await getManagedOrphanStore().listOpen()).toEqual([]);
+  });
+
+  it('a failed, refundable turn whose debit did not land leaves NO intent: the sweep never charges it', async () => {
+    await ledger.append({ userId: USER.id, delta: 10_000, reason: 'grant' });
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_3);
+      api.emit({ type: 'session.status_terminated' });
+    }) satisfies Script;
+
+    const heal = failDebits();
+    const run = await drive(await turn());
+
+    heal();
+    expect(run.error).toBeDefined();
+    expect(parseCostCursor((await getChatIndex().get(chatId))?.managedSettledAt)?.pending ?? []).toEqual([]);
+
+    await runBillingSweep({}, { client: fake.client });
+
+    expect(await debitIds(), 'the user owes nothing for a refunded turn').toEqual([]);
+  });
+
+  it('CONTROL: a failed turn that wrote files (not refundable) keeps its intent, and the sweep debits it once', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      await api.callTool('project_write', { path: 'src/a.ts', content: 'a' });
+      api.emit({ type: 'session.status_terminated' });
+    }) satisfies Script;
+
+    const heal = failDebits();
+    const run = await drive(await turn());
+
+    heal();
+    expect(run.error).toBeDefined();
+    expect(
+      parseCostCursor((await getChatIndex().get(chatId))?.managedSettledAt)?.pending?.map((p) => p.generationId),
+    ).toEqual([run.generation.generationId]);
+
+    await runBillingSweep({}, { client: fake.client });
+    await runBillingSweep({}, { client: fake.client });
+
+    expect(await debitIds()).toEqual([run.generation.generationId]);
+    expect((await rows()).filter((e) => e.reason === 'refund')).toEqual([]);
+  });
+
+  it('a carried-over charge is labelled as such in the ledger', async () => {
+    fake.seed('sesn_carry2', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+      { type: 'session.status_idle', stop_reason: { type: 'end_turn' } },
+    ]);
+    await bindChat('sesn_carry2');
+    fake.script = answer;
+
+    const run = await drive(await turn());
+    const carry = (await rows()).find((e) => e.generationId === `${run.generation.generationId}_carry`);
+
+    expect(carry?.note).toMatch(/carried over/);
   });
 });

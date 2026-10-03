@@ -191,6 +191,7 @@ import { accumulateStepUsage, emptyUsage, type GenerationUsage, type UsageStep }
 import { extractStepCacheTokens, shouldWarnMissingUsageNamespace, usageNamespaceFor } from './usage-metadata';
 import { familyOf } from '~/lib/modules/llm/model-families';
 import { drainStopReasons, peekStopReasons } from '~/lib/modules/llm/stop-reason-tap';
+import { addUnreportedUsage, createWireUsageRecorder, unreportedWireUsage } from '~/lib/modules/llm/wire-usage';
 import { describeRefusal, drainFallbackHandoffs } from '~/lib/modules/llm/refusal-fallback';
 import { workspaceProtocolFor } from './workspace-protocol';
 
@@ -2154,12 +2155,30 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   const servedEffort: EffortLevel =
     effort ?? servableEffort(model, parseEffort(env(request.context, 'THINKING_EFFORT')) ?? DEFAULT_EFFORT);
 
+  /*
+   * no-unbilled-usage D7: every request this generation makes (each step attempt, every retry and re-issue)
+   * is recorded from the wire, so a step that breaks before the SDK reports it — a Stop, a dropped stream, a
+   * killed silent think, a provider retry — is still billed at settlement. Keyed by the message id the SDK
+   * reports for the steps it DID bill (`reportStep`), so nothing is counted twice. Request-scoped: handed to
+   * this generation's model instances only.
+   */
+  const wireUsage = createWireUsageRecorder();
+  const reportedStepIds = new Set<string>();
+  const reportStep = (step: unknown) => {
+    const id = (step as { response?: { id?: unknown } } | null)?.response?.id;
+
+    if (typeof id === 'string' && id) {
+      reportedStepIds.add(id);
+    }
+  };
+
   const modelInstance = provider.getModelInstance({
     model,
     serverEnv: (request.context as { cloudflare?: { env?: Env } })?.cloudflare?.env as Env,
     apiKeys: useByok ? request.apiKeys : undefined,
     providerSettings: useByok ? request.providerSettings : undefined,
     effort,
+    wireUsage,
 
     /* The rolling tail cache breakpoint (D13). Spread, so the loop-off call is exactly today's. */
     ...(toolLoop ? { toolLoop } : {}),
@@ -2539,6 +2558,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          */
         turnMeter?.onStep(step);
 
+        /* D7: the meter just billed this step — its message id is accounted for. */
+        if (toolLoop) {
+          reportStep(step);
+        }
+
         if (!useByok) {
           accumulateStepUsage(checkpointTotals, [step as unknown as UsageStep], modelFamily);
           checkpointer.checkpoint(checkpointTotals);
@@ -2643,6 +2667,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
     if (!toolLoop) {
       accumulateStepUsage(totals, steps as unknown as UsageStep[], modelFamily);
+
+      /* D7: these steps are billed now — their message ids are accounted for. */
+      (steps ?? []).forEach(reportStep);
     }
 
     finishReason = await result.finishReason;
@@ -3088,6 +3115,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
                   providerSettings: useByok ? request.providerSettings : undefined,
                   effort,
                   thinkingMode: 'disabled',
+                  wireUsage,
                   ...(toolLoop ? { toolLoop } : {}),
                 })
               : undefined;
@@ -3462,6 +3490,37 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
       failed = !request.abortSignal?.aborted && !(toolLoop && isDeliberateLoopStop(loopState.stopReason));
       throw error;
     } finally {
+      /* Whether the gateway streamed billed output on its own (below) — decided before D7's additions. */
+      const streamedOutput = totals.completionTokens > 0;
+
+      /*
+       * no-unbilled-usage D7: the steps the SDK never reported — one that broke after `message_start` (a
+       * Stop, a reset, a killed think), a provider retry's failed attempt, every step of an aborted
+       * tool-loop-off drain — were still billed to us by the provider. Add their wire usage now, before the
+       * usage resolves, the row is recorded and the turn settles. Bounded wait for the scans to catch up;
+       * a failed turn still refunds under the unchanged policy (D10).
+       */
+      try {
+        await wireUsage.settled();
+
+        const inFlight = unreportedWireUsage(wireUsage.attempts, reportedStepIds);
+
+        if (inFlight.attempts > 0) {
+          addUnreportedUsage(totals, inFlight);
+          logger.warn(
+            `Generation ${generationId}: billing ${inFlight.attempts} step attempt(s) the SDK never reported ` +
+              `(${inFlight.promptTokens} in, ${inFlight.cacheReadTokens} cached, ${inFlight.cacheCreationTokens} written, ` +
+              `${inFlight.completionTokens} out)`,
+          );
+        }
+      } catch (error) {
+        logger.error(
+          `Generation ${generationId}: could not read the in-flight step usage: ${(error as Error)?.message}`,
+        );
+      } finally {
+        wireUsage.close();
+      }
+
       resolveUsage(totals);
 
       /*
@@ -3471,7 +3530,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * not evidence against the provider, and leaving a stale cooldown standing would keep traffic
        * off the cheapest rung — and off its warm prefix — long after it recovered.
        */
-      if (totals.completionTokens > 0) {
+      if (streamedOutput) {
         recordProviderSuccess(config.provider);
       }
 

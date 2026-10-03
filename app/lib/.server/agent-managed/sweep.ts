@@ -22,9 +22,14 @@ import { getChatIndex } from '~/lib/.server/projects/chat-index';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { createScopedLogger } from '~/utils/logger';
 import { getManagedEngineConfig } from './config';
-import { getManagedOrphanStore, type ManagedOrphan } from './orphans';
+import { getManagedOrphanStore, type ManagedOrphan, type ManagedOrphanStore } from './orphans';
 import { sessionModel } from './session-health';
-import { hasPendingDetachTail, settleManagedTurn } from './settle';
+import {
+  hasPendingDetachTail,
+  settleManagedTurn,
+  settlePendingDebitsDetailed,
+  type SettlementCursorIO,
+} from './settle';
 
 /** A per-settlement id suffix — a generation is debited at most once (migration 0029), so ids never repeat. */
 const uniqueSuffix = () => `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -142,6 +147,20 @@ export async function sweepManagedChats(input: {
   return report;
 }
 
+/** An orphan's cursor lives on its own record — the chat row that held it may be gone. */
+export function orphanCursorIO(orphan: ManagedOrphan, store: ManagedOrphanStore): SettlementCursorIO {
+  let cursor = orphan.cursor;
+
+  return {
+    bound: async () => orphan.sessionId,
+    get: async () => cursor,
+    set: async (next) => {
+      await store.setCursor(orphan.id, next);
+      cursor = next;
+    },
+  };
+}
+
 /** Settle one orphan (D4). Resolves it once its usage is accounted for. Never throws. */
 async function settleOrphan(
   orphan: ManagedOrphan,
@@ -158,6 +177,27 @@ async function settleOrphan(
     } catch (error) {
       if (!isGone(error)) {
         throw error;
+      }
+
+      /*
+       * Verifier money defect 1: the session is gone, but an intent on the orphan's cursor is a DECIDED charge
+       * that needs no session — debit it before the record is resolved, and keep the record open if it does
+       * not land, so the next sweep retries.
+       */
+      const pending = await settlePendingDebitsDetailed({
+        projectId: orphan.projectId,
+        chatId: orphan.chatId,
+        context: input.context,
+        cursorIO: orphanCursorIO(orphan, store),
+      });
+
+      if (pending.remaining > 0) {
+        logger.error(
+          `Orphaned session ${orphan.sessionId} is gone and a debit its cursor counts did not land — kept for the next sweep`,
+        );
+        report.failed += 1;
+
+        return;
       }
 
       logger.error(
@@ -183,7 +223,6 @@ async function settleOrphan(
     }
 
     const config = getManagedEngineConfig(input.context);
-    let cursor = orphan.cursor;
     const settled = await settleManagedTurn({
       client: input.client,
       sessionId: orphan.sessionId,
@@ -197,14 +236,7 @@ async function settleOrphan(
       context: input.context,
       anchorWhenEmpty: false,
       requireBoundSession: true,
-      cursorIO: {
-        bound: async () => orphan.sessionId,
-        get: async () => cursor,
-        set: async (next) => {
-          await store.setCursor(orphan.id, next);
-          cursor = next;
-        },
-      },
+      cursorIO: orphanCursorIO(orphan, store),
     });
 
     if (!settled.complete) {

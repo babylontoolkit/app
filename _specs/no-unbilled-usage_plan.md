@@ -100,12 +100,12 @@ Also: web search debits AFTER the vendor is paid and only logs a failed debit (`
 - [x] **T4 — Delete settles first.** D4 for chat, project and account delete. Tests: delete during a live
   managed turn → session interrupted + settled + archived, ledger row lands, then the rows go; a settle
   failure leaves a sweepable record.
-- [ ] **T5 — Carry-over + safe rebind.** D5. Tests: carried-over usage bills as `_carry` before the turn and
+- [x] **T5 — Carry-over + safe rebind.** D5. Tests: carried-over usage bills as `_carry` before the turn and
   a failed turn refunds only its own usage; rebind with a failing `_prior` read keeps the session bound;
   a still-running old session is interrupted, settled, then archived.
-- [ ] **T6 — Pending-debit intent.** D6. Tests: cursor written + debit "crashes" → sweep debits it once;
+- [x] **T6 — Pending-debit intent.** D6. Tests: cursor written + debit "crashes" → sweep debits it once;
   normal path leaves no intent.
-- [ ] **T7 — Bill the step in flight.** D7. Tests: a stream that breaks after `message_start` bills its
+- [x] **T7 — Bill the step in flight.** D7. Tests: a stream that breaks after `message_start` bills its
   input/cache tokens; a retry attempt that broke after `message_start` is billed; tool-loop-off abort bills
   what was consumed.
 - [ ] **T8 — Enhancer.** D8. Test: a provider error before streaming settles (zero or partial) instead of

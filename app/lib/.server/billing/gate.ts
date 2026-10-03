@@ -486,6 +486,48 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
 }
 
 /**
+ * Debit an ALREADY-ANCHORED generation exactly once — the recovery of a managed pending-debit intent
+ * (no-unbilled-usage D6, `agent-managed/settle.ts`). Only the ledger row is written: `settleGeneration`
+ * would re-anchor the row and rewrite a `failed` turn as `completed`. A 0029 duplicate is the expected
+ * "it had landed, only its clear was lost" case and reports `already-billed` with no alert. Any other
+ * failure THROWS, and the caller keeps the intent for the next try (it is never dropped).
+ */
+export async function debitAnchoredGeneration(input: {
+  userId: string;
+  generationId: string;
+  credits: number;
+  note: string;
+  context?: unknown;
+}): Promise<'debited' | 'already-billed'> {
+  try {
+    await getLedger(input.context).append({
+      userId: input.userId,
+      delta: -input.credits,
+      reason: 'generation',
+      generationId: input.generationId,
+      note: input.note,
+    });
+
+    logger.info(`Charged ${input.credits} credits to ${input.userId} for ${input.generationId} (recovered intent)`);
+
+    return 'debited';
+  } catch (error) {
+    if (error instanceof DuplicateGenerationDebitError) {
+      return 'already-billed';
+    }
+
+    getMonitor(input.context).alert(
+      ALERT_SIGNALS.LEDGER_INTEGRITY,
+      `A recovered debit of ${input.credits} credits for ${input.generationId} did not land — kept for retry: ` +
+        `${(error as Error).message}`,
+      { severity: 'warning', scope: 'settle-generation', userId: input.userId, tags: { credits: input.credits } },
+    );
+
+    throw error;
+  }
+}
+
+/**
  * Refund a generation that failed (§4.6: "failed generations auto-refund").
  *
  * A compensating row, never a deletion — the debit stays in the history and the refund sits beside

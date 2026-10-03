@@ -87,6 +87,7 @@ import {
   rebindDeadSession,
   refundManagedTurn,
   settleDetachedTail,
+  MANAGED_CHARGE_LABEL,
   settleManagedTurn,
   shouldRefundManagedTurn,
 } from './settle';
@@ -98,6 +99,9 @@ import { runManagedTurn, type ManagedTurnEnd, type ManagedTurnResult } from './t
 import { budgetAmountCents, ceilingUsdForCredits } from './usage';
 
 const logger = createScopedLogger('managed-engine');
+
+/** The ledger note's label for usage a turn carried over from before it started (no-unbilled-usage D5). */
+const CARRIED_CHARGE_LABEL = `${MANAGED_CHARGE_LABEL} — carried over`;
 
 /**
  * What a managed turn needs — the subset of `AgentRequest` that means something on this engine.
@@ -482,13 +486,10 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         context: request.context,
       });
 
-      const previous = sessionRef.sessionId;
-
-      await client.beta.sessions.archive(previous).catch((error) => {
-        logger.warn(
-          `Session ${previous}: could not archive it after a tier/effort switch: ${(error as Error)?.message}`,
-        );
-      });
+      /*
+       * `rebindDeadSession` archives the old session itself once it is accounted for and stopped — and keeps
+       * it for the billing sweep, unarchived, when it is not (no-unbilled-usage D5).
+       */
       sessionRef = await claimSession();
       inspection = sessionRef.created ? null : await inspectSession(client, sessionRef.sessionId);
     } else if (inspection.kind === 'live' && request.resume) {
@@ -532,6 +533,55 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
 
   const sessionId = sessionRef.sessionId;
   const chatId = request.chatId as string;
+
+  /*
+   * no-unbilled-usage D5 (G3): bill what the session ran BEFORE this turn — a tail nobody settled, a Stop
+   * tail that was killed, a settlement whose read failed — under its own id, NOW, before this turn sends
+   * anything. This turn's settlement (and so its refund, if it fails) then covers only its own usage.
+   * After the supersede above, so an interrupted old turn has stopped and its usage has landed. A session
+   * this turn just created has nothing to carry. A resume carries too: what the detached turn ran since its
+   * last settlement is billed here, and the resumed request bills only what it runs.
+   *
+   * DECISION: when the old turn is STILL running past the supersede wait, what has landed is billed here and
+   * what lands after it falls into this turn's settlement — bounded (the interrupt was sent; at most the
+   * request in flight), and only in the under-refund direction. A carry that cannot complete is logged and
+   * the turn proceeds: refusing the turn over our bookkeeping is the wrong trade, and the usage stays on the
+   * cursor for this turn's settlement.
+   */
+  if (!sessionRef.created) {
+    const carried = await keepAlive(
+      request.context,
+      settleManagedTurn({
+        client,
+        sessionId,
+        projectId,
+        chatId,
+        userId,
+        generationId: `${generationId}_carry`,
+        model: servedModel,
+
+        /* Verifier slip d: a carry is not this turn's build or repair — an edit, labelled as carried over. */
+        statusKind: 'edit',
+        chargeLabel: CARRIED_CHARGE_LABEL,
+        sessionHourUsd: config.sessionHourUsd,
+        context: request.context,
+        anchorWhenEmpty: false,
+        requireBoundSession: true,
+      }),
+      `carry ${generationId}`,
+    );
+
+    if (carried.settlement && carried.settlement.creditsCharged > 0) {
+      logger.info(
+        `Managed turn ${generationId}: billed ${carried.settlement.creditsCharged} credits of earlier usage before it started`,
+      );
+    } else if (!carried.complete) {
+      logger.warn(
+        `Managed turn ${generationId}: the usage carried from earlier could not be settled before it started — ` +
+          "it is billed with this turn's own settlement",
+      );
+    }
+  }
 
   const userMessage = request.resume
     ? null
@@ -796,6 +846,20 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         });
       }
 
+      /*
+       * Whether this turn is REFUNDED by policy — decided BEFORE settling (every fact it needs is known), so
+       * the settlement can mark its pending intent refundable: a refunded turn whose debit does not land must
+       * never be debited later with no refund behind it (verifier money defect 2).
+       */
+      const refund =
+        failed &&
+        shouldRefundManagedTurn({
+          end: 'failed',
+          wroteFiles: overlay.writes.size > 0,
+          producedText: result?.producedText ?? false,
+          toolCalls: result?.toolCallsAnswered ?? 0,
+        });
+
       /* Kept alive (no-unbilled-usage D1): a workerd disconnect must not cancel the turn-end debit. */
       const settled = await keepAlive(
         request.context,
@@ -810,6 +874,10 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
           statusKind,
           sessionHourUsd: config.sessionHourUsd,
           context: request.context,
+
+          /* Bound-only (verifier slip c): a chat a concurrent turn moved is that turn's to settle. */
+          requireBoundSession: true,
+          refundable: refund,
         }),
         `managed settlement ${generationId}`,
       );
@@ -845,15 +913,6 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
           `detached tail ${generationId}`,
         );
       }
-
-      const refund =
-        failed &&
-        shouldRefundManagedTurn({
-          end: 'failed',
-          wroteFiles: overlay.writes.size > 0,
-          producedText: result?.producedText ?? false,
-          toolCalls: result?.toolCallsAnswered ?? 0,
-        });
 
       if (refund) {
         await keepAlive(
