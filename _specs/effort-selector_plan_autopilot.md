@@ -32,3 +32,7 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - DECISION T8b: in an open project the pill is a compact 26px level meter (labelled pill overflowed the fixed 533px chat column); recorded in the plan as D12. Owner should look at it: verifier noted it reads like a signal-strength icon until hovered.
 - T7 ✅ verified (independent, live) — 1 attempt — effort.spec 28, session-payload 43.
 - T8 ✅ verified (independent, live) — 1 attempt — EffortPanel.spec 20; live: 3 notches, no Low/Max, row width unchanged, paddingRight 0px, persisted on reload; paid managed proof: 2 turns (6 credits) logged `effort medium → xhigh` / `xhigh → medium` session moves, gen records carry effort.
+- DECISION T9: SPEC.md has no "How to update this spec" section — followed §11 Working Agreement and the §8l entry format; new §8l entry dated 2026-10-02; managed plan gets D14 (D10 untouched).
+- DECISION T9: regenerated all 80 `spec/agent-seams.md` line refs by diff-mapping from e1ae7dbc + classified `effort-offer.ts` → seam-classification spec green again.
+- DECISION T9: also fixed two pre-existing stale "/slash → high" claims beside the effort text (retired 2026-08-14) so the docs agree with §4.2a.
+- T9 ✅ verified (independent) — 1 attempt — 18 doc-reading spec files, 720 tests green; precedence-wording slip fixed by orchestrator.

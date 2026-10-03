@@ -427,8 +427,9 @@ export const ChatImpl = memo(
     const tierRequested = canUseTier(session, selectedTier) ? selectedTier : 'standard';
 
     /*
-     * The session's thinking-effort floor (§4.2.9), set by `/effort`. Session-scoped by design — it resets
-     * to `medium` on reload so a floor raised for one hard problem cannot quietly bill for months.
+     * The user's thinking effort (§4.2.9), set on the always-visible effort control (or `/effort`) and
+     * persisted per browser (`bt_effort_level`). Sent on the body; the server re-validates it against the
+     * levels the deploy offers (`_specs/effort-selector_plan.md`).
      */
     const baseEffort = useStore(baseEffortStore);
 

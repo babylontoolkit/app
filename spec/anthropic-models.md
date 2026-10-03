@@ -1,6 +1,6 @@
 # Anthropic Model Support — Rebuild Guide
 
-> **Engine scope (2026-10-01).** This guide covers the LEGACY engine's provider path (`@ai-sdk/anthropic`, `thinkingFetch`, the sampling-param strip), which still serves Plan mode, MCP turns and the prompt enhancer. The managed engine (SPEC §4.2) talks to Anthropic's Managed Agents API through `@anthropic-ai/sdk` 0.131.0; effort is set on the provisioned agent (`MANAGED_AGENT_EFFORT`) and none of the wrappers here are in its path.
+> **Engine scope (2026-10-01).** This guide covers the LEGACY engine's provider path (`@ai-sdk/anthropic`, `thinkingFetch`, the sampling-param strip), which still serves Plan mode, MCP turns and the prompt enhancer. The managed engine (SPEC §4.2) talks to Anthropic's Managed Agents API through `@anthropic-ai/sdk` 0.131.0; effort is set per SESSION at create (`agent_with_overrides` + `model:{id, effort}`) — the user's choice when the deploy offers it (§3.6a), else `MANAGED_AGENT_EFFORT` — and none of the wrappers here are in its path.
 
 How to wire current Claude models into this bolt.diy fork, and the three non-obvious
 failures you WILL hit if you only swap the model ID strings.
@@ -347,7 +347,14 @@ is exactly what made `low` look like free money. It was not. See §3.5a.
 puts Sonnet 5 at `medium` on par with Sonnet 4.6 at `high`.
 
 **Config, never hardcoded:** `THINKING_EFFORT=medium|high|xhigh|max` (`DEFAULT_EFFORT` in
-`capabilities.ts`). Raise it for hard work. There is nothing below `medium` to drop to.
+`capabilities.ts`) is the legacy operator default; `MANAGED_AGENT_EFFORT` (same values) is the managed
+one. Either applies only when the user has not picked a level (§3.6a). There is nothing below `medium` to
+drop to.
+
+The USER picks from Medium · High · Extra high (`xhigh`), plus Max when the operator sets
+`ENABLE_MAX_EFFORT=true` (2026-10-02, §3.6a). Effort has no price of its own — a deeper level spends more
+thinking tokens at the output rate — and credits are cost-proportional, so a `max` turn that costs us 2×
+bills the user ~2× and the margin is unchanged.
 
 ### 3.4b The last-resort retry runs THINKING-OFF — the silence is the failure (2026-07-27; units defect fixed 2026-08-21)
 
@@ -449,42 +456,55 @@ now — a repair is a turn the model has demonstrably failed, which nobody chose
 told about. `TurnShape` no longer carries a slash field, so restoring the rule means restoring the
 field: a decision, not a patch.
 
-Precedence: **policy > `THINKING_EFFORT` > `medium`**. The policy overriding operator config is
+Precedence (legacy engine): **policy (folded over the user's level) > the user's level > `THINKING_EFFORT` > `medium`**. The policy overriding operator config is
 deliberate — a build that has already failed twice is not the place to economise, and repairs are
 capped (`MAX_REPAIR_TURNS = 2`), so the escalated spend is bounded and rare.
 
-### 3.6a The user's floor — `/effort`, and why it stops at `high` (2026-07-27)
+### 3.6a The user's level — Medium · High · Extra high (· Max) (2026-10-02; replaces the 2026-07-27 two-level floor)
 
-`effortForTurn` takes one more input: `baseEffort`, the level the USER chose for their session with
-`/effort` (SPEC §4.2.9). It is a **floor**, folded in by rank:
+The user chooses their effort on a visible composer control (SPEC §4.2.9): `medium` (the default and the
+minimum), `high`, `xhigh` ("Extra high"), and `max` only when the operator sets `ENABLE_MAX_EFFORT=true`
+(it ships off: every credit is user-backed, but the platform prepays the provider, so the pool's drain rate
+matters). The choice persists per browser and is re-validated on every request.
 
-| Turn | `medium` session | `high` session |
-|---|---|---|
-| Creation / ordinary edit / `/slash` invocation | `medium` | `high` |
-| Repair, attempt 1 | `high` | `high` |
-| Repair, attempt 2 | `xhigh` | `xhigh` |
+On the LEGACY engine, `effortForTurn` takes it as `baseEffort`, a **floor** folded in by rank:
 
-Three properties, each of which fails silently if dropped:
+| Turn | `medium` | `high` | `xhigh` | `max` |
+|---|---|---|---|---|
+| Creation / ordinary edit / `/slash` invocation | `medium` | `high` | `xhigh` | `max` |
+| Repair, attempt 1 | `high` | `high` | `xhigh` | `max` |
+| Repair, attempt 2 | `xhigh` | `xhigh` | `xhigh` | `max` |
 
-1. **It never caps.** A `high` session's second repair still gets `xhigh`. Taking the floor there instead
-   would mean choosing `high` makes hard failures think *less* than the default session does — backwards,
-   and invisible.
-2. **Only `medium` and `high` are offerable.** `xhigh`/`max` are what the ladder spends on *evidence*; as a
-   session default they turn an escalation ceiling into a floor, so every ordinary edit would start where a
-   twice-failed build ends. `parseUserEffort` enforces this at the boundary — the value arrives in a
-   **browser body**, on the platform's credit pool, and a tampered client asking for `max` on every turn
-   must cost nothing. Unlike `parseEffort` (which clamps an operator's `low` *up* to `medium`), it never
-   clamps: an unrecognised value is "no choice", i.e. the operator default.
-3. **It is not persisted.** It resets to `medium` on every reload. A raised floor bills more on every
-   subsequent turn while producing no visible signal, so persisting it means a user raises it once for one
-   hard problem and quietly pays more for months. Session-scoped, the expensive state cannot outlive its
-   reason.
+On the MANAGED engine it is the session's effort, set at create; there is **no repair escalation** there,
+because a session's effort is fixed for its life and escalating per repair would move the session per
+repair. Changing the level moves the chat to a new session, exactly like a tier change (a resume never
+switches) — the user pays one cold-cache prefix per change.
 
-This is still not a prose classifier (§3.6): the user is choosing a visible, up-front session floor, not
-having their wording read to guess how hard the turn is.
+Four properties, each of which fails silently if dropped:
 
-`xhigh` is the ceiling; `max` exists in the union but nothing selects it. **The policy only ever
-escalates.** Its value is not paying less on easy turns (there is no cheap tier — §3.5a) but paying
+1. **It never caps.** A `high` session's second repair still gets `xhigh`, and an `xhigh` session's first
+   repair stays `xhigh` rather than dropping to `high`. Taking the floor as a cap would make a raised level
+   think *less* on hard failures than the default does — backwards, and invisible.
+2. **The server validates against what the deploy OFFERS, and never clamps up.** `parseUserEffort(raw,
+   offered)` is an exact-match whitelist over `offeredUserEffortLevels(context)`; the value arrives in a
+   **browser body**, on the platform's credit pool, so `low`, a typo, a non-string, or `max` with the switch
+   off resolves to "no choice", i.e. the operator default. The client hiding the Max notch is a courtesy,
+   never the wall. Unlike `parseEffort` (which clamps an operator's `low` *up* to `medium`), it never
+   clamps — a browser value must never be routed through `parseEffort`.
+3. **Per-model support is data, default-allowed.** `MODELS_WITHOUT_XHIGH` clamps `xhigh` down to `high`
+   for a model measured rejecting it (`servableEffort`); it is EMPTY — every current rung
+   (`claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1`) accepted `xhigh` and `max` as a session
+   override (2026-10-02). The SERVED level is what is recorded (`generations.effort`) and shown in
+   `/context`.
+4. **It is readable at a glance.** The old rule refused to persist the choice because a raised floor billed
+   more with no visible signal. The control now always shows its current value, which is what makes
+   persisting it safe; a hidden control spending money would bring the old reason back.
+
+This is still not a prose classifier (§3.6): the user is choosing a visible, up-front level, not having
+their wording read to guess how hard the turn is.
+
+The ladder never goes past `xhigh` on its own; `max` is reached only by a user who picked it (or an
+operator default naming it). **The policy only ever escalates.** Its value is not paying less on easy turns (there is no cheap tier — §3.5a) but paying
 more on the turns that have already *demonstrated* they need it: without this, a repair turn thinks
 exactly as hard as the turn that just failed, which is backwards.
 

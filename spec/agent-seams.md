@@ -130,49 +130,50 @@ believed.
 
 | Module | Entry point | Invoked at |
 |---|---|---|
-| `app/lib/.server/agent/tool-loop.ts` | `resolveToolLoopConfig` — the `AGENT_TOOL_LOOP` kill switch and its budgets, resolved once after the credit gate (tool-loop plan D2); also `resolveTurnCeiling`, `resolveMaxOutputTokens` (ASSEMBLE), `createTurnMeter` (STREAM) and `runToolLoopSegments` (STREAM → ASSEMBLE, see the straddler note above) | `proxy.ts:1025` (`resolveToolLoopConfig`) |
-| `app/lib/.server/agent-managed/config.ts` | `resolveAgentEngine` — the deploy's engine (`AGENT_ENGINE`, managed-agents-engine plan D9), read after the walls and the claim | `api.agent.ts:250` (`resolveAgentEngine`) |
-| `app/lib/.server/agent-managed/engine-select.ts` | `selectEngineForTurn` — managed only for a build turn with no MCP tools; Plan and MCP turns stay legacy | `api.agent.ts:247` (`selectEngineForTurn`) |
-| `app/lib/.server/agent-managed/engine.ts` | `runManagedGeneration` — the managed engine's twin of `runAgentGeneration`: config, then the credit gate, then (T5) the session and its event bridge (STREAM). The route dispatches to it only after the same walls, caps and claim (`engine-seam.spec.ts`) | `api.agent.ts:270` (`runManagedGeneration`) |
-| `app/lib/.server/agent/attachments.ts` | `validateAttachments` | `api.agent.ts:210` (`validateAttachments`) |
-| `app/lib/.server/agent/config.ts` | `getPlatformConfig`, `getPlatformModel`, `getTierModel`, `providersToPrice`, `requirePlatformKey` | `proxy.ts:849` (`providersToPrice`) |
-| `app/lib/.server/agent/discuss-note.ts` | `discussModeNote` | `proxy.ts:1271` (`discussModeNote`) |
-| `app/lib/.server/agent/effort-policy.ts` | `effortForTurn` | `proxy.ts:2099` (`effortForTurn`) |
-| `app/lib/.server/agent/inflight.ts` | `shouldClaimProject`, `claimProject` | `api.agent.ts:233` (`shouldClaimProject`) |
-| `app/lib/.server/agent/media-note.ts` | `mediaProtocolNote` | `proxy.ts:1815` (`mediaProtocolNote`) |
-| `app/lib/.server/agent/project-instructions.ts` | `buildProjectInstructions` | `proxy.ts:1226` (`buildProjectInstructions`) |
-| `app/lib/.server/agent/project-notes.ts` | `buildProjectNotes` | `proxy.ts:1740` (`buildProjectNotes`) |
-| `app/lib/.server/agent/request-fingerprint.ts` | `computeRequestFingerprint` | `proxy.ts:2365` (`computeRequestFingerprint`) |
-| `app/lib/.server/agent/request-invariants.ts` | `checkNoDuplicatePaths`, `checkFirstBuildManifest`, `checkManifestShrink` (with the manifest); `checkNoFileBodies` (per assembly, inside `startStream`); `checkHandoffRecorded` + `reportIntegrity` (once, at settlement) | `proxy.ts:1390` (`checkNoDuplicatePaths`) |
-| `app/lib/.server/assets/library-manifest.ts` | `assetLibraryIndexForRequest` | `proxy.ts:1432` (`assetLibraryIndexForRequest`) |
-| `app/lib/.server/assets/library-store.ts` | `activeAssetLibrary`, `ensureAssetLibraryForContext` | `proxy.ts:859` (`ensureAssetLibraryForContext`) |
-| `app/lib/.server/billing/market-price-store.ts` | `ensureMarketPrices`, `marketPriceProvidersFor` | `proxy.ts:849` (`marketPriceProvidersFor`) |
-| `app/lib/.server/billing/premium.ts` | `decideModelTier`, `tierDeclinedNotice` | `proxy.ts:1108` (`decideModelTier`) |
-| `app/lib/.server/billing/rates.ts` | `getModelTiers` | `proxy.ts:1084` (`getModelTiers`) |
-| `app/lib/.server/game-backend/separation.ts` | `sanitizeGameBackend` | `api.agent.ts:336` (`sanitizeGameBackend`) |
-| `app/lib/.server/agent/workspace-protocol.ts` | `workspaceProtocolFor` — the Workspace Protocol system block (tools variant when the tool loop is on, the legacy `<boltArtifact>` text when off), pushed right after the base prompt with no cache breakpoint of its own (tool-loop plan D17) | `proxy.ts:1354` (`workspaceProtocolFor`) |
-| `app/lib/.server/agent/bridge-notes.ts` | `bridgeTurnNotes` — the Unity Bridge + local scene server notes, pushed after the last cache breakpoint (§4.17, D37) | `proxy.ts:1766` (`bridgeTurnNotes`) |
-| `app/lib/.server/bridge/service.ts` | `resolveBridgeTurn`, `takeFinishedJobsForNote` — ⚠️ **ASSEMBLE + STREAM**: `settleDropped` runs in the generation's `finally`, marking bridge jobs still queued when the turn ends cancelled (§4.17; no ledger row — D53). Filed here because the turn decision is the entry point | `proxy.ts:1647` (`resolveBridgeTurn`) |
-| `app/lib/.server/licensing/entitlements.ts` | `resolveByok` | `proxy.ts:892` (`resolveByok`) |
-| `app/lib/.server/media/provider.ts` | `resolveMediaProvider` | `proxy.ts:1613` (`resolveMediaProvider`) |
-| `app/lib/.server/projects/ownership.ts` | `requireOwnedProject` | `api.agent.ts:201` (`requireOwnedProject`) |
-| `app/lib/.server/prompt/active.ts` | `getActivePrompt` | `proxy.ts:1152` (`getActivePrompt`) |
-| `app/lib/.server/prompt/store.ts` | `getPromptStore` | `proxy.ts:1197` (`getPromptStore`) |
-| `app/lib/.server/skills/store.ts` | `getSkillStore` | `proxy.ts:768` (`getSkillStore`) |
-| `app/lib/.server/storage/index.ts` | `getObjectStore` | `proxy.ts:1621` (`getObjectStore`) |
-| `app/lib/.server/supabase/auth.ts` | `requireVerifiedUser` | `api.agent.ts:187` (`requireVerifiedUser`) |
-| `app/lib/agent/starter-note.ts` | `starterGameTypeFrom`, `starterGameTypeNote` | `proxy.ts:1797` (`starterGameTypeFrom`) |
-| `app/lib/agent/toolkit-systems.ts` | `toolkitSystemsNoteForRequest` | `proxy.ts:1448` (`toolkitSystemsNoteForRequest`) |
-| `app/lib/chat/message-envelope.ts` | `stripTransportPrefix`, `splitCarriedArtifact`, `stripTransportEnvelopes`, `countUnstrippedEnvelopes` | `proxy.ts:761` (`stripTransportPrefix`) |
-| `app/lib/context/file-manifest.ts` | `buildFileManifest`, `renderFileManifest` | `proxy.ts:1411` (`renderFileManifest`) |
-| `app/lib/modules/llm/model-families.ts` | `familyOf` | `proxy.ts:1128` (`familyOf`) |
-| `app/lib/registry/entries.ts` | `findRegistryEntry` | `proxy.ts:1797` (`findRegistryEntry`) |
-| `app/lib/skills/slash.ts` | `parseSlashInvocation` | `proxy.ts:762` (`parseSlashInvocation`) |
+| `app/lib/.server/agent/tool-loop.ts` | `resolveToolLoopConfig` — the `AGENT_TOOL_LOOP` kill switch and its budgets, resolved once after the credit gate (tool-loop plan D2); also `resolveTurnCeiling`, `resolveMaxOutputTokens` (ASSEMBLE), `createTurnMeter` (STREAM) and `runToolLoopSegments` (STREAM → ASSEMBLE, see the straddler note above) | `proxy.ts:1043` (`resolveToolLoopConfig`) |
+| `app/lib/.server/agent-managed/config.ts` | `resolveAgentEngine` — the deploy's engine (`AGENT_ENGINE`, managed-agents-engine plan D9), read after the walls and the claim | `api.agent.ts:251` (`resolveAgentEngine`) |
+| `app/lib/.server/agent-managed/engine-select.ts` | `selectEngineForTurn` — managed only for a build turn with no MCP tools; Plan and MCP turns stay legacy | `api.agent.ts:248` (`selectEngineForTurn`) |
+| `app/lib/.server/agent-managed/engine.ts` | `runManagedGeneration` — the managed engine's twin of `runAgentGeneration`: config, then the credit gate, then (T5) the session and its event bridge (STREAM). The route dispatches to it only after the same walls, caps and claim (`engine-seam.spec.ts`) | `api.agent.ts:271` (`runManagedGeneration`) |
+| `app/lib/.server/agent/attachments.ts` | `validateAttachments` | `api.agent.ts:211` (`validateAttachments`) |
+| `app/lib/.server/agent/config.ts` | `getPlatformConfig`, `getPlatformModel`, `getTierModel`, `providersToPrice`, `requirePlatformKey` | `proxy.ts:867` (`providersToPrice`) |
+| `app/lib/.server/agent/discuss-note.ts` | `discussModeNote` | `proxy.ts:1289` (`discussModeNote`) |
+| `app/lib/.server/agent/effort-offer.ts` | `offeredUserEffortLevels` — the effort levels this deploy lets a USER pick (`ENABLE_MAX_EFFORT` adds `max`); the list `parseUserEffort` validates the browser's effort against (effort-selector plan D11) | `proxy.ts:2126` (`offeredUserEffortLevels`) |
+| `app/lib/.server/agent/effort-policy.ts` | `effortForTurn` | `proxy.ts:2117` (`effortForTurn`) |
+| `app/lib/.server/agent/inflight.ts` | `shouldClaimProject`, `claimProject` | `api.agent.ts:234` (`shouldClaimProject`) |
+| `app/lib/.server/agent/media-note.ts` | `mediaProtocolNote` | `proxy.ts:1833` (`mediaProtocolNote`) |
+| `app/lib/.server/agent/project-instructions.ts` | `buildProjectInstructions` | `proxy.ts:1244` (`buildProjectInstructions`) |
+| `app/lib/.server/agent/project-notes.ts` | `buildProjectNotes` | `proxy.ts:1758` (`buildProjectNotes`) |
+| `app/lib/.server/agent/request-fingerprint.ts` | `computeRequestFingerprint` | `proxy.ts:2398` (`computeRequestFingerprint`) |
+| `app/lib/.server/agent/request-invariants.ts` | `checkNoDuplicatePaths`, `checkFirstBuildManifest`, `checkManifestShrink` (with the manifest); `checkNoFileBodies` (per assembly, inside `startStream`); `checkHandoffRecorded` + `reportIntegrity` (once, at settlement) | `proxy.ts:1408` (`checkNoDuplicatePaths`) |
+| `app/lib/.server/assets/library-manifest.ts` | `assetLibraryIndexForRequest` | `proxy.ts:1450` (`assetLibraryIndexForRequest`) |
+| `app/lib/.server/assets/library-store.ts` | `activeAssetLibrary`, `ensureAssetLibraryForContext` | `proxy.ts:877` (`ensureAssetLibraryForContext`) |
+| `app/lib/.server/billing/market-price-store.ts` | `ensureMarketPrices`, `marketPriceProvidersFor` | `proxy.ts:867` (`marketPriceProvidersFor`) |
+| `app/lib/.server/billing/premium.ts` | `decideModelTier`, `tierDeclinedNotice` | `proxy.ts:1126` (`decideModelTier`) |
+| `app/lib/.server/billing/rates.ts` | `getModelTiers` | `proxy.ts:1102` (`getModelTiers`) |
+| `app/lib/.server/game-backend/separation.ts` | `sanitizeGameBackend` | `api.agent.ts:337` (`sanitizeGameBackend`) |
+| `app/lib/.server/agent/workspace-protocol.ts` | `workspaceProtocolFor` — the Workspace Protocol system block (tools variant when the tool loop is on, the legacy `<boltArtifact>` text when off), pushed right after the base prompt with no cache breakpoint of its own (tool-loop plan D17) | `proxy.ts:1372` (`workspaceProtocolFor`) |
+| `app/lib/.server/agent/bridge-notes.ts` | `bridgeTurnNotes` — the Unity Bridge + local scene server notes, pushed after the last cache breakpoint (§4.17, D37) | `proxy.ts:1784` (`bridgeTurnNotes`) |
+| `app/lib/.server/bridge/service.ts` | `resolveBridgeTurn`, `takeFinishedJobsForNote` — ⚠️ **ASSEMBLE + STREAM**: `settleDropped` runs in the generation's `finally`, marking bridge jobs still queued when the turn ends cancelled (§4.17; no ledger row — D53). Filed here because the turn decision is the entry point | `proxy.ts:1665` (`resolveBridgeTurn`) |
+| `app/lib/.server/licensing/entitlements.ts` | `resolveByok` | `proxy.ts:910` (`resolveByok`) |
+| `app/lib/.server/media/provider.ts` | `resolveMediaProvider` | `proxy.ts:1631` (`resolveMediaProvider`) |
+| `app/lib/.server/projects/ownership.ts` | `requireOwnedProject` | `api.agent.ts:202` (`requireOwnedProject`) |
+| `app/lib/.server/prompt/active.ts` | `getActivePrompt` | `proxy.ts:1170` (`getActivePrompt`) |
+| `app/lib/.server/prompt/store.ts` | `getPromptStore` | `proxy.ts:1215` (`getPromptStore`) |
+| `app/lib/.server/skills/store.ts` | `getSkillStore` | `proxy.ts:786` (`getSkillStore`) |
+| `app/lib/.server/storage/index.ts` | `getObjectStore` | `proxy.ts:1639` (`getObjectStore`) |
+| `app/lib/.server/supabase/auth.ts` | `requireVerifiedUser` | `api.agent.ts:188` (`requireVerifiedUser`) |
+| `app/lib/agent/starter-note.ts` | `starterGameTypeFrom`, `starterGameTypeNote` | `proxy.ts:1815` (`starterGameTypeFrom`) |
+| `app/lib/agent/toolkit-systems.ts` | `toolkitSystemsNoteForRequest` | `proxy.ts:1466` (`toolkitSystemsNoteForRequest`) |
+| `app/lib/chat/message-envelope.ts` | `stripTransportPrefix`, `splitCarriedArtifact`, `stripTransportEnvelopes`, `countUnstrippedEnvelopes` | `proxy.ts:779` (`stripTransportPrefix`) |
+| `app/lib/context/file-manifest.ts` | `buildFileManifest`, `renderFileManifest` | `proxy.ts:1429` (`renderFileManifest`) |
+| `app/lib/modules/llm/model-families.ts` | `familyOf` | `proxy.ts:1146` (`familyOf`) |
+| `app/lib/registry/entries.ts` | `findRegistryEntry` | `proxy.ts:1815` (`findRegistryEntry`) |
+| `app/lib/skills/slash.ts` | `parseSlashInvocation` | `proxy.ts:780` (`parseSlashInvocation`) |
 
 `app/lib/agent/creation-plan.ts` is ASSEMBLE for `creationPhaseNote` / `parseCreationPhaseId` /
 `projectOwesBuild` and STREAM for `phaseOwesFiles`, which asks of a finished turn whether it owed
 files.
-`app/lib/modules/llm/capabilities.ts` is ASSEMBLE for `parseUserEffort` and
+`app/lib/modules/llm/capabilities.ts` is ASSEMBLE for `parseUserEffort` / `servableEffort` and
 STREAM→ASSEMBLE for `canDisableThinking`, which decides the last-resort re-issue.
 `app/lib/.server/llm/history.ts` is ASSEMBLE for `compactHistory` / `historySize` / `historySavings`
 and a straddler for `stripReplayedReasoning` — see above.
@@ -181,23 +182,23 @@ and a straddler for `stripReplayedReasoning` — see above.
 
 | Module | Entry point | Invoked at |
 |---|---|---|
-| `app/lib/.server/agent/action-tags.ts` | `createTagCounter`, `isTruncatedAction` | `proxy.ts:2764` (`createTagCounter`) |
-| `app/lib/.server/agent/heartbeat.ts` | `withGenerationHeartbeat` | `api.agent.ts:575` (`withGenerationHeartbeat`) |
-| `app/lib/.server/agent/protocol-strip.ts` | `ProtocolTagStreamFilter` | `api.agent.ts:555` (`ProtocolTagStreamFilter`) |
-| `app/lib/.server/agent/provider-select.ts` | `recordProviderFailure`, `recordProviderSuccess` | `proxy.ts:2912` (`recordProviderFailure`) |
-| `app/lib/.server/agent/shell-strip.ts` | `ShellActionStreamFilter` | `api.agent.ts:547` (`ShellActionStreamFilter`) |
-| `app/lib/.server/agent/step-prefix.ts` | `stepPrefixHashes`, `prefixChanges` | `proxy.ts:2456` (`stepPrefixHashes`) |
-| `app/lib/.server/agent/step-text-separator.ts` | `createStepTextSeparator` — a paragraph break between two tool-loop steps' narration (tool-loop plan D20) | `proxy.ts:2716` (`createStepTextSeparator`) |
-| `app/lib/.server/agent/step-usage.ts` | `accumulateStepUsage`, `emptyUsage` | `proxy.ts:2172` (`emptyUsage`) |
-| `app/lib/.server/agent/usage-metadata.ts` | `extractStepCacheTokens`, `shouldWarnMissingUsageNamespace`, `usageNamespaceFor` | `proxy.ts:2427` (`extractStepCacheTokens`) |
-| `app/lib/.server/agent/usage.ts` | `getGenerationLog` | `proxy.ts:3518` (`getGenerationLog`) |
-| `app/lib/.server/billing/savings.ts` | `describeSavings` | `proxy.ts:3465` (`describeSavings`) |
-| `app/lib/.server/monitoring/failure-rate.ts` | `sharedFailureRate` | `proxy.ts:3680` (`sharedFailureRate`) |
-| `app/lib/.server/monitoring/paid-path-rates.ts` | `recordRefundOutcome`, `recordRescueMarkers` | `proxy.ts:3700` (`recordRescueMarkers`) |
-| `app/lib/modules/llm/refusal-fallback.ts` | `describeRefusal`, `drainFallbackHandoffs` | `proxy.ts:3316` (`describeRefusal`) |
-| `app/lib/modules/llm/stop-reason-tap.ts` | `peekStopReasons`, `drainStopReasons` | `proxy.ts:3314` (`peekStopReasons`) |
-| `app/lib/.server/agent/turn-annotations.ts` | `buildTurnAnnotations` — the four end-of-turn annotations (usage, agentMeta incl. `describeTurnOutcome`, agentWorkspace, credits), built once for the stream AND the managed engine's server-written transcript (managed-agents-engine T10) | `api.agent.ts:664` (`buildTurnAnnotations`) |
-| `app/lib/.server/monitoring/index.ts` | `getMonitor`, `FUNNEL_EVENTS`, `ALERT_SIGNALS` — ⚠️ **ASSEMBLE + STREAM**: the monitor is obtained at the assembly doorway and fires funnel events and alerts throughout the turn. Filed here because the alerts that matter are stream-side, but it belongs to no single phase | `proxy.ts:874` (`getMonitor`) |
+| `app/lib/.server/agent/action-tags.ts` | `createTagCounter`, `isTruncatedAction` | `proxy.ts:2797` (`createTagCounter`) |
+| `app/lib/.server/agent/heartbeat.ts` | `withGenerationHeartbeat` | `api.agent.ts:576` (`withGenerationHeartbeat`) |
+| `app/lib/.server/agent/protocol-strip.ts` | `ProtocolTagStreamFilter` | `api.agent.ts:556` (`ProtocolTagStreamFilter`) |
+| `app/lib/.server/agent/provider-select.ts` | `recordProviderFailure`, `recordProviderSuccess` | `proxy.ts:2945` (`recordProviderFailure`) |
+| `app/lib/.server/agent/shell-strip.ts` | `ShellActionStreamFilter` | `api.agent.ts:548` (`ShellActionStreamFilter`) |
+| `app/lib/.server/agent/step-prefix.ts` | `stepPrefixHashes`, `prefixChanges` | `proxy.ts:2489` (`stepPrefixHashes`) |
+| `app/lib/.server/agent/step-text-separator.ts` | `createStepTextSeparator` — a paragraph break between two tool-loop steps' narration (tool-loop plan D20) | `proxy.ts:2749` (`createStepTextSeparator`) |
+| `app/lib/.server/agent/step-usage.ts` | `accumulateStepUsage`, `emptyUsage` | `proxy.ts:2205` (`emptyUsage`) |
+| `app/lib/.server/agent/usage-metadata.ts` | `extractStepCacheTokens`, `shouldWarnMissingUsageNamespace`, `usageNamespaceFor` | `proxy.ts:2460` (`extractStepCacheTokens`) |
+| `app/lib/.server/agent/usage.ts` | `getGenerationLog` | `proxy.ts:3551` (`getGenerationLog`) |
+| `app/lib/.server/billing/savings.ts` | `describeSavings` | `proxy.ts:3498` (`describeSavings`) |
+| `app/lib/.server/monitoring/failure-rate.ts` | `sharedFailureRate` | `proxy.ts:3714` (`sharedFailureRate`) |
+| `app/lib/.server/monitoring/paid-path-rates.ts` | `recordRefundOutcome`, `recordRescueMarkers` | `proxy.ts:3734` (`recordRescueMarkers`) |
+| `app/lib/modules/llm/refusal-fallback.ts` | `describeRefusal`, `drainFallbackHandoffs` | `proxy.ts:3349` (`describeRefusal`) |
+| `app/lib/modules/llm/stop-reason-tap.ts` | `peekStopReasons`, `drainStopReasons` | `proxy.ts:3347` (`peekStopReasons`) |
+| `app/lib/.server/agent/turn-annotations.ts` | `buildTurnAnnotations` — the four end-of-turn annotations (usage, agentMeta incl. `describeTurnOutcome`, agentWorkspace, credits), built once for the stream AND the managed engine's server-written transcript (managed-agents-engine T10) | `api.agent.ts:665` (`buildTurnAnnotations`) |
+| `app/lib/.server/monitoring/index.ts` | `getMonitor`, `FUNNEL_EVENTS`, `ALERT_SIGNALS` — ⚠️ **ASSEMBLE + STREAM**: the monitor is obtained at the assembly doorway and fires funnel events and alerts throughout the turn. Filed here because the alerts that matter are stream-side, but it belongs to no single phase | `proxy.ts:892` (`getMonitor`) |
 
 `app/lib/.server/agent/proxy.ts` itself is the whole pipeline; `api.agent.ts` invokes it as `runAgentGeneration`.
 
@@ -205,26 +206,26 @@ and a straddler for `stripReplayedReasoning` — see above.
 
 | Module | Entry point | Invoked at |
 |---|---|---|
-| `app/lib/.server/agent/mcp-relay.ts` | `cancelGenerationToolCalls` | `proxy.ts:3719` (`cancelGenerationToolCalls`) |
-| `app/lib/.server/bridge/relay.ts` | `cancelGenerationBridgeJobs` — drops the generation's still-queued Unity Bridge jobs in the `finally`, so `settleDropped` marks them cancelled (§4.17) | `proxy.ts:3722` (`cancelGenerationBridgeJobs`) |
+| `app/lib/.server/agent/mcp-relay.ts` | `cancelGenerationToolCalls` | `proxy.ts:3753` (`cancelGenerationToolCalls`) |
+| `app/lib/.server/bridge/relay.ts` | `cancelGenerationBridgeJobs` — drops the generation's still-queued Unity Bridge jobs in the `finally`, so `settleDropped` marks them cancelled (§4.17) | `proxy.ts:3756` (`cancelGenerationBridgeJobs`) |
 
 ### ASSEMBLE + TOOL — built during assembly, enforced inside `execute`
 
 | Module | Entry point | Built at |
 |---|---|---|
-| `app/lib/.server/agent/file-tools.ts` | `createFileTools` | `proxy.ts:2017` (`createFileTools`) |
-| `app/lib/.server/agent/mcp-tools.ts` | `createMcpRelayTools` | `proxy.ts:1526` (`createMcpRelayTools`) |
-| `app/lib/.server/agent/media-tools.ts` | `createMediaTools` | `proxy.ts:1617` (`createMediaTools`) |
-| `app/lib/.server/agent/bridge-tools.ts` | `createBridgeTools` — Unity Bridge tools; consent and dispatch happen inside `execute` via `bridge/service.ts` (§4.17) | `proxy.ts:1656` (`createBridgeTools`) |
-| `app/lib/.server/agent/workspace-tools.ts` | `createWorkspaceTools` — the tool loop's write/edit/run/check/todos relay; `WorkspaceOverlay` is built in ASSEMBLE and read by `read_file` (tool-loop plan D1–D5) | `proxy.ts:1934` (`createWorkspaceTools`) |
-| `app/lib/.server/agent/preview-tools.ts` | `createPreviewTools` | `proxy.ts:1573` (`createPreviewTools`) |
-| `app/lib/.server/agent/reference-tools.ts` | `createReferenceTools` (TOOL), `carriedReferenceIds` (ASSEMBLE) | `proxy.ts:1200` (`carriedReferenceIds`) |
-| `app/lib/.server/agent/tool-repair.ts` | `createRepairTool`; `repairUnavailableToolCall` is handed to the SDK as a per-call hook | `proxy.ts:2055` (`createRepairTool`) |
-| `app/lib/.server/agent/tools.ts` | `createSkillTools` | `proxy.ts:2068` (`createSkillTools`) |
-| `app/lib/.server/agent/web-fetch-tool.ts` | `createWebFetchTool` | `proxy.ts:1986` (`createWebFetchTool`) |
-| `app/lib/.server/agent/web-search-tool.ts` | `createWebSearchTool` | `proxy.ts:1985` (`createWebSearchTool`) |
-| `app/lib/.server/agent/budgets.ts` | `resolveAgentBudgets` — straddler, see above; reached through `tool-loop.ts`'s `resolveTurnBudgets`, which the prompt refresh shares | `proxy.ts:1694` (`resolveTurnBudgets`) |
-| `app/lib/.server/agent/tool-policy.ts` | `toolPolicyForTurn` — straddler, see above | `proxy.ts:1696` (`toolPolicyForTurn`) |
+| `app/lib/.server/agent/file-tools.ts` | `createFileTools` | `proxy.ts:2035` (`createFileTools`) |
+| `app/lib/.server/agent/mcp-tools.ts` | `createMcpRelayTools` | `proxy.ts:1544` (`createMcpRelayTools`) |
+| `app/lib/.server/agent/media-tools.ts` | `createMediaTools` | `proxy.ts:1635` (`createMediaTools`) |
+| `app/lib/.server/agent/bridge-tools.ts` | `createBridgeTools` — Unity Bridge tools; consent and dispatch happen inside `execute` via `bridge/service.ts` (§4.17) | `proxy.ts:1674` (`createBridgeTools`) |
+| `app/lib/.server/agent/workspace-tools.ts` | `createWorkspaceTools` — the tool loop's write/edit/run/check/todos relay; `WorkspaceOverlay` is built in ASSEMBLE and read by `read_file` (tool-loop plan D1–D5) | `proxy.ts:1952` (`createWorkspaceTools`) |
+| `app/lib/.server/agent/preview-tools.ts` | `createPreviewTools` | `proxy.ts:1591` (`createPreviewTools`) |
+| `app/lib/.server/agent/reference-tools.ts` | `createReferenceTools` (TOOL), `carriedReferenceIds` (ASSEMBLE) | `proxy.ts:1218` (`carriedReferenceIds`) |
+| `app/lib/.server/agent/tool-repair.ts` | `createRepairTool`; `repairUnavailableToolCall` is handed to the SDK as a per-call hook | `proxy.ts:2073` (`createRepairTool`) |
+| `app/lib/.server/agent/tools.ts` | `createSkillTools` | `proxy.ts:2086` (`createSkillTools`) |
+| `app/lib/.server/agent/web-fetch-tool.ts` | `createWebFetchTool` | `proxy.ts:2004` (`createWebFetchTool`) |
+| `app/lib/.server/agent/web-search-tool.ts` | `createWebSearchTool` | `proxy.ts:2003` (`createWebSearchTool`) |
+| `app/lib/.server/agent/budgets.ts` | `resolveAgentBudgets` — straddler, see above; reached through `tool-loop.ts`'s `resolveTurnBudgets`, which the prompt refresh shares | `proxy.ts:1712` (`resolveTurnBudgets`) |
+| `app/lib/.server/agent/tool-policy.ts` | `toolPolicyForTurn` — straddler, see above | `proxy.ts:1714` (`toolPolicyForTurn`) |
 
 ### Straddlers filed above, listed here so every module appears exactly once
 
@@ -242,16 +243,16 @@ file, so a reference that drifted fails a test instead of quietly becoming ficti
 
 | Module | Phases | First invoked at |
 |---|---|---|
-| `app/lib/.server/agent/creation-completion.ts` | STREAM → ASSEMBLE | `proxy.ts:3225` (`shouldVerifyCreationCompleteness`) |
-| `app/lib/.server/agent/delivery.ts` | ASSEMBLE + STREAM, via two exports | `proxy.ts:3773` (`deliveryModeFor`) |
-| `app/lib/.server/agent/preload-skills.ts` | ASSEMBLE, reading the previous turn's STREAM | `proxy.ts:1273` (`preloadSkills`) |
-| `app/lib/.server/agent/retry-policy.ts` | STREAM → ASSEMBLE | `proxy.ts:2880` (`shouldRetryGeneration`) |
-| `app/lib/.server/agent/unproductive.ts` | STREAM → ASSEMBLE | `proxy.ts:3166` (`shouldRescueUnproductiveTurn`) |
-| `app/lib/.server/billing/gate.ts` | ASSEMBLE + STREAM | `proxy.ts:1006` (`checkCreditGate`) |
-| `app/lib/.server/llm/history.ts` | ASSEMBLE + (STREAM → ASSEMBLE) | `proxy.ts:2160` (`compactHistory`) |
-| `app/lib/.server/prompt/cache-warmer.ts` | ASSEMBLE + STREAM | `proxy.ts:865` (`ensureCacheWarmer`) |
-| `app/lib/agent/creation-plan.ts` | ASSEMBLE + STREAM | `proxy.ts:997` (`parseCreationPhaseId`) |
-| `app/lib/modules/llm/capabilities.ts` | ASSEMBLE + (STREAM → ASSEMBLE) | `proxy.ts:2108` (`parseUserEffort`) |
+| `app/lib/.server/agent/creation-completion.ts` | STREAM → ASSEMBLE | `proxy.ts:3258` (`shouldVerifyCreationCompleteness`) |
+| `app/lib/.server/agent/delivery.ts` | ASSEMBLE + STREAM, via two exports | `proxy.ts:3810` (`deliveryModeFor`) |
+| `app/lib/.server/agent/preload-skills.ts` | ASSEMBLE, reading the previous turn's STREAM | `proxy.ts:1291` (`preloadSkills`) |
+| `app/lib/.server/agent/retry-policy.ts` | STREAM → ASSEMBLE | `proxy.ts:2913` (`shouldRetryGeneration`) |
+| `app/lib/.server/agent/unproductive.ts` | STREAM → ASSEMBLE | `proxy.ts:3199` (`shouldRescueUnproductiveTurn`) |
+| `app/lib/.server/billing/gate.ts` | ASSEMBLE + STREAM | `proxy.ts:1024` (`checkCreditGate`) |
+| `app/lib/.server/llm/history.ts` | ASSEMBLE + (STREAM → ASSEMBLE) | `proxy.ts:2193` (`compactHistory`) |
+| `app/lib/.server/prompt/cache-warmer.ts` | ASSEMBLE + STREAM | `proxy.ts:883` (`ensureCacheWarmer`) |
+| `app/lib/agent/creation-plan.ts` | ASSEMBLE + STREAM | `proxy.ts:1015` (`parseCreationPhaseId`) |
+| `app/lib/modules/llm/capabilities.ts` | ASSEMBLE + (STREAM → ASSEMBLE) | `proxy.ts:2126` (`parseUserEffort`) |
 
 ## Adding a participant
 

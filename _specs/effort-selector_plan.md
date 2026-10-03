@@ -152,7 +152,7 @@ the user ~2× — **margin unchanged**. On managed, longer turns also bill more 
   **Acceptance:** driven live in Chrome — pick Max, send a build turn, `/context` shows Max and the
   managed session is new; pick Medium again → another new session; row width identical at Medium and
   Extra high; `body.style.paddingRight` stays `0px` with the panel open.
-- [ ] **T9 — Docs (same PR).** SPEC.md L286/L288/L466/L570–572/L1144–1163/L1341 + a §8l decision
+- [x] **T9 — Docs (same PR).** SPEC.md L286/L288/L466/L570–572/L1144–1163/L1341 + a §8l decision
   entry; `spec/anthropic-models.md` L3, §3.5, §3.6a (+ L486 "nothing selects max"); CLAUDE.md effort
   entry and managed bullet; `_specs/managed-agents-engine_plan.md` new decision (don't edit D10
   history); `spec/agent-seams.md` line refs if `proxy.ts` moved.
