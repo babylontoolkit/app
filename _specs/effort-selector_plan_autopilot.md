@@ -38,3 +38,6 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - T9 ✅ verified (independent) — 1 attempt — 18 doc-reading spec files, 720 tests green; precedence-wording slip fixed by orchestrator.
 - DECISION T10 (scope expansion): `pnpm test` was red only on 13 `engine-turn.spec.ts` tests inherited from e1ae7dbc — settlement now reads per-thread cumulative usage (`sessions.threads.list` + tiered `cache_creation`) and the fake client had neither. Fixed TEST-ONLY in `fake-session.testkit.ts` (one primary thread + session usage summed from `span.model_request_end`, cache writes reported as the 5-minute tier) — no production code touched. Without it the pre-commit hook blocks every commit.
 - T10 ✅ gates: typecheck 0, lint 0 errors (31 pre-existing warnings), full suite green; final commit made THROUGH the pre-commit hook.
+- NOTE T10: `.husky/pre-commit` runs typecheck → lint → brand gate, NOT the tests (CLAUDE.md says it does). Full `pnpm test` run separately: 441 files, 9281 passed, 8 skipped, 0 failed. Dev server responds 200 on :5173.
+
+## Run 1 — ended 2026-10-02 15:45 — 10/10 complete, 0 deferred. Plan finished. Last commit: see `git log` (T10 commit + this log).
