@@ -84,9 +84,10 @@ async function agentAction({ context, request }: ActionFunctionArgs) {
     premium?: boolean;
 
     /**
-     * The user's chosen base thinking effort for this session (§4.2.9): `'medium'` (the default) or
-     * `'high'`. Typed as a plain string here on purpose — it is an untrusted browser value, and the
-     * proxy validates it with `parseUserEffort` rather than a cast that would let `max` through.
+     * The user's chosen thinking effort for this session (§4.2.9): `'medium'` (the default), `'high'`,
+     * `'xhigh'`, or `'max'` when the operator enables it. Typed as a plain string here on purpose — it is
+     * an untrusted browser value, and the server validates it with `parseUserEffort` against the deploy's
+     * offered levels rather than a cast that would let `max` through with the switch off.
      */
     effort?: string;
 

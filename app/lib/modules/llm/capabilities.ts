@@ -172,14 +172,15 @@ export const REJECTED_EFFORT = 'low';
 export const DEFAULT_EFFORT: EffortLevel = 'medium';
 
 /**
- * Validate an operator-supplied `THINKING_EFFORT`, returning `undefined` when there is nothing usable
+ * Validate an operator-supplied effort (`THINKING_EFFORT`, `MANAGED_AGENT_EFFORT` — `varName` names it in
+ * the warning), returning `undefined` when there is nothing usable
  * to say (so the caller falls back to `DEFAULT_EFFORT`).
  *
  * A raw `as EffortLevel` cast on an env var is a lie the type system cannot catch: `.env.local` is a
  * string file, so a typo (`hgih`) or the banned `low` would sail through the cast and onto the wire.
  * Both are clamped here, loudly, at the one place the string becomes a typed value.
  */
-export function parseEffort(raw: string | undefined): EffortLevel | undefined {
+export function parseEffort(raw: string | undefined, varName = 'THINKING_EFFORT'): EffortLevel | undefined {
   if (!raw) {
     return undefined;
   }
@@ -192,7 +193,7 @@ export function parseEffort(raw: string | undefined): EffortLevel | undefined {
 
   if (value === REJECTED_EFFORT) {
     console.warn(
-      `[capabilities] THINKING_EFFORT=low is not supported — it breaches read-only project zones ` +
+      `[capabilities] ${varName}=low is not supported — it breaches read-only project zones ` +
         `(see the note above EFFORT_LEVELS). Clamping to "${DEFAULT_EFFORT}".`,
     );
 
@@ -201,7 +202,7 @@ export function parseEffort(raw: string | undefined): EffortLevel | undefined {
 
   if (!(EFFORT_LEVELS as readonly string[]).includes(value)) {
     console.warn(
-      `[capabilities] THINKING_EFFORT="${raw}" is not one of ${EFFORT_LEVELS.join('|')}. ` +
+      `[capabilities] ${varName}="${raw}" is not one of ${EFFORT_LEVELS.join('|')}. ` +
         `Falling back to "${DEFAULT_EFFORT}".`,
     );
 
@@ -212,43 +213,102 @@ export function parseEffort(raw: string | undefined): EffortLevel | undefined {
 }
 
 /**
- * The two levels a USER may choose as the base effort for their session (SPEC §4.2a, §4.2.9).
+ * The levels a USER may choose for their session (SPEC §4.2a, §4.2.9; `_specs/effort-selector_plan.md` D1).
  *
- * Deliberately a STRICT SUBSET of `EFFORT_LEVELS`, not the whole union:
+ * DERIVED from `EFFORT_LEVELS`, never retyped: `medium` · `high` · `xhigh` · `max`. Owner, 2026-10-02:
+ * the old rule — "the user picks a FLOOR, `medium` or `high`, NOTHING ELSE" — is reversed. Effort has no
+ * price of its own; it changes how many thinking tokens a turn spends, which bill at the output rate, and
+ * credits are cost-proportional, so an `xhigh`/`max` turn bills the user for what it spends and the margin
+ * is unchanged. The control is now always visible with its current value, which removes the "billed more
+ * with no visible signal" reason the subset existed for.
  *
- *  - Below `medium` there is nothing — `low` is a correctness bug, not a discount (see `REJECTED_EFFORT`).
- *  - Above `high` there is `xhigh`/`max`, which `effort-policy.ts` spends ONLY on evidence (a repair that
- *    has already failed twice). Handing those to a user as a session default turns the escalation ladder
- *    into a floor — every ordinary edit would start where a twice-failed build ends, on the operator's
- *    credit pool, with no signal that the turn needed it. The ceiling stays earned, never chosen.
+ * Two limits remain, both on purpose:
  *
- * So the user picks the FLOOR (`medium` or `high`); the policy still escalates above it on evidence.
+ *  - Below `medium` there is nothing — `low` is a correctness bug, not a discount (see `REJECTED_EFFORT`),
+ *    and it is not in `EFFORT_LEVELS`, so it is unreachable here by construction.
+ *  - `max` is OFFERED only when the operator enables it (`ENABLE_MAX_EFFORT`, D11): the platform prepays
+ *    the provider, so the pool's drain RATE matters even though every credit is user-backed. What is
+ *    offered on a deploy is `offeredUserEffortLevels(context)` (server); the safe default list is
+ *    `DEFAULT_OFFERED_EFFORT_LEVELS`.
  */
-export const USER_EFFORT_LEVELS = ['medium', 'high'] as const;
+export const USER_EFFORT_LEVELS: readonly EffortLevel[] = EFFORT_LEVELS;
 
-export type UserEffortLevel = (typeof USER_EFFORT_LEVELS)[number];
+/** A level a user may pick — every `EffortLevel` (kept as a name so callers read as "the user's choice"). */
+export type UserEffortLevel = EffortLevel;
 
 /** The base effort a session starts at when the user has not chosen. Matches `DEFAULT_EFFORT`. */
 export const DEFAULT_USER_EFFORT: UserEffortLevel = 'medium';
 
 /**
- * Validate a CLIENT-SUPPLIED base effort, returning `undefined` for anything that is not one of the two
- * user-selectable levels.
- *
- * This is a request from a browser, so it is untrusted in exactly the way `THINKING_EFFORT` is not: a
- * tampered body asking for `max` on every turn is a request to multiply the thinking bill on the
- * platform's credit pool. Anything unrecognised — `max`, `xhigh`, `low`, a typo, a number, an object —
- * resolves to `undefined`, which means "no user choice" and falls back to the operator default. It never
- * throws and never clamps upward: an unusable value must cost nothing, not buy the expensive setting.
+ * What is offered when `ENABLE_MAX_EFFORT` is off (the shipping default, D11): every user level except
+ * `max`. Derived by filtering, so a new level added to `EFFORT_LEVELS` is offered without an edit here.
  */
-export function parseUserEffort(raw: unknown): UserEffortLevel | undefined {
+export const DEFAULT_OFFERED_EFFORT_LEVELS: readonly EffortLevel[] = USER_EFFORT_LEVELS.filter(
+  (level) => level !== 'max',
+);
+
+/**
+ * Validate a CLIENT-SUPPLIED effort against the levels this deploy OFFERS, returning `undefined` for
+ * anything else.
+ *
+ * This is a request from a browser, so it is untrusted in exactly the way `THINKING_EFFORT` is not.
+ * Exact-match whitelist (trimmed, case-folded): `low`, a typo, a number, an object, and any level not in
+ * `offered` resolve to `undefined`, which means "no user choice" and falls back to the operator default.
+ * It never throws and NEVER CLAMPS — unlike `parseEffort`, which clamps an operator's `low` up to
+ * `medium` as a convenience; a browser value must never be routed through that (D1).
+ *
+ * `offered` defaults to the SAFE list (no `max`), so a caller that forgets to pass the deploy's offered
+ * list cannot buy `max` with the switch off — the server never trusts the client to hide the notch.
+ */
+export function parseUserEffort(
+  raw: unknown,
+  offered: readonly EffortLevel[] = DEFAULT_OFFERED_EFFORT_LEVELS,
+): UserEffortLevel | undefined {
   if (typeof raw !== 'string') {
     return undefined;
   }
 
   const value = raw.trim().toLowerCase();
 
-  return (USER_EFFORT_LEVELS as readonly string[]).includes(value) ? (value as UserEffortLevel) : undefined;
+  return (offered as readonly string[]).includes(value) ? (value as UserEffortLevel) : undefined;
+}
+
+/**
+ * Models that REJECT `xhigh` (the SDK: "Not all models accept this level") — DATA, default-allowed (D5),
+ * the same shape as `MODELS_WITHOUT_ADAPTIVE_THINKING`: a new model needs no code (§4.6.1a), and an entry
+ * is added only when a model is MEASURED rejecting the level.
+ *
+ * EMPTY on purpose: the T1 probe (`scripts/effort-probe.mjs`, 2026-10-02) had every rung —
+ * `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` — accept `xhigh` and `max` as a Managed
+ * Agents session override, with the read-back echoing the level (`_specs/effort-selector_plan.md`
+ * Findings). Entries match the exact bare id or that id with a `-YYYYMMDD` date suffix, never a prefix.
+ */
+export const MODELS_WITHOUT_XHIGH: readonly string[] = [];
+
+/**
+ * The effort actually SERVED for `modelId`, given a deny-list: `xhigh` clamps DOWN to `high` for a listed
+ * model; everything else — `max` included — is returned unchanged. Pure, and takes the list so the clamp
+ * is testable while `MODELS_WITHOUT_XHIGH` is empty.
+ *
+ * Matches like `canDisableThinking`'s allow-list: the exact bare id (an `anthropic.` prefix stripped), or
+ * that id plus a `-YYYYMMDD` date suffix — never a bare prefix, so `claude-opus-5` never matches
+ * `claude-opus-5-5`.
+ */
+export function servableEffortFor(modelId: string, effort: EffortLevel, denyList: readonly string[]): EffortLevel {
+  if (effort !== 'xhigh') {
+    return effort;
+  }
+
+  const id = bareModelId(modelId);
+  const undated = id.replace(/-\d{8}$/, '');
+  const denied = denyList.includes(id) || (undated !== id && denyList.includes(undated));
+
+  return denied ? 'high' : effort;
+}
+
+/** `servableEffortFor` against the shipped `MODELS_WITHOUT_XHIGH`. The served (post-clamp) value is what gets recorded and shown. */
+export function servableEffort(modelId: string, effort: EffortLevel): EffortLevel {
+  return servableEffortFor(modelId, effort, MODELS_WITHOUT_XHIGH);
 }
 
 function bareModelId(modelId: string): string {

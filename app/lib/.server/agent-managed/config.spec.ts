@@ -7,7 +7,7 @@
  * `.env.local` key that vitest loads.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getManagedClient, resolveAgentEngine, setManagedClientForTests } from './config';
+import { getManagedClient, getManagedEngineConfig, resolveAgentEngine, setManagedClientForTests } from './config';
 
 const ctx = (vars: Record<string, string>) => ({ cloudflare: { env: vars } });
 
@@ -86,5 +86,42 @@ describe('getManagedClient — the test network wall', () => {
     const fake = {} as unknown as Parameters<typeof setManagedClientForTests>[0];
     setManagedClientForTests(fake);
     expect(getManagedClient(ctx({}))).toBe(fake);
+  });
+});
+
+describe('getManagedEngineConfig — MANAGED_AGENT_EFFORT (effort-selector T3, D8)', () => {
+  const effortOf = (value: string | undefined) =>
+    getManagedEngineConfig(
+      ctx({ ANTHROPIC_API_KEY: 'sk-test-not-real', ...(value === undefined ? {} : { MANAGED_AGENT_EFFORT: value }) }),
+    ).effort;
+
+  beforeEach(() => {
+    vi.stubEnv('MANAGED_AGENT_EFFORT', undefined as unknown as string);
+  });
+
+  it('unset → medium', () => {
+    expect(effortOf(undefined)).toBe('medium');
+  });
+
+  it('every EffortLevel is honoured — xhigh and max no longer collapse to medium', () => {
+    expect(effortOf('medium')).toBe('medium');
+    expect(effortOf('high')).toBe('high');
+    expect(effortOf('xhigh')).toBe('xhigh');
+    expect(effortOf('max')).toBe('max');
+    expect(effortOf(' MAX ')).toBe('max');
+  });
+
+  it('low clamps to medium WITH a warning naming MANAGED_AGENT_EFFORT', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    expect(effortOf('low')).toBe('medium');
+    expect(warn.mock.calls.some((args) => String(args[0]).includes('MANAGED_AGENT_EFFORT=low'))).toBe(true);
+  });
+
+  it('garbage → medium (with a warning)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    expect(effortOf('turbo')).toBe('medium');
+    expect(warn).toHaveBeenCalled();
   });
 });

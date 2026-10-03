@@ -9,6 +9,8 @@
  * Everything a session needs (T5) is here: the agent id + version to start it on, the environment, and
  * the reference files to mount under `/workspace/agent/<rel>` (D12).
  */
+import type { EffortLevel } from '~/lib/modules/llm/capabilities';
+
 export interface ManagedReferenceFile {
   /** Path inside the Agent Reference repo, e.g. `references/web-app-builder.md`. Mounted at `/workspace/agent/<rel>`. */
   rel: string;
@@ -39,7 +41,7 @@ export interface ManagedAgentRecord {
   agentHash: string;
   environmentId: string;
   model: string;
-  effort: 'medium' | 'high';
+  effort: EffortLevel;
 
   /** The Agent Reference commit the reference files were uploaded from. */
   referenceSha: string;

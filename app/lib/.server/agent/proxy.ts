@@ -150,6 +150,7 @@ import {
   type InvariantViolation,
 } from './request-invariants';
 import { canDisableThinking, parseUserEffort, supportsAdaptiveThinking } from '~/lib/modules/llm/capabilities';
+import { offeredUserEffortLevels } from '~/lib/.server/agent/effort-offer';
 import type { LanguageModelV1 } from 'ai';
 import { getGenerationLog, type GenerationRecord } from './usage';
 import {
@@ -339,10 +340,12 @@ export interface AgentRequest {
   premium?: boolean;
 
   /**
-   * The user's chosen base thinking effort for this session (§4.2.9) — `'medium'` or `'high'`.
+   * The user's chosen thinking effort for this session (§4.2.9) — `'medium'`, `'high'`, `'xhigh'`, or
+   * `'max'` when the operator enables it (`ENABLE_MAX_EFFORT`).
    *
-   * Untrusted and validated at the boundary (`parseUserEffort`): anything else — `max`, `xhigh`, `low`, a
-   * typo — becomes `undefined` and the operator default stands. It is a FLOOR handed to `effortForTurn`,
+   * Untrusted and validated at the boundary (`parseUserEffort` against `offeredUserEffortLevels`):
+   * anything else — `low`, a typo, `max` with the switch off — becomes `undefined` and the operator
+   * default stands. It is a FLOOR handed to `effortForTurn`,
    * so the escalation rules still fire above it.
    */
   effort?: string;
@@ -2101,11 +2104,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
     repairAttempt: request.repairAttempt ?? 1,
 
     /*
-     * The user's session floor (§4.2.9), validated here rather than trusted: a browser body asking for
-     * `max` on every turn would multiply the thinking bill on the platform's pool. Only `medium`/`high`
-     * survive `parseUserEffort`; everything else is `undefined` and falls back to the operator default.
+     * The user's chosen effort (§4.2.9), validated here rather than trusted: only levels this deploy
+     * OFFERS survive (`max` only with `ENABLE_MAX_EFFORT`, D11); `low`, typos and anything else are
+     * `undefined` and fall back to the operator default.
      */
-    baseEffort: parseUserEffort(request.effort),
+    baseEffort: parseUserEffort(request.effort, offeredUserEffortLevels(request.context)),
   });
 
   const modelInstance = provider.getModelInstance({

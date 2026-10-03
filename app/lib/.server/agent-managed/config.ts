@@ -11,6 +11,7 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import { env, envNumber, NotConfiguredError } from '~/lib/.server/env';
+import { DEFAULT_EFFORT, type EffortLevel, parseEffort } from '~/lib/modules/llm/capabilities';
 
 export type AgentEngine = 'managed' | 'legacy';
 
@@ -48,8 +49,12 @@ export interface ManagedEngineConfig {
   /** The agent's model (D10) — `LLM_MODEL`, else Sonnet 5.5. */
   model: string;
 
-  /** Thinking effort the agent is provisioned at (D10). */
-  effort: 'medium' | 'high';
+  /**
+   * Thinking effort the agent is provisioned at (D10) — the OPERATOR default (`MANAGED_AGENT_EFFORT`), used
+   * when no user choice arrives (`_specs/effort-selector_plan.md` D8). Any `EffortLevel`; `max` is allowed
+   * here even when `ENABLE_MAX_EFFORT` is off — that switch governs only what a USER may pick.
+   */
+  effort: EffortLevel;
 
   /** Price of one active session-hour in USD (D7). Anthropic list price at the time of writing: 0.08. */
   sessionHourUsd: number;
@@ -78,12 +83,17 @@ export function getManagedEngineConfig(context: unknown): ManagedEngineConfig {
     );
   }
 
-  const effortRaw = env(context, 'MANAGED_AGENT_EFFORT')?.trim();
+  /*
+   * Parsed by the OPERATOR rule (`parseEffort`): `low` clamps to `medium` with a warning, a typo warns and
+   * falls back to the default. It used to be `=== 'high' ? 'high' : 'medium'`, which silently turned an
+   * operator's `xhigh`/`max` into `medium`.
+   */
+  const effort = parseEffort(env(context, 'MANAGED_AGENT_EFFORT'), 'MANAGED_AGENT_EFFORT') ?? DEFAULT_EFFORT;
 
   return {
     apiKey,
     model: env(context, 'LLM_MODEL')?.trim() || DEFAULT_MANAGED_MODEL,
-    effort: effortRaw === 'high' ? 'high' : 'medium',
+    effort,
     sessionHourUsd: Math.max(0, envNumber(context, 'MANAGED_SESSION_HOUR_USD', DEFAULT_SESSION_HOUR_USD)),
     environmentId: env(context, 'MANAGED_AGENTS_ENVIRONMENT_ID')?.trim() || undefined,
   };

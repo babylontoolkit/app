@@ -15,13 +15,19 @@ import { streamText } from 'ai';
 import { describe, expect, it } from 'vitest';
 import {
   canDisableThinking,
+  DEFAULT_OFFERED_EFFORT_LEVELS,
   dropOrphanReasoningSignatures,
+  EFFORT_LEVELS,
+  MODELS_WITHOUT_XHIGH,
   parseEffort,
   parseUserEffort,
+  servableEffort,
+  servableEffortFor,
   stripSamplingParams,
   supportsAdaptiveThinking,
   supportsSamplingParams,
   thinkingFetch,
+  USER_EFFORT_LEVELS,
 } from '~/lib/modules/llm/capabilities';
 
 /** Builds an Anthropic SSE response body from raw event objects. */
@@ -605,20 +611,6 @@ describe('effort (§3.5 — the default nobody chose)', () => {
   });
 
   /**
-   * `parseUserEffort` — the wall between a BROWSER BODY and the thinking bill (§4.2.9).
-   *
-   * `parseEffort` above guards an operator's `.env`; this guards a value posted by a client we do not
-   * control, on the platform's credit pool. The two rules that make it safe, and the two ways it fails
-   * silently if either is dropped:
-   *
-   *   1. Only the two user-selectable levels survive. `xhigh`/`max` are what `effort-policy.ts` spends on
-   *      EVIDENCE; a body that could name them would let a tampered client buy the most expensive setting
-   *      on every ordinary turn, and nothing would throw.
-   *   2. Anything unrecognised resolves to `undefined` — "no choice", the operator default — and NEVER
-   *      clamps upward the way `parseEffort` clamps `low` to `medium`. An unusable value must cost
-   *      nothing; clamping a garbage value onto a real level is inventing a request the user never made.
-   */
-  /**
    * The LAST-RESORT retry's thinking override must reach the WIRE (§4.2a) — the whole point is that the
    * request stops being silent, and a per-request option that never lands in the body would be a
    * mitigation that changes nothing while reading as fixed.
@@ -694,30 +686,109 @@ describe('effort (§3.5 — the default nobody chose)', () => {
     });
   });
 
-  describe('parseUserEffort — the client-supplied floor', () => {
-    it('accepts exactly the two user-selectable levels', () => {
+  /**
+   * `parseUserEffort` — the wall between a BROWSER BODY and the thinking bill (§4.2.9,
+   * `_specs/effort-selector_plan.md` D1/D11).
+   *
+   * `parseEffort` above guards an operator's `.env`; this guards a value posted by a client we do not
+   * control. Owner, 2026-10-02: users may now pick `medium`/`high`/`xhigh`, and `max` only when the
+   * operator enables it. The rules that keep it safe, each failing silently if dropped:
+   *
+   *   1. Only OFFERED levels survive, and the DEFAULT offered list has no `max` — a caller that forgets to
+   *      pass the deploy's list cannot buy `max` with the switch off.
+   *   2. Anything unrecognised resolves to `undefined` — "no choice", the operator default — and NEVER
+   *      clamps the way `parseEffort` clamps `low` to `medium`.
+   */
+  describe('parseUserEffort — the client-supplied effort', () => {
+    it('accepts medium, high and xhigh by default (trimmed, case-folded)', () => {
       expect(parseUserEffort('medium')).toBe('medium');
       expect(parseUserEffort('high')).toBe('high');
+      expect(parseUserEffort('xhigh')).toBe('xhigh');
       expect(parseUserEffort(' High ')).toBe('high');
       expect(parseUserEffort('MEDIUM')).toBe('medium');
+      expect(parseUserEffort(' XHigh ')).toBe('xhigh');
     });
 
-    it('refuses the escalation-only levels — a browser may never buy `xhigh`/`max`', () => {
-      expect(parseUserEffort('xhigh')).toBeUndefined();
+    it('USER_EFFORT_LEVELS is the whole EFFORT_LEVELS union — derived, never a narrower retyped list', () => {
+      expect([...USER_EFFORT_LEVELS]).toEqual([...EFFORT_LEVELS]);
+      expect([...USER_EFFORT_LEVELS]).toEqual(['medium', 'high', 'xhigh', 'max']);
+      expect([...DEFAULT_OFFERED_EFFORT_LEVELS]).toEqual(['medium', 'high', 'xhigh']);
+    });
+
+    it('every user level parses when the deploy offers it', () => {
+      for (const level of USER_EFFORT_LEVELS) {
+        expect(parseUserEffort(level, USER_EFFORT_LEVELS)).toBe(level);
+      }
+    });
+
+    it('`max` is REFUSED with the default offered list (ENABLE_MAX_EFFORT off) — never clamped to xhigh', () => {
       expect(parseUserEffort('max')).toBeUndefined();
+      expect(parseUserEffort('max', DEFAULT_OFFERED_EFFORT_LEVELS)).toBeUndefined();
+    });
+
+    it('`max` is ACCEPTED when the offered list includes it (ENABLE_MAX_EFFORT on)', () => {
+      expect(parseUserEffort('max', USER_EFFORT_LEVELS)).toBe('max');
+      expect(parseUserEffort(' MAX ', [...DEFAULT_OFFERED_EFFORT_LEVELS, 'max'])).toBe('max');
+    });
+
+    it('an offered list is a whitelist — a level outside it is refused, not clamped', () => {
+      expect(parseUserEffort('xhigh', ['medium', 'high'])).toBeUndefined();
     });
 
     it('refuses `low` outright rather than clamping it (unlike the operator path)', () => {
       expect(parseUserEffort('low')).toBeUndefined();
+      expect(parseUserEffort('low', USER_EFFORT_LEVELS)).toBeUndefined();
     });
 
     it('returns undefined for anything that is not a level string', () => {
       expect(parseUserEffort(undefined)).toBeUndefined();
       expect(parseUserEffort('')).toBeUndefined();
       expect(parseUserEffort('hgih')).toBeUndefined();
+      expect(parseUserEffort('extra-high')).toBeUndefined();
       expect(parseUserEffort(2)).toBeUndefined();
       expect(parseUserEffort(null)).toBeUndefined();
       expect(parseUserEffort({ effort: 'max' })).toBeUndefined();
+    });
+  });
+
+  /**
+   * `servableEffort` — per-model `xhigh` support is DATA, default-allowed (D5). The shipped deny-list is
+   * empty (the T1 probe had every rung accept `xhigh`), so the clamp is pinned through `servableEffortFor`
+   * with a fixture list.
+   */
+  describe('servableEffort — xhigh clamps to high only for a listed model', () => {
+    const DENY = ['claude-old-9'];
+
+    it('a listed model clamps xhigh → high', () => {
+      expect(servableEffortFor('claude-old-9', 'xhigh', DENY)).toBe('high');
+      expect(servableEffortFor('anthropic.claude-old-9', 'xhigh', DENY)).toBe('high');
+    });
+
+    it('a dated id of a listed model matches too', () => {
+      expect(servableEffortFor('claude-old-9-20261001', 'xhigh', DENY)).toBe('high');
+    });
+
+    it('never matches a bare PREFIX (claude-old-9 does not deny claude-old-9-5)', () => {
+      expect(servableEffortFor('claude-old-9-5', 'xhigh', DENY)).toBe('xhigh');
+    });
+
+    it('max and the lower levels are untouched, even on a listed model', () => {
+      expect(servableEffortFor('claude-old-9', 'max', DENY)).toBe('max');
+      expect(servableEffortFor('claude-old-9', 'high', DENY)).toBe('high');
+      expect(servableEffortFor('claude-old-9', 'medium', DENY)).toBe('medium');
+    });
+
+    it('an unknown future model is allowed xhigh (default-allowed — a new model needs no code)', () => {
+      expect(servableEffort('claude-opus-9', 'xhigh')).toBe('xhigh');
+      expect(servableEffortFor('claude-opus-9', 'xhigh', DENY)).toBe('xhigh');
+    });
+
+    it('the shipped rungs serve xhigh and max unchanged (T1 probe: all accepted)', () => {
+      for (const model of ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1']) {
+        expect(servableEffort(model, 'xhigh')).toBe('xhigh');
+        expect(servableEffort(model, 'max')).toBe('max');
+      }
+      expect([...MODELS_WITHOUT_XHIGH]).toEqual([]);
     });
   });
 });

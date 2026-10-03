@@ -1,6 +1,10 @@
 /**
  * The user's base thinking effort for THIS session (SPEC §4.2a, §4.2.9) — the `/effort` control.
  *
+ * ⚠️ 2026-10-02 (owner, `_specs/effort-selector_plan.md`): the "two levels only, never persisted" rule
+ * below is REVERSED — users may pick `xhigh`, and `max` when `ENABLE_MAX_EFFORT` is on, and the choice
+ * will persist (T7 rewrites this module and its copy). Kept until then so the history is readable.
+ *
  * Thinking tokens bill as OUTPUT, at the full output rate (`spec/anthropic-models.md` §3.5), so this is
  * the one user-facing dial that moves the bill directly rather than through what gets built. Two levels,
  * and only two:
@@ -43,6 +47,8 @@ export function setBaseEffort(level: UserEffortLevel): void {
 export const EFFORT_LABELS: Record<UserEffortLevel, string> = {
   medium: 'Medium',
   high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
 };
 
 /**
@@ -52,4 +58,6 @@ export const EFFORT_LABELS: Record<UserEffortLevel, string> = {
 export const EFFORT_DESCRIPTIONS: Record<UserEffortLevel, string> = {
   medium: 'Default. Best value — full-quality builds and edits at the lowest thinking spend.',
   high: 'More deliberation before it writes. Costs more credits per turn; worth it for genuinely hard tasks.',
+  xhigh: 'Deeper still — for hard bugs and big systems. Noticeably more credits per turn.',
+  max: 'The most deliberation available. Slowest, and the most credits per turn.',
 };

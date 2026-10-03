@@ -327,6 +327,46 @@ describe('provisionManagedAgent', () => {
     expect(calls.agentsCreate).toHaveLength(1);
   });
 
+  it('MANAGED_AGENT_EFFORT=max provisions the agent at max (effort-selector T3, D8)', async () => {
+    vi.stubEnv('MANAGED_AGENT_EFFORT', 'max');
+    await newVersion('sha-a');
+
+    const result = await provisionManagedAgent({ context: ctx });
+
+    expect(result).toMatchObject({ status: 'created', key: 'claude-sonnet-5-5:max' });
+    expect((calls.agentsCreate[0] as Record<string, unknown>).model).toEqual({
+      id: 'claude-sonnet-5-5',
+      effort: 'max',
+    });
+    expect((await getManagedAgentRecord(ctx))?.effort).toBe('max');
+  });
+
+  it('MANAGED_AGENT_EFFORT=xhigh provisions at xhigh (no longer silently medium)', async () => {
+    vi.stubEnv('MANAGED_AGENT_EFFORT', 'xhigh');
+    await newVersion('sha-a');
+
+    await provisionManagedAgent({ context: ctx });
+
+    expect((calls.agentsCreate[0] as Record<string, unknown>).model).toEqual({
+      id: 'claude-sonnet-5-5',
+      effort: 'xhigh',
+    });
+  });
+
+  it('a garbage MANAGED_AGENT_EFFORT provisions at medium', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.stubEnv('MANAGED_AGENT_EFFORT', 'turbo');
+    await newVersion('sha-a');
+
+    const result = await provisionManagedAgent({ context: ctx });
+
+    expect(result).toMatchObject({ key: 'claude-sonnet-5-5:medium' });
+    expect((calls.agentsCreate[0] as Record<string, unknown>).model).toEqual({
+      id: 'claude-sonnet-5-5',
+      effort: 'medium',
+    });
+  });
+
   it('force pushes a new agent version unconditionally even when nothing changed', async () => {
     await newVersion('sha-a');
     await provisionManagedAgent({ context: ctx });
