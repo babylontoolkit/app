@@ -112,7 +112,7 @@ Also: web search debits AFTER the vendor is paid and only logs a failed debit (`
   hanging.
 - [x] **T9 — Media + web search.** D9. Tests: create timeout → no refund, task `unknown`, no blind retry;
   explicit 4xx → refund; web search debits before the vendor call.
-- [ ] **T10 — Docs + gates.** SPEC §4.6 + `spec/billing.md` (the no-unbilled-usage rule, the sweep, the
+- [x] **T10 — Docs + gates.** SPEC §4.6 + `spec/billing.md` (the no-unbilled-usage rule, the sweep, the
   sanctioned-absorption list D10) + CLAUDE.md one entry; `pnpm typecheck && pnpm lint:fix && pnpm lint &&
   pnpm test` green.
 

@@ -83,12 +83,11 @@ const LOUDNESS = /reason:\s*'refund'|refundGeneration|refundMediaTask|ALERT_SIGN
  * Adding an entry is a decision made in review, in writing — "it seemed harmless" is how every hole in
  * `spec/spend-holes.md` shipped. A reason under 40 characters is refused below.
  */
-const NO_LOUDNESS_BY_DESIGN: Record<string, string> = {
-  'lib/.server/agent/web-search-tool.ts':
-    'The one sanctioned after-the-fact debit (spec/fail-loud.md §Scope, migration 0010). The vendor was ' +
-    'already paid and reason "search" may go negative, so a failed debit is logged and the research ' +
-    'answer proceeds; there is nothing to refund and nothing the user could act on.',
-};
+/*
+ * Empty since 2026-10-03: web search (its only entry) now debits BEFORE the vendor call, refunds a definite
+ * vendor failure and raises LEDGER_INTEGRITY on a failed debit — so no debiting path is exempt.
+ */
+const NO_LOUDNESS_BY_DESIGN: Record<string, string> = {};
 
 interface Writer {
   file: string;

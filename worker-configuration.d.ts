@@ -155,4 +155,86 @@ interface Env {
   UNITY_BRIDGE_ENABLED: string;
   BRIDGE_GRANT_PRIVATE_KEY: string;
   BRIDGE_GRANT_TTL_HOURS: string;
+
+  /*
+   * Read by the app but missing from this file until 2026-10-03 — so in production each one was
+   * silently ignored and its code default applied (found while shipping the billing sweep).
+   * `env-delivery.spec.ts` now fails any `env(context, 'NAME')` read that is not named here.
+   */
+
+  /** Agent engine + turn budgets (SPEC §4.2, §8l). */
+  AGENT_ENGINE: string;
+  AGENT_ENGINE_EVAL_OVERRIDE: string;
+  AGENT_TOOL_LOOP: string;
+  AGENT_CLAIM_TTL_MINUTES: string;
+  AGENT_MAX_FILE_READS: string;
+  AGENT_MAX_READ_CHARS: string;
+  AGENT_MAX_PLAN_READ_CHARS: string;
+  AGENT_MAX_REFERENCE_LOADS: string;
+
+  /** Thinking effort (SPEC §4.2a, §4.2.9). `ENABLE_MAX_EFFORT` is the operator switch for the Max level. */
+  THINKING_EFFORT: string;
+  MANAGED_AGENT_EFFORT: string;
+  ENABLE_MAX_EFFORT: string;
+
+  /** Managed engine (SPEC §4.2, §4.6). `MANAGED_SESSION_HOUR_USD` is a billing rate. */
+  MANAGED_AGENTS_ENVIRONMENT_ID: string;
+  MANAGED_SESSION_HOUR_USD: string;
+  MANAGED_SUPERSEDE_WAIT_MS: string;
+  MANAGED_DETACH_SETTLE_WAIT_MS: string;
+  MANAGED_DETACH_SETTLE_POLL_MS: string;
+
+  /** No unbilled usage — the billing sweep (spec/billing.md). */
+  BILLING_SWEEP_INTERVAL_MS: string;
+  BILLING_SWEEP_STALE_MS: string;
+  BILLING_SWEEP_MANAGED_WINDOW_MS: string;
+
+  /** Pricing + grants (SPEC §4.6). `CREATION_FLAT_CREDITS` is RETIRED and refused if set — listed so the refusal fires in production too. */
+  PROJECT_CREATE_CREDITS: string;
+  CREATION_FLAT_CREDITS: string;
+  GRANTS_ENABLED: string;
+
+  /** Provider + media gateways (SPEC §4.2a, §4.16). */
+  COMET_API_KEY: string;
+  FAL_API_KEY: string;
+  MEDIA_CALLBACK_URL: string;
+
+  /** Prompt cache warmer (spec/context-budget.md). */
+  CACHE_WARMER_ENABLED: string;
+  CACHE_WARMER_FANOUT: string;
+  CACHE_WARMER_INTERVAL_MINUTES: string;
+
+  /** Skills, git import, sharing, sandbox cost model. */
+  SKILLS_EXCLUDE: string;
+  GIT_CLONE_MAX_MB: string;
+  SHARE_DOMAIN: string;
+  SANDBOX_VM_USD_PER_HOUR: string;
+  SANDBOX_EST_VM_HOURS_PER_KCREDIT: string;
+
+  /** Unity Editor subscription check (SPEC §4.18a). */
+  UNITY_SUBSCRIPTION_API_KEY: string;
+  UNITY_SUBSCRIPTION_RATE_MAX: string;
+  UNITY_SUBSCRIPTION_RATE_WINDOW_MS: string;
+
+  /** Read through wrappers (`numberSetting`, `*_ENV_KEY`, `readEnv`, `baseUrlKey`) — same silent-default failure. */
+  AGENT_TURN_MAX_CREDITS: string;
+  AGENT_MAX_SEGMENTS: string;
+  AGENT_SEGMENT_STEPS: string;
+  AGENT_CHECK_MAX_NUDGES: string;
+  AGENT_COMPACT_AT_TOKENS: string;
+  AUTO_MODEL_SELECT: string;
+  LLM_PROVIDER_CHAIN: string;
+  ENHANCE_PROMPT_MODEL: string;
+  KIE_ENHANCE_PROMPT_MODEL: string;
+  COMET_ENHANCE_PROMPT_MODEL: string;
+  ANTHROPIC_ENHANCE_PROMPT_MODEL: string;
+  KIE_BASE_URL: string;
+  COMET_BASE_URL: string;
+  ZAI_BASE_URL: string;
+
+  /** Git OAuth (SPEC §4.13) — read as `${prefix}_OAUTH_CLIENT_ID|SECRET`; without these, Link to GitHub/GitLab is "not configured" in production. */
+  GITHUB_OAUTH_CLIENT_ID: string;
+  GITHUB_OAUTH_CLIENT_SECRET: string;
+  GITLAB_OAUTH_CLIENT_ID: string;
+  GITLAB_OAUTH_CLIENT_SECRET: string;
 }

@@ -4,7 +4,10 @@ bindings=""
 
 # Function to extract variable names from the TypeScript interface
 extract_env_vars() {
-  grep -o '[A-Z_]\+:' worker-configuration.d.ts | sed 's/://'
+  # Declaration lines only (`  NAME: type;`). Names may contain DIGITS and lowercase (S3_BUCKET,
+  # HuggingFace_API_KEY) — the old `[A-Z_]\+:` matched `_BUCKET`, so every S3_* variable was silently
+  # dropped in production. `env-delivery.spec.ts` runs this exact pattern.
+  grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:' worker-configuration.d.ts | tr -d ' \t:'
 }
 
 # First try to read from .env.local if it exists

@@ -1,6 +1,6 @@
 # spec/billing.md — Credits, Stripe & Entitlements (governs SPEC §4.6, §4.6.1, §4.6.1a, §4.5.4)
 
-> **Engine scope (2026-10-01).** The formula, the ledger, the gate and `settleGeneration` are shared by both agent engines. The managed engine (SPEC §4.2) differs only in where usage comes from and how a turn is bounded: per-request usage from the session's `span.model_request_end` events plus active session-hours (`MANAGED_SESSION_HOUR_USD`) added as `extraRawCostUsd`, settled by a per-chat cursor (`chats.managed_settled_at`) so a detached and resumed turn bills once; the turn's credit ceiling becomes the session's hard `max_list_cost` budget. SPEC §4.6 "Settlement on the managed engine" is the authority.
+> **Engine scope (2026-10-01).** The formula, the ledger, the gate and `settleGeneration` are shared by both agent engines. The managed engine (SPEC §4.2) differs only in where usage comes from and how a turn is bounded: per-request usage from the session's `span.model_request_end` events plus active session-hours (`MANAGED_SESSION_HOUR_USD`) added as `extraRawCostUsd`, settled by a per-chat cursor (`chats.managed_settled_at`) so a detached and resumed turn bills once; the turn's credit ceiling becomes the session's hard `max_list_cost` budget. A session nobody returns to is billed by the sweep (§"No unbilled usage"). SPEC §4.6 "Settlement on the managed engine" is the authority.
 
 > **Status: IMPLEMENTED and verified end-to-end (Stage 3, 2026-07).** The design below is what we
 > built, with four deliberate divergences recorded in *Divergences from the original design* at the
@@ -134,6 +134,86 @@ that could.
 - Aborted (Stop): charge tokens actually consumed to abort.
 - Hard failure (API error, zero actions parsed + error status): auto-refund row (`reason='refund'`).
 - BYOK generations (Pro-entitled only): no LLM debit; still write a `generations` row (tokens, `credits_charged=0`) and enforce rate limits. Optional platform fee behind config, default off. Server MUST verify entitlement freshness before honoring BYOK on each generation.
+
+## No unbilled usage (2026-10-03, SPEC §4.6, plan `_specs/no-unbilled-usage_plan.md`)
+
+Owner, 2026-10-02: *"We always figure a way to get billing in, we never eat the cost."* **Every byte of
+provider spend reaches the ledger — even when the request dies, the process restarts, the tab closes, or
+the user never comes back.** The platform absorbs only the spend on the sanctioned list below; anything
+else that goes unbilled is a defect, and every one of these failures is silent (a token count that goes
+DOWN reads as a cheaper turn). The mechanism, in brief:
+
+- **Settlement outlives the request.** Production runs under workerd (`wrangler pages dev`), which
+  CANCELS un-registered work when the client disconnects — measured 2026-10-02: a `finally` after the
+  stream, a fire-and-forget promise and a `setTimeout` all stopped with the request, so a closed tab
+  billed nothing. Every stream driver, settlement, refund, tail and sweep is registered through
+  `keepAlive(context, promise)` (`runtime/keep-alive.ts` → `context.cloudflare.ctx.waitUntil`, a plain
+  promise on Node), and `wrangler.toml` sets `enable_request_signal` — without it `request.signal` never
+  fires under workerd and a kept-alive turn runs a closed tab's whole turn to completion.
+- **A durable record before spend.** Every model turn (legacy, managed, enhancer) writes its
+  `generations` row `status:'running'` (with `engine`, chat, managed session id; migration 0028) before
+  the first provider call, and the legacy engine checkpoints cumulative usage onto it after every
+  finished step (`checkpoint_at`). BYOK turns write no running row (the user's key paid).
+- **The billing sweep** (`billing/sweep.ts`) bills what a dead process left behind: (a) a `running`
+  legacy/enhancer row stale past `BILLING_SWEEP_STALE_MS` (default 15 min) and not in flight here →
+  settled from its last checkpoint as `interrupted`, never refunded; (b) every chat bound to a managed
+  session active within `BILLING_SWEEP_MANAGED_WINDOW_MS` (default 7 days) whose session cost is above
+  its cursor and has no turn in flight → a cursor settlement, plus every open billing orphan; (c) every
+  pending-debit intent → debited once. Started from the request doorways (proxy, managed engine,
+  `/api/me`) and every `BILLING_SWEEP_INTERVAL_MS` (default 10 min); never two at once; never throws.
+- **Claim before debit, one debit per generation.** A settler of a `running` row first CLAIMS it (a
+  guarded `running`→`interrupted` update), and migration 0029's partial unique index refuses a second
+  `'generation'` debit for the same generation id — a refused duplicate is "already billed" (0 credits,
+  alerted, never refunded). Every tail settles under its own suffixed id (`_carry`, `<generation>_<session>_prior`,
+  `_sweep_<ts>`, `_delete_<ts>`, `_orphan_<ts>`).
+- **Delete and re-home settle first.** Deleting a chat, project or account interrupts each live managed
+  session (bounded wait), settles it, archives it, and settles every stale legacy row of those chats —
+  THEN deletes. A session that cannot be settled is copied to a durable orphan
+  (`managed_billing_orphans`, no FKs, so it survives the delete) that the sweep bills; if that record
+  cannot be written either, the delete is **refused retryably (503) and nothing is erased**. A chat moved
+  to another project settles its session first, billed to the OLD owner, under the same refusal rule.
+- **Carried-over usage bills on its own.** At managed turn start (and on a resume) anything above the
+  cursor settles as `<gen>_carry` before the turn begins, so a failed turn's refund covers only its own
+  usage. A rebind/tier/effort switch releases the old session only after its `_prior` settlement
+  succeeded (or the session is gone); an incomplete one becomes an orphan first.
+- **No cursor-without-debit window.** The managed cursor records its charge as a pending-debit intent in
+  the same write; the intent clears when the debit lands, and every settlement (and the sweep) debits
+  stored intents first. A refundable turn's intent is DROPPED, never debited — refunds are not
+  idempotent, so a debit+refund pair could refund twice.
+- **One billing owner per session** (migration 0030): at most one OPEN orphan per managed session; the
+  sweep defers an orphan while its chat is still bound; an orphan is advanced BEFORE its chat is released,
+  and a failed advance releases nothing.
+- **The step in flight is billed from the wire** (`modules/llm/wire-usage.ts`). The provider bills input
+  and cache tokens at `message_start` and output as it streams; a step the SDK never reported (a Stop, a
+  drop, a killed silent think, a provider retry, a tool-loop-off abort) is billed from the per-request tap,
+  keyed by message id so a reported step never counts twice; a broken step's output is floored at
+  streamed chars/4 (may under-bill, never over-bills). **Anthropic-shaped wires only** (Anthropic, and the
+  KIE/Comet Claude routes) — the `gpt`/`gemini`/`chat` wires are not tapped, a known gap.
+- **The enhancer cannot hang.** It settles from a bounded race (2 s after the stream ends) instead of
+  awaiting `result.steps`, which never resolves on a pre-stream provider error.
+- **Media: an ambiguous create holds its debit.** A create failure is classified refused / not-sent /
+  ambiguous, defaulting to AMBIGUOUS: the debit stands, the task is marked `unknown`
+  (`finishReason: 'media-unconfirmed'`), it is never retried blind, and it is alerted and listed on the
+  Admin usage report for an operator to reconcile. Under workerd every transport failure is ambiguous
+  (measured: a refused connection and an after-send drop are indistinguishable).
+- **Web search debits before the vendor.** A definite vendor failure refunds the toll, a timeout keeps it,
+  and under enforced billing a debit that cannot land alerts and the vendor is NOT called.
+
+**The sanctioned absorption list — the ONLY platform-absorbed spend (owner policy, D10):**
+
+1. **R1** a legacy generation that hard-fails (error, empty or think-only response) — auto-refund.
+2. **R2** a managed turn that FAILED, or ended with no text and no tool calls, and wrote no files.
+3. **R3** a failed prompt enhancement.
+4. **R4** a media task the provider explicitly refused, or that was never sent.
+5. **R5** a media render the provider confirmed failed (refund exactly once).
+6. **R6** a cut-out stage that cannot start — refunds the cut-out's share only; the render stands.
+7. **R7** a web search the vendor definitely failed.
+8. **R8** the project-creation charge of a project deleted before any completed generation.
+
+Plus the **cache-warmer** ops spend (no generations row, no ledger entry — by design), and managed
+**runtime-only** usage (session-hours with no model request) is never settled alone — it rides into the
+next settlement that has real usage. A Stop, a budget pause, a detach, a turn that wrote files and an
+`interrupted` sweep settlement are never refunded.
 
 ## Pre-flight gate (single choke point, in agent proxy)
 
@@ -342,7 +422,8 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   insufficient balance is a 402 refusal before the task exists — unlike `'generation'`, whose
   overdraft allowance exists only because settlement runs after spend). Failures auto-refund exactly
   once (`media/service.ts`: per-task serialisation + a `refunded` latch; a flaky status poll is
-  pending, never a failure). Every media task anchors a `generations` row (`med_…`), so the
+  pending, never a failure) — but an AMBIGUOUS create (timeout, network, any workerd transport failure)
+  is not a failure: its debit is held and the task marked `unknown` (§"No unbilled usage"). Every media task anchors a `generations` row (`med_…`), so the
   `credit_ledger.generation_id` FK, the refund path, and the admin per-model cost breakdown all work
   unchanged. Quote and debit share ONE code path (`quoteMediaRequest`), so the price on the Generate
   button is the price in the ledger. Pinned by `media.spec.ts` + `ledger-sql.spec.ts`.
@@ -354,8 +435,8 @@ doc-sync rules applied to money, mirroring the §4.4 template pin:
   behind, and the debit's audit note is the project id, which does not exist until the row does. Never
   allowed to go negative (absent from `mayGoNegative`; enforced +
   insufficient → **402 naming the price and the balance, with ZERO project rows and ZERO ledger rows
-  written**). The posture follows the same reasoning as `'media'` vs `'search'`: it debits before
-  anything is provisioned, so it must REFUSE rather than overdraw — the opposite of `'generation'`,
+  written**). The posture follows the same reasoning as `'media'` (and, since 2026-10-03, `'search'`): it
+  debits before anything is provisioned, so it must REFUSE rather than overdraw — the opposite of `'generation'`,
   whose overdraft allowance exists only because settlement runs after the spend has happened.
   Not anchored to a `generations` row (generation_id null, like `'grant'`/`'search'`). The new balance
   rides back on the response so the client can settle it without a second round trip — the enhancer's
@@ -605,7 +686,9 @@ against a cached prefix) and a weighting factor is a pricing decision we have no
   so we eat it: the debit stays (it happened) and a compensating `refund` row sits beside it, pointing
   at the same `generation_id`. Append-only means the history stays honest *and* the balance comes out
   right. A **Stop** is not a failure — a stopped generation burned real tokens by the user's own
-  decision, and is charged for what it consumed to the abort point (§4.12).
+  decision, and is charged for what it consumed to the abort point (§4.12), including the step in
+  flight (billed from the wire). These refunds are the sanctioned absorption list in §"No unbilled
+  usage" — nothing else is eaten.
 
 - **The grace window is the subtlest rule in the file.** "The license service said nothing" and "the
   license service said no" are different facts. Conflating them means every blip in *our*

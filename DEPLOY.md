@@ -117,6 +117,15 @@ are not read at runtime.
 > **Adding an `env(context, 'NEW_VAR')` read means adding the name to `worker-configuration.d.ts`.**
 > Listing an unset name costs nothing; omitting a set one is a silent outage.
 
+> 🔴 **Billing under workerd needs `enable_request_signal` and `waitUntil` (2026-10-03).** workerd
+> cancels a request's work when the client disconnects unless it was registered with `waitUntil` —
+> measured: a settlement `finally` and every fire-and-forget tail stopped with the request, so a closed
+> tab billed nothing. Every settlement, refund, tail and the billing sweep go through `keepAlive`
+> (`context.cloudflare.ctx.waitUntil`, which Remix's Pages handler provides — no entry change needed),
+> and `wrangler.toml`'s `compatibility_flags` carries **`enable_request_signal`** (already set): without
+> it `request.signal` never fires, so a kept-alive turn would run a closed tab's whole turn to the end.
+> Do not remove either. See `spec/billing.md` §"No unbilled usage".
+
 ---
 
 ## 2. Lightsail Container Service

@@ -41,3 +41,9 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - T8 ✅ verified (independent) — 1 attempt.
 - T9 ✅ verified (independent) — 1 attempt (+ workerd classification measured).
 - R1/R2 (carried residuals) ✅ verified (independent) — 3 attempts. Suites: 172 files / 3,765 tests green.
+- DECISION T10: R1–R8 numbered from the refund call sites (spec/billing.md). fail-loud's four terminal states kept; `interrupted` / media `unknown` documented as CHARGED AS CONSUMED variants.
+- DECISION T10 (scope expansion, verifier-found): production env delivery was broken for ~55 names — `bindings.sh` dropped every name with a digit/lowercase (all `S3_*` → S3 silently OFF in production; `HuggingFace_API_KEY`), and ~50 names the app reads were never declared in `worker-configuration.d.ts` (incl. `MANAGED_SESSION_HOUR_USD`, `AGENT_TURN_MAX_CREDITS`, `PROJECT_CREATE_CREDITS`, `FAL_API_KEY`, `ENABLE_MAX_EFFORT`, `GITHUB/GITLAB_OAUTH_*`). Fixed bindings.sh regex + declared all + default-deny guard `env-delivery.spec.ts` (literal, wrapper, *_ENV_KEY, baseUrlKey and template-literal reads; checks the exact bindings.sh extraction). Exclusions by design: UPSTREAM_LLM_ROUTES_ENABLED, VITE_GITHUB_ACCESS_TOKEN.
+- DECISION T10: stale `NO_LOUDNESS_BY_DESIGN` web-search exemption removed (web search now debits first + alerts).
+- T10 ✅ verified (independent) — 3 attempts; full gates: typecheck 0, lint 0 errors, 452 files / ~9,490 tests green, brand gate green.
+
+## Run 1 — ended 2026-10-03 00:39 HST — 10/10 complete, 0 deferred. Plan finished.

@@ -7,7 +7,7 @@
 > D drove live 2026-07-26 — so §"The four stages" is now a record of what was built and why, not a
 > to-do list. Three things are deliberately NOT covered and are named where they are decided rather
 > than left to be rediscovered: the KIE **create-time** media failure branch is still unit-proven only
-> (§"Stage D"); `web_search`'s after-the-fact debit stays sanctioned (§Scope); and the
+> (§"Stage D"); `web_search`'s debit (before the vendor call since 2026-10-03) stays sanctioned in unmetered mode (§Scope); and the
 > `transport-envelope` tripwire stays a per-occurrence alert rather than a rate (§"Stage C").
 > **Stage A's inventory is §"The money-path inventory" below**; the
 > three defects it found are fixed and pinned (`media.spec.ts` orphan refund,
@@ -55,8 +55,9 @@ refund | promo | adjustment` (`billing/ledger.ts`; `license` was removed with §
 the debiting members (`generation`, `media`, `search`, `project_create`) all carry this
 contract. Unity Bridge operations (§4.17) are not billed separately; the model turn that drives
 Unity/Blender is billed like any generation (owner, 2026-09-29), so a bridge job has no ledger row
-and no refund path of its own. `search` debits AFTER the vendor
-returned and may go negative by design — that is a documented posture, not a silent failure.
+and no refund path of its own. `search` debits BEFORE the vendor call (since 2026-10-03, `spec/billing.md` §"No unbilled usage"):
+a definite vendor failure refunds, a timeout keeps the toll, and under enforced billing a debit that
+cannot land alerts and the vendor is not called. It may still go negative by design (migration 0010).
 `project_create` (migration 0015) is the opposite posture: it debits BEFORE anything is provisioned,
 so it refuses rather than overdraws, and its refund path is the deletion of a project that never
 completed a generation.
@@ -70,7 +71,7 @@ Every credit-spending request ends in **exactly one** of:
 | **DELIVERED** | The thing asked for exists and is *observable*: file actions applied, text streamed, bytes at the dest path, `license.json` returned | Judged from what WE observed (`textChars`, actions, sniffed bytes) — never from the provider's `finishReason` (see rule 7) |
 | **REFUSED BEFORE SPEND** | 4xx with a describable reason; **zero debit** | The media pattern: quote → refuse (`lookupMediaPrice` → null → 402/400); unpriced model refused; caps checked before the gate |
 | **REFUNDED** | The debit stands (it happened) + a compensating `refund` row + an error the user can see and Retry | Zero-text hard failure; media render failure (refund-exactly-once latch); license `grant()` race loser |
-| **CHARGED AS CONSUMED** | A **Stop** — the user's own abort, billed to the abort point | §4.12. A Stop is never a failure and never refunds |
+| **CHARGED AS CONSUMED** | A **Stop** — the user's own abort, billed to the abort point; also a turn whose process or tab died (`interrupted`, billed by the sweep from its last checkpoint) and an ambiguous media create (`unknown`, debit held) | §4.12; `spec/billing.md` §"No unbilled usage". Never a failure, never refunds |
 
 **"Completed with nothing to show" is not a state.** A generation that ends outside these four is a
 defect by definition — the 316-credit promise was exactly that, and the fix (the unproductive
@@ -94,7 +95,8 @@ regression hides *inside* the machinery built to catch the last one.
 4. **`catch` + log is not handling on a money path.** A swallowed error must refund, retry, or
    surface a reason the caller can render. Exactly two sanctioned swallows: observability itself
    (the monitor never throws — a narration channel must not break what it narrates) and the
-   documented `'search'` after-the-fact debit. Anything else needs a written sentence beside it.
+   documented `'search'` debit in unmetered mode (a failed debit warns and the search runs free; under
+   enforced billing it refuses the vendor call instead). Anything else needs a written sentence beside it.
 5. **A settled charge the UI cannot see is a defect even when the ledger is right** (the enhancer
    lesson). Every debit path must move the on-screen balance — annotation or `refreshSession()`.
 6. **A guard is only real if a test fails when it is removed.** Mutation-verify. All three of
@@ -207,7 +209,7 @@ exactly 11 call sites, and every one is below. The KIE-reaching set is enumerate
 | 2 | `billing/gate.ts` `refundGeneration` | `refund` | REFUNDED | compensating row; `finish_reason: error`; `status: failed`; §4.10 refund audit |
 | 3 | `media/service.ts` `startMediaTask` | `media` | REFUSED BEFORE SPEND (unpriced / 402 / 4K cut-out / empty prompt) · DELIVERED | quote = debit (same code path); `media-task` data part; panel + tool result name the exact price |
 | 4 | `media/service.ts` `refundMediaTask` | `refund` | REFUNDED | `refunded` latch (exactly once); task record `status: failed` + `error`; toast |
-| 5 | `agent/web-search-tool.ts` `debitSearch` | `search` | DELIVERED only | **SANCTIONED after-the-fact debit** (§Scope). May go negative; a failed debit is logged and the research answer proceeds |
+| 5 | `agent/web-search-tool.ts` `debitSearch` | `search` | REFUSED BEFORE SPEND (enforced debit cannot land → vendor not called, alerted) · DELIVERED · REFUNDED (definite vendor failure; a timeout keeps the toll) | Debited BEFORE the vendor call since 2026-10-03 (§Scope). May go negative; in unmetered mode a failed debit warns and the search runs free |
 | 8 | `billing/ledger.ts` `ensureSignupGrant` | `grant` | credit — not a debit | partial unique index; `DuplicateGrantError` → null |
 | 9 | `billing/stripe.ts` pack purchase | `purchase` | credit — not a debit | idempotent on `session.id`; `DuplicatePaymentError` → 2xx |
 | 10 | `billing/stripe.ts` subscription invoice | `purchase` | credit — not a debit | idempotent on `invoice.id`; unattributable invoice logged loudly, never 500 |
@@ -219,7 +221,7 @@ exactly 11 call sites, and every one is below. The KIE-reaching set is enumerate
 |---|---|---|---|
 | `agent/proxy.ts` (generation, repair, forced continuation, unproductive rescue, paid model tiers) | `checkCreditGate` once | `settleGeneration` in `finally` | zero-text → hard failure → auto-refund (a build turn that already paid for media gets ONE tools-off rescue pass first); abort → CHARGED AS CONSUMED |
 | `routes/api.enhancer.ts` | `checkCreditGate` | `settleGeneration` on stream end | **FIXED in Stage A** — see defect 2 |
-| `media/kie-client.ts` `create` | debit precedes it | n/a (fixed price) | create throws → refund + anchor `failed` + 502 |
+| `media/kie-client.ts` `create` | debit precedes it | n/a (fixed price) | create throws → classified: an explicit refusal or a request never sent → refund + anchor `failed` + 502; an AMBIGUOUS failure (timeout, network — every transport failure under workerd) → debit HELD, task `unknown`, alerted, Admin-listed (2026-10-03) |
 | `media/kie-client.ts` `query` | n/a | n/a | flaky poll ≠ failure (stays pending); a reported failure refunds once |
 
 ### The `catch` audit — `app/lib/.server/{agent,billing,media}`
@@ -230,7 +232,7 @@ category Stage A removed from the money paths.
 | Classification | Count | Examples |
 |---|---|---|
 | Rethrow (with a typed refusal) | 6 | `MediaRefusedError`, `LicenseRefusedError`, `DuplicatePaymentError` re-raise, KIE non-JSON |
-| Refund | 5 | media create-failure, media poll-failure, cut-out-cannot-start, license grant-throw, license race-loser |
+| Refund | 5 | media create refused/not-sent (an ambiguous create holds its debit since 2026-10-03), media poll-failure, cut-out-cannot-start, license grant-throw, license race-loser |
 | Report (alert + log) | 4 | **new in Stage A** — anchor failure, charge failure, generation refund failure, media/license refund failure |
 | Retry | 1 | `retry-policy.ts` — one provider retry, only with zero output produced |
 | Sanctioned swallow (with its sentence) | 36 | observability itself (`monitoring`, `heartbeat`); the documented `'search'` debit; parse/probe misses that return `null` (`store.ts`, `attachments.ts`, `kie-client.ts` result shapes); best-effort enrichment that runs AFTER settlement (`usage.ts`, `generations.ts` upsert, `recoverTranscript`); `providerRates`' premium injection (documented: settlement may never refuse) |
@@ -266,7 +268,7 @@ category Stage A removed from the money paths.
    reports a clean bill of health forever).
 
 **Two things Stage A deliberately did NOT change**, both flagged for the owner rather than fixed:
-`web_search`'s after-the-fact debit stays sanctioned exactly as the Scope section describes; and
+`web_search`'s debit stays sanctioned exactly as the Scope section describes (it moved BEFORE the vendor call on 2026-10-03); and
 `providerRates`' per-rung injection swallow stays, because its alternative is taking settlement down. Since 2026-07-31 it swallows PER RUNG (§4.6.1a), so one broken selector cannot drop another rung's row.
 
 ## The four stages — ALL COMPLETE (A+B+C 2026-07-25, D 2026-07-26)
@@ -297,9 +299,9 @@ exactly as the warning below demands: a file counts as a money path when it *imp
 *calls `.append({`* — which is a complete definition (the ledger is the only way credits move), not a
 guess about which call sites matter. Comment-stripped, so machinery named in a doc comment never
 counts. Default-deny: any file writing a DEBITING reason (`generation`, `media`, `search`, `license`)
-must name a compensating row or a `LEDGER_INTEGRITY` alert, or sit in `NO_LOUDNESS_BY_DESIGN` with a
-justification over 40 characters. One entry qualifies today: `web-search-tool.ts`, the sanctioned
-after-the-fact debit. A reason in neither the debit nor the credit set fails outright, so a *new*
+must name a compensating row or a `LEDGER_INTEGRITY` alert. (The `NO_LOUDNESS_BY_DESIGN` escape it
+once described has no entries: since 2026-10-03 web search debits BEFORE the vendor call and alerts on
+a failed debit, so no debiting path is exempt.) A reason in neither the debit nor the credit set fails outright, so a *new*
 `LedgerReason` is caught on the day it lands. A second describe pins the §"When you add a paid path"
 doc-comment contract: a module that spends credits must cite the spec that governs it.
 
@@ -423,7 +425,8 @@ transparency cut-out (`stage`/`cutout`/`renderUrl` on the record) and were bille
 afterwards from the ledger, the task records and the panel — not staged by the person writing this
 entry.** That is stronger evidence than a staged drive for the question "does this work in real use",
 and weaker for "can I make it fail on demand": a second failure mode (KIE erroring at CREATE time
-rather than during the render — the `create throws → refund + anchor failed + 502` branch) is still
+rather than during the render — the `create throws → refund + anchor failed + 502` branch, which since
+2026-10-03 refunds only an explicit refusal and HOLDS the debit on an ambiguous failure) is still
 only unit-proven. The refund-exactly-once latch is now live-confirmed on the poll branch, which was the
 one that mattered most.
 
