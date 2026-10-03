@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentGeneration } from '~/lib/.server/agent/proxy';
 import { deliverClientToolResult } from '~/lib/.server/agent/mcp-relay';
 import { billedUsage } from '~/lib/.server/billing/gate';
-import { FsGenerationStore, setGenerationStore } from '~/lib/.server/billing/generations';
+import { FsGenerationStore, getGenerationStore, setGenerationStore } from '~/lib/.server/billing/generations';
+import { isGenerationInFlight, isManagedTurnInFlight } from '~/lib/.server/billing/in-flight';
 import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { rawCostUsd } from '~/lib/.server/billing/rates';
 import { FsChatIndex, getChatIndex, setChatIndex } from '~/lib/.server/projects/chat-index';
@@ -1227,8 +1228,18 @@ describe('a browser that stops answering DETACHES the turn — never a tool fail
 
     try {
       const generation = await turn();
-      const running = drive(generation, () => false);
+      let asked = false;
+      const running = drive(generation, () => {
+        asked = true;
+        return false;
+      });
 
+      /*
+       * Advance only once the browser has been ASKED: the turn opens its durable `running` row first
+       * (no-unbilled-usage D2, real file I/O), so the relay's timeout timer does not exist yet when `drive`
+       * returns — advancing earlier would run the clock past a timer that was never set.
+       */
+      await vi.waitFor(() => expect(asked).toBe(true));
       await vi.advanceTimersByTimeAsync(WORKSPACE_CHECK_TIMEOUT_MS + 50);
 
       const run = await running;
@@ -1518,5 +1529,74 @@ describe('the status panel sees the turn’s running cost (managed-billing-visib
     expect(rowsWhileRunning).toBe(0);
     expect(settled).toBeGreaterThan(0);
     expect(shown).toBe(settled);
+  });
+});
+
+/*
+ * no-unbilled-usage D2 (T2): a managed turn's `generations` row exists, `running`, BEFORE the session
+ * receives the turn's message — so a process that dies mid-turn leaves a record the sweep can find — and
+ * the turn's own settlement finishes THAT row exactly once.
+ */
+describe('the running row (no-unbilled-usage D2)', () => {
+  it('exists before the first event, names the engine and session, and settles once to completed', async () => {
+    let seen: Array<{ id: string; status?: string; engine?: string; managedSessionId?: string }> = [];
+    let inFlightDuringTurn = false;
+    let generationInFlight = false;
+    let generationId = '';
+    const upserts: Array<Record<string, unknown>> = [];
+    const store = getGenerationStore();
+    const upsert = store.upsert.bind(store);
+
+    store.upsert = async (row) => {
+      upserts.push({ ...row });
+      return upsert(row);
+    };
+
+    fake.script = (async (api) => {
+      generationInFlight = isGenerationInFlight(generationId);
+      seen = (await getGenerationStore().list()).map((r) => ({
+        id: r.id,
+        status: r.status,
+        engine: r.engine,
+        managedSessionId: r.managedSessionId,
+      }));
+      inFlightDuringTurn = isManagedTurnInFlight(chatId);
+      api.modelRequest(USAGE_1);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    const generation = await turn();
+    generationId = generation.generationId;
+
+    const run = await drive(generation);
+
+    expect(run.error).toBeUndefined();
+
+    /* Slip 1: the managed GENERATION is tracked too, so sweep (a) never flips its row mid-turn. */
+    expect(generationInFlight).toBe(true);
+    expect(isGenerationInFlight(generationId)).toBe(false);
+
+    /* Slip 2: settlement's own write names the project and chat, so the Postgres upsert cannot erase them. */
+    const settlementWrite = upserts.find(
+      (u) => u.status === 'completed' && u.rawCostUsd !== undefined && u.durationMs === undefined,
+    );
+    expect(settlementWrite).toMatchObject({ projectId: PROJECT, chatId });
+
+    expect(seen).toEqual([
+      expect.objectContaining({ id: generation.generationId, status: 'running', engine: 'managed' }),
+    ]);
+    expect(seen[0].managedSessionId).toMatch(/^sesn_/);
+    expect(inFlightDuringTurn).toBe(true);
+    expect(isManagedTurnInFlight(chatId)).toBe(false);
+
+    const all = await getGenerationStore().list();
+    const mine = all.filter((r) => r.id === generation.generationId);
+
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ status: 'completed', engine: 'managed' });
+
+    const debits = (await rows()).filter((e) => e.generationId === generation.generationId);
+    expect(debits).toHaveLength(1);
   });
 });

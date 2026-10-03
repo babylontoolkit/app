@@ -121,6 +121,23 @@ export class DuplicateRefundError extends Error {
 }
 
 /**
+ * A second `generation` debit naming a generation id that was already debited (migration 0029's partial
+ * unique index; no-unbilled-usage verifier defect B). For settlement this means "already billed": two
+ * settlers raced for one generation and the other won. Never a refund, never a second row.
+ */
+export class DuplicateGenerationDebitError extends Error {
+  constructor(generationId: string) {
+    super(`Generation ${generationId} has already been debited.`);
+    this.name = 'DuplicateGenerationDebitError';
+  }
+}
+
+/** Does `entry` fall under migration 0029's index (one `generation` debit per generation id)? */
+export function isOncePerGenerationDebit(entry: Pick<LedgerEntry, 'reason' | 'generationId'>): boolean {
+  return entry.reason === 'generation' && typeof entry.generationId === 'string' && entry.generationId.length > 0;
+}
+
+/**
  * Notes whose refund may happen at most once, matching migration 0015's partial index predicate.
  *
  * Narrow on purpose: every other refund note repeats legitimately (one user sees "Generation failed"
@@ -263,6 +280,14 @@ export class FsLedger implements Ledger {
        * real guarantee rather than the read-then-write check it would be at a call site: local mode is
        * single-process, so the mutex is this backend's equivalent of the index.
        */
+      /* Mirrors migration 0029's partial unique index — inside `_serialize`, so it is a real guarantee. */
+      if (
+        isOncePerGenerationDebit(entry) &&
+        rows.some((r) => r.reason === 'generation' && r.generationId === entry.generationId)
+      ) {
+        throw new DuplicateGenerationDebitError(entry.generationId!);
+      }
+
       if (
         isSingleRefundNote(entry.reason, entry.note) &&
         rows.some((r) => r.note === entry.note && r.reason === 'refund')
@@ -407,6 +432,10 @@ export class SupabaseLedger implements Ledger {
 
         if (entry.paymentRef) {
           throw new DuplicatePaymentError(entry.paymentRef);
+        }
+
+        if (isOncePerGenerationDebit(entry)) {
+          throw new DuplicateGenerationDebitError(entry.generationId!);
         }
       }
 

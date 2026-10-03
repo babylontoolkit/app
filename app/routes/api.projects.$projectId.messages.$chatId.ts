@@ -8,6 +8,7 @@
  *     under the owned project's prefix, so even a valid-looking id can only ever address a chat in a
  *     project the caller owns.
  */
+import { settleBeforeDelete } from '~/lib/.server/agent-managed/delete-settle';
 import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
@@ -73,7 +74,14 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
     }
 
     if (request.method === 'DELETE') {
+      /*
+       * Settle FIRST (no-unbilled-usage D4): the chat's index row is the only record of its managed session
+       * and cost cursor, and `deleteChat` removes it. Never throws; a settlement that cannot complete
+       * leaves a durable orphan record the billing sweep bills later.
+       */
+      await settleBeforeDelete({ userId: user.id, projectId: project.id, chatIds: [chatId], context });
       await deleteChat(project.id, chatId, context);
+
       return json({ ok: true });
     }
 

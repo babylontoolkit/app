@@ -212,9 +212,67 @@ export interface GenerationRecord {
    */
   integrityIssues?: string[];
 
-  /** `running` is what settlement anchors; the proxy resolves it to `completed` / `failed`. */
-  status?: 'running' | 'completed' | 'failed';
+  /**
+   * `running` is written BEFORE the first provider call (`running-generation.ts`, no-unbilled-usage D2)
+   * and by media tasks; settlement resolves it to `completed`, the proxy to `failed` when it was, and the
+   * billing sweep (`sweep.ts`, D3) to `interrupted` — a turn whose process died, billed from its last
+   * checkpoint and never refunded.
+   */
+  status?: 'running' | 'completed' | 'failed' | 'interrupted';
   error?: string;
+
+  /**
+   * Which engine wrote the row (migration 0028): `legacy` | `managed` | `enhancer`. ABSENT on media rows
+   * and on every row written before 0028 — the sweep settles only the engines it knows, so a media task's
+   * `running` row (debited up front) is never mistaken for an unbilled turn. Absent means UNKNOWN.
+   */
+  engine?: GenerationEngine;
+
+  /** The Managed Agents session a managed turn ran on, when known as the row opened (migration 0028). */
+  managedSessionId?: string;
+
+  /**
+   * The last sign of life of a `running` row (migration 0028): set when the row opens and on every usage
+   * checkpoint. The sweep's staleness test reads this (falling back to `createdAt`), so a long turn that is
+   * still checkpointing is never swept from under itself.
+   */
+  checkpointAt?: string;
+}
+
+/** The engines whose `running` rows the billing sweep knows how to settle (no-unbilled-usage D2/D3). */
+export type GenerationEngine = 'legacy' | 'managed' | 'enhancer';
+
+/**
+ * What a usage checkpoint writes onto a RUNNING row (`GenerationStore.checkpoint`) — the CUMULATIVE usage
+ * of every step finished so far, never a delta, so a lost checkpoint costs only the steps after the next
+ * one rather than corrupting the total.
+ */
+export interface GenerationCheckpoint {
+  promptTokens: number;
+  completionTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  toolRounds?: number;
+
+  /** The server clock at the checkpoint — the row's new last sign of life. */
+  at: string;
+}
+
+/** Which `running` rows to list (`GenerationStore.listRunning`). Every filter given must match. */
+export interface RunningGenerationFilter {
+  /** Only rows whose last sign of life (`checkpointAt`, else `createdAt`) is before this ISO time. */
+  staleBefore?: string;
+
+  /** Only rows written by these engines — rows with no engine never match a non-empty list. */
+  engines?: GenerationEngine[];
+
+  /** Only rows of these chats. */
+  chatIds?: string[];
+
+  /** Only rows of this project. */
+  projectId?: string;
+
+  limit?: number;
 }
 
 /**
@@ -312,6 +370,9 @@ export const FIELD_COVERAGE: Record<keyof GenerationRecord, FieldCoverage> = {
   error: { kind: 'persisted', column: 'error' },
   requestFingerprints: { kind: 'persisted', column: 'request_fingerprints' },
   integrityIssues: { kind: 'persisted', column: 'integrity_issues' },
+  engine: { kind: 'persisted', column: 'engine' },
+  managedSessionId: { kind: 'persisted', column: 'managed_session_id' },
+  checkpointAt: { kind: 'persisted', column: 'checkpoint_at' },
 };
 
 /** An upsert. Only the identity fields are required — everything else fills in as it becomes known. */
@@ -351,6 +412,51 @@ export interface GenerationStore {
    * nothing to refund and the answer is never consulted.
    */
   hasBilledGeneration(projectId: string): Promise<boolean>;
+
+  /**
+   * Write a usage checkpoint onto a RUNNING row (no-unbilled-usage D2). GUARDED: writes nothing once the
+   * row has left `running`, so a checkpoint that lands after settlement can never reopen a finished turn
+   * or roll its usage back. Returns whether a row was updated.
+   */
+  checkpoint(id: string, checkpoint: GenerationCheckpoint): Promise<boolean>;
+
+  /**
+   * Move a row to `status`, only while it is still `running` (the same guard). Touches nothing else — the
+   * Postgres upsert writes every column, so a status-only change through it would zero the row's usage.
+   */
+  markStatus(id: string, status: 'completed' | 'failed' | 'interrupted'): Promise<boolean>;
+
+  /** `running` rows matching `filter` — the sweep's (D3) and the delete path's (D4) query. */
+  listRunning(filter: RunningGenerationFilter): Promise<GenerationRecord[]>;
+}
+
+/** Does `record` match `filter`? The FS store's predicate, and the spec of the Postgres query. */
+function matchesRunning(record: GenerationRecord, filter: RunningGenerationFilter): boolean {
+  if (record.status !== 'running') {
+    return false;
+  }
+
+  if (filter.engines && (!record.engine || !filter.engines.includes(record.engine))) {
+    return false;
+  }
+
+  if (filter.chatIds && (!record.chatId || !filter.chatIds.includes(record.chatId))) {
+    return false;
+  }
+
+  if (filter.projectId && record.projectId !== filter.projectId) {
+    return false;
+  }
+
+  if (filter.staleBefore) {
+    const lastSign = record.checkpointAt ?? record.createdAt;
+
+    if (!lastSign || Date.parse(lastSign) >= Date.parse(filter.staleBefore)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /*
@@ -376,7 +482,85 @@ export class FsGenerationStore implements GenerationStore {
     return path.join(this._dir, `${id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`);
   }
 
+  /**
+   * Every read-modify-write of one row goes through this, so a checkpoint and the settlement upsert of the
+   * same generation can never interleave and lose one another (local mode is one process).
+   */
+  private readonly _locks = new Map<string, Promise<unknown>>();
+
+  private _withRow<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this._locks.get(id) ?? Promise.resolve();
+    const next = previous.then(fn, fn);
+    const settled = next.catch(() => undefined);
+
+    this._locks.set(id, settled);
+    void settled.then(() => {
+      if (this._locks.get(id) === settled) {
+        this._locks.delete(id);
+      }
+    });
+
+    return next;
+  }
+
+  private async _read(id: string): Promise<GenerationRecord | null> {
+    try {
+      return JSON.parse(await fs.readFile(this._file(id), 'utf8')) as GenerationRecord;
+    } catch {
+      return null;
+    }
+  }
+
+  async checkpoint(id: string, checkpoint: GenerationCheckpoint): Promise<boolean> {
+    return this._withRow(id, async () => {
+      const existing = await this._read(id);
+
+      if (!existing || existing.status !== 'running') {
+        return false;
+      }
+
+      const { at, ...usage } = checkpoint;
+      const updated: GenerationRecord = {
+        ...existing,
+        ...usage,
+        totalTokens: usage.promptTokens + usage.completionTokens,
+        checkpointAt: at,
+      };
+
+      await fs.writeFile(this._file(id), JSON.stringify(updated, null, 2), 'utf8');
+
+      return true;
+    });
+  }
+
+  async markStatus(id: string, status: 'completed' | 'failed' | 'interrupted'): Promise<boolean> {
+    return this._withRow(id, async () => {
+      const existing = await this._read(id);
+
+      if (!existing || existing.status !== 'running') {
+        return false;
+      }
+
+      await fs.writeFile(this._file(id), JSON.stringify({ ...existing, status }, null, 2), 'utf8');
+
+      return true;
+    });
+  }
+
+  async listRunning(filter: RunningGenerationFilter): Promise<GenerationRecord[]> {
+    const all = await this.list(Number.MAX_SAFE_INTEGER);
+    const matching = all
+      .filter((record) => matchesRunning(record, filter))
+      .sort((a, b) => (a.checkpointAt ?? a.createdAt ?? '').localeCompare(b.checkpointAt ?? b.createdAt ?? ''));
+
+    return filter.limit ? matching.slice(0, filter.limit) : matching;
+  }
+
   async upsert(row: GenerationUpsert): Promise<void> {
+    await this._withRow(row.id, () => this._upsert(row));
+  }
+
+  private async _upsert(row: GenerationUpsert): Promise<void> {
     try {
       await fs.mkdir(this._dir, { recursive: true });
 
@@ -486,8 +670,15 @@ export class SupabaseGenerationStore implements GenerationStore {
       {
         id: row.id,
         user_id: row.userId,
-        project_id: row.projectId ?? null,
-        message_id: row.chatId ?? null,
+
+        /*
+         * NO `?? null` (no-unbilled-usage, verifier slip 2): the turn's `running` row writes both FIRST, and a
+         * later upsert of the same id that does not know them (settlement, a status write) must not ERASE
+         * them. `undefined` is dropped from the JSON body and PostgREST updates only the keys it is sent; a
+         * new row gets the column's NULL default either way.
+         */
+        project_id: row.projectId,
+        message_id: row.chatId,
         model: row.model,
 
         /*
@@ -543,6 +734,18 @@ export class SupabaseGenerationStore implements GenerationStore {
          */
         request_fingerprints: row.requestFingerprints ?? null,
         integrity_issues: row.integrityIssues ?? null,
+
+        /*
+         * Migration 0028 (no-unbilled-usage D2). 🔴 NO `?? null` HERE, deliberately unlike every column
+         * above: these three are written by the `running` row the turn opens BEFORE it spends, and every
+         * later upsert of the same id (settlement, the proxy's enrichment) does not know them. An
+         * `undefined` value is dropped by the JSON body, and PostgREST's upsert updates only the keys it is
+         * sent — so leaving them undefined is what keeps a settlement from erasing the engine the sweep
+         * filters on. `?? null` would null them on every turn's end.
+         */
+        engine: row.engine,
+        managed_session_id: row.managedSessionId,
+        checkpoint_at: row.checkpointAt,
       },
       { onConflict: 'id' },
     );
@@ -556,6 +759,77 @@ export class SupabaseGenerationStore implements GenerationStore {
       logger.error(`FAILED TO WRITE generation row ${row.id} — the ledger debit will be REJECTED: ${error.message}`);
       throw new Error(`Generation row write failed: ${error.message}`);
     }
+  }
+
+  async checkpoint(id: string, checkpoint: GenerationCheckpoint): Promise<boolean> {
+    const db = await createAdminClient(this._context);
+    const { data, error } = await db
+      .from('generations')
+      .update({
+        input_tokens: checkpoint.promptTokens,
+        cached_input_tokens: checkpoint.cacheReadTokens,
+        cache_write_tokens: checkpoint.cacheCreationTokens,
+        output_tokens: checkpoint.completionTokens,
+        ...(checkpoint.toolRounds !== undefined ? { tool_rounds: checkpoint.toolRounds } : {}),
+        checkpoint_at: checkpoint.at,
+      })
+      .eq('id', id)
+      .eq('status', 'running')
+      .select('id');
+
+    if (error) {
+      throw new Error(`Checkpoint of generation ${id} failed: ${error.message}`);
+    }
+
+    return (data ?? []).length > 0;
+  }
+
+  async markStatus(id: string, status: 'completed' | 'failed' | 'interrupted'): Promise<boolean> {
+    const db = await createAdminClient(this._context);
+    const { data, error } = await db
+      .from('generations')
+      .update({ status })
+      .eq('id', id)
+      .eq('status', 'running')
+      .select('id');
+
+    if (error) {
+      throw new Error(`Could not mark generation ${id} ${status}: ${error.message}`);
+    }
+
+    return (data ?? []).length > 0;
+  }
+
+  async listRunning(filter: RunningGenerationFilter): Promise<GenerationRecord[]> {
+    const db = await createAdminClient(this._context);
+    let query = db.from('generations').select().eq('status', 'running');
+
+    if (filter.engines) {
+      query = query.in('engine', filter.engines);
+    }
+
+    if (filter.chatIds) {
+      query = query.in('message_id', filter.chatIds);
+    }
+
+    if (filter.projectId) {
+      query = query.eq('project_id', filter.projectId);
+    }
+
+    if (filter.staleBefore) {
+      /* coalesce(checkpoint_at, created_at) < staleBefore — the partial index's expression (0028). */
+      query = query.or(
+        `checkpoint_at.lt.${filter.staleBefore},and(checkpoint_at.is.null,created_at.lt.${filter.staleBefore})`,
+      );
+    }
+
+    const { data, error } = await query.order('created_at', { ascending: true }).limit(filter.limit ?? 500);
+
+    if (error) {
+      throw new Error(`Could not list running generations: ${error.message}`);
+    }
+
+    return (data ?? []).map(toGenerationRecord);
   }
 
   async hasBilledGeneration(projectId: string): Promise<boolean> {
@@ -674,6 +948,9 @@ function toGenerationRecord(r: any): GenerationRecord {
     integrityIssues: r.integrity_issues ?? undefined,
     status: r.status,
     error: r.error ?? undefined,
+    engine: r.engine ?? undefined,
+    managedSessionId: r.managed_session_id ?? undefined,
+    checkpointAt: r.checkpoint_at ?? undefined,
   };
 }
 

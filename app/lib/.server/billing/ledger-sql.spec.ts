@@ -660,6 +660,119 @@ describe('the migrations', () => {
       await db.exec(`delete from public.generations where id in ('gen_eff', 'gen_noeff')`);
     });
   });
+
+  /*
+   * Migration 0028 (`_specs/no-unbilled-usage_plan.md` D2–D4): the `running` row's engine, session and
+   * last sign of life; the sweep's partial indexes; and the orphan record a failed delete-settlement leaves
+   * behind, which must SURVIVE the delete that created it.
+   */
+  describe('migration 0028 — the sweep can find what a dead process left', () => {
+    const column = async (table: string, name: string) =>
+      (
+        await db.query<{ data_type: string; is_nullable: string; column_default: string | null }>(
+          `select data_type, is_nullable, column_default from information_schema.columns
+           where table_schema = 'public' and table_name = $1 and column_name = $2`,
+          [table, name],
+        )
+      ).rows[0];
+
+    it('adds engine, managed_session_id and checkpoint_at to generations — nullable, no default', async () => {
+      for (const [name, type] of [
+        ['engine', 'text'],
+        ['managed_session_id', 'text'],
+        ['checkpoint_at', 'timestamp with time zone'],
+      ] as const) {
+        const col = await column('generations', name);
+
+        expect(col, `${name} must exist`).toBeDefined();
+        expect(col.data_type).toBe(type);
+        expect(col.is_nullable).toBe('YES');
+        expect(col.column_default, `${name}: NULL means unknown, never a default`).toBeNull();
+      }
+    });
+
+    it("accepts an 'interrupted' status and finds stale running rows through the partial index", async () => {
+      await db.query(
+        `insert into public.generations (id, user_id, model, status, engine, checkpoint_at)
+         values ('gen_run_old', $1, 'm', 'running', 'legacy', now() - interval '1 hour'),
+                ('gen_run_new', $1, 'm', 'running', 'legacy', now()),
+                ('gen_done', $1, 'm', 'interrupted', 'legacy', now() - interval '1 hour')`,
+        [USER],
+      );
+
+      const { rows } = await db.query<{ id: string }>(
+        `select id from public.generations
+         where status = 'running' and coalesce(checkpoint_at, created_at) < now() - interval '15 minutes'`,
+      );
+      expect(rows.map((r) => r.id)).toEqual(['gen_run_old']);
+
+      const indexes = await db.query<{ indexdef: string }>(
+        `select indexdef from pg_indexes where indexname in ('generations_running_idx', 'chats_managed_session_idx')`,
+      );
+      expect(indexes.rows).toHaveLength(2);
+      expect(indexes.rows.every((r) => /WHERE/i.test(r.indexdef))).toBe(true);
+
+      await db.exec(`delete from public.generations where id in ('gen_run_old', 'gen_run_new', 'gen_done')`);
+    });
+
+    it('managed_billing_orphans has RLS on, and its rows survive the account they bill', async () => {
+      const rls = await db.query<{ relrowsecurity: boolean }>(
+        `select relrowsecurity from pg_class
+         where relnamespace = 'public'::regnamespace and relname = 'managed_billing_orphans'`,
+      );
+      expect(rls.rows[0]?.relrowsecurity).toBe(true);
+
+      const fks = await db.query(
+        `select 1 from information_schema.table_constraints
+         where table_name = 'managed_billing_orphans' and constraint_type = 'FOREIGN KEY'`,
+      );
+      expect(fks.rows, 'no foreign key — the record must outlive the delete').toHaveLength(0);
+
+      await db.query(
+        `insert into public.managed_billing_orphans (id, user_id, project_id, chat_id, session_id, model)
+         values ('orph_1', $1, 'prj_x', 'chat_x', 'sesn_x', 'm')`,
+        [USER],
+      );
+      await db.query(`delete from auth.users where id = $1`, [USER]);
+
+      const kept = await db.query(`select id from public.managed_billing_orphans where id = 'orph_1'`);
+      expect(kept.rows).toHaveLength(1);
+
+      await db.exec(`delete from public.managed_billing_orphans`);
+    });
+  });
+});
+
+/*
+ * Migration 0029 (no-unbilled-usage, verifier defect B layer 2): a generation is debited AT MOST ONCE. Every
+ * settlement names its own generation id (`_tail`, `_stop`, `_prior`, `_sweep`, `_delete` are distinct ids),
+ * so a second `generation` debit naming the same id is a race between two settlers — the database refuses it.
+ */
+describe('migration 0029 — one generation debit per generation id', () => {
+  it('refuses a second generation debit for the same id', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await createGeneration('gen_once');
+    await append({ delta: -10, reason: 'generation', generationId: 'gen_once' });
+
+    await expect(append({ delta: -10, reason: 'generation', generationId: 'gen_once' })).rejects.toThrow(
+      /duplicate key|unique/i,
+    );
+    expect(await balance()).toBe(990);
+  });
+
+  it('CONTROL — refunds of it, other generations and id-less debits are untouched', async () => {
+    await append({ delta: 1000, reason: 'grant' });
+    await createGeneration('gen_a1');
+    await createGeneration('gen_a2');
+    await append({ delta: -10, reason: 'generation', generationId: 'gen_a1' });
+    await append({ delta: 10, reason: 'refund', generationId: 'gen_a1' });
+    await append({ delta: 10, reason: 'refund', generationId: 'gen_a1' });
+    await append({ delta: -10, reason: 'generation', generationId: 'gen_a2' });
+    await append({ delta: -10, reason: 'generation', generationId: null });
+    await append({ delta: -10, reason: 'generation', generationId: null });
+
+    expect(await balance()).toBe(980);
+  });
 });
 
 describe('append_ledger_entry (the only way a ledger row is written)', () => {

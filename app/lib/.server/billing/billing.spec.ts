@@ -1969,6 +1969,15 @@ describe('the generation row a debit points at', () => {
       async hasBilledGeneration() {
         return false;
       },
+      async checkpoint() {
+        return false;
+      },
+      async markStatus() {
+        return false;
+      },
+      async listRunning() {
+        return [];
+      },
     };
 
     setGenerationStore(store);

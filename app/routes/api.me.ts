@@ -11,6 +11,7 @@
  * route, because OAuth users never pass through it. Every authenticated path lands here, and the
  * grant is idempotent, so "call it every time" is both correct and safe.
  */
+import { ensureBillingSweep } from '~/lib/.server/billing/sweep';
 import { json, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { getUser } from '~/lib/.server/supabase/auth';
 import { isSupabaseConfigured } from '~/lib/.server/supabase/client';
@@ -73,6 +74,12 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
      * (`marketPriceProvidersFor`). Refreshing only one leaves the other on its baked table silently.
      */
     await Promise.all(marketPricesToRefresh(context).map((provider) => ensureMarketPrices(provider, context)));
+
+    /*
+     * The billing sweep's doorway (no-unbilled-usage D3) — the session endpoint every page load hits, so a
+     * deploy with no generations yet still recovers what a previous process left unbilled. Never throws.
+     */
+    ensureBillingSweep(context);
 
     const user = await getUser(request, context);
     const platform = getPlatformConfig(context);

@@ -82,6 +82,15 @@ beforeEach(() => {
       /* The route never decorates a ledger view — that is `/api/credits`. */
       return [];
     },
+    async checkpoint() {
+      return false;
+    },
+    async markStatus() {
+      return false;
+    },
+    async listRunning() {
+      return [];
+    },
     async hasBilledGeneration() {
       /* The route never asks — that is the project-delete refund path (§4.4a). */
       return false;

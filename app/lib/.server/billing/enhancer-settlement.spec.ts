@@ -66,6 +66,9 @@ let tmp: string;
 let ledger: FsLedger;
 let upserts: GenerationUpsert[];
 
+/** The settlement's writes — the D2 `running` row opened before the model call is not one of them. */
+const finals = () => upserts.filter((u) => u.status !== 'running');
+
 /** One ai@4 `StepResult`, cut down to the fields `accumulateStepUsage` reads. */
 interface FakeStep {
   usage: { promptTokens?: number; completionTokens?: number };
@@ -154,7 +157,7 @@ describe('the enhancer settles into exactly one terminal state', () => {
 
     await enhance();
 
-    await vi.waitFor(() => expect(upserts.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
     expect(await ledger.balance(USER)).toBeLessThan(1000);
     expect(upserts.every((u) => u.status !== 'failed')).toBe(true);
   });
@@ -187,6 +190,26 @@ describe('the enhancer settles into exactly one terminal state', () => {
     expect(await ledger.balance(USER)).toBe(1000);
   });
 
+  /*
+   * no-unbilled-usage D2: the row exists, `running`, BEFORE the provider call — so an enhancement whose
+   * process dies (or whose stream hangs) leaves a record the sweep can settle.
+   */
+  it('opens a running row before the model is called, and settlement finishes the same id', async () => {
+    let statusesAtCall: Array<string | undefined> = [];
+
+    streamText.mockImplementation(async () => {
+      statusesAtCall = upserts.map((u) => u.status);
+      return fakeResult([{ type: 'text-delta', textDelta: 'a better prompt' }]);
+    });
+
+    await enhance();
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
+
+    expect(statusesAtCall).toEqual(['running']);
+    expect(upserts[0]).toMatchObject({ engine: 'enhancer', statusKind: 'enhance' });
+    expect(new Set(upserts.map((u) => u.id)).size, 'one generation id, never a second row').toBe(1);
+  });
+
   it('REFUSED BEFORE SPEND — an empty balance never reaches the model', async () => {
     await ledger.append({ userId: USER, delta: -1000, reason: 'adjustment' });
     streamText.mockResolvedValue(fakeResult([{ type: 'text-delta', textDelta: 'x' }]));
@@ -214,9 +237,9 @@ describe('🔴 the enhancer bills from result.steps, not result.usage', () => {
     streamText.mockResolvedValue(fakeResult([{ type: 'text-delta', textDelta: 'a better prompt' }], steps));
 
     await enhance();
-    await vi.waitFor(() => expect(upserts.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
 
-    return upserts.at(-1)!;
+    return finals().at(-1)!;
   }
 
   /*
@@ -262,18 +285,18 @@ describe('🔴 the enhancer bills from result.steps, not result.usage', () => {
     streamText.mockResolvedValue(fakeResult([{ type: 'text-delta', textDelta: 'a better prompt' }]));
 
     await enhance();
-    await vi.waitFor(() => expect(upserts.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
 
-    expect(upserts.at(-1)).toMatchObject({ promptTokens: 4000, completionTokens: 1200 });
+    expect(finals().at(-1)).toMatchObject({ promptTokens: 4000, completionTokens: 1200 });
   });
 
   it('falls back to result.usage when the steps array is EMPTY, not just absent', async () => {
     streamText.mockResolvedValue(fakeResult([{ type: 'text-delta', textDelta: 'a better prompt' }], []));
 
     await enhance();
-    await vi.waitFor(() => expect(upserts.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
 
-    expect(upserts.at(-1)?.promptTokens, 'an empty array must not bill zero').toBe(4000);
+    expect(finals().at(-1)?.promptTokens, 'an empty array must not bill zero').toBe(4000);
   });
 
   /*
@@ -359,9 +382,9 @@ describe('the enhancer model is the one that runs AND the one that is billed', (
     streamText.mockResolvedValue(fakeResult([{ type: 'text-delta', textDelta: 'a better prompt' }]));
 
     await enhance();
-    await vi.waitFor(() => expect(upserts.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
 
-    return { billedModel: upserts.at(-1)?.model, spent: 1000 - (await ledger.balance(USER)) };
+    return { billedModel: finals().at(-1)?.model, spent: 1000 - (await ledger.balance(USER)) };
   }
 
   it('sends the configured model to the provider', async () => {
@@ -397,7 +420,7 @@ describe('the enhancer model is the one that runs AND the one that is billed', (
     streamText.mockResolvedValue(fakeResult([{ type: 'text-delta', textDelta: 'a better prompt' }]));
 
     await enhance();
-    await vi.waitFor(() => expect(upserts.length).toBeGreaterThan(0));
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
 
     expect(config.seenOverride, 'and it follows the resolution, it is not a constant').toBe('Comet');
   });

@@ -12,6 +12,7 @@
  * holds nothing belonging to that project), so it covers this module too.
  */
 import { deleteMessages } from './message-store';
+import { settleBeforeDelete } from '~/lib/.server/agent-managed/delete-settle';
 import { deleteWorkingCopy } from './working-copy';
 import { getProjectStore } from './store';
 import { deleteRemixSeed } from '~/lib/.server/share/seed-store';
@@ -51,6 +52,16 @@ export interface PurgeProjectOptions {
  */
 export async function purgeProject(project: Project, options: PurgeProjectOptions): Promise<void> {
   const { userId, context, refundCreation = true } = options;
+
+  /*
+   * 🔴 SETTLE FIRST (no-unbilled-usage D4). The chat index rows hold every managed session id and cost
+   * cursor of this project, and `deleteMessages` (and the project row's cascade) removes them: a session
+   * still running, or with usage past its cursor, would never be billed. Interrupts, settles and archives
+   * each session, and settles any `running` legacy row of the project. Never throws; a settlement that
+   * cannot complete leaves a durable orphan record for the billing sweep. Account deletion purges every
+   * project through here, so it is covered too.
+   */
+  await settleBeforeDelete({ userId, projectId: project.id, context });
 
   /*
    * 🔴 The PUBLISHED BUILD goes first, and it was missing entirely until account deletion went looking

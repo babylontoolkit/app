@@ -91,6 +91,9 @@ import {
   shouldRefundManagedTurn,
 } from './settle';
 import { keepAlive } from '~/lib/.server/runtime/keep-alive';
+import { trackGeneration, trackManagedTurn } from '~/lib/.server/billing/in-flight';
+import { openRunningGeneration } from '~/lib/.server/billing/running-generation';
+import { ensureBillingSweep } from '~/lib/.server/billing/sweep';
 import { runManagedTurn, type ManagedTurnEnd, type ManagedTurnResult } from './turn';
 import { budgetAmountCents, ceilingUsdForCredits } from './usage';
 
@@ -261,6 +264,9 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
    * synchronously). Never throws: a failed refresh serves the last-loaded or baked list.
    */
   await Promise.all(LLM_PRICE_PROVIDERS.map((provider) => ensureMarketPrices(provider, request.context)));
+
+  /* The billing sweep (no-unbilled-usage D3): started lazily at a request doorway. Never throws, never blocks. */
+  ensureBillingSweep(request.context);
 
   /*
    * 2. Credit gate — once, up front, the ONE moment a turn may be refused for balance (§4.2.1). Never
@@ -650,11 +656,47 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   const assistantIdListeners: Array<(messageId: string) => void> = [];
 
   async function* run(): AsyncGenerator<AgentChunk> {
+    /*
+     * no-unbilled-usage D3: this chat has a turn in flight HERE — the billing sweep must not settle it under
+     * its own id (a failed turn's refund would then miss that part) — and so does this GENERATION, whose
+     * `running` row the sweep's stale-row pass must not flip to `interrupted` mid-turn (verifier slip 1).
+     * Released in a `finally` of their own once the turn has settled and any detached tail is registered
+     * (which the sweep also respects); a mark that is never released expires.
+     */
+    const releaseChat = trackManagedTurn(chatId);
+    const releaseGeneration = trackGeneration(generationId);
+
+    try {
+      yield* runTurn();
+    } finally {
+      releaseGeneration();
+      releaseChat();
+    }
+  }
+
+  async function* runTurn(): AsyncGenerator<AgentChunk> {
     let result: ManagedTurnResult | null = null;
     let end: ManagedTurnEnd['kind'] = 'failed';
     let failed = false;
 
     try {
+      /*
+       * D2: the durable record BEFORE the session receives this turn — a process that dies mid-turn leaves a
+       * row the sweep can find. Never throws; the turn's settlement finishes this same row.
+       */
+      await openRunningGeneration({
+        id: generationId,
+        userId,
+        model: servedModel,
+        provider: 'Anthropic',
+        engine: 'managed',
+        projectId,
+        chatId,
+        statusKind,
+        managedSessionId: sessionId,
+        context: request.context,
+      });
+
       const turn = runManagedTurn({
         client,
         sessionId,

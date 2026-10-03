@@ -63,6 +63,22 @@ export interface ChatIndexRow {
   managedSettledAt?: string;
 }
 
+/**
+ * A chat bound to a managed session, as the billing sweep sees it (no-unbilled-usage D3 (b)).
+ *
+ * `userId` is the OWNER of the chat's project — resolved through the project row (ownership is not
+ * stored here). The Postgres index joins it in; the filesystem index cannot reach the project store and
+ * leaves it absent, and the sweep resolves it.
+ */
+export interface ManagedChatRow {
+  id: string;
+  projectId: string;
+  managedSessionId: string;
+  managedSettledAt?: string;
+  updatedAt: string;
+  userId?: string;
+}
+
 /** What a caller passes to `claimManagedSession`. */
 export interface ManagedSessionClaim {
   /** The server chat id (a UUID — validated by the caller). */
@@ -131,6 +147,25 @@ export interface ChatIndex {
    * other one has already claimed in its place. Returns whether this call cleared it.
    */
   releaseManagedSession(input: { id: string; projectId: string; sessionId: string }): Promise<boolean>;
+
+  /**
+   * Every chat bound to a managed session (no-unbilled-usage D3 (b)) — the billing sweep's list. A partial
+   * index (`managed_session_id is not null`, migration 0028) keeps it cheap. `updatedSince` bounds it to
+   * chats active in a window: a session's last usage lands within a bounded time of the chat's last turn,
+   * and the sweep runs far more often than the window, so an older chat has been swept many times already.
+   */
+  listWithManagedSession(input?: { updatedSince?: string; limit?: number }): Promise<ManagedChatRow[]>;
+}
+
+function toManagedChatRow(row: ChatIndexRow, userId?: string): ManagedChatRow {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    managedSessionId: row.managedSessionId!,
+    ...(row.managedSettledAt ? { managedSettledAt: row.managedSettledAt } : {}),
+    updatedAt: row.updatedAt,
+    ...(userId ? { userId } : {}),
+  };
 }
 
 /*
@@ -255,6 +290,16 @@ export class FsChatIndex implements ChatIndex {
     return rows.filter((row) => row.projectId === projectId).sort(byNewestActivity);
   }
 
+  async listWithManagedSession(input: { updatedSince?: string; limit?: number } = {}): Promise<ManagedChatRow[]> {
+    const rows = (await this._table.all())
+      .filter((row) => row.managedSessionId)
+      .filter((row) => !input.updatedSince || row.updatedAt >= input.updatedSince)
+      .sort(byNewestActivity)
+      .map((row) => toManagedChatRow(row));
+
+    return input.limit ? rows.slice(0, input.limit) : rows;
+  }
+
   async listByProjects(projectIds: string[]): Promise<ChatIndexRow[]> {
     const wanted = new Set(projectIds);
     const rows = await this._table.all();
@@ -374,6 +419,30 @@ export class SupabaseChatIndex implements ChatIndex {
     }
 
     return (data ?? []).map(fromRow);
+  }
+
+  async listWithManagedSession(input: { updatedSince?: string; limit?: number } = {}): Promise<ManagedChatRow[]> {
+    const db = await this._db();
+
+    /* The owner comes from the PROJECT row — the one home of ownership (§4.5.3); `chats` has no user id. */
+    let query = db.from('chats').select('*, projects!inner(user_id)').not('managed_session_id', 'is', null);
+
+    if (input.updatedSince) {
+      query = query.gte('updated_at', input.updatedSince);
+    }
+
+    const { data, error } = await query
+      .order('updated_at', { ascending: false })
+      .order('id', { ascending: true })
+      .limit(input.limit ?? 1000);
+
+    if (error) {
+      throw new Error(`Failed to list chats with a managed session: ${error.message}`);
+    }
+
+    return (data ?? []).map((row: ChatRow & { projects?: { user_id?: string } | null }) =>
+      toManagedChatRow(fromRow(row), row.projects?.user_id ?? undefined),
+    );
   }
 
   async remove(id: string): Promise<void> {

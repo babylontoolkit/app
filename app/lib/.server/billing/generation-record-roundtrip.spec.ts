@@ -181,7 +181,25 @@ describe('the five fields that used to vanish on Postgres (migration 0023)', () 
     expect(payload.raw_stops).toBeNull();
     expect(payload.fallback_handoffs).toBeNull();
     expect(payload.blocks_loaded).toBeNull();
-    expect(payload.message_id).toBeNull();
+  });
+
+  /*
+   * no-unbilled-usage (verifier slip 2): the turn's `running` row writes `project_id` / `message_id` FIRST,
+   * and every later upsert of the same id (settlement, which does not always know them) must not ERASE
+   * them. PostgREST's upsert updates only the keys it is sent, and the JSON body drops `undefined` — so an
+   * absent project or chat must be absent from the wire, never `null`.
+   */
+  it('never sends project_id / message_id it was not given — a later upsert cannot erase them', async () => {
+    await store().upsert(ANCHOR);
+
+    const wire = JSON.parse(JSON.stringify(lastPayload()));
+
+    expect(wire).not.toHaveProperty('project_id');
+    expect(wire).not.toHaveProperty('message_id');
+
+    /* CONTROL — given, they are sent. */
+    await store().upsert({ ...ANCHOR, projectId: 'prj_1', chatId: 'cht_1' });
+    expect(lastPayload()).toMatchObject({ project_id: 'prj_1', message_id: 'cht_1' });
   });
 });
 

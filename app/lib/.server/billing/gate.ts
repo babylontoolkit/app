@@ -18,7 +18,7 @@
 import { createScopedLogger } from '~/utils/logger';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { ALERT_SIGNALS } from '~/lib/.server/monitoring/events';
-import { getLedger } from './ledger';
+import { getLedger, DuplicateGenerationDebitError } from './ledger';
 import { getGenerationStore } from './generations';
 import { creditsForRawCost, creditsForUsage, getBillingConfig, rawCostUsd, type TokenUsage } from './rates';
 
@@ -188,6 +188,20 @@ export interface SettleInput {
    * → the old suffix for a flat price, nothing otherwise.
    */
   chargeLabel?: string;
+
+  /**
+   * The status the anchored row ends in. Default `completed`. The billing sweep (no-unbilled-usage D3)
+   * passes `interrupted` for a turn whose process died: billed from its last checkpoint, never refunded.
+   */
+  status?: 'completed' | 'interrupted';
+
+  /**
+   * The row's project and chat, when the caller knows them. Optional because the Postgres upsert writes
+   * every column, and an absent one is written NULL — the proxy fills both in its enrichment write, but
+   * the sweep has no enrichment step, so it passes them here or the swept row would lose them.
+   */
+  projectId?: string;
+  chatId?: string;
 
   context?: unknown;
 }
@@ -359,6 +373,8 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
        * a value an earlier upsert already wrote.
        */
       statusKind: input.statusKind,
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+      ...(input.chatId ? { chatId: input.chatId } : {}),
       promptTokens: input.usage.promptTokens,
       completionTokens: input.usage.completionTokens,
       cacheReadTokens: input.usage.cacheReadTokens,
@@ -373,7 +389,7 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
        * with no enrichment step (the prompt enhancer) would otherwise leave every row `running`
        * forever, and the admin cost dashboards are derived from these rows.
        */
-      status: 'completed',
+      status: input.status ?? 'completed',
     });
   } catch (error) {
     /*
@@ -425,6 +441,37 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
 
     return { creditsCharged: credits, rawCostUsd: cost, balanceAfter: entry.balanceAfter };
   } catch (error) {
+    /*
+     * ALREADY BILLED (migration 0029; no-unbilled-usage verifier defect B). Another settler debited this
+     * generation first — a sweep racing a turn whose in-flight mark expired, say. The earlier debit stands;
+     * this call charged nothing, so it reports nothing a caller could refund. Loud, because a race here
+     * means one of the two settlers saw stale usage.
+     */
+    if (error instanceof DuplicateGenerationDebitError) {
+      logger.error(`Generation ${input.generationId} was already debited — this settlement charged nothing more`);
+      getMonitor(input.context).alert(
+        ALERT_SIGNALS.LEDGER_INTEGRITY,
+        `Generation ${input.generationId} was settled twice; the second debit (${credits} credits) was refused by ` +
+          'the one-debit-per-generation rule and treated as already billed',
+        {
+          severity: 'warning',
+          scope: 'settle-generation',
+          userId: input.userId,
+          tags: { model: input.model, credits },
+        },
+      );
+
+      try {
+        return {
+          creditsCharged: 0,
+          rawCostUsd: cost,
+          balanceAfter: await getLedger(input.context).balance(input.userId),
+        };
+      } catch {
+        return null;
+      }
+    }
+
     // Loud, because this is money. But never fatal to the user's generation.
     logger.error(`FAILED TO CHARGE generation ${input.generationId} for ${input.userId}: ${(error as Error).message}`);
     getMonitor(input.context).alert(

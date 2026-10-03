@@ -162,6 +162,9 @@ import {
 import { offeredUserEffortLevels } from '~/lib/.server/agent/effort-offer';
 import type { LanguageModelV1 } from 'ai';
 import { getGenerationLog, type GenerationRecord } from './usage';
+import { trackGeneration } from '~/lib/.server/billing/in-flight';
+import { createUsageCheckpointer, openRunningGeneration } from '~/lib/.server/billing/running-generation';
+import { ensureBillingSweep } from '~/lib/.server/billing/sweep';
 import {
   compactHistory,
   stripReplayedReasoning,
@@ -888,6 +891,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * prompt reading at 0.1x instead of writing at 2x (`prompt/cache-warmer.ts`).
    */
   ensureCacheWarmer(request.context);
+
+  /* Same doorway: the billing sweep (no-unbilled-usage D3). Lazily started, never throws, never blocks. */
+  ensureBillingSweep(request.context);
 
   /*
    * The requested rung rides into provider selection so a paid turn is routed to a gateway that SELLS
@@ -2317,6 +2323,16 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   let stepClock = startedAt;
   let stepIndex = 0;
 
+  /*
+   * no-unbilled-usage D2: the turn's CUMULATIVE usage, written onto its `running` row after every finished
+   * step — what the billing sweep settles from if this process dies before the `finally` below runs. A
+   * shadow of `totals` on purpose: with the tool loop off, `totals` is only accumulated after a stream
+   * ENDS, which is exactly the moment a dead process never reaches. BYOK turns are not checkpointed: the
+   * user's own key paid, so there is nothing for the platform to recover.
+   */
+  const checkpointer = createUsageCheckpointer({ id: generationId, context: request.context });
+  const checkpointTotals: GenerationUsage = emptyUsage();
+
   /** One warning per generation when the family's usage namespace is absent — see the step handler. */
   let warnedMissingUsageNamespace = false;
   const stepLog: NonNullable<GenerationRecord['steps']> = [];
@@ -2522,6 +2538,11 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
          * bookkeeping above so the step log is complete even for the step that crosses it.
          */
         turnMeter?.onStep(step);
+
+        if (!useByok) {
+          accumulateStepUsage(checkpointTotals, [step as unknown as UsageStep], modelFamily);
+          checkpointer.checkpoint(checkpointTotals);
+        }
 
         /*
          * The two numbers that diagnose a slow/expensive step, and they are different questions:
@@ -2885,7 +2906,41 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
   }
 
   async function* run(): AsyncGenerator<AgentChunk> {
+    /*
+     * no-unbilled-usage D3: this generation is running HERE — the billing sweep must leave its row to the
+     * `finally` below. Released after settlement; a mark that is never released expires (`in-flight.ts`).
+     */
+    const releaseInFlight = useByok ? () => undefined : trackGeneration(generationId);
+
+    /* In a `finally` of its own (verifier slip 3): released whatever the turn's own `finally` does. */
     try {
+      yield* runTurn();
+    } finally {
+      releaseInFlight();
+    }
+  }
+
+  async function* runTurn(): AsyncGenerator<AgentChunk> {
+    try {
+      /*
+       * D2: the durable record BEFORE the first provider call. A process that dies mid-turn leaves this
+       * `running` row (plus its step checkpoints) for the sweep to settle. Never throws; settlement below
+       * finishes the same row. BYOK turns write none — the user's key paid, nothing to recover.
+       */
+      if (!useByok) {
+        await openRunningGeneration({
+          id: generationId,
+          userId: user.id,
+          model,
+          provider: config.provider,
+          engine: 'legacy',
+          projectId: request.projectId,
+          chatId: request.chatId,
+          statusKind: statusKindFor({ isRepair, isFirstBuildTurn, isDiscussTurn: Boolean(discussNote) }),
+          context: request.context,
+        });
+      }
+
       /*
        * A creation turn runs a MEDIA-ONLY loop when the platform can render (§4.16) — one small round
        * of generate_* calls for the design art, then the answer — and with NO tools otherwise: one
@@ -3452,6 +3507,12 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
        * work. `/api/agent` already keeps the whole drain alive; registering the debit and its refund here
        * too means no caller of `runAgentGeneration` can lose them to a disconnect.
        */
+      /*
+       * Every step checkpoint lands before settlement finishes the row (they are guarded, but in order).
+       * Bounded (`CHECKPOINT_FLUSH_TIMEOUT_MS`): a hung store must never keep a turn from settling.
+       */
+      await checkpointer.flush();
+
       const settlement = await keepAlive(
         request.context,
         settleGeneration({

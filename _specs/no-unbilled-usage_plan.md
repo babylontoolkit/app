@@ -90,14 +90,14 @@ Also: web search debits AFTER the vendor is paid and only logs a failed debit (`
   `enable_request_signal` in `wrangler.toml` if the probe shows the signal does not fire. Findings record
   what was measured. **Acceptance:** after a mid-stream disconnect under the production shape, a legacy
   turn's ledger row lands.
-- [ ] **T2 — Durable `running` row + legacy step checkpoints.** D2 for legacy, managed and enhancer.
+- [x] **T2 — Durable `running` row + legacy step checkpoints.** D2 for legacy, managed and enhancer.
   Tests: a row exists before the first provider call; each finished step updates its cumulative usage; a
   completed turn ends `completed` exactly once (no double debit). Migration only if a column is missing.
-- [ ] **T3 — Sweep.** D3 (a)–(c) + `listWithManagedSession` (FS + Postgres, migration with the partial
+- [x] **T3 — Sweep.** D3 (a)–(c) + `listWithManagedSession` (FS + Postgres, migration with the partial
   index, asserted in `ledger-sql.spec.ts`). Tests: stale legacy row → billed from checkpoint, `interrupted`,
   no refund; managed chat with cost above cursor and no in-flight turn → billed once; CONTROL a chat with a
   turn in flight is skipped; a second sweep charges nothing; a throwing session read never throws.
-- [ ] **T4 — Delete settles first.** D4 for chat, project and account delete. Tests: delete during a live
+- [x] **T4 — Delete settles first.** D4 for chat, project and account delete. Tests: delete during a live
   managed turn → session interrupted + settled + archived, ledger row lands, then the rows go; a settle
   failure leaves a sweepable record.
 - [ ] **T5 — Carry-over + safe rebind.** D5. Tests: carried-over usage bills as `_carry` before the turn and

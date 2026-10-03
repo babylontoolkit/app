@@ -105,6 +105,20 @@ export interface SettleManagedInput {
    * turn's own settlement and a rebind's run while the session is bound by construction.
    */
   requireBoundSession?: boolean;
+
+  /**
+   * Where this settlement reads the bound session and reads/writes the cost cursor. Default: the chat's
+   * index row (`sessions.ts`). The orphan record of a chat deleted while its settlement failed
+   * (no-unbilled-usage D4, `orphans.ts`) supplies its own — the chat row that held the cursor is gone.
+   */
+  cursorIO?: SettlementCursorIO;
+}
+
+/** The bound session and the cost cursor, wherever they live (see `SettleManagedInput.cursorIO`). */
+export interface SettlementCursorIO {
+  bound(): Promise<string | null>;
+  get(): Promise<string | null>;
+  set(next: string): Promise<void>;
 }
 
 export interface ManagedSettlement {
@@ -121,6 +135,25 @@ export interface ManagedSettlement {
 
   /** The model this settlement billed at (the session's own, when it reported one). */
   model?: string;
+
+  /**
+   * Everything the session had cost is now accounted for: the session was read and either nothing was new
+   * or the cursor advanced over the new usage. `false` when the read or the cursor write failed — the usage
+   * is still unsettled, and a caller about to lose the cursor (a delete, D4) must keep a record of it.
+   * `true` for a session no longer bound to the chat (its new owner settles it).
+   */
+  complete: boolean;
+
+  /**
+   * The cost cursor as it stands AFTER this settlement — the one it wrote, or the one it found when it
+   * charged nothing. `undefined` when it never got as far as reading it. A caller that must keep a record of
+   * the cursor beyond the chat row (a delete's orphan, D4) keeps THIS one: the pre-settlement cursor would
+   * make the next settlement charge this one's usage again (verifier defect A).
+   */
+  cursor?: string | null;
+
+  /** The chat was no longer bound to this session: its new owner settles it; nothing was read. */
+  unbound?: true;
 }
 
 /** Every thread of the session with its model and cumulative usage (`null` until the thread first idles). */
@@ -202,16 +235,28 @@ export function settleManagedTurn(input: SettleManagedInput): Promise<ManagedSet
  * event stream (measured), so a settlement that read only that stream would have given every subagent
  * token away — and the total charged for a session can never be worth less than what it cost us.
  */
+/** The default cursor home: the chat's index row. */
+function chatCursorIO(input: SettleManagedInput): SettlementCursorIO {
+  return {
+    bound: () => getManagedSessionId(input.projectId, input.chatId, input.context),
+    get: () => getManagedSettledAt(input.projectId, input.chatId, input.context),
+    set: (next) => setManagedSettledAt(input.projectId, input.chatId, next, input.context),
+  };
+}
+
 async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> {
   let usage = emptyUsage();
   let requests = 0;
   const sessionHoursUsd = 0;
   let model = input.model;
   let charge: ManagedCharge | null = null;
+  let complete = false;
+  let cursorAfter: string | null | undefined;
+  const io = input.cursorIO ?? chatCursorIO(input);
 
   try {
     if (input.requireBoundSession) {
-      const bound = await getManagedSessionId(input.projectId, input.chatId, input.context);
+      const bound = await io.bound();
 
       if (bound !== input.sessionId) {
         logger.warn(
@@ -219,13 +264,16 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
             '(the rebind settled that session when it released it)',
         );
 
-        return { settlement: null, usage, requests, sessionHoursUsd, model };
+        return { settlement: null, usage, requests, sessionHoursUsd, model, complete: true, unbound: true };
       }
     }
 
     const config = getBillingConfig(input.context);
     const billing: BillingRates = { creditUnitCostUsd: config.creditUnitCostUsd, margin: config.margin };
-    const stored = await getManagedSettledAt(input.projectId, input.chatId, input.context);
+    const stored = await io.get();
+
+    cursorAfter = stored;
+
     const session = await input.client.beta.sessions.retrieve(input.sessionId);
 
     model = sessionModel(session) ?? input.model;
@@ -269,10 +317,18 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
      */
     const decided = decideManagedCharge(cost, cursor, billing);
 
+    if (!decided) {
+      complete = true;
+    }
+
     if (decided) {
       try {
         /* Cursor FIRST, then the debit: a lost debit under-bills and alerts; the other order double-charges. */
-        await setManagedSettledAt(input.projectId, input.chatId, serializeCostCursor(decided.next), input.context);
+        const next = serializeCostCursor(decided.next);
+
+        await io.set(next);
+        cursorAfter = next;
+        complete = true;
         charge = decided;
         usage = decided.usage;
         requests = 1;
@@ -295,7 +351,7 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
   }
 
   if (input.anchorWhenEmpty === false && !charge) {
-    return { settlement: null, usage, requests, sessionHoursUsd, model };
+    return { settlement: null, usage, requests, sessionHoursUsd, model, complete, cursor: cursorAfter };
   }
 
   /*
@@ -309,6 +365,10 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
     model,
     provider: 'Anthropic',
     statusKind: input.statusKind,
+
+    /* So the Postgres upsert never erases what the turn's running row recorded (verifier slip 2). */
+    projectId: input.projectId,
+    chatId: input.chatId,
     usage,
     ...(charge
       ? { flatCredits: charge.credits, rawCostOverrideUsd: charge.trueCostUsd, chargeLabel: MANAGED_CHARGE_LABEL }
@@ -316,7 +376,7 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
     context: input.context,
   });
 
-  return { settlement, usage, requests, sessionHoursUsd, model };
+  return { settlement, usage, requests, sessionHoursUsd, model, complete, cursor: cursorAfter };
 }
 
 /** How long a detached turn's tail settlement waits for its session to stop running (D2). */
@@ -441,6 +501,14 @@ export async function flushDetachedTail(input: { projectId: string; chatId: stri
     logger.error(`Chat ${input.chatId}: could not flush the detached turn's tail: ${(error as Error)?.message}`);
     return false;
   }
+}
+
+/**
+ * Is a detached turn's tail still waiting for this chat in this process? The billing sweep treats it as a
+ * turn in flight (no-unbilled-usage D3): the tail settles the chat itself when its session stops.
+ */
+export function hasPendingDetachTail(projectId: string, chatId: string): boolean {
+  return (detachTails.get(chatKey(projectId, chatId))?.size ?? 0) > 0;
 }
 
 /** Specs: resolve once every background tail settlement started so far has finished. */
@@ -588,7 +656,15 @@ export async function rebindDeadSession(
       { scope: 'managed-rebind', level: 'warning' },
     );
   } else {
-    await settleManagedTurn({ ...input, generationId: `${input.generationId}_prior`, anchorWhenEmpty: false });
+    /*
+     * Keyed by the SESSION too: one turn can release two sessions (a tier switch, then a dead replacement), and
+     * a generation is debited at most once (migration 0029) — a shared `_prior` id would refuse the second.
+     */
+    await settleManagedTurn({
+      ...input,
+      generationId: `${input.generationId}_${input.sessionId}_prior`,
+      anchorWhenEmpty: false,
+    });
   }
 
   const released = await releaseManagedSession(input.projectId, input.chatId, input.sessionId, input.context);
