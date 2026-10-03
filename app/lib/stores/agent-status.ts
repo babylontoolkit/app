@@ -95,6 +95,12 @@ export interface AgentStatusSnapshot {
   /** How long that step had run when the server wrote this part. */
   stepElapsedMs?: number;
 
+  /**
+   * The turn's running cost, as the SERVER estimated it (managed only — it settles once, at the end). An
+   * ESTIMATE, shown as "~N credits so far"; the ledger shows the settled number. Absent → no cost shown.
+   */
+  creditsSoFar?: number;
+
   /** Client wall time when the part was first ingested — the anchor for live elapsed display. */
   receivedAt: number;
 }
@@ -134,6 +140,7 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     typicalMs?: unknown;
     step?: unknown;
     stepElapsedMs?: unknown;
+    creditsSoFar?: unknown;
   };
 
   if (
@@ -204,6 +211,11 @@ export function updateAgentStatus(part: unknown, now = Date.now()): void {
     typeof status.stepElapsedMs === 'number' &&
     Number.isFinite(status.stepElapsedMs)
       ? { step: status.step.trim().slice(0, 120), stepElapsedMs: Math.max(0, status.stepElapsedMs) }
+      : {}),
+
+    /* An estimate is a money claim: carried only as a real, non-negative number. */
+    ...(typeof status.creditsSoFar === 'number' && Number.isFinite(status.creditsSoFar) && status.creditsSoFar >= 0
+      ? { creditsSoFar: Math.round(status.creditsSoFar) }
       : {}),
     receivedAt: now,
   });
@@ -448,6 +460,17 @@ const COPY: Record<AgentStatusKind, { label: string; thinking: string; generatin
   },
 };
 
+/** "~1,234 credits so far" — labelled as the estimate it is; nothing for zero or none. */
+export function formatCreditsSoFar(credits: number | undefined): string | undefined {
+  if (typeof credits !== 'number' || !Number.isFinite(credits) || credits <= 0) {
+    return undefined;
+  }
+
+  const n = Math.round(credits);
+
+  return `~${n.toLocaleString('en-US')} credit${n === 1 ? '' : 's'} so far`;
+}
+
 /**
  * Hidden for now (owner, 2026-09-30): the bar's "usually about 5m" / "longer than usual" caption, and the
  * "nothing from the model for 2m" clause. Both are still computed; flip a flag to bring one back.
@@ -477,6 +500,9 @@ export function describeAgentStatus(
 
   /** Why nothing is appearing, on a provider measured to deliver in one batch. */
   note?: string;
+
+  /** "~N credits so far" — the server's running estimate (managed), absent when none or zero. */
+  cost?: string;
 } {
   const elapsed = formatElapsed(currentElapsedMs(status, now));
   const copy = COPY[status.kind];
@@ -593,9 +619,12 @@ export function describeAgentStatus(
         ? copy.thinking
         : copy.generating;
 
+  const cost = formatCreditsSoFar(status.creditsSoFar);
+
   return {
     label: `${copy.label} — ${elapsed}`,
     detail,
+    ...(cost ? { cost } : {}),
     ...(progressLine ? { progress: progressLine } : {}),
     ...(fraction === undefined ? {} : { fraction }),
     ...(expectation ? { expectation } : {}),

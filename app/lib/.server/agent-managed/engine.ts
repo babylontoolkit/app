@@ -30,7 +30,7 @@ import { userTypedText } from '~/lib/chat/message-envelope';
 import { checkCreditGate } from '~/lib/.server/billing/gate';
 import { ensureMarketPrices, LLM_PRICE_PROVIDERS } from '~/lib/.server/billing/market-price-store';
 import { decideModelTier, tierDeclinedNotice, type ModelTierDecision } from '~/lib/.server/billing/premium';
-import { getBillingConfigSafe, getModelTiers } from '~/lib/.server/billing/rates';
+import { getBillingConfigSafe, getModelTiers, ratesFor } from '~/lib/.server/billing/rates';
 import type { ManagedAgentRecord } from './record';
 import { envNumber, NotConfiguredError } from '~/lib/.server/env';
 import {
@@ -73,12 +73,23 @@ import { getManagedClient, getManagedEngineConfig } from './config';
 import { createManagedDispatcher } from './dispatch';
 import { buildManagedUserMessage } from './message';
 import { createStepTracker } from './step';
+import { createCreditsEstimator, type CreditsEstimator } from './credits-estimate';
+import type { ApiUsageLike } from './session-cost';
 import { recordManagedBuildPhases } from './build-complete';
 import { ensureManagedAgentRecord, getManagedAgentRecord } from './provision';
 import { REFERENCE_MOUNT_PATH } from './system-prompt';
-import { getOrCreateManagedSession, ManagedSessionError } from './sessions';
+import { getManagedSettledAt, getOrCreateManagedSession, ManagedSessionError } from './sessions';
 import { inspectSession, SUPERSEDE_WAIT_MS, supersedePendingTurn } from './session-health';
-import { rebindDeadSession, refundManagedTurn, settleManagedTurn, shouldRefundManagedTurn } from './settle';
+import {
+  DETACH_SETTLE_POLL_MS,
+  DETACH_SETTLE_WAIT_MS,
+  flushDetachedTail,
+  rebindDeadSession,
+  refundManagedTurn,
+  settleDetachedTail,
+  settleManagedTurn,
+  shouldRefundManagedTurn,
+} from './settle';
 import { runManagedTurn, type ManagedTurnEnd, type ManagedTurnResult } from './turn';
 import { budgetAmountCents, ceilingUsdForCredits } from './usage';
 
@@ -369,6 +380,13 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   /* 4. The chat's session — created on the chat's first managed turn, reused after (T4). */
   const client = getManagedClient(request.context);
 
+  /*
+   * A detached turn's tail still waiting in the background (D2) is settled NOW, before this turn claims,
+   * inspects or messages the session — otherwise it would bill part of THIS turn under the old turn's id,
+   * and a refund of this turn would miss it. Bounded (one retrieve + one settlement); never throws.
+   */
+  await flushDetachedTail({ projectId, chatId: request.chatId });
+
   const claimSession = () =>
     getOrCreateManagedSession({
       userId,
@@ -608,6 +626,23 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   /* What the turn is doing right now, from the session's own events — the status panel's step label. */
   const steps = createStepTracker();
 
+  /*
+   * And what it has cost so far (managed-billing-visibility D1): the session's own cumulative usage priced
+   * by settlement's functions against the cursor as it stands now, at turn start. Writes nothing. A billing
+   * config that cannot be read leaves the panel without a cost line, never the turn without a heartbeat.
+   */
+  const estimateBilling = getBillingConfigSafe(request.context);
+  const credits: CreditsEstimator | null = estimateBilling
+    ? createCreditsEstimator({
+        cursor: () => getManagedSettledAt(projectId, chatId, request.context),
+        model: servedModel,
+        ratesOf: (m) => ratesFor(m, 'Anthropic', request.context),
+        billing: { creditUnitCostUsd: estimateBilling.creditUnitCostUsd, margin: estimateBilling.margin },
+        sessionHourUsd: config.sessionHourUsd,
+        refresh: async () => ((await client.beta.sessions.retrieve(sessionId)) as { usage?: ApiUsageLike }).usage,
+      })
+    : null;
+
   /* This turn's identity across requests (the session's `user.message` event id) and its narration. */
   let turnId: string | undefined;
   let narration = '';
@@ -625,7 +660,10 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         userMessage,
         dispatcher,
         abortSignal: turnSignal,
-        onEvent: (event) => steps.observe(event),
+        onEvent: (event) => {
+          steps.observe(event);
+          credits?.observe(event);
+        },
         onTurnId: (id) => {
           turnId = id;
           assistantIdListeners.forEach((listener) => listener(managedAssistantId(id)));
@@ -729,6 +767,28 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
       });
 
       usage.resolve(settled.usage);
+
+      /*
+       * D2 (`_specs/managed-billing-visibility_plan.md`): a detached session keeps running until it idles on
+       * a call no browser answers — bill that tail in the background instead of only at the chat's next
+       * settlement, which a chat nobody reopens never has. Fire-and-forget, never throws.
+       */
+      if (end === 'detached') {
+        void settleDetachedTail({
+          client,
+          sessionId,
+          projectId,
+          chatId,
+          userId,
+          generationId,
+          model: servedModel,
+          statusKind,
+          sessionHourUsd: config.sessionHourUsd,
+          context: request.context,
+          waitMs: envNumber(request.context, 'MANAGED_DETACH_SETTLE_WAIT_MS', DETACH_SETTLE_WAIT_MS),
+          pollMs: envNumber(request.context, 'MANAGED_DETACH_SETTLE_POLL_MS', DETACH_SETTLE_POLL_MS),
+        });
+      }
 
       const refund =
         failed &&
@@ -836,6 +896,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     deliveryMode: 'streamed',
     currentActivity: () => null,
     currentStep: () => steps.current(),
+    currentCreditsEstimate: () => credits?.current() ?? null,
     toolContext: { loaded: new Set<string>(), offerLoadSkill: false },
     usage: usage.promise,
     outcome: outcome.promise,

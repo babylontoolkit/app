@@ -3,8 +3,8 @@
  *
  * Every request that ran a managed turn settles ONCE, at its end — a finished turn, a detached one (a
  * closed tab), a Stop, a failure, a budget pause — and each settlement charges exactly the session's
- * usage events after the chat's cursor (`usage.ts`), plus the active session-hours added since, then
- * advances the cursor. So a turn split across a closed tab and a reopened one is billed once in total,
+ * cumulative cost (`session-cost.ts`: every thread's tokens plus its runtime) minus what the chat's cost
+ * cursor has already charged, then advances the cursor. So a turn split across a closed tab and a reopened one is billed once in total,
  * and a settlement that finds nothing new charges nothing.
  *
  * ## Order: cursor first, then the debit
@@ -27,7 +27,7 @@ import { refundGeneration, settleGeneration, type Settlement } from '~/lib/.serv
 import type { GenerationUsage } from '~/lib/.server/agent/step-usage';
 import { createScopedLogger } from '~/utils/logger';
 import { sessionModel } from './session-health';
-import { getManagedSettledAt, releaseManagedSession, setManagedSettledAt } from './sessions';
+import { getManagedSessionId, getManagedSettledAt, releaseManagedSession, setManagedSettledAt } from './sessions';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { getBillingConfig, ratesFor } from '~/lib/.server/billing/rates';
 import {
@@ -51,6 +51,9 @@ import {
 import { emptyUsage, isAfterCursor, parseCursor, type UsageEventLike } from './usage';
 
 const logger = createScopedLogger('managed-settle');
+
+/** The ledger note's name for a managed charge (D3) — never the retired "flat creation price". */
+export const MANAGED_CHARGE_LABEL = 'managed session';
 
 const chains = new Map<string, Promise<unknown>>();
 
@@ -93,6 +96,15 @@ export interface SettleManagedInput {
    * false, so a dead session that owed nothing leaves no empty row behind.
    */
   anchorWhenEmpty?: boolean;
+
+  /**
+   * Settle only while the chat is still BOUND to `sessionId` (checked inside the per-chat chain). For a
+   * settlement that runs LATE — a detached turn's background tail, a Stop's tail — the chat may have moved
+   * to another session in the meantime (a tier switch, a rebind), and the cursor went with it: settling the
+   * old session against the new cursor would bill its whole history a second time. Default false — a
+   * turn's own settlement and a rebind's run while the session is bound by construction.
+   */
+  requireBoundSession?: boolean;
 }
 
 export interface ManagedSettlement {
@@ -198,6 +210,19 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
   let charge: ManagedCharge | null = null;
 
   try {
+    if (input.requireBoundSession) {
+      const bound = await getManagedSessionId(input.projectId, input.chatId, input.context);
+
+      if (bound !== input.sessionId) {
+        logger.warn(
+          `Chat ${input.chatId}: no longer bound to session ${input.sessionId} — its late settlement charges nothing ` +
+            '(the rebind settled that session when it released it)',
+        );
+
+        return { settlement: null, usage, requests, sessionHoursUsd, model };
+      }
+    }
+
     const config = getBillingConfig(input.context);
     const billing: BillingRates = { creditUnitCostUsd: config.creditUnitCostUsd, margin: config.margin };
     const stored = await getManagedSettledAt(input.projectId, input.chatId, input.context);
@@ -285,11 +310,209 @@ async function settleNow(input: SettleManagedInput): Promise<ManagedSettlement> 
     provider: 'Anthropic',
     statusKind: input.statusKind,
     usage,
-    ...(charge ? { flatCredits: charge.credits, rawCostOverrideUsd: charge.trueCostUsd } : {}),
+    ...(charge
+      ? { flatCredits: charge.credits, rawCostOverrideUsd: charge.trueCostUsd, chargeLabel: MANAGED_CHARGE_LABEL }
+      : {}),
     context: input.context,
   });
 
   return { settlement, usage, requests, sessionHoursUsd, model };
+}
+
+/** How long a detached turn's tail settlement waits for its session to stop running (D2). */
+export const DETACH_SETTLE_WAIT_MS = 30 * 60_000;
+
+/** How often it asks. 5 s × 30 min is at most 360 retrieves for a session that never stops. */
+export const DETACH_SETTLE_POLL_MS = 5_000;
+
+/** Consecutive failed retrieves after which the wait gives up and settles what has landed. */
+const DETACH_RETRIEVE_FAILURES = 3;
+
+/** A tail still waiting, and how to cut its wait short. */
+interface PendingTail {
+  job: Promise<void>;
+  flush: () => void;
+}
+
+/** Pending tails by chat (the per-chat chain key) — a turn start flushes its chat's. */
+const detachTails = new Map<string, Set<PendingTail>>();
+
+const chatKey = (projectId: string, chatId: string) => `${projectId}:${chatId}`;
+
+export interface DetachedTailInput extends Omit<SettleManagedInput, 'anchorWhenEmpty' | 'requireBoundSession'> {
+  waitMs: number;
+  pollMs: number;
+
+  /** Injected for specs; production sleeps on an unref'd timer so a pending wait never holds the process. */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+function unrefSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms) as unknown as { unref?: () => void };
+
+    timer.unref?.();
+  });
+}
+
+/**
+ * A DETACHED turn's tail, settled in the background (`_specs/managed-billing-visibility_plan.md` D2).
+ *
+ * A closed tab settles what had accrued at the detach — but the session keeps running until it idles on
+ * the next custom tool call no browser answers, and that tail was billed only at the chat's NEXT
+ * settlement (a resume, the next turn). A chat nobody reopens never paid for it. So the detach fires this,
+ * fire-and-forget: wait (bounded) for the session to stop running, then run the ordinary cursor
+ * settlement. It is safe against a resume settling first — settlement is by cursor and serialised per
+ * chat, so whichever arrives second charges only what is new (usually nothing) — and it settles only while
+ * the chat is still bound to this session (`requireBoundSession`).
+ *
+ * Never throws; never answers a tool call and never interrupts (a detach is not a Stop, D6). Residual,
+ * accepted: a server restart inside the wait leaves the tail for the chat's next settlement.
+ */
+export function settleDetachedTail(input: DetachedTailInput): Promise<void> {
+  const key = chatKey(input.projectId, input.chatId);
+  let flushed = false;
+  let wake: (() => void) | null = null;
+  const signal = {
+    get flushed() {
+      return flushed;
+    },
+
+    /* Resolves when the tail is flushed — raced against each sleep so a flush never waits out a poll. */
+    woken: new Promise<void>((resolve) => {
+      wake = resolve;
+    }),
+  };
+  const entry: PendingTail = {
+    job: Promise.resolve(),
+    flush: () => {
+      flushed = true;
+      wake?.();
+    },
+  };
+
+  entry.job = runDetachedTail(input, signal).finally(() => {
+    const set = detachTails.get(key);
+
+    set?.delete(entry);
+
+    if (set && set.size === 0) {
+      detachTails.delete(key);
+    }
+  });
+
+  if (!detachTails.has(key)) {
+    detachTails.set(key, new Set());
+  }
+
+  detachTails.get(key)!.add(entry);
+
+  return entry.job;
+}
+
+/**
+ * A turn START settles any tail still waiting for this chat — NOW, before the new turn sends anything
+ * (verifier finding). A tail left waiting would see the NEW turn as `running` and, at its deadline, bill
+ * part of the new turn under the old turn's `<gen>_tail` id: a refund of the failed new turn would then
+ * refund only its own share. Flushed, the tail charges exactly the old turn's post-detach usage (at most
+ * one retrieve + one cursor settlement, serialised per chat), and the new turn's settlement only its own.
+ * Accepted residual: old-turn usage still in flight at the flush lands in the new turn's settlement — one
+ * request at most (the new turn interrupts the old one), and only ever the under-bill direction on a refund.
+ * `true` when a pending tail was flushed. Never throws.
+ */
+export async function flushDetachedTail(input: { projectId: string; chatId: string | undefined }): Promise<boolean> {
+  try {
+    if (!input.chatId) {
+      return false;
+    }
+
+    const pending = [...(detachTails.get(chatKey(input.projectId, input.chatId)) ?? [])];
+
+    if (pending.length === 0) {
+      return false;
+    }
+
+    pending.forEach((tail) => tail.flush());
+    await Promise.allSettled(pending.map((tail) => tail.job));
+
+    return true;
+  } catch (error) {
+    logger.error(`Chat ${input.chatId}: could not flush the detached turn's tail: ${(error as Error)?.message}`);
+    return false;
+  }
+}
+
+/** Specs: resolve once every background tail settlement started so far has finished. */
+export async function waitForDetachTails(): Promise<void> {
+  while (detachTails.size) {
+    await Promise.allSettled([...detachTails.values()].flatMap((set) => [...set].map((tail) => tail.job)));
+  }
+}
+
+async function runDetachedTail(
+  input: DetachedTailInput,
+  signal: { readonly flushed: boolean; woken: Promise<void> },
+): Promise<void> {
+  try {
+    const now = input.now ?? Date.now;
+    const sleep = input.sleep ?? unrefSleep;
+    const deadline = now() + Math.max(0, input.waitMs);
+    let failures = 0;
+
+    for (;;) {
+      if (signal.flushed) {
+        break;
+      }
+
+      let status: string | undefined;
+
+      try {
+        status = (await input.client.beta.sessions.retrieve(input.sessionId))?.status;
+        failures = 0;
+      } catch (error) {
+        failures += 1;
+
+        if (failures >= DETACH_RETRIEVE_FAILURES) {
+          logger.warn(
+            `Session ${input.sessionId}: could not read its status after the detach (${(error as Error)?.message}) — ` +
+              'settling what has landed',
+          );
+          break;
+        }
+      }
+
+      if (status !== undefined && status !== 'running' && status !== 'rescheduling') {
+        break;
+      }
+
+      if (now() >= deadline) {
+        logger.warn(
+          `Session ${input.sessionId}: still ${status ?? 'unknown'} at the detach deadline — settling what has landed`,
+        );
+        break;
+      }
+
+      /* Never sleep past the deadline; a flush cuts the sleep short. */
+      await Promise.race([sleep(Math.max(1, Math.min(input.pollMs, deadline - now()))), signal.woken]);
+    }
+
+    const { waitMs: _waitMs, pollMs: _pollMs, sleep: _sleep, now: _now, ...settle } = input;
+    const settled = await settleManagedTurn({
+      ...settle,
+      generationId: `${input.generationId}_tail`,
+      anchorWhenEmpty: false,
+      requireBoundSession: true,
+    });
+
+    if (settled.settlement && settled.settlement.creditsCharged > 0) {
+      logger.info(
+        `Chat ${input.chatId}: billed ${settled.settlement.creditsCharged} credits for the detached turn's tail`,
+      );
+    }
+  } catch (error) {
+    logger.error(`Chat ${input.chatId}: could not settle the detached turn's tail: ${(error as Error)?.message}`);
+  }
 }
 
 /**

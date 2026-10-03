@@ -110,7 +110,7 @@ export const StreamingStatus = memo(({ progress: artifact }: { progress?: Artifa
     );
   }
 
-  const { label, detail, progress, fraction, expectation, note } = describeAgentStatus(status, now, artifact);
+  const { label, detail, progress, fraction, expectation, note, cost } = describeAgentStatus(status, now, artifact);
 
   return (
     <div className="mt-4 w-full rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-1 px-3 py-2">
@@ -118,7 +118,14 @@ export const StreamingStatus = memo(({ progress: artifact }: { progress?: Artifa
         <div className="text-base i-svg-spinners:90-ring-with-bg text-bolt-elements-item-contentAccent" />
         <span className="font-medium text-bolt-elements-textPrimary">{label}</span>
       </div>
-      <div className="mt-1 pl-6 text-xs text-bolt-elements-textSecondary">{detail}</div>
+      <div className="mt-1 pl-6 text-xs text-bolt-elements-textSecondary">
+        {detail}
+        {/*
+         * The running cost (managed — it settles once, at the end, so without this a long build looks
+         * free). An ESTIMATE, labelled as one; tabular figures so the row never resizes as it climbs.
+         */}
+        {cost && <span className="ml-1.5 tabular-nums text-bolt-elements-textTertiary">· {cost}</span>}
+      </div>
       {/*
        * The expectation bar: how far through a TYPICAL turn of this kind we are.
        *

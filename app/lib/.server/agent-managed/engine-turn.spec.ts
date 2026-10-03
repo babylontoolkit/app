@@ -34,7 +34,8 @@ import { setManagedClientForTests } from './config';
 import { runManagedGeneration } from './engine';
 import { createFakeManagedClient, type FakeClient, type Script } from './fake-session.testkit';
 import type { ManagedAgentRecord } from './record';
-import { settleManagedTurn } from './settle';
+import { flushDetachedTail, settleManagedTurn, waitForDetachTails } from './settle';
+import { releaseManagedSession } from './sessions';
 import { SUPERSEDED_RESULT } from './session-health';
 
 const MODEL = 'claude-sonnet-5-5';
@@ -103,6 +104,10 @@ beforeEach(async () => {
   vi.stubEnv('LLM_PROVIDER', 'Anthropic');
   vi.stubEnv('MANAGED_SUPERSEDE_WAIT_MS', '50');
 
+  /* D2's background tail settlement: short here so a detached turn's tail never outlives its test. */
+  vi.stubEnv('MANAGED_DETACH_SETTLE_WAIT_MS', '200');
+  vi.stubEnv('MANAGED_DETACH_SETTLE_POLL_MS', '5');
+
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'managed-turn-'));
   ledger = new FsLedger(path.join(tmp, 'ledger'));
   setLedger(ledger);
@@ -142,6 +147,9 @@ function memoryStore(): ObjectStore {
 }
 
 afterEach(async () => {
+  /* A detached turn's background tail settlement (D2) finishes BEFORE the stores it writes are unpinned. */
+  await waitForDetachTails();
+
   /* A detached turn's script waits forever on its unanswered call — by design; it is simply dropped. */
   setManagedClientForTests(undefined);
   setLedger(undefined);
@@ -410,6 +418,230 @@ describe('settlement is by cursor (T7)', () => {
       ),
     );
     expect((await settle('gen_tail2')).settlement?.creditsCharged).toBe(0);
+  });
+});
+
+describe('the ledger note names what priced a managed charge (managed-billing-visibility D3)', () => {
+  it('a managed settlement says "managed session", never "flat creation price"', async () => {
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'hi' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    await drive(await turn());
+
+    const debits = (await rows()).filter((e) => e.reason === 'generation');
+
+    expect(debits).toHaveLength(1);
+    expect(debits[0].note).toContain('managed session');
+    expect(debits[0].note).not.toContain('flat creation price');
+  });
+});
+
+describe('a detached turn settles its TAIL in the background (managed-billing-visibility D2)', () => {
+  /*
+   * The tab closes while the session is still RUNNING (a model request in flight). The detached request
+   * settles what had accrued; the session then makes another request and idles on a tool call nobody
+   * answers. Without a background tail settlement that second request is billed only if this chat is
+   * ever settled again — a chat nobody reopens never pays for it.
+   */
+  let release: () => void;
+
+  function scriptThatOutlivesTheTab(): Script {
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    return async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Starting.' }] });
+      api.modelRequest(USAGE_1);
+      await released;
+      api.modelRequest(USAGE_2);
+      await api.callTool('project_write', { path: 'src/a.ts', content: 'a' });
+    };
+  }
+
+  /** Run a turn and close the tab on its first narration. */
+  async function detachOnFirstText() {
+    const controller = new AbortController();
+    const generation = await turn({ abortSignal: controller.signal });
+
+    try {
+      for await (const chunk of generation.textStream) {
+        if (chunk.type === 'text') {
+          controller.abort();
+        }
+      }
+    } catch {
+      // A detach may surface as the stream's abort — either way the turn settled in its finally.
+    }
+
+    await generation.settlement;
+
+    return generation;
+  }
+
+  const charged = async () => (await rows()).filter((e) => e.reason === 'generation').map((e) => -e.delta);
+
+  it('the usage the session runs AFTER the detach is billed once, when it idles', async () => {
+    fake.script = scriptThatOutlivesTheTab();
+    await detachOnFirstText();
+
+    expect(await charged()).toEqual([creditsFor(USAGE_1)]);
+
+    release();
+    await waitForDetachTails();
+
+    expect(await charged()).toEqual([creditsFor(USAGE_1), creditsFor(USAGE_2)]);
+  });
+
+  it('a resume that settled the tail FIRST leaves the background settlement nothing to charge', async () => {
+    vi.stubEnv('MANAGED_DETACH_SETTLE_POLL_MS', '200');
+    fake.script = scriptThatOutlivesTheTab();
+    await detachOnFirstText();
+
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    /* The reopened tab's settlement (what a resume runs at its end). */
+    await settleManagedTurn({
+      client: fake.client,
+      sessionId: 'sesn_1',
+      projectId: PROJECT,
+      chatId,
+      userId: USER.id,
+      generationId: 'gen_resume',
+      model: MODEL,
+      statusKind: 'edit',
+      sessionHourUsd: 0.08,
+      context: {},
+    });
+    await waitForDetachTails();
+
+    expect(await charged()).toEqual([creditsFor(USAGE_1), creditsFor(USAGE_2)]);
+  });
+
+  it('a session that never stops is settled at the deadline', async () => {
+    vi.stubEnv('MANAGED_DETACH_SETTLE_WAIT_MS', '60');
+    fake.script = (async (api) => {
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'Starting.' }] });
+      api.modelRequest(USAGE_1);
+      await new Promise(() => undefined);
+    }) satisfies Script;
+    await detachOnFirstText();
+
+    /* Still running: a request ends after the detach, and the session never idles. */
+    const session = fake.sessions.get('sesn_1')!;
+    const at = new Date(Date.parse(session.events.at(-1)!.created_at!) + 500).toISOString();
+
+    session.events.push({
+      type: 'span.model_request_end',
+      id: 'late',
+      processed_at: at,
+      created_at: at,
+      model_usage: USAGE_2,
+    });
+    expect(session.status).toBe('running');
+
+    await waitForDetachTails();
+
+    expect(await charged()).toEqual([creditsFor(USAGE_1), creditsFor(USAGE_2)]);
+  });
+
+  it('a throwing retrieve never throws out of the background settlement', async () => {
+    fake.script = scriptThatOutlivesTheTab();
+    await detachOnFirstText();
+
+    const sessions = fake.client.beta.sessions as unknown as { retrieve: () => Promise<never> };
+
+    sessions.retrieve = async () => {
+      throw new Error('anthropic is down');
+    };
+    release();
+
+    await expect(waitForDetachTails()).resolves.toBeUndefined();
+    expect(await charged()).toEqual([creditsFor(USAGE_1)]);
+  });
+
+  /*
+   * Verifier finding: a tail still WAITING when the user starts a new turn on the same session would see
+   * the new turn as `running`, and at its deadline bill part of the NEW turn under the old turn's id — so a
+   * refund of the failed new turn refunded only its own share. A turn start flushes the pending tail first.
+   */
+  it('a new turn FLUSHES a pending tail: the tail bills only the old usage, the new turn only its own, and its refund is exact', async () => {
+    vi.stubEnv('MANAGED_DETACH_SETTLE_POLL_MS', '60000');
+    vi.stubEnv('MANAGED_DETACH_SETTLE_WAIT_MS', '1500');
+
+    /* A balance to refund into (the ledger refuses a refund that would leave it negative). */
+    await ledger.append({ userId: USER.id, delta: 10_000, reason: 'grant' });
+    fake.script = scriptThatOutlivesTheTab();
+    await detachOnFirstText();
+
+    /* The old turn's post-detach request lands; the tail is asleep (long poll) and has not seen it. */
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(await charged()).toEqual([creditsFor(USAGE_1)]);
+
+    /* The new turn makes a request and then FAILS with nothing written — refund-eligible. */
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_3);
+      api.emit({ type: 'session.status_terminated' });
+    }) satisfies Script;
+
+    const next = await drive(await turn({ messages: [userMessage('try again')] }));
+
+    expect(next.error).toBeDefined();
+
+    const all = await rows();
+    const debits = all.filter((e) => e.reason === 'generation');
+    const refunds = all.filter((e) => e.reason === 'refund');
+
+    expect(debits.map((e) => -e.delta)).toEqual([creditsFor(USAGE_1), creditsFor(USAGE_2), creditsFor(USAGE_3)]);
+    expect(debits[1].generationId).toMatch(/_tail$/);
+    expect(refunds.map((e) => e.delta)).toEqual([creditsFor(USAGE_3)]);
+    expect(refunds[0].generationId).toBe(debits[2].generationId);
+  });
+
+  it('CONTROL: with no pending tail a turn start flushes nothing and bills only its own usage', async () => {
+    expect(await flushDetachedTail({ projectId: PROJECT, chatId })).toBe(false);
+
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+    await drive(await turn());
+
+    const debits = (await rows()).filter((e) => e.reason === 'generation');
+
+    expect(debits.map((e) => -e.delta)).toEqual([creditsFor(USAGE_1)]);
+    expect(debits.some((e) => e.generationId?.endsWith('_tail'))).toBe(false);
+  });
+
+  it('a flush after the tail already finished is a no-op', async () => {
+    fake.script = scriptThatOutlivesTheTab();
+    await detachOnFirstText();
+    release();
+    await waitForDetachTails();
+
+    const before = await rows();
+
+    expect(await flushDetachedTail({ projectId: PROJECT, chatId })).toBe(false);
+    expect(await rows()).toEqual(before);
+  });
+
+  it('a chat moved to another session during the wait is never billed the old session again', async () => {
+    vi.stubEnv('MANAGED_DETACH_SETTLE_POLL_MS', '200');
+    fake.script = scriptThatOutlivesTheTab();
+    await detachOnFirstText();
+
+    /* A tier switch released the session (its own tail settled there) — the cursor went with it. */
+    await releaseManagedSession(PROJECT, chatId, 'sesn_1', {});
+    release();
+    await waitForDetachTails();
+
+    expect(await charged()).toEqual([creditsFor(USAGE_1)]);
   });
 });
 
@@ -1246,5 +1478,45 @@ describe('the status panel sees the turn’s live step (owner, 2026-10-02)', () 
 
     expect(run.error).toBeUndefined();
     expect(seen).toEqual(['Thinking', 'Writing src/scripts/Drift.ts', 'Working out the next step']);
+  });
+});
+
+describe('the status panel sees the turn’s running cost (managed-billing-visibility D1)', () => {
+  it('the estimate shown during the turn is what the turn then settles — and nothing is written while it runs', async () => {
+    let shown: number | null | undefined;
+    let rowsWhileRunning = -1;
+    let generation: AgentGeneration | null = null;
+
+    fake.script = (async (api) => {
+      api.modelRequest(USAGE_1);
+
+      /* The session reports its cumulative usage (the live API sends `session.usage` at each idle). */
+      const usage = USAGE_1;
+      api.emit({
+        type: 'session.usage',
+        usage: {
+          input_tokens: usage.input_tokens,
+          output_tokens: usage.output_tokens,
+          cache_read_input_tokens: usage.cache_read_input_tokens,
+          cache_creation: { ephemeral_5m_input_tokens: usage.cache_creation_input_tokens },
+          active_seconds: 0,
+          list_cost: { amount: '0', currency: 'USD' },
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      shown = generation?.currentCreditsEstimate?.();
+      rowsWhileRunning = (await rows()).length;
+      api.emit({ type: 'agent.message', content: [{ type: 'text', text: 'ok' }] });
+      api.endTurn();
+    }) satisfies Script;
+
+    generation = await turn();
+
+    const run = await drive(generation);
+    const settled = (await run.generation.settlement)?.creditsCharged;
+
+    expect(rowsWhileRunning).toBe(0);
+    expect(settled).toBeGreaterThan(0);
+    expect(shown).toBe(settled);
   });
 });

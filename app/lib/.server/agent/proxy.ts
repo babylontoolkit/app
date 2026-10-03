@@ -585,6 +585,12 @@ export interface AgentGeneration {
    */
   currentStep?: () => { label: string; since: number } | null;
 
+  /**
+   * The turn's running cost as an ESTIMATE of what settlement would charge now (managed only —
+   * `agent-managed/credits-estimate.ts`). Optional: the legacy engine settles per step and sends none.
+   */
+  currentCreditsEstimate?: () => number | null;
+
   /** Skills loaded during this generation — mutated by the tool loop as it runs. */
   toolContext: SkillToolContext;
 

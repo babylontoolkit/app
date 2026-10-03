@@ -180,6 +180,15 @@ export interface SettleInput {
    */
   rawCostOverrideUsd?: number;
 
+  /**
+   * What priced this charge, named in the ledger note in place of the flat-price suffix
+   * (`_specs/managed-billing-visibility_plan.md` D3). The managed engine passes its session charge through
+   * `flatCredits` and labels it `managed session` — without this every managed row read "— flat creation
+   * price", which is wrong on every edit and reads like a mis-bill to anyone reconciling the ledger. Absent
+   * → the old suffix for a flat price, nothing otherwise.
+   */
+  chargeLabel?: string;
+
   context?: unknown;
 }
 
@@ -402,7 +411,11 @@ export async function settleGeneration(input: SettleInput): Promise<Settlement |
        */
       note:
         `${input.model}: ${input.usage.promptTokens} in / ${input.usage.completionTokens} out` +
-        (Math.floor(input.flatCredits ?? 0) > 0 && credits > 0 ? ' — flat creation price' : ''),
+        (input.chargeLabel
+          ? ` — ${input.chargeLabel}`
+          : Math.floor(input.flatCredits ?? 0) > 0 && credits > 0
+            ? ' — flat creation price'
+            : ''),
     });
 
     logger.info(

@@ -510,3 +510,54 @@ describe('the observed step rides the heartbeat (managed engine)', () => {
     expect(writes.every((w) => !('step' in w))).toBe(true);
   });
 });
+
+describe('the live credit estimate rides the heartbeat (managed-billing-visibility D1)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('carries creditsSoFar when the source reports one', () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s), { creditsSoFar: () => 1234 });
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+    hb.stop();
+
+    expect(writes.at(-1)).toMatchObject({ creditsSoFar: 1234 });
+  });
+
+  it('CONTROL: no source (legacy) → no creditsSoFar key on the wire', () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const hb = createHeartbeat('gen-1', (s) => writes.push(s));
+
+    vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+    hb.stop();
+
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes.every((w) => !('creditsSoFar' in w))).toBe(true);
+  });
+
+  it('a throwing or unknown source drops the field, never the heartbeat', () => {
+    for (const source of [
+      () => {
+        throw new Error('boom');
+      },
+      () => null,
+      () => Number.NaN,
+      () => -3,
+    ]) {
+      const writes: Array<Record<string, unknown>> = [];
+      const hb = createHeartbeat('gen-1', (s) => writes.push(s), { creditsSoFar: source });
+
+      vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+      hb.stop();
+
+      expect(writes.length).toBeGreaterThan(0);
+      expect(writes.every((w) => !('creditsSoFar' in w))).toBe(true);
+    }
+  });
+});

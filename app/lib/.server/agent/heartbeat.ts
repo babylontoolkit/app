@@ -167,6 +167,13 @@ export interface AgentStatusPart {
   /** How long the current step has run, per the server's clock. Sent with `step` only. */
   stepElapsedMs?: number;
 
+  /**
+   * What the turn has cost so far — an ESTIMATE of what settlement would charge right now
+   * (`_specs/managed-billing-visibility_plan.md` D1). Only the managed engine sends it (it settles once,
+   * at the turn's end, so without this a half-hour build looks free). Absent → the panel shows no cost.
+   */
+  creditsSoFar?: number;
+
   [key: string]: string | number | undefined;
 }
 
@@ -211,6 +218,20 @@ export interface HeartbeatOptions {
 
   /** Pull the turn's current observed step at tick time (`AgentGeneration.currentStep`). */
   step?: () => { label: string; since: number } | null | undefined;
+
+  /** Pull the turn's running credit estimate at tick time (`AgentGeneration.currentCreditsEstimate`). */
+  creditsSoFar?: () => number | null | undefined;
+}
+
+/** A throwing or non-numeric estimate loses the field for that tick, never the heartbeat. */
+function creditsFields(source: HeartbeatOptions['creditsSoFar']) {
+  try {
+    const value = source?.();
+
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? { creditsSoFar: Math.round(value) } : {};
+  } catch {
+    return {};
+  }
 }
 
 /** A throwing step source loses the step for that tick, never the heartbeat itself (liveness comes first). */
@@ -294,6 +315,7 @@ export function createHeartbeat(
         ...(options.deliveryMode ? { deliveryMode: options.deliveryMode } : {}),
         ...(typeof options.typicalMs === 'number' ? { typicalMs: options.typicalMs } : {}),
         ...stepFields(readStep(options.step), now),
+        ...creditsFields(options.creditsSoFar),
       });
     } catch {
       // A status channel must never break the generation it narrates.

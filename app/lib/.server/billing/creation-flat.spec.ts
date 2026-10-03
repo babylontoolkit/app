@@ -516,6 +516,32 @@ describe('settlement with a flat price (retained lever, driven against the real 
     expect(debit!.note).toContain('flat creation price');
   });
 
+  /*
+   * A caller that priced the charge itself NAMES its pricing (managed-billing-visibility D3): the managed
+   * engine passes its session charge through `flatCredits`, and every one of its rows read "flat creation
+   * price" — wrong on every edit, and it reads like a billing bug. The test above is the CONTROL: no label
+   * keeps the old suffix.
+   */
+  it('a chargeLabel replaces the flat suffix in the note', async () => {
+    await ledger.append({ userId: 'u1', delta: 10_000, reason: 'grant' });
+
+    await settleGeneration({
+      userId: 'u1',
+      generationId: 'g-labelled',
+      model: 'claude-sonnet-5',
+      provider: 'Anthropic',
+      usage,
+      flatCredits: 42,
+      chargeLabel: 'managed session',
+    });
+
+    const debit = (await ledger.list('u1')).find((r) => r.reason === 'generation');
+
+    expect(debit!.delta).toBe(-42);
+    expect(debit!.note).toContain('managed session');
+    expect(debit!.note).not.toContain('flat creation price');
+  });
+
   it('does NOT mark an ordinary cost-derived debit as flat-priced', async () => {
     await ledger.append({ userId: 'u1', delta: 10_000, reason: 'grant' });
 

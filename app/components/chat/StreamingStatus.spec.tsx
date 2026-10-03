@@ -236,3 +236,32 @@ describe('StreamingStatus — sounds in the render line', () => {
     expect(screen.getByText('Generating 1 image…')).toBeInTheDocument();
   });
 });
+
+describe('StreamingStatus — the live credit estimate (managed-billing-visibility D1)', () => {
+  it('shows ~N credits so far beside the step, in tabular figures', () => {
+    updateAgentStatus({
+      type: 'agent-status',
+      generationId: 'gen-1',
+      seq: 1,
+      phase: 'thinking',
+      elapsedMs: 5000,
+      step: 'Thinking',
+      stepElapsedMs: 4000,
+      creditsSoFar: 312,
+    });
+    render(<StreamingStatus />);
+
+    const cost = screen.getByText(/~312 credits so far/);
+
+    expect(cost).toBeInTheDocument();
+    expect(cost.className).toContain('tabular-nums');
+    expect(screen.getByText(/Thinking ·/)).toBeInTheDocument();
+  });
+
+  it('CONTROL: no estimate on the wire (legacy) → no cost text', () => {
+    liveHeartbeat();
+    render(<StreamingStatus />);
+
+    expect(screen.queryByText(/credits so far/)).toBeNull();
+  });
+});

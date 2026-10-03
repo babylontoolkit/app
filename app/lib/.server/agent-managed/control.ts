@@ -217,6 +217,9 @@ export async function settleStoppedTail(input: {
 
       /* Nothing new since the turn's own settlement → no empty `generations` row for the Stop. */
       anchorWhenEmpty: false,
+
+      /* A chat moved to another session while we waited must not be billed this one's history again. */
+      requireBoundSession: true,
     });
   } catch (error) {
     logger.error(`Chat ${input.chatId}: could not settle the stopped turn's tail: ${(error as Error)?.message}`);

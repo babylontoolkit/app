@@ -704,3 +704,31 @@ describe('the observed step (managed engine)', () => {
     expect(agentStatusStore.get()!.step).toBeUndefined();
   });
 });
+
+describe('the live credit estimate (managed-billing-visibility D1)', () => {
+  beforeEach(() => resetAgentStatus());
+
+  it('keeps creditsSoFar and shows it as an estimate', () => {
+    updateAgentStatus(part({ step: 'Thinking', stepElapsedMs: 1000, creditsSoFar: 1234 }), 1000);
+
+    const status = agentStatusStore.get()!;
+
+    expect(status.creditsSoFar).toBe(1234);
+    expect(describeAgentStatus(status, 1000).cost).toBe('~1,234 credits so far');
+  });
+
+  it('one credit is singular', () => {
+    updateAgentStatus(part({ creditsSoFar: 1 }), 1000);
+
+    expect(describeAgentStatus(agentStatusStore.get()!, 1000).cost).toBe('~1 credit so far');
+  });
+
+  it('CONTROL: absent (legacy), zero or junk → no cost line', () => {
+    for (const creditsSoFar of [undefined, 0, -5, Number.NaN, '12']) {
+      resetAgentStatus();
+      updateAgentStatus(part(creditsSoFar === undefined ? {} : { creditsSoFar }), 1000);
+
+      expect(describeAgentStatus(agentStatusStore.get()!, 1000).cost).toBeUndefined();
+    }
+  });
+});

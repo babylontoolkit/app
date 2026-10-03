@@ -606,6 +606,9 @@ async function streamGeneration(
 
       /* What the turn is doing right now — the managed engine observes it from session events. */
       step: () => generation.currentStep?.() ?? null,
+
+      /* And what it has cost so far — an estimate; the ledger shows the settled number (managed only). */
+      creditsSoFar: () => generation.currentCreditsEstimate?.() ?? null,
     },
   );
 
