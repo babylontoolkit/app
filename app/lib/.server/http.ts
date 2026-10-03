@@ -49,6 +49,9 @@ export const SAFE_ERRORS: ReadonlySet<string> = new Set([
    * the button being broken (`share/build-failure.ts`, the same lesson one door over).
    */
   'RateLimitedError',
+
+  /* A delete or chat move refused until a managed session's billing is secured (no-unbilled-usage R1-b). */
+  'ManagedSettlementUnconfirmedError',
   'UnsupportedGitHostError',
   'CloneTooLargeError',
   'LfsPointerError',

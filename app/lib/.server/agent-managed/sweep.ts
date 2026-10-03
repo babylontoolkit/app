@@ -22,7 +22,7 @@ import { getChatIndex } from '~/lib/.server/projects/chat-index';
 import { getProjectStore } from '~/lib/.server/projects/store';
 import { createScopedLogger } from '~/utils/logger';
 import { getManagedEngineConfig } from './config';
-import { getManagedOrphanStore, type ManagedOrphan, type ManagedOrphanStore } from './orphans';
+import { advanceOpenOrphan, getManagedOrphanStore, type ManagedOrphan, type ManagedOrphanStore } from './orphans';
 import { sessionModel } from './session-health';
 import {
   hasPendingDetachTail,
@@ -163,11 +163,64 @@ export function orphanCursorIO(orphan: ManagedOrphan, store: ManagedOrphanStore)
 
 /** Settle one orphan (D4). Resolves it once its usage is accounted for. Never throws. */
 async function settleOrphan(
-  orphan: ManagedOrphan,
+  listed: ManagedOrphan,
   input: { client: Anthropic; context?: unknown },
   report: ManagedSweepReport,
 ): Promise<void> {
+  let orphan = listed;
   const store = getManagedOrphanStore(input.context);
+
+  /*
+   * 🔴 ONE BILLING OWNER (no-unbilled-usage R2). A chat that still holds this session OWNS its usage — it is
+   * settled from the chat's cursor (pass b). Settling the orphan too would bill the same usage twice, and its
+   * mid-turn branch would interrupt a LIVE turn. So the orphan is deferred while the chat is bound: its pending
+   * intents are still debited by pass (c) (idempotent, migration 0029), its cursor is advanced to the chat's so
+   * it never trails what the chat billed, and it takes over once the chat lets go. A binding that cannot be
+   * read defers too — the next sweep decides.
+   */
+  let chatCursor: string | null | undefined;
+
+  try {
+    const row = await getChatIndex(input.context).get(orphan.chatId);
+
+    if (row && row.projectId === orphan.projectId && row.managedSessionId === orphan.sessionId) {
+      chatCursor = row.managedSettledAt ?? null;
+    }
+  } catch (error) {
+    logger.warn(`Orphan ${orphan.id}: its chat's binding could not be read — deferred: ${(error as Error)?.message}`);
+    report.skipped += 1;
+
+    return;
+  }
+
+  if (chatCursor !== undefined) {
+    await advanceOpenOrphan(input.context, orphan.sessionId, chatCursor);
+    report.skipped += 1;
+
+    return;
+  }
+
+  /*
+   * RE-READ after the binding check (R2-b). The record in hand came from `listOpen`, which may predate a rebind
+   * that advanced it and THEN released the chat; a binding that reads unbound proves the advance already landed
+   * (it is written before the release), so only a fresh read carries it. Billing from the listed copy would
+   * re-bill what the chat billed. Gone (withdrawn) or resolved meanwhile → nothing to do.
+   */
+  try {
+    const fresh = await store.openForSession(orphan.sessionId);
+
+    if (!fresh) {
+      report.skipped += 1;
+      return;
+    }
+
+    orphan = fresh;
+  } catch (error) {
+    logger.warn(`Orphan ${orphan.id}: could not re-read it — deferred: ${(error as Error)?.message}`);
+    report.skipped += 1;
+
+    return;
+  }
 
   try {
     let session;

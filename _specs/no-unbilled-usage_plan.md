@@ -108,9 +108,9 @@ Also: web search debits AFTER the vendor is paid and only logs a failed debit (`
 - [x] **T7 — Bill the step in flight.** D7. Tests: a stream that breaks after `message_start` bills its
   input/cache tokens; a retry attempt that broke after `message_start` is billed; tool-loop-off abort bills
   what was consumed.
-- [ ] **T8 — Enhancer.** D8. Test: a provider error before streaming settles (zero or partial) instead of
+- [x] **T8 — Enhancer.** D8. Test: a provider error before streaming settles (zero or partial) instead of
   hanging.
-- [ ] **T9 — Media + web search.** D9. Tests: create timeout → no refund, task `unknown`, no blind retry;
+- [x] **T9 — Media + web search.** D9. Tests: create timeout → no refund, task `unknown`, no blind retry;
   explicit 4xx → refund; web search debits before the vendor call.
 - [ ] **T10 — Docs + gates.** SPEC §4.6 + `spec/billing.md` (the no-unbilled-usage rule, the sweep, the
   sanctioned-absorption list D10) + CLAUDE.md one entry; `pnpm typecheck && pnpm lint:fix && pnpm lint &&

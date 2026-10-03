@@ -12,7 +12,12 @@
 import type { ObjectStore } from '~/lib/.server/storage';
 import type { MediaEndpoint, MediaProviderName, RetiredMediaProviderName } from './provider';
 
-export type MediaTaskStatus = 'pending' | 'succeeded' | 'failed';
+/*
+ * `unknown` (no-unbilled-usage D9): the create may have been ACCEPTED but we hold no task id to poll — a
+ * timeout, a reset after send, a 5xx with no definite refusal. The debit STANDS (the provider may be
+ * charging us for the render) and an admin reconciles it (Admin → Usage). Terminal for the poll path.
+ */
+export type MediaTaskStatus = 'pending' | 'succeeded' | 'failed' | 'unknown';
 
 export interface MediaTaskRecord {
   /** `med_…` — also the id of the anchoring `generations` row and the ledger debit's generationId. */
@@ -81,6 +86,16 @@ export interface MediaTaskRecord {
 
   /** Set when the failure refund has been appended — the poll path's idempotency latch. */
   refunded?: boolean;
+
+  /**
+   * The credits of the cut-out stage alone, fixed at creation from the quote (no-unbilled-usage D9). When
+   * stage 1 rendered (we paid the provider) and the cut-out cannot start, ONLY this share is refunded —
+   * stage 1's charge stands. Absent on records written before it existed (re-derived from the price list).
+   */
+  cutoutCredits?: number;
+
+  /** What the failure refund actually returned, when it was not the whole `credits` (a partial refund). */
+  refundedCredits?: number;
 
   createdAt: string;
   updatedAt: string;

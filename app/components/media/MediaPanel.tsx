@@ -470,7 +470,7 @@ interface TaskRow {
   model: string;
   prompt: string;
   destPath: string;
-  status: 'pending' | 'succeeded' | 'failed';
+  status: 'pending' | 'succeeded' | 'failed' | 'unknown';
   credits: number;
   error?: string;
 }
@@ -878,7 +878,9 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
                       ? 'i-ph:check-circle text-green-500'
                       : task.status === 'failed'
                         ? 'i-ph:x-circle text-red-500'
-                        : 'i-svg-spinners:90-ring-with-bg text-bolt-elements-textSecondary'
+                        : task.status === 'unknown'
+                          ? 'i-ph:question text-amber-500'
+                          : 'i-svg-spinners:90-ring-with-bg text-bolt-elements-textSecondary'
                   }
                 />
                 <div className="flex-1 min-w-0">
@@ -886,6 +888,7 @@ export function MediaPanel({ projectId, onClose }: MediaPanelProps) {
                   <div className="text-bolt-elements-textTertiary truncate">
                     {task.destPath} · {task.credits} credits
                     {task.status === 'failed' && ` · refunded${task.error ? ` — ${task.error}` : ''}`}
+                    {task.status === 'unknown' && ' · not confirmed by the provider — credits held for review'}
                   </div>
                 </div>
                 {task.status === 'pending' && (

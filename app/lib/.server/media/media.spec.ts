@@ -24,11 +24,14 @@ import { setMediaDispatcher } from './dispatch';
 import {
   buildProviderPayload,
   deriveDestPath,
+  MEDIA_UNCONFIRMED_REASON,
   MediaRefusedError,
   pollMediaTask,
   quoteMediaRequest,
+  setMediaRecordSaveDelaysForTests,
   startMediaTask,
 } from './service';
+import { MediaCreateError } from './create-failure';
 
 const USER = 'user-1';
 const PROJECT = 'proj-1';
@@ -178,6 +181,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   setMediaDispatcher(undefined);
+  setMediaRecordSaveDelaysForTests(undefined);
   setLedger(undefined);
   setGenerationStore(undefined);
   setObjectStore(undefined);
@@ -421,7 +425,10 @@ describe('starting a render (billing enforced)', () => {
     await grant(100);
 
     const provider = new FakeProvider();
-    provider.createError = new Error('moderation flag');
+    provider.createError = new MediaCreateError(
+      'KIE createTask failed: {"code":422,"msg":"moderation flag"}',
+      'refused',
+    );
 
     await expect(startMediaTask(imageInput({ provider }))).rejects.toMatchObject({ statusCode: 502 });
 
@@ -430,17 +437,111 @@ describe('starting a render (billing enforced)', () => {
   });
 
   /*
+   * 🔴 no-unbilled-usage D9 — an AMBIGUOUS create keeps its debit. A timeout says nothing about whether the
+   * provider accepted the render; if it did, it is rendering on OUR account. Refunding it handed out a free
+   * render, and the old dispatch then retried it into an un-debited duplicate.
+   */
+  describe('an ambiguous create (D9)', () => {
+    function timeoutError() {
+      return Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    }
+
+    it('is NOT refunded: the debit stands, the task is `unknown`, the row is unconfirmed', async () => {
+      await grant(100);
+
+      const provider = new FakeProvider();
+      const objectStore = memoryStore();
+      provider.createError = timeoutError();
+
+      const refusal = await startMediaTask(imageInput({ provider, objectStore })).catch((error) => error);
+
+      expect(refusal).toMatchObject({ name: 'MediaRefusedError', statusCode: 502 });
+      expect(refusal.message).toMatch(/held until it is reconciled/);
+      expect(await ledger.balance(USER), 'no refund for a render that may be running').toBe(76);
+      expect((await ledger.list(USER)).filter((e) => e.reason === 'refund')).toHaveLength(0);
+
+      const id = upserts[0].id;
+      const record = await getMediaTask(objectStore, PROJECT, id);
+
+      expect(record).toMatchObject({ status: 'unknown', credits: 24, kieTaskId: '' });
+      expect(upserts.at(-1)).toMatchObject({
+        id,
+        status: 'interrupted',
+        finishReason: MEDIA_UNCONFIRMED_REASON,
+        creditsCharged: 24,
+      });
+    });
+
+    it('is never retried blind through the real queue — one create, never a duplicate', async () => {
+      await grant(100);
+      setMediaDispatcher(undefined);
+
+      const provider = new FakeProvider();
+      let calls = 0;
+
+      provider.create = async () => {
+        calls++;
+        throw timeoutError();
+      };
+
+      await expect(startMediaTask(imageInput({ provider }))).rejects.toMatchObject({ statusCode: 502 });
+      expect(calls, 'a timeout may have been accepted — a retry would start an un-debited render').toBe(1);
+    });
+
+    it('an untyped error with no definite refusal is ambiguous too (the safe default)', async () => {
+      await grant(100);
+
+      const provider = new FakeProvider();
+      provider.createError = new Error('socket hang up');
+
+      await expect(startMediaTask(imageInput({ provider }))).rejects.toMatchObject({ statusCode: 502 });
+      expect(await ledger.balance(USER)).toBe(76);
+    });
+
+    /* CONTROL — an explicit 4xx refusal still refunds at once. */
+    it('CONTROL: an explicit HTTP 4xx refusal refunds', async () => {
+      await grant(100);
+
+      const provider = new FakeProvider();
+      provider.createError = new Error('fal refused the request (HTTP 422): bad option');
+
+      await expect(startMediaTask(imageInput({ provider }))).rejects.toMatchObject({ statusCode: 502 });
+      expect(await ledger.balance(USER)).toBe(100);
+      expect(upserts.at(-1)?.status).toBe('failed');
+    });
+
+    /* CONTROL — a request that never left (connection refused before sending) refunds. */
+    it('CONTROL: a create that was never sent refunds', async () => {
+      await grant(100);
+
+      const provider = new FakeProvider();
+      provider.createError = new MediaCreateError('connect ECONNREFUSED', 'not-sent', true);
+
+      await expect(startMediaTask(imageInput({ provider }))).rejects.toMatchObject({ statusCode: 502 });
+      expect(await ledger.balance(USER)).toBe(100);
+    });
+  });
+
+  /*
    * The fifth terminal state (`spec/fail-loud.md`): debited, rendering at KIE, and NO task record —
    * so nothing can ever poll it and nothing can ever refund it. The caller only sees "could not
    * start", which reads as a refusal that cost nothing. Money gone, silently.
    */
-  it('refunds when the task record cannot be stored — a render nothing can poll is a failure', async () => {
+  /*
+   * 🔴 no-unbilled-usage D9: the render STARTED and is billed to us, so a task record that cannot be stored
+   * is no longer refunded (that handed out a free render on every store hiccup). The save is retried; if it
+   * still fails, the debit stands, the row is unconfirmed with the provider's task id, and it is said out loud.
+   */
+  it('keeps the debit when the task record cannot be stored — and marks the render unconfirmed', async () => {
     await grant(100);
+    setMediaRecordSaveDelaysForTests([0, 0]);
 
     const provider = new FakeProvider();
     const objectStore = memoryStore();
+    let puts = 0;
 
     objectStore.put = async () => {
+      puts++;
       throw new Error('object store unavailable');
     };
 
@@ -449,9 +550,36 @@ describe('starting a render (billing enforced)', () => {
       statusCode: 500,
     });
 
-    expect(provider.created, 'the render did start — that is why this must refund').toHaveLength(1);
-    expect(await ledger.balance(USER), 'the debit came back').toBe(100);
-    expect(upserts.at(-1)?.status).toBe('failed');
+    expect(provider.created, 'the render did start').toHaveLength(1);
+    expect(puts, 'the save was retried, bounded').toBe(3);
+    expect(await ledger.balance(USER), 'the render is running on our account — the debit stands').toBe(76);
+    expect(upserts.at(-1)).toMatchObject({ status: 'interrupted', finishReason: MEDIA_UNCONFIRMED_REASON });
+    expect(upserts.at(-1)?.error, 'the provider task id, so an admin can find the render').toContain('kie-1');
+  });
+
+  it('a record save that succeeds on retry starts the task normally', async () => {
+    await grant(100);
+    setMediaRecordSaveDelaysForTests([0, 0]);
+
+    const provider = new FakeProvider();
+    const objectStore = memoryStore();
+    const realPut = objectStore.put.bind(objectStore);
+    let puts = 0;
+
+    objectStore.put = async (...args: Parameters<typeof realPut>) => {
+      puts++;
+
+      if (puts === 1) {
+        throw new Error('blip');
+      }
+
+      return realPut(...args);
+    };
+
+    const started = await startMediaTask(imageInput({ provider, objectStore }));
+
+    expect(await getMediaTask(objectStore, PROJECT, started.taskId)).toMatchObject({ status: 'pending' });
+    expect(await ledger.balance(USER)).toBe(76);
   });
 
   it('anchors a generations row BEFORE the debit (the FK rule)', async () => {
@@ -689,10 +817,17 @@ describe('the cut-out pass', () => {
     expect(await ledger.balance(USER), 'a delivered cut-out keeps its charge').toBe(74);
   });
 
-  it('fails LOUDLY and refunds in full when the cut-out cannot start', async () => {
+  /*
+   * 🔴 no-unbilled-usage D9: stage 1 RENDERED — the provider billed us for it — so a cut-out that cannot
+   * start refunds ONLY the cut-out's share. It used to refund both stages, i.e. the platform absorbed every
+   * render whose stage 2 failed to start. The task still FAILS (never the opaque render in its place).
+   */
+  it('fails LOUDLY and refunds ONLY the cut-out share when the cut-out cannot start', async () => {
     const provider = new FakeProvider();
     const objectStore = memoryStore();
     const started = await startTransparent(provider, objectStore);
+
+    expect(started.credits, 'render 24 + cut-out 2').toBe(26);
 
     provider.state = { state: 'succeeded', resultUrl: RENDER_URL };
     provider.createError = new Error('recraft is down');
@@ -704,11 +839,12 @@ describe('the cut-out pass', () => {
       objectStore,
     });
 
-    expect(task).toMatchObject({ status: 'failed', refunded: true });
+    expect(task).toMatchObject({ status: 'failed', refunded: true, refundedCredits: 2 });
     expect(task?.error).toMatch(/cut-out pass could not start/);
+    expect(task?.error).toMatch(/24 credits stand/);
     expect(task?.resultUrl, 'the opaque render is NOT quietly substituted').toBeUndefined();
-    expect(await ledger.balance(USER), 'both stages refunded').toBe(100);
-    expect(upserts.at(-1)?.status).toBe('failed');
+    expect(await ledger.balance(USER), "the cut-out's 2 came back; the render's 24 stand").toBe(76);
+    expect(upserts.at(-1)).toMatchObject({ status: 'failed', creditsCharged: 24 });
   });
 
   it('refunds BOTH stages when the render itself fails', async () => {
@@ -1647,7 +1783,7 @@ describe('fal.ai — transparent images, the cut-out pass per gateway (T4)', () 
     expect(await ledger.balance(USER)).toBe(44);
   });
 
-  it('a fal cut-out that cannot start fails and refunds in full', async () => {
+  it('a fal cut-out that cannot start fails and refunds only the cut-out share (D9)', async () => {
     const provider = new FakeProvider('FAL');
     const objectStore = memoryStore();
     const started = await startTransparent(provider, objectStore);
@@ -1665,7 +1801,12 @@ describe('fal.ai — transparent images, the cut-out pass per gateway (T4)', () 
     expect(task).toMatchObject({ status: 'failed', refunded: true });
     expect(task?.error).toMatch(/cut-out pass could not start/);
     expect(task?.resultUrl, 'the opaque render is NOT quietly substituted').toBeUndefined();
-    expect(await ledger.balance(USER), 'both stages refunded').toBe(100);
+
+    const share = task!.refundedCredits!;
+
+    expect(share).toBeGreaterThan(0);
+    expect(share, 'never the whole task').toBeLessThan(started.credits);
+    expect(await ledger.balance(USER), 'only the cut-out share came back').toBe(100 - started.credits + share);
   });
 
   it('refuses the fal cut-out as a primary model before any debit', () => {

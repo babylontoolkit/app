@@ -30,9 +30,10 @@ export interface MediaTaskHandle {
 }
 
 interface MediaTaskStatus {
-  status: 'pending' | 'succeeded' | 'failed';
+  status: 'pending' | 'succeeded' | 'failed' | 'unknown';
   error?: string;
   credits?: number;
+  refundedCredits?: number;
 }
 
 /** Tasks this session is already tracking — a re-rendered data part must not spawn a second poller. */
@@ -139,7 +140,22 @@ export async function trackMediaTask(handle: MediaTaskHandle, opts: { force?: bo
         completed.add(handle.taskId);
         toast.error(
           `The ${handle.kind} generation failed${task.error ? `: ${task.error}` : ''}. ` +
-            `${task.credits ? 'Your credits were refunded.' : ''}`,
+            (typeof task.refundedCredits === 'number'
+              ? `${task.refundedCredits} credits were refunded.`
+              : task.credits
+                ? 'Your credits were refunded.'
+                : ''),
+        );
+
+        return;
+      }
+
+      /* no-unbilled-usage D9: the provider never confirmed the render — terminal, credits held for review. */
+      if (task.status === 'unknown') {
+        completed.add(handle.taskId);
+        toast.warning(
+          `The ${handle.kind} render was not confirmed by the provider, so it cannot be delivered automatically. ` +
+            'Its credits are held until it is reviewed.',
         );
 
         return;

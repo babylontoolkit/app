@@ -32,7 +32,7 @@ import {
 import { getGenerationStore } from '~/lib/.server/billing/generations';
 import type { GenerationUsage } from '~/lib/.server/agent/step-usage';
 import { createScopedLogger } from '~/utils/logger';
-import { getManagedOrphanStore } from './orphans';
+import { advanceOpenOrphan, getManagedOrphanStore } from './orphans';
 import { sessionModel } from './session-health';
 import { getManagedSessionId, getManagedSettledAt, releaseManagedSession, setManagedSettledAt } from './sessions';
 import { ALERT_SIGNALS, getMonitor } from '~/lib/.server/monitoring';
@@ -1063,11 +1063,48 @@ export async function rebindDeadSession(
     }
   }
 
-  if (keep) {
-    await keepForSweep(input, kept, keep);
+  /* Did an open orphan of this session exist BEFORE this keep? Then this keep only merged into it (R2). */
+  const preExisting = keep ? await openOrphanOf(input) : null;
+  const orphanId = keep ? await keepForSweep(input, kept, keep) : null;
+
+  /*
+   * 🔴 Let go WITHOUT a keep: an open orphan of this session (one a past failed release could not withdraw) is
+   * advanced to this cursor BEFORE the release (R2-b). After it, a sweep that sees the chat unbound settles the
+   * orphan from its stale cursor and bills the stretch the chat just billed a second time — under a different
+   * generation id, so migration 0029 cannot stop it. Advancing first is harmless if the release then fails (a
+   * merge never rewinds). DECISION (R2-b): an advance that FAILS is a keep problem — nothing is released and
+   * the turn is refused, retryably; a stale owner left behind is a later double charge.
+   */
+  if (!keep && !unbound && !(await advanceOpenOrphan(input.context, input.sessionId, kept.cursor))) {
+    throw new ManagedRebindError(
+      'The previous session of this chat could not be closed out yet. Nothing was charged for this message — ' +
+        'send it again in a moment.',
+    );
   }
 
-  const released = await releaseManagedSession(input.projectId, input.chatId, input.sessionId, input.context);
+  /*
+   * 🔴 EXACTLY ONE OWNER (no-unbilled-usage residual R2a). The orphan was recorded FIRST so a release can never
+   * leave the session unowned. But a release that THROWS leaves the chat still bound — and then the chat and
+   * the orphan would both hold the cursor. So when the chat demonstrably still holds the session, an orphan
+   * THIS keep created is WITHDRAWN (deleted, never resolved — `undoKeepAfterFailedRelease`) and the turn is
+   * refused (retryable): the chat stays the single owner. A pre-existing orphan stays, deferred by the sweep.
+   */
+  let released: boolean;
+
+  try {
+    released = await releaseManagedSession(input.projectId, input.chatId, input.sessionId, input.context);
+  } catch (error) {
+    await undoKeepAfterFailedRelease(
+      input,
+      orphanId && orphanId !== preExisting?.id ? orphanId : null,
+      (error as Error)?.message ?? String(error),
+    );
+
+    throw new ManagedRebindError(
+      'The previous session of this chat could not be closed out yet. Nothing was charged for this message — ' +
+        'send it again in a moment.',
+    );
+  }
 
   logger.warn(
     released
@@ -1084,6 +1121,83 @@ export async function rebindDeadSession(
       );
     });
   }
+}
+
+/** The open orphan of the session being rebound, or null (a failed read counts as none — never throws). */
+async function openOrphanOf(input: Omit<SettleManagedInput, 'anchorWhenEmpty'>) {
+  try {
+    return await getManagedOrphanStore(input.context).openForSession(input.sessionId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The release after `keepForSweep` threw (R2a). Verifier R2: the withdrawal must not look like "billed and
+ * done" — a RESOLVED orphan is never reopened, so a resend's keep would get the resolved row back and the
+ * session would end with NO billing owner. So:
+ *
+ *  - an orphan THIS keep created is DELETED (`withdraw`) when the chat demonstrably still holds the session —
+ *    the chat is the single owner, and a later keep records the orphan afresh;
+ *  - an orphan that already existed (`withdrawId` null) is LEFT — it carries its own pending intents. While the
+ *    chat holds the session the sweep defers it (`sweep.ts`: the chat owns the usage; intents debit
+ *    idempotently under 0029), and every path that lets go of the session advances its cursor first
+ *    (`advanceOpenOrphan`), so it never bills what the chat billed;
+ *  - when the binding cannot be read, the orphan is kept and the possible double owner is alerted.
+ *
+ * DECISION (R2 verifier fix): delete-on-withdraw + defer-while-bound is the provably single-owner pair. Never
+ * throws.
+ */
+async function undoKeepAfterFailedRelease(
+  input: Omit<SettleManagedInput, 'anchorWhenEmpty'>,
+  withdrawId: string | null,
+  releaseError: string,
+): Promise<void> {
+  logger.error(`Chat ${input.chatId}: releasing session ${input.sessionId} failed: ${releaseError}`);
+
+  if (!withdrawId) {
+    return;
+  }
+
+  let bound: string | null | undefined;
+
+  try {
+    bound = await getManagedSessionId(input.projectId, input.chatId, input.context);
+  } catch (error) {
+    bound = undefined;
+    logger.error(
+      `Chat ${input.chatId}: could not read its binding after a failed release: ${(error as Error)?.message}`,
+    );
+  }
+
+  if (bound === input.sessionId) {
+    try {
+      await getManagedOrphanStore(input.context).withdraw(withdrawId);
+      logger.warn(
+        `Chat ${input.chatId}: still bound to ${input.sessionId} — its new orphan ${withdrawId} was withdrawn`,
+      );
+
+      return;
+    } catch (error) {
+      /* Kept: the sweep defers it while the chat holds the session, so this is not a double charge. */
+      logger.error(`Chat ${input.chatId}: withdrawing orphan ${withdrawId} failed: ${(error as Error)?.message}`);
+
+      return;
+    }
+  }
+
+  if (bound !== undefined) {
+    /* The release DID land (the error was after the write): the orphan is now the session's only owner. */
+    return;
+  }
+
+  getMonitor(input.context).alert(
+    ALERT_SIGNALS.LEDGER_INTEGRITY,
+    `Managed session ${input.sessionId} (chat ${input.chatId}): a release failed (${releaseError}) and the chat's ` +
+      `binding could not be read, so orphan ${withdrawId} was kept. The sweep defers it while the chat holds the ` +
+      'session; check it if the chat is later released without settling.',
+    { severity: 'warning', scope: 'managed-rebind', userId: input.userId, tags: { sessionId: input.sessionId } },
+  );
 }
 
 /** A rebind that cannot be completed safely: the chat keeps its session; the turn is refused (retryable). */
@@ -1106,14 +1220,14 @@ async function keepForSweep(
   input: Omit<SettleManagedInput, 'anchorWhenEmpty'>,
   settled: { cursor?: string | null; model?: string },
   why: string,
-): Promise<void> {
+): Promise<string> {
   try {
     const cursor =
       settled.cursor !== undefined
         ? settled.cursor
         : await getManagedSettledAt(input.projectId, input.chatId, input.context);
 
-    await getManagedOrphanStore(input.context).record({
+    const recorded = await getManagedOrphanStore(input.context).record({
       userId: input.userId,
       projectId: input.projectId,
       chatId: input.chatId,
@@ -1123,6 +1237,8 @@ async function keepForSweep(
       reason: why.slice(0, 500),
     });
     logger.warn(`Chat ${input.chatId}: session ${input.sessionId} ${why} — kept for the billing sweep`);
+
+    return recorded.id;
   } catch (error) {
     logger.error(
       `Chat ${input.chatId}: session ${input.sessionId} ${why}, and it could not be kept for the sweep: ` +

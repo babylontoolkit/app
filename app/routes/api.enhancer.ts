@@ -38,6 +38,8 @@ import { getGenerationStore } from '~/lib/.server/billing/generations';
 import { getEnhancerModel, resolvePlatformProvider } from '~/lib/.server/agent/config';
 import { accumulateStepUsage, emptyUsage, type UsageStep } from '~/lib/.server/agent/step-usage';
 import { familyOf } from '~/lib/modules/llm/model-families';
+import { addUnreportedUsage, createWireUsageRecorder, unreportedWireUsage } from '~/lib/modules/llm/wire-usage';
+import { settledWithin } from '~/lib/.server/billing/enhancer-usage';
 
 export async function action(args: ActionFunctionArgs) {
   return enhancerAction(args);
@@ -144,7 +146,14 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
       });
     }
 
+    /*
+     * no-unbilled-usage D8: the wire recorder, so an enhancement whose provider call broke before the SDK
+     * reported a step (the steps then never settle — `enhancer-usage.ts`) still records what was billed.
+     */
+    const wireUsage = createWireUsageRecorder();
+
     const result = await streamText({
+      wireUsage,
       messages: [
         {
           role: 'user',
@@ -192,6 +201,7 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
     }).catch((error: unknown) => {
       /* Nothing was streamed, so nothing is owed: close the running row rather than leave it to the sweep. */
       releaseInFlight();
+      wireUsage.close();
       void getGenerationStore(context)
         .markStatus(generationId, 'failed')
         .catch(() => undefined);
@@ -272,23 +282,71 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
        * so a shape this does not recognise must still bill SOMETHING rather than throw away the turn.
        */
       const usage = emptyUsage();
+      const reportedIds = new Set<string>();
+      let usageFromResult = false;
 
+      /*
+       * 🔴 RACED, never awaited bare (no-unbilled-usage D8). A provider error before the first step finished
+       * leaves `result.steps` and `result.usage` pending FOREVER (ai@4.3.16) — awaiting either parked this
+       * settlement for good: no terminal row, no refund, no alert. The stream has already ended here, so the
+       * SDK has resolved them if it ever will; losing the race means "no step was reported".
+       */
       try {
-        const steps = await result.steps;
+        /* Raced together, so a hang costs one bounded wait, not two. */
+        const [steps, combined] = await Promise.all([settledWithin(result.steps), settledWithin(result.usage)]);
 
         if (steps?.length) {
           accumulateStepUsage(usage, steps as unknown as UsageStep[], familyOf(model) ?? undefined);
-        } else {
-          const combined = await result.usage;
+
+          for (const step of steps as unknown as Array<{ response?: { id?: unknown } }>) {
+            if (typeof step?.response?.id === 'string' && step.response.id) {
+              reportedIds.add(step.response.id);
+            }
+          }
+        } else if (combined) {
           usage.promptTokens = combined.promptTokens ?? 0;
           usage.completionTokens = combined.completionTokens ?? 0;
           usage.totalTokens = usage.promptTokens + usage.completionTokens;
+          usageFromResult = usage.totalTokens > 0;
+        } else {
+          logger.warn(`Enhancement ${generationId}: the SDK reported no usage — billing from the wire`);
         }
       } catch (error) {
+        /* Settle anyway — a row left `running` is a turn nobody finishes until the sweep. */
         logger.error(`Failed to read enhancement usage for ${generationId}: ${(error as Error)?.message}`);
-        return;
       }
 
+      /*
+       * D7/D8: what the provider billed that the SDK never reported — every attempt when the steps never
+       * settled. Skipped when the usage came from `result.usage` (no step ids to match, so the same attempt
+       * would count twice).
+       */
+      try {
+        if (!usageFromResult) {
+          await wireUsage.settled();
+
+          const inFlight = unreportedWireUsage(wireUsage.attempts, reportedIds);
+
+          if (inFlight.attempts > 0) {
+            addUnreportedUsage(usage, inFlight);
+            logger.warn(
+              `Enhancement ${generationId}: billing ${inFlight.attempts} attempt(s) the SDK never reported ` +
+                `(${inFlight.promptTokens} in, ${inFlight.completionTokens} out)`,
+            );
+          }
+        }
+      } catch (error) {
+        logger.error(`Enhancement ${generationId}: could not read the wire usage: ${(error as Error)?.message}`);
+      } finally {
+        wireUsage.close();
+      }
+
+      /*
+       * 🔴 ONE write carries the outcome (no-unbilled-usage T8). The failure used to be a SECOND upsert of
+       * `{ id, userId, model, status: 'failed' }` after settlement — and the Postgres upsert writes every
+       * usage column (`input_tokens: row.promptTokens ?? 0`, …), so it ZEROED the tokens, credits and raw
+       * cost the anchor had just recorded. The status now rides the settlement's own anchor write.
+       */
       const settlement = await settleGeneration({
         userId: user.id,
         generationId,
@@ -303,6 +361,7 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
         statusKind: 'enhance',
         byok: byok.allowed,
         context,
+        ...(failed ? { status: 'failed' as const } : {}),
       });
 
       if (!failed) {
@@ -322,10 +381,6 @@ async function enhancerAction({ context, request }: ActionFunctionArgs) {
           context,
         );
       }
-
-      await getGenerationStore(context)
-        .upsert({ id: generationId, userId: user.id, model, status: 'failed' })
-        .catch(() => undefined);
     }
 
     // Return the text stream directly since it's already text data

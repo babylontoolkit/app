@@ -39,7 +39,7 @@ import { flushDetachedTail, settleManagedTurn, waitForDetachTails } from './sett
 import { releaseManagedSession } from './sessions';
 import { SUPERSEDED_RESULT } from './session-health';
 import { FsManagedOrphanStore, getManagedOrphanStore, setManagedOrphanStore } from './orphans';
-import { parseCostCursor } from './session-cost';
+import { EMPTY_COST_CURSOR, parseCostCursor, serializeCostCursor } from './session-cost';
 import { runBillingSweep } from '~/lib/.server/billing/sweep';
 import { FsProjectStore, setProjectStore } from '~/lib/.server/projects/store';
 
@@ -1750,6 +1750,8 @@ describe('a rebind never releases a session that still owes usage (no-unbilled-u
       listOpen: async () => [],
       setCursor: async () => undefined,
       resolve: async () => undefined,
+      openForSession: async () => null,
+      withdraw: async () => undefined,
     });
 
     const error = await turn().catch((e) => e);
@@ -1758,6 +1760,300 @@ describe('a rebind never releases a session that still owes usage (no-unbilled-u
     expect(error.isRetryable).toBe(true);
     expect((await getChatIndex().get(chatId))?.managedSessionId).toBe('sesn_dead');
     expect(fake.sessions.size, 'no new session was created').toBe(1);
+    expect(fake.sends).toEqual([]);
+  });
+
+  /*
+   * 🔴 no-unbilled-usage residual R2a — EXACTLY ONE BILLING OWNER, through a failed release AND the retry.
+   *
+   * The orphan is recorded first, then the chat is released. A release that THROWS leaves the chat bound, so
+   * the orphan THIS rebind created is WITHDRAWN (deleted — never "resolved", which means billed-and-archived
+   * and is never reopened) and the turn is refused retryably. The resend then keeps the session again and its
+   * release lands: the orphan is the one owner, and the sweep bills the session ONCE.
+   */
+  function breakReleaseOnce() {
+    const index = getChatIndex() as unknown as { releaseManagedSession: (input: never) => Promise<boolean> };
+    const real = index.releaseManagedSession.bind(index);
+    let broken = true;
+
+    index.releaseManagedSession = async (input) => {
+      if (broken) {
+        broken = false;
+        throw new Error('db write failed');
+      }
+
+      return real(input);
+    };
+  }
+
+  it('a failed release withdraws its orphan; the resend keeps it again — one owner, billed once', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dead', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    dead.status = 'terminated';
+    await bindChat('sesn_dead');
+
+    const heal = breakUsageRead('sesn_dead');
+
+    breakReleaseOnce();
+
+    const refused = await turn().catch((e) => e);
+
+    expect(refused.isRetryable).toBe(true);
+    expect((await getChatIndex().get(chatId))?.managedSessionId, 'the chat still owns it').toBe('sesn_dead');
+    expect(await getManagedOrphanStore().listOpen(), 'and nothing else does').toEqual([]);
+
+    /* The resend: the session is kept again and this time the release lands. */
+    const run = await drive(await turn());
+
+    expect(run.error).toBeUndefined();
+    expect((await getChatIndex().get(chatId))?.managedSessionId).not.toBe('sesn_dead');
+
+    const open = await getManagedOrphanStore().listOpen();
+
+    expect(
+      open.map((o) => o.sessionId),
+      'the orphan now owns the session',
+    ).toEqual(['sesn_dead']);
+
+    heal();
+    await runBillingSweep({}, { client: fake.client });
+    await runBillingSweep({}, { client: fake.client });
+
+    const billed = (await rows()).filter((e) => String(e.generationId).startsWith(`${chatId}_orphan_`));
+
+    expect(
+      billed.map((e) => -e.delta),
+      'billed exactly once',
+    ).toEqual([creditsFor(USAGE_1)]);
+  });
+
+  /*
+   * A failed release whose keep MERGED into an orphan that already existed must not withdraw it — that orphan
+   * carries its own pending intents. While the chat still holds the session the sweep DEFERS the orphan (the
+   * chat is the owner of the usage; intents are debited idempotently, migration 0029), so nothing is billed
+   * twice and no live turn is interrupted.
+   */
+  it('a failed release never withdraws a pre-existing orphan; its intents survive and nothing bills twice', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dead', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    dead.status = 'terminated';
+    await bindChat('sesn_dead');
+
+    const intent = {
+      generationId: 'gen_r2_kept_intent',
+      credits: 7,
+      rawCostUsd: 0.01,
+      model: 'm',
+      userId: USER.id,
+      projectId: PROJECT,
+      chatId,
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    };
+
+    await getManagedOrphanStore().record({
+      userId: USER.id,
+      projectId: PROJECT,
+      chatId,
+      sessionId: 'sesn_dead',
+      cursor: serializeCostCursor({ ...EMPTY_COST_CURSOR, pending: [intent] }),
+      model: 'm',
+    });
+
+    const heal = breakUsageRead('sesn_dead');
+
+    breakReleaseOnce();
+    await turn().catch(() => undefined);
+
+    const open = await getManagedOrphanStore().listOpen();
+
+    expect(open).toHaveLength(1);
+    expect(parseCostCursor(open[0].cursor)?.pending?.map((p) => p.generationId)).toEqual(['gen_r2_kept_intent']);
+
+    heal();
+
+    /* The sweep's chat pass bills the chat's owner, resolved from the project row. */
+    setProjectStore({ get: async (id: string) => (id === PROJECT ? { id, userId: USER.id } : null) } as never);
+    await runBillingSweep({}, { client: fake.client });
+    await runBillingSweep({}, { client: fake.client });
+
+    const all = await rows();
+    const usageDebits = all.filter((e) => e.reason === 'generation' && e.generationId !== 'gen_r2_kept_intent');
+
+    expect(
+      all.filter((e) => e.generationId === 'gen_r2_kept_intent'),
+      'the intent is billed once',
+    ).toHaveLength(1);
+    expect(
+      usageDebits.reduce((sum, e) => sum - e.delta, 0),
+      "the session's usage is billed once, by its single owner",
+    ).toBe(creditsFor(USAGE_1));
+    expect(
+      fake.sends.filter((x) => x.sessionId === 'sesn_dead' && x.events.some((e) => e.type === 'user.interrupt')),
+    ).toEqual([]);
+
+    /*
+     * The chat now lets go WITHOUT a keep (a complete rebind). The orphan takes over — from the chat's cursor,
+     * never its own older one, or the sweep would bill again what the chat just billed.
+     */
+    const run = await drive(await turn());
+
+    expect(run.error).toBeUndefined();
+    expect((await getChatIndex().get(chatId))?.managedSessionId).not.toBe('sesn_dead');
+
+    await runBillingSweep({}, { client: fake.client });
+
+    const reBilled = (await rows()).filter(
+      (e) =>
+        e.reason === 'generation' &&
+        (String(e.generationId).startsWith(`${chatId}_orphan_`) || String(e.generationId).endsWith('_sesn_dead_prior')),
+    );
+
+    expect(
+      reBilled.reduce((sum, e) => sum - e.delta, 0),
+      'the orphan re-billed nothing the chat had billed',
+    ).toBe(0);
+  });
+
+  /*
+   * The chat lets go WITHOUT a keep right after its own `_prior` settlement billed the session — with no sweep
+   * in between to sync the idle orphan. The release advances the orphan to the chat's cursor first; without
+   * that the sweep would bill the session a second time from the orphan's older cursor.
+   */
+  it('a complete rebind advances an idle orphan before letting go — the session is never billed twice', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dead', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    dead.status = 'terminated';
+    await bindChat('sesn_dead');
+    await getManagedOrphanStore().record({
+      userId: USER.id,
+      projectId: PROJECT,
+      chatId,
+      sessionId: 'sesn_dead',
+      cursor: null,
+      model: 'm',
+    });
+
+    const run = await drive(await turn());
+
+    expect(run.error).toBeUndefined();
+    expect((await rows()).some((e) => String(e.generationId).endsWith('_sesn_dead_prior'))).toBe(true);
+
+    await runBillingSweep({}, { client: fake.client });
+
+    const sessionDebits = (await rows()).filter(
+      (e) =>
+        e.reason === 'generation' &&
+        (String(e.generationId).startsWith(`${chatId}_orphan_`) || String(e.generationId).endsWith('_sesn_dead_prior')),
+    );
+
+    expect(
+      sessionDebits.reduce((sum, e) => sum - e.delta, 0),
+      'billed once',
+    ).toBe(creditsFor(USAGE_1));
+  });
+
+  /*
+   * R2-b: the advance happens BEFORE the release. A sweep that runs in the window right after the release sees
+   * the chat unbound and settles the orphan — it must find the orphan already at the chat's cursor (re-read
+   * after the binding check), or it bills the stretch the chat's `_prior` just billed a second time.
+   */
+  it('a sweep in the window right after the release cannot double-bill (advance precedes release)', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dead', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    dead.status = 'terminated';
+    await bindChat('sesn_dead');
+    await getManagedOrphanStore().record({
+      userId: USER.id,
+      projectId: PROJECT,
+      chatId,
+      sessionId: 'sesn_dead',
+      cursor: null,
+      model: 'm',
+    });
+
+    /* The orphan list is read BEFORE the rebind — the copy a racing sweep holds is the stale one. */
+    const orphanStore = getManagedOrphanStore() as unknown as { listOpen: () => Promise<unknown[]> };
+    const listedBeforeTheRebind = await orphanStore.listOpen();
+
+    orphanStore.listOpen = async () => listedBeforeTheRebind;
+
+    const index = getChatIndex() as unknown as { releaseManagedSession: (input: never) => Promise<boolean> };
+    const real = index.releaseManagedSession.bind(index);
+
+    index.releaseManagedSession = async (input) => {
+      const released = await real(input);
+
+      await runBillingSweep({}, { client: fake.client });
+
+      return released;
+    };
+
+    const run = await drive(await turn());
+
+    expect(run.error).toBeUndefined();
+
+    const sessionDebits = (await rows()).filter(
+      (e) =>
+        e.reason === 'generation' &&
+        (String(e.generationId).startsWith(`${chatId}_orphan_`) || String(e.generationId).endsWith('_sesn_dead_prior')),
+    );
+
+    expect(
+      sessionDebits.reduce((sum, e) => sum - e.delta, 0),
+      'billed once',
+    ).toBe(creditsFor(USAGE_1));
+  });
+
+  /* R2-b: an open orphan that cannot be advanced is a keep problem — nothing is released, the turn is refused. */
+  it('an orphan advance that fails releases nothing and refuses the turn retryably', async () => {
+    fake.script = answer;
+
+    const dead = fake.seed('sesn_dead', [
+      { type: 'user.message', content: [] },
+      { type: 'span.model_request_end', model_usage: USAGE_1 },
+    ]);
+
+    dead.status = 'terminated';
+    await bindChat('sesn_dead');
+    await getManagedOrphanStore().record({
+      userId: USER.id,
+      projectId: PROJECT,
+      chatId,
+      sessionId: 'sesn_dead',
+      cursor: null,
+      model: 'm',
+    });
+
+    const store = getManagedOrphanStore() as unknown as { setCursor: () => Promise<void> };
+
+    store.setCursor = async () => {
+      throw new Error('orphan store down');
+    };
+
+    const error = await turn().catch((e) => e);
+
+    expect(error.isRetryable).toBe(true);
+    expect((await getChatIndex().get(chatId))?.managedSessionId, 'not released').toBe('sesn_dead');
     expect(fake.sends).toEqual([]);
   });
 

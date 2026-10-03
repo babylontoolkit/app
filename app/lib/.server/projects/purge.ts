@@ -12,7 +12,7 @@
  * holds nothing belonging to that project), so it covers this module too.
  */
 import { deleteMessages } from './message-store';
-import { settleBeforeDelete } from '~/lib/.server/agent-managed/delete-settle';
+import { assertDeleteSettled, settleBeforeDelete } from '~/lib/.server/agent-managed/delete-settle';
 import { deleteWorkingCopy } from './working-copy';
 import { getProjectStore } from './store';
 import { deleteRemixSeed } from '~/lib/.server/share/seed-store';
@@ -61,7 +61,11 @@ export async function purgeProject(project: Project, options: PurgeProjectOption
    * cannot complete leaves a durable orphan record for the billing sweep. Account deletion purges every
    * project through here, so it is covered too.
    */
-  await settleBeforeDelete({ userId, projectId: project.id, context });
+  /*
+   * R1-b: refused (retryable 503, nothing deleted) when a session's billing could not be secured — the chat
+   * rows about to go are the only record of it. Account deletion re-runs cleanly (purged projects drop out).
+   */
+  assertDeleteSettled(await settleBeforeDelete({ userId, projectId: project.id, context }), 'Deleting this project');
 
   /*
    * 🔴 The PUBLISHED BUILD goes first, and it was missing entirely until account deletion went looking

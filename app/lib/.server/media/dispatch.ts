@@ -20,8 +20,10 @@
  *
  *  - the quote and the DEBIT happen BEFORE this runs, so the credits are already committed
  *  - a retry here therefore **never re-debits** — one task, one debit, up to `MAX_ATTEMPTS` attempts
- *    at getting it accepted
- *  - a final failure still refunds exactly once, via the caller's existing catch
+ *    at getting it accepted — and it runs ONLY after a create that certainly did not start (D9); a
+ *    create the provider may have accepted is never retried blind
+ *  - a final DEFINITE refusal still refunds exactly once, via the caller's catch; an AMBIGUOUS one keeps
+ *    its debit and is held as `unknown` (`create-failure.ts`)
  *  - the cut-out second stage is chained on the POLL path and is unaffected
  *
  * ## Never regress
@@ -50,6 +52,7 @@
  *    false claim in a comment is how this class of defect survives review (see `shell-strip.ts`).
  */
 import { createScopedLogger } from '~/utils/logger';
+import { classifyCreateFailure } from './create-failure';
 
 const logger = createScopedLogger('media-dispatch');
 
@@ -64,19 +67,6 @@ export const MEDIA_MAX_ATTEMPTS = 3;
 
 /** Backoff before attempt 2 and 3. Bounded and short — this is a create call, not a render. */
 export const MEDIA_RETRY_DELAYS_MS = [1_000, 4_000];
-
-/**
- * Is this a refusal that will repeat identically? Message-sniffed, because `provider.create` throws a
- * plain `Error` with the wire body in its message (`kie-client.ts:87`) rather than a typed status.
- *
- * ⚠️ DEFAULT IS RETRYABLE. Getting this wrong in the "deterministic" direction loses an image the user
- * asked for; getting it wrong the other way costs a few seconds. The asymmetry decides the default.
- */
-export function isDeterministicRefusal(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-
-  return /\b(4[0-9]{2})\b/.test(message) || /invalid|unsupported|not found|unauthor|forbidden|malformed/i.test(message);
-}
 
 export interface DispatchDeps {
   now: () => number;
@@ -133,14 +123,22 @@ function makeDispatcher(state: QueueState, deps: DispatchDeps) {
           lastError = error;
 
           /*
-           * A DETERMINISTIC refusal is not worth retrying — an unknown model, a malformed payload or a
-           * rejected prompt will be refused identically three times, and all the retry buys is ~5s of
-           * extra latency before the user's refund. Retries exist for transient faults: a 5xx, a rate
-           * limit, a dropped connection. Anything we cannot classify is treated as transient, because
-           * the cost of a needless retry is seconds and the cost of a missed one is a lost image.
+           * 🔴 RETRY ONLY A DEFINITE NON-ACCEPTANCE (no-unbilled-usage D9). The debit was taken once, before
+           * this queue; a retry after a create the provider may have ACCEPTED (a timeout, a reset after send,
+           * a 5xx) starts a second render nobody paid for — an un-debited duplicate on our account. So only a
+           * create that certainly did not start is retried: a connection refused before sending, a 429, a
+           * documented "try again" code. Everything else stops here: a definite refusal refunds, an
+           * ambiguous one is held as `unknown` (`create-failure.ts`).
+           *
+           * This REVERSES the 2026-08-08 default ("anything we cannot classify is transient"), which was
+           * written when a failed create always refunded and a retry could only cost seconds.
            */
-          if (isDeterministicRefusal(error)) {
-            logger.warn(`media dispatch ${label}: provider refused deterministically, not retrying`);
+          const failure = classifyCreateFailure(error);
+
+          if (!failure.retryable) {
+            logger.warn(
+              `media dispatch ${label}: create ${failure.outcome === 'ambiguous' ? 'may have been accepted' : 'refused'}, not retrying`,
+            );
             break;
           }
 

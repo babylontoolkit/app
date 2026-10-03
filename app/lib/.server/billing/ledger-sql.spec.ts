@@ -744,6 +744,48 @@ describe('the migrations', () => {
 });
 
 /*
+ * Migration 0030 (no-unbilled-usage residual R2b): ONE open billing orphan per managed session. Two open owners
+ * of one session make the sweep bill its usage twice; a resolved orphan is history and is not constrained.
+ */
+describe('migration 0030 — one open orphan per managed session', () => {
+  it('refuses a second OPEN orphan of the same session, whatever its id', async () => {
+    await db.query(
+      `insert into public.managed_billing_orphans (id, user_id, project_id, chat_id, session_id, model)
+       values ('o_1', $1, 'prj', 'chat_a', 'sesn_dup', 'm')`,
+      [USER],
+    );
+
+    await expect(
+      db.query(
+        `insert into public.managed_billing_orphans (id, user_id, project_id, chat_id, session_id, model)
+         values ('o_2', $1, 'prj', 'chat_b', 'sesn_dup', 'm')`,
+        [USER],
+      ),
+    ).rejects.toThrow(/duplicate key|unique/i);
+
+    await db.exec(`delete from public.managed_billing_orphans`);
+  });
+
+  it('CONTROL — a resolved orphan does not block a new open one, nor do other sessions', async () => {
+    await db.query(
+      `insert into public.managed_billing_orphans (id, user_id, project_id, chat_id, session_id, model, resolved_at)
+       values ('o_old', $1, 'prj', 'chat_a', 'sesn_x', 'm', now())`,
+      [USER],
+    );
+    await db.query(
+      `insert into public.managed_billing_orphans (id, user_id, project_id, chat_id, session_id, model)
+       values ('o_new', $1, 'prj', 'chat_a2', 'sesn_x', 'm'), ('o_other', $1, 'prj', 'chat_c', 'sesn_y', 'm')`,
+      [USER],
+    );
+
+    const open = await db.query(`select id from public.managed_billing_orphans where resolved_at is null`);
+
+    expect(open.rows).toHaveLength(2);
+    await db.exec(`delete from public.managed_billing_orphans`);
+  });
+});
+
+/*
  * Migration 0029 (no-unbilled-usage, verifier defect B layer 2): a generation is debited AT MOST ONCE. Every
  * settlement names its own generation id (`_tail`, `_stop`, `_prior`, `_sweep`, `_delete` are distinct ids),
  * so a second `generation` debit naming the same id is a race between two settlers — the database refuses it.

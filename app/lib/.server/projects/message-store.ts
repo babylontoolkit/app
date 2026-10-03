@@ -140,9 +140,102 @@ export async function putChat(projectId: string, chat: StoredChat, context?: unk
    * `listChats` repairs the row on the next listing anyway. Loud in the log, invisible to the user.
    */
   try {
-    await getChatIndex(context).upsert(summaryToRow(projectId, chat));
+    await indexChat(projectId, chat, context);
   } catch (error) {
     logger.error(`Chat ${chat.serverChatId} saved but not indexed: ${(error as Error).message}`);
+  }
+}
+
+/** Write the chat's index row — settling a managed session it is about to forget first (R1). */
+async function indexChat(projectId: string, chat: StoredChat, context?: unknown): Promise<void> {
+  await settleBeforeRehome(projectId, chat.serverChatId, context);
+  await getChatIndex(context).upsert(summaryToRow(projectId, chat));
+}
+
+/**
+ * 🔴 SETTLE BEFORE A CHAT MOVES PROJECTS (no-unbilled-usage residual R1).
+ *
+ * Migration 0026's trigger (and `FsChatIndex.upsert`'s mirror) clears a chat's managed session id AND its
+ * cost cursor the moment the row is upserted under a different project — a session never follows a chat id
+ * to another project. That is a security rule and it stays (the safety net). But the cursor is also where a
+ * session's PENDING DEBITS live (D6) and the marker of how much of its usage was already billed, so a
+ * re-home silently dropped both: the intents were never debited and the session's unsettled usage became
+ * unbillable — the platform ate it.
+ *
+ * So before the upsert that would move the row, the session is handled exactly as a delete handles it
+ * (`settleBeforeDelete`): interrupted if mid-turn, its pending intents debited, settled by cursor, archived —
+ * or, when that cannot complete, kept in a durable orphan record carrying the post-settlement cursor for the
+ * sweep. Billed to the OLD project's owner: the session ran on their conversation.
+ *
+ * When that cannot even be attempted — the old project's owner cannot be resolved, or the settlement threw —
+ * the MOVE is refused (this throws, alerted): the index row stays with the old project, so the session stays
+ * bound and billable there, and the next save or listing retries. DECISION (verifier R1 slip): an orphan
+ * cannot be recorded without the account it bills (`user_id` is not null), and moving the row anyway would
+ * let the trigger erase the only record of the usage. The transcript itself is already saved either way.
+ */
+export async function settleBeforeRehome(projectId: string, chatId: string, context?: unknown): Promise<void> {
+  let existing: ChatIndexRow | null = null;
+
+  try {
+    existing = await getChatIndex(context).get(chatId);
+  } catch (error) {
+    /*
+     * R1-b: unknown is not "not a move" — upserting blind could re-home the row and let the trigger erase a
+     * session nobody settled. The index write is skipped (the transcript is already saved); the next save or
+     * listing repairs it.
+     */
+    logger.warn(`Chat ${chatId}: could not read its index row before indexing — skipped: ${(error as Error)?.message}`);
+    throw new Error(`chat ${chatId}: its index row could not be read, so it is not re-indexed now`);
+  }
+
+  if (!existing || existing.projectId === projectId || !existing.managedSessionId) {
+    return;
+  }
+
+  try {
+    /* Lazy: the managed engine is a heavy import, and this path runs only on the rare re-home. */
+    const [{ getProjectStore }, { assertDeleteSettled, settleBeforeDelete }] = await Promise.all([
+      import('./store'),
+      import('~/lib/.server/agent-managed/delete-settle'),
+    ]);
+    const owner = (await getProjectStore(context).get(existing.projectId))?.userId;
+
+    if (!owner) {
+      throw new Error(`the chat's current project ${existing.projectId} has no owner on record`);
+    }
+
+    logger.warn(
+      `Chat ${chatId} is moving from project ${existing.projectId} to ${projectId} — settling its managed session ` +
+        `${existing.managedSessionId} first`,
+    );
+
+    /* R1-b: the move proceeds only when the report PROVES the session was settled or kept in an orphan. */
+    assertDeleteSettled(
+      await settleBeforeDelete({
+        userId: owner,
+        projectId: existing.projectId,
+        chatIds: [chatId],
+        context,
+        skipLegacyRows: true,
+      }),
+      'Moving this chat',
+    );
+  } catch (error) {
+    const { ALERT_SIGNALS, getMonitor } = await import('~/lib/.server/monitoring');
+
+    logger.error(
+      `Chat ${chatId}: could not settle its managed session before a re-home — the move is refused: ` +
+        `${(error as Error)?.message}`,
+    );
+    getMonitor(context).alert(
+      ALERT_SIGNALS.LEDGER_INTEGRITY,
+      `Chat ${chatId} was NOT moved to project ${projectId}: its managed session ${existing.managedSessionId} could ` +
+        `not be settled first (${(error as Error)?.message}). It stays bound to project ${existing.projectId}; the ` +
+        'next save retries.',
+      { severity: 'warning', scope: 'managed-rehome', tags: { sessionId: existing.managedSessionId } },
+    );
+
+    throw new Error(`chat ${chatId} cannot move projects until its managed session is settled`);
   }
 }
 
@@ -314,7 +407,7 @@ async function backfill(projectId: string, serverChatId: string, context?: unkno
   }
 
   try {
-    await getChatIndex(context).upsert(summaryToRow(projectId, chat));
+    await indexChat(projectId, chat, context);
   } catch (error) {
     // Listing is a read. It must not fail because a repair failed — the next listing tries again.
     logger.warn(`Could not backfill the index for chat ${serverChatId}: ${(error as Error).message}`);

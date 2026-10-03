@@ -18,6 +18,7 @@ import { FsGenerationStore, setGenerationStore } from '~/lib/.server/billing/gen
 import { invalidateMarketPricesCache } from '~/lib/.server/billing/market-price-store';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import { setMediaDispatcher } from '~/lib/.server/media/dispatch';
+import { MediaCreateError } from '~/lib/.server/media/create-failure';
 import type { CreateMediaTaskInput, MediaProvider, MediaProviderName } from '~/lib/.server/media/provider';
 import { setObjectStore, type ObjectStore } from '~/lib/.server/storage';
 import { mediaModelDefaults, type MediaModelDefaults } from '~/lib/media/provider-defaults';
@@ -76,15 +77,20 @@ const fund = (credits: number) => ledger.append({ userId: USER, delta: credits, 
 const balance = async () => (await ledger.list(USER))[0]?.balanceAfter ?? 0;
 const reasons = async () => (await ledger.list(USER)).reverse().map((e) => [e.reason, e.delta]);
 
-function fakeProvider(name: MediaProviderName, behaviour: 'ok' | 'refuse' = 'ok') {
+function fakeProvider(name: MediaProviderName, behaviour: 'ok' | 'refuse' | 'timeout' = 'ok') {
   const created: CreateMediaTaskInput[] = [];
   const provider: MediaProvider = {
     name,
     create: async (input) => {
       created.push(input);
 
+      /* An EXPLICIT refusal (a 4xx) refunds; a timeout may have been accepted and keeps its debit (D9). */
       if (behaviour === 'refuse') {
-        throw new Error('upstream said no');
+        throw new MediaCreateError('upstream said no (HTTP 422)', 'refused');
+      }
+
+      if (behaviour === 'timeout') {
+        throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
       }
 
       return `task_${created.length}`;
@@ -170,6 +176,22 @@ describe('managed media tools — the server answers them (T8)', () => {
     expect(rows.map(([reason]) => reason)).toEqual(['adjustment', 'media', 'refund']);
     expect(rows[1][1]).toBe(-(rows[2][1] as number));
     expect(await balance()).toBe(1000);
+  });
+
+  /* no-unbilled-usage D9: a create the provider may have ACCEPTED keeps its debit, and the agent is told. */
+  it('an AMBIGUOUS create (timeout) keeps the debit — no refund — and the agent is told not to retry', async () => {
+    await fund(1000);
+
+    const { provider, created } = fakeProvider('KIE', 'timeout');
+    const { dispatcher, tasks } = dispatcherWith({ provider });
+    const answer = await dispatcher.dispatch(call('generate_image', { prompt: 'a logo' }));
+
+    expect(created.length).toBe(1);
+    expect(tasks).toHaveLength(0);
+    expect(answer?.isError).toBe(true);
+    expect(textOf(answer)).toMatch(/do not retry/i);
+    expect((await reasons()).map(([reason]) => reason)).toEqual(['adjustment', 'media']);
+    expect(await balance()).toBeLessThan(1000);
   });
 
   it('refused BEFORE spend: an unfunded user with billing enforced never reaches the provider', async () => {

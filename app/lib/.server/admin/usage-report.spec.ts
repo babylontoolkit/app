@@ -302,7 +302,37 @@ describe('buildUsageReport', () => {
     it('CONTROL — a sample with no media reports zero renders, not a missing field', () => {
       const report = buildUsageReport(llm());
 
-      expect(report.media).toEqual({ renders: 0, creditsCharged: 0, rawCostUsd: 0 });
+      expect(report.media).toEqual({
+        renders: 0,
+        creditsCharged: 0,
+        rawCostUsd: 0,
+        unconfirmed: 0,
+        unconfirmedTasks: [],
+      });
+    });
+
+    /*
+     * 🔴 no-unbilled-usage D9: a render the provider may be running that nothing can poll keeps its debit —
+     * never refunded automatically — so it must be FINDABLE on the operator's screen, one row each.
+     */
+    it('lists the unconfirmed renders an operator must reconcile', () => {
+      const report = buildUsageReport([
+        ...llm(),
+        media({
+          id: 'med_held',
+          creditsCharged: 24,
+          status: 'interrupted',
+          finishReason: 'media-unconfirmed',
+          error: 'the create was not confirmed — timeout',
+        }),
+        media({ id: 'med_ok', creditsCharged: 24 }),
+      ]);
+
+      expect(report.media.unconfirmed).toBe(1);
+      expect(report.media.unconfirmedTasks).toEqual([
+        expect.objectContaining({ id: 'med_held', creditsCharged: 24, error: expect.stringContaining('timeout') }),
+      ]);
+      expect(report.media.renders, 'still counted as a render').toBe(2);
     });
 
     it('counts only generations, so eight renders are not eight generations', () => {

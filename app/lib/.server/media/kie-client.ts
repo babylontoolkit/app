@@ -21,6 +21,7 @@
  */
 import { createScopedLogger } from '~/utils/logger';
 import type { CreateMediaTaskInput, MediaEndpoint, MediaProvider, MediaProviderName, MediaTaskState } from './provider';
+import { classifyTransportFailure, MediaCreateError } from './create-failure';
 
 const logger = createScopedLogger('kie-media');
 
@@ -48,25 +49,46 @@ export class KieMediaProvider implements MediaProvider {
     this._apiKey = apiKey;
   }
 
-  private async _request(url: string, method: 'GET' | 'POST', body?: unknown): Promise<any> {
-    const response = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this._apiKey}`,
-        'User-Agent': UA,
-        Accept: 'application/json',
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(30_000),
-    });
+  /**
+   * One request, with its HTTP status. A fetch that throws is classified for the money (`create-failure.ts`):
+   * a timeout is AMBIGUOUS (the body may have been accepted), a refused connection is `not-sent`.
+   */
+  private async _send(url: string, method: 'GET' | 'POST', body?: unknown): Promise<{ status: number; text: string }> {
+    let response: Response;
 
-    const text = await response.text();
+    try {
+      response = await fetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${this._apiKey}`,
+          'User-Agent': UA,
+          Accept: 'application/json',
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      throw classifyTransportFailure(error);
+    }
+
+    try {
+      return { status: response.status, text: await response.text() };
+    } catch (error) {
+      throw new MediaCreateError(
+        `KIE answered HTTP ${response.status} but the body could not be read: ${(error as Error)?.message}`,
+        'ambiguous',
+      );
+    }
+  }
+
+  private async _request(url: string, method: 'GET' | 'POST', body?: unknown): Promise<any> {
+    const { status, text } = await this._send(url, method, body);
 
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(`KIE returned non-JSON from ${url} (HTTP ${response.status}): ${text.slice(0, 200)}`);
+      throw new Error(`KIE returned non-JSON from ${url} (HTTP ${status}): ${text.slice(0, 200)}`);
     }
   }
 
@@ -80,7 +102,10 @@ export class KieMediaProvider implements MediaProvider {
     endpoint: MediaEndpoint,
   ): asserts endpoint is 'jobs' | 'veo' | 'suno-sounds' | 'suno-music' {
     if (endpoint !== 'jobs' && endpoint !== 'veo' && !isSunoEndpoint(endpoint)) {
-      throw new Error(`KIE does not serve the "${endpoint}" endpoint — that task belongs to another provider.`);
+      throw new MediaCreateError(
+        `KIE does not serve the "${endpoint}" endpoint — that task belongs to another provider.`,
+        'not-sent',
+      );
     }
   }
 
@@ -92,17 +117,36 @@ export class KieMediaProvider implements MediaProvider {
      * `{ model, input }` envelope — `service.ts` has already shaped it, including the `model` field
      * (the Suno VERSION, e.g. V5), which is not the priced model id.
      */
-    const result = isSunoEndpoint(input.endpoint)
-      ? await this._request(`${API}${SUNO_CREATE_PATH[input.endpoint]}`, 'POST', input.payload)
+    const url = isSunoEndpoint(input.endpoint)
+      ? `${API}${SUNO_CREATE_PATH[input.endpoint]}`
       : input.endpoint === 'veo'
-        ? await this._request(`${API}/api/v1/veo/generate`, 'POST', input.payload)
-        : await this._request(`${API}/api/v1/jobs/createTask`, 'POST', { model: input.model, input: input.payload });
+        ? `${API}/api/v1/veo/generate`
+        : `${API}/api/v1/jobs/createTask`;
+    const body =
+      isSunoEndpoint(input.endpoint) || input.endpoint === 'veo'
+        ? input.payload
+        : { model: input.model, input: input.payload };
+
+    const { status, text } = await this._send(url, 'POST', body);
+
+    let result: any;
+
+    try {
+      result = JSON.parse(text);
+    } catch {
+      /* No body we can read: a 4xx is a refusal; anything else may have been accepted. */
+      const detail = `KIE returned non-JSON from ${url} (HTTP ${status}): ${text.slice(0, 200)}`;
+
+      throw status >= 400 && status < 500
+        ? new MediaCreateError(detail, 'refused', status === 429)
+        : new MediaCreateError(detail, 'ambiguous');
+    }
 
     const taskId = result?.data?.taskId;
 
     if (!taskId || ((input.endpoint === 'veo' || isSunoEndpoint(input.endpoint)) && result?.code !== 200)) {
       // KIE's error text names the real problem (bad option, moderation) — surface it, capped.
-      throw new Error(`KIE createTask failed: ${JSON.stringify(result).slice(0, 300)}`);
+      throw classifyKieRejection(status, result, `KIE createTask failed: ${JSON.stringify(result).slice(0, 300)}`);
     }
 
     logger.info(`KIE task ${taskId} created (${input.endpoint}, ${input.model})`);
@@ -128,6 +172,38 @@ export class KieMediaProvider implements MediaProvider {
   download(url: string): Promise<Response> {
     return downloadResult(url);
   }
+}
+
+/**
+ * The money class of a KIE create answer that carried no usable task (`create-failure.ts`, D9).
+ *
+ * KIE answers HTTP 200 with its own `code` in the body. Its documented codes: 401/402/404/422 and 501
+ * ("generation failed") / 505 ("feature disabled") are definite refusals; 429 (rate limited) and 455
+ * ("service unavailable") are refusals worth retrying; 500 is a server error that says nothing about
+ * whether the task was created, so it is AMBIGUOUS. A body with no code falls back to the HTTP status.
+ * Exported for direct tests.
+ */
+export function classifyKieRejection(httpStatus: number, body: any, detail: string): MediaCreateError {
+  const code = typeof body?.code === 'number' ? body.code : Number(body?.code);
+
+  if (Number.isFinite(code) && code !== 200) {
+    if (code === 429 || code === 455) {
+      return new MediaCreateError(detail, 'refused', true);
+    }
+
+    if ((code >= 400 && code < 500) || code === 501 || code === 505) {
+      return new MediaCreateError(detail, 'refused');
+    }
+
+    return new MediaCreateError(detail, 'ambiguous');
+  }
+
+  if (httpStatus >= 400 && httpStatus < 500) {
+    return new MediaCreateError(detail, 'refused', httpStatus === 429);
+  }
+
+  /* A 200 with no task id and no error code — KIE may have created a task we cannot name. */
+  return new MediaCreateError(detail, 'ambiguous');
 }
 
 /**

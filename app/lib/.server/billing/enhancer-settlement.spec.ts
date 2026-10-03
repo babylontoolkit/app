@@ -16,6 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FsLedger, setLedger } from './ledger';
 import { setGenerationStore, type GenerationStore, type GenerationUpsert } from './generations';
 import { MODEL_RATES } from './rates';
+import { setEnhancerStepsWaitForTests } from './enhancer-usage';
+import { streamText as realStreamText } from 'ai';
+import { MockLanguageModelV1 } from 'ai/test';
+import type { WireUsageRecorder } from '~/lib/modules/llm/wire-usage';
 
 const USER = 'user-enh';
 
@@ -139,11 +143,13 @@ beforeEach(async () => {
   upserts = [];
   setGenerationStore({
     upsert: async (row: GenerationUpsert) => void upserts.push(row),
+    markStatus: async () => true,
     list: async () => [],
   } as unknown as GenerationStore);
 });
 
 afterEach(async () => {
+  setEnhancerStepsWaitForTests(undefined);
   setLedger(undefined);
   setGenerationStore(undefined);
   streamText.mockReset();
@@ -458,5 +464,131 @@ describe('the enhancer model is the one that runs AND the one that is billed', (
     expect(cheap.spent).toBeGreaterThan(0);
     expect(cheap.spent).toBeLessThan(dear.spent);
     expect(cheap.spent * ratio).toBe(dear.spent);
+  });
+});
+
+/**
+ * 🔴 no-unbilled-usage D8 — the enhancer CANNOT HANG on a provider that fails before streaming.
+ *
+ * ai@4.3.16, reproduced here against the REAL `streamText` (only the model is a mock): a `doStream` that
+ * throws yields one `error` part and ends, and `result.steps` / `result.usage` never settle. The route used
+ * to `await result.steps` after the drain — its settlement parked forever, the row stayed `running`, nothing
+ * refunded, nothing alerted. These cases drive that exact SDK behaviour, so a revert to a bare await is a
+ * timeout here, not a pass.
+ */
+describe('🔴 a provider error before streaming settles instead of hanging (D8)', () => {
+  /** Route the mocked `streamText` through the real SDK with a model whose stream call fails. */
+  function failingProvider(onCall?: (wire: WireUsageRecorder | undefined) => void) {
+    streamText.mockImplementation(async (props: { wireUsage?: WireUsageRecorder }) => {
+      const model = new MockLanguageModelV1({
+        doStream: async () => {
+          onCall?.(props.wireUsage);
+          throw new Error('401 invalid x-api-key');
+        },
+      });
+
+      return realStreamText({ model, prompt: 'enhance this', onError: () => undefined });
+    });
+  }
+
+  it('settles, records `failed`, and the row never stays running', async () => {
+    setEnhancerStepsWaitForTests(20);
+    failingProvider();
+
+    await enhance();
+
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0), { timeout: 1500 });
+    expect(finals().at(-1)?.status).toBe('failed');
+    expect(await ledger.balance(USER), 'nothing owed, nothing kept').toBe(1000);
+  });
+
+  /*
+   * The broken attempt the SDK never reported: the provider accepted the request (`message_start`) and
+   * billed its input before the stream broke. The wire recorder is the only place that number exists — it
+   * reaches the row's usage (the platform's absorbed cost is visible) and is refunded under the unchanged
+   * failed-generation rule (D10).
+   */
+  it('bills the consumed input from the wire, then refunds it under the failure rule', async () => {
+    setEnhancerStepsWaitForTests(20);
+    failingProvider((wire) => {
+      const attempt = wire!.begin();
+
+      attempt.started = true;
+      attempt.messageIds.push('msg_broken');
+      attempt.input = 640;
+    });
+
+    await enhance();
+
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0), { timeout: 1500 });
+
+    const row = finals().at(-1)!;
+
+    expect(row.status).toBe('failed');
+    expect(row.promptTokens, 'the wire attempt reached the bill').toBe(640);
+    expect(row.creditsCharged).toBeGreaterThan(0);
+    expect(await ledger.balance(USER), 'and the failure rule refunded it').toBe(1000);
+  });
+
+  it("hands the route's wire recorder to the model call", async () => {
+    streamText.mockResolvedValue(fakeResult([{ type: 'text-delta', textDelta: 'a better prompt' }]));
+
+    await enhance();
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
+
+    expect(typeof streamText.mock.calls[0][0].wireUsage?.begin).toBe('function');
+  });
+});
+
+/**
+ * 🔴 THE FAILURE WRITE KEEPS THE USAGE (no-unbilled-usage T8, a pre-existing records defect).
+ *
+ * The failure used to be a second upsert of `{ id, userId, model, status: 'failed' }` after settlement, and
+ * the Postgres store writes every usage column from the payload (`input_tokens: row.promptTokens ?? 0`) — so
+ * on production it ZEROED the tokens, credits and raw cost the anchor had just written. Asserted on the
+ * PAYLOADS, because the FS store merges and would hide it.
+ */
+describe('a failed enhancement records its usage on every write', () => {
+  it('no write marks it failed without the usage it consumed', async () => {
+    streamText.mockResolvedValue(
+      fakeResult(
+        [
+          { type: 'text-delta', textDelta: 'a bett' },
+          { type: 'error', error: new Error('provider exploded') },
+        ],
+        [{ usage: { promptTokens: 295, completionTokens: 12 } }],
+      ),
+    );
+
+    await enhance();
+    await vi.waitFor(() => expect(finals().some((u) => u.status === 'failed')).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    for (const write of finals()) {
+      expect(write.promptTokens, `write ${JSON.stringify(write)} would zero input_tokens`).toBe(295);
+      expect(write.completionTokens).toBe(12);
+      expect(write.creditsCharged).toBeGreaterThan(0);
+    }
+  });
+
+  /* CONTROL — a delivered enhancement settles exactly once: one terminal write, one debit. */
+  it('CONTROL: a normal enhancement bills once', async () => {
+    streamText.mockResolvedValue(
+      fakeResult(
+        [{ type: 'text-delta', textDelta: 'a better prompt' }],
+        [{ usage: { promptTokens: 295, completionTokens: 335 } }],
+      ),
+    );
+
+    await enhance();
+    await vi.waitFor(() => expect(finals().length).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(finals()).toHaveLength(1);
+    expect(finals()[0].status).toBe('completed');
+
+    const debits = (await ledger.list(USER)).filter((e) => e.reason === 'generation');
+
+    expect(debits).toHaveLength(1);
   });
 });

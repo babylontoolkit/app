@@ -22,11 +22,12 @@ import { FsLedger, setLedger } from '~/lib/.server/billing/ledger';
 import { createUsageCheckpointer, openRunningGeneration } from '~/lib/.server/billing/running-generation';
 import { runBillingSweep } from '~/lib/.server/billing/sweep';
 import { FsChatIndex, getChatIndex, setChatIndex } from '~/lib/.server/projects/chat-index';
-import { deleteChat } from '~/lib/.server/projects/message-store';
+import { deleteChat, putChat } from '~/lib/.server/projects/message-store';
+import { EMPTY_COST_CURSOR, parseCostCursor, serializeCostCursor } from './session-cost';
 import { FsProjectStore, setProjectStore } from '~/lib/.server/projects/store';
 import { setObjectStore, type ObjectStore } from '~/lib/.server/storage';
 import { setManagedClientForTests } from './config';
-import { settleBeforeDelete } from './delete-settle';
+import { assertDeleteSettled, settleBeforeDelete } from './delete-settle';
 import { createFakeManagedClient, type FakeClient } from './fake-session.testkit';
 import { FsManagedOrphanStore, getManagedOrphanStore, setManagedOrphanStore } from './orphans';
 
@@ -38,6 +39,9 @@ let ledger: FsLedger;
 let store: FsGenerationStore;
 let fake: FakeClient;
 let projectId: string;
+let otherProjectId: string;
+
+const OTHER_USER = '55555555-5555-4555-8555-555555555555';
 
 function memoryStore(): ObjectStore {
   const objects = new Map<string, Uint8Array>();
@@ -83,6 +87,7 @@ beforeEach(async () => {
   const projects = new FsProjectStore(path.join(tmp, 'projects'));
   setProjectStore(projects);
   projectId = (await projects.create({ userId: USER, name: 'Game', templateId: 'blank' } as never)).id;
+  otherProjectId = (await projects.create({ userId: OTHER_USER, name: 'Other', templateId: 'blank' } as never)).id;
 
   await ledger.append({ userId: USER, delta: 10_000, reason: 'grant' });
 
@@ -340,5 +345,192 @@ describe('a session that keeps running past the delete wait', () => {
     const tail = -all[0].delta;
     expect(tail, `the sweep re-billed the delete's ${x} credits`).toBeLessThan(x / 2);
     expect(await getManagedOrphanStore().listOpen()).toEqual([]);
+  });
+});
+
+/**
+ * 🔴 no-unbilled-usage residual R1 — a RE-HOME settles first.
+ *
+ * Migration 0026's trigger (and `FsChatIndex.upsert`) clears a chat's session AND its cost cursor when the
+ * row is upserted under another project. The cursor carries the session's PENDING DEBITS (D6) and the marker
+ * of what was already billed — so a re-home lost both, silently, and the platform ate the usage. A save that
+ * would move the row now settles the session (as a delete does) first, billed to the OLD project's owner.
+ */
+describe('a chat moved to another project settles its session first (R1)', () => {
+  const save = (target: string, chatId: string) =>
+    putChat(target, {
+      serverChatId: chatId,
+      title: 'moved',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+    });
+
+  async function chatWithIntent() {
+    const { chatId, sessionId } = await liveChat('idle');
+    const intent = {
+      generationId: 'gen_r1_intent',
+      credits: 42,
+      rawCostUsd: 0.07,
+      model: MODEL,
+      userId: USER,
+      projectId,
+      chatId,
+      statusKind: 'edit',
+      usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 },
+    };
+
+    await getChatIndex().setManagedSettledAt({
+      id: chatId,
+      projectId,
+      settledAt: serializeCostCursor({ ...EMPTY_COST_CURSOR, pending: [intent] }),
+    });
+
+    return { chatId, sessionId };
+  }
+
+  it('debits the pending intent and settles the unsettled usage BEFORE the cursor is cleared', async () => {
+    const { chatId, sessionId } = await chatWithIntent();
+
+    await save(otherProjectId, chatId);
+
+    const billed = await debits();
+
+    expect(billed.map((e) => e.generationId)).toContain('gen_r1_intent');
+    expect(
+      billed.some((e) => e.generationId?.startsWith(`${chatId}_delete_`) && -e.delta > 0),
+      'the session usage above the cursor was settled',
+    ).toBe(true);
+    expect(await ledger.list(OTHER_USER), "never billed to the new project's owner").toEqual([]);
+
+    const moved = await getChatIndex().get(chatId);
+
+    expect(moved?.projectId).toBe(otherProjectId);
+    expect(moved?.managedSessionId, 'the trigger still forgets the session — the safety net stays').toBeUndefined();
+    expect(fake.archived).toContain(sessionId);
+  });
+
+  it('a settlement that cannot complete leaves an orphan carrying the cursor for the sweep', async () => {
+    const { chatId, sessionId } = await chatWithIntent();
+
+    setManagedClientForTests(undefined);
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+
+    await save(otherProjectId, chatId);
+
+    const open = await getManagedOrphanStore().listOpen();
+
+    expect(open.map((o) => o.sessionId)).toEqual([sessionId]);
+    expect(parseCostCursor(open[0].cursor)?.pending?.map((p) => p.generationId)).toEqual(['gen_r1_intent']);
+  });
+
+  /*
+   * Verifier R1 slip: when the OLD project's owner cannot be resolved, nothing can be billed or orphaned (an
+   * orphan needs its account) — so the MOVE is refused: the row stays bound to the old project, the session and
+   * its cursor (pending intent included) survive, and the transcript is still saved.
+   */
+  it('an old project with no owner on record refuses the move instead of losing the usage', async () => {
+    const { chatId, sessionId } = await chatWithIntent();
+    const real = new FsProjectStore(path.join(tmp, 'projects'));
+
+    setProjectStore({
+      get: async (id: string) => (id === projectId ? null : real.get(id)),
+    } as never);
+
+    await save(otherProjectId, chatId);
+
+    const row = await getChatIndex().get(chatId);
+
+    expect(row?.projectId, 'not moved').toBe(projectId);
+    expect(row?.managedSessionId).toBe(sessionId);
+    expect(parseCostCursor(row?.managedSettledAt)?.pending?.map((p) => p.generationId)).toEqual(['gen_r1_intent']);
+    expect(await debits()).toEqual([]);
+  });
+
+  /*
+   * R1-b: a TRANSIENT index read failure used to drop the row silently (`.catch(() => null)`): nothing was
+   * settled, nothing alerted, and the erase went ahead. Now the handling is unconfirmed → refused, retryably.
+   */
+  it('a transient index read failure refuses the delete and the move — binding intact', async () => {
+    const { chatId, sessionId } = await chatWithIntent();
+    const index = getChatIndex() as unknown as { get: (id: string) => Promise<unknown> };
+    const realGet = index.get.bind(index);
+    let failing = true;
+
+    index.get = async (id: string) => {
+      if (failing) {
+        throw new Error('index read timed out');
+      }
+
+      return realGet(id);
+    };
+
+    const report = await settleBeforeDelete({ userId: USER, projectId, chatIds: [chatId], pollMs: 5 });
+
+    expect(report.unconfirmed).toBeGreaterThan(0);
+    expect(() => assertDeleteSettled(report, 'Deleting this chat')).toThrow(/try again/);
+
+    await save(otherProjectId, chatId);
+    failing = false;
+
+    const row = await getChatIndex().get(chatId);
+
+    expect(row?.projectId, 'not moved').toBe(projectId);
+    expect(row?.managedSessionId).toBe(sessionId);
+    expect(await debits()).toEqual([]);
+  });
+
+  /* R1-b: settlement impossible AND the orphan write failed → nothing proves the usage survives → refused. */
+  it('a failed orphan write refuses the delete and the move', async () => {
+    const { chatId, sessionId } = await chatWithIntent();
+
+    setManagedClientForTests(undefined);
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+    setManagedOrphanStore({
+      record: async () => {
+        throw new Error('orphan table down');
+      },
+      listOpen: async () => [],
+      setCursor: async () => undefined,
+      resolve: async () => undefined,
+      openForSession: async () => null,
+      withdraw: async () => undefined,
+    });
+
+    const report = await settleBeforeDelete({ userId: USER, projectId, chatIds: [chatId], pollMs: 5 });
+
+    expect(report.unconfirmed).toBe(1);
+    expect(() => assertDeleteSettled(report, 'Deleting this chat')).toThrow(/Nothing was deleted/);
+
+    await save(otherProjectId, chatId);
+
+    const row = await getChatIndex().get(chatId);
+
+    expect(row?.projectId, 'not moved').toBe(projectId);
+    expect(row?.managedSessionId).toBe(sessionId);
+  });
+
+  /* CONTROL — a delete whose orphan write SUCCEEDS still proceeds (the D4 decision: Anthropic down never blocks a delete). */
+  it('CONTROL: settlement impossible but orphan recorded → the delete is allowed', async () => {
+    const { chatId } = await chatWithIntent();
+
+    setManagedClientForTests(undefined);
+    vi.stubEnv('ANTHROPIC_API_KEY', '');
+
+    const report = await settleBeforeDelete({ userId: USER, projectId, chatIds: [chatId], pollMs: 5 });
+
+    expect(report.unconfirmed).toBe(0);
+    expect(() => assertDeleteSettled(report, 'x')).not.toThrow();
+  });
+
+  /* CONTROL — an ordinary save in the SAME project touches no money and keeps the session bound. */
+  it('CONTROL: a save in the same project settles nothing', async () => {
+    const { chatId, sessionId } = await chatWithIntent();
+
+    await save(projectId, chatId);
+
+    expect(await debits()).toEqual([]);
+    expect((await getChatIndex().get(chatId))?.managedSessionId).toBe(sessionId);
+    expect(fake.archived).not.toContain(sessionId);
   });
 });

@@ -28,7 +28,24 @@ interface UsageReport {
   charsPerOutputToken: number;
   markers: { forcedContinuation: number; unproductiveRescue: number; providerRetry: number; rescued: number };
   integrity: { turnsWithViolations: number; byInvariant: Record<string, number>; turnsWithReissues: number };
-  media: { renders: number; creditsCharged: number; rawCostUsd: number };
+  media: {
+    renders: number;
+    creditsCharged: number;
+    rawCostUsd: number;
+
+    /* no-unbilled-usage D9: renders that may be running with no task to poll — debit held, reconcile by hand. */
+    unconfirmed?: number;
+    unconfirmedTasks?: Array<{
+      id: string;
+      userId: string;
+      projectId?: string;
+      model: string;
+      provider?: string;
+      creditsCharged: number;
+      createdAt?: string;
+      error?: string;
+    }>;
+  };
   byModel: Array<{ model: string; generations: number; rawCostUsd: number }>;
 }
 
@@ -576,6 +593,32 @@ export function AdminTab() {
                 <span>Media renders: {report.media.renders}</span>
                 <span>Media credits: {report.media.creditsCharged.toLocaleString()}</span>
                 <span>Media raw cost: ${report.media.rawCostUsd.toFixed(2)}</span>
+                {(report.media.unconfirmed ?? 0) > 0 && (
+                  <span className="text-amber-500">Unconfirmed media: {report.media.unconfirmed}</span>
+                )}
+              </div>
+            )}
+            {/*
+             * no-unbilled-usage D9: a render whose create was never confirmed (a timeout, a 5xx) or whose
+             * task record could not be stored. Its debit STANDS — it may be rendering on our account — so
+             * each one is listed here to be reconciled against the provider, and refunded with a credit
+             * adjustment if it never ran.
+             */}
+            {(report.media?.unconfirmedTasks?.length ?? 0) > 0 && (
+              <div className="mt-2 text-xs text-bolt-elements-textSecondary">
+                <div className="font-medium text-amber-500">
+                  Unconfirmed media — debit held, reconcile with the provider
+                </div>
+                <ul className="mt-1 flex flex-col gap-0.5">
+                  {report.media.unconfirmedTasks!.map((task) => (
+                    <li key={task.id} className="truncate" title={task.error}>
+                      {task.id} · {task.provider ?? '?'} {task.model} · {task.creditsCharged} credits · user{' '}
+                      {task.userId}
+                      {task.createdAt ? ` · ${new Date(task.createdAt).toLocaleString()}` : ''}
+                      {task.error ? ` — ${task.error}` : ''}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
             {/*

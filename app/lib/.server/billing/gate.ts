@@ -192,8 +192,10 @@ export interface SettleInput {
   /**
    * The status the anchored row ends in. Default `completed`. The billing sweep (no-unbilled-usage D3)
    * passes `interrupted` for a turn whose process died: billed from its last checkpoint, never refunded.
+   * The prompt enhancer passes `failed` for a broken enhancement (no-unbilled-usage T8) so the outcome rides
+   * this one anchor write — a second, status-only upsert through the Postgres store zeroes every usage column.
    */
-  status?: 'completed' | 'interrupted';
+  status?: 'completed' | 'interrupted' | 'failed';
 
   /**
    * The row's project and chat, when the caller knows them. Optional because the Postgres upsert writes

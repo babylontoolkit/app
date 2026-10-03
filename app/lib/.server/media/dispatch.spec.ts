@@ -11,6 +11,10 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { createDispatchQueue, MEDIA_MAX_ATTEMPTS, MEDIA_RETRY_DELAYS_MS, MEDIA_SPACING_MS } from './dispatch';
+import { MediaCreateError } from './create-failure';
+
+/** A create that CERTAINLY did not start (a 429 / a refused connection) — the only kind the queue retries (D9). */
+const transient = (message: string) => new MediaCreateError(message, 'refused', true);
 
 /** A controllable clock: `sleep` advances it, so elapsed time is exactly what the queue asked for. */
 function fakeClock() {
@@ -137,7 +141,7 @@ describe('per-image retry', () => {
   it('retries a failing create and succeeds on a later attempt', async () => {
     const clock = fakeClock();
     const dispatch = createDispatchQueue(clock.deps);
-    const create = vi.fn().mockRejectedValueOnce(new Error('KIE blip')).mockResolvedValueOnce('task-123');
+    const create = vi.fn().mockRejectedValueOnce(transient('KIE 429')).mockResolvedValueOnce('task-123');
 
     await expect(dispatch('img', create)).resolves.toBe('task-123');
     expect(create).toHaveBeenCalledTimes(2);
@@ -148,9 +152,9 @@ describe('per-image retry', () => {
     const dispatch = createDispatchQueue(clock.deps);
     const create = vi
       .fn()
-      .mockRejectedValueOnce(new Error('first'))
-      .mockRejectedValueOnce(new Error('second'))
-      .mockRejectedValueOnce(new Error('final'));
+      .mockRejectedValueOnce(transient('first'))
+      .mockRejectedValueOnce(transient('second'))
+      .mockRejectedValueOnce(transient('final'));
 
     await expect(dispatch('img', create)).rejects.toThrow('final');
     expect(create).toHaveBeenCalledTimes(MEDIA_MAX_ATTEMPTS);
@@ -160,9 +164,73 @@ describe('per-image retry', () => {
     const clock = fakeClock();
     const dispatch = createDispatchQueue(clock.deps);
 
-    await dispatch('img', vi.fn().mockRejectedValueOnce(new Error('x')).mockResolvedValueOnce('ok'));
+    await dispatch('img', vi.fn().mockRejectedValueOnce(transient('x')).mockResolvedValueOnce('ok'));
 
     expect(clock.sleeps).toContain(MEDIA_RETRY_DELAYS_MS[0]);
+  });
+});
+
+/**
+ * 🔴 no-unbilled-usage D9 — NEVER RETRY A CREATE THE PROVIDER MAY HAVE ACCEPTED.
+ *
+ * The debit is taken once, before the queue. A retry after a timeout / reset / 5xx starts a SECOND render
+ * if the first was accepted — on our account, debited to nobody. The old default ("anything we cannot
+ * classify is transient") did exactly that.
+ */
+describe('retries only a definite non-acceptance (D9)', () => {
+  it('never retries a timeout — it may have been accepted', async () => {
+    const dispatch = createDispatchQueue(fakeClock().deps);
+    const timeout = Object.assign(new Error('aborted due to timeout'), { name: 'TimeoutError' });
+    const create = vi.fn().mockRejectedValue(timeout);
+
+    await expect(dispatch('img', create)).rejects.toBe(timeout);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('never retries a typed ambiguous failure (a 5xx, a 2xx with no task id)', async () => {
+    const dispatch = createDispatchQueue(fakeClock().deps);
+    const create = vi.fn().mockRejectedValue(new MediaCreateError('HTTP 502', 'ambiguous'));
+
+    await expect(dispatch('img', create)).rejects.toThrow('HTTP 502');
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('never retries an untyped error it cannot classify', async () => {
+    const dispatch = createDispatchQueue(fakeClock().deps);
+    const create = vi.fn().mockRejectedValue(new Error('socket hang up'));
+
+    await expect(dispatch('img', create)).rejects.toThrow('socket hang up');
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a definite refusal that will repeat (HTTP 422)', async () => {
+    const dispatch = createDispatchQueue(fakeClock().deps);
+    const create = vi.fn().mockRejectedValue(new Error('fal refused the request (HTTP 422): bad option'));
+
+    await expect(dispatch('img', create)).rejects.toThrow('422');
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  /* CONTROL — a connection refused before sending is retried: it certainly did not start. */
+  it('CONTROL: retries a create that was never sent', async () => {
+    const dispatch = createDispatchQueue(fakeClock().deps);
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(new MediaCreateError('connect ECONNREFUSED', 'not-sent', true))
+      .mockResolvedValueOnce('task-9');
+
+    await expect(dispatch('img', create)).resolves.toBe('task-9');
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('CONTROL: retries an untyped HTTP 429', async () => {
+    const dispatch = createDispatchQueue(fakeClock().deps);
+    const create = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fal refused the request (HTTP 429): slow down'))
+      .mockResolvedValueOnce('task-10');
+
+    await expect(dispatch('img', create)).resolves.toBe('task-10');
   });
 });
 

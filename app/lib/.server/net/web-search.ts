@@ -289,17 +289,36 @@ export function getSearchProvider(env: Record<string, string | undefined> = proc
 
 export type SearchOutcome =
   | { ok: true; provider: string; billable: boolean; results: SearchResult[] }
-  | { ok: false; error: string };
+  | {
+      ok: false;
+      error: string;
 
-/** Run a web search. Never throws — a backend hiccup comes back as `{ ok: false }`. */
-export async function webSearch(query: string, limit = DEFAULT_SEARCH_LIMIT): Promise<SearchOutcome> {
+      /*
+       * no-unbilled-usage D9: the vendor may still have counted (and billed) this query — a TIMEOUT, where
+       * the request may have been served. Absent/false when the vendor answered with a refusal or the call
+       * failed outright, which is the only failure a prepaid search toll is refunded for.
+       */
+      maybeCharged?: boolean;
+    };
+
+/**
+ * Run a web search. Never throws — a backend hiccup comes back as `{ ok: false }`.
+ *
+ * `provider` lets a caller that already resolved the backend (the tool, which must know BEFORE the call
+ * whether the search is billable — it debits first) run exactly that one; omitted = resolved from config.
+ */
+export async function webSearch(
+  query: string,
+  limit = DEFAULT_SEARCH_LIMIT,
+  resolved?: SearchProvider,
+): Promise<SearchOutcome> {
   const q = (query ?? '').trim();
 
   if (!q) {
     return { ok: false, error: 'Empty search query.' };
   }
 
-  const provider = getSearchProvider();
+  const provider = resolved ?? getSearchProvider();
   const capped = Math.max(1, Math.min(limit || DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT));
 
   try {
@@ -308,8 +327,8 @@ export async function webSearch(query: string, limit = DEFAULT_SEARCH_LIMIT): Pr
 
     return { ok: true, provider: provider.name, billable: provider.billable, results };
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'TimeoutError') {
-      return { ok: false, error: 'Search timed out.' };
+    if ((error as { name?: unknown } | null)?.name === 'TimeoutError') {
+      return { ok: false, error: 'Search timed out.', maybeCharged: true };
     }
 
     logger.error(`webSearch(${q}) failed: ${error instanceof Error ? error.message : String(error)}`);

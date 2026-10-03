@@ -26,6 +26,8 @@ import {
   type SoundKind,
 } from '~/lib/media/provider-defaults';
 import { dispatchMediaCreate } from './dispatch';
+import { classifyCreateFailure, MediaCreateError } from './create-failure';
+import { MEDIA_UNCONFIRMED_REASON } from './unconfirmed';
 import { getMonitor } from '~/lib/.server/monitoring';
 import { recordRefundOutcome } from '~/lib/.server/monitoring/paid-path-rates';
 import { ALERT_SIGNALS } from '~/lib/.server/monitoring/events';
@@ -734,26 +736,67 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
 
   let kieTaskId: string;
 
+  /* The row every later status write carries, so a status change never zeroes the money columns. */
+  const row: MediaRowFacts = {
+    id,
+    userId: input.userId,
+    projectId: input.projectId,
+    model: quote.model,
+    provider: mediaProvider,
+    credits: debited,
+    usd: quote.usd,
+  };
+
   try {
     /*
-     * 🔴 THROUGH THE QUEUE (`dispatch.ts`): one render dispatched at a time, spaced, with per-image
-     * retry. The debit above has already happened, so a retry here NEVER re-debits — one task, one
-     * charge, up to MEDIA_MAX_ATTEMPTS attempts at getting it accepted. Only a final failure reaches
-     * the catch below, which refunds exactly as it always did.
+     * The payload is built BEFORE the dispatch, so a throw here is certainly pre-send (`not-sent` → refund)
+     * and never read as a create the provider might have accepted.
+     */
+    let payload: Record<string, unknown>;
+
+    try {
+      payload = buildProviderPayload(
+        quote.model,
+        { ...input, options: quote.options, durationSeconds: quote.durationSeconds ?? input.durationSeconds },
+        quote.delivery,
+        mediaProvider,
+      );
+    } catch (error) {
+      throw new MediaCreateError(`the request could not be built: ${(error as Error).message}`, 'not-sent');
+    }
+
+    /*
+     * 🔴 THROUGH THE QUEUE (`dispatch.ts`): one render dispatched at a time, spaced. The debit above has
+     * already happened, so a retry here NEVER re-debits — and since D9 the queue retries only a create that
+     * certainly did not start, so a retry can never be an un-debited duplicate either.
      */
     kieTaskId = await dispatchMediaCreate(id, () =>
       input.provider.create({
         endpoint: endpointFor(mediaProvider, quote.model),
         model: quote.model,
-        payload: buildProviderPayload(
-          quote.model,
-          { ...input, options: quote.options, durationSeconds: quote.durationSeconds ?? input.durationSeconds },
-          quote.delivery,
-          mediaProvider,
-        ),
+        payload,
       }),
     );
   } catch (error) {
+    const failure = classifyCreateFailure(error);
+
+    /*
+     * 🔴 AMBIGUOUS — NEVER REFUNDED (no-unbilled-usage D9). A timeout, a reset after send or a 5xx says
+     * nothing about whether the provider accepted the render; if it did, it is rendering and billed to US.
+     * Refunding it gave the user a free render; the old dispatch then RETRIED it, starting a second one
+     * nobody paid for. The debit stands, the task is `unknown`, and an admin reconciles it (no gateway we use
+     * can be asked about a create it never named — there is no idempotency key on either).
+     */
+    if (failure.outcome === 'ambiguous') {
+      await holdUnconfirmedMedia(input, row, quote, destPath, (error as Error)?.message ?? String(error));
+
+      throw new MediaRefusedError(
+        `${mediaProvider} did not confirm the render (${(error as Error)?.message ?? 'no answer'}). It may still ` +
+          `be rendering, so its ${debited} credits are held until it is reconciled — do not retry this request.`,
+        502,
+      );
+    }
+
     // The task never started, so the money comes straight back and the anchor says failed.
     await refundMediaTask(
       input.userId,
@@ -764,9 +807,7 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
       `${mediaProvider} refused the task: ${(error as Error).message}`,
       input.context,
     );
-    await getGenerationStore(input.context)
-      .upsert({ id, userId: input.userId, model: quote.model, status: 'failed' })
-      .catch(() => undefined);
+    await writeMediaRow(input.context, row, 'failed', { error: (error as Error)?.message });
 
     recordRefundOutcome(getMonitor(input.context), 'media', true);
 
@@ -804,38 +845,39 @@ export async function startMediaTask(input: StartMediaInput): Promise<StartedMed
      * it is stored rather than re-derived, so a price-list change mid-render can never make a task
      * that was PAID for as transparent finish as an opaque one.
      */
-    ...(quote.delivery?.cutout ? { cutout: true as const, stage: 'render' as const } : {}),
+    ...(quote.delivery?.cutout
+      ? { cutout: true as const, stage: 'render' as const, cutoutCredits: cutoutShare(quote, debited, config) }
+      : {}),
     createdAt: now,
     updatedAt: now,
   };
 
   /*
-   * 🔴 THE TASK RECORD IS THE ONLY THING THAT CAN EVER FINISH OR REFUND THIS RENDER.
+   * 🔴 THE TASK RECORD IS THE ONLY THING THAT CAN EVER FINISH THIS RENDER.
    *
-   * By this line the user has been DEBITED and KIE is rendering. The record is what the poll route
-   * reads to deliver the bytes, and what the failure path reads to refund. Left unguarded, an object
-   * store hiccup here produced a fifth terminal state (`spec/fail-loud.md`): money gone, render
-   * running, nothing able to poll it, nothing able to refund it, and the tool result reporting only
-   * that the task "could not start" — the exact silent shape this spec exists to remove.
+   * By this line the user has been DEBITED and the provider is rendering — on OUR account. The record is
+   * what the poll route reads to deliver the bytes and what the failure path reads to refund.
    *
-   * So: refund, mark the anchor failed, and refuse out loud. The render at KIE is not recoverable
-   * (it is already paid for on OUR account), but the user's credits are, and that is the half that
-   * is ours to get right.
+   * no-unbilled-usage D9: a failed save used to REFUND — but the render it could no longer track was still
+   * running and still billed to us, so every object-store hiccup handed out a free render. Now the save is
+   * retried (bounded); if it still cannot land, the debit STANDS and the generations row is marked
+   * unconfirmed with the provider's task id, so an admin can find the render and reconcile it. Said out loud
+   * either way — never the silent fifth terminal state (`spec/fail-loud.md`).
    */
-  try {
-    await putMediaTask(input.objectStore, record);
-  } catch (error) {
-    const message = `the render started but its task record could not be stored: ${(error as Error).message}`;
-    logger.error(`Media task ${id} orphaned — ${message}`);
+  const saveError = await saveTaskRecordWithRetry(input.objectStore, record);
 
-    await refundMediaTask(input.userId, id, debited, message, input.context);
-    await getGenerationStore(input.context)
-      .upsert({ id, userId: input.userId, model: quote.model, status: 'failed' })
-      .catch(() => undefined);
+  if (saveError) {
+    const message = `the render started (provider task ${kieTaskId}) but its task record could not be stored: ${saveError}`;
+    logger.error(`Media task ${id} untracked — ${message}`);
 
-    recordRefundOutcome(getMonitor(input.context), 'media', true);
+    await markMediaUnconfirmed(input.context, row, message);
+    recordRefundOutcome(getMonitor(input.context), 'media', false);
 
-    throw new MediaRefusedError(`The render could not be tracked, so it was cancelled and refunded: ${message}`, 500);
+    throw new MediaRefusedError(
+      `The render started but could not be tracked, so it cannot be delivered automatically. Its ${debited} ` +
+        'credits are held until it is reconciled — do not retry this request.',
+      500,
+    );
   }
 
   logger.info(
@@ -956,27 +998,41 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
           return updated;
         } catch (error) {
           /*
-           * The cut-out could not start. The render exists and cost us real money, but the USER
-           * asked for a transparent asset and is not getting one — that is a failed task, refunded
-           * in full, said out loud. Quietly delivering the opaque render instead is the silent
-           * degradation this pipeline was built to end.
+           * The cut-out could not start. The USER asked for a transparent asset and is not getting one, so
+           * the task FAILS — the opaque render is never delivered in its place (§4.16: refuse, never
+           * downgrade).
+           *
+           * 🔴 But stage 1 RENDERED, and the provider billed US for it (no-unbilled-usage D9). Refunding the
+           * whole task — what this did — absorbed that render. DECISION (D9, owner rule "we never eat the
+           * cost"): refund ONLY the cut-out stage's share; stage 1's charge stands, and the message says so.
            */
           const message = `the cut-out pass could not start: ${(error as Error).message}`;
-          logger.error(`Media task ${record.id} ${message}`);
+          const share = cutoutShareForRecord(record, input.context);
+
+          logger.error(
+            `Media task ${record.id} ${message} — DECISION: refunding the cut-out share (${share} of ` +
+              `${record.credits} credits); the rendered stage's charge stands`,
+          );
 
           updated.status = 'failed';
-          updated.error = message;
+          updated.error =
+            share > 0
+              ? `${message} (the cut-out's ${share} credits were refunded; the completed render's ` +
+                `${record.credits - share} credits stand)`
+              : message;
 
-          if (!record.refunded && record.credits > 0) {
-            await refundMediaTask(record.userId, record.id, record.credits, message, input.context);
+          if (!record.refunded && share > 0) {
+            await refundMediaTask(record.userId, record.id, share, message, input.context);
             updated.refunded = true;
+            updated.refundedCredits = share;
           }
 
-          await getGenerationStore(input.context)
-            .upsert({ id: record.id, userId: record.userId, model: record.model, status: 'failed' })
-            .catch(() => undefined);
+          await writeMediaRow(input.context, rowOf(record), 'failed', {
+            error: message,
+            creditsCharged: Math.max(0, record.credits - share),
+          });
           await putMediaTask(input.objectStore, updated);
-          recordRefundOutcome(getMonitor(input.context), 'media', true);
+          recordRefundOutcome(getMonitor(input.context), 'media', share > 0);
 
           return updated;
         }
@@ -984,9 +1040,7 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
 
       updated.status = 'succeeded';
       updated.resultUrl = state.resultUrl;
-      await getGenerationStore(input.context)
-        .upsert({ id: record.id, userId: record.userId, model: record.model, status: 'completed' })
-        .catch(() => undefined);
+      await writeMediaRow(input.context, rowOf(record), 'completed');
     } else {
       updated.status = 'failed';
       updated.error = state.error;
@@ -996,9 +1050,7 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
         updated.refunded = true;
       }
 
-      await getGenerationStore(input.context)
-        .upsert({ id: record.id, userId: record.userId, model: record.model, status: 'failed' })
-        .catch(() => undefined);
+      await writeMediaRow(input.context, rowOf(record), 'failed', { error: state.error });
     }
 
     await putMediaTask(input.objectStore, updated);
@@ -1018,6 +1070,203 @@ export async function pollMediaTask(input: PollMediaInput): Promise<MediaTaskRec
 
     return updated;
   });
+}
+
+/*
+ * ---------------------------------------------------------------------------------------------
+ * no-unbilled-usage D9 — the media row, unconfirmed creates, record-save retry, the cut-out share
+ * ---------------------------------------------------------------------------------------------
+ */
+
+/** What every status write of a media task's `generations` row carries. */
+interface MediaRowFacts {
+  id: string;
+  userId: string;
+  projectId: string;
+  model: string;
+  provider: string;
+  credits: number;
+  usd: number;
+}
+
+function rowOf(record: MediaTaskRecord): MediaRowFacts {
+  return {
+    id: record.id,
+    userId: record.userId,
+    projectId: record.projectId,
+    model: record.model,
+
+    /* The stamped name, never `mediaProviderOf` — that throws for a retired gateway, whose rows still close. */
+    provider: record.provider ?? 'KIE',
+    credits: record.credits,
+    usd: record.usd,
+  };
+}
+
+export { MEDIA_UNCONFIRMED_REASON };
+
+/**
+ * Write a media row's status WITH its money columns. 🔴 A bare `{ id, userId, model, status }` upsert is a
+ * full-row write on Postgres (`input_tokens: row.promptTokens ?? 0`, `credits_charged: … ?? 0`), so every
+ * media status change used to ZERO the row's credits and raw cost — which is why the Admin media spend read
+ * low on production. Never throws: a status write must not undo the money that already moved.
+ */
+async function writeMediaRow(
+  context: unknown,
+  row: MediaRowFacts,
+  status: 'completed' | 'failed' | 'interrupted',
+  extra: { error?: string; finishReason?: string; creditsCharged?: number } = {},
+): Promise<void> {
+  await getGenerationStore(context)
+    .upsert({
+      id: row.id,
+      userId: row.userId,
+      projectId: row.projectId,
+      model: row.model,
+      provider: row.provider,
+      creditsCharged: extra.creditsCharged ?? row.credits,
+      rawCostUsd: row.usd,
+      status,
+      ...(extra.error ? { error: extra.error.slice(0, 500) } : {}),
+      ...(extra.finishReason ? { finishReason: extra.finishReason } : {}),
+    })
+    .catch((error) => logger.error(`Media row ${row.id} → ${status} not recorded: ${(error as Error)?.message}`));
+}
+
+/**
+ * The row of a render we may be paying for but cannot track: `interrupted` (billed, never refunded — the
+ * sweep's word for it) with `finishReason: media-unconfirmed`, which is what the Admin report lists. Alerted,
+ * because only an operator can reconcile it.
+ */
+async function markMediaUnconfirmed(context: unknown, row: MediaRowFacts, message: string): Promise<void> {
+  await writeMediaRow(context, row, 'interrupted', { error: message, finishReason: MEDIA_UNCONFIRMED_REASON });
+
+  getMonitor(context).alert(
+    ALERT_SIGNALS.LEDGER_INTEGRITY,
+    `Media task ${row.id} is unconfirmed — ${message}. Its ${row.credits} credits are held (not refunded); ` +
+      'reconcile it against the provider (Admin → Usage → unconfirmed media).',
+    {
+      severity: 'warning',
+      scope: 'media-unconfirmed',
+      userId: row.userId,
+      tags: { mediaId: row.id, credits: row.credits },
+    },
+  );
+}
+
+/** An ambiguous create: the debit stands, the task is stored `unknown` (best-effort), the row is unconfirmed. */
+async function holdUnconfirmedMedia(
+  input: StartMediaInput,
+  row: MediaRowFacts,
+  quote: MediaQuote,
+  destPath: string,
+  reason: string,
+): Promise<void> {
+  const message = `the create was not confirmed — the render may have started: ${reason}`;
+
+  logger.error(`Media task ${row.id}: ${message} — DECISION: no refund, no retry; held as unknown`);
+
+  const now = new Date().toISOString();
+
+  await putMediaTask(input.objectStore, {
+    id: row.id,
+    projectId: input.projectId,
+    userId: input.userId,
+    kind: quote.kind,
+    provider: input.provider.name,
+    endpoint: endpointFor(input.provider.name, quote.model),
+    model: quote.model,
+    prompt: input.prompt,
+    options: quote.options,
+    durationSeconds: quote.durationSeconds ?? input.durationSeconds,
+    destPath,
+    usd: quote.usd,
+    credits: row.credits,
+    status: 'unknown',
+    kieTaskId: '',
+    error: message.slice(0, 500),
+    createdAt: now,
+    updatedAt: now,
+  }).catch((error) =>
+    logger.error(`Media task ${row.id}: the unknown record was not stored: ${(error as Error)?.message}`),
+  );
+
+  await markMediaUnconfirmed(input.context, row, message);
+  recordRefundOutcome(getMonitor(input.context), 'media', false);
+}
+
+/** Backoff before the 2nd and 3rd record-save attempts. */
+export const MEDIA_RECORD_SAVE_DELAYS_MS = [250, 1_000];
+
+let recordSaveDelays: readonly number[] = MEDIA_RECORD_SAVE_DELAYS_MS;
+
+/** Tests only: no real sleeps between record-save attempts. */
+export function setMediaRecordSaveDelaysForTests(delays?: readonly number[]): void {
+  recordSaveDelays = delays ?? MEDIA_RECORD_SAVE_DELAYS_MS;
+}
+
+/** Store the task record, retrying a transient store failure. Returns the last error message, or null. */
+async function saveTaskRecordWithRetry(store: ObjectStore, record: MediaTaskRecord): Promise<string | null> {
+  let last = '';
+
+  for (let attempt = 0; attempt <= recordSaveDelays.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, recordSaveDelays[attempt - 1]));
+    }
+
+    try {
+      await putMediaTask(store, record);
+      return null;
+    } catch (error) {
+      last = (error as Error)?.message ?? String(error);
+      logger.warn(`Media task ${record.id}: record save attempt ${attempt + 1} failed: ${last}`);
+    }
+  }
+
+  return last;
+}
+
+/**
+ * The cut-out stage's share of a transparent render's debit: the total less what the render alone would
+ * have cost. Zero when nothing was debited (unmetered). Fixed at creation (`cutoutCredits`).
+ */
+function cutoutShare(quote: MediaQuote, debited: number, config: ReturnType<typeof getBillingConfig>): number {
+  if (debited <= 0 || !quote.cutoutUsd) {
+    return 0;
+  }
+
+  const renderCredits = creditsForRawCost(Math.max(0, quote.usd - quote.cutoutUsd), config);
+
+  return Math.min(debited, Math.max(0, quote.credits - renderCredits));
+}
+
+/**
+ * The share for a record — its stored `cutoutCredits`, or for a record written before that field, the
+ * cut-out row's price in the active list (capped at the debit). Never more than was debited.
+ */
+function cutoutShareForRecord(record: MediaTaskRecord, context: unknown): number {
+  if (record.credits <= 0) {
+    return 0;
+  }
+
+  if (typeof record.cutoutCredits === 'number' && Number.isFinite(record.cutoutCredits)) {
+    return Math.min(record.credits, Math.max(0, record.cutoutCredits));
+  }
+
+  try {
+    const provider = mediaProviderOf(record);
+    const model = cutoutModelFor(provider);
+    const price = model ? lookupMediaPrice(activeMarketPrices(provider), { model, options: {} }) : null;
+
+    if (price) {
+      return Math.min(record.credits, creditsForRawCost(price.usd, getBillingConfig(context)));
+    }
+  } catch (error) {
+    logger.warn(`Media task ${record.id}: cut-out share not derivable: ${(error as Error)?.message}`);
+  }
+
+  /* Unknowable share on a legacy record: refund the whole task (the pre-D9 rule) rather than nothing. */
+  return record.credits;
 }
 
 /** The compensating row (§4.6 "failed generations auto-refund" — same rule, media flavour). */

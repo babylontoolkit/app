@@ -33,7 +33,7 @@ import { getChatIndex, type ChatIndexRow } from '~/lib/.server/projects/chat-ind
 import { keepAlive } from '~/lib/.server/runtime/keep-alive';
 import { createScopedLogger } from '~/utils/logger';
 import { getManagedClient, getManagedEngineConfig } from './config';
-import { getManagedOrphanStore } from './orphans';
+import { advanceOpenOrphan, getManagedOrphanStore } from './orphans';
 import { sessionModel, SUPERSEDE_WAIT_MS } from './session-health';
 import { settleManagedTurn } from './settle';
 
@@ -52,6 +52,13 @@ export interface DeleteSettleInput {
 
   context?: unknown;
 
+  /**
+   * Settle the managed sessions only, leaving the chats' legacy / enhancer rows to the sweep. A RE-HOME
+   * (`message-store.ts` `settleBeforeRehome`) moves a chat rather than deleting it: its legacy turns still
+   * belong to it and may be in flight in another request.
+   */
+  skipLegacyRows?: boolean;
+
   /** Specs' seams. */
   client?: Anthropic;
   pollMs?: number;
@@ -63,12 +70,45 @@ export interface DeleteSettleReport {
   credits: number;
   orphaned: number;
   legacyRows: number;
+
+  /**
+   * Sessions (or chat lists) whose handling is NOT confirmed — the chats could not be read, or a session
+   * could neither be settled completely nor kept in a CONFIRMED orphan write (R1-b). A caller about to erase
+   * the chat rows must refuse while this is non-zero (`assertDeleteSettled`): the rows are the only record.
+   */
+  unconfirmed: number;
+}
+
+/** A delete or move refused because a managed session's billing could not be secured first (retryable). */
+export class ManagedSettlementUnconfirmedError extends Error {
+  readonly statusCode = 503;
+  readonly isRetryable = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedSettlementUnconfirmedError';
+  }
+}
+
+/**
+ * Refuse (throw, retryable) unless every session the delete or move would erase was handled — settled in
+ * full, or kept in a confirmed orphan record. DECISION (R1-b): an erase that cannot prove the usage survives
+ * it is refused rather than proceeding; the user retries in a moment.
+ */
+export function assertDeleteSettled(report: DeleteSettleReport, what: string): void {
+  if (report.unconfirmed > 0) {
+    throw new ManagedSettlementUnconfirmedError(
+      `${what} could not be completed right now: an agent session's usage could not be saved for billing first. ` +
+        'Nothing was deleted — please try again in a moment.',
+    );
+  }
 }
 
 function isMidTurn(status: string | undefined): boolean {
   return status === 'running' || status === 'rescheduling';
 }
 
+/** The chats being erased. THROWS on a read failure — a dropped row is a session nobody settles (R1-b). */
 async function chatsOf(input: DeleteSettleInput): Promise<ChatIndexRow[]> {
   const index = getChatIndex(input.context);
 
@@ -76,7 +116,7 @@ async function chatsOf(input: DeleteSettleInput): Promise<ChatIndexRow[]> {
     return index.listByProject(input.projectId);
   }
 
-  const rows = await Promise.all(input.chatIds.map((id) => index.get(id).catch(() => null)));
+  const rows = await Promise.all(input.chatIds.map((id) => index.get(id)));
 
   return rows.filter((row): row is ChatIndexRow => Boolean(row && row.projectId === input.projectId));
 }
@@ -155,6 +195,16 @@ async function settleSession(
     logger.warn(`Session ${sessionId}: could not archive it on delete: ${(error as Error)?.message}`);
   });
 
+  /*
+   * An idle open orphan of this session (a past failed release left it beside the bound chat) must not be swept
+   * later from a cursor older than what was just billed (no-unbilled-usage R2). An advance that fails (after
+   * its retry) is treated as an incomplete settlement: the caller then records an orphan, and `record` MERGES
+   * this cursor into the open one — the same advance by the other door; if that fails too the erase is refused.
+   */
+  if (!(await advanceOpenOrphan(input.context, sessionId, settled.cursor))) {
+    return { ok: false, cursor: settled.cursor ?? null };
+  }
+
   return { ok: true };
 }
 
@@ -163,7 +213,7 @@ async function recordOrphan(
   input: DeleteSettleInput,
   why: string,
   cursor: string | null,
-) {
+): Promise<boolean> {
   try {
     const model = (() => {
       try {
@@ -185,14 +235,16 @@ async function recordOrphan(
     logger.warn(
       `Chat ${row.id}: its session ${row.managedSessionId} could not be settled on delete (${why}) — kept for the sweep`,
     );
+
+    return true;
   } catch (error) {
     logger.error(
       `Chat ${row.id}: could not record its unsettled session ${row.managedSessionId}: ${(error as Error)?.message}`,
     );
     getMonitor(input.context).alert(
       ALERT_SIGNALS.LEDGER_INTEGRITY,
-      `Chat ${row.id} was deleted with managed session ${row.managedSessionId} UNSETTLED and no orphan record — ` +
-        `its unbilled usage may be lost (${why}; ${(error as Error)?.message})`,
+      `Chat ${row.id}: managed session ${row.managedSessionId} could not be settled NOR kept in an orphan record — ` +
+        `the delete or move is refused until it can be (${why}; ${(error as Error)?.message})`,
       {
         severity: 'critical',
         scope: 'managed-delete-settle',
@@ -200,17 +252,28 @@ async function recordOrphan(
         tags: { sessionId: row.managedSessionId },
       },
     );
+
+    return false;
   }
 }
 
 async function settleNow(input: DeleteSettleInput): Promise<DeleteSettleReport> {
-  const report: DeleteSettleReport = { sessions: 0, settled: 0, credits: 0, orphaned: 0, legacyRows: 0 };
+  const report: DeleteSettleReport = {
+    sessions: 0,
+    settled: 0,
+    credits: 0,
+    orphaned: 0,
+    legacyRows: 0,
+    unconfirmed: 0,
+  };
   let rows: ChatIndexRow[] = [];
 
   try {
     rows = await chatsOf(input);
   } catch (error) {
-    logger.error(`Project ${input.projectId}: could not list the chats being deleted: ${(error as Error)?.message}`);
+    /* Unknown chats are unknown sessions: the erase must not proceed on them (R1-b). */
+    report.unconfirmed += 1;
+    logger.error(`Project ${input.projectId}: could not read the chats being deleted: ${(error as Error)?.message}`);
   }
 
   const managed = rows.filter((row): row is ChatIndexRow & { managedSessionId: string } =>
@@ -258,12 +321,19 @@ async function settleNow(input: DeleteSettleInput): Promise<DeleteSettleReport> 
 
       if (!ok) {
         report.orphaned += 1;
-        await recordOrphan(row, input, why, cursor);
+
+        if (!(await recordOrphan(row, input, why, cursor))) {
+          report.unconfirmed += 1;
+        }
       }
     }
   }
 
   /* Legacy / enhancer rows of these chats that nothing will ever finish. */
+  if (input.skipLegacyRows) {
+    return report;
+  }
+
   try {
     const store = getGenerationStore(input.context);
     const running = await store.listRunning({
@@ -288,13 +358,16 @@ async function settleNow(input: DeleteSettleInput): Promise<DeleteSettleReport> 
   return report;
 }
 
-/** Settle every session and running row the delete is about to orphan. Never throws. */
+/**
+ * Settle every session and running row the delete is about to orphan. Never throws — the caller decides from
+ * the report (`assertDeleteSettled`) whether the erase may proceed.
+ */
 export function settleBeforeDelete(input: DeleteSettleInput): Promise<DeleteSettleReport> {
   return keepAlive(
     input.context,
     settleNow(input).catch((error: unknown) => {
       logger.error(`Settle-before-delete failed for project ${input.projectId}: ${(error as Error)?.message}`);
-      return { sessions: 0, settled: 0, credits: 0, orphaned: 0, legacyRows: 0 };
+      return { sessions: 0, settled: 0, credits: 0, orphaned: 0, legacyRows: 0, unconfirmed: 1 };
     }),
     `settle before delete ${input.projectId}`,
   );

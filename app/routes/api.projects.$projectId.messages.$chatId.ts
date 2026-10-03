@@ -8,7 +8,7 @@
  *     under the owned project's prefix, so even a valid-looking id can only ever address a chat in a
  *     project the caller owns.
  */
-import { settleBeforeDelete } from '~/lib/.server/agent-managed/delete-settle';
+import { assertDeleteSettled, settleBeforeDelete } from '~/lib/.server/agent-managed/delete-settle';
 import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from '@remix-run/cloudflare';
 import { requireUser } from '~/lib/.server/supabase/auth';
 import { requireOwnedProject } from '~/lib/.server/projects/ownership';
@@ -79,7 +79,10 @@ export async function action({ request, params, context }: ActionFunctionArgs) {
        * and cost cursor, and `deleteChat` removes it. Never throws; a settlement that cannot complete
        * leaves a durable orphan record the billing sweep bills later.
        */
-      await settleBeforeDelete({ userId: user.id, projectId: project.id, chatIds: [chatId], context });
+      assertDeleteSettled(
+        await settleBeforeDelete({ userId: user.id, projectId: project.id, chatIds: [chatId], context }),
+        'Deleting this chat',
+      );
       await deleteChat(project.id, chatId, context);
 
       return json({ ok: true });

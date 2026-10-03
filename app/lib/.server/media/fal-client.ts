@@ -39,6 +39,7 @@
  * Confirmed by `scripts/fal-media-probe.mjs` (2026-10-01, 13 jobs): the status-URL relation, the
  * failed-job shape and the result field names. Each lives in ONE function here.
  */
+import { classifyHttpRefusal, classifyTransportFailure, MediaCreateError } from './create-failure';
 import { createScopedLogger } from '~/utils/logger';
 import type { CreateMediaTaskInput, MediaEndpoint, MediaProvider, MediaProviderName, MediaTaskState } from './provider';
 
@@ -158,14 +159,30 @@ export class FalMediaProvider implements MediaProvider {
 
   /** One request, parsed. Returns the status alongside the body so callers decide what a status means. */
   private async _request(url: string, method: 'GET' | 'POST', body?: unknown): Promise<{ status: number; json: any }> {
-    const response = await fetch(url, {
-      method,
-      headers: this._headers(body !== undefined),
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(30_000),
-    });
+    let response: Response;
 
-    const text = await response.text();
+    try {
+      response = await fetch(url, {
+        method,
+        headers: this._headers(body !== undefined),
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      /* A timeout may have been ACCEPTED (ambiguous); a refused connection was never sent (`create-failure.ts`). */
+      throw classifyTransportFailure(error);
+    }
+
+    let text: string;
+
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw new MediaCreateError(
+        `fal answered HTTP ${response.status} but the body could not be read: ${(error as Error)?.message}`,
+        'ambiguous',
+      );
+    }
 
     let json: any;
 
@@ -185,7 +202,10 @@ export class FalMediaProvider implements MediaProvider {
    */
   private _assertFalEndpoint(endpoint: MediaEndpoint): void {
     if (endpoint !== 'fal-queue') {
-      throw new Error(`fal does not serve the "${endpoint}" endpoint — that task belongs to another provider.`);
+      throw new MediaCreateError(
+        `fal does not serve the "${endpoint}" endpoint — that task belongs to another provider.`,
+        'not-sent',
+      );
     }
   }
 
@@ -193,7 +213,7 @@ export class FalMediaProvider implements MediaProvider {
     this._assertFalEndpoint(input.endpoint);
 
     if (!FAL_MODEL_ID.test(input.model)) {
-      throw new Error(`"${input.model}" is not a fal model id.`);
+      throw new MediaCreateError(`"${input.model}" is not a fal model id.`, 'not-sent');
     }
 
     /*
@@ -206,14 +226,19 @@ export class FalMediaProvider implements MediaProvider {
 
     if (status < 200 || status >= 300) {
       // fal's `detail` names the real problem (no balance, a bad option) — surface it, capped.
-      throw new Error(`fal refused the request (HTTP ${status}): ${describeFalError(json, 'no detail').slice(0, 300)}`);
+      throw classifyHttpRefusal(
+        status,
+        `fal refused the request (HTTP ${status}): ${describeFalError(json, 'no detail').slice(0, 300)}`,
+      );
     }
 
     const responseUrl = json?.response_url;
 
     if (typeof responseUrl !== 'string' || !isFalQueueUrl(responseUrl)) {
-      throw new Error(
+      /* A 2xx is an ACCEPTED request — it is rendering and billed; we just cannot name it (D9). */
+      throw new MediaCreateError(
         `fal accepted the request but returned no usable response_url: ${JSON.stringify(json).slice(0, 300)}`,
+        'ambiguous',
       );
     }
 

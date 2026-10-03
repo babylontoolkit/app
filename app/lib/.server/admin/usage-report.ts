@@ -15,6 +15,7 @@
  */
 import type { GenerationRecord } from '~/lib/.server/billing/generations';
 import { generationKind } from './generation-kind';
+import { MEDIA_UNCONFIRMED_REASON } from '~/lib/.server/media/unconfirmed';
 
 export interface ModelUsage {
   model: string;
@@ -116,7 +117,31 @@ export interface MediaUsage {
   renders: number;
   creditsCharged: number;
   rawCostUsd: number;
+
+  /**
+   * 🔴 Renders the provider may be running that nothing can poll (no-unbilled-usage D9): an ambiguous create
+   * (a timeout, a 5xx with no definite refusal) or a task record that could not be stored. The debit STANDS
+   * — never refunded automatically — so these are the rows an operator reconciles against the provider:
+   * refund through a credit adjustment if the render never happened. Listed (capped), not just counted, so
+   * each one can be found.
+   */
+  unconfirmed: number;
+  unconfirmedTasks: UnconfirmedMediaTask[];
 }
+
+export interface UnconfirmedMediaTask {
+  id: string;
+  userId: string;
+  projectId?: string;
+  model: string;
+  provider?: string;
+  creditsCharged: number;
+  createdAt?: string;
+  error?: string;
+}
+
+/** How many unconfirmed renders the report lists (the count is never capped). */
+export const MAX_UNCONFIRMED_LISTED = 50;
 
 export interface IntegrityCounts {
   /** Turns whose request violated at least one invariant. */
@@ -196,7 +221,7 @@ export function buildUsageReport(allRecords: GenerationRecord[]): UsageReport {
     charsPerOutputToken: 0,
     markers: { forcedContinuation: 0, unproductiveRescue: 0, providerRetry: 0, rescued: 0 },
     integrity: { turnsWithViolations: 0, byInvariant: {}, turnsWithReissues: 0 },
-    media: { renders: 0, creditsCharged: 0, rawCostUsd: 0 },
+    media: { renders: 0, creditsCharged: 0, rawCostUsd: 0, unconfirmed: 0, unconfirmedTasks: [] },
     byModel: [],
   };
 
@@ -213,6 +238,23 @@ export function buildUsageReport(allRecords: GenerationRecord[]): UsageReport {
     report.media.renders++;
     report.media.creditsCharged += n(rec.creditsCharged);
     report.media.rawCostUsd += n(rec.rawCostUsd);
+
+    if (rec.finishReason === MEDIA_UNCONFIRMED_REASON) {
+      report.media.unconfirmed++;
+
+      if (report.media.unconfirmedTasks.length < MAX_UNCONFIRMED_LISTED) {
+        report.media.unconfirmedTasks.push({
+          id: rec.id,
+          userId: rec.userId ?? '',
+          ...(rec.projectId ? { projectId: rec.projectId } : {}),
+          model: rec.model,
+          ...(rec.provider ? { provider: rec.provider } : {}),
+          creditsCharged: n(rec.creditsCharged),
+          ...(rec.createdAt ? { createdAt: rec.createdAt } : {}),
+          ...(rec.error ? { error: rec.error } : {}),
+        });
+      }
+    }
   }
 
   for (const rec of records) {

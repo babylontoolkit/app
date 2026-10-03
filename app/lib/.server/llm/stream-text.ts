@@ -10,6 +10,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { createFilesContext, extractPropertiesFromMessage } from './utils';
 import { discussPrompt } from '~/lib/common/prompts/discuss-prompt';
 import type { DesignScheme } from '~/types/design-scheme';
+import type { WireUsageRecorder } from '~/lib/modules/llm/wire-usage';
 
 export type Messages = Message[];
 
@@ -65,6 +66,13 @@ export async function streamText(props: {
   messageSliceId?: number;
   chatMode?: 'discuss' | 'build';
   designScheme?: DesignScheme;
+
+  /*
+   * no-unbilled-usage D7/D8 (fork addition): the caller's per-request wire recorder, handed to the model
+   * instance so an attempt the SDK never reports (a provider error before the first step finished) is
+   * still billed. OPTIONAL — omitted = upstream's fetch chain exactly.
+   */
+  wireUsage?: WireUsageRecorder;
 }) {
   const {
     messages,
@@ -279,6 +287,7 @@ export async function streamText(props: {
       serverEnv,
       apiKeys,
       providerSettings,
+      ...(props.wireUsage ? { wireUsage: props.wireUsage } : {}),
     }),
     system: chatMode === 'build' ? systemPrompt : discussPrompt(),
     ...tokenParams,

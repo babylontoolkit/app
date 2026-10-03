@@ -33,3 +33,11 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - T5 ✅ verified (independent) — 1 attempt.
 - T6 ✅ verified (independent) — 2 attempts (2 money defects fixed).
 - T7 ✅ verified (independent) — 1 attempt. Suites: 147 files / 3,187 tests green.
+- DECISION T8: enhancer settles from a bounded race (2 s after stream end); failure status rides the settlement write (no zeroing upsert); wire recorder passed (additive prop in upstream stream-text.ts, logged in FORK_BASE.md).
+- DECISION T9: media create failures classified refused / not-sent / ambiguous, DEFAULT ambiguous → debit held, task `unknown`, Admin "unconfirmed" list, alert. Under workerd every transport failure is ambiguous (measured: refused connection and after-send drop are indistinguishable). Cut-out start failure refunds only the cut-out share. All media status writes carry the money columns. Web search debits before the vendor call; no vendor call on a failed enforced debit.
+- DECISION R1: a chat moved to another project settles its session first (billed to the OLD owner); a move/delete whose session handling cannot be confirmed is refused retryably (503) — nothing erased.
+- DECISION R2: one billing owner per session — orphan withdraw = delete; sweep defers an orphan while its chat is still bound; orphan advanced BEFORE release; failed advance → no release, retryable refusal; migration 0030 one open orphan per session.
+- NOTE: account-delete refusal message says "Nothing was deleted" even if earlier projects in the loop were purged — wording only, retry completes correctly.
+- T8 ✅ verified (independent) — 1 attempt.
+- T9 ✅ verified (independent) — 1 attempt (+ workerd classification measured).
+- R1/R2 (carried residuals) ✅ verified (independent) — 3 attempts. Suites: 172 files / 3,765 tests green.
