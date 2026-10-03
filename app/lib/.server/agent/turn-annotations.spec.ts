@@ -76,4 +76,14 @@ describe('buildTurnAnnotations', () => {
       creationPhasesCompleted: ['design', 'game', 'frontend'],
     });
   });
+
+  it('carries the SERVED effort when the generation has one, after tierReason; absent when unknown (D9)', () => {
+    const a = buildTurnAnnotations({ ...GENERATION, effort: 'xhigh' }, FACTS);
+
+    expect(a.agentMeta.value.effort).toBe('xhigh');
+    expect(Object.keys(a.agentMeta.value).slice(4, 7)).toEqual(['tier', 'tierReason', 'effort']);
+
+    /* The CONTROL: no effort on the generation is no key at all — never a defaulted `medium`. */
+    expect('effort' in buildTurnAnnotations(GENERATION, FACTS).agentMeta.value).toBe(false);
+  });
 });

@@ -157,7 +157,16 @@ export function ContextIndicator() {
               }}
             >
               <span className="text-bolt-elements-textSecondary">Thinking effort</span>
-              <span className="underline decoration-dotted underline-offset-2">{EFFORT_LABELS[effort]}</span>
+              <span>
+                <span className="underline decoration-dotted underline-offset-2">{EFFORT_LABELS[effort]}</span>
+                {/* What the last turn was SERVED at (D9), when the server reports one that differs. */}
+                {stats.servedEffort && stats.servedEffort !== effort && (
+                  <span className="text-bolt-elements-textTertiary">
+                    {' '}
+                    · last turn {EFFORT_LABELS[stats.servedEffort]}
+                  </span>
+                )}
+              </span>
             </button>
           </div>
           <div className="mt-3 pt-2 border-t border-bolt-elements-borderColor text-xs text-bolt-elements-textSecondary">

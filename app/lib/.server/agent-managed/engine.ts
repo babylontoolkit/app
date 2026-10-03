@@ -66,6 +66,8 @@ import type { TurnOutcomeFacts } from '~/lib/agent/turn-outcome';
 import type { AgentWorkspaceSummary, TodoItem } from '~/lib/agent/workspace-protocol-types';
 import type { FileMap } from '~/lib/.server/llm/constants';
 import type { AuthUser } from '~/lib/.server/supabase/auth';
+import { offeredUserEffortLevels } from '~/lib/.server/agent/effort-offer';
+import { parseUserEffort, servableEffort, type EffortLevel } from '~/lib/modules/llm/capabilities';
 import { createScopedLogger } from '~/utils/logger';
 import { getManagedClient, getManagedEngineConfig } from './config';
 import { createManagedDispatcher } from './dispatch';
@@ -113,7 +115,11 @@ export interface ManagedTurnRequest {
   /** The model tier the user asked for — a request, re-derived server-side (§4.6.1a). */
   tier?: string;
 
-  /** The user's effort floor — untrusted, validated where it is used. */
+  /**
+   * The user's chosen effort — untrusted, validated where it is used (`parseUserEffort` against the levels
+   * this deploy offers). On this engine it is the session's effort, set at create (`agent_with_overrides`);
+   * a change MOVES the chat to a new session, like a tier change (`_specs/effort-selector_plan.md` D3).
+   */
   effort?: string;
 
   /** Derived by the route from the project ROW (`projectOwesBuild`), never the body. */
@@ -135,6 +141,34 @@ export interface ManagedTurnRequest {
 
   /** T6: re-attach to a session waiting on tool results rather than sending a new user message. */
   resume?: boolean;
+}
+
+/**
+ * Why a chat's live session cannot serve this turn, or `null` when it can (D3). A session's model and
+ * effort are fixed for its life, so either differing MOVES the chat. A session that does not report its
+ * effort (created as plain `agent`, before per-session overrides) runs at its agent's provisioned effort.
+ * Exported for the spec; the caller never asks on a RESUME.
+ */
+export function sessionSwitchReason(
+  inspection: { kind: string; model?: string; effort?: EffortLevel },
+  agentRecord: Pick<ManagedAgentRecord, 'model' | 'effort'>,
+  effort: EffortLevel,
+): string | null {
+  if (inspection.kind !== 'live') {
+    return null;
+  }
+
+  if (inspection.model && inspection.model !== agentRecord.model) {
+    return `model ${inspection.model} → ${agentRecord.model}`;
+  }
+
+  const current = inspection.effort ?? agentRecord.effort;
+
+  if (current && current !== effort) {
+    return `effort ${current} → ${effort}`;
+  }
+
+  return null;
 }
 
 /** The legacy engine's gate refusal, reproduced exactly (`proxy.ts`, "2. Credit gate"). */
@@ -282,6 +316,17 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   }
 
   const agentRecord = record;
+
+  /*
+   * The effort this turn's session runs at (`_specs/effort-selector_plan.md` D1/D8/D11): the user's choice
+   * when it is a level this deploy OFFERS (exact match — `low`, typos and `max` with the switch off are no
+   * choice), else the operator default (`MANAGED_AGENT_EFFORT`), clamped to what the rung's model serves.
+   * There is NO repair escalation here (D4): escalating per repair would move the session per repair.
+   */
+  const effort: EffortLevel = servableEffort(
+    agentRecord.model,
+    parseUserEffort(request.effort, offeredUserEffortLevels(request.context)) ?? config.effort,
+  );
   const activeVersionId = (await getPromptStore().getActive())?.id ?? null;
 
   if (!request.projectId) {
@@ -331,8 +376,18 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
       chatId: request.chatId,
       context: request.context,
       create: async () => {
+        /*
+         * `agent_with_overrides` pins the session's effort at create (D2) — the agent is provisioned once
+         * per rung, and a session cannot change effort later. `budget` MUST stay on create: a session
+         * created without one can never gain one (T1 Finding).
+         */
         const created = await client.beta.sessions.create({
-          agent: { type: 'agent', id: agentRecord.agentId, version: agentRecord.agentVersion },
+          agent: {
+            type: 'agent_with_overrides',
+            id: agentRecord.agentId,
+            version: agentRecord.agentVersion,
+            model: { id: agentRecord.model, effort },
+          },
           environment_id: agentRecord.environmentId,
           title: `project ${projectId}`,
           ...(budgetFor(0) ? { budget: budgetFor(0) } : {}),
@@ -365,18 +420,24 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
   /* The model the turn actually runs: this tier's agent — or, on a resume, whatever the session runs. */
   let servedModel = agentRecord.model;
 
+  /* Likewise the effort: a resume runs at whatever the session was created with. */
+  let servedEffort: EffortLevel = effort;
+
   /* Inspected ONCE; a session created by this turn needs no inspection. */
   let inspection = sessionRef.created ? null : await inspectSession(client, sessionRef.sessionId);
 
   if (inspection) {
     /*
-     * The user changed model tier: the chat's session runs ANOTHER rung's agent, and a session's model
-     * cannot be changed. The old turn (if any) is superseded, its unbilled tail settled at ITS model,
+     * The user changed model tier or effort: the chat's session runs ANOTHER rung's agent, or the same
+     * agent at another effort, and a session's model and effort cannot be changed. The old turn (if any) is superseded, its unbilled tail settled at ITS model,
      * the session released and archived, and a new session is created on this tier's agent — whose
      * first message carries the conversation so far (`conversationRecap`). A RESUME never switches:
      * re-attaching to the waiting turn is its whole point.
      */
-    if (inspection.kind === 'live' && inspection.model && inspection.model !== agentRecord.model && !request.resume) {
+    const switchReason = request.resume ? null : sessionSwitchReason(inspection, agentRecord, effort);
+
+    if (inspection.kind === 'live' && switchReason) {
+      logger.info(`Session ${sessionRef.sessionId}: ${switchReason} — moving the chat to a new session`);
       await supersedePendingTurn(client, sessionRef.sessionId, inspection.status, {
         signal: request.abortSignal,
         waitMs: Math.max(0, envNumber(request.context, 'MANAGED_SUPERSEDE_WAIT_MS', SUPERSEDE_WAIT_MS)),
@@ -390,7 +451,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
         chatId: request.chatId as string,
         userId,
         generationId,
-        model: inspection.model,
+        model: inspection.model ?? agentRecord.model,
         statusKind,
         sessionHourUsd: config.sessionHourUsd,
         context: request.context,
@@ -399,12 +460,15 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
       const previous = sessionRef.sessionId;
 
       await client.beta.sessions.archive(previous).catch((error) => {
-        logger.warn(`Session ${previous}: could not archive it after a tier switch: ${(error as Error)?.message}`);
+        logger.warn(
+          `Session ${previous}: could not archive it after a tier/effort switch: ${(error as Error)?.message}`,
+        );
       });
       sessionRef = await claimSession();
       inspection = sessionRef.created ? null : await inspectSession(client, sessionRef.sessionId);
-    } else if (inspection.kind === 'live' && inspection.model && request.resume) {
-      servedModel = inspection.model;
+    } else if (inspection.kind === 'live' && request.resume) {
+      servedModel = inspection.model ?? servedModel;
+      servedEffort = inspection.effort ?? agentRecord.effort;
     }
   }
 
@@ -700,6 +764,7 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
           projectId,
           model: settled.model ?? servedModel,
           provider: 'Anthropic',
+          effort: servedEffort,
           creditsCharged: charged,
           rawCostUsd: settled.settlement?.rawCostUsd ?? 0,
           promptVersionId: activeVersionId,
@@ -754,6 +819,9 @@ export async function runManagedGeneration(request: ManagedTurnRequest): Promise
     promptVersionId: activeVersionId ?? '',
     model: servedModel,
     provider: 'Anthropic',
+
+    /* The effort the session runs at — shown in `/context` and recorded on the row (D9). */
+    effort: servedEffort,
 
     /* One provisioned agent per rung (D10, §4.6.1a): the rung that RAN and why. */
     tier: tierDecision.tier,

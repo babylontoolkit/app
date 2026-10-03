@@ -14,6 +14,7 @@
  * being truncated anyway", which is precisely when `/clear` costs nothing you still had.
  */
 import { atom } from 'nanostores';
+import { EFFORT_LEVELS, type EffortLevel } from '~/lib/modules/llm/capabilities';
 
 export interface ContextStats {
   /** Messages re-sent this turn, post-compaction (user + assistant). */
@@ -72,6 +73,14 @@ export interface ContextStats {
    * a real discount to a turn that did not earn it.
    */
   savings: TurnSavings | null;
+
+  /**
+   * The effort the last turn was SERVED at (`agentMeta.effort`, `_specs/effort-selector_plan.md` D9) —
+   * after the server's validation, escalation and per-model clamp, so it can differ from the user's pick.
+   * Null when the annotation did not carry one (an older saved message). Like `savings` it describes ONE
+   * turn and is never carried forward.
+   */
+  servedEffort: EffortLevel | null;
 }
 
 /** The wire shape of `Savings` (`~/lib/.server/billing/savings.ts`), restated client-side. */
@@ -178,7 +187,13 @@ export function updateContextStats(annotations: unknown[] | undefined): void {
     model: (meta?.model as string) ?? prev?.model ?? '',
     provider: (meta?.provider as string) ?? prev?.provider ?? '',
     savings: readSavings(credits?.savings),
+    servedEffort: readEffort(meta?.effort),
   });
+}
+
+/** A wire effort back to a level — anything that is not one reads as absent, never a default. */
+function readEffort(raw: unknown): EffortLevel | null {
+  return typeof raw === 'string' && (EFFORT_LEVELS as readonly string[]).includes(raw) ? (raw as EffortLevel) : null;
 }
 
 /**

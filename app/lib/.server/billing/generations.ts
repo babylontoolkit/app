@@ -22,6 +22,7 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { EFFORT_LEVELS, type EffortLevel } from '~/lib/modules/llm/capabilities';
 import { createScopedLogger } from '~/utils/logger';
 import { platformDataDir } from '~/lib/.server/prompt/store';
 import { createAdminClient, isSupabaseConfigured } from '~/lib/.server/supabase/client';
@@ -50,6 +51,14 @@ export interface GenerationRecord {
    * A reader must handle absence; it must never default.
    */
   provider?: string;
+
+  /**
+   * The thinking effort the generation was SERVED at (`_specs/effort-selector_plan.md` D9) — after the
+   * legacy policy's escalation, the operator default and the per-model clamp, or the managed session's
+   * effort. Migration 0027. OPTIONAL for `provider`'s reason: rows written before the column existed do
+   * not know, and NULL must read as unknown — never as `medium`.
+   */
+  effort?: EffortLevel;
 
   /** What we actually charged. Zero for BYOK and for unmetered beta mode — but always recorded. */
   creditsCharged?: number;
@@ -264,6 +273,7 @@ export const FIELD_COVERAGE: Record<keyof GenerationRecord, FieldCoverage> = {
   projectId: { kind: 'persisted', column: 'project_id' },
   model: { kind: 'persisted', column: 'model' },
   provider: { kind: 'persisted', column: 'provider' },
+  effort: { kind: 'persisted', column: 'effort' },
   creditsCharged: { kind: 'persisted', column: 'credits_charged' },
   rawCostUsd: { kind: 'persisted', column: 'raw_cost_usd' },
   promptVersionId: { kind: 'persisted', column: 'prompt_version_id' },
@@ -487,6 +497,9 @@ export class SupabaseGenerationStore implements GenerationStore {
          * indistinguishable from one that did. Migration 0021 leaves history NULL for the same reason.
          */
         provider: row.provider ?? null,
+
+        /* Migration 0027. NULL when unknown — never defaulted to `medium`, for `provider`'s reason. */
+        effort: row.effort ?? null,
         prompt_version_id: row.promptVersionId ?? null,
         input_tokens: row.promptTokens ?? 0,
         cached_input_tokens: row.cacheReadTokens ?? 0,
@@ -599,6 +612,13 @@ export class SupabaseGenerationStore implements GenerationStore {
   }
 }
 
+/** A stored `effort` column back to a level — NULL or an unknown string reads as unknown, never a default. */
+function parseStoredEffort(raw: unknown): EffortLevel | undefined {
+  return typeof raw === 'string' && (EFFORT_LEVELS as readonly string[]).includes(raw)
+    ? (raw as EffortLevel)
+    : undefined;
+}
+
 /*
  * The one row -> record mapping. It was inline in `list()`; a second reader (`listByIds`) made a
  * second copy the obvious move, and two mappings of one table drift silently — a column read by one
@@ -624,6 +644,7 @@ function toGenerationRecord(r: any): GenerationRecord {
     projectId: r.project_id ?? undefined,
     model: r.model,
     provider: r.provider ?? undefined,
+    effort: parseStoredEffort(r.effort),
     creditsCharged: r.credits_charged,
     rawCostUsd: Number(r.raw_cost_usd),
     promptVersionId: r.prompt_version_id,

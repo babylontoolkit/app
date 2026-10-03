@@ -110,7 +110,7 @@ the user ~2× — **margin unchanged**. On managed, longer turns also bill more 
   `MANAGED_AGENT_EFFORT` parsed with `parseEffort` (default `medium`, `low` → `medium` with a warning).
   Update `config.spec.ts`, `provision.spec.ts`, `.env.example`.
   **Acceptance:** `MANAGED_AGENT_EFFORT=max` provisions at `max`; garbage → `medium`.
-- [ ] **T4 — 🔴 MANDATORY: fix the managed engine ignoring the user's effort.** `engine.ts`: `effort =
+- [x] **T4 — 🔴 MANDATORY: fix the managed engine ignoring the user's effort.** `engine.ts`: `effort =
   servableEffort(agentRecord.model, parseUserEffort(request.effort) ?? config.effort)`; session create
   uses `agent_with_overrides` with `model:{ id, effort }`; `session-health.ts` exposes `effort` from
   `agent.model.effort`; the switch condition becomes `model differs || effort differs` (never on
@@ -119,12 +119,12 @@ the user ~2× — **margin unchanged**. On managed, longer turns also bill more 
   carries the recap; same effort reuses the session (CONTROL); resume never switches; `low`/garbage
   serve the default. `fake-session.testkit.ts` echoes the requested effort.
   **Acceptance:** mutation — dropping the effort comparison fails the move test.
-- [ ] **T5 — Legacy path.** `effort-policy.ts` comments rewritten; add `xhigh`/`max` floor cases to
+- [x] **T5 — Legacy path.** `effort-policy.ts` comments rewritten; add `xhigh`/`max` floor cases to
   `effort-policy.spec.ts` (max floor stays max on repair 2; xhigh floor on repair 1 stays xhigh); apply
   `servableEffort` after `effortForTurn` in `proxy.ts`. `canDisableThinking` clamp unchanged (Opus 5 at
   xhigh/max keeps thinking adaptive on the last retry — already handled).
   **Acceptance:** spec green.
-- [ ] **T6 — Record served effort.** Migration `0027_generation_effort.sql` (`effort text null`), store
+- [x] **T6 — Record served effort.** Migration `0027_generation_effort.sql` (`effort text null`), store
   writes on both engines, `FIELD_COVERAGE` entry, `ledger-sql.spec.ts`/`field-coverage.spec.ts` pass.
   `/context` reads it from the annotation.
   **Acceptance:** a generation row carries `effort`; NULL = unknown (pre-migration rows).

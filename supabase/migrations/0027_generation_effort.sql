@@ -1,0 +1,11 @@
+-- The thinking effort a generation was SERVED at (`_specs/effort-selector_plan.md` D9, SPEC §4.2a).
+--
+-- The user now picks an effort (Medium / High / Extra high, and Max when the operator enables it), the
+-- legacy engine escalates it on repairs, and a model may clamp `xhigh` down to `high`. Effort has no
+-- price of its own — it moves how many thinking tokens a turn spends, which bill at the output rate —
+-- so without this column a turn that cost three times its neighbour has no recorded reason why.
+--
+-- `text`, NULLABLE, NO DEFAULT, NO BACKFILL. NULL means UNKNOWN (a row written before this column
+-- existed), and must never be read as `medium`: a default here would record an effort the turn may not
+-- have run at, indistinguishable from one it did — the pattern migration 0021 killed for `provider`.
+alter table public.generations add column if not exists effort text;

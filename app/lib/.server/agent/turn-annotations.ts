@@ -20,6 +20,7 @@ export type AnnotatedGeneration = Pick<
   | 'promptVersionId'
   | 'model'
   | 'provider'
+  | 'effort'
   | 'tier'
   | 'tierReason'
   | 'toolContext'
@@ -76,6 +77,9 @@ export function buildTurnAnnotations(generation: AnnotatedGeneration, facts: Tur
          */
         tier: generation.tier,
         tierReason: generation.tierReason,
+
+        /* The effort the turn was SERVED at (`_specs/effort-selector_plan.md` D9) — absent when unknown. */
+        ...(generation.effort ? { effort: generation.effort } : {}),
         skillsLoaded: [...generation.toolContext.loaded],
         blocksLoaded: generation.blocksLoaded,
         history: generation.historyStats,

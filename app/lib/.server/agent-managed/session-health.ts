@@ -19,6 +19,7 @@
  * tail is billed once, with the next settlement, like any detached tail.
  */
 import type Anthropic from '@anthropic-ai/sdk';
+import { EFFORT_LEVELS, type EffortLevel } from '~/lib/modules/llm/capabilities';
 import { createScopedLogger } from '~/utils/logger';
 import { awaitingToolResults, listCurrentTurnEvents, unansweredToolCalls } from './turn';
 
@@ -32,6 +33,12 @@ export type SessionInspection =
 
       /** The model the session's agent runs — a session's model is fixed for its life. */
       model?: string;
+
+      /**
+       * The effort the session runs at (`session.agent.model.effort`) — fixed for its life like the model
+       * (`_specs/effort-selector_plan.md` D3). Undefined when not reported or not a level we know.
+       */
+      effort?: EffortLevel;
     }
   | { kind: 'dead'; reason: 'terminated' | 'archived' | 'missing' };
 
@@ -40,6 +47,25 @@ export function sessionModel(session: unknown): string | undefined {
   const id = (session as { agent?: { model?: { id?: unknown } } } | null)?.agent?.model?.id;
 
   return typeof id === 'string' && id ? id : undefined;
+}
+
+/**
+ * The effort a retrieved session runs at (`session.agent.model.effort`). Measured (T1) as a bare string;
+ * an object form (`{ type: 'xhigh' }` / `{ effort: 'xhigh' }`) is tolerated. Anything that is not a known
+ * level is undefined — never guessed.
+ */
+export function sessionEffort(session: unknown): EffortLevel | undefined {
+  const raw = (session as { agent?: { model?: { effort?: unknown } } } | null)?.agent?.model?.effort;
+  const value =
+    typeof raw === 'string'
+      ? raw
+      : raw && typeof raw === 'object'
+        ? ((raw as { type?: unknown; effort?: unknown }).type ?? (raw as { effort?: unknown }).effort)
+        : undefined;
+
+  return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value)
+    ? (value as EffortLevel)
+    : undefined;
 }
 
 const isNotFound = (error: unknown) => (error as { status?: number })?.status === 404;
@@ -64,6 +90,7 @@ export async function inspectSession(client: Anthropic, sessionId: string): Prom
       status: session.status,
       listCostCents: Number.isFinite(cents) ? cents : 0,
       model: sessionModel(session),
+      effort: sessionEffort(session),
     };
   } catch (error) {
     if (isNotFound(error)) {

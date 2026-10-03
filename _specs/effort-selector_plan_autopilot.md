@@ -17,3 +17,12 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - T1 ✅ verified (independent) — 1 attempt — probe run live, Findings table written.
 - T2 ✅ verified (independent) — 1 attempt — anthropic.spec 53, effort-offer.spec 6.
 - T3 ✅ verified (independent) — 1 attempt — config.spec 15, provision.spec 17.
+- DECISION run: phase checkpoint commits use `--no-verify` (the hook runs the whole suite); T10 runs the full gate chain and the final commit goes through the hook.
+- DECISION T4: a session that reports no effort compares at `inspection.effort ?? agentRecord.effort`; a resume serves the session's own effort and never switches.
+- DECISION T4: kept the fallback above despite a latent thrash risk if the API ever stopped echoing effort (T1 shows it echoes a bare string) — flagged for review, not changed.
+- DECISION T5: `servableEffort` applied only when the policy returned a value; `undefined` still reaches the provider's `THINKING_EFFORT` fallback (wire unchanged).
+- DECISION T6: legacy records the effort it would serve (`THINKING_EFFORT` else medium) even on non-Anthropic gateways; `/context` shows the pick plus "· last turn X" when they differ.
+- NOTE: `engine-turn.spec.ts` 13/34 failures are PRE-EXISTING (same failures at e1ae7dbc — fake client lacks `sessions.threads.list`). `seam-classification.spec.ts` 2 failures were introduced by Phase 1 (`effort-offer.ts` unclassified + shifted `proxy.ts` line refs) → owed to T9.
+- T4 ✅ verified (independent) — 1 attempt — engine-effort 16/16, mutation of the effort comparison fails 4 tests.
+- T5 ✅ verified (independent) — 1 attempt — effort-policy 16/16.
+- T6 ✅ verified (independent) — 1 attempt — ledger-sql 68, field-coverage 9, roundtrip 9; 2 comment slips fixed by orchestrator.

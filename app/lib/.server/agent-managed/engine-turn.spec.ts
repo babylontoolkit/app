@@ -289,7 +289,7 @@ describe('a whole managed turn', () => {
     const session = fake.sessions.get('sesn_1')!;
 
     expect(session.createParams).toMatchObject({
-      agent: { type: 'agent', id: 'agent_1', version: 3 },
+      agent: { type: 'agent_with_overrides', id: 'agent_1', version: 3, model: { effort: 'medium' } },
       environment_id: 'env_1',
       resources: [{ type: 'file', file_id: 'file_ref', mount_path: '/workspace/agent/reference.md' }],
       budget: { type: 'limit', max_list_cost: { amount: '250', currency: 'USD' } },

@@ -30,14 +30,19 @@
  * that is silently overridden on a whole class of turns is a suggestion, and the user is the last to
  * find out. Repairs are exempt from that objection because nobody chose them.
  *
- * ## The user may raise the FLOOR, and only to `high` (§4.2.9)
+ * ## The user sets the FLOOR — any offered level (§4.2.9, `_specs/effort-selector_plan.md` D1/D11)
  *
  * `baseEffort` is the one thing a person gets to say here, and it is still not a prose classifier: the
- * user is not describing the turn, they are choosing a session-wide floor, up front, visibly, in exactly
- * two positions. `medium` (the default, every session, every reload) or `high` — never `xhigh`/`max`,
- * because those are what the escalation ladder spends on EVIDENCE, and a chosen ceiling is a floor that
- * makes every ordinary edit start where a twice-failed build ends. The floor never lowers anything and
- * never caps anything: a `high` session that hits a second repair still gets `xhigh`.
+ * user is not describing the turn, they are choosing a session-wide level, up front, on a control that
+ * always shows its current value. Any level this deploy OFFERS — `medium` (the default), `high`, `xhigh`,
+ * and `max` when the operator enables it (`ENABLE_MAX_EFFORT`) — already validated by `parseUserEffort`.
+ * (Owner, 2026-10-02: the old "`medium` or `high` only" rule is reversed — effort has no price of its own,
+ * credits are cost-proportional, and the visible control removes the "billed more with no signal" reason.)
+ *
+ * The floor never lowers anything and never caps anything: escalation folds by RANK over it, so a `high`
+ * session's second repair still gets `xhigh`, an `xhigh` session's first repair stays `xhigh` (not `high`),
+ * and a `max` session stays `max` on every turn. This ladder is the LEGACY engine's (Plan mode, MCP turns);
+ * the managed engine runs repairs at the user's level (D4 — escalating there would move the session).
  */
 import { EFFORT_LEVELS, type EffortLevel, type UserEffortLevel } from '~/lib/modules/llm/capabilities';
 
@@ -49,11 +54,12 @@ export interface TurnShape {
   repairAttempt: number;
 
   /**
-   * The user's chosen base effort for this session (`/effort`, §4.2.9) — `medium` or `high` only, already
-   * validated by `parseUserEffort`. `undefined` means they never chose, so the operator default stands.
+   * The user's chosen base effort for this session (§4.2.9) — any level the deploy offers (`medium`,
+   * `high`, `xhigh`, and `max` with `ENABLE_MAX_EFFORT`), already validated by `parseUserEffort`.
+   * `undefined` means they never chose, so the operator default stands.
    *
-   * It is a FLOOR, never a cap: the escalation rules below still fire above it. A `high` session that hits
-   * a second repair gets `xhigh`, exactly as a `medium` one does.
+   * It is a FLOOR, never a cap: the escalation rules below still fire above it, by rank. A `high` session
+   * that hits a second repair gets `xhigh`; an `xhigh` or `max` session keeps its level on every repair.
    */
   baseEffort?: UserEffortLevel;
 }

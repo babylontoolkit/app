@@ -209,12 +209,18 @@ export function createFakeManagedClient(script: Script = async (api) => api.endT
 
   const retrieve = async (id: string) => {
     const s = requireSession(id);
-    const agentId = (s.createParams.agent as { id?: string } | undefined)?.id;
+    const agentParams = s.createParams.agent as
+      | { type?: string; id?: string; model?: { id?: string; effort?: string } }
+      | undefined;
+    const agentId = agentParams?.id;
     const model = agentId ? state.agentModels[agentId] : undefined;
+
+    /* Like the live API (T1): an `agent_with_overrides` session reads back the effort it was created with. */
+    const effort = agentParams?.model?.effort ?? 'medium';
 
     return {
       id: s.id,
-      ...(model ? { agent: { type: 'agent', id: agentId, model: { id: model, effort: 'medium' } } } : {}),
+      ...(model ? { agent: { type: agentParams?.type ?? 'agent', id: agentId, model: { id: model, effort } } } : {}),
       status: s.status,
       archived_at: s.archivedAt,
       budget: s.budget,

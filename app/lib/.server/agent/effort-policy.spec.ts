@@ -124,5 +124,26 @@ describe('effortForTurn', () => {
     it('does not compound a floor with an equal escalation', () => {
       expect(effortForTurn({ isRepair: true, repairAttempt: 1, baseEffort: 'high' })).toBe('high');
     });
+
+    /*
+     * `xhigh` and `max` are user-pickable since 2026-10-02 (`_specs/effort-selector_plan.md` D1/D11). The
+     * ladder folds over them by RANK, so a higher floor is never LOWERED by an escalation that ranks below it.
+     */
+    it('an `xhigh` floor on an ordinary turn is `xhigh`', () => {
+      expect(effortForTurn({ ...EDIT, baseEffort: 'xhigh' })).toBe('xhigh');
+    });
+
+    it('an `xhigh` floor on a first repair stays `xhigh` — never lowered to the repair’s `high`', () => {
+      expect(effortForTurn({ isRepair: true, repairAttempt: 1, baseEffort: 'xhigh' })).toBe('xhigh');
+    });
+
+    it('a `max` floor stays `max` on a second repair — the `xhigh` escalation never caps it', () => {
+      expect(effortForTurn({ isRepair: true, repairAttempt: 2, baseEffort: 'max' })).toBe('max');
+    });
+
+    it('a `max` floor stays `max` on an ordinary turn and a first repair', () => {
+      expect(effortForTurn({ ...EDIT, baseEffort: 'max' })).toBe('max');
+      expect(effortForTurn({ isRepair: true, repairAttempt: 1, baseEffort: 'max' })).toBe('max');
+    });
   });
 });

@@ -97,7 +97,27 @@ describe('updateContextStats', () => {
 
       /* The annotation above carries no `savings`, and absent means SAY NOTHING — never zero. */
       savings: null,
+
+      /* …nor an effort: an older saved message reports none, and absent is null — never `medium`. */
+      servedEffort: null,
     });
+  });
+
+  it('carries the effort the turn was SERVED at, and never carries it forward (D9)', () => {
+    const turn = (effort?: unknown) => [
+      { type: 'usage', value: { promptTokens: 9_000 } },
+      { type: 'agentMeta', value: { model: 'claude-sonnet-5', provider: 'Anthropic', effort } },
+    ];
+
+    updateContextStats(turn('xhigh'));
+    expect(contextStatsStore.get()?.servedEffort).toBe('xhigh');
+
+    updateContextStats(turn());
+    expect(contextStatsStore.get()?.servedEffort).toBeNull();
+
+    /* A level the client does not know (`low`, a typo) reads as absent — never coerced to a level. */
+    updateContextStats(turn('low'));
+    expect(contextStatsStore.get()?.servedEffort).toBeNull();
   });
 
   it('carries the GATEWAY that served the turn, not just the model', () => {

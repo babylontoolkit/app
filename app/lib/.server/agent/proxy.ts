@@ -149,7 +149,15 @@ import {
   reportIntegrity,
   type InvariantViolation,
 } from './request-invariants';
-import { canDisableThinking, parseUserEffort, supportsAdaptiveThinking } from '~/lib/modules/llm/capabilities';
+import {
+  canDisableThinking,
+  DEFAULT_EFFORT,
+  parseEffort,
+  parseUserEffort,
+  servableEffort,
+  supportsAdaptiveThinking,
+  type EffortLevel,
+} from '~/lib/modules/llm/capabilities';
 import { offeredUserEffortLevels } from '~/lib/.server/agent/effort-offer';
 import type { LanguageModelV1 } from 'ai';
 import { getGenerationLog, type GenerationRecord } from './usage';
@@ -161,7 +169,7 @@ import {
   HISTORY_WINDOW_TURNS,
   type HistorySize,
 } from '~/lib/.server/llm/history';
-import { envNumber } from '~/lib/.server/env';
+import { env, envNumber } from '~/lib/.server/env';
 import {
   buildPreloadedSkillBlock,
   carriedSkillNames,
@@ -496,6 +504,13 @@ export interface AgentGeneration {
    * `config.provider` that `settleGeneration` bills from, so the number and the label cannot disagree.
    */
   provider: PlatformProviderName;
+
+  /**
+   * The effort the turn was SERVED at (`_specs/effort-selector_plan.md` D9) — after the policy's escalation,
+   * the operator default and the per-model clamp (`servableEffort`). Optional: an older generation shape
+   * (and a spec's hand-built one) may not carry it, and absent must read as unknown.
+   */
+  effort?: EffortLevel;
 
   /**
    * The rung of the model tier ladder that actually RAN, and why (§4.6.1a).
@@ -2099,7 +2114,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
    * `/slash` skill invocation alike — takes the user's chosen effort, else the operator's configured
    * default. There is no cheap tier for edits — `low` breached a read-only zone when we measured it.
    */
-  const effort = effortForTurn({
+  const policyEffort = effortForTurn({
     isRepair,
     repairAttempt: request.repairAttempt ?? 1,
 
@@ -2110,6 +2125,21 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
      */
     baseEffort: parseUserEffort(request.effort, offeredUserEffortLevels(request.context)),
   });
+
+  /*
+   * Clamped to what this model serves (`servableEffort`, D5 — `xhigh`→`high` for a model on
+   * `MODELS_WITHOUT_XHIGH`). Only when the policy spoke: `undefined` still means "the provider's
+   * configured default", which this file must not resolve a second time on the wire path.
+   */
+  const effort = policyEffort ? servableEffort(model, policyEffort) : undefined;
+
+  /*
+   * The effort the turn is SERVED at, for the record and `/context` only (D9). When the policy had no
+   * opinion that is the provider's own fallback (`THINKING_EFFORT`, else `medium` — `anthropic.ts`
+   * `getModelInstance`), mirrored here so the row says what ran rather than NULL; never sent from here.
+   */
+  const servedEffort: EffortLevel =
+    effort ?? servableEffort(model, parseEffort(env(request.context, 'THINKING_EFFORT')) ?? DEFAULT_EFFORT);
 
   const modelInstance = provider.getModelInstance({
     model,
@@ -3525,6 +3555,7 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
         projectId: request.projectId,
         model,
         provider: config.provider,
+        effort: servedEffort,
         creditsCharged: failed ? 0 : (settlement?.creditsCharged ?? 0),
         rawCostUsd: settlement?.rawCostUsd ?? 0,
         promptVersionId: promptVersion.id,
@@ -3734,6 +3765,9 @@ export async function runAgentGeneration(request: AgentRequest): Promise<AgentGe
 
     // The gateway that served the turn — the same value `settleGeneration` bills from.
     provider: config.provider,
+
+    // The effort the turn was served at (D9) — recorded on the row and shown in `/context`.
+    effort: servedEffort,
 
     /*
      * The rung that actually RAN, plus why. Recorded because a tier used to be inferable only from the

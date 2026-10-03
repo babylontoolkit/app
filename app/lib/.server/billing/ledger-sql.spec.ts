@@ -623,6 +623,43 @@ describe('the migrations', () => {
       await db.exec(`delete from public.generations where id in ('gen_nostream', 'gen_clean')`);
     });
   });
+
+  /*
+   * Migration 0027: the effort a generation was SERVED at (`_specs/effort-selector_plan.md` D9). NULL is
+   * UNKNOWN (a pre-0027 row) and must never read as `medium` — so no default, ever.
+   */
+  describe('migration 0027 — the served effort is on the record', () => {
+    it('adds `effort` as nullable text with no default', async () => {
+      const { rows } = await db.query<{ data_type: string; is_nullable: string; column_default: string | null }>(
+        `select data_type, is_nullable, column_default from information_schema.columns
+         where table_schema = 'public' and table_name = 'generations' and column_name = 'effort'`,
+      );
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].data_type).toBe('text');
+      expect(rows[0].is_nullable).toBe('YES');
+      expect(rows[0].column_default, 'a default would record an effort the turn may not have run at').toBeNull();
+    });
+
+    it('round-trips a served level, and a row that never said reads back NULL', async () => {
+      await db.query(
+        `insert into public.generations (id, user_id, model, effort) values ('gen_eff', $1, 'm', 'xhigh')`,
+        [USER],
+      );
+      await createGeneration('gen_noeff');
+
+      const { rows } = await db.query<{ id: string; effort: string | null }>(
+        `select id, effort from public.generations where id in ('gen_eff', 'gen_noeff') order by id`,
+      );
+
+      expect(rows).toEqual([
+        { id: 'gen_eff', effort: 'xhigh' },
+        { id: 'gen_noeff', effort: null },
+      ]);
+
+      await db.exec(`delete from public.generations where id in ('gen_eff', 'gen_noeff')`);
+    });
+  });
 });
 
 describe('append_ledger_entry (the only way a ledger row is written)', () => {
