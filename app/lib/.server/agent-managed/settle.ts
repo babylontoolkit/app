@@ -373,7 +373,7 @@ export async function rebindDeadSession(
   logger.warn(
     released
       ? input.reason === 'switched'
-        ? `Chat ${input.chatId}: the user changed model tier — released session ${input.sessionId}; a new session will be created on the new tier's agent`
+        ? `Chat ${input.chatId}: the user changed model tier or effort — released session ${input.sessionId}; a new session will be created at the new setting`
         : `Chat ${input.chatId}: released ${input.reason} session ${input.sessionId}; a new session will be created`
       : `Chat ${input.chatId}: ${input.reason} session ${input.sessionId} was already replaced by a concurrent turn`,
   );

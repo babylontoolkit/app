@@ -89,6 +89,13 @@ the user ~2× — **margin unchanged**. On managed, longer turns also bill more 
   `MANAGED_AGENT_EFFORT`/`THINKING_EFFORT` may still name `max` (operator choice). The offered list
   reaches the client on `/api/me` (`effortLevels`), so the slider shows 3 or 4 notches with no rebuild.
 
+- **D12 — Compact meter in an open project (auto-pilot, T8).** The chat column is a fixed 533px, and a
+  labelled pill (87px) pushed the model pill past the composer edge. So in an open project the control is a
+  26px level meter (one bar per offered level, filled to the current one; tooltip + aria-label name the
+  level); the landing composer keeps the icon + label pill. D7's constraints (always visible, value
+  visible, fixed footprint, row never resizes) still hold. Persistence lives in `stores/effort.ts`
+  (`bt_effort_level`), not `settings.ts`.
+
 ## Tasks
 
 - [x] **T1 — Wire probe (managed).** Script `scripts/effort-probe.mjs`: for each rung model
@@ -128,7 +135,7 @@ the user ~2× — **margin unchanged**. On managed, longer turns also bill more 
   writes on both engines, `FIELD_COVERAGE` entry, `ledger-sql.spec.ts`/`field-coverage.spec.ts` pass.
   `/context` reads it from the annotation.
   **Acceptance:** a generation row carries `effort`; NULL = unknown (pre-migration rows).
-- [ ] **T7 — Store + persistence.** `stores/effort.ts`: 4-entry `EFFORT_LABELS` / `EFFORT_DESCRIPTIONS`
+- [x] **T7 — Store + persistence.** `stores/effort.ts`: 4-entry `EFFORT_LABELS` / `EFFORT_DESCRIPTIONS`
   (honest copy: Max = slowest, most credits per turn; Extra high = for hard bugs/big systems), persist
   in `settings.ts` like `modelTierStore` with `parseUserEffort` on read (a corrupt stored value →
   `medium`). Update `client-commands.ts` description.
@@ -136,7 +143,7 @@ the user ~2× — **margin unchanged**. On managed, longer turns also bill more 
   resolves to Medium (the default — never a silent step to `xhigh`).
   **Acceptance:** reload keeps the choice; corrupt localStorage → Medium; stored Max with the switch
   off → Medium.
-- [ ] **T8 — The control.** Generalise `components/ui/Slider.tsx` to N options with a per-instance
+- [x] **T8 — The control.** Generalise `components/ui/Slider.tsx` to N options with a per-instance
   `layoutId` (and `type="button"`), or add `NotchedSlider.tsx`; rebuild `EffortPanel` around it (4
   notches, labels under each, selected description, "changing effort starts a fresh session" note on
   managed); add `EffortPill` trigger before `ModelTierPill` in `ChatBox.tsx`, fixed width, `aria-label`

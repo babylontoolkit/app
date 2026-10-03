@@ -163,6 +163,7 @@ const SESSION_ENV = [
 
   // capability flags and vendors
   'PRO_FEATURES_ENABLED',
+  'ENABLE_MAX_EFFORT',
   'STRIPE_SECRET_KEY',
   'STRIPE_PUBLISHABLE_KEY',
   'SUPABASE_URL',
@@ -217,6 +218,7 @@ interface SessionPayload {
     modelTiers: { standardModel: string; tiers: TierRow[] };
   };
   pro?: Record<string, unknown>;
+  effortLevels?: string[];
 }
 
 /** Call the REAL loader and read the REAL response — status included, because status is the point. */
@@ -269,6 +271,45 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   invalidateMarketPricesCache();
+});
+
+/* ============================================================ 0. the offered effort levels (effort-selector T7) */
+
+describe('effortLevels — the levels the effort control may offer (D11)', () => {
+  it('offers Medium · High · Extra high by default — no Low, no Max', async () => {
+    stubSessionEnv();
+
+    const { status, body } = await callMe();
+
+    expect(status).toBe(200);
+    expect(body.effortLevels).toEqual(['medium', 'high', 'xhigh']);
+  });
+
+  it('adds Max when ENABLE_MAX_EFFORT=true', async () => {
+    stubSessionEnv({ ENABLE_MAX_EFFORT: 'true' });
+
+    const { body } = await callMe();
+
+    expect(body.effortLevels).toEqual(['medium', 'high', 'xhigh', 'max']);
+  });
+
+  it.each(['false', '1', 'yes', ''])('ENABLE_MAX_EFFORT=%j is NOT on', async (value) => {
+    stubSessionEnv({ ENABLE_MAX_EFFORT: value });
+
+    const { body } = await callMe();
+
+    expect(body.effortLevels).toEqual(['medium', 'high', 'xhigh']);
+  });
+
+  it('is present for a signed-out session too (the composer renders the pill before sign-in)', async () => {
+    stubSessionEnv();
+    doors.getUser.mockResolvedValue(null);
+
+    const { status, body } = await callMe();
+
+    expect(status).toBe(200);
+    expect(body.effortLevels).toEqual(['medium', 'high', 'xhigh']);
+  });
 });
 
 /* ============================================================ 1. CONTROLS — the drive is real */

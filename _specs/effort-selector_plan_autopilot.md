@@ -26,3 +26,9 @@ Queue: T1–T10 (ALL), 0/10 done at start.
 - T4 ✅ verified (independent) — 1 attempt — engine-effort 16/16, mutation of the effort comparison fails 4 tests.
 - T5 ✅ verified (independent) — 1 attempt — effort-policy 16/16.
 - T6 ✅ verified (independent) — 1 attempt — ledger-sql 68, field-coverage 9, roundtrip 9; 2 comment slips fixed by orchestrator.
+- DECISION T8: live drive uses Extra high (Max ships off per D11; flipping ENABLE_MAX_EFFORT needs a dev-server restart) — the Max notch path is pinned by unit specs; live check confirms 3 notches with the switch off.
+- DECISION T7: persistence in `stores/effort.ts` (key `bt_effort_level`); `baseEffortStore` = choice if offered else medium; a not-offered stored level resets to medium only after `/api/me` loads.
+- DECISION T8: new `NotchedSlider.tsx` (Workbench's `Slider.tsx` untouched); selecting a notch keeps the panel open; "fresh agent session" note only on managed.
+- DECISION T8b: in an open project the pill is a compact 26px level meter (labelled pill overflowed the fixed 533px chat column); recorded in the plan as D12. Owner should look at it: verifier noted it reads like a signal-strength icon until hovered.
+- T7 ✅ verified (independent, live) — 1 attempt — effort.spec 28, session-payload 43.
+- T8 ✅ verified (independent, live) — 1 attempt — EffortPanel.spec 20; live: 3 notches, no Low/Max, row width unchanged, paddingRight 0px, persisted on reload; paid managed proof: 2 turns (6 credits) logged `effort medium → xhigh` / `xhigh → medium` session moves, gen records carry effort.

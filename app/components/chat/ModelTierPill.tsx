@@ -24,7 +24,6 @@ import { classNames } from '~/utils/classNames';
 import { canUseTier, sessionStore } from '~/lib/stores/session';
 import { modelTierStore } from '~/lib/stores/settings';
 import { useByokUnlocked } from '~/lib/hooks/useSession';
-import { EFFORT_LABELS, baseEffortStore } from '~/lib/stores/effort';
 import { hasModelChoice, modelTierPanelOpen, parseModel } from '~/lib/stores/model-tier';
 
 export function ModelTierPill() {
@@ -35,7 +34,6 @@ export function ModelTierPill() {
    */
   const session = useStore(sessionStore);
   const selected = useStore(modelTierStore);
-  const effort = useStore(baseEffortStore);
   const byokUnlocked = useByokUnlocked();
 
   // BYOK users choose a model directly; nothing to show until we know who the user is.
@@ -79,13 +77,10 @@ export function ModelTierPill() {
   const locked = selected !== 'standard' && !eligible;
 
   /*
-   * The session's thinking effort rides in this tooltip (§4.2.9). It has no pill of its own — the row is
-   * crowded and effort is a rarely-changed setting — but a raised floor costs credits on every turn, so
-   * it must be READABLE somewhere the user already looks. This pill and the `/context` report are that
-   * somewhere; the control itself is `/effort`.
+   * The thinking effort no longer rides in this tooltip (`_specs/effort-selector_plan.md` D7): it has its
+   * own always-visible pill (`EffortPill`) beside this one, so repeating it here would be a second place
+   * to keep in step with nothing gained.
    */
-  const effortLine = ` Thinking effort: ${EFFORT_LABELS[effort]} — type /effort to change.`;
-
   const selectedLabel = selectedRow?.label ?? 'Standard';
 
   /*
@@ -115,7 +110,7 @@ export function ModelTierPill() {
    */
   return (
     <IconButton
-      title={title + effortLine}
+      title={title}
       className={classNames('transition-all flex items-center gap-1 px-1', {
         '!bg-bolt-elements-item-backgroundAccent !text-bolt-elements-item-contentAccent': active,
         'opacity-50': locked,

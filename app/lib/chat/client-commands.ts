@@ -54,7 +54,7 @@ export const CLIENT_COMMAND_SUMMARIES: (SkillSummary & { takesArgs: false })[] =
   },
   {
     name: 'effort',
-    description: 'Set how hard the model thinks this session — Medium (default) or High. Free, no server call.',
+    description: 'Set how hard the model thinks — Medium (default) and up. Free, no server call.',
     builtin: true,
     takesArgs: false,
   },

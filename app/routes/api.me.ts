@@ -25,6 +25,21 @@ import { errorResponse } from '~/lib/.server/http';
 import { getMonitor, FUNNEL_EVENTS } from '~/lib/.server/monitoring';
 import { ensureMarketPrices, marketPriceProvidersFor } from '~/lib/.server/billing/market-price-store';
 import { resolveAgentEngine } from '~/lib/.server/agent-managed/config';
+import { offeredUserEffortLevels } from '~/lib/.server/agent/effort-offer';
+import { DEFAULT_OFFERED_EFFORT_LEVELS, type EffortLevel } from '~/lib/modules/llm/capabilities';
+
+/**
+ * The effort levels a user may pick on this deploy (`_specs/effort-selector_plan.md` D11) — a rendering
+ * hint for the effort control's notches. GUARDED like every other lookup here: a config read must never
+ * take the session endpoint down, and the safe fallback is the default list (no Max).
+ */
+function effortLevelsHint(context: unknown): EffortLevel[] {
+  try {
+    return [...offeredUserEffortLevels(context)];
+  } catch {
+    return [...DEFAULT_OFFERED_EFFORT_LEVELS];
+  }
+}
 
 /**
  * Which price lists to refresh — GUARDED, because `getPlatformProvider` throws on a typo'd
@@ -90,6 +105,7 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
          * render for ANYONE, signed in or not (§4.6.1).
          */
         proFeaturesEnabled: platform.proFeaturesEnabled,
+        effortLevels: effortLevelsHint(context),
       });
     }
 
@@ -245,6 +261,8 @@ export async function loader({ request, context }: LoaderFunctionArgs) {
           return 'legacy' as const;
         }
       })(),
+
+      effortLevels: effortLevelsHint(context),
 
       pro: {
         proFeaturesEnabled: platform.proFeaturesEnabled,

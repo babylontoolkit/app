@@ -1,39 +1,44 @@
 /**
- * The `/effort` picker (SPEC §4.2.9) — choose this session's base thinking effort.
+ * The effort picker (SPEC §4.2.9; `_specs/effort-selector_plan.md` D7) — a notched slider over the levels
+ * this deploy offers (Medium · High · Extra high, plus Max when `ENABLE_MAX_EFFORT` is on; never Low).
  *
- * Rendered in the chat toolbar row but INVISIBLE until opened, deliberately: the row is already crowded
- * (§4.1a's lesson one level down), and effort is a rarely-changed session setting, not a per-turn toggle
- * like Plan/Build. It is reached by `/effort` or by clicking the effort row in the `/context` report; the
- * value it holds is always visible in the model pill's tooltip and in that report, so a raised floor is
- * never invisible even though its control is.
+ * Opened by the composer's `EffortPill`, by `/effort`, or by the effort row in the `/context` report. The
+ * current value is always on screen in the pill, so the panel's job is the CHOICE and its consequence:
+ * the selected level's description (honest about credits — thinking bills as output) and, on the managed
+ * engine, that a change starts a fresh agent session on the next message (a session's effort is fixed
+ * for its life, so the engine moves the chat to a new one — D3).
  *
- * The panel states the credit consequence on the expensive option rather than only naming it. `high` is
- * more thinking tokens on every turn, billed at the full output rate — the user should be choosing that
- * knowingly.
+ * Selecting a notch applies immediately and leaves the panel open (it is a slider: arrow keys walk the
+ * notches, and the description follows). Escape, the close button, or a click outside closes it.
  */
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useStore } from '@nanostores/react';
-import { classNames } from '~/utils/classNames';
 import { IconButton } from '~/components/ui/IconButton';
+import { NotchedSlider } from '~/components/ui/NotchedSlider';
 import {
   EFFORT_DESCRIPTIONS,
   EFFORT_LABELS,
   baseEffortStore,
   effortPanelOpen,
+  offeredEffortLevelsStore,
   setBaseEffort,
-  type UserEffortLevel,
 } from '~/lib/stores/effort';
-import { USER_EFFORT_LEVELS } from '~/lib/modules/llm/capabilities';
+import { sessionStore } from '~/lib/stores/session';
+
+/** Marks the pill, so a click on it is not also an "outside click" that closes the panel it is toggling. */
+export const EFFORT_PILL_ATTR = 'data-effort-pill';
 
 export function EffortPanel() {
   const current = useStore(baseEffortStore);
+  const offered = useStore(offeredEffortLevelsStore);
   const open = useStore(effortPanelOpen);
+  const session = useStore(sessionStore);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   /*
-   * Escape closes it. The panel is opened by a TYPED COMMAND, so a user who opens it by reflex and does not
-   * want it has no muscle-memory affordance to reach for other than this — and an overlay sitting on the
-   * hero with only an X to dismiss reads as stuck. Bound while open only, so it never competes with anything
-   * else for the key.
+   * Escape and outside clicks close it. Bound while open only, so they never compete with anything else.
+   * A pointerdown on the pill is excluded: the pill's own click toggles the panel, and closing here first
+   * would make that click re-open it.
    */
   useEffect(() => {
     if (!open) {
@@ -46,66 +51,61 @@ export function EffortPanel() {
       }
     };
 
-    window.addEventListener('keydown', onKey);
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
 
-    return () => window.removeEventListener('keydown', onKey);
+      if (!target || panelRef.current?.contains(target) || target.closest?.(`[${EFFORT_PILL_ATTR}]`)) {
+        return;
+      }
+
+      effortPanelOpen.set(false);
+    };
+
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pointerdown', onPointerDown);
+
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('pointerdown', onPointerDown);
+    };
   }, [open]);
 
   /*
    * 🔴 THE ANCHOR IS ALWAYS RENDERED; only the POPUP is conditional (§4.1a — "a right-aligned toolbar must
    * not RESIZE"). Returning `null` when closed removed a flex child, so opening the picker inserted one
-   * `gap-1` and shifted every control to its right by exactly 4px — measured live in Chrome, and the same
-   * defect class as the preview-gated buttons that render disabled rather than absent. Holding the space
-   * from first paint costs nothing (the anchor is zero-width) and makes the two states geometrically
-   * identical.
+   * `gap-1` and shifted every control beside it by exactly 4px — measured live in Chrome. Holding the
+   * space from first paint costs nothing (the anchor is zero-width) and makes both states identical.
    */
   return (
     <div className="relative">
       {open && (
-        <div className="absolute bottom-full right-0 mb-2 w-80 z-50 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg p-4 text-sm text-bolt-elements-textPrimary">
+        <div
+          ref={panelRef}
+          role="dialog"
+          aria-label="Thinking effort"
+          className="absolute bottom-full right-0 mb-2 w-80 z-50 rounded-lg border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 shadow-lg p-4 text-sm text-bolt-elements-textPrimary"
+        >
           <div className="flex items-center justify-between mb-3">
             <span className="font-medium">Thinking effort</span>
             <IconButton title="Close" className="transition-all" onClick={() => effortPanelOpen.set(false)}>
               <div className="i-ph:x text-base" />
             </IconButton>
           </div>
-          <div className="space-y-2">
-            {USER_EFFORT_LEVELS.map((level: UserEffortLevel) => {
-              const active = level === current;
-
-              return (
-                <button
-                  key={level}
-                  type="button"
-                  className={classNames(
-                    'w-full text-left rounded-md border px-3 py-2 transition-all',
-                    active
-                      ? 'border-bolt-elements-item-contentAccent bg-bolt-elements-item-backgroundAccent text-bolt-elements-item-contentAccent'
-                      : 'border-bolt-elements-borderColor hover:bg-bolt-elements-background-depth-3',
-                  )}
-                  onClick={() => {
-                    setBaseEffort(level);
-                    effortPanelOpen.set(false);
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <div className={active ? 'i-ph:check-circle-fill text-base' : 'i-ph:circle text-base opacity-50'} />
-                    <span className="text-xs font-medium">
-                      {EFFORT_LABELS[level]}
-                      {level === 'medium' ? ' — default' : ''}
-                    </span>
-                  </div>
-                  <div className="mt-1 text-[11px] leading-snug text-bolt-elements-textSecondary">
-                    {EFFORT_DESCRIPTIONS[level]}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-          <div className="mt-3 pt-2 border-t border-bolt-elements-borderColor text-[11px] leading-snug text-bolt-elements-textSecondary">
-            Resets to Medium each session. Repairs and <span className="font-mono">/skill</span> turns still think
-            harder on their own — this is the floor, not a cap.
-          </div>
+          <NotchedSlider
+            ariaLabel="Thinking effort"
+            options={offered.map((level) => ({ value: level, label: EFFORT_LABELS[level] }))}
+            selected={current}
+            onSelect={setBaseEffort}
+            className="px-1"
+          />
+          <p className="mt-3 text-xs leading-snug text-bolt-elements-textPrimary" data-testid="effort-description">
+            <span className="font-medium">{EFFORT_LABELS[current]}.</span> {EFFORT_DESCRIPTIONS[current]}
+          </p>
+          {session.agentEngine === 'managed' && (
+            <div className="mt-3 pt-2 border-t border-bolt-elements-borderColor text-[11px] leading-snug text-bolt-elements-textSecondary">
+              Changing effort starts a fresh agent session on your next message (your project and chat stay).
+            </div>
+          )}
         </div>
       )}
     </div>

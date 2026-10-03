@@ -15,6 +15,7 @@
 import { atom } from 'nanostores';
 import { DEFAULT_MODEL } from '~/utils/constants';
 import type { ImageProviderName } from '~/lib/media/image-capabilities';
+import { DEFAULT_OFFERED_EFFORT_LEVELS, EFFORT_LEVELS, type EffortLevel } from '~/lib/modules/llm/capabilities';
 
 export interface CreditPack {
   id: string;
@@ -223,6 +224,14 @@ export interface SessionState {
    */
   agentEngine: 'managed' | 'legacy';
 
+  /**
+   * The thinking-effort levels this deploy lets a user pick (`_specs/effort-selector_plan.md` D11) — a
+   * rendering hint for the effort control's notches, never an authority: the server validates every
+   * turn's effort against its own list (`parseUserEffort(raw, offered)`). Defaults to Medium · High ·
+   * Extra high; `ENABLE_MAX_EFFORT` adds Max.
+   */
+  effortLevels: readonly EffortLevel[];
+
   pro: {
     /** The master switch. Off (the default) means Pro/BYOK UI does not exist for ANYONE. */
     proFeaturesEnabled: boolean;
@@ -257,10 +266,27 @@ export const EMPTY_SESSION: SessionState = {
    */
   media: { provider: null },
   agentEngine: 'legacy',
+  effortLevels: DEFAULT_OFFERED_EFFORT_LEVELS,
   pro: { proFeaturesEnabled: false, byokUnlocked: false, tier: null, status: null, subscriberEmail: null },
 };
 
 export const sessionStore = atom<SessionState>(EMPTY_SESSION);
+
+/**
+ * Validate the offered effort list on arrival, like `normalizeModelTiers`: keep only known levels, in
+ * canonical (ascending) order, and fall back to the default list when the result is unusable (absent,
+ * malformed, or missing `medium` — the default, which every deploy offers). A server can widen the
+ * list; it can never hand the client a level the client does not know how to label.
+ */
+export function normalizeEffortLevels(raw: unknown): readonly EffortLevel[] {
+  if (!Array.isArray(raw)) {
+    return DEFAULT_OFFERED_EFFORT_LEVELS;
+  }
+
+  const levels = EFFORT_LEVELS.filter((level) => raw.includes(level));
+
+  return levels.includes('medium') ? levels : DEFAULT_OFFERED_EFFORT_LEVELS;
+}
 
 /** Refresh from `/api/me`. Safe to call often; it is one cheap read. */
 export async function refreshSession(): Promise<SessionState> {
@@ -295,6 +321,7 @@ export async function refreshSession(): Promise<SessionState> {
         : EMPTY_SESSION.credits,
       media: data.media ?? EMPTY_SESSION.media,
       agentEngine: data.agentEngine === 'managed' ? 'managed' : 'legacy',
+      effortLevels: normalizeEffortLevels(data.effortLevels),
       pro: data.pro ?? EMPTY_SESSION.pro,
     };
 

@@ -13,6 +13,7 @@ import { toast } from 'react-toastify';
 import { SpeechRecognitionButton } from '~/components/chat/SpeechRecognition';
 import { ContextIndicator } from './ContextIndicator';
 import { EffortPanel } from './EffortPanel';
+import { EffortPill } from './EffortPill';
 import { SupabaseConnection } from './SupabaseConnection';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import styles from './BaseChat.module.scss';
@@ -419,12 +420,6 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             </IconButton>
             {props.chatStarted && <ContextIndicator />}
             {/*
-             * The `/effort` picker (§4.2.9). Renders NOTHING until opened — it is a rarely-changed session
-             * setting, and the row is already crowded. Unconditional (no `chatStarted` gate): the creation
-             * turn takes the same floor as every other turn, so it must be settable before the first send.
-             */}
-            <EffortPanel />
-            {/*
              * Also Pro-gated — and this one is easy to miss. When collapsed, this button RENDERS THE
              * MODEL NAME (`props.model`). Hiding the settings panel but leaving this toggle would put
              * "claude-sonnet-5" in the toolbar of a product whose whole premise is that credits users
@@ -472,17 +467,27 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
            * The PANEL sits beside the pill rather than inside it: its anchor must be a permanent flex
            * child so opening the popup cannot shift the row (§4.1a), and the pill is a plain
            * `IconButton` whose own box the absolutely-positioned popup would otherwise be measured
-           * against. Same arrangement as `EffortPanel` in the left group.
+           * against. Same arrangement as `EffortPill` + `EffortPanel` just before it.
            *
            * ⚠️ `items-center` is required on the wrapper: the left group sets its own, and without one
            * here the pill stretches to the row's height and its accent fill grows with it.
            *
-           * ⚠️ And the anchor now comes AFTER the pill, unlike `EffortPanel` on the left. The popup is
+           * ⚠️ And the anchor comes AFTER the pill, as `EffortPanel`'s does after its pill. The popup is
            * `absolute … right-0`, so its right edge lands on its anchor's — which on the left of the
            * pill would hang the 320px panel 4px short of the row's edge for no reason. Last child puts
            * it flush with the composer.
            */}
           <div className="flex gap-1 items-center">
+            {/*
+             * The EFFORT pill + picker (`_specs/effort-selector_plan.md` D7), just before the model pill:
+             * both are standing properties of the session that move the bill. Fixed width, so changing the
+             * level never shifts the row (§4.1a); COMPACT (a level meter) once a project is open, because the
+             * fixed-width chat column leaves no room for a label (see `EffortPill`). Unconditional (no `chatStarted` gate): the first build
+             * turn takes the user's effort like every other turn, so it must be settable before the first
+             * send. The panel's anchor comes AFTER the pill for the same reason as `ModelTierPanel`'s.
+             */}
+            <EffortPill compact={props.chatStarted} />
+            <EffortPanel />
             <ModelTierPill />
             <ModelTierPanel />
           </div>
